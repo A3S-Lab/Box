@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.js
+*.d.ts
+.env
+.env.local
+package-lock.json

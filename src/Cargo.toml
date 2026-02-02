@@ -1,0 +1,76 @@
+[workspace]
+members = [
+    "core",
+    "runtime",
+    "cli",
+    "code",
+    "queue",
+    "sdk/python",
+    "sdk/typescript",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["A3S Lab Team"]
+license = "MIT"
+repository = "https://github.com/A3S-Lab/Box"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+# gRPC
+tonic = "0.11"
+tonic-build = "0.11"
+prost = "0.12"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+
+# File system
+notify = "6.1"
+
+# Cryptography (for integrity checks)
+sha2 = "0.10"
+hex = "0.4"
+
+# HTTP client (for skill downloads)
+reqwest = { version = "0.11", features = ["json", "stream"] }
+
+# Python bindings
+pyo3 = { version = "0.20", features = ["abi3-py38"] }
+
+# TypeScript bindings
+napi = { version = "2.14", features = ["async", "tokio_rt"] }
+napi-derive = "2.14"
+napi-build = "2.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Concurrency
+parking_lot = "0.12"
+dashmap = "5.5"

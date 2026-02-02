@@ -1,0 +1,73 @@
+# A3S Box TypeScript SDK - Justfile
+
+# Default recipe
+default:
+    @just --list
+
+# Build everything (TypeScript + native module)
+build:
+    npm run build
+
+# Build TypeScript only
+build-ts:
+    npm run build:ts
+
+# Build native module only
+build-native:
+    npm run build:native
+
+# Build in debug mode
+build-debug:
+    npm run build:debug
+
+# Clean build artifacts
+clean:
+    npm run clean
+    rm -rf node_modules
+
+# Run Rust tests
+test:
+    cargo test -p a3s-box-sdk-ts --lib
+
+# Run tests with output
+test-verbose:
+    cargo test -p a3s-box-sdk-ts --lib -- --nocapture
+
+# Format Rust code
+fmt:
+    cargo fmt -p a3s-box-sdk-ts
+
+# Check Rust formatting
+fmt-check:
+    cargo fmt -p a3s-box-sdk-ts -- --check
+
+# Run clippy
+lint:
+    cargo clippy -p a3s-box-sdk-ts --all-targets -- -D warnings
+
+# Run clippy with fixes
+lint-fix:
+    cargo clippy -p a3s-box-sdk-ts --all-targets --fix --allow-dirty
+
+# Check Rust compilation
+check:
+    cargo check -p a3s-box-sdk-ts
+
+# Generate Rust documentation
+doc:
+    cargo doc -p a3s-box-sdk-ts --no-deps --document-private-items
+
+# Install npm dependencies
+npm-install:
+    npm install
+
+# List exported modules
+exports:
+    @echo "Exports from @a3s-lab/box:"
+    @echo "  - A3sClient (gRPC client)"
+    @echo "  - getConfig, getModelConfig, printConfig (configuration)"
+    @echo "  - Types: TokenUsage, StreamChunk, GenerateResponse, etc."
+    @echo ""
+    @echo "Exports from @a3s-lab/box/native:"
+    @echo "  - Box, createBox (native module)"
+    @echo "  - Session"

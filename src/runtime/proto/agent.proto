@@ -1,0 +1,199 @@
+syntax = "proto3";
+
+package a3s.box.agent;
+
+// Agent service - runs inside the guest VM
+service AgentService {
+  // Session management
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
+
+  // Generation
+  rpc Generate(GenerateRequest) returns (GenerateResponse);
+  rpc Stream(GenerateRequest) returns (stream StreamChunk);
+  rpc GenerateObject(GenerateObjectRequest) returns (GenerateObjectResponse);
+  rpc StreamObject(GenerateObjectRequest) returns (stream ObjectStreamChunk);
+
+  // Skills
+  rpc UseSkill(UseSkillRequest) returns (UseSkillResponse);
+  rpc RemoveSkill(RemoveSkillRequest) returns (RemoveSkillResponse);
+
+  // Session commands
+  rpc Compact(SessionCommandRequest) returns (SessionCommandResponse);
+  rpc Clear(SessionCommandRequest) returns (SessionCommandResponse);
+  rpc Configure(ConfigureRequest) returns (ConfigureResponse);
+
+  // Introspection
+  rpc GetContextUsage(ContextUsageRequest) returns (ContextUsageResponse);
+  rpc GetHistory(HistoryRequest) returns (HistoryResponse);
+
+  // Control
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Session management
+
+message CreateSessionRequest {
+  optional string system = 1;
+  float context_threshold = 2;
+  string context_strategy = 3;
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+}
+
+message DestroySessionRequest {
+  string session_id = 1;
+}
+
+message DestroySessionResponse {}
+
+// Generation
+
+message GenerateRequest {
+  string session_id = 1;
+  string prompt = 2;
+}
+
+message GenerateResponse {
+  string text = 1;
+  TokenUsage usage = 2;
+  repeated ToolCall tool_calls = 3;
+  repeated ToolResult tool_results = 4;
+  repeated Step steps = 5;
+}
+
+message StreamChunk {
+  oneof chunk {
+    string text_delta = 1;
+    ToolCall tool_call = 2;
+    ToolResult tool_result = 3;
+    GenerateResponse done = 4;
+  }
+}
+
+message GenerateObjectRequest {
+  string session_id = 1;
+  string prompt = 2;
+  string schema = 3; // JSON schema
+}
+
+message GenerateObjectResponse {
+  string object = 1; // JSON object
+  TokenUsage usage = 2;
+}
+
+message ObjectStreamChunk {
+  oneof chunk {
+    string partial_object = 1; // Partial JSON object
+    GenerateObjectResponse done = 2;
+  }
+}
+
+// Skills
+
+message UseSkillRequest {
+  string session_id = 1;
+  string skill_name = 2;
+}
+
+message UseSkillResponse {}
+
+message RemoveSkillRequest {
+  string session_id = 1;
+  string skill_name = 2;
+}
+
+message RemoveSkillResponse {}
+
+// Session commands
+
+message SessionCommandRequest {
+  string session_id = 1;
+}
+
+message SessionCommandResponse {}
+
+message ConfigureRequest {
+  string session_id = 1;
+  optional bool thinking = 2;
+  optional int32 budget = 3;
+  optional ModelConfig model = 4;
+}
+
+message ConfigureResponse {}
+
+message ModelConfig {
+  string provider = 1;
+  string name = 2;
+  optional string base_url = 3;
+  optional string api_key = 4;
+}
+
+// Introspection
+
+message ContextUsageRequest {
+  string session_id = 1;
+}
+
+message ContextUsageResponse {
+  int32 used_tokens = 1;
+  int32 max_tokens = 2;
+  float percent = 3;
+  int32 turns = 4;
+}
+
+message HistoryRequest {
+  string session_id = 1;
+}
+
+message HistoryResponse {
+  repeated Turn turns = 1;
+}
+
+message Turn {
+  string role = 1; // "user" | "assistant"
+  string content = 2;
+  int64 timestamp = 3;
+}
+
+// Control
+
+message CancelRequest {
+  string session_id = 1;
+}
+
+message CancelResponse {}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+}
+
+// Common types
+
+message TokenUsage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+}
+
+message ToolCall {
+  string name = 1;
+  string args = 2; // JSON
+}
+
+message ToolResult {
+  string name = 1;
+  string output = 2;
+  int32 exit_code = 3;
+}
+
+message Step {
+  int32 index = 1;
+  string step_type = 2; // "thinking" | "tool_call" | "text"
+  string content = 3;
+}

@@ -1,0 +1,21 @@
+[package]
+name = "a3s-box-queue"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "a3s_box_queue"
+path = "src/lib.rs"
+
+[dependencies]
+a3s-box-core = { path = "../core" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

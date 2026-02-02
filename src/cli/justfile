@@ -1,0 +1,69 @@
+# A3S Box CLI - Justfile
+
+# Default recipe
+default:
+    @just --list
+
+# Build
+build:
+    cargo build -p a3s-box
+
+# Build in release mode
+build-release:
+    cargo build -p a3s-box --release
+
+# Run tests
+test:
+    cargo test -p a3s-box
+
+# Run tests with output
+test-verbose:
+    cargo test -p a3s-box -- --nocapture
+
+# Format code
+fmt:
+    cargo fmt -p a3s-box
+
+# Check formatting
+fmt-check:
+    cargo fmt -p a3s-box -- --check
+
+# Run clippy
+lint:
+    cargo clippy -p a3s-box --all-targets -- -D warnings
+
+# Run clippy with fixes
+lint-fix:
+    cargo clippy -p a3s-box --all-targets --fix --allow-dirty
+
+# Check compilation
+check:
+    cargo check -p a3s-box
+
+# Generate documentation
+doc:
+    cargo doc -p a3s-box --no-deps --document-private-items
+
+# Open documentation
+doc-open:
+    cargo doc -p a3s-box --no-deps --open
+
+# Show help
+help:
+    cargo run -p a3s-box -- --help
+
+# Show version
+version:
+    cargo run -p a3s-box -- version
+
+# Run create command
+create WORKSPACE=".":
+    cargo run -p a3s-box -- create --workspace {{WORKSPACE}}
+
+# Install CLI locally
+install:
+    cargo install --path .
+
+# Uninstall CLI
+uninstall:
+    cargo uninstall a3s-box

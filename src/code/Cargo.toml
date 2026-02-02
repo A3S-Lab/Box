@@ -1,0 +1,56 @@
+[package]
+name = "a3s-box-code"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "a3s-box-code"
+path = "src/main.rs"
+
+[dependencies]
+a3s-box-core = { path = "../core" }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+
+# HTTP client for LLM APIs
+reqwest = { workspace = true }
+
+# File operations
+glob = "0.3"
+ignore = "0.4"
+
+# Diff for edit tool
+similar = "2.4"
+
+# Async channels
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Base64 for image encoding
+base64 = "0.21"
+
+# Bytes for streaming
+bytes = "1.5"
+
+# Pin for futures
+pin-project-lite = "0.2"
+
+# Async stream for gRPC streaming
+async-stream = "0.3"
+
+[build-dependencies]
+tonic-build = "0.11"
+prost-build = "0.12"

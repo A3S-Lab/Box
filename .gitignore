@@ -1,0 +1,70 @@
+# System files
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dist/
+*.tsbuildinfo
+
+# Cache
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.cache/
+temp/
+
+# Test Reports
+test-results/
+test-report/
+test-output/
+junit.xml
+*.test-results.xml
+*.test-report.html
+.nyc_output/
+coverage.xml
+.vitest/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Claude Code
+.claude/settings.local.json
+.claude/sessions/
+.claude/cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# Git Worktrees
+.worktrees/

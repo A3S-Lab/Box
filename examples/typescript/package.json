@@ -1,0 +1,19 @@
+{
+  "name": "a3s-box-example",
+  "version": "0.1.0",
+  "description": "Example TypeScript client for A3S Box Code Agent",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@a3s-lab/box": "file:../../src/sdk/typescript",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
