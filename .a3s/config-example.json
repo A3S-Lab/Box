@@ -1,0 +1,8 @@
+{
+  "system": {
+    "apiUrl": "http://127.0.0.1:3000"
+  },
+  "authToken": "<your-auth-token>",
+  "refreshToken": "<your-refresh-token>",
+  "tokenExpiresAt": 0
+}

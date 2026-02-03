@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <em>"SQLite for sandboxing" — a lightweight library embedded directly in applications</em>
+  <em>Hardware-isolated AI agent execution — run untrusted code safely with microVM sandboxing</em>
 </p>
 
 <p align="center">
@@ -21,6 +21,8 @@
 ## Overview
 
 **A3S Box** embeds a full-featured coding agent inside hardware-isolated virtual machines, exposing Python and TypeScript SDKs. No daemon, no root privileges — just import the library and run sandboxed AI agents.
+
+> **Current Focus**: We are implementing CRI (Container Runtime Interface) support to enable A3S Box to run as a Kubernetes container runtime. See the [CRI Implementation Plan](./docs/cri-implementation-plan.md) for details.
 
 ```typescript
 import { A3sClient } from "@a3s-lab/box";
@@ -283,12 +285,12 @@ async with Box() as box:
 
 ## Roadmap
 
-### Phase 1: Foundation ✅
+### Phase 1: Foundation 🚧
 
 **Core Infrastructure**
-- [x] MicroVM runtime with libkrun
-- [x] gRPC communication over vsock
-- [x] Multi-session support
+- [ ] MicroVM runtime with libkrun
+- [ ] gRPC communication over vsock
+- [x] Multi-session support (state machine)
 - [x] Lane-based command queue
 - [x] Basic tool suite (bash, read, write, edit, grep, glob)
 
@@ -318,12 +320,61 @@ async with Box() as box:
 - [ ] Connection pooling
 
 **Developer Experience**
-- [x] TypeScript design guidelines (CLAUDE.md)
+- [x] Rust design guidelines (CLAUDE.md)
 - [ ] Comprehensive test suite
 - [ ] API documentation
 - [ ] Error message improvements
 
-### Phase 3: Skill System 📋
+### Phase 3: CRI Runtime Integration 📋
+
+**OCI Image Support** (2-3 weeks)
+- [ ] OCI image format definition and Dockerfile
+- [ ] OCI image parser (manifest, config, layers)
+- [ ] Rootfs extraction from OCI images
+- [ ] Agent configuration from OCI labels
+- [ ] Integration with Box runtime
+
+**CRI RuntimeService** (3-4 weeks)
+- [ ] CRI service structure and gRPC server
+- [ ] Pod Sandbox lifecycle (create, start, stop, remove)
+- [ ] Container lifecycle (create, start, stop, remove)
+- [ ] Pod/Container status and listing
+- [ ] Configuration mapping (K8s → Box)
+- [ ] Exec and attach support
+
+**CRI ImageService** (2-3 weeks)
+- [ ] Image management (list, pull, remove)
+- [ ] Image cache with LRU eviction
+- [ ] Image status and filesystem usage
+
+**Deployment & Testing** (2-3 weeks)
+- [ ] RuntimeClass configuration
+- [ ] DaemonSet deployment manifests
+- [ ] kubelet integration
+- [ ] Integration tests with crictl
+- [ ] End-to-end K8s testing
+
+### Phase 4: Production Optimization 📋
+
+**Performance**
+- [ ] Image caching and preloading
+- [ ] Box instance pooling
+- [ ] Fast VM boot optimization
+- [ ] Resource usage optimization
+
+**Observability**
+- [ ] Prometheus metrics export
+- [ ] OpenTelemetry integration
+- [ ] Performance metrics dashboard
+- [ ] Cost tracking
+
+**Security**
+- [ ] Resource limits enforcement
+- [ ] Network isolation policies
+- [ ] Audit logging
+- [ ] Secret management
+
+### Phase 5: Skill System 📋
 
 **Skill Infrastructure**
 - [ ] SKILL.md parser (YAML frontmatter)
@@ -342,44 +393,6 @@ async with Box() as box:
 - [ ] Version management
 - [ ] Dependency resolution
 
-### Phase 4: Advanced Features 📋
-
-**Context Management**
-- [ ] LLM-based context compaction
-- [ ] Conversation summarization
-- [ ] Long-term memory
-- [ ] Context window optimization
-
-**Multi-Agent**
-- [ ] Agent-to-agent communication
-- [ ] Hierarchical agent orchestration
-- [ ] Shared context between agents
-
-**Observability**
-- [ ] OpenTelemetry integration
-- [ ] Token usage analytics
-- [ ] Performance metrics dashboard
-- [ ] Cost tracking
-
-### Phase 5: Production Ready 📋
-
-**Security**
-- [ ] Resource limits (CPU, memory, disk)
-- [ ] Network isolation
-- [ ] Audit logging
-- [ ] Secret management
-
-**Scalability**
-- [ ] Horizontal scaling
-- [ ] Load balancing
-- [ ] Session persistence
-- [ ] Distributed queue
-
-**Platform Support**
-- [ ] Docker container support
-- [ ] Kubernetes operator
-- [ ] Cloud provider integrations (AWS, GCP, Azure)
-
 ### Phase 6: Ecosystem 📋
 
 **SDKs**
@@ -387,11 +400,16 @@ async with Box() as box:
 - [ ] Go SDK
 - [ ] Rust SDK (native)
 
+**Platform Support**
+- [ ] Kubernetes operator
+- [ ] Helm charts
+- [ ] Cloud provider integrations (AWS, GCP, Azure)
+
 **Integrations**
 - [ ] VS Code extension
 - [ ] JetBrains plugin
 - [ ] GitHub Actions
-- [ ] Slack/Discord bots
+- [ ] CI/CD pipelines
 
 **Documentation**
 - [ ] Interactive tutorials
@@ -435,11 +453,30 @@ box/
 │   └── sdk/
 │       ├── python/     # Python bindings (PyO3)
 │       └── typescript/ # TypeScript bindings (NAPI-RS)
+├── docs/               # Documentation
+│   ├── architecture.md           # Architecture design
+│   ├── configuration-guide.md    # Configuration guide
+│   ├── cri-implementation-plan.md # CRI implementation plan
+│   ├── code-agent-interface.md   # Coding agent interface spec
+│   ├── llm-config-design.md      # LLM configuration design
+│   └── examples/                 # Configuration examples
 ├── examples/
 │   └── typescript/     # TypeScript examples
 ├── CLAUDE.md           # AI coding guidelines
 └── README.md           # This file
 ```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Architecture](./docs/architecture.md) | Single-container + file mount architecture design |
+| [Configuration Guide](./docs/configuration-guide.md) | Coding agent, LLM, and skill configuration |
+| [CRI Implementation Plan](./docs/cri-implementation-plan.md) | Kubernetes CRI runtime integration plan |
+| [LLM Config Design](./docs/llm-config-design.md) | Multi-provider, per-model API key configuration |
+| [Code Agent Interface](./docs/code-agent-interface.md) | Standard interface for coding agents |
+| [Extensible Tools](./docs/extensible-tools.md) | Extensible tool system design |
+| [Examples](./docs/examples/) | LLM and configuration examples |
 
 ### Contributing
 

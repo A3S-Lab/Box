@@ -2,12 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
-
-**A3S Box** is a meta-agent sandbox runtime based on microVMs. It embeds a full-featured coding agent inside hardware-isolated virtual machines, exposing Python and TypeScript SDKs. Think "SQLite for sandboxing" — a lightweight library embedded directly in applications without requiring a daemon or root privileges.
-
-The developer writes business logic in Python/TypeScript + SKILL.md files; A3S Box provides a sandboxed coding agent that can execute arbitrary code, edit files, and run tools — all confined to a microVM with its own Linux kernel.
-
 ## Build & Development Commands
 
 ```bash
@@ -19,7 +13,7 @@ cargo build --release                 # Release build
 # Test
 cargo test --all                      # All tests
 cargo test -p a3s-box-core --lib      # Unit tests for a specific crate
-cargo test -p a3s-box-runtime --lib -- --test-threads=1  # Single-threaded (avoids gvproxy Go runtime issues)
+cargo test -p a3s-box-runtime --lib -- --test-threads=1  # Single-threaded
 cargo test -p a3s-box-core --lib -- test_name            # Run a single test by name
 
 # Format & Lint
@@ -29,54 +23,6 @@ cargo clippy                          # Lint (enforced in CI)
 
 # Proto compilation happens automatically via build.rs in runtime/
 ```
-
-## Architecture
-
-```
-Host Process (Python/TypeScript SDK)
-  │
-  ▼ (gRPC over vsock:4088)
-a3s-box-runtime (Rust library)
-  ├── VmManager (BoxState lifecycle: Created → Ready → Busy → Compacting → Stopped)
-  ├── SessionManager (multi-session support)
-  ├── SkillManager (Deno-style package management)
-  ├── CommandQueue (lane-based priority scheduling, 6 built-in lanes)
-  └── gRPC Client → guest
-  │
-  ▼ (libkrun + virtio-fs)
-Guest (inside microVM)
-  ├── a3s-box-code (Rust agent binary)
-  ├── gRPC Server (AgentService on vsock:4088)
-  ├── LLM Client (Anthropic, OpenAI, etc.)
-  ├── Tool Executor (bash, read, write, edit, grep, glob)
-  └── Session management
-```
-
-### Workspace Crates
-
-| Crate | Type | Purpose |
-|-------|------|---------|
-| `core` | lib | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `CommandQueue`, `Lane` |
-| `runtime` | lib | VM lifecycle, session management, skill loading, gRPC client, virtio-fs mounts, metrics |
-| `code` | bin | Guest agent: LLM providers, tool execution, session management inside the VM |
-| `queue` | lib | `QueueManager` (builder pattern) and `QueueMonitor` (health checking) |
-| `cli` | bin | Clap-based CLI: `create`, `build`, `cache-warmup` commands |
-| `sdk/python` | cdylib | Python bindings via PyO3 |
-| `sdk/typescript` | cdylib | TypeScript bindings via NAPI-RS |
-
-Dependency flow: all crates depend on `core` for shared types and error handling.
-
-### Lane-Based Command Queue
-
-All SDK calls enter a priority queue before reaching the guest. Six built-in lanes (priority 0-5): system, control, query, session, skill, prompt. Skills can declare custom lanes (`skill:<name>`) for isolated provisioning. Higher priority lanes (lower number) never get blocked by lower priority work.
-
-### Skill System (Deno-style)
-
-Skills are SKILL.md files with YAML frontmatter pointing to remote CLI tool URLs. On first activation, tools are downloaded and cached in `/a3s/cache/`. Subsequent activations use the cache. Three-level progressive disclosure: metadata at boot → full context + tools on activation → instant from cache.
-
-### gRPC Protocol
-
-Defined in `src/runtime/proto/agent.proto`. Compiled by `tonic-build` in `src/runtime/build.rs`. Services: session CRUD, generate/stream (text and structured), skill management, session commands (compact/clear/configure), introspection, and control (cancel/health).
 
 ## Code Style
 
@@ -98,31 +44,6 @@ Key guidelines:
 - **Naming**: crates are kebab-case, modules are snake_case, types are PascalCase.
 
 **Python SDK:** Async/await for all I/O. Context managers (`async with`) for automatic cleanup. Type hints encouraged.
-
-## Important Notes
-
-### Platform Support
-
-- macOS ARM64 (Apple Silicon), Linux x86_64/ARM64, Windows (via WSL2)
-- macOS Intel is **NOT** supported
-
-### Architecture Quirks
-
-- **gRPC communication**: Host-guest communication via vsock (not TCP), port 4088
-- **Runtime data**: `~/.a3s/` directory stores images, boxes, cache, and databases
-- **Lazy boot**: VM starts on first API call, not on `create_box()`
-
-### Common Pitfalls
-
-- Running on Intel Mac → UnsupportedEngine error
-- Not handling async/await properly → runtime errors
-- Exceeding resource limits → box killed (OOM)
-
-### Quick Debugging
-
-1. Enable logging: `RUST_LOG=debug`
-2. Check `~/.a3s/` disk space and permissions
-3. Verify platform support (KVM on Linux, Hypervisor.framework on macOS)
 
 ---
 
@@ -309,18 +230,6 @@ mod krun_engine {
 }
 ```
 
-Minimal Knowledge applies to comments too:
-
-```rust
-// ❌ Comment reveals implementation details
-// Pass transport as-is - krun engine will transform unix:// to vsock://
-let uri = transport.to_uri();
-
-// ✅ Comment maintains abstraction
-// Engine handles any transport-specific transformations
-let uri = transport.to_uri();
-```
-
 **Prepare Before Execute**
 
 ```rust
@@ -402,56 +311,6 @@ src/
 - [ ] Preconditions validated early
 - [ ] Names considered carefully (5+ alternatives evaluated)
 - [ ] Code has clear hierarchy and predictable organization
-
----
-
-## Lessons from Real Mistakes
-
-### Case Study: Duplicate Transformation Logic
-
-**The Mistake:**
-Added `unix://` → `vsock://` transformation in `runtime/vm.rs` when it already existed in `runtime/engines/krun/engine.rs`.
-
-**Why it happened:**
-
-- Didn't search before implementing (violated Rule #3)
-- Became "yes man" to own design (violated Rule #0)
-- Didn't question which layer should own the logic (violated Rule #7)
-
-**How rules should have prevented it:**
-
-| Rule | What Should Have Happened |
-|------|---------------------------|
-| **#0 (Don't Be Yes Man)** | "Does this already exist?" → Search first |
-| **#3 (Search Before Implement)** | `grep -r "transform.*vsock" src/` → Found in engines/krun/engine.rs |
-| **#5 (DRY)** | Check for existing transformation logic |
-| **#7 (Minimal Knowledge)** | "Why does vm.rs know about krun details?" → Wrong layer |
-
-**The Fix:**
-
-```rust
-// ❌ WRONG: vm.rs duplicating krun logic
-fn create_guest_entrypoint(&self, transport: &Transport) -> GuestEntrypoint {
-    let guest_transport = match transport {
-        Transport::Unix { .. } => Transport::vsock(4088),  // Duplicate!
-        ...
-    };
-}
-
-// ✅ RIGHT: Pass as-is, let engine handle it
-fn create_guest_entrypoint(&self, transport: &Transport) -> GuestEntrypoint {
-    let uri = transport.to_uri();  // engines/krun/engine.rs transforms later
-    format!("exec a3s-box-agent --listen {}", uri)
-}
-```
-
-**Key Lesson:**
-Rules are not a QA checklist to run after coding. They are a **design thinking framework** to apply BEFORE and DURING coding. Always:
-
-1. Search first (`grep`)
-2. Read affected files completely
-3. Question ownership/layering
-4. THEN code
 
 ---
 

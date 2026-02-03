@@ -62,6 +62,9 @@ coverage.xml
 .env.local
 .env.*.local
 
+# A3S Configuration (contains sensitive tokens)
+.a3s/config.json
+
 # Logs
 logs/
 *.log
