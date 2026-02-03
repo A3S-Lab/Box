@@ -255,18 +255,42 @@ impl AgentService for AgentServiceImpl {
 
     async fn use_skill(
         &self,
-        _request: Request<UseSkillRequest>,
+        request: Request<UseSkillRequest>,
     ) -> Result<Response<UseSkillResponse>, Status> {
-        // TODO: Implement skill activation
-        Ok(Response::new(UseSkillResponse {}))
+        let req = request.into_inner();
+
+        let tool_names = self
+            .session_manager
+            .use_skill(&req.session_id, &req.skill_name, &req.skill_content)
+            .await
+            .map_err(|e| {
+                tracing::error!("UseSkill failed: {:?}", e);
+                Status::internal(format!("{:#}", e))
+            })?;
+
+        Ok(Response::new(UseSkillResponse {
+            tool_names,
+        }))
     }
 
     async fn remove_skill(
         &self,
-        _request: Request<RemoveSkillRequest>,
+        request: Request<RemoveSkillRequest>,
     ) -> Result<Response<RemoveSkillResponse>, Status> {
-        // TODO: Implement skill removal
-        Ok(Response::new(RemoveSkillResponse {}))
+        let req = request.into_inner();
+
+        let removed_tools = self
+            .session_manager
+            .remove_skill(&req.session_id, &req.skill_name)
+            .await
+            .map_err(|e| {
+                tracing::error!("RemoveSkill failed: {:?}", e);
+                Status::internal(format!("{:#}", e))
+            })?;
+
+        Ok(Response::new(RemoveSkillResponse {
+            removed_tools,
+        }))
     }
 
     // ========================================================================

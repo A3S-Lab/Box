@@ -36,6 +36,15 @@ ignore = "0.4"
 # Diff for edit tool
 similar = "2.4"
 
+# Regex for template substitution
+regex = "1.10"
+
+# Shell argument parsing
+shell-words = "1.1"
+
+# YAML parsing for skill files
+serde_yaml = "0.9"
+
 # Async channels
 tokio-util = { version = "0.7", features = ["codec"] }
 
@@ -54,3 +63,6 @@ async-stream = "0.3"
 [build-dependencies]
 tonic-build = "0.11"
 prost-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3.10"

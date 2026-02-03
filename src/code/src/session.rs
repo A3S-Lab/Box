@@ -8,7 +8,7 @@
 //! - Session persistence (TODO)
 
 use crate::agent::{AgentConfig, AgentEvent, AgentLoop, AgentResult};
-use crate::llm::{self, LlmClient, LlmConfig, Message, TokenUsage, ToolDefinition, default_tools};
+use crate::llm::{self, LlmClient, LlmConfig, Message, TokenUsage, ToolDefinition};
 use crate::tools::ToolExecutor;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -49,20 +49,23 @@ pub struct Session {
     pub thinking_budget: Option<usize>,
     /// Per-session LLM client (overrides default if set)
     pub llm_client: Option<Arc<dyn LlmClient>>,
+    /// Activated skills and their tool names
+    pub active_skills: HashMap<String, Vec<String>>,
 }
 
 impl Session {
-    pub fn new(id: String, system: Option<String>) -> Self {
+    pub fn new(id: String, system: Option<String>, tools: Vec<ToolDefinition>) -> Self {
         Self {
             id,
             system,
             messages: Vec::new(),
             context_usage: ContextUsage::default(),
             total_usage: TokenUsage::default(),
-            tools: default_tools(),
+            tools,
             thinking_enabled: false,
             thinking_budget: None,
             llm_client: None,
+            active_skills: HashMap::new(),
         }
     }
 
@@ -107,6 +110,26 @@ impl Session {
         }
         Ok(())
     }
+
+    /// Activate a skill and track its tools
+    pub fn activate_skill(&mut self, skill_name: String, tool_names: Vec<String>) {
+        self.active_skills.insert(skill_name, tool_names);
+    }
+
+    /// Deactivate a skill and return its tool names
+    pub fn deactivate_skill(&mut self, skill_name: &str) -> Option<Vec<String>> {
+        self.active_skills.remove(skill_name)
+    }
+
+    /// Check if a skill is active
+    pub fn is_skill_active(&self, skill_name: &str) -> bool {
+        self.active_skills.contains_key(skill_name)
+    }
+
+    /// Get all active skill names
+    pub fn active_skill_names(&self) -> Vec<String> {
+        self.active_skills.keys().cloned().collect()
+    }
 }
 
 /// Session manager handles multiple concurrent sessions
@@ -133,7 +156,9 @@ impl SessionManager {
         context_threshold: Option<f32>,
         _context_strategy: Option<String>,
     ) -> Result<String> {
-        let mut session = Session::new(id.clone(), system);
+        // Get tool definitions from the executor
+        let tools = self.tool_executor.definitions();
+        let mut session = Session::new(id.clone(), system, tools);
 
         // Set context threshold if provided
         if let Some(threshold) = context_threshold {
@@ -378,6 +403,100 @@ impl SessionManager {
         let sessions = self.sessions.read().await;
         sessions.len()
     }
+
+    /// Activate a skill for a session
+    ///
+    /// Registers the skill's tools with the executor and tracks them in the session.
+    /// Returns the names of tools that were registered.
+    pub async fn use_skill(
+        &self,
+        session_id: &str,
+        skill_name: &str,
+        skill_content: &str,
+    ) -> Result<Vec<String>> {
+        let session_lock = self.get_session(session_id).await?;
+
+        // Check if skill is already active
+        {
+            let session = session_lock.read().await;
+            if session.is_skill_active(skill_name) {
+                tracing::info!("Skill {} is already active for session {}", skill_name, session_id);
+                return Ok(session.active_skills.get(skill_name).cloned().unwrap_or_default());
+            }
+        }
+
+        // Register tools with the executor
+        let tool_names = self.tool_executor.register_skill_tools(skill_content);
+
+        if tool_names.is_empty() {
+            tracing::warn!("No tools found in skill: {}", skill_name);
+        }
+
+        // Track in session
+        {
+            let mut session = session_lock.write().await;
+            session.activate_skill(skill_name.to_string(), tool_names.clone());
+            // Update session's tool definitions
+            session.tools = self.tool_executor.definitions();
+        }
+
+        tracing::info!(
+            "Activated skill {} for session {} with tools: {:?}",
+            skill_name,
+            session_id,
+            tool_names
+        );
+
+        Ok(tool_names)
+    }
+
+    /// Deactivate a skill for a session
+    ///
+    /// Unregisters the skill's tools from the executor.
+    /// Returns the names of tools that were unregistered.
+    pub async fn remove_skill(
+        &self,
+        session_id: &str,
+        skill_name: &str,
+    ) -> Result<Vec<String>> {
+        let session_lock = self.get_session(session_id).await?;
+
+        // Get tool names from session
+        let tool_names = {
+            let mut session = session_lock.write().await;
+            session.deactivate_skill(skill_name)
+        };
+
+        let Some(tool_names) = tool_names else {
+            tracing::info!("Skill {} is not active for session {}", skill_name, session_id);
+            return Ok(vec![]);
+        };
+
+        // Unregister tools from executor
+        let removed = self.tool_executor.unregister_tools(&tool_names);
+
+        // Update session's tool definitions
+        {
+            let mut session = session_lock.write().await;
+            session.tools = self.tool_executor.definitions();
+        }
+
+        tracing::info!(
+            "Deactivated skill {} for session {} (removed tools: {:?})",
+            skill_name,
+            session_id,
+            removed
+        );
+
+        Ok(removed)
+    }
+
+    /// List active skills for a session
+    pub async fn list_active_skills(&self, session_id: &str) -> Result<Vec<String>> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        Ok(session.active_skill_names())
+    }
 }
 
 #[cfg(test)]
@@ -386,7 +505,11 @@ mod tests {
 
     #[test]
     fn test_session_creation() {
-        let session = Session::new("test-1".to_string(), Some("You are helpful.".to_string()));
+        let session = Session::new(
+            "test-1".to_string(),
+            Some("You are helpful.".to_string()),
+            vec![],
+        );
         assert_eq!(session.id, "test-1");
         assert_eq!(session.system, Some("You are helpful.".to_string()));
         assert!(session.messages.is_empty());

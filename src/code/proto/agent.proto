@@ -97,16 +97,21 @@ message ObjectStreamChunk {
 message UseSkillRequest {
   string session_id = 1;
   string skill_name = 2;
+  string skill_content = 3; // SKILL.md content
 }
 
-message UseSkillResponse {}
+message UseSkillResponse {
+  repeated string tool_names = 1; // Names of tools that were registered
+}
 
 message RemoveSkillRequest {
   string session_id = 1;
   string skill_name = 2;
 }
 
-message RemoveSkillResponse {}
+message RemoveSkillResponse {
+  repeated string removed_tools = 1; // Names of tools that were unregistered
+}
 
 // Session commands
 

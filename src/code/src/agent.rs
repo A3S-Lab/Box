@@ -9,7 +9,7 @@
 //! This implements agentic behavior where the LLM can use tools
 //! to accomplish tasks autonomously.
 
-use crate::llm::{LlmClient, LlmResponse, Message, TokenUsage, ToolDefinition, default_tools};
+use crate::llm::{LlmClient, LlmResponse, Message, TokenUsage, ToolDefinition};
 use crate::tools::ToolExecutor;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             system_prompt: None,
-            tools: default_tools(),
+            tools: Vec::new(), // Tools are provided by ToolExecutor
             max_tool_rounds: MAX_TOOL_ROUNDS,
         }
     }
@@ -378,7 +378,7 @@ mod tests {
     fn test_agent_config_default() {
         let config = AgentConfig::default();
         assert!(config.system_prompt.is_none());
-        assert!(!config.tools.is_empty());
+        assert!(config.tools.is_empty()); // Tools are provided externally
         assert_eq!(config.max_tool_rounds, MAX_TOOL_ROUNDS);
     }
 }

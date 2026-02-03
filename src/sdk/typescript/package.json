@@ -41,7 +41,6 @@
     "build:debug": "napi build --platform",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run build && napi prepublish -t npm",
-    "test": "echo \"Error: no test specified\" && exit 1",
     "version": "napi version"
   },
   "keywords": [
