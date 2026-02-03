@@ -264,3 +264,395 @@ pub mod lane_ids {
     pub const SKILL: &str = "skill";
     pub const PROMPT: &str = "prompt";
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test command implementation
+    struct TestCommand {
+        result: serde_json::Value,
+        delay_ms: Option<u64>,
+    }
+
+    impl TestCommand {
+        fn new(result: serde_json::Value) -> Self {
+            Self {
+                result,
+                delay_ms: None,
+            }
+        }
+
+        fn with_delay(result: serde_json::Value, delay_ms: u64) -> Self {
+            Self {
+                result,
+                delay_ms: Some(delay_ms),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Command for TestCommand {
+        async fn execute(&self) -> Result<serde_json::Value> {
+            if let Some(delay) = self.delay_ms {
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+            }
+            Ok(self.result.clone())
+        }
+
+        fn command_type(&self) -> &str {
+            "test"
+        }
+    }
+
+    /// Failing test command
+    struct FailingCommand {
+        message: String,
+    }
+
+    #[async_trait]
+    impl Command for FailingCommand {
+        async fn execute(&self) -> Result<serde_json::Value> {
+            Err(BoxError::Other(self.message.clone()))
+        }
+
+        fn command_type(&self) -> &str {
+            "failing"
+        }
+    }
+
+    #[test]
+    fn test_priorities() {
+        assert_eq!(priorities::SYSTEM, 0);
+        assert_eq!(priorities::CONTROL, 1);
+        assert_eq!(priorities::QUERY, 2);
+        assert_eq!(priorities::SESSION, 3);
+        assert_eq!(priorities::SKILL, 4);
+        assert_eq!(priorities::PROMPT, 5);
+
+        // System has highest priority (lowest number)
+        assert!(priorities::SYSTEM < priorities::CONTROL);
+        assert!(priorities::CONTROL < priorities::QUERY);
+        assert!(priorities::QUERY < priorities::SESSION);
+        assert!(priorities::SESSION < priorities::SKILL);
+        assert!(priorities::SKILL < priorities::PROMPT);
+    }
+
+    #[test]
+    fn test_lane_ids() {
+        assert_eq!(lane_ids::SYSTEM, "system");
+        assert_eq!(lane_ids::CONTROL, "control");
+        assert_eq!(lane_ids::QUERY, "query");
+        assert_eq!(lane_ids::SESSION, "session");
+        assert_eq!(lane_ids::SKILL, "skill");
+        assert_eq!(lane_ids::PROMPT, "prompt");
+    }
+
+    #[test]
+    fn test_lane_new() {
+        let config = LaneConfig {
+            min_concurrency: 1,
+            max_concurrency: 4,
+        };
+        let lane = Lane::new("test-lane", config, priorities::QUERY);
+
+        assert_eq!(lane.id(), "test-lane");
+    }
+
+    #[tokio::test]
+    async fn test_lane_priority() {
+        let config = LaneConfig {
+            min_concurrency: 1,
+            max_concurrency: 4,
+        };
+        let lane = Lane::new("test", config, priorities::SESSION);
+
+        assert_eq!(lane.priority().await, priorities::SESSION);
+    }
+
+    #[tokio::test]
+    async fn test_lane_status_initial() {
+        let config = LaneConfig {
+            min_concurrency: 2,
+            max_concurrency: 8,
+        };
+        let lane = Lane::new("test", config, priorities::QUERY);
+
+        let status = lane.status().await;
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.active, 0);
+        assert_eq!(status.min, 2);
+        assert_eq!(status.max, 8);
+    }
+
+    #[tokio::test]
+    async fn test_lane_enqueue() {
+        let config = LaneConfig {
+            min_concurrency: 1,
+            max_concurrency: 4,
+        };
+        let lane = Lane::new("test", config, priorities::QUERY);
+
+        let cmd = Box::new(TestCommand::new(serde_json::json!({"result": "ok"})));
+        let _rx = lane.enqueue(cmd).await;
+
+        let status = lane.status().await;
+        assert_eq!(status.pending, 1);
+    }
+
+    #[tokio::test]
+    async fn test_lane_status_serialization() {
+        let status = LaneStatus {
+            pending: 5,
+            active: 2,
+            min: 1,
+            max: 8,
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"pending\":5"));
+        assert!(json.contains("\"active\":2"));
+        assert!(json.contains("\"min\":1"));
+        assert!(json.contains("\"max\":8"));
+
+        let parsed: LaneStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.pending, 5);
+        assert_eq!(parsed.active, 2);
+    }
+
+    #[tokio::test]
+    async fn test_command_queue_new() {
+        let emitter = EventEmitter::new(100);
+        let queue = CommandQueue::new(emitter);
+
+        let status = queue.status().await;
+        assert!(status.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_command_queue_register_lane() {
+        let emitter = EventEmitter::new(100);
+        let queue = CommandQueue::new(emitter);
+
+        let config = LaneConfig {
+            min_concurrency: 1,
+            max_concurrency: 4,
+        };
+        let lane = Arc::new(Lane::new("test-lane", config, priorities::QUERY));
+
+        queue.register_lane(lane).await;
+
+        let status = queue.status().await;
+        assert!(status.contains_key("test-lane"));
+    }
+
+    #[tokio::test]
+    async fn test_command_queue_submit() {
+        let emitter = EventEmitter::new(100);
+        let queue = CommandQueue::new(emitter);
+
+        let config = LaneConfig {
+            min_concurrency: 1,
+            max_concurrency: 4,
+        };
+        let lane = Arc::new(Lane::new("test-lane", config, priorities::QUERY));
+        queue.register_lane(lane).await;
+
+        let cmd = Box::new(TestCommand::new(serde_json::json!({"status": "ok"})));
+        let result = queue.submit("test-lane", cmd).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_command_queue_submit_unknown_lane() {
+        let emitter = EventEmitter::new(100);
+        let queue = CommandQueue::new(emitter);
+
+        let cmd = Box::new(TestCommand::new(serde_json::json!({})));
+        let result = queue.submit("nonexistent", cmd).await;
+
+        assert!(result.is_err());
+        if let Err(BoxError::QueueError(msg)) = result {
+            assert!(msg.contains("Lane not found"));
+            assert!(msg.contains("nonexistent"));
+        } else {
+            panic!("Expected QueueError");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_command_queue_multiple_lanes() {
+        let emitter = EventEmitter::new(100);
+        let queue = CommandQueue::new(emitter);
+
+        // Register multiple lanes
+        let configs = vec![
+            ("system", priorities::SYSTEM, 1),
+            ("control", priorities::CONTROL, 8),
+            ("query", priorities::QUERY, 4),
+        ];
+
+        for (id, priority, max) in configs {
+            let config = LaneConfig {
+                min_concurrency: 1,
+                max_concurrency: max,
+            };
+            let lane = Arc::new(Lane::new(id, config, priority));
+            queue.register_lane(lane).await;
+        }
+
+        let status = queue.status().await;
+        assert_eq!(status.len(), 3);
+        assert!(status.contains_key("system"));
+        assert!(status.contains_key("control"));
+        assert!(status.contains_key("query"));
+    }
+
+    #[tokio::test]
+    async fn test_command_queue_status() {
+        let emitter = EventEmitter::new(100);
+        let queue = CommandQueue::new(emitter);
+
+        let config = LaneConfig {
+            min_concurrency: 2,
+            max_concurrency: 16,
+        };
+        let lane = Arc::new(Lane::new("query", config, priorities::QUERY));
+        queue.register_lane(lane).await;
+
+        let status = queue.status().await;
+        let lane_status = status.get("query").unwrap();
+
+        assert_eq!(lane_status.min, 2);
+        assert_eq!(lane_status.max, 16);
+        assert_eq!(lane_status.pending, 0);
+        assert_eq!(lane_status.active, 0);
+    }
+
+    #[test]
+    fn test_lane_state_has_capacity() {
+        let config = LaneConfig {
+            min_concurrency: 1,
+            max_concurrency: 2,
+        };
+        let mut state = LaneState::new(config, priorities::QUERY);
+
+        assert!(state.has_capacity());
+        state.active = 1;
+        assert!(state.has_capacity());
+        state.active = 2;
+        assert!(!state.has_capacity());
+    }
+
+    #[tokio::test]
+    async fn test_lane_state_has_pending() {
+        let config = LaneConfig {
+            min_concurrency: 1,
+            max_concurrency: 4,
+        };
+        let state = LaneState::new(config, priorities::QUERY);
+
+        assert!(!state.has_pending());
+
+        // Can't easily add to pending without full setup, but test the initial state
+        assert_eq!(state.pending.len(), 0);
+    }
+
+    #[test]
+    fn test_lane_status_debug() {
+        let status = LaneStatus {
+            pending: 3,
+            active: 1,
+            min: 1,
+            max: 4,
+        };
+
+        let debug_str = format!("{:?}", status);
+        assert!(debug_str.contains("LaneStatus"));
+        assert!(debug_str.contains("pending"));
+        assert!(debug_str.contains("active"));
+    }
+
+    #[test]
+    fn test_lane_status_clone() {
+        let status = LaneStatus {
+            pending: 5,
+            active: 2,
+            min: 1,
+            max: 8,
+        };
+
+        let cloned = status.clone();
+        assert_eq!(cloned.pending, 5);
+        assert_eq!(cloned.active, 2);
+        assert_eq!(cloned.min, 1);
+        assert_eq!(cloned.max, 8);
+    }
+
+    #[tokio::test]
+    async fn test_command_execution() {
+        let cmd = TestCommand::new(serde_json::json!({"value": 42}));
+        let result = cmd.execute().await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), serde_json::json!({"value": 42}));
+    }
+
+    #[tokio::test]
+    async fn test_command_type() {
+        let cmd = TestCommand::new(serde_json::json!({}));
+        assert_eq!(cmd.command_type(), "test");
+
+        let failing = FailingCommand {
+            message: "error".to_string(),
+        };
+        assert_eq!(failing.command_type(), "failing");
+    }
+
+    #[tokio::test]
+    async fn test_failing_command() {
+        let cmd = FailingCommand {
+            message: "Something went wrong".to_string(),
+        };
+
+        let result = cmd.execute().await;
+        assert!(result.is_err());
+
+        if let Err(BoxError::Other(msg)) = result {
+            assert_eq!(msg, "Something went wrong");
+        } else {
+            panic!("Expected Other error");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_command_with_delay() {
+        let cmd = TestCommand::with_delay(serde_json::json!({"delayed": true}), 10);
+
+        let start = std::time::Instant::now();
+        let result = cmd.execute().await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert!(elapsed.as_millis() >= 10);
+    }
+
+    #[test]
+    fn test_priority_type() {
+        let p: Priority = 5;
+        assert_eq!(p, 5u8);
+    }
+
+    #[test]
+    fn test_lane_id_type() {
+        let id: LaneId = "test-lane".to_string();
+        assert_eq!(id, "test-lane");
+    }
+
+    #[test]
+    fn test_command_id_type() {
+        let id: CommandId = "cmd-123".to_string();
+        assert_eq!(id, "cmd-123");
+    }
+}

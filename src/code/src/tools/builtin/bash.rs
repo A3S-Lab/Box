@@ -115,10 +115,7 @@ impl Tool for BashTool {
         if result.is_err() {
             child.kill().await.ok();
             return Ok(ToolOutput {
-                content: format!(
-                    "{}\n\n[Command timed out after {}ms]",
-                    output, timeout_ms
-                ),
+                content: format!("{}\n\n[Command timed out after {}ms]", output, timeout_ms),
                 success: false,
                 metadata: Some(serde_json::json!({ "exit_code": 124 })),
             });
@@ -180,6 +177,9 @@ mod tests {
         let params = tool.parameters();
 
         assert!(params["properties"]["command"].is_object());
-        assert!(params["required"].as_array().unwrap().contains(&serde_json::json!("command")));
+        assert!(params["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("command")));
     }
 }

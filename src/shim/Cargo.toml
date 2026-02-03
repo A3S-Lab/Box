@@ -1,0 +1,30 @@
+[package]
+name = "a3s-box-shim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MicroVM shim process for A3S Box"
+
+[[bin]]
+name = "a3s-box-shim"
+path = "src/main.rs"
+
+[dependencies]
+a3s-box-core = { path = "../core" }
+a3s-box-runtime = { path = "../runtime" }
+libkrun-sys = { path = "../deps/libkrun-sys" }
+
+# CLI
+clap = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# System
+libc = { workspace = true }

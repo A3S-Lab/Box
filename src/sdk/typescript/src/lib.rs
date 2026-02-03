@@ -71,7 +71,7 @@ pub struct SessionConfig {
 /// A3S Box - main entry point
 #[napi(js_name = "Box")]
 pub struct A3sBox {
-    // TODO: Add actual BoxLite runtime handle
+    // TODO: Add actual A3S Box runtime handle
     _placeholder: (),
 }
 
@@ -85,9 +85,7 @@ impl A3sBox {
         // 2. Initialize VmManager
         // 3. Boot VM (lazy)
 
-        Ok(Self {
-            _placeholder: (),
-        })
+        Ok(Self { _placeholder: () })
     }
 
     /// Create a session

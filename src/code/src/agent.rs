@@ -9,22 +9,41 @@
 //! This implements agentic behavior where the LLM can use tools
 //! to accomplish tasks autonomously.
 
+use crate::hitl::ConfirmationManager;
 use crate::llm::{LlmClient, LlmResponse, Message, TokenUsage, ToolDefinition};
+use crate::permissions::{PermissionDecision, PermissionPolicy};
 use crate::tools::ToolExecutor;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::{mpsc, RwLock};
 
 /// Maximum number of tool execution rounds before stopping
 const MAX_TOOL_ROUNDS: usize = 50;
 
 /// Agent configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentConfig {
     pub system_prompt: Option<String>,
     pub tools: Vec<ToolDefinition>,
     pub max_tool_rounds: usize,
+    /// Optional permission policy for tool execution control
+    pub permission_policy: Option<Arc<RwLock<PermissionPolicy>>>,
+    /// Optional confirmation manager for HITL (Human-in-the-Loop)
+    pub confirmation_manager: Option<Arc<ConfirmationManager>>,
+}
+
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("system_prompt", &self.system_prompt)
+            .field("tools", &self.tools)
+            .field("max_tool_rounds", &self.max_tool_rounds)
+            .field("permission_policy", &self.permission_policy.is_some())
+            .field("confirmation_manager", &self.confirmation_manager.is_some())
+            .finish()
+    }
 }
 
 impl Default for AgentConfig {
@@ -33,6 +52,8 @@ impl Default for AgentConfig {
             system_prompt: None,
             tools: Vec::new(), // Tools are provided by ToolExecutor
             max_tool_rounds: MAX_TOOL_ROUNDS,
+            permission_policy: None,
+            confirmation_manager: None,
         }
     }
 }
@@ -77,6 +98,58 @@ pub enum AgentEvent {
     /// Error occurred
     #[serde(rename = "error")]
     Error { message: String },
+
+    /// Tool execution requires confirmation (HITL)
+    #[serde(rename = "confirmation_required")]
+    ConfirmationRequired {
+        tool_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+        timeout_ms: u64,
+    },
+
+    /// Confirmation received from user (HITL)
+    #[serde(rename = "confirmation_received")]
+    ConfirmationReceived {
+        tool_id: String,
+        approved: bool,
+        reason: Option<String>,
+    },
+
+    /// Confirmation timed out (HITL)
+    #[serde(rename = "confirmation_timeout")]
+    ConfirmationTimeout {
+        tool_id: String,
+        action_taken: String, // "rejected" or "auto_approved"
+    },
+
+    /// External task pending (needs SDK processing)
+    #[serde(rename = "external_task_pending")]
+    ExternalTaskPending {
+        task_id: String,
+        session_id: String,
+        lane: crate::hitl::SessionLane,
+        command_type: String,
+        payload: serde_json::Value,
+        timeout_ms: u64,
+    },
+
+    /// External task completed
+    #[serde(rename = "external_task_completed")]
+    ExternalTaskCompleted {
+        task_id: String,
+        session_id: String,
+        success: bool,
+    },
+
+    /// Tool execution denied by permission policy
+    #[serde(rename = "permission_denied")]
+    PermissionDenied {
+        tool_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+        reason: String,
+    },
 }
 
 /// Result of agent execution
@@ -181,12 +254,7 @@ impl AgentLoop {
                         }
                         crate::llm::StreamEvent::ToolUseStart { id, name } => {
                             if let Some(tx) = &event_tx {
-                                tx.send(AgentEvent::ToolStart {
-                                    id,
-                                    name,
-                                })
-                                .await
-                                .ok();
+                                tx.send(AgentEvent::ToolStart { id, name }).await.ok();
                             }
                         }
                         crate::llm::StreamEvent::ToolUseInputDelta(_) => {
@@ -261,15 +329,182 @@ impl AgentLoop {
                 // In streaming mode, ToolStart is sent when we receive ToolUseStart from LLM
                 // But we still need to send ToolEnd after execution
 
-                // Execute the tool
-                let result = self
-                    .tool_executor
-                    .execute(&tool_call.name, &tool_call.args)
-                    .await;
+                // Check permission before executing tool
+                let permission_decision = if let Some(policy_lock) = &self.config.permission_policy
+                {
+                    let policy = policy_lock.read().await;
+                    policy.check(&tool_call.name, &tool_call.args)
+                } else {
+                    PermissionDecision::Allow // No policy = allow all
+                };
 
-                let (output, exit_code, is_error) = match result {
-                    Ok(r) => (r.output, r.exit_code, r.exit_code != 0),
-                    Err(e) => (format!("Tool execution error: {}", e), 1, true),
+                let (output, exit_code, is_error) = match permission_decision {
+                    PermissionDecision::Deny => {
+                        // Tool execution denied by permission policy
+                        let denial_msg = format!(
+                            "Permission denied: Tool '{}' is blocked by permission policy.",
+                            tool_call.name
+                        );
+
+                        // Send permission denied event
+                        if let Some(tx) = &event_tx {
+                            tx.send(AgentEvent::PermissionDenied {
+                                tool_id: tool_call.id.clone(),
+                                tool_name: tool_call.name.clone(),
+                                args: tool_call.args.clone(),
+                                reason: "Blocked by deny rule in permission policy".to_string(),
+                            })
+                            .await
+                            .ok();
+                        }
+
+                        (denial_msg, 1, true)
+                    }
+                    PermissionDecision::Ask => {
+                        // HITL: Check if this tool requires confirmation
+                        if let Some(cm) = &self.config.confirmation_manager {
+                            // First check if this tool actually requires confirmation
+                            // (considers HITL enabled, YOLO lanes, auto-approve lists, etc.)
+                            if !cm.requires_confirmation(&tool_call.name).await {
+                                // No confirmation needed - execute directly
+                                let result = self
+                                    .tool_executor
+                                    .execute(&tool_call.name, &tool_call.args)
+                                    .await;
+
+                                let (output, exit_code, is_error) = match result {
+                                    Ok(r) => (r.output, r.exit_code, r.exit_code != 0),
+                                    Err(e) => (format!("Tool execution error: {}", e), 1, true),
+                                };
+
+                                // Send tool end event
+                                if let Some(tx) = &event_tx {
+                                    tx.send(AgentEvent::ToolEnd {
+                                        id: tool_call.id.clone(),
+                                        name: tool_call.name.clone(),
+                                        output: output.clone(),
+                                        exit_code,
+                                    })
+                                    .await
+                                    .ok();
+                                }
+
+                                // Add tool result to messages
+                                messages.push(Message::tool_result(&tool_call.id, &output, is_error));
+                                continue; // Skip the rest, move to next tool call
+                            }
+
+                            // Get timeout from policy
+                            let policy = cm.policy().await;
+                            let timeout_ms = policy.default_timeout_ms;
+                            let timeout_action = policy.timeout_action;
+
+                            // Request confirmation (this emits ConfirmationRequired event)
+                            let rx = cm
+                                .request_confirmation(
+                                    &tool_call.id,
+                                    &tool_call.name,
+                                    &tool_call.args,
+                                )
+                                .await;
+
+                            // Wait for confirmation with timeout
+                            let confirmation_result = tokio::time::timeout(
+                                Duration::from_millis(timeout_ms),
+                                rx,
+                            )
+                            .await;
+
+                            match confirmation_result {
+                                Ok(Ok(response)) => {
+                                    // Got confirmation response
+                                    if response.approved {
+                                        // Approved: execute the tool
+                                        let result = self
+                                            .tool_executor
+                                            .execute(&tool_call.name, &tool_call.args)
+                                            .await;
+
+                                        match result {
+                                            Ok(r) => (r.output, r.exit_code, r.exit_code != 0),
+                                            Err(e) => {
+                                                (format!("Tool execution error: {}", e), 1, true)
+                                            }
+                                        }
+                                    } else {
+                                        // Rejected by user
+                                        let rejection_msg = format!(
+                                            "Tool '{}' execution was rejected by user. Reason: {}",
+                                            tool_call.name,
+                                            response.reason.unwrap_or_else(|| "No reason provided".to_string())
+                                        );
+                                        (rejection_msg, 1, true)
+                                    }
+                                }
+                                Ok(Err(_)) => {
+                                    // Channel closed (confirmation manager dropped)
+                                    let msg = format!(
+                                        "Tool '{}' confirmation failed: confirmation channel closed",
+                                        tool_call.name
+                                    );
+                                    (msg, 1, true)
+                                }
+                                Err(_) => {
+                                    // Timeout - check timeout action
+                                    // Note: check_timeouts() should be called by a background task,
+                                    // but we handle it here as well for safety
+                                    cm.check_timeouts().await;
+
+                                    match timeout_action {
+                                        crate::hitl::TimeoutAction::Reject => {
+                                            let msg = format!(
+                                                "Tool '{}' execution timed out waiting for confirmation ({}ms). Execution rejected.",
+                                                tool_call.name, timeout_ms
+                                            );
+                                            (msg, 1, true)
+                                        }
+                                        crate::hitl::TimeoutAction::AutoApprove => {
+                                            // Auto-approve on timeout: execute the tool
+                                            let result = self
+                                                .tool_executor
+                                                .execute(&tool_call.name, &tool_call.args)
+                                                .await;
+
+                                            match result {
+                                                Ok(r) => (r.output, r.exit_code, r.exit_code != 0),
+                                                Err(e) => {
+                                                    (format!("Tool execution error: {}", e), 1, true)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // No confirmation manager configured, treat as Allow
+                            let result = self
+                                .tool_executor
+                                .execute(&tool_call.name, &tool_call.args)
+                                .await;
+
+                            match result {
+                                Ok(r) => (r.output, r.exit_code, r.exit_code != 0),
+                                Err(e) => (format!("Tool execution error: {}", e), 1, true),
+                            }
+                        }
+                    }
+                    PermissionDecision::Allow => {
+                        // Execute the tool
+                        let result = self
+                            .tool_executor
+                            .execute(&tool_call.name, &tool_call.args)
+                            .await;
+
+                        match result {
+                            Ok(r) => (r.output, r.exit_code, r.exit_code != 0),
+                            Err(e) => (format!("Tool execution error: {}", e), 1, true),
+                        }
+                    }
                 };
 
                 // Send tool end event
@@ -295,7 +530,10 @@ impl AgentLoop {
         &self,
         history: &[Message],
         prompt: &str,
-    ) -> Result<(mpsc::Receiver<AgentEvent>, tokio::task::JoinHandle<Result<AgentResult>>)> {
+    ) -> Result<(
+        mpsc::Receiver<AgentEvent>,
+        tokio::task::JoinHandle<Result<AgentResult>>,
+    )> {
         let (tx, rx) = mpsc::channel(100);
 
         let llm_client = self.llm_client.clone();
@@ -373,6 +611,10 @@ impl Default for AgentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::{ContentBlock, StreamEvent};
+    use crate::permissions::PermissionPolicy;
+    use crate::tools::ToolExecutor;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_agent_config_default() {
@@ -380,5 +622,976 @@ mod tests {
         assert!(config.system_prompt.is_none());
         assert!(config.tools.is_empty()); // Tools are provided externally
         assert_eq!(config.max_tool_rounds, MAX_TOOL_ROUNDS);
+        assert!(config.permission_policy.is_none());
+    }
+
+    // ========================================================================
+    // Mock LLM Client for Testing
+    // ========================================================================
+
+    /// Mock LLM client that returns predefined responses
+    struct MockLlmClient {
+        /// Responses to return (consumed in order)
+        responses: std::sync::Mutex<Vec<LlmResponse>>,
+        /// Number of calls made
+        call_count: AtomicUsize,
+    }
+
+    impl MockLlmClient {
+        fn new(responses: Vec<LlmResponse>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        /// Create a response with text only (no tool calls)
+        fn text_response(text: &str) -> LlmResponse {
+            LlmResponse {
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: text.to_string(),
+                    }],
+                },
+                usage: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                },
+                stop_reason: Some("end_turn".to_string()),
+            }
+        }
+
+        /// Create a response with a tool call
+        fn tool_call_response(tool_id: &str, tool_name: &str, args: serde_json::Value) -> LlmResponse {
+            LlmResponse {
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: vec![ContentBlock::ToolUse {
+                        id: tool_id.to_string(),
+                        name: tool_name.to_string(),
+                        input: args,
+                    }],
+                },
+                usage: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                },
+                stop_reason: Some("tool_use".to_string()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for MockLlmClient {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _system: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<LlmResponse> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                anyhow::bail!("No more mock responses available");
+            }
+            Ok(responses.remove(0))
+        }
+
+        async fn complete_streaming(
+            &self,
+            _messages: &[Message],
+            _system: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> Result<mpsc::Receiver<StreamEvent>> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                anyhow::bail!("No more mock responses available");
+            }
+            let response = responses.remove(0);
+
+            let (tx, rx) = mpsc::channel(10);
+            tokio::spawn(async move {
+                // Send text deltas if any
+                for block in &response.message.content {
+                    if let ContentBlock::Text { text } = block {
+                        tx.send(StreamEvent::TextDelta(text.clone())).await.ok();
+                    }
+                }
+                tx.send(StreamEvent::Done(response)).await.ok();
+            });
+
+            Ok(rx)
+        }
+    }
+
+    // ========================================================================
+    // Agent Loop Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_agent_simple_response() {
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::text_response("Hello, I'm an AI assistant."),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let config = AgentConfig::default();
+
+        let agent = AgentLoop::new(mock_client.clone(), tool_executor, config);
+        let result = agent.execute(&[], "Hello", None).await.unwrap();
+
+        assert_eq!(result.text, "Hello, I'm an AI assistant.");
+        assert_eq!(result.tool_calls_count, 0);
+        assert_eq!(mock_client.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_with_tool_call() {
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            // First response: tool call
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo hello"}),
+            ),
+            // Second response: final text
+            MockLlmClient::text_response("The command output was: hello"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let config = AgentConfig::default();
+
+        let agent = AgentLoop::new(mock_client.clone(), tool_executor, config);
+        let result = agent.execute(&[], "Run echo hello", None).await.unwrap();
+
+        assert_eq!(result.text, "The command output was: hello");
+        assert_eq!(result.tool_calls_count, 1);
+        assert_eq!(mock_client.call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_agent_permission_deny() {
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            // First response: tool call that will be denied
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "rm -rf /tmp/test"}),
+            ),
+            // Second response: LLM responds to the denial
+            MockLlmClient::text_response("I cannot execute that command due to permission restrictions."),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create permission policy that denies rm commands
+        let permission_policy = PermissionPolicy::new().deny("bash(rm:*)");
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            ..Default::default()
+        };
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let agent = AgentLoop::new(mock_client.clone(), tool_executor, config);
+        let result = agent.execute(&[], "Delete files", Some(tx)).await.unwrap();
+
+        // Check that we received a PermissionDenied event
+        let mut found_permission_denied = false;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::PermissionDenied { tool_name, .. } = event {
+                assert_eq!(tool_name, "bash");
+                found_permission_denied = true;
+            }
+        }
+        assert!(found_permission_denied, "Should have received PermissionDenied event");
+
+        assert_eq!(result.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_permission_allow() {
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            // First response: tool call that will be allowed
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo hello"}),
+            ),
+            // Second response: final text
+            MockLlmClient::text_response("Done!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create permission policy that allows echo commands
+        let permission_policy = PermissionPolicy::new()
+            .allow("bash(echo:*)")
+            .deny("bash(rm:*)");
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            ..Default::default()
+        };
+
+        let agent = AgentLoop::new(mock_client.clone(), tool_executor, config);
+        let result = agent.execute(&[], "Echo hello", None).await.unwrap();
+
+        assert_eq!(result.text, "Done!");
+        assert_eq!(result.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_streaming_events() {
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::text_response("Hello!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let config = AgentConfig::default();
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let (mut rx, handle) = agent.execute_streaming(&[], "Hi").await.unwrap();
+
+        // Collect events
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result.text, "Hello!");
+
+        // Check we received Start and End events
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Start { .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::End { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_agent_max_tool_rounds() {
+        // Create a mock that always returns tool calls (infinite loop)
+        let responses: Vec<LlmResponse> = (0..100)
+            .map(|i| {
+                MockLlmClient::tool_call_response(
+                    &format!("tool-{}", i),
+                    "bash",
+                    serde_json::json!({"command": "echo loop"}),
+                )
+            })
+            .collect();
+
+        let mock_client = Arc::new(MockLlmClient::new(responses));
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        let config = AgentConfig {
+            max_tool_rounds: 3,
+            ..Default::default()
+        };
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Loop forever", None).await;
+
+        // Should fail due to max tool rounds exceeded
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Max tool rounds"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_no_permission_policy() {
+        // When no permission policy is set, all tools should be allowed
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "rm -rf /tmp/test"}),
+            ),
+            MockLlmClient::text_response("Done!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let config = AgentConfig {
+            permission_policy: None, // No policy
+            ..Default::default()
+        };
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Delete", None).await.unwrap();
+
+        // Should execute without permission denied
+        assert_eq!(result.text, "Done!");
+        assert_eq!(result.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_permission_ask_executes() {
+        // When permission is Ask (and no HITL), it should execute the tool
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo test"}),
+            ),
+            MockLlmClient::text_response("Done!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create policy where bash falls through to Ask (default)
+        let permission_policy = PermissionPolicy::new(); // Default decision is Ask
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            ..Default::default()
+        };
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Echo", None).await.unwrap();
+
+        // Should execute (Ask without HITL = execute)
+        assert_eq!(result.text, "Done!");
+    }
+
+    // ========================================================================
+    // HITL (Human-in-the-Loop) Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_agent_hitl_approved() {
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo hello"}),
+            ),
+            MockLlmClient::text_response("Command executed!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL confirmation manager with policy enabled
+        let (event_tx, _event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        // Create permission policy that returns Ask for bash
+        let permission_policy = PermissionPolicy::new(); // Default is Ask
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager.clone()),
+            ..Default::default()
+        };
+
+        // Spawn a task to approve the confirmation
+        let cm_clone = confirmation_manager.clone();
+        tokio::spawn(async move {
+            // Wait a bit for the confirmation request to be created
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Approve it
+            cm_clone.confirm("tool-1", true, None).await.ok();
+        });
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Run echo", None).await.unwrap();
+
+        assert_eq!(result.text, "Command executed!");
+        assert_eq!(result.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_rejected() {
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "rm -rf /"}),
+            ),
+            MockLlmClient::text_response("Understood, I won't do that."),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL confirmation manager
+        let (event_tx, _event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        // Permission policy returns Ask
+        let permission_policy = PermissionPolicy::new();
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager.clone()),
+            ..Default::default()
+        };
+
+        // Spawn a task to reject the confirmation
+        let cm_clone = confirmation_manager.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cm_clone
+                .confirm("tool-1", false, Some("Too dangerous".to_string()))
+                .await
+                .ok();
+        });
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Delete everything", None).await.unwrap();
+
+        // LLM should respond to the rejection
+        assert_eq!(result.text, "Understood, I won't do that.");
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_timeout_reject() {
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy, TimeoutAction};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo test"}),
+            ),
+            MockLlmClient::text_response("Timed out, I understand."),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL with very short timeout and Reject action
+        let (event_tx, _event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            default_timeout_ms: 50, // Very short timeout
+            timeout_action: TimeoutAction::Reject,
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        let permission_policy = PermissionPolicy::new();
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager),
+            ..Default::default()
+        };
+
+        // Don't approve - let it timeout
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Echo", None).await.unwrap();
+
+        // Should get timeout rejection response from LLM
+        assert_eq!(result.text, "Timed out, I understand.");
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_timeout_auto_approve() {
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy, TimeoutAction};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo hello"}),
+            ),
+            MockLlmClient::text_response("Auto-approved and executed!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL with very short timeout and AutoApprove action
+        let (event_tx, _event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            default_timeout_ms: 50, // Very short timeout
+            timeout_action: TimeoutAction::AutoApprove,
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        let permission_policy = PermissionPolicy::new();
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager),
+            ..Default::default()
+        };
+
+        // Don't approve - let it timeout and auto-approve
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Echo", None).await.unwrap();
+
+        // Should auto-approve on timeout and execute
+        assert_eq!(result.text, "Auto-approved and executed!");
+        assert_eq!(result.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_confirmation_events() {
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo test"}),
+            ),
+            MockLlmClient::text_response("Done!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL confirmation manager
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            default_timeout_ms: 5000, // Long enough timeout
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        let permission_policy = PermissionPolicy::new();
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager.clone()),
+            ..Default::default()
+        };
+
+        // Spawn task to approve and collect events
+        let cm_clone = confirmation_manager.clone();
+        let event_handle = tokio::spawn(async move {
+            let mut events = Vec::new();
+            // Wait for ConfirmationRequired event
+            while let Ok(event) = event_rx.recv().await {
+                events.push(event.clone());
+                if let AgentEvent::ConfirmationRequired { tool_id, .. } = event {
+                    // Approve it
+                    cm_clone.confirm(&tool_id, true, None).await.ok();
+                    // Wait for ConfirmationReceived
+                    if let Ok(recv_event) = event_rx.recv().await {
+                        events.push(recv_event);
+                    }
+                    break;
+                }
+            }
+            events
+        });
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let _result = agent.execute(&[], "Echo", None).await.unwrap();
+
+        // Check events
+        let events = event_handle.await.unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::ConfirmationRequired { .. })),
+            "Should have ConfirmationRequired event"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::ConfirmationReceived { approved: true, .. })),
+            "Should have ConfirmationReceived event with approved=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_disabled_auto_executes() {
+        // When HITL is disabled, tools should execute automatically even with Ask permission
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo auto"}),
+            ),
+            MockLlmClient::text_response("Auto executed!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL with enabled=false
+        let (event_tx, _event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: false, // HITL disabled
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        let permission_policy = PermissionPolicy::new(); // Default is Ask
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager),
+            ..Default::default()
+        };
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Echo", None).await.unwrap();
+
+        // Should execute without waiting for confirmation
+        assert_eq!(result.text, "Auto executed!");
+        assert_eq!(result.tool_calls_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_with_permission_deny_skips_hitl() {
+        // When permission is Deny, HITL should not be triggered
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "rm -rf /"}),
+            ),
+            MockLlmClient::text_response("Blocked by permission."),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL enabled
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        // Permission policy denies rm commands
+        let permission_policy = PermissionPolicy::new().deny("bash(rm:*)");
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager),
+            ..Default::default()
+        };
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Delete", None).await.unwrap();
+
+        // Should be denied without HITL
+        assert_eq!(result.text, "Blocked by permission.");
+
+        // Should NOT have any ConfirmationRequired events
+        let mut found_confirmation = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, AgentEvent::ConfirmationRequired { .. }) {
+                found_confirmation = true;
+            }
+        }
+        assert!(!found_confirmation, "HITL should not be triggered when permission is Deny");
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_with_permission_allow_skips_hitl() {
+        // When permission is Allow, HITL should not be triggered
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "bash",
+                serde_json::json!({"command": "echo hello"}),
+            ),
+            MockLlmClient::text_response("Allowed!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL enabled
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        // Permission policy allows echo commands
+        let permission_policy = PermissionPolicy::new().allow("bash(echo:*)");
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager),
+            ..Default::default()
+        };
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Echo", None).await.unwrap();
+
+        // Should execute without HITL
+        assert_eq!(result.text, "Allowed!");
+
+        // Should NOT have any ConfirmationRequired events
+        let mut found_confirmation = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, AgentEvent::ConfirmationRequired { .. }) {
+                found_confirmation = true;
+            }
+        }
+        assert!(!found_confirmation, "HITL should not be triggered when permission is Allow");
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_multiple_tool_calls() {
+        // Test multiple tool calls in sequence with HITL
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            // First response: two tool calls
+            LlmResponse {
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: vec![
+                        ContentBlock::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "bash".to_string(),
+                            input: serde_json::json!({"command": "echo first"}),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "tool-2".to_string(),
+                            name: "bash".to_string(),
+                            input: serde_json::json!({"command": "echo second"}),
+                        },
+                    ],
+                },
+                usage: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                },
+                stop_reason: Some("tool_use".to_string()),
+            },
+            MockLlmClient::text_response("Both executed!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // Create HITL
+        let (event_tx, _event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            default_timeout_ms: 5000,
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        let permission_policy = PermissionPolicy::new(); // Default Ask
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager.clone()),
+            ..Default::default()
+        };
+
+        // Spawn task to approve both tools
+        let cm_clone = confirmation_manager.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            cm_clone.confirm("tool-1", true, None).await.ok();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            cm_clone.confirm("tool-2", true, None).await.ok();
+        });
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Run both", None).await.unwrap();
+
+        assert_eq!(result.text, "Both executed!");
+        assert_eq!(result.tool_calls_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_partial_approval() {
+        // Test: first tool approved, second rejected
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            // First response: two tool calls
+            LlmResponse {
+                message: Message {
+                    role: "assistant".to_string(),
+                    content: vec![
+                        ContentBlock::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "bash".to_string(),
+                            input: serde_json::json!({"command": "echo safe"}),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "tool-2".to_string(),
+                            name: "bash".to_string(),
+                            input: serde_json::json!({"command": "rm -rf /"}),
+                        },
+                    ],
+                },
+                usage: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                },
+                stop_reason: Some("tool_use".to_string()),
+            },
+            MockLlmClient::text_response("First worked, second rejected."),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        let (event_tx, _event_rx) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            default_timeout_ms: 5000,
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        let permission_policy = PermissionPolicy::new();
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager.clone()),
+            ..Default::default()
+        };
+
+        // Approve first, reject second
+        let cm_clone = confirmation_manager.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            cm_clone.confirm("tool-1", true, None).await.ok();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            cm_clone.confirm("tool-2", false, Some("Dangerous".to_string())).await.ok();
+        });
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Run both", None).await.unwrap();
+
+        assert_eq!(result.text, "First worked, second rejected.");
+        assert_eq!(result.tool_calls_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_agent_hitl_yolo_mode_auto_approves() {
+        // YOLO mode: specific lanes auto-approve without confirmation
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy, SessionLane};
+        use tokio::sync::broadcast;
+
+        let mock_client = Arc::new(MockLlmClient::new(vec![
+            MockLlmClient::tool_call_response(
+                "tool-1",
+                "read", // Query lane tool
+                serde_json::json!({"path": "/tmp/test.txt"}),
+            ),
+            MockLlmClient::text_response("File read!"),
+        ]));
+
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+
+        // YOLO mode for Query lane (read, glob, ls, grep)
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let mut yolo_lanes = std::collections::HashSet::new();
+        yolo_lanes.insert(SessionLane::Query);
+        let hitl_policy = ConfirmationPolicy {
+            enabled: true,
+            yolo_lanes, // Auto-approve query operations
+            ..Default::default()
+        };
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        let permission_policy = PermissionPolicy::new();
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager),
+            ..Default::default()
+        };
+
+        let agent = AgentLoop::new(mock_client, tool_executor, config);
+        let result = agent.execute(&[], "Read file", None).await.unwrap();
+
+        // Should auto-execute without confirmation (YOLO mode)
+        assert_eq!(result.text, "File read!");
+
+        // Should NOT have ConfirmationRequired for yolo lane
+        let mut found_confirmation = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, AgentEvent::ConfirmationRequired { .. }) {
+                found_confirmation = true;
+            }
+        }
+        assert!(!found_confirmation, "YOLO mode should not trigger confirmation");
+    }
+
+    #[tokio::test]
+    async fn test_agent_config_with_all_options() {
+        use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
+        use tokio::sync::broadcast;
+
+        let (event_tx, _) = broadcast::channel(100);
+        let hitl_policy = ConfirmationPolicy::default();
+        let confirmation_manager = Arc::new(ConfirmationManager::new(hitl_policy, event_tx));
+
+        let permission_policy = PermissionPolicy::new().allow("bash(*)");
+        let policy_lock = Arc::new(RwLock::new(permission_policy));
+
+        let config = AgentConfig {
+            system_prompt: Some("Test system prompt".to_string()),
+            tools: vec![],
+            max_tool_rounds: 10,
+            permission_policy: Some(policy_lock),
+            confirmation_manager: Some(confirmation_manager),
+        };
+
+        assert_eq!(config.system_prompt, Some("Test system prompt".to_string()));
+        assert_eq!(config.max_tool_rounds, 10);
+        assert!(config.permission_policy.is_some());
+        assert!(config.confirmation_manager.is_some());
+
+        // Test Debug trait
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("AgentConfig"));
+        assert!(debug_str.contains("permission_policy: true"));
+        assert!(debug_str.contains("confirmation_manager: true"));
     }
 }

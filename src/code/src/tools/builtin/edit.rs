@@ -134,7 +134,6 @@ fn generate_diff(old: &str, new: &str, file_path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_edit_file() {

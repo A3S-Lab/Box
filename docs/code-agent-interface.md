@@ -1,131 +1,131 @@
-# A3S Code Agent 接口规范
+# A3S Code Agent Interface Specification
 
-## 概述
+## Overview
 
-本文档定义了 A3S Code Agent 的标准接口，任何实现了该接口的编码智能体都可以集成到 A3S Box 中。
+This document defines the standard interface for A3S Code Agent. Any coding agent implementing this interface can be seamlessly integrated into A3S Box.
 
-## 设计原则
+## Design Principles
 
-1. **协议无关** - 支持 gRPC、REST、WebSocket 等多种协议
-2. **能力声明** - 智能体可以声明自己支持的功能
-3. **工具可扩展** - 支持自定义工具和扩展
-4. **会话管理** - 支持多会话并发
-5. **流式响应** - 支持流式生成和事件推送
+1. **Protocol Agnostic** - Support gRPC, REST, WebSocket, and other protocols
+2. **Capability Declaration** - Agents can declare their supported features
+3. **Extensible Tools** - Support custom tools and extensions
+4. **Session Management** - Support multi-session concurrency
+5. **Streaming Responses** - Support streaming generation and event push
 
-## 核心接口
+## Core Interface
 
-### 1. Agent Service（智能体服务）
+### 1. Agent Service
 
-所有编码智能体必须实现以下核心接口：
+All coding agents must implement the following core interface:
 
 ```protobuf
 syntax = "proto3";
 package a3s.code.agent.v1;
 
-// 编码智能体服务
+// Coding Agent Service
 service CodeAgentService {
-  // === 生命周期管理 ===
+  // === Lifecycle Management ===
 
-  // 健康检查
+  // Health check
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 
-  // 获取智能体能力
+  // Get agent capabilities
   rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
 
-  // 初始化智能体
+  // Initialize agent
   rpc Initialize(InitializeRequest) returns (InitializeResponse);
 
-  // 关闭智能体
+  // Shutdown agent
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 
-  // === 会话管理 ===
+  // === Session Management ===
 
-  // 创建会话
+  // Create session
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
 
-  // 销毁会话
+  // Destroy session
   rpc DestroySession(DestroySessionRequest) returns (DestroySessionResponse);
 
-  // 列出会话
+  // List sessions
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
 
-  // 获取会话信息
+  // Get session info
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
 
-  // 配置会话
+  // Configure session
   rpc ConfigureSession(ConfigureSessionRequest) returns (ConfigureSessionResponse);
 
-  // === 代码生成 ===
+  // === Code Generation ===
 
-  // 生成代码（同步）
+  // Generate code (synchronous)
   rpc Generate(GenerateRequest) returns (GenerateResponse);
 
-  // 生成代码（流式）
+  // Generate code (streaming)
   rpc StreamGenerate(GenerateRequest) returns (stream GenerateChunk);
 
-  // 生成结构化输出（同步）
+  // Generate structured output (synchronous)
   rpc GenerateStructured(GenerateStructuredRequest) returns (GenerateStructuredResponse);
 
-  // 生成结构化输出（流式）
+  // Generate structured output (streaming)
   rpc StreamGenerateStructured(GenerateStructuredRequest) returns (stream GenerateStructuredChunk);
 
-  // === 工具执行 ===
+  // === Tool Execution ===
 
-  // 执行工具
+  // Execute tool
   rpc ExecuteTool(ExecuteToolRequest) returns (ExecuteToolResponse);
 
-  // 批量执行工具
+  // Batch execute tools
   rpc ExecuteToolBatch(ExecuteToolBatchRequest) returns (ExecuteToolBatchResponse);
 
-  // 列出可用工具
+  // List available tools
   rpc ListTools(ListToolsRequest) returns (ListToolsResponse);
 
-  // 注册自定义工具
+  // Register custom tool
   rpc RegisterTool(RegisterToolRequest) returns (RegisterToolResponse);
 
-  // === 技能管理 ===
+  // === Skill Management ===
 
-  // 加载技能
+  // Load skill
   rpc LoadSkill(LoadSkillRequest) returns (LoadSkillResponse);
 
-  // 卸载技能
+  // Unload skill
   rpc UnloadSkill(UnloadSkillRequest) returns (UnloadSkillResponse);
 
-  // 列出技能
+  // List skills
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
 
-  // === 上下文管理 ===
+  // === Context Management ===
 
-  // 获取上下文使用情况
+  // Get context usage
   rpc GetContextUsage(GetContextUsageRequest) returns (GetContextUsageResponse);
 
-  // 压缩上下文
+  // Compact context
   rpc CompactContext(CompactContextRequest) returns (CompactContextResponse);
 
-  // 清空上下文
+  // Clear context
   rpc ClearContext(ClearContextRequest) returns (ClearContextResponse);
 
-  // === 事件流 ===
+  // === Event Stream ===
 
-  // 订阅事件
+  // Subscribe to events
   rpc SubscribeEvents(SubscribeEventsRequest) returns (stream AgentEvent);
 
-  // === 控制操作 ===
+  // === Control Operations ===
 
-  // 取消操作
+  // Cancel operation
   rpc Cancel(CancelRequest) returns (CancelResponse);
 
-  // 暂停操作
+  // Pause operation
   rpc Pause(PauseRequest) returns (PauseResponse);
 
-  // 恢复操作
+  // Resume operation
   rpc Resume(ResumeRequest) returns (ResumeResponse);
 }
 ```
 
-### 2. 消息定义
+### 2. Message Definitions
 
-#### 2.1 健康检查
+#### 2.1 Health Check
 
 ```protobuf
 message HealthCheckRequest {}
@@ -144,134 +144,71 @@ message HealthCheckResponse {
 }
 ```
 
-#### 2.2 能力声明
+#### 2.2 Capability Declaration
 
 ```protobuf
 message GetCapabilitiesRequest {}
 
 message GetCapabilitiesResponse {
-  // 智能体基本信息
+  // Agent basic info
   AgentInfo info = 1;
 
-  // 支持的功能
+  // Supported features
   repeated string features = 2;
 
-  // 支持的工具
+  // Supported tools
   repeated ToolCapability tools = 3;
 
-  // 支持的模型
+  // Supported models
   repeated ModelCapability models = 4;
 
-  // 资源限制
+  // Resource limits
   ResourceLimits limits = 5;
 
-  // 扩展元数据
+  // Extension metadata
   map<string, string> metadata = 6;
 }
 
 message AgentInfo {
-  string name = 1;           // 智能体名称，如 "a3s-code", "opencode"
-  string version = 2;        // 版本号，如 "0.1.0"
-  string description = 3;    // 描述
-  string author = 4;         // 作者
-  string license = 5;        // 许可证
-  string homepage = 6;       // 主页
+  string name = 1;           // Agent name, e.g., "a3s-code", "opencode"
+  string version = 2;        // Version number, e.g., "0.1.0"
+  string description = 3;    // Description
+  string author = 4;         // Author
+  string license = 5;        // License
+  string homepage = 6;       // Homepage
 }
 
 message ToolCapability {
-  string name = 1;           // 工具名称
-  string description = 2;    // 工具描述
-  repeated string parameters = 3;  // 参数列表
-  bool async = 4;            // 是否支持异步执行
+  string name = 1;           // Tool name
+  string description = 2;    // Tool description
+  repeated string parameters = 3;  // Parameter list
+  bool async = 4;            // Supports async execution
 }
 
 message ModelCapability {
-  string provider = 1;       // 提供商，如 "anthropic", "openai"
-  string model = 2;          // 模型名称
-  repeated string features = 3;  // 支持的功能
+  string provider = 1;       // Provider, e.g., "anthropic", "openai"
+  string model = 2;          // Model name
+  repeated string features = 3;  // Supported features
 }
 
 message ResourceLimits {
-  uint64 max_context_tokens = 1;    // 最大上下文 token 数
-  uint32 max_concurrent_sessions = 2;  // 最大并发会话数
-  uint32 max_tools_per_request = 3;    // 单次请求最大工具数
+  uint64 max_context_tokens = 1;    // Maximum context tokens
+  uint32 max_concurrent_sessions = 2;  // Maximum concurrent sessions
+  uint32 max_tools_per_request = 3;    // Maximum tools per request
 }
 ```
 
-#### 2.3 初始化
-
-```protobuf
-message InitializeRequest {
-  // 工作目录
-  string workspace = 1;
-
-  // 配置
-  AgentConfig config = 2;
-
-  // 环境变量
-  map<string, string> env = 3;
-}
-
-message InitializeResponse {
-  bool success = 1;
-  string message = 2;
-  AgentInfo info = 3;
-}
-
-message AgentConfig {
-  // LLM 配置
-  LLMConfig llm = 1;
-
-  // 工具配置
-  ToolsConfig tools = 2;
-
-  // 日志配置
-  LogConfig log = 3;
-
-  // 自定义配置
-  map<string, string> custom = 4;
-}
-
-message LLMConfig {
-  string provider = 1;       // 提供商
-  string model = 2;          // 模型
-  string api_key = 3;        // API 密钥
-  string base_url = 4;       // 基础 URL
-  float temperature = 5;     // 温度
-  uint32 max_tokens = 6;     // 最大 token 数
-}
-
-message ToolsConfig {
-  repeated string enabled_tools = 1;   // 启用的工具
-  repeated string disabled_tools = 2;  // 禁用的工具
-  map<string, string> tool_config = 3; // 工具配置
-}
-
-message LogConfig {
-  enum Level {
-    DEBUG = 0;
-    INFO = 1;
-    WARN = 2;
-    ERROR = 3;
-  }
-
-  Level level = 1;
-  string format = 2;
-  string output = 3;
-}
-```
-
-#### 2.4 会话管理
+#### 2.3 Session Management
 
 ```protobuf
 message CreateSessionRequest {
-  // 会话 ID（可选，不提供则自动生成）
+  // Session ID (optional, auto-generated if not provided)
   string session_id = 1;
 
-  // 会话配置
+  // Session configuration
   SessionConfig config = 2;
 
-  // 初始上下文
+  // Initial context
   repeated Message initial_context = 3;
 }
 
@@ -281,22 +218,22 @@ message CreateSessionResponse {
 }
 
 message SessionConfig {
-  // 会话名称
+  // Session name
   string name = 1;
 
-  // 工作目录
+  // Working directory
   string workspace = 2;
 
-  // LLM 配置（覆盖全局配置）
+  // LLM configuration (overrides global config)
   LLMConfig llm = 3;
 
-  // 系统提示词
+  // System prompt
   string system_prompt = 4;
 
-  // 最大上下文长度
+  // Maximum context length
   uint32 max_context_length = 5;
 
-  // 自动压缩上下文
+  // Auto compact context
   bool auto_compact = 6;
 }
 
@@ -325,17 +262,17 @@ message ContextUsage {
 }
 ```
 
-#### 2.5 代码生成
+#### 2.4 Code Generation
 
 ```protobuf
 message GenerateRequest {
-  // 会话 ID
+  // Session ID
   string session_id = 1;
 
-  // 用户消息
+  // User messages
   repeated Message messages = 2;
 
-  // 生成选项
+  // Generation options
   GenerateOptions options = 3;
 }
 
@@ -354,65 +291,49 @@ message Message {
   map<string, string> metadata = 4;
 }
 
-message Attachment {
-  enum Type {
-    TYPE_UNKNOWN = 0;
-    TYPE_FILE = 1;
-    TYPE_IMAGE = 2;
-    TYPE_CODE = 3;
-    TYPE_DATA = 4;
-  }
-
-  Type type = 1;
-  string name = 2;
-  string mime_type = 3;
-  bytes content = 4;
-  string url = 5;
-}
-
 message GenerateOptions {
-  // 是否启用工具
+  // Enable tools
   bool enable_tools = 1;
 
-  // 允许的工具列表
+  // Allowed tools list
   repeated string allowed_tools = 2;
 
-  // 最大工具调用次数
+  // Maximum tool calls
   uint32 max_tool_calls = 3;
 
-  // 生成参数
+  // Generation parameters
   float temperature = 4;
   uint32 max_tokens = 5;
   repeated string stop_sequences = 6;
 
-  // 是否返回中间步骤
+  // Return intermediate steps
   bool return_intermediate_steps = 7;
 }
 
 message GenerateResponse {
-  // 会话 ID
+  // Session ID
   string session_id = 1;
 
-  // 生成的消息
+  // Generated message
   Message message = 2;
 
-  // 工具调用
+  // Tool calls
   repeated ToolCall tool_calls = 3;
 
-  // 使用情况
+  // Usage
   Usage usage = 4;
 
-  // 完成原因
+  // Finish reason
   FinishReason finish_reason = 5;
 
-  // 元数据
+  // Metadata
   map<string, string> metadata = 6;
 }
 
 message ToolCall {
   string id = 1;
   string name = 2;
-  string arguments = 3;  // JSON 格式
+  string arguments = 3;  // JSON format
   ToolResult result = 4;
 }
 
@@ -421,12 +342,6 @@ message ToolResult {
   string output = 2;
   string error = 3;
   map<string, string> metadata = 4;
-}
-
-message Usage {
-  uint32 prompt_tokens = 1;
-  uint32 completion_tokens = 2;
-  uint32 total_tokens = 3;
 }
 
 enum FinishReason {
@@ -438,7 +353,7 @@ enum FinishReason {
   FINISH_REASON_ERROR = 5;
 }
 
-// 流式响应
+// Streaming response
 message GenerateChunk {
   enum ChunkType {
     CHUNK_TYPE_UNKNOWN = 0;
@@ -458,109 +373,43 @@ message GenerateChunk {
 }
 ```
 
-#### 2.6 工具执行
+## Built-in Tool Specification
 
-```protobuf
-message ExecuteToolRequest {
-  string session_id = 1;
-  string tool_name = 2;
-  string arguments = 3;  // JSON 格式
-  map<string, string> options = 4;
-}
+All coding agents should support the following built-in tools:
 
-message ExecuteToolResponse {
-  ToolResult result = 1;
-}
+### File Operations (6 tools)
+1. **read_file** - Read file contents
+2. **write_file** - Write file contents
+3. **edit_file** - Edit file (exact replacement)
+4. **delete_file** - Delete file
+5. **list_files** - List files
+6. **search_files** - Search files (glob pattern)
 
-message ListToolsRequest {
-  string session_id = 1;
-}
+### Code Operations (5 tools)
+7. **grep** - Search code contents
+8. **find_definition** - Find definition
+9. **find_references** - Find references
+10. **format_code** - Format code
+11. **lint_code** - Code lint
 
-message ListToolsResponse {
-  repeated Tool tools = 1;
-}
+### Command Execution (2 tools)
+12. **bash** - Execute bash command
+13. **run_script** - Run script
 
-message Tool {
-  string name = 1;
-  string description = 2;
-  string parameters_schema = 3;  // JSON Schema
-  repeated string tags = 4;
-  bool async = 5;
-}
-```
+### Git Tools (4 tools)
+14. **git_status** - Git status
+15. **git_diff** - Git diff
+16. **git_commit** - Git commit
+17. **git_log** - Git log
 
-#### 2.7 事件流
+### Other Tools (3 tools)
+18. **web_search** - Web search
+19. **web_fetch** - Fetch web content
+20. **ask_user** - Ask user
 
-```protobuf
-message SubscribeEventsRequest {
-  string session_id = 1;
-  repeated string event_types = 2;
-}
+## Tool Parameter Specification
 
-message AgentEvent {
-  enum EventType {
-    EVENT_TYPE_UNKNOWN = 0;
-    EVENT_TYPE_SESSION_CREATED = 1;
-    EVENT_TYPE_SESSION_DESTROYED = 2;
-    EVENT_TYPE_GENERATION_STARTED = 3;
-    EVENT_TYPE_GENERATION_COMPLETED = 4;
-    EVENT_TYPE_TOOL_CALLED = 5;
-    EVENT_TYPE_TOOL_COMPLETED = 6;
-    EVENT_TYPE_ERROR = 7;
-    EVENT_TYPE_WARNING = 8;
-    EVENT_TYPE_INFO = 9;
-  }
-
-  EventType type = 1;
-  string session_id = 2;
-  int64 timestamp = 3;
-  string message = 4;
-  map<string, string> data = 5;
-}
-```
-
-## 内置工具规范
-
-所有编码智能体应该支持以下内置工具：
-
-### 文件操作工具
-
-1. **read_file** - 读取文件内容
-2. **write_file** - 写入文件内容
-3. **edit_file** - 编辑文件（精确替换）
-4. **delete_file** - 删除文件
-5. **list_files** - 列出文件
-6. **search_files** - 搜索文件（glob 模式）
-
-### 代码操作工具
-
-7. **grep** - 搜索代码内容
-8. **find_definition** - 查找定义
-9. **find_references** - 查找引用
-10. **format_code** - 格式化代码
-11. **lint_code** - 代码检查
-
-### 命令执行工具
-
-12. **bash** - 执行 bash 命令
-13. **run_script** - 运行脚本
-
-### Git 工具
-
-14. **git_status** - Git 状态
-15. **git_diff** - Git 差异
-16. **git_commit** - Git 提交
-17. **git_log** - Git 日志
-
-### 其他工具
-
-18. **web_search** - 网络搜索
-19. **web_fetch** - 获取网页内容
-20. **ask_user** - 询问用户
-
-## 工具参数规范
-
-每个工具必须提供 JSON Schema 定义其参数：
+Each tool must provide a JSON Schema defining its parameters:
 
 ```json
 {
@@ -585,52 +434,15 @@ message AgentEvent {
 }
 ```
 
-## 错误处理
+## Protocol Adapters
 
-所有 RPC 方法应该使用标准的 gRPC 状态码：
+### gRPC Implementation (Recommended)
 
-```protobuf
-enum ErrorCode {
-  OK = 0;
-  CANCELLED = 1;
-  UNKNOWN = 2;
-  INVALID_ARGUMENT = 3;
-  DEADLINE_EXCEEDED = 4;
-  NOT_FOUND = 5;
-  ALREADY_EXISTS = 6;
-  PERMISSION_DENIED = 7;
-  RESOURCE_EXHAUSTED = 8;
-  FAILED_PRECONDITION = 9;
-  ABORTED = 10;
-  OUT_OF_RANGE = 11;
-  UNIMPLEMENTED = 12;
-  INTERNAL = 13;
-  UNAVAILABLE = 14;
-  DATA_LOSS = 15;
-  UNAUTHENTICATED = 16;
-}
+Directly implement the protobuf-defined interface.
 
-message Error {
-  ErrorCode code = 1;
-  string message = 2;
-  repeated ErrorDetail details = 3;
-}
+### REST API Implementation
 
-message ErrorDetail {
-  string field = 1;
-  string message = 2;
-}
-```
-
-## 协议适配
-
-### gRPC 实现（推荐）
-
-直接实现上述 protobuf 定义的接口。
-
-### REST API 实现
-
-如果智能体使用 REST API（如 OpenCode），需要提供适配器：
+If the agent uses REST API (like OpenCode), an adapter is needed:
 
 ```
 POST /sessions                    → CreateSession
@@ -642,9 +454,9 @@ GET /health                       → HealthCheck
 GET /capabilities                 → GetCapabilities
 ```
 
-### WebSocket 实现
+### WebSocket Implementation
 
-通过 WebSocket 传输 JSON 格式的消息：
+Transmit JSON format messages via WebSocket:
 
 ```json
 {
@@ -657,16 +469,16 @@ GET /capabilities                 → GetCapabilities
 }
 ```
 
-## 实现示例
+## Implementation Examples
 
-### 最小实现（Rust）
+### Minimal Implementation (Rust)
 
 ```rust
 use tonic::{Request, Response, Status};
 use a3s_code_agent::*;
 
 pub struct MyCodeAgent {
-    // 智能体状态
+    // Agent state
 }
 
 #[tonic::async_trait]
@@ -717,11 +529,11 @@ impl CodeAgentService for MyCodeAgent {
         }))
     }
 
-    // 实现其他方法...
+    // Implement other methods...
 }
 ```
 
-### 最小实现（Python）
+### Minimal Implementation (Python)
 
 ```python
 import grpc
@@ -765,7 +577,7 @@ class MyCodeAgent(CodeAgentServiceServicer):
             metadata={}
         )
 
-    # 实现其他方法...
+    # Implement other methods...
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
@@ -775,9 +587,9 @@ def serve():
     server.wait_for_termination()
 ```
 
-## 集成到 A3S Box
+## Integration with A3S Box
 
-### 1. 配置编码智能体
+### 1. Configure Coding Agent
 
 ```yaml
 # box-config.yaml
@@ -785,25 +597,25 @@ coding_agent:
   kind: "custom"
   name: "my-code-agent"
   image: "ghcr.io/myorg/my-code-agent:v1"
-  protocol: "grpc"  # 或 "rest", "websocket"
+  protocol: "grpc"  # or "rest", "websocket"
   port: 4088
 ```
 
-### 2. A3S Box 自动发现
+### 2. A3S Box Auto Discovery
 
-A3S Box 会：
-1. 启动智能体容器
-2. 调用 `HealthCheck` 确认就绪
-3. 调用 `GetCapabilities` 获取能力
-4. 调用 `Initialize` 初始化智能体
-5. 开始使用智能体
+A3S Box will:
+1. Start the agent container
+2. Call `HealthCheck` to confirm readiness
+3. Call `GetCapabilities` to get capabilities
+4. Call `Initialize` to initialize the agent
+5. Start using the agent
 
-### 3. 协议适配
+### 3. Protocol Adaptation
 
-如果智能体使用非 gRPC 协议，A3S Box 会自动加载适配器：
+If the agent uses non-gRPC protocol, A3S Box will automatically load an adapter:
 
 ```rust
-// A3S Box 内部
+// A3S Box internal
 let agent_client = match config.protocol {
     Protocol::Grpc => GrpcAgentClient::new(config),
     Protocol::Rest => RestAgentAdapter::new(config),
@@ -811,51 +623,51 @@ let agent_client = match config.protocol {
 };
 ```
 
-## 兼容性矩阵
+## Compatibility Matrix
 
-| 智能体 | 协议 | 适配器 | 状态 |
-|--------|------|--------|------|
-| A3S Code | gRPC | 原生 | ✅ 完全支持 |
-| OpenCode | REST | REST 适配器 | ✅ 完全支持 |
-| Claude Code | 专有 | 专有适配器 | 🚧 计划中 |
-| 自定义智能体 | gRPC/REST/WS | 自动检测 | ✅ 完全支持 |
+| Agent | Protocol | Adapter | Status |
+|-------|----------|---------|--------|
+| A3S Code | gRPC | Native | Fully Supported |
+| OpenCode | REST | REST Adapter | Fully Supported |
+| Claude Code | Proprietary | Proprietary Adapter | Planned |
+| Custom Agent | gRPC/REST/WS | Auto Detection | Fully Supported |
 
-## 测试和验证
+## Testing and Validation
 
-### 1. 接口测试
+### Interface Testing
 
 ```bash
-# 健康检查
+# Health check
 grpcurl -plaintext localhost:4088 a3s.code.agent.v1.CodeAgentService/HealthCheck
 
-# 获取能力
+# Get capabilities
 grpcurl -plaintext localhost:4088 a3s.code.agent.v1.CodeAgentService/GetCapabilities
 
-# 创建会话
+# Create session
 grpcurl -plaintext -d '{"config": {"name": "test"}}' \
   localhost:4088 a3s.code.agent.v1.CodeAgentService/CreateSession
 ```
 
-### 2. 兼容性测试
+### Compatibility Testing
 
-A3S Box 提供测试套件验证智能体兼容性：
+A3S Box provides a test suite to verify agent compatibility:
 
 ```bash
 a3s-box test-agent --image ghcr.io/myorg/my-agent:latest
 ```
 
-## 未来规划
+## Future Plans
 
-### 近期计划
-- 多模态支持（图片、音频）
-- 协作式编辑
-- 实时协作
+### Near-term
+- Multimodal support (images, audio)
+- Collaborative editing
+- Real-time collaboration
 
-### 远期计划
-- 分布式智能体
-- 智能体间通信
-- 联邦学习
+### Long-term
+- Distributed agents
+- Inter-agent communication
+- Federated learning
 
 ---
 
-**最后更新**: 2026-02-03
+**Last Updated**: 2026-02-04

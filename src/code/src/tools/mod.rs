@@ -25,7 +25,7 @@ mod types;
 
 pub use builtin::register_builtin_tools;
 pub use registry::ToolRegistry;
-pub use skill_loader::{parse_skill_tools, load_tools_from_skill, SkillToolDef};
+pub use skill_loader::{load_tools_from_skill, parse_skill_tools, SkillToolDef};
 pub use types::{Tool, ToolBackend, ToolContext, ToolOutput};
 
 use crate::llm::ToolDefinition;
@@ -149,7 +149,11 @@ impl ToolExecutor {
         }
 
         if !registered.is_empty() {
-            tracing::info!("Registered {} skill tools: {:?}", registered.len(), registered);
+            tracing::info!(
+                "Registered {} skill tools: {:?}",
+                registered.len(),
+                registered
+            );
         }
 
         registered
@@ -244,7 +248,10 @@ Test skill content
 
         // Now should have 8 tools
         assert_eq!(executor.definitions().len(), 8);
-        assert!(executor.definitions().iter().any(|t| t.name == "custom-echo"));
+        assert!(executor
+            .definitions()
+            .iter()
+            .any(|t| t.name == "custom-echo"));
     }
 
     #[tokio::test]

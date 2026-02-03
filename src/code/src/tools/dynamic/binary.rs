@@ -70,10 +70,7 @@ impl BinaryTool {
         // If we have a URL, check cache or download
         if let Some(url) = &self.url {
             let cache_dir = ctx.workspace.join(".a3s/cache/tools");
-            let binary_name = url
-                .split('/')
-                .last()
-                .unwrap_or(&self.name);
+            let binary_name = url.split('/').next_back().unwrap_or(&self.name);
             let cached_path = cache_dir.join(binary_name);
 
             if cached_path.exists() {
@@ -89,10 +86,7 @@ impl BinaryTool {
                 .with_context(|| format!("Failed to download binary from {}", url))?;
 
             if !response.status().is_success() {
-                anyhow::bail!(
-                    "Failed to download binary: HTTP {}",
-                    response.status()
-                );
+                anyhow::bail!("Failed to download binary: HTTP {}", response.status());
             }
 
             let bytes = response.bytes().await?;
@@ -161,9 +155,9 @@ impl Tool for BinaryTool {
             cmd.env("TOOL_ARGS", args.to_string());
         }
 
-        let mut child = cmd.spawn().with_context(|| {
-            format!("Failed to spawn binary: {}", binary_path)
-        })?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to spawn binary: {}", binary_path))?;
 
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();

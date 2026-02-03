@@ -23,6 +23,7 @@ pub struct HttpTool {
 }
 
 impl HttpTool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         description: String,
@@ -95,9 +96,8 @@ impl HttpTool {
         // For GET requests, add remaining args as query parameters
         if self.method.to_uppercase() == "GET" {
             if let Some(obj) = args.as_object() {
-                let mut url = reqwest::Url::parse(&base_url).unwrap_or_else(|_| {
-                    reqwest::Url::parse("http://invalid").unwrap()
-                });
+                let mut url = reqwest::Url::parse(&base_url)
+                    .unwrap_or_else(|_| reqwest::Url::parse("http://invalid").unwrap());
 
                 for (key, value) in obj {
                     // Skip if already substituted in URL
@@ -171,9 +171,10 @@ impl Tool for HttpTool {
         }
 
         // Send request
-        let response = request.send().await.with_context(|| {
-            format!("HTTP request failed: {} {}", self.method, url)
-        })?;
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("HTTP request failed: {} {}", self.method, url))?;
 
         let status = response.status();
         let headers = response.headers().clone();
@@ -181,12 +182,19 @@ impl Tool for HttpTool {
 
         // Build output
         let mut output = String::new();
-        output.push_str(&format!("HTTP {} {}\n", status.as_u16(), status.canonical_reason().unwrap_or("")));
+        output.push_str(&format!(
+            "HTTP {} {}\n",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        ));
         output.push_str(&format!("URL: {}\n\n", url));
 
         // Include relevant headers
         if let Some(content_type) = headers.get("content-type") {
-            output.push_str(&format!("Content-Type: {}\n", content_type.to_str().unwrap_or("")));
+            output.push_str(&format!(
+                "Content-Type: {}\n",
+                content_type.to_str().unwrap_or("")
+            ));
         }
         output.push('\n');
 

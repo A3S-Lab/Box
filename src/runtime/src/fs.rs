@@ -25,13 +25,16 @@ pub struct FsManager {
 impl FsManager {
     /// Create a new filesystem manager
     pub fn new() -> Self {
-        Self {
-            mounts: Vec::new(),
-        }
+        Self { mounts: Vec::new() }
     }
 
     /// Add a mount point
-    pub fn add_mount(&mut self, host_path: impl AsRef<Path>, guest_path: impl AsRef<Path>, readonly: bool) {
+    pub fn add_mount(
+        &mut self,
+        host_path: impl AsRef<Path>,
+        guest_path: impl AsRef<Path>,
+        readonly: bool,
+    ) {
         self.mounts.push(MountPoint {
             host_path: host_path.as_ref().to_path_buf(),
             guest_path: guest_path.as_ref().to_path_buf(),
@@ -112,24 +115,19 @@ mod dirs {
     pub fn cache_dir() -> Option<PathBuf> {
         #[cfg(target_os = "macos")]
         {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join("Library/Caches"))
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Caches"))
         }
 
         #[cfg(target_os = "linux")]
         {
             std::env::var_os("XDG_CACHE_HOME")
                 .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME")
-                        .map(|home| PathBuf::from(home).join(".cache"))
-                })
+                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
         }
 
         #[cfg(target_os = "windows")]
         {
-            std::env::var_os("LOCALAPPDATA")
-                .map(PathBuf::from)
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
         }
     }
 }

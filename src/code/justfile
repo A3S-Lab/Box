@@ -1,94 +1,49 @@
 # A3S Box Code (Guest Agent) - Justfile
+# Most commands available via root: just test, just fmt, just lint
 
-# Default recipe
 default:
     @just --list
 
-# Build
-build:
-    cargo build -p a3s-box-code
-
-# Build in release mode
-build-release:
-    cargo build -p a3s-box-code --release
-
-# Run tests
+# Run tests (this crate only)
 test:
     cargo test -p a3s-box-code
 
-# Run tests with output
-test-verbose:
-    cargo test -p a3s-box-code -- --nocapture
-
-# Run a specific test
-test-one TEST:
-    cargo test -p a3s-box-code -- {{TEST}}
-
-# Format code
-fmt:
-    cargo fmt -p a3s-box-code
-
-# Check formatting
-fmt-check:
-    cargo fmt -p a3s-box-code -- --check
-
-# Run clippy
-lint:
-    cargo clippy -p a3s-box-code --all-targets -- -D warnings
-
-# Run clippy with fixes
-lint-fix:
-    cargo clippy -p a3s-box-code --all-targets --fix --allow-dirty
-
-# Check compilation
-check:
-    cargo check -p a3s-box-code
-
-# Generate documentation
-doc:
-    cargo doc -p a3s-box-code --no-deps --document-private-items
-
-# Open documentation
-doc-open:
-    cargo doc -p a3s-box-code --no-deps --open
-
-# Start the agent server (for development)
-# Loads environment variables from ../src/.env and ../src/.env.local
-# .env.local takes precedence over .env
-# Inherits LLM env vars from shell: LLM_PROVIDER, LLM_API_KEY, LLM_MODEL, LLM_BASE_URL
-# Or provider-specific: ANTHROPIC_API_KEY, OPENAI_API_KEY
-# Set A3S_WORKSPACE or WORKSPACE to override default workspace location
+# Start agent server (dev mode)
 serve:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Load .env from parent directory if it exists
-    if [ -f ../.env ]; then
-        echo "Loading environment from ../.env"
-        export $(grep -v '^#' ../.env | grep -v '^$' | xargs)
-    fi
-    # Load .env.local from parent directory if it exists (overrides .env)
-    if [ -f ../.env.local ]; then
-        echo "Loading environment from ../.env.local"
-        export $(grep -v '^#' ../.env.local | grep -v '^$' | xargs)
-    fi
+    [ -f ../.env ] && export $(grep -v '^#' ../.env | grep -v '^$' | xargs)
+    [ -f ../.env.local ] && export $(grep -v '^#' ../.env.local | grep -v '^$' | xargs)
     RUST_LOG=info cargo run -p a3s-box-code
 
-# Start the agent server with debug logging
+# Run queue and HITL tests
+test-queue:
+    cargo test -p a3s-box-code --lib -- queue::tests hitl::tests
+
+# Run queue tests only
+test-queue-only:
+    cargo test -p a3s-box-code --lib -- queue::tests
+
+# Run HITL tests only (hitl module)
+test-hitl:
+    cargo test -p a3s-box-code --lib -- hitl::tests
+
+# Run HITL tests in agent loop (agent module)
+test-agent-hitl:
+    cargo test -p a3s-box-code --lib -- agent::tests::test_agent_hitl
+
+# Run all HITL-related tests (hitl + agent)
+test-hitl-all:
+    cargo test -p a3s-box-code --lib -- hitl::tests agent::tests::test_agent_hitl
+
+# Run session tests (includes queue/HITL integration)
+test-session:
+    cargo test -p a3s-box-code --lib -- session::tests
+
+# Start agent server (debug logging)
 serve-debug:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Load .env from parent directory if it exists
-    if [ -f ../.env ]; then
-        echo "Loading environment from ../.env"
-        export $(grep -v '^#' ../.env | grep -v '^$' | xargs)
-    fi
-    # Load .env.local from parent directory if it exists (overrides .env)
-    if [ -f ../.env.local ]; then
-        echo "Loading environment from ../.env.local"
-        export $(grep -v '^#' ../.env.local | grep -v '^$' | xargs)
-    fi
+    [ -f ../.env ] && export $(grep -v '^#' ../.env | grep -v '^$' | xargs)
+    [ -f ../.env.local ] && export $(grep -v '^#' ../.env.local | grep -v '^$' | xargs)
     RUST_LOG=debug cargo run -p a3s-box-code
-
-# Regenerate proto files
-proto:
-    cargo build -p a3s-box-code

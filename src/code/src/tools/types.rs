@@ -36,9 +36,7 @@ impl ToolContext {
         };
 
         // Canonicalize to resolve .. and symlinks
-        let canonical = resolved
-            .canonicalize()
-            .unwrap_or_else(|_| resolved.clone());
+        let canonical = resolved.canonicalize().unwrap_or_else(|_| resolved.clone());
 
         // Security check: ensure path is within workspace
         if !canonical.starts_with(&self.workspace) {
@@ -139,10 +137,11 @@ pub trait Tool: Send + Sync {
 }
 
 /// Tool backend type for dynamic tools
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ToolBackend {
     /// Built-in Rust implementation
+    #[default]
     Builtin,
 
     /// External binary executable
@@ -194,12 +193,6 @@ fn default_http_method() -> String {
 
 fn default_http_timeout() -> u64 {
     30_000 // 30 seconds
-}
-
-impl Default for ToolBackend {
-    fn default() -> Self {
-        Self::Builtin
-    }
 }
 
 #[cfg(test)]

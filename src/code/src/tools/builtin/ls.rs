@@ -69,7 +69,6 @@ impl Tool for LsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_ls_directory() {
@@ -120,10 +119,7 @@ mod tests {
         // Create a test file
         std::fs::write(temp_dir.path().join("test.txt"), "").unwrap();
 
-        let result = tool
-            .execute(&serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.execute(&serde_json::json!({}), &ctx).await.unwrap();
 
         assert!(result.success);
         assert!(result.content.contains("test.txt"));

@@ -1,53 +1,17 @@
 # A3S Box Python SDK - Justfile
+# Most commands available via root: just test, just fmt, just lint
 
-# Default recipe
 default:
     @just --list
 
-# Build
+# Build with maturin (dev)
 build:
-    cargo build -p a3s-box-sdk-python
+    maturin develop
 
-# Build in release mode
+# Build release wheel
 build-release:
-    cargo build -p a3s-box-sdk-python --release
-
-# Run tests
-test:
-    cargo test -p a3s-box-sdk-python --lib
-
-# Run tests with output
-test-verbose:
-    cargo test -p a3s-box-sdk-python --lib -- --nocapture
-
-# Format code
-fmt:
-    cargo fmt -p a3s-box-sdk-python
-
-# Check formatting
-fmt-check:
-    cargo fmt -p a3s-box-sdk-python -- --check
-
-# Run clippy
-lint:
-    cargo clippy -p a3s-box-sdk-python --all-targets -- -D warnings
-
-# Run clippy with fixes
-lint-fix:
-    cargo clippy -p a3s-box-sdk-python --all-targets --fix --allow-dirty
-
-# Check compilation
-check:
-    cargo check -p a3s-box-sdk-python
-
-# Generate documentation
-doc:
-    cargo doc -p a3s-box-sdk-python --no-deps --document-private-items
-
-# Build wheel with maturin
-wheel:
     maturin build --release
 
-# Install in development mode
-dev:
-    maturin develop
+# Run tests (this crate only)
+test:
+    cargo test -p a3s-box-sdk-python --lib

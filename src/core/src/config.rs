@@ -47,40 +47,58 @@ impl BoxConfig {
         let mut lanes = HashMap::new();
 
         // System lane (fixed concurrency)
-        lanes.insert("system".to_string(), LaneConfig {
-            min_concurrency: 1,
-            max_concurrency: 1,
-        });
+        lanes.insert(
+            "system".to_string(),
+            LaneConfig {
+                min_concurrency: 1,
+                max_concurrency: 1,
+            },
+        );
 
         // Control lane
-        lanes.insert("control".to_string(), LaneConfig {
-            min_concurrency: 1,
-            max_concurrency: 8,
-        });
+        lanes.insert(
+            "control".to_string(),
+            LaneConfig {
+                min_concurrency: 1,
+                max_concurrency: 8,
+            },
+        );
 
         // Query lane
-        lanes.insert("query".to_string(), LaneConfig {
-            min_concurrency: 1,
-            max_concurrency: 8,
-        });
+        lanes.insert(
+            "query".to_string(),
+            LaneConfig {
+                min_concurrency: 1,
+                max_concurrency: 8,
+            },
+        );
 
         // Session lane
-        lanes.insert("session".to_string(), LaneConfig {
-            min_concurrency: 1,
-            max_concurrency: 4,
-        });
+        lanes.insert(
+            "session".to_string(),
+            LaneConfig {
+                min_concurrency: 1,
+                max_concurrency: 4,
+            },
+        );
 
         // Skill lane
-        lanes.insert("skill".to_string(), LaneConfig {
-            min_concurrency: 1,
-            max_concurrency: 4,
-        });
+        lanes.insert(
+            "skill".to_string(),
+            LaneConfig {
+                min_concurrency: 1,
+                max_concurrency: 4,
+            },
+        );
 
         // Prompt lane
-        lanes.insert("prompt".to_string(), LaneConfig {
-            min_concurrency: 1,
-            max_concurrency: 1,
-        });
+        lanes.insert(
+            "prompt".to_string(),
+            LaneConfig {
+                min_concurrency: 1,
+                max_concurrency: 1,
+            },
+        );
 
         lanes
     }
@@ -194,7 +212,7 @@ impl Default for SessionConfig {
 }
 
 /// Context compaction strategy
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextStrategy {
     /// LLM generates a summary of conversation history
     Summarize,
@@ -204,4 +222,321 @@ pub enum ContextStrategy {
 
     /// Keep system prompt + LLM summary + recent turns
     SlidingWindow,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_box_config_default() {
+        let config = BoxConfig::default();
+
+        assert!(!config.workspace.as_os_str().is_empty());
+        assert_eq!(config.skills.len(), 1);
+        assert_eq!(config.model.provider, "anthropic");
+        assert_eq!(config.resources.vcpus, 2);
+        assert!(!config.debug_grpc);
+    }
+
+    #[test]
+    fn test_box_config_default_lanes() {
+        let config = BoxConfig::default();
+
+        assert!(config.lanes.contains_key("system"));
+        assert!(config.lanes.contains_key("control"));
+        assert!(config.lanes.contains_key("query"));
+        assert!(config.lanes.contains_key("session"));
+        assert!(config.lanes.contains_key("skill"));
+        assert!(config.lanes.contains_key("prompt"));
+        assert_eq!(config.lanes.len(), 6);
+    }
+
+    #[test]
+    fn test_box_config_system_lane() {
+        let config = BoxConfig::default();
+        let system_lane = config.lanes.get("system").unwrap();
+
+        assert_eq!(system_lane.min_concurrency, 1);
+        assert_eq!(system_lane.max_concurrency, 1);
+    }
+
+    #[test]
+    fn test_box_config_control_lane() {
+        let config = BoxConfig::default();
+        let control_lane = config.lanes.get("control").unwrap();
+
+        assert_eq!(control_lane.min_concurrency, 1);
+        assert_eq!(control_lane.max_concurrency, 8);
+    }
+
+    #[test]
+    fn test_box_config_prompt_lane() {
+        let config = BoxConfig::default();
+        let prompt_lane = config.lanes.get("prompt").unwrap();
+
+        // Prompt lane should have max concurrency of 1 (serial execution)
+        assert_eq!(prompt_lane.max_concurrency, 1);
+    }
+
+    #[test]
+    fn test_model_config_default() {
+        let config = ModelConfig::default();
+
+        assert_eq!(config.provider, "anthropic");
+        assert_eq!(config.name, "claude-sonnet-4-20250514");
+        assert!(config.base_url.is_none());
+        assert!(config.api_key.is_none());
+    }
+
+    #[test]
+    fn test_model_config_custom() {
+        let config = ModelConfig {
+            provider: "openai".to_string(),
+            name: "gpt-4o".to_string(),
+            base_url: Some("https://api.openai.com/v1".to_string()),
+            api_key: Some("sk-test-key".to_string()),
+        };
+
+        assert_eq!(config.provider, "openai");
+        assert_eq!(config.name, "gpt-4o");
+        assert!(config.base_url.is_some());
+        assert!(config.api_key.is_some());
+    }
+
+    #[test]
+    fn test_resource_config_default() {
+        let config = ResourceConfig::default();
+
+        assert_eq!(config.vcpus, 2);
+        assert_eq!(config.memory_mb, 1024);
+        assert_eq!(config.disk_mb, 4096);
+        assert_eq!(config.timeout, 3600);
+    }
+
+    #[test]
+    fn test_resource_config_custom() {
+        let config = ResourceConfig {
+            vcpus: 4,
+            memory_mb: 2048,
+            disk_mb: 8192,
+            timeout: 7200,
+        };
+
+        assert_eq!(config.vcpus, 4);
+        assert_eq!(config.memory_mb, 2048);
+        assert_eq!(config.disk_mb, 8192);
+        assert_eq!(config.timeout, 7200);
+    }
+
+    #[test]
+    fn test_lane_config() {
+        let config = LaneConfig {
+            min_concurrency: 2,
+            max_concurrency: 16,
+        };
+
+        assert_eq!(config.min_concurrency, 2);
+        assert_eq!(config.max_concurrency, 16);
+    }
+
+    #[test]
+    fn test_log_level_conversion() {
+        assert_eq!(
+            tracing::Level::from(LogLevel::Debug),
+            tracing::Level::DEBUG
+        );
+        assert_eq!(tracing::Level::from(LogLevel::Info), tracing::Level::INFO);
+        assert_eq!(tracing::Level::from(LogLevel::Warn), tracing::Level::WARN);
+        assert_eq!(
+            tracing::Level::from(LogLevel::Error),
+            tracing::Level::ERROR
+        );
+    }
+
+    #[test]
+    fn test_session_config_default() {
+        let config = SessionConfig::default();
+
+        assert!(config.system.is_none());
+        assert_eq!(config.context_threshold, 0.75);
+        assert_eq!(config.context_strategy, ContextStrategy::Summarize);
+    }
+
+    #[test]
+    fn test_session_config_custom() {
+        let config = SessionConfig {
+            system: Some("You are a helpful assistant.".to_string()),
+            context_threshold: 0.9,
+            context_strategy: ContextStrategy::SlidingWindow,
+        };
+
+        assert_eq!(
+            config.system,
+            Some("You are a helpful assistant.".to_string())
+        );
+        assert_eq!(config.context_threshold, 0.9);
+        assert_eq!(config.context_strategy, ContextStrategy::SlidingWindow);
+    }
+
+    #[test]
+    fn test_context_strategy_variants() {
+        assert_eq!(ContextStrategy::Summarize, ContextStrategy::Summarize);
+        assert_eq!(ContextStrategy::Truncate, ContextStrategy::Truncate);
+        assert_eq!(ContextStrategy::SlidingWindow, ContextStrategy::SlidingWindow);
+        assert_ne!(ContextStrategy::Summarize, ContextStrategy::Truncate);
+    }
+
+    #[test]
+    fn test_box_config_serialization() {
+        let config = BoxConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+
+        assert!(json.contains("workspace"));
+        assert!(json.contains("model"));
+        assert!(json.contains("resources"));
+        assert!(json.contains("lanes"));
+    }
+
+    #[test]
+    fn test_box_config_deserialization() {
+        let json = r#"{
+            "workspace": "/tmp/workspace",
+            "skills": ["/tmp/skills"],
+            "model": {
+                "provider": "openai",
+                "name": "gpt-4",
+                "base_url": null,
+                "api_key": null
+            },
+            "resources": {
+                "vcpus": 4,
+                "memory_mb": 2048,
+                "disk_mb": 8192,
+                "timeout": 1800
+            },
+            "lanes": {},
+            "log_level": "Debug",
+            "debug_grpc": true
+        }"#;
+
+        let config: BoxConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.workspace.to_str().unwrap(), "/tmp/workspace");
+        assert_eq!(config.model.provider, "openai");
+        assert_eq!(config.resources.vcpus, 4);
+        assert!(config.debug_grpc);
+    }
+
+    #[test]
+    fn test_model_config_serialization() {
+        let config = ModelConfig {
+            provider: "anthropic".to_string(),
+            name: "claude-3-opus".to_string(),
+            base_url: Some("https://api.anthropic.com".to_string()),
+            api_key: None,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: ModelConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.provider, config.provider);
+        assert_eq!(parsed.name, config.name);
+        assert_eq!(parsed.base_url, config.base_url);
+    }
+
+    #[test]
+    fn test_resource_config_serialization() {
+        let config = ResourceConfig {
+            vcpus: 8,
+            memory_mb: 4096,
+            disk_mb: 16384,
+            timeout: 0,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: ResourceConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.vcpus, 8);
+        assert_eq!(parsed.memory_mb, 4096);
+        assert_eq!(parsed.timeout, 0); // Unlimited
+    }
+
+    #[test]
+    fn test_lane_config_serialization() {
+        let config = LaneConfig {
+            min_concurrency: 1,
+            max_concurrency: 4,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: LaneConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.min_concurrency, 1);
+        assert_eq!(parsed.max_concurrency, 4);
+    }
+
+    #[test]
+    fn test_log_level_serialization() {
+        let levels = vec![LogLevel::Debug, LogLevel::Info, LogLevel::Warn, LogLevel::Error];
+
+        for level in levels {
+            let json = serde_json::to_string(&level).unwrap();
+            let parsed: LogLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                tracing::Level::from(parsed),
+                tracing::Level::from(level)
+            );
+        }
+    }
+
+    #[test]
+    fn test_context_strategy_serialization() {
+        let strategies = vec![
+            ContextStrategy::Summarize,
+            ContextStrategy::Truncate,
+            ContextStrategy::SlidingWindow,
+        ];
+
+        for strategy in strategies {
+            let json = serde_json::to_string(&strategy).unwrap();
+            let parsed: ContextStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, strategy);
+        }
+    }
+
+    #[test]
+    fn test_session_config_serialization() {
+        let config = SessionConfig {
+            system: Some("Test system prompt".to_string()),
+            context_threshold: 0.8,
+            context_strategy: ContextStrategy::Truncate,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: SessionConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.system, config.system);
+        assert_eq!(parsed.context_threshold, 0.8);
+        assert_eq!(parsed.context_strategy, ContextStrategy::Truncate);
+    }
+
+    #[test]
+    fn test_config_clone() {
+        let config = BoxConfig::default();
+        let cloned = config.clone();
+
+        assert_eq!(config.workspace, cloned.workspace);
+        assert_eq!(config.model.provider, cloned.model.provider);
+        assert_eq!(config.resources.vcpus, cloned.resources.vcpus);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = BoxConfig::default();
+        let debug_str = format!("{:?}", config);
+
+        assert!(debug_str.contains("BoxConfig"));
+        assert!(debug_str.contains("workspace"));
+        assert!(debug_str.contains("model"));
+    }
 }

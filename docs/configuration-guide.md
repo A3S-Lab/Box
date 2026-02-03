@@ -1,34 +1,34 @@
-# A3S Box 配置指南
+# A3S Box Configuration Guide
 
-## 概述
+## Overview
 
-本文档详细说明如何配置 A3S Box 实例，包括编码智能体类型、业务智能体、资源限制等。
+This document explains how to configure A3S Box instances, including coding agent types, business agents, resource limits, and more.
 
-## 快速开始
+## Quick Start
 
-### 默认配置（使用 A3S Code）
+### Default Configuration (using A3S Code)
 
 ```python
 from a3s_box import create_box
 
-# 使用默认配置：A3S Code 作为编码智能体
+# Use default configuration: A3S Code as the coding agent
 box = await create_box()
 
-# 使用编码智能体
+# Use the coding agent
 await box.coding.generate("Write a Python function to calculate fibonacci")
 ```
 
-### 指定编码智能体类型
+### Specify Coding Agent Type
 
 ```python
 from a3s_box import create_box, BoxConfig, AgentConfig
 
-# 使用 OpenCode 作为编码智能体
+# Use OpenCode as the coding agent
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(kind="opencode")
 ))
 
-# 使用自定义编码智能体
+# Use a custom coding agent
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(
         kind="oci_image",
@@ -37,31 +37,31 @@ box = await create_box(BoxConfig(
 ))
 ```
 
-## 配置结构
+## Configuration Structure
 
 ### BoxConfig
 
 ```python
 @dataclass
 class BoxConfig:
-    """A3S Box 配置"""
+    """A3S Box configuration"""
 
-    # Box ID（可选，不提供则自动生成）
+    # Box ID (optional, auto-generated if not provided)
     box_id: Optional[str] = None
 
-    # 编码智能体配置（默认：a3s-code）
+    # Coding agent configuration (default: a3s-code)
     coding_agent: AgentConfig = field(default_factory=lambda: AgentConfig(kind="a3s_code"))
 
-    # 技能挂载列表（业务智能体）
+    # Skill mount list (business agents)
     skills: List[SkillMount] = field(default_factory=list)
 
-    # 资源配置
+    # Resource configuration
     resources: ResourceConfig = field(default_factory=ResourceConfig)
 
-    # 网络配置
+    # Network configuration
     network: NetworkConfig = field(default_factory=NetworkConfig)
 
-    # 工作目录
+    # Working directory
     workspace: str = "/workspace"
 ```
 
@@ -70,36 +70,36 @@ class BoxConfig:
 ```python
 @dataclass
 class AgentConfig:
-    """智能体配置"""
+    """Agent configuration"""
 
-    # 智能体类型
+    # Agent type
     kind: str  # "a3s_code", "opencode", "oci_image", "local_binary", "remote_binary"
 
-    # 版本（可选）
+    # Version (optional)
     version: Optional[str] = None
 
-    # OCI 镜像（kind="oci_image" 时必需）
+    # OCI image (required when kind="oci_image")
     image: Optional[str] = None
 
-    # 本地二进制路径（kind="local_binary" 时必需）
+    # Local binary path (required when kind="local_binary")
     path: Optional[str] = None
 
-    # 远程二进制 URL（kind="remote_binary" 时必需）
+    # Remote binary URL (required when kind="remote_binary")
     url: Optional[str] = None
 
-    # 校验和（kind="remote_binary" 时必需）
+    # Checksum (required when kind="remote_binary")
     checksum: Optional[str] = None
 
-    # 自定义入口点
+    # Custom entrypoint
     entrypoint: Optional[str] = None
 
-    # 环境变量
+    # Environment variables
     env: Dict[str, str] = field(default_factory=dict)
 
-    # LLM 配置（支持对象或文件路径）
+    # LLM configuration (supports object or file path)
     llm: Optional[Union[LLMConfig, str]] = None
 
-    # Skills 配置目录（挂载到容器内 /a3s/skills/）
+    # Skills configuration directory (mounted to /a3s/skills/ in container)
     skills_dir: Optional[str] = None
 ```
 
@@ -108,38 +108,29 @@ class AgentConfig:
 ```python
 @dataclass
 class LLMConfig:
-    """LLM 配置"""
+    """LLM configuration"""
 
-    # 默认提供商
+    # Default provider
     default_provider: str
 
-    # 默认模型
+    # Default model
     default_model: str
 
-    # 提供商列表
+    # Provider list
     providers: List[ProviderConfig]
 
     @classmethod
     def from_file(cls, path: str) -> "LLMConfig":
-        """从文件加载配置"""
+        """Load configuration from file"""
         with open(path) as f:
             data = json.load(f)
         return cls.from_dict(data)
 
-    @classmethod
-    def from_dict(cls, data: dict) -> "LLMConfig":
-        """从字典创建配置"""
-        return cls(
-            default_provider=data["defaultProvider"],
-            default_model=data["defaultModel"],
-            providers=[ProviderConfig.from_dict(p) for p in data["providers"]]
-        )
-
 @dataclass
 class ProviderConfig:
-    """LLM 提供商配置"""
+    """LLM provider configuration"""
 
-    # 提供商名称
+    # Provider name
     name: str
 
     # API Key
@@ -148,44 +139,44 @@ class ProviderConfig:
     # Base URL
     base_url: str
 
-    # 模型列表
+    # Model list
     models: List[ModelConfig]
 
 @dataclass
 class ModelConfig:
-    """模型配置"""
+    """Model configuration"""
 
-    # 模型 ID
+    # Model ID
     id: str
 
-    # 模型名称
+    # Model name
     name: str
 
-    # 模型家族
+    # Model family
     family: str
 
-    # 支持附件
+    # Supports attachments
     attachment: bool
 
-    # 支持推理
+    # Supports reasoning
     reasoning: bool
 
-    # 支持工具调用
+    # Supports tool calling
     tool_call: bool
 
-    # 支持温度参数
+    # Supports temperature parameter
     temperature: bool
 
-    # 发布日期（可选）
+    # Release date (optional)
     release_date: Optional[str] = None
 
-    # 模态支持
+    # Modality support
     modalities: Optional[dict] = None
 
-    # 成本信息（可选）
+    # Cost information (optional)
     cost: Optional[dict] = None
 
-    # 限制信息
+    # Limit information
     limit: Optional[dict] = None
 ```
 
@@ -194,15 +185,15 @@ class ModelConfig:
 ```python
 @dataclass
 class ResourceConfig:
-    """资源配置"""
+    """Resource configuration"""
 
-    # 内存限制
+    # Memory limit
     memory: int = 2 * 1024 * 1024 * 1024  # 2GB
 
-    # CPU 核心数
+    # CPU cores
     cpus: int = 2
 
-    # 磁盘限制
+    # Disk limit
     disk: int = 10 * 1024 * 1024 * 1024  # 10GB
 ```
 
@@ -211,23 +202,23 @@ class ResourceConfig:
 ```python
 @dataclass
 class NetworkConfig:
-    """网络配置"""
+    """Network configuration"""
 
-    # 是否启用外部网络访问
+    # Enable external network access
     enable_external: bool = True
 ```
 
-## 使用示例
+## Usage Examples
 
-### 示例 1: 默认配置（A3S Code）
+### Example 1: Default Configuration (A3S Code)
 
 ```python
 from a3s_box import create_box
 
-# 最简单的方式：使用所有默认值
+# Simplest way: use all defaults
 box = await create_box()
 
-# 等价于：
+# Equivalent to:
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(kind="a3s_code"),
     skills=[],
@@ -236,7 +227,7 @@ box = await create_box(BoxConfig(
 ))
 ```
 
-### 示例 2: 使用 OpenCode + LLM 配置文件
+### Example 2: Using OpenCode + LLM Config File
 
 ```python
 from a3s_box import create_box, BoxConfig, AgentConfig
@@ -245,7 +236,7 @@ box = await create_box(BoxConfig(
     coding_agent=AgentConfig(
         kind="opencode",
         version="latest",
-        # 从文件加载 LLM 配置
+        # Load LLM configuration from file
         llm="/path/to/llm-config.json"
     )
 ))
@@ -254,8 +245,8 @@ box = await create_box(BoxConfig(
 **llm-config.json**:
 ```json
 {
-  "defaultProvider": "kimi",
-  "defaultModel": "kimi-k2-5",
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-20250514",
   "providers": [
     {
       "name": "anthropic",
@@ -286,74 +277,12 @@ box = await create_box(BoxConfig(
           }
         }
       ]
-    },
-    {
-      "name": "kimi",
-      "apiKey": "${KIMI_API_KEY}",
-      "baseUrl": "http://35.220.164.252:3888/v1",
-      "models": [
-        {
-          "id": "kimi-k2-5",
-          "name": "KIMI K2.5",
-          "family": "kimi",
-          "attachment": false,
-          "reasoning": false,
-          "toolCall": true,
-          "temperature": true,
-          "limit": {
-            "context": 128000,
-            "output": 4096
-          }
-        }
-      ]
     }
   ]
 }
 ```
 
-### 示例 3: 使用特定版本的 A3S Code + 内联 LLM 配置
-
-```python
-from a3s_box import create_box, BoxConfig, AgentConfig, LLMConfig, ProviderConfig, ModelConfig
-
-box = await create_box(BoxConfig(
-    coding_agent=AgentConfig(
-        kind="a3s_code",
-        version="0.2.0",
-        # 内联 LLM 配置对象
-        llm=LLMConfig(
-            default_provider="anthropic",
-            default_model="claude-sonnet-4-20250514",
-            providers=[
-                ProviderConfig(
-                    name="anthropic",
-                    api_key=os.getenv("ANTHROPIC_API_KEY"),
-                    base_url="https://api.anthropic.com/v1",
-                    models=[
-                        ModelConfig(
-                            id="claude-sonnet-4-20250514",
-                            name="Claude Sonnet 4",
-                            family="claude-sonnet",
-                            attachment=True,
-                            reasoning=False,
-                            tool_call=True,
-                            temperature=True,
-                            modalities={
-                                "input": ["text", "image", "pdf"],
-                                "output": ["text"]
-                            },
-                            cost={"input": 3, "output": 15},
-                            limit={"context": 200000, "output": 64000}
-                        )
-                    ]
-                )
-            ]
-        )
-    )
-))
-```
-
-### 示例 4: 使用自定义 OCI 镜像
+### Example 3: Using Custom OCI Image
 
 ```python
 box = await create_box(BoxConfig(
@@ -369,46 +298,19 @@ box = await create_box(BoxConfig(
 ))
 ```
 
-### 示例 5: 使用本地二进制
+### Example 4: Skills Directory Mounting
 
 ```python
-box = await create_box(BoxConfig(
-    coding_agent=AgentConfig(
-        kind="local_binary",
-        path="/path/to/my-agent",
-        entrypoint="exec /a3s/agent/my-agent --listen vsock://4088",
-        env={
-            "WORKSPACE": "/workspace",
-        }
-    )
-))
-```
-
-### 示例 6: 使用远程二进制
-
-```python
-box = await create_box(BoxConfig(
-    coding_agent=AgentConfig(
-        kind="remote_binary",
-        url="https://releases.example.com/agent-v1.0.tar.gz",
-        checksum="sha256:abc123...",
-    )
-))
-```
-
-### 示例 7: Skills 目录挂载
-
-```python
-# 方式 1: 通过 skills_dir 挂载整个目录
+# Method 1: Mount entire directory via skills_dir
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(
         kind="a3s_code",
         llm="/path/to/llm-config.json",
-        skills_dir="/path/to/skills"  # 整个目录挂载到 /a3s/skills/
+        skills_dir="/path/to/skills"  # Entire directory mounted to /a3s/skills/
     )
 ))
 
-# 主机目录结构:
+# Host directory structure:
 # /path/to/skills/
 #   ├── order-agent/
 #   │   └── SKILL.md
@@ -417,13 +319,13 @@ box = await create_box(BoxConfig(
 #   └── payment-agent/
 #       └── SKILL.md
 
-# 容器内自动挂载为:
+# Container auto-mounted as:
 # /a3s/skills/
 #   ├── order-agent/
 #   ├── data-agent/
 #   └── payment-agent/
 
-# 方式 2: 单独挂载每个技能
+# Method 2: Mount each skill individually
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(kind="a3s_code"),
     skills=[
@@ -432,26 +334,23 @@ box = await create_box(BoxConfig(
     ]
 ))
 
-# 方式 3: 混合使用（推荐）
+# Method 3: Mixed usage (recommended)
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(
         kind="a3s_code",
-        skills_dir="/path/to/common-skills"  # 通用技能
+        skills_dir="/path/to/common-skills"  # Common skills
     ),
     skills=[
-        SkillMount(name="custom-agent", path="/path/to/custom-agent"),  # 额外技能
+        SkillMount(name="custom-agent", path="/path/to/custom-agent"),  # Extra skills
     ]
 ))
 ```
 
-### 示例 8: 编码智能体 + 业务智能体
-
-### 示例 8: 自定义资源限制
+### Example 5: Custom Resource Limits
 
 ```python
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(kind="a3s_code"),
-
     resources=ResourceConfig(
         memory=4 * 1024 * 1024 * 1024,  # 4GB
         cpus=4,
@@ -460,20 +359,20 @@ box = await create_box(BoxConfig(
 ))
 ```
 
-### 示例 9: 从 YAML 文件加载配置
+### Example 6: Load from YAML File
 
 ```python
 import yaml
 from a3s_box import create_box, BoxConfig
 
-# 加载配置文件
+# Load configuration file
 with open("box-config.yaml") as f:
     config_dict = yaml.safe_load(f)
 
-# 创建配置对象
+# Create configuration object
 config = BoxConfig.from_dict(config_dict)
 
-# 创建 Box
+# Create Box
 box = await create_box(config)
 ```
 
@@ -505,62 +404,40 @@ network:
 workspace: "/workspace"
 ```
 
-### 示例 10: 环境变量替换
+## TypeScript SDK Examples
 
-```python
-import os
-from a3s_box import create_box, BoxConfig, AgentConfig, LLMConfig
-
-box = await create_box(BoxConfig(
-    coding_agent=AgentConfig(
-        kind="a3s_code",
-        llm=LLMConfig(
-            provider="anthropic",
-            model="claude-3-5-sonnet-20241022",
-            api_key=os.getenv("ANTHROPIC_API_KEY"),  # 从环境变量读取
-        ),
-        env={
-            "RUST_LOG": os.getenv("RUST_LOG", "info"),  # 默认值
-            "WORKSPACE": os.getenv("WORKSPACE", "/workspace"),
-        }
-    )
-))
-```
-
-## TypeScript SDK 示例
-
-### 默认配置
+### Default Configuration
 
 ```typescript
 import { createBox } from '@a3s/box';
 
-// 使用默认配置
+// Use default configuration
 const box = await createBox();
 
-// 使用编码智能体
+// Use coding agent
 await box.coding.generate('Write a TypeScript function');
 ```
 
-### 指定编码智能体
+### Specify Coding Agent
 
 ```typescript
 import { createBox, BoxConfig, AgentConfig } from '@a3s/box';
 
-// 使用 OpenCode
+// Use OpenCode
 const box = await createBox({
   codingAgent: {
     kind: 'opencode',
     version: 'latest',
     llm: {
       provider: 'anthropic',
-      model: 'claude-3-5-sonnet-20241022',
+      model: 'claude-sonnet-4-20250514',
       apiKey: process.env.ANTHROPIC_API_KEY,
     },
   },
 });
 ```
 
-### 完整配置
+### Complete Configuration
 
 ```typescript
 const box = await createBox({
@@ -569,8 +446,8 @@ const box = await createBox({
   codingAgent: {
     kind: 'a3s_code',
     version: '0.1.0',
-    llm: '/path/to/llm-config.json',  // LLM 配置文件
-    skillsDir: '/path/to/skills',     // Skills 目录
+    llm: '/path/to/llm-config.json',  // LLM config file
+    skillsDir: '/path/to/skills',     // Skills directory
   },
 
   skills: [
@@ -595,9 +472,9 @@ const box = await createBox({
 });
 ```
 
-## 配置验证
+## Configuration Validation
 
-A3S Box 会在创建时验证配置：
+A3S Box validates configuration at creation time:
 
 ```python
 from a3s_box import create_box, BoxConfig, AgentConfig
@@ -607,59 +484,59 @@ try:
     box = await create_box(BoxConfig(
         coding_agent=AgentConfig(
             kind="oci_image",
-            # 错误：缺少 image 参数
+            # Error: missing image parameter
         )
     ))
 except ConfigValidationError as e:
-    print(f"配置错误: {e}")
-    # 输出: 配置错误: AgentConfig with kind='oci_image' requires 'image' parameter
+    print(f"Configuration error: {e}")
+    # Output: Configuration error: AgentConfig with kind='oci_image' requires 'image' parameter
 ```
 
-## 配置最佳实践
+## Best Practices
 
-### 1. 使用环境变量存储敏感信息
+### 1. Use Environment Variables for Sensitive Information
 
 ```python
-# ✅ 好的做法
+# Good practice
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(
         kind="a3s_code",
         llm=LLMConfig(
             provider="anthropic",
-            api_key=os.getenv("ANTHROPIC_API_KEY"),  # 从环境变量读取
+            api_key=os.getenv("ANTHROPIC_API_KEY"),  # Read from environment variable
         )
     )
 ))
 
-# ❌ 不好的做法
+# Bad practice
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(
         kind="a3s_code",
         llm=LLMConfig(
             provider="anthropic",
-            api_key="sk-ant-...",  # 硬编码 API 密钥
+            api_key="sk-ant-...",  # Hardcoded API key
         )
     )
 ))
 ```
 
-### 2. 使用配置文件管理复杂配置
+### 2. Use Configuration Files for Complex Configurations
 
 ```python
-# ✅ 好的做法：使用 YAML 配置文件
+# Good practice: Use YAML configuration file
 config = BoxConfig.from_yaml("box-config.yaml")
 box = await create_box(config)
 
-# ❌ 不好的做法：在代码中硬编码大量配置
+# Bad practice: Hardcode lots of configuration in code
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(...),
     skills=[...],
     resources=ResourceConfig(...),
-    # ... 很多配置
+    # ... lots of configuration
 ))
 ```
 
-### 3. 为不同环境使用不同配置
+### 3. Use Different Configurations for Different Environments
 
 ```python
 import os
@@ -676,114 +553,93 @@ else:
 box = await create_box(config)
 ```
 
-### 4. 验证配置
+## Configuration Reference
 
-```python
-from a3s_box import BoxConfig
+### Coding Agent Types
 
-# 加载配置
-config = BoxConfig.from_yaml("box-config.yaml")
+| Type | Description | Required Parameters |
+|------|-------------|---------------------|
+| `a3s_code` | A3S Code (default) | None |
+| `opencode` | OpenCode | None |
+| `oci_image` | OCI Image | `image` |
+| `local_binary` | Local Binary | `path` |
+| `remote_binary` | Remote Binary | `url`, `checksum` |
 
-# 验证配置
-errors = config.validate()
-if errors:
-    for error in errors:
-        print(f"配置错误: {error}")
-    exit(1)
+### LLM Providers
 
-# 创建 Box
-box = await create_box(config)
-```
-
-## 配置参考
-
-### 编码智能体类型
-
-| 类型 | 说明 | 必需参数 |
-|------|------|----------|
-| `a3s_code` | A3S Code（默认） | 无 |
-| `opencode` | OpenCode | 无 |
-| `oci_image` | OCI 镜像 | `image` |
-| `local_binary` | 本地二进制 | `path` |
-| `remote_binary` | 远程二进制 | `url`, `checksum` |
-
-### LLM 提供商
-
-| 提供商 | 支持的模型 |
-|--------|-----------|
-| `anthropic` | claude-3-5-sonnet-20241022, claude-opus-4, claude-3-haiku-20240307 |
+| Provider | Supported Models |
+|----------|-----------------|
+| `anthropic` | claude-sonnet-4-20250514, claude-opus-4, claude-3-haiku-20240307 |
 | `openai` | gpt-4, gpt-4-turbo, gpt-3.5-turbo |
 | `google` | gemini-pro, gemini-ultra |
-| `local` | 本地模型（需要配置 base_url） |
+| `local` | Local models (requires base_url configuration) |
 
-### 资源限制
+### Resource Limits
 
-| 参数 | 默认值（编码） | 默认值（业务） | 说明 |
-|------|--------------|--------------|------|
-| `memory` | 2GB | 1GB | 内存限制 |
-| `cpus` | 2 | 1 | CPU 核心数 |
-| `disk` | 10GB | 5GB | 磁盘限制 |
+| Parameter | Default (Coding) | Default (Business) | Description |
+|-----------|-----------------|-------------------|-------------|
+| `memory` | 2GB | 1GB | Memory limit |
+| `cpus` | 2 | 1 | CPU cores |
+| `disk` | 10GB | 5GB | Disk limit |
 
-## 故障排查
+## Troubleshooting
 
-### 问题 1: 编码智能体启动失败
+### Problem 1: Coding Agent Startup Failure
 
 ```
 Error: Failed to start coding agent: connection timeout
 ```
 
-**解决方案**:
-1. 检查智能体镜像是否存在
-2. 检查网络连接
-3. 增加启动超时时间
+**Solution**:
+1. Check if the agent image exists
+2. Check network connection
+3. Increase startup timeout
 
 ```python
 box = await create_box(BoxConfig(
     coding_agent=AgentConfig(kind="a3s_code"),
-    startup_timeout=60,  # 增加到 60 秒
+    startup_timeout=60,  # Increase to 60 seconds
 ))
 ```
 
-### 问题 2: API 密钥无效
+### Problem 2: Invalid API Key
 
 ```
 Error: Invalid API key for provider 'anthropic'
 ```
 
-**解决方案**:
-1. 检查环境变量是否设置
-2. 验证 API 密钥是否有效
+**Solution**:
+1. Check if environment variable is set
+2. Verify API key is valid
 
 ```bash
-# 检查环境变量
+# Check environment variable
 echo $ANTHROPIC_API_KEY
 
-# 设置环境变量
+# Set environment variable
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-### 问题 3: 资源不足
+### Problem 3: Insufficient Resources
 
 ```
 Error: Failed to allocate resources: insufficient memory
 ```
 
-**解决方案**:
-1. 减少资源限制
-2. 增加主机资源
+**Solution**:
+1. Reduce resource limits
+2. Increase host resources
 
 ```python
 box = await create_box(BoxConfig(
     resources=ResourceConfig(
-        coding=ContainerResources(
-            memory=1 * 1024 * 1024 * 1024,  # 减少到 1GB
-            cpus=1,
-        )
+        memory=1 * 1024 * 1024 * 1024,  # Reduce to 1GB
+        cpus=1,
     )
 ))
 ```
 
 ---
 
-**版本**: 1.0.0
-**最后更新**: 2026-02-03
+**Version**: 1.0.0
+**Last Updated**: 2026-02-04

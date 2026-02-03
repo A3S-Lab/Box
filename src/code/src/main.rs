@@ -1,33 +1,6 @@
-//! A3S Box Code Agent
+//! A3S Box Code Agent Binary
 //!
-//! Rust implementation of the coding agent that runs inside the guest VM.
-//! Provides gRPC service for host-guest communication.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! Host (SDK) --gRPC-over-vsock--> Guest Agent
-//!                                    |
-//!                                    +-- Session Manager
-//!                                    |      +-- Session 1
-//!                                    |      +-- Session 2
-//!                                    |      +-- ...
-//!                                    |
-//!                                    +-- Agent Loop
-//!                                    |      +-- LLM Client
-//!                                    |      +-- Tool Executor
-//!                                    |
-//!                                    +-- Tools
-//!                                           +-- bash
-//!                                           +-- read/write/edit
-//!                                           +-- grep/glob/ls
-//! ```
-
-mod agent;
-mod llm;
-mod service;
-mod session;
-mod tools;
+//! Entry point for the coding agent that runs inside the guest VM.
 
 use anyhow::Result;
 
@@ -45,7 +18,7 @@ async fn main() -> Result<()> {
     tracing::info!("Version: {}", env!("CARGO_PKG_VERSION"));
 
     // Start gRPC service
-    service::start_server().await?;
+    a3s_box_code::service::start_server().await?;
 
     Ok(())
 }

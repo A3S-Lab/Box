@@ -18,6 +18,7 @@ use super::Tool;
 use std::sync::Arc;
 
 /// Create a dynamic tool from a backend specification
+#[allow(dead_code)]
 pub fn create_tool(
     name: String,
     description: String,
@@ -33,7 +34,14 @@ pub fn create_tool(
             url,
             path,
             args_template,
-        } => Arc::new(BinaryTool::new(name, description, parameters, url, path, args_template)),
+        } => Arc::new(BinaryTool::new(
+            name,
+            description,
+            parameters,
+            url,
+            path,
+            args_template,
+        )),
         ToolBackend::Http {
             url,
             method,

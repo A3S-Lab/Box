@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// BoxLite error types
+/// A3S Box error types
 #[derive(Error, Debug)]
 pub enum BoxError {
     /// VM failed to start
@@ -24,10 +24,7 @@ pub enum BoxError {
 
     /// Context window overflow
     #[error("Context overflow: {used}/{max} tokens")]
-    ContextOverflowError {
-        used: usize,
-        max: usize,
-    },
+    ContextOverflowError { used: usize, max: usize },
 
     /// LLM API error
     #[error("Model error: {provider} {status_code} - {message}")]
@@ -82,5 +79,158 @@ impl From<serde_yaml::Error> for BoxError {
     }
 }
 
-/// Result type alias for BoxLite operations
+/// Result type alias for A3S Box operations
 pub type Result<T> = std::result::Result<T, BoxError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_box_boot_error_display() {
+        let error = BoxError::BoxBootError {
+            message: "Failed to start VM".to_string(),
+            hint: Some("Check virtualization support".to_string()),
+        };
+        assert_eq!(error.to_string(), "VM boot failed: Failed to start VM");
+    }
+
+    #[test]
+    fn test_box_boot_error_without_hint() {
+        let error = BoxError::BoxBootError {
+            message: "No kernel found".to_string(),
+            hint: None,
+        };
+        assert_eq!(error.to_string(), "VM boot failed: No kernel found");
+    }
+
+    #[test]
+    fn test_session_error_display() {
+        let error = BoxError::SessionError("Session not found".to_string());
+        assert_eq!(error.to_string(), "Session error: Session not found");
+    }
+
+    #[test]
+    fn test_tool_download_error_display() {
+        let error = BoxError::ToolDownloadError {
+            url: "https://example.com/tool".to_string(),
+            status_code: 404,
+            message: "Not Found".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Tool download failed: https://example.com/tool -> 404"
+        );
+    }
+
+    #[test]
+    fn test_context_overflow_error_display() {
+        let error = BoxError::ContextOverflowError {
+            used: 150000,
+            max: 128000,
+        };
+        assert_eq!(error.to_string(), "Context overflow: 150000/128000 tokens");
+    }
+
+    #[test]
+    fn test_model_error_display() {
+        let error = BoxError::ModelError {
+            provider: "anthropic".to_string(),
+            status_code: 429,
+            message: "Rate limit exceeded".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Model error: anthropic 429 - Rate limit exceeded"
+        );
+    }
+
+    #[test]
+    fn test_timeout_error_display() {
+        let error = BoxError::TimeoutError("Operation timed out after 30s".to_string());
+        assert_eq!(
+            error.to_string(),
+            "Timeout: Operation timed out after 30s"
+        );
+    }
+
+    #[test]
+    fn test_io_error_conversion() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let box_error: BoxError = io_error.into();
+        assert!(matches!(box_error, BoxError::IoError(_)));
+        assert!(box_error.to_string().contains("file not found"));
+    }
+
+    #[test]
+    fn test_serialization_error_display() {
+        let error = BoxError::SerializationError("Invalid JSON".to_string());
+        assert_eq!(error.to_string(), "Serialization error: Invalid JSON");
+    }
+
+    #[test]
+    fn test_config_error_display() {
+        let error = BoxError::ConfigError("Missing required field".to_string());
+        assert_eq!(
+            error.to_string(),
+            "Configuration error: Missing required field"
+        );
+    }
+
+    #[test]
+    fn test_queue_error_display() {
+        let error = BoxError::QueueError("Lane not found".to_string());
+        assert_eq!(error.to_string(), "Queue error: Lane not found");
+    }
+
+    #[test]
+    fn test_skill_error_display() {
+        let error = BoxError::SkillError("Skill parsing failed".to_string());
+        assert_eq!(error.to_string(), "Skill error: Skill parsing failed");
+    }
+
+    #[test]
+    fn test_other_error_display() {
+        let error = BoxError::Other("Unknown error occurred".to_string());
+        assert_eq!(error.to_string(), "Unknown error occurred");
+    }
+
+    #[test]
+    fn test_serde_json_error_conversion() {
+        let json_str = "{ invalid json }";
+        let result: std::result::Result<serde_json::Value, _> = serde_json::from_str(json_str);
+        let json_error = result.unwrap_err();
+        let box_error: BoxError = json_error.into();
+        assert!(matches!(box_error, BoxError::SerializationError(_)));
+    }
+
+    #[test]
+    fn test_serde_yaml_error_conversion() {
+        let yaml_str = "invalid: yaml: content:";
+        let result: std::result::Result<serde_yaml::Value, _> = serde_yaml::from_str(yaml_str);
+        let yaml_error = result.unwrap_err();
+        let box_error: BoxError = yaml_error.into();
+        assert!(matches!(box_error, BoxError::SerializationError(_)));
+    }
+
+    #[test]
+    fn test_result_type_alias() {
+        fn returns_ok() -> Result<i32> {
+            Ok(42)
+        }
+
+        fn returns_err() -> Result<i32> {
+            Err(BoxError::Other("test error".to_string()))
+        }
+
+        assert_eq!(returns_ok().unwrap(), 42);
+        assert!(returns_err().is_err());
+    }
+
+    #[test]
+    fn test_error_is_debug() {
+        let error = BoxError::SessionError("test".to_string());
+        let debug_str = format!("{:?}", error);
+        assert!(debug_str.contains("SessionError"));
+    }
+}

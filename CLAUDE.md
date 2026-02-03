@@ -5,21 +5,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Development Commands
 
 ```bash
-# Build
-cargo build                           # Build entire workspace
-cargo build -p a3s-box-core           # Build specific crate
-cargo build --release                 # Release build
+# Build (using justfile)
+just build                            # Build all (Rust + SDKs)
+just release                          # Release build
+cd src && cargo build -p a3s-box-core # Build specific crate
 
-# Test
-cargo test --all                      # All tests
-cargo test -p a3s-box-core --lib      # Unit tests for a specific crate
-cargo test -p a3s-box-runtime --lib -- --test-threads=1  # Single-threaded
-cargo test -p a3s-box-core --lib -- test_name            # Run a single test by name
+# Test (using justfile)
+just test                             # All tests with colored progress
+just test-code                        # Code agent tests
+just test-core                        # Core crate tests
+just test-skills                      # Skill loader tests
+just test-tools                       # All tools tests
+
+# Raw cargo test commands
+cd src && cargo test -p a3s-box-core --lib      # Unit tests for a specific crate
+cd src && cargo test -p a3s-box-core --lib -- test_name  # Run a single test by name
+
+# Coverage (requires: cargo install cargo-llvm-cov, brew install lcov)
+just cov                              # Pretty terminal coverage report
+just cov-html                         # HTML report in browser
+just cov-module queue                 # Coverage for specific module
 
 # Format & Lint
-cargo fmt --all                       # Format code
-cargo fmt --all -- --check            # Check formatting
-cargo clippy                          # Lint (enforced in CI)
+just fmt                              # Format code (cargo fmt --all)
+just lint                             # Lint (cargo clippy)
+just ci                               # Full CI checks (fmt + lint + test)
 
 # Proto compilation happens automatically via build.rs in runtime/
 ```
@@ -44,6 +54,97 @@ Key guidelines:
 - **Naming**: crates are kebab-case, modules are snake_case, types are PascalCase.
 
 **Python SDK:** Async/await for all I/O. Context managers (`async with`) for automatic cleanup. Type hints encouraged.
+
+---
+
+## Language Policy
+
+**MANDATORY: All code and documentation MUST be written in English.**
+
+### Code Comments (English)
+
+All code comments MUST be written in English, including:
+
+- Module-level documentation (`//!` in Rust)
+- Function/struct/field documentation (`///` in Rust)
+- Inline comments (`//` in Rust)
+- Python docstrings and comments
+
+```rust
+// ✅ Correct: English comments
+/// Create a new session manager
+pub fn new() -> Self { ... }
+
+// ❌ Wrong: Non-English comments
+/// 创建新的会话管理器
+pub fn new() -> Self { ... }
+```
+
+### Documentation Files (English)
+
+All documentation files MUST be written in English:
+
+- README.md
+- docs/*.md
+- CLAUDE.md (this file)
+
+### Rationale
+
+- **Consistency**: Single language across codebase
+- **Accessibility**: English is the standard for open-source projects
+- **Tooling**: Better IDE support, documentation generation, and AI assistance
+
+---
+
+## Documentation Maintenance
+
+**MANDATORY: Update documentation after completing major features.**
+
+### After Completing a Feature Module
+
+When a significant feature or module is completed, you MUST:
+
+1. **Update README.md**:
+   - Update the Features section if new capabilities were added
+   - Update the Roadmap to mark completed items with ✅
+   - Update test counts if they changed
+   - Update API Reference if new public APIs were added
+   - Update code examples if behavior changed
+
+2. **Remove Obsolete Content**:
+   - Delete outdated documentation that no longer reflects reality
+   - Remove TODO comments for completed work
+   - Update or remove examples that use deprecated APIs
+   - Clean up roadmap items that are no longer planned
+
+3. **Keep Consistent**:
+   - Ensure code comments match actual behavior
+   - Ensure README examples are runnable
+   - Ensure version numbers and statistics are accurate
+
+### Checklist
+
+```markdown
+After completing a major feature:
+- [ ] README.md Features section updated
+- [ ] README.md Roadmap updated (mark ✅, update descriptions)
+- [ ] README.md test count updated (run `just test` to get count)
+- [ ] README.md API Reference updated (if public API changed)
+- [ ] Obsolete documentation removed
+- [ ] Code examples verified to work
+```
+
+### Example
+
+```markdown
+// Before: Roadmap shows "Session persistence" as TODO
+### Phase 2: Reliability 🚧
+- [ ] Session persistence
+
+// After: Feature completed, update roadmap
+### Phase 2: Reliability ✅
+- [x] Session persistence (JSON file default, pluggable SessionStore trait)
+```
 
 ---
 
@@ -331,3 +432,140 @@ src/
 5. THEN code (following rules)
 
 **The rules are not a QA checklist—they're a design thinking framework.**
+
+---
+
+## Test-Driven Development (TDD)
+
+**MANDATORY: All feature development MUST follow Test-Driven Development.**
+
+### The TDD Workflow
+
+```
+1. Write tests FIRST  →  2. Run tests (should fail)  →  3. Implement feature  →  4. Run tests (should pass)  →  5. Feature complete
+```
+
+### Rules
+
+**Rule 1: Tests Before Code**
+
+Before writing ANY implementation code, write unit tests that define the expected behavior.
+
+```rust
+// ✅ Correct workflow
+// Step 1: Write test first
+#[test]
+fn test_parse_skill_frontmatter() {
+    let content = "---\nname: test\n---\n# Content";
+    let result = parse_frontmatter(content);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap()["name"], "test");
+}
+
+// Step 2: Run test → FAILS (function doesn't exist)
+// Step 3: Implement parse_frontmatter()
+// Step 4: Run test → PASSES
+// Step 5: Feature complete ✓
+
+// ❌ Wrong: Writing implementation without tests
+fn parse_frontmatter(content: &str) -> Result<Value> {
+    // Implementation without tests...
+}
+```
+
+**Rule 2: Tests Define Completion**
+
+A feature is considered **complete** ONLY when:
+- All related unit tests pass
+- `just test` shows green for affected crates
+
+```bash
+# Feature is NOT complete until:
+just test
+# ✓ PASSED  262 passed  0 ignored  (4 crates)
+```
+
+**Rule 3: Code Changes Require Test Updates**
+
+When modifying existing code:
+- Update corresponding tests to reflect new behavior
+- Add new tests for new code paths
+- All tests MUST pass before considering the change complete
+
+```rust
+// If you change this function:
+fn calculate_timeout(base: u64, multiplier: f32) -> u64 {
+    (base as f32 * multiplier) as u64  // Changed from base * 2
+}
+
+// You MUST update its test:
+#[test]
+fn test_calculate_timeout() {
+    assert_eq!(calculate_timeout(100, 1.5), 150);  // Updated assertion
+}
+```
+
+**Rule 4: Deleted Features = Deleted Tests**
+
+When removing a feature or function:
+- Delete ALL corresponding unit tests
+- Do NOT leave orphaned tests or `#[ignore]` tests for removed code
+- Run `just test` to ensure no test failures from missing code
+
+```rust
+// ❌ Wrong: Leaving tests for deleted code
+#[test]
+#[ignore]  // TODO: removed feature
+fn test_old_feature() { ... }
+
+// ✅ Correct: Delete the test entirely when deleting the feature
+// (test file should not contain test_old_feature at all)
+```
+
+### Test File Organization
+
+```
+src/
+  └── module/
+      ├── mod.rs           // Implementation
+      └── (tests at bottom of mod.rs, or in tests/ directory)
+
+// Tests go in the same file, at the bottom:
+// --- mod.rs ---
+pub fn my_function() -> Result<()> { ... }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_my_function() { ... }
+}
+```
+
+### Running Tests
+
+```bash
+# Run all tests with progress display
+just test
+
+# Run tests for specific crate
+just test-code      # a3s-box-code
+just test-core      # a3s-box-core
+just test-runtime   # a3s-box-runtime
+
+# Run specific test by name
+cd src && cargo test -p a3s-box-code --lib -- test_name
+
+# Run tests with output
+just test-v
+```
+
+### Pre-Submission Test Checklist
+
+- [ ] Wrote tests BEFORE implementation
+- [ ] All new functions have corresponding tests
+- [ ] All modified functions have updated tests
+- [ ] Deleted code has no remaining tests
+- [ ] `just test` passes with all green
+- [ ] No `#[ignore]` tests added for "later"

@@ -56,10 +56,7 @@ impl Tool for ScriptTool {
     }
 
     async fn execute(&self, args: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        tracing::debug!(
-            "Executing script with interpreter: {}",
-            self.interpreter
-        );
+        tracing::debug!("Executing script with interpreter: {}", self.interpreter);
 
         let mut cmd = Command::new(&self.interpreter);
 
@@ -105,9 +102,9 @@ impl Tool for ScriptTool {
         // Also pass full args as JSON
         cmd.env("TOOL_ARGS", args.to_string());
 
-        let mut child = cmd.spawn().with_context(|| {
-            format!("Failed to spawn interpreter: {}", self.interpreter)
-        })?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to spawn interpreter: {}", self.interpreter))?;
 
         // Write script to stdin (except for node which uses -e)
         if self.interpreter != "node" {
@@ -230,10 +227,7 @@ mod tests {
         );
 
         let ctx = ToolContext::new(PathBuf::from("/tmp"));
-        let result = tool
-            .execute(&serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.execute(&serde_json::json!({}), &ctx).await.unwrap();
 
         assert!(result.success);
         assert!(result.content.contains("Python works!"));
@@ -278,10 +272,7 @@ mod tests {
         );
 
         let ctx = ToolContext::new(PathBuf::from("/tmp"));
-        let result = tool
-            .execute(&serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.execute(&serde_json::json!({}), &ctx).await.unwrap();
 
         assert!(!result.success);
     }

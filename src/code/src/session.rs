@@ -5,16 +5,57 @@
 //! - Conversation history tracking
 //! - Context usage monitoring
 //! - Per-session LLM client configuration
-//! - Session persistence (TODO)
+//! - Session state management (Active, Paused, Completed, Error)
+//! - Per-session command queue with lane-based priority
+//! - Human-in-the-Loop (HITL) confirmation support
+//! - Session persistence (JSONL file storage)
+//!
+//! ## Skill System
+//!
+//! Skills are loaded globally via `SessionManager::load_skill()` and available
+//! to all sessions. Per-session tool access is controlled through `PermissionPolicy`.
 
 use crate::agent::{AgentConfig, AgentEvent, AgentLoop, AgentResult};
+use crate::hitl::{ConfirmationManager, ConfirmationPolicy};
 use crate::llm::{self, LlmClient, LlmConfig, Message, TokenUsage, ToolDefinition};
+use crate::permissions::{PermissionDecision, PermissionPolicy};
+use crate::queue::{SessionCommandQueue, SessionQueueConfig};
+use crate::store::{FileSessionStore, LlmConfigData, SessionData, SessionStore};
 use crate::tools::ToolExecutor;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
+
+/// Session state enum matching proto SessionState
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SessionState {
+    #[default]
+    Unknown = 0,
+    Active = 1,
+    Paused = 2,
+    Completed = 3,
+    Error = 4,
+}
+
+impl SessionState {
+    /// Convert to proto i32 value
+    pub fn to_proto_i32(self) -> i32 {
+        self as i32
+    }
+
+    /// Create from proto i32 value
+    pub fn from_proto_i32(value: i32) -> Self {
+        match value {
+            1 => SessionState::Active,
+            2 => SessionState::Paused,
+            3 => SessionState::Completed,
+            4 => SessionState::Error,
+            _ => SessionState::Unknown,
+        }
+    }
+}
 
 /// Context usage statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,11 +77,31 @@ impl Default for ContextUsage {
     }
 }
 
+/// Session configuration (matches proto SessionConfig)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionConfig {
+    pub name: String,
+    pub workspace: String,
+    pub system_prompt: Option<String>,
+    pub max_context_length: u32,
+    pub auto_compact: bool,
+    /// Queue configuration (optional, uses defaults if None)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_config: Option<SessionQueueConfig>,
+    /// Confirmation policy (optional, uses defaults if None)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_policy: Option<ConfirmationPolicy>,
+    /// Permission policy (optional, uses defaults if None)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_policy: Option<PermissionPolicy>,
+}
+
 /// Session state
 #[allow(dead_code)]
 pub struct Session {
     pub id: String,
-    pub system: Option<String>,
+    pub config: SessionConfig,
+    pub state: SessionState,
     pub messages: Vec<Message>,
     pub context_usage: ContextUsage,
     pub total_usage: TokenUsage,
@@ -49,15 +110,50 @@ pub struct Session {
     pub thinking_budget: Option<usize>,
     /// Per-session LLM client (overrides default if set)
     pub llm_client: Option<Arc<dyn LlmClient>>,
-    /// Activated skills and their tool names
-    pub active_skills: HashMap<String, Vec<String>>,
+    /// Creation timestamp (Unix epoch seconds)
+    pub created_at: i64,
+    /// Last update timestamp (Unix epoch seconds)
+    pub updated_at: i64,
+    /// Per-session command queue
+    pub command_queue: SessionCommandQueue,
+    /// HITL confirmation manager
+    pub confirmation_manager: Arc<ConfirmationManager>,
+    /// Permission policy for tool execution
+    pub permission_policy: Arc<RwLock<PermissionPolicy>>,
+    /// Event broadcaster for this session
+    event_tx: broadcast::Sender<AgentEvent>,
 }
 
 impl Session {
-    pub fn new(id: String, system: Option<String>, tools: Vec<ToolDefinition>) -> Self {
+    pub fn new(id: String, config: SessionConfig, tools: Vec<ToolDefinition>) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        // Create event broadcaster
+        let (event_tx, _) = broadcast::channel(100);
+
+        // Create command queue with config or defaults
+        let queue_config = config.queue_config.clone().unwrap_or_default();
+        let command_queue = SessionCommandQueue::new(&id, queue_config, event_tx.clone());
+
+        // Create confirmation manager with policy or defaults
+        let confirmation_policy = config.confirmation_policy.clone().unwrap_or_default();
+        let confirmation_manager = Arc::new(ConfirmationManager::new(
+            confirmation_policy,
+            event_tx.clone(),
+        ));
+
+        // Create permission policy with config or defaults
+        let permission_policy = Arc::new(RwLock::new(
+            config.permission_policy.clone().unwrap_or_default(),
+        ));
+
         Self {
             id,
-            system,
+            config,
+            state: SessionState::Active,
             messages: Vec::new(),
             context_usage: ContextUsage::default(),
             total_usage: TokenUsage::default(),
@@ -65,8 +161,109 @@ impl Session {
             thinking_enabled: false,
             thinking_budget: None,
             llm_client: None,
-            active_skills: HashMap::new(),
+            created_at: now,
+            updated_at: now,
+            command_queue,
+            confirmation_manager,
+            permission_policy,
+            event_tx,
         }
+    }
+
+    /// Get a receiver for session events
+    pub fn subscribe_events(&self) -> broadcast::Receiver<AgentEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// Get the event broadcaster
+    pub fn event_tx(&self) -> broadcast::Sender<AgentEvent> {
+        self.event_tx.clone()
+    }
+
+    /// Update the confirmation policy
+    pub async fn set_confirmation_policy(&self, policy: ConfirmationPolicy) {
+        self.confirmation_manager.set_policy(policy).await;
+    }
+
+    /// Get the current confirmation policy
+    pub async fn confirmation_policy(&self) -> ConfirmationPolicy {
+        self.confirmation_manager.policy().await
+    }
+
+    /// Update the permission policy
+    pub async fn set_permission_policy(&self, policy: PermissionPolicy) {
+        let mut p = self.permission_policy.write().await;
+        *p = policy;
+    }
+
+    /// Get the current permission policy
+    pub async fn permission_policy(&self) -> PermissionPolicy {
+        self.permission_policy.read().await.clone()
+    }
+
+    /// Check permission for a tool invocation
+    pub async fn check_permission(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> PermissionDecision {
+        self.permission_policy.read().await.check(tool_name, args)
+    }
+
+    /// Add an allow rule to the permission policy
+    pub async fn add_allow_rule(&self, rule: &str) {
+        let mut p = self.permission_policy.write().await;
+        p.allow.push(crate::permissions::PermissionRule::new(rule));
+    }
+
+    /// Add a deny rule to the permission policy
+    pub async fn add_deny_rule(&self, rule: &str) {
+        let mut p = self.permission_policy.write().await;
+        p.deny.push(crate::permissions::PermissionRule::new(rule));
+    }
+
+    /// Add an ask rule to the permission policy
+    pub async fn add_ask_rule(&self, rule: &str) {
+        let mut p = self.permission_policy.write().await;
+        p.ask.push(crate::permissions::PermissionRule::new(rule));
+    }
+
+    /// Set handler mode for a lane
+    pub async fn set_lane_handler(
+        &self,
+        lane: crate::hitl::SessionLane,
+        config: crate::queue::LaneHandlerConfig,
+    ) {
+        self.command_queue.set_lane_handler(lane, config).await;
+    }
+
+    /// Get handler config for a lane
+    pub async fn get_lane_handler(
+        &self,
+        lane: crate::hitl::SessionLane,
+    ) -> crate::queue::LaneHandlerConfig {
+        self.command_queue.get_lane_handler(lane).await
+    }
+
+    /// Complete an external task
+    pub async fn complete_external_task(
+        &self,
+        task_id: &str,
+        result: crate::queue::ExternalTaskResult,
+    ) -> bool {
+        self.command_queue
+            .complete_external_task(task_id, result)
+            .await
+    }
+
+    /// Get pending external tasks
+    pub async fn pending_external_tasks(&self) -> Vec<crate::queue::ExternalTask> {
+        self.command_queue.pending_external_tasks().await
+    }
+
+    /// Get the system prompt from config
+    pub fn system(&self) -> Option<&str> {
+        self.config.system_prompt.as_deref()
     }
 
     /// Get conversation history
@@ -80,6 +277,7 @@ impl Session {
     pub fn add_message(&mut self, message: Message) {
         self.messages.push(message);
         self.context_usage.turns = self.messages.len();
+        self.touch();
     }
 
     /// Update context usage after a response
@@ -92,12 +290,14 @@ impl Session {
         self.context_usage.used_tokens = usage.prompt_tokens;
         self.context_usage.percent =
             self.context_usage.used_tokens as f32 / self.context_usage.max_tokens as f32;
+        self.touch();
     }
 
     /// Clear conversation history
     pub fn clear(&mut self) {
         self.messages.clear();
         self.context_usage = ContextUsage::default();
+        self.touch();
     }
 
     /// Compact context by summarizing old messages
@@ -108,66 +308,242 @@ impl Session {
         if self.messages.len() > keep_messages {
             self.messages = self.messages.split_off(self.messages.len() - keep_messages);
         }
+        self.touch();
         Ok(())
     }
 
-    /// Activate a skill and track its tools
-    pub fn activate_skill(&mut self, skill_name: String, tool_names: Vec<String>) {
-        self.active_skills.insert(skill_name, tool_names);
+    /// Pause the session
+    pub fn pause(&mut self) -> bool {
+        if self.state == SessionState::Active {
+            self.state = SessionState::Paused;
+            self.touch();
+            true
+        } else {
+            false
+        }
     }
 
-    /// Deactivate a skill and return its tool names
-    pub fn deactivate_skill(&mut self, skill_name: &str) -> Option<Vec<String>> {
-        self.active_skills.remove(skill_name)
+    /// Resume the session
+    pub fn resume(&mut self) -> bool {
+        if self.state == SessionState::Paused {
+            self.state = SessionState::Active;
+            self.touch();
+            true
+        } else {
+            false
+        }
     }
 
-    /// Check if a skill is active
-    pub fn is_skill_active(&self, skill_name: &str) -> bool {
-        self.active_skills.contains_key(skill_name)
+    /// Set session state to error
+    pub fn set_error(&mut self) {
+        self.state = SessionState::Error;
+        self.touch();
     }
 
-    /// Get all active skill names
-    pub fn active_skill_names(&self) -> Vec<String> {
-        self.active_skills.keys().cloned().collect()
+    /// Set session state to completed
+    pub fn set_completed(&mut self) {
+        self.state = SessionState::Completed;
+        self.touch();
+    }
+
+    /// Update the updated_at timestamp
+    fn touch(&mut self) {
+        self.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+    }
+
+    /// Convert to serializable SessionData for persistence
+    pub fn to_session_data(&self, llm_config: Option<LlmConfigData>) -> SessionData {
+        SessionData {
+            id: self.id.clone(),
+            config: self.config.clone(),
+            state: self.state,
+            messages: self.messages.clone(),
+            context_usage: self.context_usage.clone(),
+            total_usage: self.total_usage.clone(),
+            tool_names: SessionData::tool_names_from_definitions(&self.tools),
+            thinking_enabled: self.thinking_enabled,
+            thinking_budget: self.thinking_budget,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            llm_config,
+        }
+    }
+
+    /// Restore session state from SessionData
+    ///
+    /// Note: This only restores serializable fields. Non-serializable fields
+    /// (event_tx, command_queue, confirmation_manager) are already initialized
+    /// in Session::new().
+    pub fn restore_from_data(&mut self, data: &SessionData) {
+        self.state = data.state;
+        self.messages = data.messages.clone();
+        self.context_usage = data.context_usage.clone();
+        self.total_usage = data.total_usage.clone();
+        self.thinking_enabled = data.thinking_enabled;
+        self.thinking_budget = data.thinking_budget;
+        self.created_at = data.created_at;
+        self.updated_at = data.updated_at;
     }
 }
 
 /// Session manager handles multiple concurrent sessions
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<String, Arc<RwLock<Session>>>>>,
-    llm_client: Option<Arc<dyn LlmClient>>,  // Optional default LLM client
+    llm_client: Option<Arc<dyn LlmClient>>, // Optional default LLM client
     tool_executor: Arc<ToolExecutor>,
+    /// Session store for persistence (optional)
+    store: Option<Arc<dyn SessionStore>>,
+    /// LLM configurations for sessions (stored separately for persistence)
+    llm_configs: Arc<RwLock<HashMap<String, LlmConfigData>>>,
 }
 
 impl SessionManager {
+    /// Create a new session manager without persistence
     pub fn new(llm_client: Option<Arc<dyn LlmClient>>, tool_executor: Arc<ToolExecutor>) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             llm_client,
             tool_executor,
+            store: None,
+            llm_configs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Create a new session
-    pub async fn create_session(
-        &self,
-        id: String,
-        system: Option<String>,
-        context_threshold: Option<f32>,
-        _context_strategy: Option<String>,
-    ) -> Result<String> {
-        // Get tool definitions from the executor
-        let tools = self.tool_executor.definitions();
-        let mut session = Session::new(id.clone(), system, tools);
+    /// Create a session manager with file-based persistence
+    ///
+    /// Sessions will be automatically saved to disk and restored on startup.
+    pub async fn with_persistence<P: AsRef<std::path::Path>>(
+        llm_client: Option<Arc<dyn LlmClient>>,
+        tool_executor: Arc<ToolExecutor>,
+        sessions_dir: P,
+    ) -> Result<Self> {
+        let store = FileSessionStore::new(sessions_dir).await?;
+        let mut manager = Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            llm_client,
+            tool_executor,
+            store: Some(Arc::new(store)),
+            llm_configs: Arc::new(RwLock::new(HashMap::new())),
+        };
 
-        // Set context threshold if provided
-        if let Some(threshold) = context_threshold {
-            session.context_usage.max_tokens =
-                (200_000.0 * threshold) as usize;
+        // Load existing sessions
+        manager.load_all_sessions().await?;
+
+        Ok(manager)
+    }
+
+    /// Create a session manager with a custom store
+    pub fn with_store(
+        llm_client: Option<Arc<dyn LlmClient>>,
+        tool_executor: Arc<ToolExecutor>,
+        store: Arc<dyn SessionStore>,
+    ) -> Self {
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            llm_client,
+            tool_executor,
+            store: Some(store),
+            llm_configs: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Load all sessions from the store
+    pub async fn load_all_sessions(&mut self) -> Result<usize> {
+        let Some(store) = &self.store else {
+            return Ok(0);
+        };
+
+        let session_ids = store.list().await?;
+        let mut loaded = 0;
+
+        for id in session_ids {
+            match store.load(&id).await {
+                Ok(Some(data)) => {
+                    if let Err(e) = self.restore_session(data).await {
+                        tracing::warn!("Failed to restore session {}: {}", id, e);
+                    } else {
+                        loaded += 1;
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!("Session {} not found in store", id);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load session {}: {}", id, e);
+                }
+            }
+        }
+
+        tracing::info!("Loaded {} sessions from store", loaded);
+        Ok(loaded)
+    }
+
+    /// Restore a session from SessionData
+    async fn restore_session(&self, data: SessionData) -> Result<()> {
+        let tools = self.tool_executor.definitions();
+        let mut session = Session::new(data.id.clone(), data.config.clone(), tools);
+
+        // Restore serializable state
+        session.restore_from_data(&data);
+
+        // Restore LLM config if present (without API key - must be reconfigured)
+        if let Some(llm_config) = &data.llm_config {
+            let mut configs = self.llm_configs.write().await;
+            configs.insert(data.id.clone(), llm_config.clone());
         }
 
         let mut sessions = self.sessions.write().await;
-        sessions.insert(id.clone(), Arc::new(RwLock::new(session)));
+        sessions.insert(data.id.clone(), Arc::new(RwLock::new(session)));
+
+        tracing::info!("Restored session: {}", data.id);
+        Ok(())
+    }
+
+    /// Save a session to the store
+    async fn save_session(&self, session_id: &str) -> Result<()> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+
+        // Get LLM config if set
+        let llm_config = {
+            let configs = self.llm_configs.read().await;
+            configs.get(session_id).cloned()
+        };
+
+        let data = session.to_session_data(llm_config);
+        store.save(&data).await?;
+
+        tracing::debug!("Saved session: {}", session_id);
+        Ok(())
+    }
+
+    /// Create a new session
+    pub async fn create_session(&self, id: String, config: SessionConfig) -> Result<String> {
+        // Get tool definitions from the executor
+        let tools = self.tool_executor.definitions();
+        let mut session = Session::new(id.clone(), config, tools);
+
+        // Set max context length if provided
+        if session.config.max_context_length > 0 {
+            session.context_usage.max_tokens = session.config.max_context_length as usize;
+        }
+
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(id.clone(), Arc::new(RwLock::new(session)));
+        }
+
+        // Persist to store
+        if let Err(e) = self.save_session(&id).await {
+            tracing::warn!("Failed to persist session {}: {}", id, e);
+        }
 
         tracing::info!("Created session: {}", id);
         Ok(id)
@@ -175,8 +551,24 @@ impl SessionManager {
 
     /// Destroy a session
     pub async fn destroy_session(&self, id: &str) -> Result<()> {
-        let mut sessions = self.sessions.write().await;
-        sessions.remove(id);
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.remove(id);
+        }
+
+        // Remove LLM config
+        {
+            let mut configs = self.llm_configs.write().await;
+            configs.remove(id);
+        }
+
+        // Delete from store
+        if let Some(store) = &self.store {
+            if let Err(e) = store.delete(id).await {
+                tracing::warn!("Failed to delete session {} from store: {}", id, e);
+            }
+        }
+
         tracing::info!("Destroyed session: {}", id);
         Ok(())
     }
@@ -198,21 +590,30 @@ impl SessionManager {
     }
 
     /// Generate response for a prompt
-    pub async fn generate(
-        &self,
-        session_id: &str,
-        prompt: &str,
-    ) -> Result<AgentResult> {
+    pub async fn generate(&self, session_id: &str, prompt: &str) -> Result<AgentResult> {
         let session_lock = self.get_session(session_id).await?;
 
+        // Check if session is paused
+        {
+            let session = session_lock.read().await;
+            if session.state == SessionState::Paused {
+                anyhow::bail!(
+                    "Session {} is paused. Call Resume before generating.",
+                    session_id
+                );
+            }
+        }
+
         // Get session state and LLM client
-        let (history, system, tools, session_llm_client) = {
+        let (history, system, tools, session_llm_client, permission_policy, confirmation_manager) = {
             let session = session_lock.read().await;
             (
                 session.messages.clone(),
-                session.system.clone(),
+                session.system().map(String::from),
                 session.tools.clone(),
                 session.llm_client.clone(),
+                session.permission_policy.clone(),
+                session.confirmation_manager.clone(),
             )
         };
 
@@ -228,18 +629,16 @@ impl SessionManager {
             );
         };
 
-        // Create agent loop
+        // Create agent loop with permission policy and confirmation manager
         let config = AgentConfig {
             system_prompt: system,
             tools,
             max_tool_rounds: 50,
+            permission_policy: Some(permission_policy),
+            confirmation_manager: Some(confirmation_manager),
         };
 
-        let agent = AgentLoop::new(
-            llm_client,
-            self.tool_executor.clone(),
-            config,
-        );
+        let agent = AgentLoop::new(llm_client, self.tool_executor.clone(), config);
 
         // Execute
         let result = agent.execute(&history, prompt, None).await?;
@@ -251,6 +650,11 @@ impl SessionManager {
             session.update_usage(&result.usage);
         }
 
+        // Persist to store
+        if let Err(e) = self.save_session(session_id).await {
+            tracing::warn!("Failed to persist session {} after generate: {}", session_id, e);
+        }
+
         Ok(result)
     }
 
@@ -259,17 +663,33 @@ impl SessionManager {
         &self,
         session_id: &str,
         prompt: &str,
-    ) -> Result<(mpsc::Receiver<AgentEvent>, tokio::task::JoinHandle<Result<AgentResult>>)> {
+    ) -> Result<(
+        mpsc::Receiver<AgentEvent>,
+        tokio::task::JoinHandle<Result<AgentResult>>,
+    )> {
         let session_lock = self.get_session(session_id).await?;
 
+        // Check if session is paused
+        {
+            let session = session_lock.read().await;
+            if session.state == SessionState::Paused {
+                anyhow::bail!(
+                    "Session {} is paused. Call Resume before generating.",
+                    session_id
+                );
+            }
+        }
+
         // Get session state and LLM client
-        let (history, system, tools, session_llm_client) = {
+        let (history, system, tools, session_llm_client, permission_policy, confirmation_manager) = {
             let session = session_lock.read().await;
             (
                 session.messages.clone(),
-                session.system.clone(),
+                session.system().map(String::from),
                 session.tools.clone(),
                 session.llm_client.clone(),
+                session.permission_policy.clone(),
+                session.confirmation_manager.clone(),
             )
         };
 
@@ -285,18 +705,16 @@ impl SessionManager {
             );
         };
 
-        // Create agent loop
+        // Create agent loop with permission policy and confirmation manager
         let config = AgentConfig {
             system_prompt: system,
             tools,
             max_tool_rounds: 50,
+            permission_policy: Some(permission_policy),
+            confirmation_manager: Some(confirmation_manager),
         };
 
-        let agent = AgentLoop::new(
-            llm_client,
-            self.tool_executor.clone(),
-            config,
-        );
+        let agent = AgentLoop::new(llm_client, self.tool_executor.clone(), config);
 
         // Execute with streaming
         let (rx, handle) = agent.execute_streaming(&history, prompt).await?;
@@ -304,6 +722,9 @@ impl SessionManager {
         // Spawn task to update session after completion
         let session_lock_clone = session_lock.clone();
         let original_handle = handle;
+        let store = self.store.clone();
+        let llm_configs = self.llm_configs.clone();
+        let session_id_owned = session_id.to_string();
 
         let wrapped_handle = tokio::spawn(async move {
             let result = original_handle.await??;
@@ -313,6 +734,19 @@ impl SessionManager {
                 let mut session = session_lock_clone.write().await;
                 session.messages = result.messages.clone();
                 session.update_usage(&result.usage);
+            }
+
+            // Persist to store
+            if let Some(store) = store {
+                let session = session_lock_clone.read().await;
+                let llm_config = {
+                    let configs = llm_configs.read().await;
+                    configs.get(&session_id_owned).cloned()
+                };
+                let data = session.to_session_data(llm_config);
+                if let Err(e) = store.save(&data).await {
+                    tracing::warn!("Failed to persist session {} after streaming: {}", session_id_owned, e);
+                }
             }
 
             Ok(result)
@@ -337,34 +771,56 @@ impl SessionManager {
 
     /// Clear session history
     pub async fn clear(&self, session_id: &str) -> Result<()> {
-        let session_lock = self.get_session(session_id).await?;
-        let mut session = session_lock.write().await;
-        session.clear();
+        {
+            let session_lock = self.get_session(session_id).await?;
+            let mut session = session_lock.write().await;
+            session.clear();
+        }
+
+        // Persist to store
+        if let Err(e) = self.save_session(session_id).await {
+            tracing::warn!("Failed to persist session {} after clear: {}", session_id, e);
+        }
+
         Ok(())
     }
 
     /// Compact session context
     pub async fn compact(&self, session_id: &str) -> Result<()> {
-        let session_lock = self.get_session(session_id).await?;
-        let mut session = session_lock.write().await;
+        {
+            let session_lock = self.get_session(session_id).await?;
+            let mut session = session_lock.write().await;
 
-        // Get LLM client for compaction (if available)
-        let llm_client = if let Some(client) = &session.llm_client {
-            client.clone()
-        } else if let Some(client) = &self.llm_client {
-            client.clone()
-        } else {
-            // If no LLM client available, just do simple truncation
-            tracing::warn!("No LLM client configured for compaction, using simple truncation");
-            let keep_messages = 20;
-            if session.messages.len() > keep_messages {
-                let len = session.messages.len();
-                session.messages = session.messages.split_off(len - keep_messages);
-            }
-            return Ok(());
-        };
+            // Get LLM client for compaction (if available)
+            let llm_client = if let Some(client) = &session.llm_client {
+                client.clone()
+            } else if let Some(client) = &self.llm_client {
+                client.clone()
+            } else {
+                // If no LLM client available, just do simple truncation
+                tracing::warn!("No LLM client configured for compaction, using simple truncation");
+                let keep_messages = 20;
+                if session.messages.len() > keep_messages {
+                    let len = session.messages.len();
+                    session.messages = session.messages.split_off(len - keep_messages);
+                }
+                // Persist after truncation
+                drop(session);
+                if let Err(e) = self.save_session(session_id).await {
+                    tracing::warn!("Failed to persist session {} after compact: {}", session_id, e);
+                }
+                return Ok(());
+            };
 
-        session.compact(&llm_client).await
+            session.compact(&llm_client).await?;
+        }
+
+        // Persist to store
+        if let Err(e) = self.save_session(session_id).await {
+            tracing::warn!("Failed to persist session {} after compact: {}", session_id, e);
+        }
+
+        Ok(())
     }
 
     /// Configure session
@@ -375,23 +831,42 @@ impl SessionManager {
         budget: Option<usize>,
         model_config: Option<LlmConfig>,
     ) -> Result<()> {
-        let session_lock = self.get_session(session_id).await?;
-        let mut session = session_lock.write().await;
+        {
+            let session_lock = self.get_session(session_id).await?;
+            let mut session = session_lock.write().await;
 
-        if let Some(t) = thinking {
-            session.thinking_enabled = t;
+            if let Some(t) = thinking {
+                session.thinking_enabled = t;
+            }
+            if let Some(b) = budget {
+                session.thinking_budget = Some(b);
+            }
+            if let Some(ref config) = model_config {
+                tracing::info!(
+                    "Configuring session {} with LLM: provider={}, model={}",
+                    session_id,
+                    config.provider,
+                    config.model
+                );
+                session.llm_client = Some(llm::create_client_with_config(config.clone()));
+            }
         }
-        if let Some(b) = budget {
-            session.thinking_budget = Some(b);
-        }
+
+        // Store LLM config for persistence (without API key)
         if let Some(config) = model_config {
-            tracing::info!(
-                "Configuring session {} with LLM: provider={}, model={}",
-                session_id,
-                config.provider,
-                config.model
-            );
-            session.llm_client = Some(llm::create_client_with_config(config));
+            let llm_config_data = LlmConfigData {
+                provider: config.provider,
+                model: config.model,
+                api_key: None, // Don't persist API key
+                base_url: config.base_url,
+            };
+            let mut configs = self.llm_configs.write().await;
+            configs.insert(session_id.to_string(), llm_config_data);
+        }
+
+        // Persist to store
+        if let Err(e) = self.save_session(session_id).await {
+            tracing::warn!("Failed to persist session {} after configure: {}", session_id, e);
         }
 
         Ok(())
@@ -404,115 +879,315 @@ impl SessionManager {
         sessions.len()
     }
 
-    /// Activate a skill for a session
+    /// Load a skill globally (available to all sessions)
     ///
-    /// Registers the skill's tools with the executor and tracks them in the session.
+    /// Registers the skill's tools with the shared tool executor.
     /// Returns the names of tools that were registered.
-    pub async fn use_skill(
-        &self,
-        session_id: &str,
-        skill_name: &str,
-        skill_content: &str,
-    ) -> Result<Vec<String>> {
-        let session_lock = self.get_session(session_id).await?;
-
-        // Check if skill is already active
-        {
-            let session = session_lock.read().await;
-            if session.is_skill_active(skill_name) {
-                tracing::info!("Skill {} is already active for session {}", skill_name, session_id);
-                return Ok(session.active_skills.get(skill_name).cloned().unwrap_or_default());
-            }
-        }
-
-        // Register tools with the executor
+    pub fn load_skill(&self, skill_name: &str, skill_content: &str) -> Vec<String> {
         let tool_names = self.tool_executor.register_skill_tools(skill_content);
 
         if tool_names.is_empty() {
             tracing::warn!("No tools found in skill: {}", skill_name);
+        } else {
+            tracing::info!(
+                "Loaded skill {} with tools: {:?}",
+                skill_name,
+                tool_names
+            );
         }
 
-        // Track in session
-        {
-            let mut session = session_lock.write().await;
-            session.activate_skill(skill_name.to_string(), tool_names.clone());
-            // Update session's tool definitions
-            session.tools = self.tool_executor.definitions();
-        }
-
-        tracing::info!(
-            "Activated skill {} for session {} with tools: {:?}",
-            skill_name,
-            session_id,
-            tool_names
-        );
-
-        Ok(tool_names)
+        tool_names
     }
 
-    /// Deactivate a skill for a session
+    /// Unload a skill globally (removes tools from all sessions)
     ///
-    /// Unregisters the skill's tools from the executor.
+    /// Unregisters the skill's tools from the shared tool executor.
     /// Returns the names of tools that were unregistered.
-    pub async fn remove_skill(
+    pub fn unload_skill(&self, tool_names: &[String]) -> Vec<String> {
+        let removed = self.tool_executor.unregister_tools(tool_names);
+
+        if !removed.is_empty() {
+            tracing::info!("Unloaded skill tools: {:?}", removed);
+        }
+
+        removed
+    }
+
+    /// List all loaded tools (from built-in and skills)
+    pub fn list_tools(&self) -> Vec<crate::llm::ToolDefinition> {
+        self.tool_executor.definitions()
+    }
+
+    /// Pause a session
+    pub async fn pause_session(&self, session_id: &str) -> Result<bool> {
+        let paused = {
+            let session_lock = self.get_session(session_id).await?;
+            let mut session = session_lock.write().await;
+            session.pause()
+        };
+
+        if paused {
+            if let Err(e) = self.save_session(session_id).await {
+                tracing::warn!("Failed to persist session {} after pause: {}", session_id, e);
+            }
+        }
+
+        Ok(paused)
+    }
+
+    /// Resume a session
+    pub async fn resume_session(&self, session_id: &str) -> Result<bool> {
+        let resumed = {
+            let session_lock = self.get_session(session_id).await?;
+            let mut session = session_lock.write().await;
+            session.resume()
+        };
+
+        if resumed {
+            if let Err(e) = self.save_session(session_id).await {
+                tracing::warn!("Failed to persist session {} after resume: {}", session_id, e);
+            }
+        }
+
+        Ok(resumed)
+    }
+
+    /// Get all sessions (returns session locks for iteration)
+    pub async fn get_all_sessions(&self) -> Vec<Arc<RwLock<Session>>> {
+        let sessions = self.sessions.read().await;
+        sessions.values().cloned().collect()
+    }
+
+    /// Get tool executor reference
+    pub fn tool_executor(&self) -> &Arc<ToolExecutor> {
+        &self.tool_executor
+    }
+
+    /// Confirm a tool execution (HITL)
+    pub async fn confirm_tool(
         &self,
         session_id: &str,
-        skill_name: &str,
-    ) -> Result<Vec<String>> {
-        let session_lock = self.get_session(session_id).await?;
-
-        // Get tool names from session
-        let tool_names = {
-            let mut session = session_lock.write().await;
-            session.deactivate_skill(skill_name)
-        };
-
-        let Some(tool_names) = tool_names else {
-            tracing::info!("Skill {} is not active for session {}", skill_name, session_id);
-            return Ok(vec![]);
-        };
-
-        // Unregister tools from executor
-        let removed = self.tool_executor.unregister_tools(&tool_names);
-
-        // Update session's tool definitions
-        {
-            let mut session = session_lock.write().await;
-            session.tools = self.tool_executor.definitions();
-        }
-
-        tracing::info!(
-            "Deactivated skill {} for session {} (removed tools: {:?})",
-            skill_name,
-            session_id,
-            removed
-        );
-
-        Ok(removed)
-    }
-
-    /// List active skills for a session
-    pub async fn list_active_skills(&self, session_id: &str) -> Result<Vec<String>> {
+        tool_id: &str,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<bool> {
         let session_lock = self.get_session(session_id).await?;
         let session = session_lock.read().await;
-        Ok(session.active_skill_names())
+        session
+            .confirmation_manager
+            .confirm(tool_id, approved, reason)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Set confirmation policy for a session (HITL)
+    pub async fn set_confirmation_policy(
+        &self,
+        session_id: &str,
+        policy: ConfirmationPolicy,
+    ) -> Result<ConfirmationPolicy> {
+        {
+            let session_lock = self.get_session(session_id).await?;
+            let session = session_lock.read().await;
+            session.set_confirmation_policy(policy.clone()).await;
+        }
+
+        // Update config for persistence
+        {
+            let session_lock = self.get_session(session_id).await?;
+            let mut session = session_lock.write().await;
+            session.config.confirmation_policy = Some(policy.clone());
+        }
+
+        // Persist to store
+        if let Err(e) = self.save_session(session_id).await {
+            tracing::warn!("Failed to persist session {} after set_confirmation_policy: {}", session_id, e);
+        }
+
+        Ok(policy)
+    }
+
+    /// Get confirmation policy for a session (HITL)
+    pub async fn get_confirmation_policy(&self, session_id: &str) -> Result<ConfirmationPolicy> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        Ok(session.confirmation_policy().await)
+    }
+
+    /// Set permission policy for a session
+    pub async fn set_permission_policy(
+        &self,
+        session_id: &str,
+        policy: PermissionPolicy,
+    ) -> Result<PermissionPolicy> {
+        {
+            let session_lock = self.get_session(session_id).await?;
+            let session = session_lock.read().await;
+            session.set_permission_policy(policy.clone()).await;
+        }
+
+        // Update config for persistence
+        {
+            let session_lock = self.get_session(session_id).await?;
+            let mut session = session_lock.write().await;
+            session.config.permission_policy = Some(policy.clone());
+        }
+
+        // Persist to store
+        if let Err(e) = self.save_session(session_id).await {
+            tracing::warn!("Failed to persist session {} after set_permission_policy: {}", session_id, e);
+        }
+
+        Ok(policy)
+    }
+
+    /// Get permission policy for a session
+    pub async fn get_permission_policy(&self, session_id: &str) -> Result<PermissionPolicy> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        Ok(session.permission_policy().await)
+    }
+
+    /// Check permission for a tool invocation
+    pub async fn check_permission(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<PermissionDecision> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        Ok(session.check_permission(tool_name, args).await)
+    }
+
+    /// Add a permission rule
+    pub async fn add_permission_rule(
+        &self,
+        session_id: &str,
+        rule_type: &str,
+        rule: &str,
+    ) -> Result<()> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        match rule_type {
+            "allow" => session.add_allow_rule(rule).await,
+            "deny" => session.add_deny_rule(rule).await,
+            "ask" => session.add_ask_rule(rule).await,
+            _ => anyhow::bail!("Unknown rule type: {}", rule_type),
+        }
+        Ok(())
+    }
+
+    /// Set lane handler configuration
+    pub async fn set_lane_handler(
+        &self,
+        session_id: &str,
+        lane: crate::hitl::SessionLane,
+        config: crate::queue::LaneHandlerConfig,
+    ) -> Result<()> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        session.set_lane_handler(lane, config).await;
+        Ok(())
+    }
+
+    /// Get lane handler configuration
+    pub async fn get_lane_handler(
+        &self,
+        session_id: &str,
+        lane: crate::hitl::SessionLane,
+    ) -> Result<crate::queue::LaneHandlerConfig> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        Ok(session.get_lane_handler(lane).await)
+    }
+
+    /// Complete an external task
+    pub async fn complete_external_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        result: crate::queue::ExternalTaskResult,
+    ) -> Result<bool> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        Ok(session.complete_external_task(task_id, result).await)
+    }
+
+    /// Get pending external tasks for a session
+    pub async fn pending_external_tasks(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::queue::ExternalTask>> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        Ok(session.pending_external_tasks().await)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hitl::{ConfirmationPolicy, SessionLane, TimeoutAction};
+    use crate::permissions::{PermissionDecision, PermissionPolicy};
+    use crate::queue::{
+        ExternalTaskResult, LaneHandlerConfig, SessionQueueConfig, TaskHandlerMode,
+    };
+    use crate::store::MemorySessionStore;
+
+    // ========================================================================
+    // Basic Session Tests
+    // ========================================================================
 
     #[test]
     fn test_session_creation() {
-        let session = Session::new(
-            "test-1".to_string(),
-            Some("You are helpful.".to_string()),
-            vec![],
-        );
+        let config = SessionConfig {
+            name: "test".to_string(),
+            workspace: "/tmp".to_string(),
+            system_prompt: Some("You are helpful.".to_string()),
+            max_context_length: 0,
+            auto_compact: false,
+            queue_config: None,
+            confirmation_policy: None,
+            permission_policy: None,
+        };
+        let session = Session::new("test-1".to_string(), config, vec![]);
         assert_eq!(session.id, "test-1");
-        assert_eq!(session.system, Some("You are helpful.".to_string()));
+        assert_eq!(session.system(), Some("You are helpful."));
         assert!(session.messages.is_empty());
+        assert_eq!(session.state, SessionState::Active);
+        assert!(session.created_at > 0);
+    }
+
+    #[test]
+    fn test_session_creation_with_queue_config() {
+        let queue_config = SessionQueueConfig {
+            control_max_concurrency: 1,
+            query_max_concurrency: 2,
+            execute_max_concurrency: 3,
+            generate_max_concurrency: 4,
+            lane_handlers: std::collections::HashMap::new(),
+        };
+        let config = SessionConfig {
+            queue_config: Some(queue_config),
+            ..Default::default()
+        };
+        let session = Session::new("test-1".to_string(), config, vec![]);
+        assert_eq!(session.id, "test-1");
+    }
+
+    #[test]
+    fn test_session_creation_with_confirmation_policy() {
+        let policy = ConfirmationPolicy::enabled()
+            .with_yolo_lanes([SessionLane::Query])
+            .with_timeout(5000, TimeoutAction::AutoApprove);
+
+        let config = SessionConfig {
+            confirmation_policy: Some(policy),
+            ..Default::default()
+        };
+        let session = Session::new("test-1".to_string(), config, vec![]);
+        assert_eq!(session.id, "test-1");
     }
 
     #[test]
@@ -521,5 +1196,1012 @@ mod tests {
         assert_eq!(usage.used_tokens, 0);
         assert_eq!(usage.max_tokens, 200_000);
         assert_eq!(usage.percent, 0.0);
+    }
+
+    #[test]
+    fn test_session_pause_resume() {
+        let config = SessionConfig::default();
+        let mut session = Session::new("test-1".to_string(), config, vec![]);
+
+        assert_eq!(session.state, SessionState::Active);
+
+        // Pause
+        assert!(session.pause());
+        assert_eq!(session.state, SessionState::Paused);
+
+        // Can't pause again
+        assert!(!session.pause());
+
+        // Resume
+        assert!(session.resume());
+        assert_eq!(session.state, SessionState::Active);
+
+        // Can't resume again
+        assert!(!session.resume());
+    }
+
+    #[test]
+    fn test_session_state_conversion() {
+        assert_eq!(SessionState::Active.to_proto_i32(), 1);
+        assert_eq!(SessionState::Paused.to_proto_i32(), 2);
+        assert_eq!(SessionState::from_proto_i32(1), SessionState::Active);
+        assert_eq!(SessionState::from_proto_i32(2), SessionState::Paused);
+        assert_eq!(SessionState::from_proto_i32(99), SessionState::Unknown);
+    }
+
+    // ========================================================================
+    // Session HITL Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_session_confirmation_policy() {
+        let config = SessionConfig::default();
+        let session = Session::new("test-1".to_string(), config, vec![]);
+
+        // Default policy (HITL disabled)
+        let policy = session.confirmation_policy().await;
+        assert!(!policy.enabled);
+
+        // Update policy
+        let new_policy = ConfirmationPolicy::enabled()
+            .with_yolo_lanes([SessionLane::Execute])
+            .with_timeout(10000, TimeoutAction::Reject);
+
+        session.set_confirmation_policy(new_policy).await;
+
+        let policy = session.confirmation_policy().await;
+        assert!(policy.enabled);
+        assert!(policy.yolo_lanes.contains(&SessionLane::Execute));
+        assert_eq!(policy.default_timeout_ms, 10000);
+        assert_eq!(policy.timeout_action, TimeoutAction::Reject);
+    }
+
+    #[tokio::test]
+    async fn test_session_subscribe_events() {
+        let config = SessionConfig::default();
+        let session = Session::new("test-1".to_string(), config, vec![]);
+
+        // Subscribe to events
+        let mut rx = session.subscribe_events();
+
+        // Send an event through the broadcaster
+        let tx = session.event_tx();
+        tx.send(crate::agent::AgentEvent::Start {
+            prompt: "test".to_string(),
+        })
+        .unwrap();
+
+        // Should receive the event
+        let event = rx.recv().await.unwrap();
+        match event {
+            crate::agent::AgentEvent::Start { prompt } => {
+                assert_eq!(prompt, "test");
+            }
+            _ => panic!("Expected Start event"),
+        }
+    }
+
+    // ========================================================================
+    // Session Lane Handler Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_session_lane_handler() {
+        let config = SessionConfig::default();
+        let session = Session::new("test-1".to_string(), config, vec![]);
+
+        // Default handler mode
+        let handler = session.get_lane_handler(SessionLane::Execute).await;
+        assert_eq!(handler.mode, TaskHandlerMode::Internal);
+
+        // Set new handler
+        session
+            .set_lane_handler(
+                SessionLane::Execute,
+                LaneHandlerConfig {
+                    mode: TaskHandlerMode::External,
+                    timeout_ms: 30000,
+                },
+            )
+            .await;
+
+        let handler = session.get_lane_handler(SessionLane::Execute).await;
+        assert_eq!(handler.mode, TaskHandlerMode::External);
+        assert_eq!(handler.timeout_ms, 30000);
+    }
+
+    #[tokio::test]
+    async fn test_session_external_tasks() {
+        let config = SessionConfig::default();
+        let session = Session::new("test-1".to_string(), config, vec![]);
+
+        // Initially no pending external tasks
+        let pending = session.pending_external_tasks().await;
+        assert!(pending.is_empty());
+
+        // Complete non-existent task
+        let completed = session
+            .complete_external_task(
+                "non-existent",
+                ExternalTaskResult {
+                    success: true,
+                    result: serde_json::json!({}),
+                    error: None,
+                },
+            )
+            .await;
+        assert!(!completed);
+    }
+
+    // ========================================================================
+    // SessionManager Tests
+    // ========================================================================
+
+    fn create_test_session_manager() -> SessionManager {
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        SessionManager::new(None, tool_executor)
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_create_session() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig {
+            name: "test-session".to_string(),
+            ..Default::default()
+        };
+
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        let session_lock = manager.get_session("session-1").await.unwrap();
+        let session = session_lock.read().await;
+        assert_eq!(session.id, "session-1");
+        assert_eq!(session.config.name, "test-session");
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_destroy_session() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Session exists
+        assert!(manager.get_session("session-1").await.is_ok());
+
+        // Destroy session
+        manager.destroy_session("session-1").await.unwrap();
+
+        // Session no longer exists
+        assert!(manager.get_session("session-1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_list_sessions() {
+        let manager = create_test_session_manager();
+
+        // Create multiple sessions
+        for i in 0..3 {
+            let config = SessionConfig {
+                name: format!("session-{}", i),
+                ..Default::default()
+            };
+            manager
+                .create_session(format!("session-{}", i), config)
+                .await
+                .unwrap();
+        }
+
+        let sessions = manager.get_all_sessions().await;
+        assert_eq!(sessions.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_pause_resume() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Pause
+        assert!(manager.pause_session("session-1").await.unwrap());
+
+        // Resume
+        assert!(manager.resume_session("session-1").await.unwrap());
+    }
+
+    // ========================================================================
+    // SessionManager HITL Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_session_manager_confirmation_policy() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Get default policy
+        let policy = manager.get_confirmation_policy("session-1").await.unwrap();
+        assert!(!policy.enabled);
+
+        // Set new policy
+        let new_policy = ConfirmationPolicy::enabled()
+            .with_yolo_lanes([SessionLane::Query, SessionLane::Execute])
+            .with_auto_approve_tools(["bash".to_string()]);
+
+        let result = manager
+            .set_confirmation_policy("session-1", new_policy)
+            .await
+            .unwrap();
+        assert!(result.enabled);
+        assert!(result.yolo_lanes.contains(&SessionLane::Query));
+        assert!(result.yolo_lanes.contains(&SessionLane::Execute));
+        assert!(result.auto_approve_tools.contains("bash"));
+
+        // Verify policy was persisted
+        let policy = manager.get_confirmation_policy("session-1").await.unwrap();
+        assert!(policy.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_confirm_tool_not_found() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Confirm non-existent tool
+        let result = manager
+            .confirm_tool("session-1", "non-existent", true, None)
+            .await
+            .unwrap();
+        assert!(!result); // Not found
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_confirm_tool_session_not_found() {
+        let manager = create_test_session_manager();
+
+        // Session doesn't exist
+        let result = manager
+            .confirm_tool("non-existent-session", "tool-1", true, None)
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // SessionManager Lane Handler Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_session_manager_lane_handler() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Get default handler
+        let handler = manager
+            .get_lane_handler("session-1", SessionLane::Execute)
+            .await
+            .unwrap();
+        assert_eq!(handler.mode, TaskHandlerMode::Internal);
+
+        // Set new handler
+        manager
+            .set_lane_handler(
+                "session-1",
+                SessionLane::Execute,
+                LaneHandlerConfig {
+                    mode: TaskHandlerMode::External,
+                    timeout_ms: 45000,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Verify handler was set
+        let handler = manager
+            .get_lane_handler("session-1", SessionLane::Execute)
+            .await
+            .unwrap();
+        assert_eq!(handler.mode, TaskHandlerMode::External);
+        assert_eq!(handler.timeout_ms, 45000);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_lane_handler_session_not_found() {
+        let manager = create_test_session_manager();
+
+        let result = manager
+            .get_lane_handler("non-existent", SessionLane::Execute)
+            .await;
+        assert!(result.is_err());
+
+        let result = manager
+            .set_lane_handler(
+                "non-existent",
+                SessionLane::Execute,
+                LaneHandlerConfig::default(),
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // SessionManager External Task Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_session_manager_external_tasks() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Initially no pending tasks
+        let pending = manager.pending_external_tasks("session-1").await.unwrap();
+        assert!(pending.is_empty());
+
+        // Complete non-existent task
+        let result = manager
+            .complete_external_task(
+                "session-1",
+                "non-existent-task",
+                ExternalTaskResult {
+                    success: true,
+                    result: serde_json::json!({}),
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_external_tasks_session_not_found() {
+        let manager = create_test_session_manager();
+
+        let result = manager.pending_external_tasks("non-existent").await;
+        assert!(result.is_err());
+
+        let result = manager
+            .complete_external_task(
+                "non-existent",
+                "task-1",
+                ExternalTaskResult {
+                    success: true,
+                    result: serde_json::json!({}),
+                    error: None,
+                },
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Integration Tests: Multiple Sessions
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_multiple_sessions_independent_policies() {
+        let manager = create_test_session_manager();
+
+        // Create two sessions with different policies
+        let config1 = SessionConfig {
+            confirmation_policy: Some(ConfirmationPolicy::enabled()),
+            ..Default::default()
+        };
+        let config2 = SessionConfig {
+            confirmation_policy: Some(
+                ConfirmationPolicy::enabled().with_yolo_lanes([SessionLane::Execute]),
+            ),
+            ..Default::default()
+        };
+
+        manager
+            .create_session("session-1".to_string(), config1)
+            .await
+            .unwrap();
+        manager
+            .create_session("session-2".to_string(), config2)
+            .await
+            .unwrap();
+
+        // Verify policies are independent
+        let policy1 = manager.get_confirmation_policy("session-1").await.unwrap();
+        let policy2 = manager.get_confirmation_policy("session-2").await.unwrap();
+
+        assert!(policy1.enabled);
+        assert!(policy1.yolo_lanes.is_empty());
+
+        assert!(policy2.enabled);
+        assert!(policy2.yolo_lanes.contains(&SessionLane::Execute));
+
+        // Update session-1 policy
+        manager
+            .set_confirmation_policy(
+                "session-1",
+                ConfirmationPolicy::enabled().with_yolo_lanes([SessionLane::Query]),
+            )
+            .await
+            .unwrap();
+
+        // session-2 should be unchanged
+        let policy2 = manager.get_confirmation_policy("session-2").await.unwrap();
+        assert!(!policy2.yolo_lanes.contains(&SessionLane::Query));
+        assert!(policy2.yolo_lanes.contains(&SessionLane::Execute));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_sessions_independent_handlers() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config.clone())
+            .await
+            .unwrap();
+        manager
+            .create_session("session-2".to_string(), config)
+            .await
+            .unwrap();
+
+        // Set different handlers for each session
+        manager
+            .set_lane_handler(
+                "session-1",
+                SessionLane::Execute,
+                LaneHandlerConfig {
+                    mode: TaskHandlerMode::External,
+                    timeout_ms: 10000,
+                },
+            )
+            .await
+            .unwrap();
+
+        manager
+            .set_lane_handler(
+                "session-2",
+                SessionLane::Execute,
+                LaneHandlerConfig {
+                    mode: TaskHandlerMode::Hybrid,
+                    timeout_ms: 20000,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Verify handlers are independent
+        let handler1 = manager
+            .get_lane_handler("session-1", SessionLane::Execute)
+            .await
+            .unwrap();
+        let handler2 = manager
+            .get_lane_handler("session-2", SessionLane::Execute)
+            .await
+            .unwrap();
+
+        assert_eq!(handler1.mode, TaskHandlerMode::External);
+        assert_eq!(handler1.timeout_ms, 10000);
+
+        assert_eq!(handler2.mode, TaskHandlerMode::Hybrid);
+        assert_eq!(handler2.timeout_ms, 20000);
+    }
+
+    // ========================================================================
+    // Permission Policy Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_session_permission_policy() {
+        let config = SessionConfig::default();
+        let session = Session::new("test-1".to_string(), config, vec![]);
+
+        // Default policy asks for everything
+        let decision = session
+            .check_permission("Bash", &serde_json::json!({"command": "ls -la"}))
+            .await;
+        assert_eq!(decision, PermissionDecision::Ask);
+    }
+
+    #[tokio::test]
+    async fn test_session_permission_policy_custom() {
+        let policy = PermissionPolicy::new()
+            .allow("Bash(cargo:*)")
+            .deny("Bash(rm:*)");
+
+        let config = SessionConfig {
+            permission_policy: Some(policy),
+            ..Default::default()
+        };
+        let session = Session::new("test-1".to_string(), config, vec![]);
+
+        // cargo commands are allowed
+        let decision = session
+            .check_permission("Bash", &serde_json::json!({"command": "cargo build"}))
+            .await;
+        assert_eq!(decision, PermissionDecision::Allow);
+
+        // rm commands are denied
+        let decision = session
+            .check_permission("Bash", &serde_json::json!({"command": "rm -rf /tmp"}))
+            .await;
+        assert_eq!(decision, PermissionDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn test_session_add_permission_rules() {
+        let config = SessionConfig::default();
+        let session = Session::new("test-1".to_string(), config, vec![]);
+
+        // Add allow rule
+        session.add_allow_rule("Bash(npm:*)").await;
+
+        // npm commands should now be allowed
+        let decision = session
+            .check_permission("Bash", &serde_json::json!({"command": "npm install"}))
+            .await;
+        assert_eq!(decision, PermissionDecision::Allow);
+
+        // Add deny rule
+        session.add_deny_rule("Bash(npm audit:*)").await;
+
+        // npm audit should be denied (deny wins)
+        let decision = session
+            .check_permission("Bash", &serde_json::json!({"command": "npm audit fix"}))
+            .await;
+        assert_eq!(decision, PermissionDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_permission_policy() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Get default policy
+        let policy = manager.get_permission_policy("session-1").await.unwrap();
+        assert_eq!(policy.default_decision, PermissionDecision::Ask);
+
+        // Set custom policy
+        let new_policy = PermissionPolicy::new()
+            .allow("Bash(cargo:*)")
+            .allow("Grep(*)");
+
+        manager
+            .set_permission_policy("session-1", new_policy)
+            .await
+            .unwrap();
+
+        // Check permission
+        let decision = manager
+            .check_permission(
+                "session-1",
+                "Bash",
+                &serde_json::json!({"command": "cargo test"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Allow);
+
+        // Grep is also allowed
+        let decision = manager
+            .check_permission("session-1", "Grep", &serde_json::json!({"pattern": "TODO"}))
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Allow);
+
+        // Other tools still ask
+        let decision = manager
+            .check_permission(
+                "session-1",
+                "Write",
+                &serde_json::json!({"file_path": "/tmp/test"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Ask);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_add_permission_rule() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Add allow rule
+        manager
+            .add_permission_rule("session-1", "allow", "Bash(just:*)")
+            .await
+            .unwrap();
+
+        // just commands should be allowed
+        let decision = manager
+            .check_permission(
+                "session-1",
+                "Bash",
+                &serde_json::json!({"command": "just test"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Allow);
+
+        // Add deny rule
+        manager
+            .add_permission_rule("session-1", "deny", "Bash(just clean:*)")
+            .await
+            .unwrap();
+
+        // just clean should be denied
+        let decision = manager
+            .check_permission(
+                "session-1",
+                "Bash",
+                &serde_json::json!({"command": "just clean"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_permission_policy_session_not_found() {
+        let manager = create_test_session_manager();
+
+        let result = manager.get_permission_policy("non-existent").await;
+        assert!(result.is_err());
+
+        let result = manager
+            .set_permission_policy("non-existent", PermissionPolicy::default())
+            .await;
+        assert!(result.is_err());
+
+        let result = manager
+            .check_permission(
+                "non-existent",
+                "Bash",
+                &serde_json::json!({"command": "ls"}),
+            )
+            .await;
+        assert!(result.is_err());
+
+        let result = manager
+            .add_permission_rule("non-existent", "allow", "Bash(*)")
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_sessions_independent_permission_policies() {
+        let manager = create_test_session_manager();
+
+        // Create sessions with different permission policies
+        let config1 = SessionConfig {
+            permission_policy: Some(PermissionPolicy::new().allow("Bash(cargo:*)")),
+            ..Default::default()
+        };
+        let config2 = SessionConfig {
+            permission_policy: Some(PermissionPolicy::new().allow("Bash(npm:*)")),
+            ..Default::default()
+        };
+
+        manager
+            .create_session("session-1".to_string(), config1)
+            .await
+            .unwrap();
+        manager
+            .create_session("session-2".to_string(), config2)
+            .await
+            .unwrap();
+
+        // Session 1 allows cargo, not npm
+        let decision = manager
+            .check_permission(
+                "session-1",
+                "Bash",
+                &serde_json::json!({"command": "cargo build"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Allow);
+
+        let decision = manager
+            .check_permission(
+                "session-1",
+                "Bash",
+                &serde_json::json!({"command": "npm install"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Ask);
+
+        // Session 2 allows npm, not cargo
+        let decision = manager
+            .check_permission(
+                "session-2",
+                "Bash",
+                &serde_json::json!({"command": "npm install"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Allow);
+
+        let decision = manager
+            .check_permission(
+                "session-2",
+                "Bash",
+                &serde_json::json!({"command": "cargo build"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision, PermissionDecision::Ask);
+    }
+
+    // ========================================================================
+    // Session Persistence Tests
+    // ========================================================================
+
+    fn create_test_session_manager_with_store() -> SessionManager {
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let store = Arc::new(MemorySessionStore::new());
+        SessionManager::with_store(None, tool_executor, store)
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_with_persistence() {
+        let manager = create_test_session_manager_with_store();
+
+        let config = SessionConfig {
+            name: "persistent-session".to_string(),
+            system_prompt: Some("You are helpful.".to_string()),
+            ..Default::default()
+        };
+
+        // Create session
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Verify session exists
+        let session_lock = manager.get_session("session-1").await.unwrap();
+        let session = session_lock.read().await;
+        assert_eq!(session.config.name, "persistent-session");
+    }
+
+    #[tokio::test]
+    async fn test_session_to_session_data() {
+        let config = SessionConfig {
+            name: "test".to_string(),
+            system_prompt: Some("Hello".to_string()),
+            ..Default::default()
+        };
+        let mut session = Session::new("test-1".to_string(), config, vec![]);
+
+        // Add some messages
+        session.messages.push(Message::user("Hello"));
+
+        // Convert to SessionData
+        let data = session.to_session_data(None);
+
+        assert_eq!(data.id, "test-1");
+        assert_eq!(data.config.name, "test");
+        assert_eq!(data.messages.len(), 1);
+        assert!(data.llm_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_to_session_data_with_llm_config() {
+        let config = SessionConfig::default();
+        let session = Session::new("test-1".to_string(), config, vec![]);
+
+        let llm_config = LlmConfigData {
+            provider: "anthropic".to_string(),
+            model: "claude-3-5-sonnet".to_string(),
+            api_key: None,
+            base_url: None,
+        };
+
+        let data = session.to_session_data(Some(llm_config));
+
+        assert!(data.llm_config.is_some());
+        let llm = data.llm_config.unwrap();
+        assert_eq!(llm.provider, "anthropic");
+        assert_eq!(llm.model, "claude-3-5-sonnet");
+    }
+
+    #[tokio::test]
+    async fn test_session_restore_from_data() {
+        let config = SessionConfig::default();
+        let mut session = Session::new("test-1".to_string(), config.clone(), vec![]);
+
+        // Create data with different state
+        let data = SessionData {
+            id: "test-1".to_string(),
+            config,
+            state: SessionState::Paused,
+            messages: vec![Message::user("Restored message")],
+            context_usage: ContextUsage {
+                used_tokens: 100,
+                max_tokens: 200000,
+                percent: 0.0005,
+                turns: 1,
+            },
+            total_usage: TokenUsage {
+                prompt_tokens: 50,
+                completion_tokens: 50,
+                total_tokens: 100,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+            tool_names: vec![],
+            thinking_enabled: true,
+            thinking_budget: Some(1000),
+            created_at: 1700000000,
+            updated_at: 1700000100,
+            llm_config: None,
+        };
+
+        // Restore
+        session.restore_from_data(&data);
+
+        // Verify
+        assert_eq!(session.state, SessionState::Paused);
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.context_usage.used_tokens, 100);
+        assert!(session.thinking_enabled);
+        assert_eq!(session.thinking_budget, Some(1000));
+        assert_eq!(session.created_at, 1700000000);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_persistence_on_pause_resume() {
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let store = Arc::new(MemorySessionStore::new());
+        let manager = SessionManager::with_store(None, tool_executor, store.clone());
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Pause should persist
+        manager.pause_session("session-1").await.unwrap();
+
+        // Check store
+        let stored = store.load("session-1").await.unwrap().unwrap();
+        assert_eq!(stored.state, SessionState::Paused);
+
+        // Resume should persist
+        manager.resume_session("session-1").await.unwrap();
+
+        let stored = store.load("session-1").await.unwrap().unwrap();
+        assert_eq!(stored.state, SessionState::Active);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_persistence_on_clear() {
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let store = Arc::new(MemorySessionStore::new());
+        let manager = SessionManager::with_store(None, tool_executor, store.clone());
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Add a message manually for testing
+        {
+            let session_lock = manager.get_session("session-1").await.unwrap();
+            let mut session = session_lock.write().await;
+            session.messages.push(Message::user("Test message"));
+        }
+
+        // Clear should persist
+        manager.clear("session-1").await.unwrap();
+
+        // Check store
+        let stored = store.load("session-1").await.unwrap().unwrap();
+        assert!(stored.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_persistence_on_destroy() {
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let store = Arc::new(MemorySessionStore::new());
+        let manager = SessionManager::with_store(None, tool_executor, store.clone());
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Verify exists in store
+        assert!(store.exists("session-1").await.unwrap());
+
+        // Destroy should delete from store
+        manager.destroy_session("session-1").await.unwrap();
+
+        // Verify deleted from store
+        assert!(!store.exists("session-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_persistence_on_policy_change() {
+        let tool_executor = Arc::new(ToolExecutor::new("/tmp".to_string()));
+        let store = Arc::new(MemorySessionStore::new());
+        let manager = SessionManager::with_store(None, tool_executor, store.clone());
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Set confirmation policy
+        let policy = ConfirmationPolicy::enabled().with_yolo_lanes([SessionLane::Query]);
+        manager
+            .set_confirmation_policy("session-1", policy)
+            .await
+            .unwrap();
+
+        // Check store
+        let stored = store.load("session-1").await.unwrap().unwrap();
+        let stored_policy = stored.config.confirmation_policy.unwrap();
+        assert!(stored_policy.enabled);
+        assert!(stored_policy.yolo_lanes.contains(&SessionLane::Query));
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_no_store_no_error() {
+        // Manager without store should work fine
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // All operations should succeed without persistence
+        manager.pause_session("session-1").await.unwrap();
+        manager.resume_session("session-1").await.unwrap();
+        manager.clear("session-1").await.unwrap();
+        manager.destroy_session("session-1").await.unwrap();
     }
 }

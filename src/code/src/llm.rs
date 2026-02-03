@@ -203,7 +203,11 @@ async fn http_post_json(
     headers: Vec<(&str, &str)>,
     body: &serde_json::Value,
 ) -> Result<(reqwest::StatusCode, String)> {
-    tracing::debug!("HTTP POST to {}: {}", url, serde_json::to_string_pretty(body)?);
+    tracing::debug!(
+        "HTTP POST to {}: {}",
+        url,
+        serde_json::to_string_pretty(body)?
+    );
 
     let mut request = client.post(url);
     // Add custom headers first
@@ -251,7 +255,12 @@ impl AnthropicClient {
         self
     }
 
-    fn build_request(&self, messages: &[Message], system: Option<&str>, tools: &[ToolDefinition]) -> serde_json::Value {
+    fn build_request(
+        &self,
+        messages: &[Message],
+        system: Option<&str>,
+        tools: &[ToolDefinition],
+    ) -> serde_json::Value {
         let mut request = serde_json::json!({
             "model": self.model,
             "max_tokens": 8192,
@@ -400,20 +409,20 @@ impl LlmClient for AnthropicClient {
 
                             if let Ok(event) = serde_json::from_str::<AnthropicStreamEvent>(data) {
                                 match event {
-                                    AnthropicStreamEvent::ContentBlockStart { index: _, content_block } => {
-                                        match content_block {
-                                            AnthropicContentBlock::Text { .. } => {}
-                                            AnthropicContentBlock::ToolUse { id, name, .. } => {
-                                                current_tool_id = id.clone();
-                                                current_tool_name = name.clone();
-                                                current_tool_input.clear();
-                                                let _ = tx.send(StreamEvent::ToolUseStart {
-                                                    id,
-                                                    name,
-                                                }).await;
-                                            }
+                                    AnthropicStreamEvent::ContentBlockStart {
+                                        index: _,
+                                        content_block,
+                                    } => match content_block {
+                                        AnthropicContentBlock::Text { .. } => {}
+                                        AnthropicContentBlock::ToolUse { id, name, .. } => {
+                                            current_tool_id = id.clone();
+                                            current_tool_name = name.clone();
+                                            current_tool_input.clear();
+                                            let _ = tx
+                                                .send(StreamEvent::ToolUseStart { id, name })
+                                                .await;
                                         }
-                                    }
+                                    },
                                     AnthropicStreamEvent::ContentBlockDelta { index: _, delta } => {
                                         match delta {
                                             AnthropicDelta::TextDelta { text } => {
@@ -421,15 +430,20 @@ impl LlmClient for AnthropicClient {
                                             }
                                             AnthropicDelta::InputJsonDelta { partial_json } => {
                                                 current_tool_input.push_str(&partial_json);
-                                                let _ = tx.send(StreamEvent::ToolUseInputDelta(partial_json)).await;
+                                                let _ = tx
+                                                    .send(StreamEvent::ToolUseInputDelta(
+                                                        partial_json,
+                                                    ))
+                                                    .await;
                                             }
                                         }
                                     }
                                     AnthropicStreamEvent::ContentBlockStop { index: _ } => {
                                         // If we were building a tool use, finalize it
                                         if !current_tool_id.is_empty() {
-                                            let input: serde_json::Value = serde_json::from_str(&current_tool_input)
-                                                .unwrap_or(serde_json::json!({}));
+                                            let input: serde_json::Value =
+                                                serde_json::from_str(&current_tool_input)
+                                                    .unwrap_or(serde_json::json!({}));
                                             content_blocks.push(ContentBlock::ToolUse {
                                                 id: current_tool_id.clone(),
                                                 name: current_tool_name.clone(),
@@ -443,10 +457,14 @@ impl LlmClient for AnthropicClient {
                                     AnthropicStreamEvent::MessageStart { message } => {
                                         usage.prompt_tokens = message.usage.input_tokens;
                                     }
-                                    AnthropicStreamEvent::MessageDelta { delta, usage: msg_usage } => {
+                                    AnthropicStreamEvent::MessageDelta {
+                                        delta,
+                                        usage: msg_usage,
+                                    } => {
                                         stop_reason = Some(delta.stop_reason);
                                         usage.completion_tokens = msg_usage.output_tokens;
-                                        usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+                                        usage.total_tokens =
+                                            usage.prompt_tokens + usage.completion_tokens;
                                     }
                                     AnthropicStreamEvent::MessageStop => {
                                         // Build final response
@@ -515,10 +533,7 @@ enum AnthropicStreamEvent {
         content_block: AnthropicContentBlock,
     },
     #[serde(rename = "content_block_delta")]
-    ContentBlockDelta {
-        index: usize,
-        delta: AnthropicDelta,
-    },
+    ContentBlockDelta { index: usize, delta: AnthropicDelta },
     #[serde(rename = "content_block_stop")]
     ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]
@@ -600,7 +615,11 @@ impl OpenAiClient {
                 let content: serde_json::Value = if msg.content.len() == 1 {
                     match &msg.content[0] {
                         ContentBlock::Text { text } => serde_json::json!(text),
-                        ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
                             return serde_json::json!({
                                 "role": "tool",
                                 "tool_call_id": tool_use_id,
@@ -610,23 +629,27 @@ impl OpenAiClient {
                         _ => serde_json::json!(""),
                     }
                 } else {
-                    serde_json::json!(msg.content.iter().map(|block| {
-                        match block {
-                            ContentBlock::Text { text } => serde_json::json!({
-                                "type": "text",
-                                "text": text,
-                            }),
-                            ContentBlock::ToolUse { id, name, input } => serde_json::json!({
-                                "type": "function",
-                                "id": id,
-                                "function": {
-                                    "name": name,
-                                    "arguments": input.to_string(),
-                                }
-                            }),
-                            _ => serde_json::json!({}),
-                        }
-                    }).collect::<Vec<_>>())
+                    serde_json::json!(msg
+                        .content
+                        .iter()
+                        .map(|block| {
+                            match block {
+                                ContentBlock::Text { text } => serde_json::json!({
+                                    "type": "text",
+                                    "text": text,
+                                }),
+                                ContentBlock::ToolUse { id, name, input } => serde_json::json!({
+                                    "type": "function",
+                                    "id": id,
+                                    "function": {
+                                        "name": name,
+                                        "arguments": input.to_string(),
+                                    }
+                                }),
+                                _ => serde_json::json!({}),
+                            }
+                        })
+                        .collect::<Vec<_>>())
                 };
 
                 // Handle assistant messages with tool calls
@@ -707,9 +730,7 @@ impl LlmClient for OpenAiClient {
 
         let url = format!("{}/v1/chat/completions", self.base_url);
         let auth_header = format!("Bearer {}", self.api_key);
-        let headers = vec![
-            ("Authorization", auth_header.as_str()),
-        ];
+        let headers = vec![("Authorization", auth_header.as_str())];
 
         let (status, body) = http_post_json(&self.client, &url, headers, &request).await?;
 
@@ -809,7 +830,8 @@ impl LlmClient for OpenAiClient {
             let mut buffer = String::new();
             let mut content_blocks: Vec<ContentBlock> = Vec::new();
             let mut text_content = String::new();
-            let mut tool_calls: std::collections::HashMap<usize, (String, String, String)> = std::collections::HashMap::new();
+            let mut tool_calls: std::collections::HashMap<usize, (String, String, String)> =
+                std::collections::HashMap::new();
             let mut usage = TokenUsage::default();
             let mut finish_reason = None;
 
@@ -834,7 +856,9 @@ impl LlmClient for OpenAiClient {
                             if data == "[DONE]" {
                                 // Build final response
                                 if !text_content.is_empty() {
-                                    content_blocks.push(ContentBlock::Text { text: text_content.clone() });
+                                    content_blocks.push(ContentBlock::Text {
+                                        text: text_content.clone(),
+                                    });
                                 }
                                 for (_, (id, name, args)) in tool_calls.drain() {
                                     content_blocks.push(ContentBlock::ToolUse {
@@ -878,9 +902,15 @@ impl LlmClient for OpenAiClient {
                                         // Handle tool calls
                                         if let Some(tcs) = delta.tool_calls {
                                             for tc in tcs {
-                                                let entry = tool_calls.entry(tc.index).or_insert_with(|| {
-                                                    (String::new(), String::new(), String::new())
-                                                });
+                                                let entry = tool_calls
+                                                    .entry(tc.index)
+                                                    .or_insert_with(|| {
+                                                        (
+                                                            String::new(),
+                                                            String::new(),
+                                                            String::new(),
+                                                        )
+                                                    });
 
                                                 if let Some(id) = tc.id {
                                                     entry.0 = id;
@@ -888,14 +918,20 @@ impl LlmClient for OpenAiClient {
                                                 if let Some(func) = tc.function {
                                                     if let Some(name) = func.name {
                                                         entry.1 = name.clone();
-                                                        let _ = tx.send(StreamEvent::ToolUseStart {
-                                                            id: entry.0.clone(),
-                                                            name,
-                                                        }).await;
+                                                        let _ = tx
+                                                            .send(StreamEvent::ToolUseStart {
+                                                                id: entry.0.clone(),
+                                                                name,
+                                                            })
+                                                            .await;
                                                     }
                                                     if let Some(args) = func.arguments {
                                                         entry.2.push_str(&args);
-                                                        let _ = tx.send(StreamEvent::ToolUseInputDelta(args)).await;
+                                                        let _ = tx
+                                                            .send(StreamEvent::ToolUseInputDelta(
+                                                                args,
+                                                            ))
+                                                            .await;
                                                     }
                                                 }
                                             }
@@ -997,7 +1033,11 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
-    pub fn new(provider: impl Into<String>, model: impl Into<String>, api_key: impl Into<String>) -> Self {
+    pub fn new(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+    ) -> Self {
         Self {
             provider: provider.into(),
             model: model.into(),
@@ -1031,7 +1071,10 @@ pub fn create_client_with_config(config: LlmConfig) -> Arc<dyn LlmClient> {
         }
         // OpenAI-compatible providers (deepseek, groq, together, ollama, etc.)
         _ => {
-            tracing::info!("Using OpenAI-compatible client for provider '{}'", config.provider);
+            tracing::info!(
+                "Using OpenAI-compatible client for provider '{}'",
+                config.provider
+            );
             let mut client = OpenAiClient::new(config.api_key, config.model);
             if let Some(base_url) = config.base_url {
                 client = client.with_base_url(base_url);
@@ -1054,9 +1097,21 @@ mod tests {
 
     #[test]
     fn test_normalize_base_url() {
-        assert_eq!(normalize_base_url("https://api.example.com"), "https://api.example.com");
-        assert_eq!(normalize_base_url("https://api.example.com/"), "https://api.example.com");
-        assert_eq!(normalize_base_url("https://api.example.com/v1"), "https://api.example.com");
-        assert_eq!(normalize_base_url("https://api.example.com/v1/"), "https://api.example.com");
+        assert_eq!(
+            normalize_base_url("https://api.example.com"),
+            "https://api.example.com"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.example.com/"),
+            "https://api.example.com"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.example.com/v1"),
+            "https://api.example.com"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.example.com/v1/"),
+            "https://api.example.com"
+        );
     }
 }

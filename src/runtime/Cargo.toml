@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 a3s-box-core = { path = "../core" }
+libkrun-sys = { path = "../deps/libkrun-sys" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -53,6 +54,14 @@ uuid = { workspace = true }
 # Concurrency
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
+
+# System
+libc = { workspace = true }
+sysinfo = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

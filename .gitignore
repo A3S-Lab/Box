@@ -47,6 +47,18 @@ junit.xml
 coverage.xml
 .vitest/
 
+# Rust Coverage (cargo-llvm-cov, tarpaulin)
+*.lcov
+lcov.info
+coverage.lcov
+*.profraw
+*.profdata
+target/llvm-cov-target/
+target/coverage/
+tarpaulin-report.html
+tarpaulin-report.json
+cobertura.xml
+
 # IDE
 .vscode/
 .idea/

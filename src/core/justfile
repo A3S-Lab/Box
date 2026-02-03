@@ -1,53 +1,13 @@
 # A3S Box Core - Justfile
+# Most commands available via root: just test, just fmt, just lint
 
-# Default recipe
 default:
     @just --list
 
-# Build
-build:
-    cargo build -p a3s-box-core
-
-# Build in release mode
-build-release:
-    cargo build -p a3s-box-core --release
-
-# Run tests
+# Run tests (this crate only)
 test:
     cargo test -p a3s-box-core --lib
 
-# Run tests with output
-test-verbose:
-    cargo test -p a3s-box-core --lib -- --nocapture
-
-# Run a specific test
+# Run single test
 test-one TEST:
     cargo test -p a3s-box-core --lib -- {{TEST}}
-
-# Format code
-fmt:
-    cargo fmt -p a3s-box-core
-
-# Check formatting
-fmt-check:
-    cargo fmt -p a3s-box-core -- --check
-
-# Run clippy
-lint:
-    cargo clippy -p a3s-box-core --all-targets -- -D warnings
-
-# Run clippy with fixes
-lint-fix:
-    cargo clippy -p a3s-box-core --all-targets --fix --allow-dirty
-
-# Check compilation
-check:
-    cargo check -p a3s-box-core
-
-# Generate documentation
-doc:
-    cargo doc -p a3s-box-core --no-deps --document-private-items
-
-# Open documentation
-doc-open:
-    cargo doc -p a3s-box-core --no-deps --open

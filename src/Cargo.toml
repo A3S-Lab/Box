@@ -2,11 +2,12 @@
 members = [
     "core",
     "runtime",
-    "cli",
     "code",
     "queue",
+    "shim",
     "sdk/python",
     "sdk/typescript",
+    "deps/libkrun-sys",
 ]
 resolver = "2"
 
@@ -74,3 +75,11 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # Concurrency
 parking_lot = "0.12"
 dashmap = "5.5"
+
+# System
+libc = "0.2"
+sysinfo = "0.30"
+dirs = "5.0"
+
+# Testing
+tempfile = "3.10"

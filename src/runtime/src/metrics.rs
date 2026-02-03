@@ -134,9 +134,7 @@ pub struct LogCollector {
 impl LogCollector {
     /// Create a new log collector
     pub fn new() -> Self {
-        Self {
-            _placeholder: (),
-        }
+        Self { _placeholder: () }
     }
 
     /// Stream all logs

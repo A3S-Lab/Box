@@ -1,6 +1,6 @@
 //! A3S Box Core - Foundational Types and Abstractions
 //!
-//! This package provides the foundational types, traits, and abstractions
+//! This module provides the foundational types, traits, and abstractions
 //! used across the A3S Box ecosystem.
 
 pub mod config;
@@ -16,4 +16,3 @@ pub use queue::{CommandQueue, Lane, LaneId};
 
 /// A3S Box version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-

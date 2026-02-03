@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "a3s_box_code"
+path = "src/lib.rs"
+
 [[bin]]
 name = "a3s-box-code"
 path = "src/main.rs"

@@ -115,7 +115,6 @@ impl Tool for GrepTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_grep_pattern() {
@@ -124,7 +123,11 @@ mod tests {
         let ctx = ToolContext::new(temp_dir.path().to_path_buf());
 
         // Create a test file
-        std::fs::write(temp_dir.path().join("test.txt"), "hello world\nfoo bar\nhello again").unwrap();
+        std::fs::write(
+            temp_dir.path().join("test.txt"),
+            "hello world\nfoo bar\nhello again",
+        )
+        .unwrap();
 
         let result = tool
             .execute(

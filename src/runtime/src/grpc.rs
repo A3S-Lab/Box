@@ -1,7 +1,7 @@
 //! gRPC client and server for host-guest communication
 
-use a3s_box_core::error::{BoxError, Result};
 use crate::session::{GenerateResult, TokenUsage};
+use a3s_box_core::error::{BoxError, Result};
 use serde::{Deserialize, Serialize};
 
 /// gRPC client for communicating with guest agent
@@ -14,13 +14,14 @@ impl AgentClient {
     /// Create a new agent client
     pub fn new(_vsock_port: u32) -> Self {
         // TODO: Connect to guest agent via vsock
-        Self {
-            _placeholder: (),
-        }
+        Self { _placeholder: () }
     }
 
     /// Create a session
-    pub async fn create_session(&self, _config: CreateSessionRequest) -> Result<CreateSessionResponse> {
+    pub async fn create_session(
+        &self,
+        _config: CreateSessionRequest,
+    ) -> Result<CreateSessionResponse> {
         // TODO: Implement gRPC call
         Err(BoxError::Other("Not implemented".to_string()))
     }
@@ -44,7 +45,10 @@ impl AgentClient {
     }
 
     /// Generate object (structured output)
-    pub async fn generate_object(&self, _request: GenerateObjectRequest) -> Result<GenerateObjectResult> {
+    pub async fn generate_object(
+        &self,
+        _request: GenerateObjectRequest,
+    ) -> Result<GenerateObjectResult> {
         // TODO: Implement gRPC call
         Err(BoxError::Other("Not implemented".to_string()))
     }
@@ -155,8 +159,14 @@ impl GenerateStream {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamChunk {
     TextDelta(String),
-    ToolCall { name: String, args: serde_json::Value },
-    ToolResult { name: String, output: String },
+    ToolCall {
+        name: String,
+        args: serde_json::Value,
+    },
+    ToolResult {
+        name: String,
+        output: String,
+    },
     Done(GenerateResult),
 }
 

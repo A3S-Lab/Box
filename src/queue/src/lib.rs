@@ -23,7 +23,7 @@ pub struct QueueStats {
     pub lanes: HashMap<String, LaneStatus>,
 }
 
-/// Queue manager provides a high-level API for managing the command queue
+/// Queue manager builder provides a high-level API for managing the command queue
 pub struct QueueManagerBuilder {
     event_emitter: EventEmitter,
     lane_configs: HashMap<String, (LaneConfig, u8)>,
@@ -39,12 +39,7 @@ impl QueueManagerBuilder {
     }
 
     /// Add a lane configuration
-    pub fn with_lane(
-        mut self,
-        id: impl Into<String>,
-        config: LaneConfig,
-        priority: u8,
-    ) -> Self {
+    pub fn with_lane(mut self, id: impl Into<String>, config: LaneConfig, priority: u8) -> Self {
         self.lane_configs.insert(id.into(), (config, priority));
         self
     }

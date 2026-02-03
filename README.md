@@ -24,6 +24,8 @@
 
 > **Current Focus**: We are implementing CRI (Container Runtime Interface) support to enable A3S Box to run as a Kubernetes container runtime. See the [CRI Implementation Plan](./docs/cri-implementation-plan.md) for details.
 
+### Basic Usage
+
 ```typescript
 import { A3sClient } from "@a3s-lab/box";
 
@@ -36,53 +38,159 @@ const sessionId = await client.createSession({
 const response = await client.generate(sessionId, "Write a hello world in Python");
 console.log(response.text);
 
-// Generate structured data
+// View tool calls made by the agent
+response.toolCalls.forEach(call => {
+  console.log(`Tool: ${call.name}, Args: ${call.args}`);
+});
+
+await client.destroySession(sessionId);
+```
+
+### Streaming Responses
+
+```typescript
+// Stream responses with real-time tool visibility
+for await (const chunk of client.stream(sessionId, "Create a REST API server")) {
+  if (chunk.textDelta) {
+    process.stdout.write(chunk.textDelta);
+  }
+  if (chunk.toolCall) {
+    console.log(`\n[Tool] ${chunk.toolCall.name}: ${chunk.toolCall.args}`);
+  }
+  if (chunk.toolResult) {
+    console.log(`[Result] ${chunk.toolResult.output.slice(0, 100)}...`);
+  }
+}
+```
+
+### Structured Output
+
+```typescript
+// Generate typed JSON objects with schema validation
 const result = await client.generateObject(sessionId, "Create a user profile", {
   type: "object",
   properties: {
     name: { type: "string" },
     age: { type: "number" },
+    skills: { type: "array", items: { type: "string" } },
   },
+  required: ["name", "age"],
 });
-console.log(result.object);
+console.log(result.object); // { name: "Alice", age: 28, skills: ["TypeScript", "Rust"] }
+```
 
-await client.destroySession(sessionId);
+### Multi-Provider Support
+
+```typescript
+// Use different LLM providers per session
+const claudeSession = await client.createSession({
+  system: "You are Claude.",
+  model: { provider: "anthropic", name: "claude-sonnet-4-20250514" },
+});
+
+const gptSession = await client.createSession({
+  system: "You are GPT.",
+  model: { provider: "openai", name: "gpt-4o" },
+});
+
+// Also supports: deepseek, groq, together, ollama (OpenAI-compatible)
+```
+
+### Skills (Extensible Tools)
+
+```typescript
+// Load skills globally (available to all sessions)
+await client.loadSkill("web-search", skillContent);
+await client.loadSkill("image-gen", skillContent);
+
+// Skills automatically available to all sessions
+const response = await client.generate(sessionId, "Search for Rust async patterns");
+
+// Use PermissionPolicy to control per-session tool access
+await client.setPermissionPolicy(sessionId, {
+  allow: ["bash", "read", "web-search"],
+  deny: ["image-gen"],  // Disable for this session
+});
 ```
 
 ## Features
 
 - 🔒 **Hardware Isolation**: Each agent runs in its own microVM with dedicated Linux kernel
-- 🚀 **Instant Boot**: Sub-second VM startup with libkrun
-- 🛠️ **Full Tool Suite**: bash, read, write, edit, grep, glob — all sandboxed
+- 🚀 **Instant Boot**: Sub-second VM startup with libkrun (~200ms cold start)
+- 🛠️ **7 Built-in Tools**: bash, read, write, edit, grep, glob, ls — all sandboxed
 - 🔄 **Streaming**: Real-time streaming responses with tool call visibility
 - 📦 **Structured Output**: Generate JSON objects with schema validation
-- 🎯 **Multi-Session**: Run multiple independent conversations
-- 🔌 **Multi-Provider**: Anthropic Claude, OpenAI GPT, and more
-- 📊 **Lane-Based Queue**: Priority scheduling for concurrent operations
+- 🎯 **Multi-Session**: Run multiple independent conversations in parallel
+- 🔌 **Multi-Provider**: Anthropic Claude, OpenAI GPT, DeepSeek, Groq, Ollama
+- 📊 **Lane-Based Queue**: 4 priority lanes (Control, Query, Execute, Generate)
+- 🧩 **Skill System**: Global extensible tools via SKILL.md (Binary, HTTP, Script backends)
+- 🪝 **Hooks System**: Extensible hooks for validating, transforming, or blocking operations
+- 👤 **Human-in-the-Loop**: Confirmation system for sensitive operations
+- 💾 **Session Persistence**: JSON file storage (default) with pluggable backends
+- 📈 **411 Tests**: Comprehensive test coverage across 4 crates
 
 ## Quick Start
 
 ### Prerequisites
 
 - **macOS ARM64** (Apple Silicon) or **Linux x86_64/ARM64**
-- Rust 1.93+ (for building)
-- Node.js 25.4.0+ (for TypeScript SDK)
+- Rust 1.75+ (for building)
+- Node.js 18+ (for TypeScript SDK)
 
 > ⚠️ **Note**: macOS Intel is NOT supported
 
 ### Installation
 
+#### macOS (Apple Silicon)
+
 ```bash
+# Install Homebrew dependencies
+brew install lld        # LLVM linker (required for cross-compiling init binary)
+brew install llvm       # LLVM/Clang (required for bindgen)
+
 # Clone the repository
 git clone https://github.com/a3s-lab/box.git
 cd box
 
+# Initialize git submodules (libkrun source)
+git submodule update --init --recursive
+
 # Build the project
 cd src && cargo build --release
-
-# Install TypeScript SDK dependencies
-cd ../examples/typescript && npm install
 ```
+
+> **Note**: The first build will automatically download prebuilt `libkrunfw` (~10 seconds) and build `libkrun` from source (~1-2 minutes).
+
+#### Linux (Ubuntu/Debian)
+
+```bash
+# Install system dependencies
+sudo apt-get update
+sudo apt-get install -y build-essential pkg-config libssl-dev
+
+# Clone the repository
+git clone https://github.com/a3s-lab/box.git
+cd box
+
+# Initialize git submodules
+git submodule update --init --recursive
+
+# Build the project
+cd src && cargo build --release
+```
+
+#### TypeScript SDK
+
+```bash
+cd examples/typescript && npm install
+```
+
+### Build Modes
+
+| Mode | Command | Use Case |
+|------|---------|----------|
+| **Full Build** | `cargo build` | Development with VM support |
+| **Stub Mode** | `A3S_DEPS_STUB=1 cargo build` | CI linting, tests without VM |
 
 ### Running the Agent
 
@@ -155,7 +263,7 @@ npx tsx src/tool-example.ts
 | `runtime` | lib | VM lifecycle, session management, gRPC client, virtio-fs mounts |
 | `code` | bin | Guest agent: LLM providers, tool execution, session management |
 | `queue` | lib | `QueueManager` (builder pattern) and `QueueMonitor` (health checking) |
-| `cli` | bin | CLI commands: `create`, `build`, `cache-warmup` |
+| `shim` | bin | CRI shim for Kubernetes integration |
 | `sdk/python` | cdylib | Python bindings via PyO3 |
 | `sdk/typescript` | cdylib | TypeScript bindings via NAPI-RS |
 
@@ -256,6 +364,43 @@ async with Box() as box:
 | `compact(sessionId)` | Compact context to reduce token usage |
 | `cancel(sessionId)` | Cancel ongoing request |
 
+### Skills (Global)
+
+| Method | Description |
+|--------|-------------|
+| `loadSkill(name, content)` | Load a skill globally (available to all sessions) |
+| `unloadSkill(name)` | Unload a skill |
+| `listSkills()` | List all loaded skills and tools |
+| `setPermissionPolicy(sessionId, policy)` | Control per-session tool access |
+
+### Session Persistence
+
+Sessions are automatically persisted and restored on restart. The default storage uses JSON files, but you can implement custom backends via the `SessionStore` trait.
+
+```rust
+// Default: JSON file storage
+let manager = SessionManager::with_persistence(
+    llm_client,
+    tool_executor,
+    "/path/to/sessions",  // Directory for session files
+).await?;
+
+// Custom storage backend (e.g., Redis, PostgreSQL)
+let custom_store = MyCustomStore::new();
+let manager = SessionManager::with_store(
+    llm_client,
+    tool_executor,
+    Arc::new(custom_store),
+);
+```
+
+The `SessionStore` trait requires implementing:
+- `save(session)` - Persist session data
+- `load(id)` - Load session by ID
+- `delete(id)` - Remove session
+- `list()` - List all session IDs
+- `exists(id)` - Check if session exists
+
 ## Configuration
 
 ### Environment Variables
@@ -285,24 +430,29 @@ async with Box() as box:
 
 ## Roadmap
 
-### Phase 1: Foundation 🚧
+### Phase 1: Foundation ✅
 
 **Core Infrastructure**
-- [ ] MicroVM runtime with libkrun
-- [ ] gRPC communication over vsock
+- [x] MicroVM runtime with libkrun (shim binary complete)
+- [x] gRPC service over vsock (guest agent service complete)
 - [x] Multi-session support (state machine)
-- [x] Lane-based command queue
-- [x] Basic tool suite (bash, read, write, edit, grep, glob)
+- [x] Lane-based command queue (4 priority lanes: Control, Query, Execute, Generate)
+- [x] Basic tool suite (bash, read, write, edit, grep, glob, ls)
+- [x] Dynamic tool loaders (binary, HTTP, script)
+- [x] Human-in-the-loop confirmation system
 
 **LLM Integration**
 - [x] Anthropic Claude support
 - [x] OpenAI GPT support
 - [x] Streaming responses
 - [x] Tool calling
+- [x] Token usage tracking
 
-**SDK**
-- [x] TypeScript SDK (gRPC client)
-- [x] Basic examples
+**Rootfs & VM**
+- [x] RootfsBuilder for minimal guest filesystem
+- [x] GuestLayout configuration
+- [x] Virtualization support detection (KVM, Apple HVF)
+- [x] VmController with subprocess isolation
 
 ### Phase 2: Structured Output & Stability 🚧
 
@@ -314,14 +464,17 @@ async with Box() as box:
 - [ ] Partial object streaming with incremental parsing
 
 **Reliability**
-- [ ] Request cancellation
-- [ ] Timeout handling
+- [x] Session persistence (JSON file default, pluggable `SessionStore` trait)
+- [ ] Request cancellation (stub exists)
+- [x] Timeout handling (bash tool)
 - [ ] Retry with exponential backoff
 - [ ] Connection pooling
+- [ ] Host-to-guest gRPC client (runtime/grpc.rs)
 
 **Developer Experience**
 - [x] Rust design guidelines (CLAUDE.md)
-- [ ] Comprehensive test suite
+- [x] Language policy (English for code/docs)
+- [x] Comprehensive test suite (284 tests across 4 crates)
 - [ ] API documentation
 - [ ] Error message improvements
 
@@ -374,13 +527,47 @@ async with Box() as box:
 - [ ] Audit logging
 - [ ] Secret management
 
-### Phase 5: Skill System 📋
+### Phase 5: Elastic Scaling 📋
+
+**Core Autoscaler**
+- [ ] Metrics collector (queue depth, concurrency, latency)
+- [ ] Scaler controller with reactive scaling
+- [ ] Scale up/down with cooldown periods
+- [ ] Integration with CRI runtime
+
+**Warm Pool**
+- [ ] Box pool manager
+- [ ] Warm instance lifecycle (Cold → Warm → Hot → Drain)
+- [ ] Pool size management
+- [ ] Cold start optimization (< 500ms target)
+
+**Session Management**
+- [ ] Session router with affinity
+- [ ] Session state checkpointing
+- [ ] Session migration during drain
+- [ ] Queue-aware load balancing
+
+**Scale to Zero**
+- [ ] Grace period handling
+- [ ] State preservation before termination
+- [ ] Fast resume from zero
+- [ ] Activation queue for pending requests
+
+**Kubernetes Operator**
+- [ ] BoxAutoscaler CRD
+- [ ] BoxDeployment CRD with revisions
+- [ ] Traffic splitting (A/B testing)
+- [ ] Predictive scaling (optional)
+
+### Phase 6: Skill System ✅
 
 **Skill Infrastructure**
-- [ ] SKILL.md parser (YAML frontmatter)
-- [ ] Remote tool download and caching
-- [ ] Skill activation/deactivation
-- [ ] Custom lane provisioning per skill
+- [x] SKILL.md parser (YAML frontmatter) - runtime & code agent
+- [x] Global skill loading (available to all sessions)
+- [x] Per-session tool access via PermissionPolicy
+- [x] Skill filtering interface (`SkillFilter` trait)
+- [x] Dynamic tool backends (Binary, HTTP, Script)
+- [x] Lazy tool download (on first use)
 
 **Built-in Skills**
 - [ ] Web fetch skill
@@ -393,17 +580,18 @@ async with Box() as box:
 - [ ] Version management
 - [ ] Dependency resolution
 
-### Phase 6: Ecosystem 📋
+### Phase 7: Ecosystem 📋
 
 **SDKs**
-- [ ] Python SDK (full implementation)
+- [ ] TypeScript SDK (bindings exist, needs full implementation)
+- [ ] Python SDK (bindings exist, needs full implementation)
 - [ ] Go SDK
 - [ ] Rust SDK (native)
 
 **Platform Support**
-- [ ] Kubernetes operator
-- [ ] Helm charts
+- [ ] Helm charts for Box Operator
 - [ ] Cloud provider integrations (AWS, GCP, Azure)
+- [ ] Managed service templates
 
 **Integrations**
 - [ ] VS Code extension
@@ -421,23 +609,63 @@ async with Box() as box:
 
 ## Development
 
+### Dependencies
+
+#### macOS
+
+| Dependency | Install | Purpose |
+|------------|---------|---------|
+| `lld` | `brew install lld` | LLVM linker for cross-compiling guest init binary |
+| `llvm` | `brew install llvm` | libclang for Rust bindgen (FFI generation) |
+| `libkrun` | git submodule | MicroVM hypervisor (built from source) |
+| `libkrunfw` | auto-download | Prebuilt Linux kernel for guest VM |
+| `cargo-llvm-cov` | `cargo install cargo-llvm-cov` | Code coverage (optional) |
+| `lcov` | `brew install lcov` | Coverage report formatting (optional) |
+
+#### Linux
+
+| Dependency | Install | Purpose |
+|------------|---------|---------|
+| `build-essential` | `apt install build-essential` | GCC, make, etc. |
+| `pkg-config` | `apt install pkg-config` | Library discovery |
+| `libssl-dev` | `apt install libssl-dev` | TLS support |
+| `libkrun` | git submodule | MicroVM hypervisor (built from source) |
+| `libkrunfw` | auto-download | Prebuilt .so for guest VM |
+| `cargo-llvm-cov` | `cargo install cargo-llvm-cov` | Code coverage (optional) |
+| `lcov` | `apt install lcov` | Coverage report formatting (optional) |
+
 ### Build Commands
 
 ```bash
-cd src
-
 # Build
-cargo build                           # Build entire workspace
-cargo build -p a3s-box-code           # Build specific crate
-cargo build --release                 # Release build
+just build                            # Build all (Rust + SDKs)
+just release                          # Release build
+cd src && cargo build -p a3s-box-code # Build specific crate
 
-# Test
-cargo test --all                      # All tests
-cargo test -p a3s-box-code --lib      # Unit tests for specific crate
+# Test (with colored progress display)
+just test                             # All tests with pretty output
+just test-raw                         # Raw cargo output
+just test-v                           # Verbose output (--nocapture)
+
+# Test subsets
+just test-code                        # Code agent tests
+just test-core                        # Core crate tests
+just test-skills                      # Skill loader tests
+just test-tools                       # All tools tests
+just test-queue                       # Queue and HITL tests
+just test-runtime                     # Runtime (check only, requires libkrun for full tests)
+
+# Coverage (requires cargo-llvm-cov + lcov)
+just cov                              # Pretty terminal coverage report
+just cov-html                         # HTML report (opens in browser)
+just cov-table                        # File-by-file table
+just cov-ci                           # Generate lcov.info for CI
+just cov-module queue                 # Coverage for specific module
 
 # Format & Lint
-cargo fmt --all                       # Format code
-cargo clippy                          # Lint (enforced in CI)
+just fmt                              # Format code
+just lint                             # Clippy lint
+just ci                               # Full CI checks (fmt + lint + test)
 ```
 
 ### Project Structure
@@ -449,16 +677,22 @@ box/
 │   ├── runtime/        # VM lifecycle and gRPC client
 │   ├── code/           # Guest agent binary
 │   ├── queue/          # Command queue utilities
-│   ├── cli/            # CLI commands
+│   ├── shim/           # CRI shim for Kubernetes
 │   └── sdk/
 │       ├── python/     # Python bindings (PyO3)
 │       └── typescript/ # TypeScript bindings (NAPI-RS)
 ├── docs/               # Documentation
 │   ├── architecture.md           # Architecture design
+│   ├── code-agent-interface.md   # Coding agent interface spec
 │   ├── configuration-guide.md    # Configuration guide
 │   ├── cri-implementation-plan.md # CRI implementation plan
-│   ├── code-agent-interface.md   # Coding agent interface spec
+│   ├── elastic-scaling.md        # Autoscaling design
+│   ├── extensible-tools.md       # Extensible tool system
+│   ├── lane-based-queue.md       # Lane-based command queue
 │   ├── llm-config-design.md      # LLM configuration design
+│   ├── rootfs-explained.md       # Root filesystem explained
+│   ├── middleware-design.md      # Response transformation middleware
+│   ├── opencode-adapter.md       # OpenCode REST adapter
 │   └── examples/                 # Configuration examples
 ├── examples/
 │   └── typescript/     # TypeScript examples
@@ -471,19 +705,57 @@ box/
 | Document | Description |
 |----------|-------------|
 | [Architecture](./docs/architecture.md) | Single-container + file mount architecture design |
+| [libkrun Dependencies](./docs/libkrun-dependencies.md) | Why libkrun, libkrunfw, lld, and llvm are needed |
+| [Git Submodules](./docs/git-submodules.md) | Understanding Git submodules and why we use them |
 | [Configuration Guide](./docs/configuration-guide.md) | Coding agent, LLM, and skill configuration |
+| [Lane-Based Queue](./docs/lane-based-queue.md) | Priority-aware command scheduling for coding agents |
+| [Elastic Scaling](./docs/elastic-scaling.md) | Knative-inspired autoscaling for AI workloads |
+| [Rootfs Explained](./docs/rootfs-explained.md) | Understanding root filesystem in MicroVMs |
 | [CRI Implementation Plan](./docs/cri-implementation-plan.md) | Kubernetes CRI runtime integration plan |
-| [LLM Config Design](./docs/llm-config-design.md) | Multi-provider, per-model API key configuration |
 | [Code Agent Interface](./docs/code-agent-interface.md) | Standard interface for coding agents |
+| [OpenCode Adapter](./docs/opencode-adapter.md) | REST to gRPC adapter for OpenCode compatibility |
+| [LLM Config Design](./docs/llm-config-design.md) | Multi-provider, per-model API key configuration |
 | [Extensible Tools](./docs/extensible-tools.md) | Extensible tool system design |
+| [Hooks System](./docs/hooks.md) | SDK-based hooks for customizing agent behavior |
+| [Middleware Design](./docs/middleware-design.md) | Response transformation middleware design |
 | [Examples](./docs/examples/) | LLM and configuration examples |
+
+### Troubleshooting
+
+#### macOS: `invalid linker name in argument '-fuse-ld=lld'`
+
+Install lld separately (not included in homebrew llvm):
+```bash
+brew install lld
+```
+
+#### macOS: `Vendored sources not found`
+
+Initialize git submodules:
+```bash
+git submodule update --init --recursive
+```
+
+#### Linux: `libkrunfw not found`
+
+The prebuilt libkrunfw will be downloaded automatically. If download fails, check network connectivity or set `A3S_DEPS_STUB=1` for testing without VM support.
+
+#### CI/Testing without VM
+
+Use stub mode to skip libkrun build (tests that don't require VM will work):
+```bash
+A3S_DEPS_STUB=1 cargo check -p a3s-box-runtime
+# Or use the justfile command which handles this automatically:
+just test-runtime
+```
 
 ### Contributing
 
 1. Read [CLAUDE.md](./CLAUDE.md) for code design rules
 2. Search before implementing (`grep -r "pattern" src/`)
 3. Follow the pre-submission checklist
-4. Run `cargo fmt` and `cargo clippy` before committing
+4. Run `just fmt` and `just lint` before committing
+5. Run `just test` to verify all tests pass
 
 ## License
 

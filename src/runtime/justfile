@@ -1,57 +1,17 @@
 # A3S Box Runtime - Justfile
+# Most commands available via root: just test, just fmt, just lint
 
-# Default recipe
 default:
     @just --list
 
-# Build
-build:
-    cargo build -p a3s-box-runtime
-
-# Build in release mode
-build-release:
-    cargo build -p a3s-box-runtime --release
-
-# Run tests (single-threaded to avoid gvproxy issues)
+# Run tests (single-threaded for gvproxy)
 test:
     cargo test -p a3s-box-runtime --lib -- --test-threads=1
 
-# Run tests with output
-test-verbose:
-    cargo test -p a3s-box-runtime --lib -- --test-threads=1 --nocapture
-
-# Run a specific test
+# Run single test
 test-one TEST:
     cargo test -p a3s-box-runtime --lib -- --test-threads=1 {{TEST}}
 
-# Format code
-fmt:
-    cargo fmt -p a3s-box-runtime
-
-# Check formatting
-fmt-check:
-    cargo fmt -p a3s-box-runtime -- --check
-
-# Run clippy
-lint:
-    cargo clippy -p a3s-box-runtime --all-targets -- -D warnings
-
-# Run clippy with fixes
-lint-fix:
-    cargo clippy -p a3s-box-runtime --all-targets --fix --allow-dirty
-
-# Check compilation
-check:
-    cargo check -p a3s-box-runtime
-
-# Generate documentation
-doc:
-    cargo doc -p a3s-box-runtime --no-deps --document-private-items
-
-# Open documentation
-doc-open:
-    cargo doc -p a3s-box-runtime --no-deps --open
-
-# Regenerate proto files
-proto:
-    cargo build -p a3s-box-runtime
+# Run rootfs module tests
+test-rootfs:
+    cargo test -p a3s-box-runtime --lib rootfs:: -- --test-threads=1 --nocapture

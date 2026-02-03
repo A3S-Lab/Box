@@ -586,7 +586,7 @@ mod tests {
 ## References
 
 - Current implementation: `src/code/src/llm.rs`
-- Proto definition: `src/code/proto/agent.proto`
+- Proto definition: `src/proto/code_agent.proto`
 - Similar systems: Vercel AI SDK, LangChain model configuration
 
 ---

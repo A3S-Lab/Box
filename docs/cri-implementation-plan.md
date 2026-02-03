@@ -1,8 +1,8 @@
-# A3S Box CRI Runtime 实现计划（方案 B：混合架构）
+# A3S Box CRI Runtime Implementation Plan
 
-> **决策**: 采用混合架构 - 对外兼容 OCI 镜像格式，对内使用 libkrun microVM
+> **Decision**: Hybrid Architecture - OCI-compatible image format externally, libkrun microVM internally
 
-## 架构概览
+## Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -17,24 +17,24 @@
 │  │  a3s-box-cri-runtime                                      │ │
 │  │  ┌─────────────────────────────────────────────────────┐ │ │
 │  │  │  CRI Service Layer                                  │ │ │
-│  │  │  - RuntimeService (Pod/Container 生命周期)          │ │ │
-│  │  │  - ImageService (OCI 镜像管理)                      │ │ │
+│  │  │  - RuntimeService (Pod/Container lifecycle)         │ │ │
+│  │  │  - ImageService (OCI image management)              │ │ │
 │  │  └─────────────────────────────────────────────────────┘ │ │
 │  │                          │                                │ │
 │  │                          ▼                                │ │
 │  │  ┌─────────────────────────────────────────────────────┐ │ │
 │  │  │  OCI Adapter Layer                                  │ │ │
-│  │  │  - OCI 镜像解析                                      │ │ │
-│  │  │  - rootfs 提取                                       │ │ │
-│  │  │  - 配置转换                                          │ │ │
+│  │  │  - OCI image parsing                                │ │ │
+│  │  │  - rootfs extraction                                │ │ │
+│  │  │  - Configuration mapping                            │ │ │
 │  │  └─────────────────────────────────────────────────────┘ │ │
 │  │                          │                                │ │
 │  │                          ▼                                │ │
 │  │  ┌─────────────────────────────────────────────────────┐ │ │
 │  │  │  a3s-box-runtime (Core)                             │ │ │
 │  │  │  - libkrun (microVM)                                │ │ │
-│  │  │  - Box 生命周期管理                                  │ │ │
-│  │  │  - Session 管理                                      │ │ │
+│  │  │  - Box lifecycle management                         │ │ │
+│  │  │  - Session management                               │ │ │
 │  │  └─────────────────────────────────────────────────────┘ │ │
 │  └───────────────────────────────────────────────────────────┘ │
 │                          │                                       │
@@ -49,49 +49,49 @@
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## 核心设计原则
+## Core Design Principles
 
-1. **对外 OCI 兼容** - 使用标准 OCI 镜像格式，兼容 K8s 生态
-2. **对内 microVM 隔离** - 保持 libkrun microVM 的硬件级隔离
-3. **渐进式实现** - 分阶段实现，每个阶段可独立交付
-4. **保持核心价值** - 不牺牲 A3S Box 的安全性和隔离性
+1. **External OCI Compatibility** - Use standard OCI image format, compatible with K8s ecosystem
+2. **Internal microVM Isolation** - Maintain libkrun microVM hardware-level isolation
+3. **Incremental Implementation** - Implement in phases, each phase independently deliverable
+4. **Preserve Core Value** - Don't sacrifice A3S Box's security and isolation
 
-## 实施阶段
+## Implementation Phases
 
-### Phase 1: OCI 镜像支持（2-3 周）
+### Phase 1: OCI Image Support (2-3 weeks)
 
-**目标**: 让 A3S Box 支持从 OCI 镜像启动
+**Goal**: Enable A3S Box to start from OCI images
 
-#### 1.1 OCI 镜像格式定义
+#### 1.1 OCI Image Format Definition
 
 ```dockerfile
 # Dockerfile for a3s-box-code
 FROM scratch
 
-# 添加最小化的 rootfs
+# Add minimal rootfs
 ADD rootfs.tar.gz /
 
-# 添加 a3s-box-code 二进制
+# Add a3s-box-code binary
 COPY a3s-box-code /usr/local/bin/
 COPY a3s-box-agent /usr/local/bin/
 
-# A3S Box 特定的标签
+# A3S Box specific labels
 LABEL a3s.agent.kind="a3s_code"
 LABEL a3s.agent.version="0.1.0"
 LABEL a3s.agent.entrypoint="/usr/local/bin/a3s-box-code"
 LABEL a3s.agent.listen="vsock://3:4088"
 
-# 标准 OCI 标签
+# Standard OCI labels
 LABEL org.opencontainers.image.title="A3S Code Agent"
 LABEL org.opencontainers.image.description="A3S Box Coding Agent"
 LABEL org.opencontainers.image.version="0.1.0"
 
-# 入口点（在 microVM 中执行）
+# Entrypoint (executed in microVM)
 ENTRYPOINT ["/usr/local/bin/a3s-box-code"]
 CMD ["--listen", "vsock://3:4088"]
 ```
 
-#### 1.2 OCI 镜像解析器
+#### 1.2 OCI Image Parser
 
 ```rust
 // src/runtime/oci/mod.rs
@@ -109,9 +109,8 @@ pub struct OciImage {
 }
 
 impl OciImage {
-    /// 从镜像引用拉取 OCI 镜像
+    /// Pull OCI image from image reference
     pub async fn pull(image_ref: &str) -> Result<Self> {
-        // 使用 containerd 或 skopeo 拉取镜像
         let manifest = Self::fetch_manifest(image_ref).await?;
         let config = Self::fetch_config(&manifest).await?;
         let layers = Self::fetch_layers(&manifest).await?;
@@ -119,16 +118,15 @@ impl OciImage {
         Ok(Self { manifest, config, layers })
     }
 
-    /// 提取 rootfs
+    /// Extract rootfs
     pub fn extract_rootfs(&self, target_dir: &Path) -> Result<()> {
         for layer in &self.layers {
-            // 解压每一层到 target_dir
             Self::extract_layer(layer, target_dir)?;
         }
         Ok(())
     }
 
-    /// 获取 A3S Agent 配置
+    /// Get A3S Agent configuration
     pub fn get_agent_config(&self) -> Result<AgentConfig> {
         let labels = &self.config.config().labels();
 
@@ -143,28 +141,28 @@ impl OciImage {
 }
 ```
 
-#### 1.3 集成到 Box Runtime
+#### 1.3 Integration with Box Runtime
 
 ```rust
 // src/runtime/box_manager.rs
 impl BoxManager {
-    /// 从 OCI 镜像创建 Box
+    /// Create Box from OCI image
     pub async fn create_box_from_oci_image(
         &self,
         image_ref: &str,
         config: BoxConfig,
     ) -> Result<Box> {
-        // 1. 拉取 OCI 镜像
+        // 1. Pull OCI image
         let oci_image = OciImage::pull(image_ref).await?;
 
-        // 2. 提取 rootfs
+        // 2. Extract rootfs
         let rootfs_dir = self.prepare_rootfs_dir(&config.box_id)?;
         oci_image.extract_rootfs(&rootfs_dir)?;
 
-        // 3. 获取 Agent 配置
+        // 3. Get Agent configuration
         let agent_config = oci_image.get_agent_config()?;
 
-        // 4. 创建 Box（使用现有的 libkrun 逻辑）
+        // 4. Create Box (using existing libkrun logic)
         let box_config = BoxConfig {
             coding_agent: agent_config,
             ..config
@@ -175,11 +173,11 @@ impl BoxManager {
 }
 ```
 
-### Phase 2: CRI RuntimeService 实现（3-4 周）
+### Phase 2: CRI RuntimeService Implementation (3-4 weeks)
 
-**目标**: 实现 CRI RuntimeService 接口
+**Goal**: Implement CRI RuntimeService interface
 
-#### 2.1 CRI 服务结构
+#### 2.1 CRI Service Structure
 
 ```rust
 // src/cri/mod.rs
@@ -220,10 +218,10 @@ impl RuntimeService for A3sBoxRuntimeService {
             Status::invalid_argument("missing pod sandbox config")
         })?;
 
-        // 从 PodSandboxConfig 创建 BoxConfig
+        // Create BoxConfig from PodSandboxConfig
         let box_config = self.pod_config_to_box_config(&config)?;
 
-        // 创建 Box 实例（作为 Pod Sandbox）
+        // Create Box instance (as Pod Sandbox)
         let box_instance = self.box_manager
             .create_box(box_config)
             .await
@@ -231,7 +229,7 @@ impl RuntimeService for A3sBoxRuntimeService {
 
         let pod_id = box_instance.id().to_string();
 
-        // 保存 Pod Sandbox 信息
+        // Save Pod Sandbox info
         let pod_sandbox = PodSandbox {
             id: pod_id.clone(),
             metadata: config.metadata,
@@ -257,19 +255,19 @@ impl RuntimeService for A3sBoxRuntimeService {
             Status::invalid_argument("missing container config")
         })?;
 
-        // 获取 Pod Sandbox (Box Instance)
+        // Get Pod Sandbox (Box Instance)
         let pod_sandbox = self.pod_sandbox_map.read().await
             .get(&pod_id)
             .ok_or_else(|| Status::not_found("pod sandbox not found"))?
             .clone();
 
-        // 在 Box 中创建 Session（作为 Container）
+        // Create Session in Box (as Container)
         let session_id = pod_sandbox.box_instance
             .create_session()
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // 保存 Container 信息
+        // Save Container info
         let container = Container {
             id: session_id.clone(),
             pod_sandbox_id: pod_id,
@@ -286,38 +284,11 @@ impl RuntimeService for A3sBoxRuntimeService {
         }))
     }
 
-    async fn start_container(
-        &self,
-        request: Request<StartContainerRequest>,
-    ) -> Result<Response<StartContainerResponse>, Status> {
-        let container_id = request.into_inner().container_id;
-
-        // 获取 Container
-        let mut containers = self.container_map.write().await;
-        let container = containers.get_mut(&container_id)
-            .ok_or_else(|| Status::not_found("container not found"))?;
-
-        // 启动 Session
-        let pod_sandbox = self.pod_sandbox_map.read().await
-            .get(&container.pod_sandbox_id)
-            .ok_or_else(|| Status::not_found("pod sandbox not found"))?
-            .clone();
-
-        pod_sandbox.box_instance
-            .start_session(&container_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        container.state = ContainerState::Running;
-
-        Ok(Response::new(StartContainerResponse {}))
-    }
-
-    // 实现其他 CRI 方法...
+    // Implement other CRI methods...
 }
 ```
 
-#### 2.2 配置映射
+#### 2.2 Configuration Mapping
 
 ```rust
 // src/cri/config_mapper.rs
@@ -329,14 +300,14 @@ impl A3sBoxRuntimeService {
         let metadata = pod_config.metadata.as_ref()
             .ok_or_else(|| BoxError::InvalidConfig("missing metadata"))?;
 
-        // 从 Pod annotations 读取 A3S Box 配置
+        // Read A3S Box configuration from Pod annotations
         let annotations = &pod_config.annotations;
         let agent_kind = annotations.get("a3s.box/agent-kind")
             .unwrap_or(&"a3s_code".to_string())
             .clone();
         let agent_image = annotations.get("a3s.box/agent-image");
 
-        // 从 Linux 配置读取资源限制
+        // Read resource limits from Linux config
         let resources = if let Some(linux) = &pod_config.linux {
             ResourceConfig {
                 memory: linux.resources.as_ref()
@@ -366,9 +337,9 @@ impl A3sBoxRuntimeService {
 }
 ```
 
-### Phase 3: CRI ImageService 实现（2-3 周）
+### Phase 3: CRI ImageService Implementation (2-3 weeks)
 
-**目标**: 实现 CRI ImageService 接口
+**Goal**: Implement CRI ImageService interface
 
 ```rust
 // src/cri/image_service.rs
@@ -409,14 +380,14 @@ impl ImageService for A3sBoxImageService {
             Status::invalid_argument("missing image spec")
         })?.image;
 
-        // 拉取 OCI 镜像
+        // Pull OCI image
         let oci_image = OciImage::pull(&image_ref)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let image_id = oci_image.id().to_string();
 
-        // 保存到镜像存储
+        // Save to image store
         self.image_store.write().await.insert(image_id.clone(), oci_image);
 
         Ok(Response::new(PullImageResponse {
@@ -439,9 +410,9 @@ impl ImageService for A3sBoxImageService {
 }
 ```
 
-### Phase 4: 部署和测试（2-3 周）
+### Phase 4: Deployment and Testing (2-3 weeks)
 
-#### 4.1 RuntimeClass 配置
+#### 4.1 RuntimeClass Configuration
 
 ```yaml
 # runtime-class.yaml
@@ -459,7 +430,7 @@ scheduling:
     effect: NoSchedule
 ```
 
-#### 4.2 DaemonSet 部署
+#### 4.2 DaemonSet Deployment
 
 ```yaml
 # a3s-box-cri-daemonset.yaml
@@ -514,7 +485,7 @@ spec:
           type: DirectoryOrCreate
 ```
 
-#### 4.3 kubelet 配置
+#### 4.3 kubelet Configuration
 
 ```yaml
 # /var/lib/kubelet/config.yaml
@@ -524,7 +495,7 @@ containerRuntimeEndpoint: unix:///var/run/a3s-box/a3s-box.sock
 imageServiceEndpoint: unix:///var/run/a3s-box/a3s-box.sock
 ```
 
-#### 4.4 测试 Pod
+#### 4.4 Test Pod
 
 ```yaml
 # test-pod.yaml
@@ -541,21 +512,7 @@ spec:
     args: ["--listen", "vsock://3:4088"]
 ```
 
-## 技术细节
-
-### OCI 镜像层次结构
-
-```
-ghcr.io/a3s-box/a3s-code:v0.1.0
-├── manifest.json
-├── config.json
-└── layers/
-    ├── layer-1.tar.gz  (base rootfs)
-    ├── layer-2.tar.gz  (a3s-box-code binary)
-    └── layer-3.tar.gz  (configuration files)
-```
-
-### 数据流
+## Data Flow
 
 ```
 1. kubectl apply -f pod.yaml
@@ -579,7 +536,7 @@ ghcr.io/a3s-box/a3s-code:v0.1.0
 10. Session created in microVM
 ```
 
-## 依赖和工具
+## Dependencies
 
 ### Rust Crates
 
@@ -595,20 +552,20 @@ oci-spec = "0.6"
 oci-distribution = "0.10"
 containerd-client = "0.4"
 
-# 现有依赖
+# Existing dependencies
 a3s-box-core = { path = "../core" }
 a3s-box-runtime = { path = "../runtime" }
 ```
 
-### 外部工具
+### External Tools
 
-- **containerd**: 用于 OCI 镜像拉取和管理
-- **skopeo**: 备选的镜像工具
-- **crictl**: CRI 测试工具
+- **containerd**: Used for OCI image pulling and management
+- **skopeo**: Alternative image tool
+- **crictl**: CRI testing tool
 
-## 测试策略
+## Testing Strategy
 
-### 单元测试
+### Unit Tests
 
 ```rust
 #[cfg(test)]
@@ -645,19 +602,19 @@ mod tests {
 }
 ```
 
-### 集成测试
+### Integration Tests
 
 ```bash
-# 使用 crictl 测试
+# Test with crictl
 crictl --runtime-endpoint unix:///var/run/a3s-box/a3s-box.sock version
 crictl --runtime-endpoint unix:///var/run/a3s-box/a3s-box.sock pull ghcr.io/a3s-box/a3s-code:v0.1.0
 crictl --runtime-endpoint unix:///var/run/a3s-box/a3s-box.sock runp pod-config.json
 crictl --runtime-endpoint unix:///var/run/a3s-box/a3s-box.sock create <pod-id> container-config.json pod-config.json
 ```
 
-## 性能优化
+## Performance Optimization
 
-### 镜像缓存
+### Image Cache
 
 ```rust
 // src/cri/image_cache.rs
@@ -668,12 +625,12 @@ pub struct ImageCache {
 
 impl ImageCache {
     pub async fn get_or_pull(&mut self, image_ref: &str) -> Result<OciImage> {
-        // 1. 检查内存缓存
+        // 1. Check memory cache
         if let Some(image) = self.lru.get(image_ref) {
             return Ok(image.clone());
         }
 
-        // 2. 检查磁盘缓存
+        // 2. Check disk cache
         let cache_path = self.cache_dir.join(Self::image_hash(image_ref));
         if cache_path.exists() {
             let image = OciImage::load_from_cache(&cache_path)?;
@@ -681,10 +638,10 @@ impl ImageCache {
             return Ok(image);
         }
 
-        // 3. 拉取镜像
+        // 3. Pull image
         let image = OciImage::pull(image_ref).await?;
 
-        // 4. 保存到缓存
+        // 4. Save to cache
         image.save_to_cache(&cache_path)?;
         self.lru.put(image_ref.to_string(), image.clone());
 
@@ -693,7 +650,7 @@ impl ImageCache {
 }
 ```
 
-### Box 实例池
+### Box Instance Pool
 
 ```rust
 // src/runtime/box_pool.rs
@@ -704,13 +661,13 @@ pub struct BoxPool {
 
 impl BoxPool {
     pub async fn get_or_create(&mut self, config: BoxConfig) -> Result<Box> {
-        // 尝试从池中获取
+        // Try to get from pool
         if let Some(box_instance) = self.pool.pop() {
             box_instance.reconfigure(config).await?;
             return Ok(box_instance);
         }
 
-        // 创建新实例
+        // Create new instance
         BoxManager::create_box(config).await
     }
 
@@ -723,82 +680,35 @@ impl BoxPool {
 }
 ```
 
-## 监控和可观测性
+## Timeline
 
-### Metrics
+| Phase | Duration | Deliverables |
+|-------|----------|--------------|
+| Phase 1 | 2-3 weeks | OCI Image Support |
+| Phase 2 | 3-4 weeks | CRI RuntimeService |
+| Phase 3 | 2-3 weeks | CRI ImageService |
+| Phase 4 | 2-3 weeks | Deployment and Testing |
+| **Total** | **9-13 weeks** | **Complete CRI Runtime** |
 
-```rust
-// src/cri/metrics.rs
-use prometheus::{Counter, Gauge, Histogram};
+## Risks and Mitigations
 
-lazy_static! {
-    static ref POD_SANDBOX_CREATED: Counter = register_counter!(
-        "a3s_box_pod_sandbox_created_total",
-        "Total number of pod sandboxes created"
-    ).unwrap();
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| CRI interface complexity | High | Reference containerd/CRI-O implementations |
+| OCI image compatibility | Medium | Use standard libraries, thorough testing |
+| Performance issues | Medium | Implement caching and pooling |
+| Nested virtualization limitations | High | Document requirements, provide cloud environment configs |
 
-    static ref CONTAINER_CREATED: Counter = register_counter!(
-        "a3s_box_container_created_total",
-        "Total number of containers created"
-    ).unwrap();
+## Next Steps
 
-    static ref IMAGE_PULL_DURATION: Histogram = register_histogram!(
-        "a3s_box_image_pull_duration_seconds",
-        "Time spent pulling images"
-    ).unwrap();
-
-    static ref ACTIVE_BOXES: Gauge = register_gauge!(
-        "a3s_box_active_boxes",
-        "Number of active Box instances"
-    ).unwrap();
-}
-```
-
-## 文档和示例
-
-### 用户文档
-
-- [ ] CRI Runtime 安装指南
-- [ ] RuntimeClass 配置说明
-- [ ] OCI 镜像构建指南
-- [ ] 故障排查手册
-
-### 开发者文档
-
-- [ ] CRI 接口实现细节
-- [ ] OCI 适配层设计
-- [ ] 测试指南
-- [ ] 贡献指南
-
-## 时间线
-
-| 阶段 | 时间 | 交付物 |
-|------|------|--------|
-| Phase 1 | 2-3 周 | OCI 镜像支持 |
-| Phase 2 | 3-4 周 | CRI RuntimeService |
-| Phase 3 | 2-3 周 | CRI ImageService |
-| Phase 4 | 2-3 周 | 部署和测试 |
-| **总计** | **9-13 周** | **完整的 CRI Runtime** |
-
-## 风险和缓解
-
-| 风险 | 影响 | 缓解措施 |
-|------|------|----------|
-| CRI 接口复杂 | 高 | 参考 containerd/CRI-O 实现 |
-| OCI 镜像兼容性 | 中 | 使用标准库，充分测试 |
-| 性能问题 | 中 | 实现缓存和池化 |
-| 嵌套虚拟化限制 | 高 | 文档说明，提供云环境配置 |
-
-## 下一步行动
-
-1. [ ] 创建 `src/cri/` 目录结构
-2. [ ] 实现 OCI 镜像解析器
-3. [ ] 编写单元测试
-4. [ ] 构建第一个 OCI 镜像
-5. [ ] 测试从 OCI 镜像启动 Box
+1. [ ] Create `src/cri/` directory structure
+2. [ ] Implement OCI image parser
+3. [ ] Write unit tests
+4. [ ] Build first OCI image
+5. [ ] Test starting Box from OCI image
 
 ---
 
-**状态**: 📋 实施计划
-**决策**: ✅ 方案 B（混合架构）
-**最后更新**: 2026-02-03
+**Status**: Implementation Plan
+**Decision**: Hybrid Architecture (Option B)
+**Last Updated**: 2026-02-04

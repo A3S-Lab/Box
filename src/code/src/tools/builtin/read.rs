@@ -152,7 +152,6 @@ async fn read_image(path: &Path) -> Result<ToolOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_is_image_file() {

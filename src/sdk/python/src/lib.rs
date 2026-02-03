@@ -114,7 +114,7 @@ impl LaneConfig {
 /// Box - main entry point
 #[pyclass]
 struct Box {
-    // TODO: Add actual BoxLite runtime handle
+    // TODO: Add actual A3S Box runtime handle
     _placeholder: (),
 }
 
@@ -136,11 +136,11 @@ impl Box {
         // 1. Create BoxConfig from parameters
         // 2. Initialize VmManager
         // 3. Boot VM (lazy)
-        let _ = (workspace, skills, model, resources, lanes, log_level, debug_grpc);
+        let _ = (
+            workspace, skills, model, resources, lanes, log_level, debug_grpc,
+        );
 
-        Ok(Self {
-            _placeholder: (),
-        })
+        Ok(Self { _placeholder: () })
     }
 
     /// Create a session
@@ -241,7 +241,12 @@ impl Session {
     }
 
     /// Configure session
-    fn configure(&self, _thinking: Option<bool>, _budget: Option<i32>, _model: Option<ModelConfig>) -> PyResult<()> {
+    fn configure(
+        &self,
+        _thinking: Option<bool>,
+        _budget: Option<i32>,
+        _model: Option<ModelConfig>,
+    ) -> PyResult<()> {
         // TODO: Implement
         Ok(())
     }
@@ -302,5 +307,7 @@ fn create_box(
     log_level: Option<String>,
     debug_grpc: bool,
 ) -> PyResult<Box> {
-    Box::new(workspace, skills, model, resources, lanes, log_level, debug_grpc)
+    Box::new(
+        workspace, skills, model, resources, lanes, log_level, debug_grpc,
+    )
 }
