@@ -117,6 +117,8 @@ await client.setPermissionPolicy(sessionId, {
 
 - 🔒 **Hardware Isolation**: Each agent runs in its own microVM with dedicated Linux kernel
 - 🚀 **Instant Boot**: Sub-second VM startup with libkrun (~200ms cold start)
+- 🐳 **OCI Image Support**: Load agents and business code from standard OCI container images
+- 🔐 **Namespace Isolation**: Agent and business code run in separate Linux namespaces
 - 🛠️ **7 Built-in Tools**: bash, read, write, edit, grep, glob, ls — all sandboxed
 - 🔄 **Streaming**: Real-time streaming responses with tool call visibility
 - 📦 **Structured Output**: Generate JSON objects with schema validation
@@ -127,7 +129,7 @@ await client.setPermissionPolicy(sessionId, {
 - 🪝 **Hooks System**: Extensible hooks for validating, transforming, or blocking operations
 - 👤 **Human-in-the-Loop**: Confirmation system for sensitive operations
 - 💾 **Session Persistence**: JSON file storage (default) with pluggable backends
-- 📈 **411 Tests**: Comprehensive test coverage across 4 crates
+- 📈 **574 Tests**: Comprehensive test coverage across 5 crates
 
 ## Quick Start
 
@@ -227,7 +229,7 @@ npx tsx src/tool-example.ts
 │                    Host Process                              │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │ Python SDK  │  │   TS SDK    │  │    Your App         │  │
-│  └──────┬──────┘  └──────┬──────┘  └────��─────┬──────────┘  │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
 │         │                │                     │             │
 │         └────────────────┼─────────────────────┘             │
 │                          │                                   │
@@ -238,6 +240,10 @@ npx tsx src/tool-example.ts
 │  │  │ VmManager   │ │SessionMgr   │ │  CommandQueue   │  │  │
 │  │  │ (lifecycle) │ │(multi-sess) │ │ (lane-based)    │  │  │
 │  │  └─────────────┘ └─────────────┘ └─────────────────┘  │  │
+│  │  ┌─────────────────────────────────────────────────┐  │  │
+│  │  │ OCI Support: Image parsing, layer extraction,   │  │  │
+│  │  │ rootfs composition from multiple OCI images     │  │  │
+│  │  └─────────────────────────────────────────────────┘  │  │
 │  └───────────────────────────┬───────────────────────────┘  │
 │                              │ gRPC over vsock:4088         │
 └──────────────────────────────┼──────────────────────────────┘
@@ -245,11 +251,25 @@ npx tsx src/tool-example.ts
 ┌──────────────────────────────┼──────────────────────────────┐
 │                              ▼                               │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │                   a3s-box-code                         │  │
+│  │              /sbin/init (guest-init, PID 1)           │  │
+│  │  - Mount filesystems (/proc, /sys, /dev, virtio-fs)   │  │
+│  │  - Create isolated namespaces (mount, PID, IPC, UTS)  │  │
+│  │  - Spawn agent in namespace                           │  │
+│  └───────────────────────────┬───────────────────────────┘  │
+│                              │                               │
+│  ┌───────────────────────────▼───────────────────────────┐  │
+│  │                   a3s-box-code (Namespace 1)          │  │
 │  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────────┐  │  │
 │  │  │ Agent Loop  │ │ LLM Client  │ │ Tool Executor   │  │  │
 │  │  │ (agentic)   │ │ (providers) │ │ (sandboxed)     │  │  │
 │  │  └─────────────┘ └─────────────┘ └─────────────────┘  │  │
+│  └───────────────────────────┬───────────────────────────┘  │
+│                              │ /usr/bin/nsexec              │
+│  ┌───────────────────────────▼───────────────────────────┐  │
+│  │              Business Code (Namespace 2)              │  │
+│  │  - Isolated execution environment                     │  │
+│  │  - Separate mount, PID, IPC, UTS namespaces           │  │
+│  │  - User application code runs here                    │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                        Guest VM (microVM)                    │
 └──────────────────────────────────────────────────────────────┘
@@ -260,9 +280,10 @@ npx tsx src/tool-example.ts
 | Crate | Type | Purpose |
 |-------|------|---------|
 | `core` | lib | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `CommandQueue` |
-| `runtime` | lib | VM lifecycle, session management, gRPC client, virtio-fs mounts |
+| `runtime` | lib | VM lifecycle, session management, gRPC client, OCI image support |
 | `code` | bin | Guest agent: LLM providers, tool execution, session management |
 | `queue` | lib | `QueueManager` (builder pattern) and `QueueMonitor` (health checking) |
+| `guest/init` | bin | Guest init (PID 1) and nsexec for namespace isolation |
 | `shim` | bin | CRI shim for Kubernetes integration |
 | `sdk/python` | cdylib | Python bindings via PyO3 |
 | `sdk/typescript` | cdylib | TypeScript bindings via NAPI-RS |
@@ -474,18 +495,21 @@ The `SessionStore` trait requires implementing:
 **Developer Experience**
 - [x] Rust design guidelines (CLAUDE.md)
 - [x] Language policy (English for code/docs)
-- [x] Comprehensive test suite (284 tests across 4 crates)
+- [x] Comprehensive test suite (574 tests across 4 crates)
 - [ ] API documentation
 - [ ] Error message improvements
 
-### Phase 3: CRI Runtime Integration 📋
+### Phase 3: CRI Runtime Integration 🚧
 
-**OCI Image Support** (2-3 weeks)
+**OCI Image Support** ✅
+- [x] OCI image parser (manifest, config, layers) - `runtime/src/oci/`
+- [x] Rootfs extraction from OCI images - `OciRootfsBuilder` with layer composition
+- [x] Integration with Box runtime - `VmManager` OCI support
+- [x] Guest init (PID 1) - `/sbin/init` for VM initialization
+- [x] Namespace isolation - Mount, PID, IPC, UTS namespaces for agent and business code
+- [x] Nsexec tool - Command-line tool for executing code in isolated namespaces
 - [ ] OCI image format definition and Dockerfile
-- [ ] OCI image parser (manifest, config, layers)
-- [ ] Rootfs extraction from OCI images
 - [ ] Agent configuration from OCI labels
-- [ ] Integration with Box runtime
 
 **CRI RuntimeService** (3-4 weeks)
 - [ ] CRI service structure and gRPC server
@@ -674,10 +698,12 @@ just ci                               # Full CI checks (fmt + lint + test)
 box/
 ├── src/
 │   ├── core/           # Foundational types and error handling
-│   ├── runtime/        # VM lifecycle and gRPC client
+│   ├── runtime/        # VM lifecycle, OCI support, and gRPC client
 │   ├── code/           # Guest agent binary
 │   ├── queue/          # Command queue utilities
 │   ├── shim/           # CRI shim for Kubernetes
+│   ├── guest/
+│   │   └── init/       # Guest init (PID 1) and nsexec for namespace isolation
 │   └── sdk/
 │       ├── python/     # Python bindings (PyO3)
 │       └── typescript/ # TypeScript bindings (NAPI-RS)
