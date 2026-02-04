@@ -19,6 +19,7 @@
 
 use crate::agent::AgentEvent;
 use crate::convert;
+use crate::hooks::{HookEngine, HookEvent, SkillLoadEvent, SkillUnloadEvent};
 use crate::llm::{self, ContentBlock};
 use crate::session::{SessionConfig, SessionManager};
 use crate::tools::ToolExecutor;
@@ -26,6 +27,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
@@ -46,11 +48,31 @@ struct AgentState {
     workspace: String,
 }
 
+/// Information about a loaded skill
+#[derive(Clone)]
+struct SkillInfo {
+    /// Skill name
+    #[allow(dead_code)]
+    name: String,
+    /// Tool names loaded from this skill
+    tool_names: Vec<String>,
+    /// Skill version (if available)
+    #[allow(dead_code)]
+    version: Option<String>,
+    /// Skill description (if available)
+    #[allow(dead_code)]
+    description: Option<String>,
+    /// Timestamp when skill was loaded (Unix milliseconds)
+    loaded_at: i64,
+}
+
 /// Code Agent service implementation
 pub struct CodeAgentServiceImpl {
     session_manager: Arc<SessionManager>,
     agent_state: Arc<RwLock<AgentState>>,
     event_tx: broadcast::Sender<AgentEvent>,
+    hook_engine: Arc<HookEngine>,
+    skill_registry: Arc<RwLock<HashMap<String, SkillInfo>>>,
 }
 
 impl CodeAgentServiceImpl {
@@ -60,6 +82,8 @@ impl CodeAgentServiceImpl {
             session_manager,
             agent_state: Arc::new(RwLock::new(AgentState::default())),
             event_tx,
+            hook_engine: Arc::new(HookEngine::new()),
+            skill_registry: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -67,6 +91,36 @@ impl CodeAgentServiceImpl {
     #[allow(dead_code)]
     fn broadcast_event(&self, event: AgentEvent) {
         let _ = self.event_tx.send(event);
+    }
+
+    /// Get the hook engine
+    pub fn hook_engine(&self) -> &Arc<HookEngine> {
+        &self.hook_engine
+    }
+
+    /// Parse skill metadata from content (frontmatter)
+    fn parse_skill_metadata(content: &str) -> (Option<String>, Option<String>) {
+        // Try to parse YAML frontmatter if present
+        if let Some(after_prefix) = content.strip_prefix("---") {
+            if let Some(end) = after_prefix.find("---") {
+                let frontmatter = &after_prefix[..end];
+                let mut version = None;
+                let mut description = None;
+
+                for line in frontmatter.lines() {
+                    let line = line.trim();
+                    if let Some(v) = line.strip_prefix("version:") {
+                        version = Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
+                    } else if let Some(d) = line.strip_prefix("description:") {
+                        description =
+                            Some(d.trim().trim_matches('"').trim_matches('\'').to_string());
+                    }
+                }
+
+                return (version, description);
+            }
+        }
+        (None, None)
     }
 }
 
@@ -645,12 +699,46 @@ impl CodeAgentService for CodeAgentServiceImpl {
         request: Request<LoadSkillRequest>,
     ) -> Result<Response<LoadSkillResponse>, Status> {
         let req = request.into_inner();
+        let skill_content = req.skill_content.clone().unwrap_or_default();
+
+        // Parse skill metadata from content
+        let (version, description) = Self::parse_skill_metadata(&skill_content);
 
         // Load skill globally (session_id is ignored, kept for API compatibility)
-        let tool_names = self.session_manager.load_skill(
-            &req.skill_name,
-            &req.skill_content.unwrap_or_default(),
-        );
+        let tool_names = self
+            .session_manager
+            .load_skill(&req.skill_name, &skill_content);
+
+        // Record load time
+        let loaded_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        // Track skill in registry
+        {
+            let mut registry = self.skill_registry.write().await;
+            registry.insert(
+                req.skill_name.clone(),
+                SkillInfo {
+                    name: req.skill_name.clone(),
+                    tool_names: tool_names.clone(),
+                    version: version.clone(),
+                    description: description.clone(),
+                    loaded_at,
+                },
+            );
+        }
+
+        // Fire SkillLoad hook (after successful load)
+        let hook_event = HookEvent::SkillLoad(SkillLoadEvent {
+            skill_name: req.skill_name.clone(),
+            tool_names: tool_names.clone(),
+            version,
+            description,
+            loaded_at,
+        });
+        let _ = self.hook_engine.fire(&hook_event).await;
 
         tracing::info!(
             "LoadSkill: {} loaded {} tools (session_id={} ignored, skills are global)",
@@ -671,18 +759,53 @@ impl CodeAgentService for CodeAgentServiceImpl {
     ) -> Result<Response<UnloadSkillResponse>, Status> {
         let req = request.into_inner();
 
-        // Unload skill globally (session_id is ignored, kept for API compatibility)
-        // Note: We need tool names to unload, but the request only has skill_name.
-        // For now, return empty - proper implementation would track skill->tools mapping.
-        tracing::warn!(
-            "UnloadSkill: {} (session_id={} ignored). Note: Unloading requires tool names.",
+        // Get skill info from registry (for hook payload and tool names)
+        let skill_info = {
+            let registry = self.skill_registry.read().await;
+            registry.get(&req.skill_name).cloned()
+        };
+
+        let (tool_names, duration_ms) = match &skill_info {
+            Some(info) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                let duration = (now - info.loaded_at).max(0) as u64;
+                (info.tool_names.clone(), duration)
+            }
+            None => (vec![], 0),
+        };
+
+        // Fire SkillUnload hook BEFORE unload (allows cleanup handlers)
+        let hook_event = HookEvent::SkillUnload(SkillUnloadEvent {
+            skill_name: req.skill_name.clone(),
+            tool_names: tool_names.clone(),
+            duration_ms,
+        });
+        let _ = self.hook_engine.fire(&hook_event).await;
+
+        // Unload tools from session manager
+        if !tool_names.is_empty() {
+            self.session_manager.unload_skill(&tool_names);
+        }
+
+        // Remove from registry
+        {
+            let mut registry = self.skill_registry.write().await;
+            registry.remove(&req.skill_name);
+        }
+
+        tracing::info!(
+            "UnloadSkill: {} unloaded {} tools (session_id={} ignored, skills are global)",
             req.skill_name,
+            tool_names.len(),
             req.session_id
         );
 
         Ok(Response::new(UnloadSkillResponse {
             success: true,
-            removed_tools: vec![],
+            removed_tools: tool_names,
         }))
     }
 

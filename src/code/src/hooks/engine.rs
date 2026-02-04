@@ -464,11 +464,10 @@ mod tests {
 
         // Register multiple hooks
         engine.register(
-            Hook::new("hook-1", HookEventType::PreToolUse)
-                .with_config(HookConfig {
-                    priority: 10,
-                    ..Default::default()
-                }),
+            Hook::new("hook-1", HookEventType::PreToolUse).with_config(HookConfig {
+                priority: 10,
+                ..Default::default()
+            }),
         );
         engine.register(
             Hook::new("hook-2", HookEventType::PreToolUse)
@@ -625,5 +624,109 @@ mod tests {
 
         let all = engine.all_hooks();
         assert_eq!(all.len(), 2);
+    }
+
+    fn make_skill_load_event(skill_name: &str, tools: Vec<&str>) -> HookEvent {
+        HookEvent::SkillLoad(crate::hooks::events::SkillLoadEvent {
+            skill_name: skill_name.to_string(),
+            tool_names: tools.iter().map(|s| s.to_string()).collect(),
+            version: Some("1.0.0".to_string()),
+            description: Some("Test skill".to_string()),
+            loaded_at: 1234567890,
+        })
+    }
+
+    fn make_skill_unload_event(skill_name: &str, tools: Vec<&str>) -> HookEvent {
+        HookEvent::SkillUnload(crate::hooks::events::SkillUnloadEvent {
+            skill_name: skill_name.to_string(),
+            tool_names: tools.iter().map(|s| s.to_string()).collect(),
+            duration_ms: 60000,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_engine_fire_skill_load() {
+        let engine = HookEngine::new();
+
+        // Register a hook for skill load events
+        engine.register(Hook::new("skill-load-hook", HookEventType::SkillLoad));
+        engine.register_handler("skill-load-hook", Arc::new(ContinueHandler));
+
+        let event = make_skill_load_event("my-skill", vec!["tool1", "tool2"]);
+        let result = engine.fire(&event).await;
+
+        assert!(result.is_continue());
+    }
+
+    #[tokio::test]
+    async fn test_engine_fire_skill_unload() {
+        let engine = HookEngine::new();
+
+        // Register a hook for skill unload events
+        engine.register(Hook::new("skill-unload-hook", HookEventType::SkillUnload));
+        engine.register_handler("skill-unload-hook", Arc::new(ContinueHandler));
+
+        let event = make_skill_unload_event("my-skill", vec!["tool1", "tool2"]);
+        let result = engine.fire(&event).await;
+
+        assert!(result.is_continue());
+    }
+
+    #[tokio::test]
+    async fn test_engine_skill_hook_with_matcher() {
+        let engine = HookEngine::new();
+
+        // Register a hook that only matches specific skill
+        engine.register(
+            Hook::new("specific-skill-hook", HookEventType::SkillLoad)
+                .with_matcher(HookMatcher::skill("my-skill")),
+        );
+        engine.register_handler(
+            "specific-skill-hook",
+            Arc::new(BlockHandler {
+                reason: "Skill blocked".to_string(),
+            }),
+        );
+
+        // Should match and block
+        let matching_event = make_skill_load_event("my-skill", vec!["tool1"]);
+        let result = engine.fire(&matching_event).await;
+        assert!(result.is_block());
+
+        // Should not match (no hooks match, so continue)
+        let non_matching_event = make_skill_load_event("other-skill", vec!["tool1"]);
+        let result = engine.fire(&non_matching_event).await;
+        assert!(result.is_continue());
+    }
+
+    #[tokio::test]
+    async fn test_engine_skill_hook_pattern_matcher() {
+        let engine = HookEngine::new();
+
+        // Register a hook with glob pattern
+        engine.register(
+            Hook::new("test-skill-hook", HookEventType::SkillLoad)
+                .with_matcher(HookMatcher::skill("test-*")),
+        );
+        engine.register_handler(
+            "test-skill-hook",
+            Arc::new(BlockHandler {
+                reason: "Test skill blocked".to_string(),
+            }),
+        );
+
+        // Should match pattern
+        let test_skill = make_skill_load_event("test-alpha", vec!["tool1"]);
+        let result = engine.fire(&test_skill).await;
+        assert!(result.is_block());
+
+        let test_skill2 = make_skill_load_event("test-beta", vec!["tool1"]);
+        let result = engine.fire(&test_skill2).await;
+        assert!(result.is_block());
+
+        // Should not match pattern
+        let prod_skill = make_skill_load_event("prod-skill", vec!["tool1"]);
+        let result = engine.fire(&prod_skill).await;
+        assert!(result.is_continue());
     }
 }

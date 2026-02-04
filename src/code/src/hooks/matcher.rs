@@ -23,6 +23,10 @@ pub struct HookMatcher {
     /// Match session ID (exact match)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+
+    /// Match skill name (supports glob patterns)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 impl HookMatcher {
@@ -63,6 +67,14 @@ impl HookMatcher {
         }
     }
 
+    /// Create a matcher for a specific skill (supports glob patterns)
+    pub fn skill(name: impl Into<String>) -> Self {
+        Self {
+            skill: Some(name.into()),
+            ..Default::default()
+        }
+    }
+
     /// Add tool filter
     pub fn with_tool(mut self, name: impl Into<String>) -> Self {
         self.tool = Some(name.into());
@@ -84,6 +96,12 @@ impl HookMatcher {
     /// Add session filter
     pub fn with_session(mut self, id: impl Into<String>) -> Self {
         self.session_id = Some(id.into());
+        self
+    }
+
+    /// Add skill filter (supports glob patterns)
+    pub fn with_skill(mut self, name: impl Into<String>) -> Self {
+        self.skill = Some(name.into());
         self
     }
 
@@ -118,6 +136,18 @@ impl HookMatcher {
         // Check command pattern (in Bash args)
         if let Some(ref command_pattern) = self.command_pattern {
             if !self.matches_command_pattern(event, command_pattern) {
+                return false;
+            }
+        }
+
+        // Check skill name (supports glob patterns)
+        if let Some(ref skill_pattern) = self.skill {
+            if let Some(skill_name) = event.skill_name() {
+                if !self.glob_match(skill_pattern, skill_name) {
+                    return false;
+                }
+            } else {
+                // Event doesn't have a skill, but we're filtering by skill
                 return false;
             }
         }
@@ -211,11 +241,7 @@ mod tests {
     use super::*;
     use crate::hooks::events::PreToolUseEvent;
 
-    fn make_pre_tool_event(
-        session_id: &str,
-        tool: &str,
-        args: serde_json::Value,
-    ) -> HookEvent {
+    fn make_pre_tool_event(session_id: &str, tool: &str, args: serde_json::Value) -> HookEvent {
         HookEvent::PreToolUse(PreToolUseEvent {
             session_id: session_id.to_string(),
             tool: tool.to_string(),
@@ -301,11 +327,8 @@ mod tests {
             "Bash",
             serde_json::json!({"command": "rm -rf /tmp/test"}),
         );
-        let echo_event = make_pre_tool_event(
-            "s1",
-            "Bash",
-            serde_json::json!({"command": "echo hello"}),
-        );
+        let echo_event =
+            make_pre_tool_event("s1", "Bash", serde_json::json!({"command": "echo hello"}));
 
         assert!(matcher.matches(&rm_event));
         assert!(!matcher.matches(&echo_event));
@@ -313,25 +336,13 @@ mod tests {
 
     #[test]
     fn test_combined_matchers() {
-        let matcher = HookMatcher::new()
-            .with_tool("Bash")
-            .with_command("rm");
+        let matcher = HookMatcher::new().with_tool("Bash").with_command("rm");
 
-        let bash_rm = make_pre_tool_event(
-            "s1",
-            "Bash",
-            serde_json::json!({"command": "rm file.txt"}),
-        );
-        let bash_echo = make_pre_tool_event(
-            "s1",
-            "Bash",
-            serde_json::json!({"command": "echo hello"}),
-        );
-        let read_event = make_pre_tool_event(
-            "s1",
-            "Read",
-            serde_json::json!({"path": "file.txt"}),
-        );
+        let bash_rm =
+            make_pre_tool_event("s1", "Bash", serde_json::json!({"command": "rm file.txt"}));
+        let bash_echo =
+            make_pre_tool_event("s1", "Bash", serde_json::json!({"command": "echo hello"}));
+        let read_event = make_pre_tool_event("s1", "Read", serde_json::json!({"path": "file.txt"}));
 
         assert!(matcher.matches(&bash_rm));
         assert!(!matcher.matches(&bash_echo)); // Bash but no rm
@@ -343,11 +354,7 @@ mod tests {
         // Command pattern should only apply to Bash tool
         let matcher = HookMatcher::command("echo");
 
-        let read_event = make_pre_tool_event(
-            "s1",
-            "Read",
-            serde_json::json!({"path": "echo.txt"}),
-        );
+        let read_event = make_pre_tool_event("s1", "Read", serde_json::json!({"path": "echo.txt"}));
 
         assert!(!matcher.matches(&read_event));
     }
@@ -381,12 +388,93 @@ mod tests {
         // Test that "path" field also works (not just "file_path")
         let matcher = HookMatcher::path("*.txt");
 
-        let event = make_pre_tool_event(
-            "s1",
-            "Read",
-            serde_json::json!({"path": "readme.txt"}),
-        );
+        let event = make_pre_tool_event("s1", "Read", serde_json::json!({"path": "readme.txt"}));
 
         assert!(matcher.matches(&event));
+    }
+
+    fn make_skill_load_event(skill_name: &str) -> HookEvent {
+        HookEvent::SkillLoad(crate::hooks::events::SkillLoadEvent {
+            skill_name: skill_name.to_string(),
+            tool_names: vec!["tool1".to_string()],
+            version: None,
+            description: None,
+            loaded_at: 0,
+        })
+    }
+
+    fn make_skill_unload_event(skill_name: &str) -> HookEvent {
+        HookEvent::SkillUnload(crate::hooks::events::SkillUnloadEvent {
+            skill_name: skill_name.to_string(),
+            tool_names: vec!["tool1".to_string()],
+            duration_ms: 1000,
+        })
+    }
+
+    #[test]
+    fn test_skill_matcher() {
+        let matcher = HookMatcher::skill("my-skill");
+
+        let matching_event = make_skill_load_event("my-skill");
+        let non_matching_event = make_skill_load_event("other-skill");
+
+        assert!(matcher.matches(&matching_event));
+        assert!(!matcher.matches(&non_matching_event));
+    }
+
+    #[test]
+    fn test_skill_matcher_pattern() {
+        // Test glob pattern matching for skill names
+        let matcher = HookMatcher::skill("test-*");
+
+        let test_skill = make_skill_load_event("test-skill");
+        let test_other = make_skill_load_event("test-other");
+        let no_match = make_skill_load_event("other-skill");
+
+        assert!(matcher.matches(&test_skill));
+        assert!(matcher.matches(&test_other));
+        assert!(!matcher.matches(&no_match));
+    }
+
+    #[test]
+    fn test_skill_matcher_unload_event() {
+        let matcher = HookMatcher::skill("my-skill");
+
+        let unload_event = make_skill_unload_event("my-skill");
+        assert!(matcher.matches(&unload_event));
+
+        let other_unload = make_skill_unload_event("other-skill");
+        assert!(!matcher.matches(&other_unload));
+    }
+
+    #[test]
+    fn test_skill_matcher_non_skill_event() {
+        // Skill matcher should not match non-skill events
+        let matcher = HookMatcher::skill("my-skill");
+
+        let tool_event = make_pre_tool_event("s1", "Bash", serde_json::json!({}));
+        assert!(!matcher.matches(&tool_event));
+    }
+
+    #[test]
+    fn test_skill_matcher_with_builder() {
+        let matcher = HookMatcher::new().with_skill("test-*");
+
+        assert_eq!(matcher.skill, Some("test-*".to_string()));
+
+        let event = make_skill_load_event("test-skill");
+        assert!(matcher.matches(&event));
+    }
+
+    #[test]
+    fn test_skill_matcher_serialization() {
+        let matcher = HookMatcher::skill("my-skill");
+
+        let json = serde_json::to_string(&matcher).unwrap();
+        assert!(json.contains("my-skill"));
+        assert!(json.contains("skill"));
+
+        let parsed: HookMatcher = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.skill, Some("my-skill".to_string()));
     }
 }

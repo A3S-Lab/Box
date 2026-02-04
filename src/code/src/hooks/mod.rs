@@ -41,7 +41,8 @@ mod matcher;
 pub use engine::{Hook, HookConfig, HookEngine, HookResult};
 pub use events::{
     GenerateEndEvent, GenerateStartEvent, HookEvent, HookEventType, PostToolUseEvent,
-    PreToolUseEvent, SessionEndEvent, SessionStartEvent, ToolResultData,
+    PreToolUseEvent, SessionEndEvent, SessionStartEvent, SkillLoadEvent, SkillUnloadEvent,
+    ToolResultData,
 };
 pub use matcher::HookMatcher;
 

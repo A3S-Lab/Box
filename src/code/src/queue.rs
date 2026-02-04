@@ -1720,6 +1720,1019 @@ mod tests {
         // This is expected behavior
     }
 
+    // ========================================================================
+    // Serialization Tests
+    // ========================================================================
+
+    #[test]
+    fn test_task_handler_mode_serialization() {
+        let modes = [
+            (TaskHandlerMode::Internal, "\"Internal\""),
+            (TaskHandlerMode::External, "\"External\""),
+            (TaskHandlerMode::Hybrid, "\"Hybrid\""),
+        ];
+
+        for (mode, expected_json) in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, expected_json);
+            let parsed: TaskHandlerMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, mode);
+        }
+    }
+
+    #[test]
+    fn test_task_handler_mode_default() {
+        let mode = TaskHandlerMode::default();
+        assert_eq!(mode, TaskHandlerMode::Internal);
+    }
+
+    #[test]
+    fn test_lane_handler_config_serialization() {
+        let config = LaneHandlerConfig {
+            mode: TaskHandlerMode::External,
+            timeout_ms: 30000,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: LaneHandlerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.mode, TaskHandlerMode::External);
+        assert_eq!(parsed.timeout_ms, 30000);
+    }
+
+    #[test]
+    fn test_session_queue_config_serialization() {
+        let mut config = SessionQueueConfig::default();
+        config.lane_handlers.insert(
+            SessionLane::Execute,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::External,
+                timeout_ms: 5000,
+            },
+        );
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: SessionQueueConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.control_max_concurrency, 2);
+        assert_eq!(parsed.query_max_concurrency, 4);
+        assert_eq!(parsed.execute_max_concurrency, 2);
+        assert_eq!(parsed.generate_max_concurrency, 1);
+        assert_eq!(
+            parsed
+                .lane_handlers
+                .get(&SessionLane::Execute)
+                .unwrap()
+                .mode,
+            TaskHandlerMode::External
+        );
+    }
+
+    #[test]
+    fn test_external_task_serialization() {
+        let task = ExternalTask {
+            task_id: "task-123".to_string(),
+            session_id: "session-1".to_string(),
+            lane: SessionLane::Execute,
+            command_type: "bash".to_string(),
+            payload: serde_json::json!({"command": "ls"}),
+            timeout_ms: 5000,
+            created_at: Some(Instant::now()),
+        };
+
+        let json = serde_json::to_string(&task).unwrap();
+        let parsed: ExternalTask = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.task_id, "task-123");
+        assert_eq!(parsed.session_id, "session-1");
+        assert_eq!(parsed.lane, SessionLane::Execute);
+        assert_eq!(parsed.command_type, "bash");
+        assert_eq!(parsed.payload["command"], "ls");
+        assert_eq!(parsed.timeout_ms, 5000);
+        // created_at is skipped in serialization
+        assert!(parsed.created_at.is_none());
+    }
+
+    #[test]
+    fn test_external_task_result_serialization() {
+        let result = ExternalTaskResult {
+            success: true,
+            result: serde_json::json!({"output": "file.txt"}),
+            error: None,
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ExternalTaskResult = serde_json::from_str(&json).unwrap();
+        assert!(parsed.success);
+        assert_eq!(parsed.result["output"], "file.txt");
+        assert!(parsed.error.is_none());
+    }
+
+    #[test]
+    fn test_external_task_result_failure_serialization() {
+        let result = ExternalTaskResult {
+            success: false,
+            result: serde_json::json!({}),
+            error: Some("Something went wrong".to_string()),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ExternalTaskResult = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.success);
+        assert_eq!(parsed.error, Some("Something went wrong".to_string()));
+    }
+
+    #[test]
+    fn test_lane_status_serialization() {
+        let status = LaneStatus {
+            lane: SessionLane::Query,
+            pending: 3,
+            active: 2,
+            max_concurrency: 4,
+            handler_mode: TaskHandlerMode::Hybrid,
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        let parsed: LaneStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.lane, SessionLane::Query);
+        assert_eq!(parsed.pending, 3);
+        assert_eq!(parsed.active, 2);
+        assert_eq!(parsed.max_concurrency, 4);
+        assert_eq!(parsed.handler_mode, TaskHandlerMode::Hybrid);
+    }
+
+    #[test]
+    fn test_session_queue_stats_default() {
+        let stats = SessionQueueStats::default();
+        assert_eq!(stats.total_pending, 0);
+        assert_eq!(stats.total_active, 0);
+        assert_eq!(stats.external_pending, 0);
+        assert!(stats.lanes.is_empty());
+    }
+
+    #[test]
+    fn test_session_queue_stats_serialization() {
+        let mut lanes = HashMap::new();
+        lanes.insert(
+            "Execute".to_string(),
+            LaneStatus {
+                lane: SessionLane::Execute,
+                pending: 1,
+                active: 2,
+                max_concurrency: 4,
+                handler_mode: TaskHandlerMode::Internal,
+            },
+        );
+
+        let stats = SessionQueueStats {
+            total_pending: 1,
+            total_active: 2,
+            external_pending: 0,
+            lanes,
+        };
+
+        let json = serde_json::to_string(&stats).unwrap();
+        let parsed: SessionQueueStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.total_pending, 1);
+        assert_eq!(parsed.total_active, 2);
+        assert_eq!(parsed.external_pending, 0);
+        assert_eq!(parsed.lanes["Execute"].pending, 1);
+    }
+
+    // ========================================================================
+    // ExternalTask Method Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_external_task_actually_times_out() {
+        let task = ExternalTask {
+            task_id: "task-1".to_string(),
+            session_id: "session-1".to_string(),
+            lane: SessionLane::Execute,
+            command_type: "test".to_string(),
+            payload: serde_json::json!({}),
+            timeout_ms: 30, // 30ms timeout
+            created_at: Some(Instant::now()),
+        };
+
+        assert!(!task.is_timed_out());
+        assert!(task.remaining_ms() > 0);
+
+        // Wait for timeout
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(task.is_timed_out());
+        assert_eq!(task.remaining_ms(), 0);
+    }
+
+    #[test]
+    fn test_external_task_remaining_ms_decreases() {
+        let task = ExternalTask {
+            task_id: "task-1".to_string(),
+            session_id: "session-1".to_string(),
+            lane: SessionLane::Execute,
+            command_type: "test".to_string(),
+            payload: serde_json::json!({}),
+            timeout_ms: 10000,
+            created_at: Some(Instant::now()),
+        };
+
+        let remaining = task.remaining_ms();
+        // Should be close to timeout_ms (within a few ms of creation)
+        assert!(remaining <= 10000);
+        assert!(remaining > 9900);
+    }
+
+    // ========================================================================
+    // SessionQueueConfig Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_session_queue_config_custom_concurrency() {
+        let config = SessionQueueConfig {
+            control_max_concurrency: 1,
+            query_max_concurrency: 8,
+            execute_max_concurrency: 4,
+            generate_max_concurrency: 2,
+            lane_handlers: HashMap::new(),
+        };
+
+        assert_eq!(config.max_concurrency(SessionLane::Control), 1);
+        assert_eq!(config.max_concurrency(SessionLane::Query), 8);
+        assert_eq!(config.max_concurrency(SessionLane::Execute), 4);
+        assert_eq!(config.max_concurrency(SessionLane::Generate), 2);
+    }
+
+    #[test]
+    fn test_session_queue_config_handler_config_default_fallback() {
+        let config = SessionQueueConfig::default();
+
+        // All lanes should return default handler config when not explicitly set
+        for lane in [
+            SessionLane::Control,
+            SessionLane::Query,
+            SessionLane::Execute,
+            SessionLane::Generate,
+        ] {
+            let handler = config.handler_config(lane);
+            assert_eq!(handler.mode, TaskHandlerMode::Internal);
+            assert_eq!(handler.timeout_ms, 60_000);
+        }
+    }
+
+    #[test]
+    fn test_session_queue_config_mixed_handlers() {
+        let mut config = SessionQueueConfig::default();
+        config.lane_handlers.insert(
+            SessionLane::Control,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::Internal,
+                timeout_ms: 1000,
+            },
+        );
+        config.lane_handlers.insert(
+            SessionLane::Execute,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::External,
+                timeout_ms: 30000,
+            },
+        );
+        config.lane_handlers.insert(
+            SessionLane::Generate,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::Hybrid,
+                timeout_ms: 120000,
+            },
+        );
+
+        assert_eq!(
+            config.handler_config(SessionLane::Control).mode,
+            TaskHandlerMode::Internal
+        );
+        assert_eq!(config.handler_config(SessionLane::Control).timeout_ms, 1000);
+
+        // Query has no explicit config, should be default
+        assert_eq!(
+            config.handler_config(SessionLane::Query).mode,
+            TaskHandlerMode::Internal
+        );
+        assert_eq!(
+            config.handler_config(SessionLane::Query).timeout_ms,
+            60_000
+        );
+
+        assert_eq!(
+            config.handler_config(SessionLane::Execute).mode,
+            TaskHandlerMode::External
+        );
+        assert_eq!(
+            config.handler_config(SessionLane::Execute).timeout_ms,
+            30000
+        );
+
+        assert_eq!(
+            config.handler_config(SessionLane::Generate).mode,
+            TaskHandlerMode::Hybrid
+        );
+        assert_eq!(
+            config.handler_config(SessionLane::Generate).timeout_ms,
+            120000
+        );
+    }
+
+    // ========================================================================
+    // tool_to_lane Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tool_to_lane_query_tools() {
+        for tool in ["read", "glob", "ls", "grep", "list_files", "search"] {
+            assert_eq!(
+                tool_to_lane(tool),
+                SessionLane::Query,
+                "Tool '{}' should map to Query lane",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_to_lane_execute_tools() {
+        for tool in ["bash", "write", "edit", "delete", "move", "copy", "execute"] {
+            assert_eq!(
+                tool_to_lane(tool),
+                SessionLane::Execute,
+                "Tool '{}' should map to Execute lane",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_to_lane_unknown_defaults_to_execute() {
+        for tool in ["unknown_tool", "custom_tool", "mcp_tool", ""] {
+            assert_eq!(
+                tool_to_lane(tool),
+                SessionLane::Execute,
+                "Unknown tool '{}' should default to Execute lane",
+                tool
+            );
+        }
+    }
+
+    // ========================================================================
+    // TaskHandlerMode Proto Conversion Edge Cases
+    // ========================================================================
+
+    #[test]
+    fn test_task_handler_mode_from_proto_negative() {
+        // Negative values should default to Internal
+        assert_eq!(
+            TaskHandlerMode::from_proto_i32(-1),
+            TaskHandlerMode::Internal
+        );
+        assert_eq!(
+            TaskHandlerMode::from_proto_i32(-100),
+            TaskHandlerMode::Internal
+        );
+    }
+
+    #[test]
+    fn test_task_handler_mode_roundtrip() {
+        for mode in [
+            TaskHandlerMode::Internal,
+            TaskHandlerMode::External,
+            TaskHandlerMode::Hybrid,
+        ] {
+            let proto = mode.to_proto_i32();
+            let back = TaskHandlerMode::from_proto_i32(proto);
+            assert_eq!(back, mode);
+        }
+    }
+
+    // ========================================================================
+    // Queue Stats Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_stats_initial_all_lanes() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig::default();
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        let stats = queue.stats().await;
+        assert_eq!(stats.total_pending, 0);
+        assert_eq!(stats.total_active, 0);
+        assert_eq!(stats.external_pending, 0);
+        assert_eq!(stats.lanes.len(), 4);
+
+        // Verify each lane has correct defaults
+        for (lane_name, expected_concurrency) in [
+            ("Control", 2),
+            ("Query", 4),
+            ("Execute", 2),
+            ("Generate", 1),
+        ] {
+            let lane_stat = &stats.lanes[lane_name];
+            assert_eq!(lane_stat.pending, 0);
+            assert_eq!(lane_stat.active, 0);
+            assert_eq!(lane_stat.max_concurrency, expected_concurrency);
+            assert_eq!(lane_stat.handler_mode, TaskHandlerMode::Internal);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stats_with_pending_commands() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig::default();
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        // Don't start scheduler - commands stay pending
+        for _ in 0..3 {
+            let cmd = Box::new(TestCommand {
+                value: serde_json::json!({}),
+            });
+            let _rx = queue.submit(SessionLane::Query, cmd).await;
+        }
+        for _ in 0..2 {
+            let cmd = Box::new(TestCommand {
+                value: serde_json::json!({}),
+            });
+            let _rx = queue.submit(SessionLane::Execute, cmd).await;
+        }
+
+        let stats = queue.stats().await;
+        assert_eq!(stats.total_pending, 5);
+        assert_eq!(stats.total_active, 0);
+        assert_eq!(stats.lanes["Query"].pending, 3);
+        assert_eq!(stats.lanes["Execute"].pending, 2);
+        assert_eq!(stats.lanes["Control"].pending, 0);
+        assert_eq!(stats.lanes["Generate"].pending, 0);
+    }
+
+    #[tokio::test]
+    async fn test_stats_with_custom_concurrency() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig {
+            control_max_concurrency: 10,
+            query_max_concurrency: 20,
+            execute_max_concurrency: 5,
+            generate_max_concurrency: 3,
+            lane_handlers: HashMap::new(),
+        };
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        let stats = queue.stats().await;
+        assert_eq!(stats.lanes["Control"].max_concurrency, 10);
+        assert_eq!(stats.lanes["Query"].max_concurrency, 20);
+        assert_eq!(stats.lanes["Execute"].max_concurrency, 5);
+        assert_eq!(stats.lanes["Generate"].max_concurrency, 3);
+    }
+
+    // ========================================================================
+    // Queue Initialization with Config Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_queue_with_preconfigured_handlers() {
+        let (event_tx, _) = broadcast::channel(100);
+        let mut config = SessionQueueConfig::default();
+
+        // Pre-configure handlers in config
+        config.lane_handlers.insert(
+            SessionLane::Execute,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::External,
+                timeout_ms: 10000,
+            },
+        );
+        config.lane_handlers.insert(
+            SessionLane::Query,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::Hybrid,
+                timeout_ms: 20000,
+            },
+        );
+
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        // Handlers should be set from config
+        let execute_handler = queue.get_lane_handler(SessionLane::Execute).await;
+        assert_eq!(execute_handler.mode, TaskHandlerMode::External);
+        assert_eq!(execute_handler.timeout_ms, 10000);
+
+        let query_handler = queue.get_lane_handler(SessionLane::Query).await;
+        assert_eq!(query_handler.mode, TaskHandlerMode::Hybrid);
+        assert_eq!(query_handler.timeout_ms, 20000);
+
+        // Unconfigured lanes should have default handler
+        let control_handler = queue.get_lane_handler(SessionLane::Control).await;
+        assert_eq!(control_handler.mode, TaskHandlerMode::Internal);
+        assert_eq!(control_handler.timeout_ms, 60_000);
+    }
+
+    // ========================================================================
+    // Session ID Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_session_id_preserved() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig::default();
+
+        let queue1 = SessionCommandQueue::new("session-abc", config.clone(), event_tx.clone());
+        let queue2 = SessionCommandQueue::new("session-xyz", config, event_tx);
+
+        assert_eq!(queue1.session_id(), "session-abc");
+        assert_eq!(queue2.session_id(), "session-xyz");
+    }
+
+    // ========================================================================
+    // External Task Failure Without Error Message
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_external_handler_failure_no_error_message() {
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let mut config = SessionQueueConfig::default();
+        config.lane_handlers.insert(
+            SessionLane::Execute,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::External,
+                timeout_ms: 5000,
+            },
+        );
+
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+        queue.start().await;
+
+        let cmd = Box::new(TestCommand {
+            value: serde_json::json!({}),
+        });
+        let rx = queue.submit(SessionLane::Execute, cmd).await;
+
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("Timeout")
+            .expect("No event");
+
+        let task_id = match event {
+            AgentEvent::ExternalTaskPending { task_id, .. } => task_id,
+            _ => panic!("Expected ExternalTaskPending"),
+        };
+
+        // Complete with failure but no explicit error message
+        queue
+            .complete_external_task(
+                &task_id,
+                ExternalTaskResult {
+                    success: false,
+                    result: serde_json::json!({}),
+                    error: None,
+                },
+            )
+            .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("Timeout")
+            .expect("Channel closed");
+
+        assert!(result.is_err());
+        // Should use default error message
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("External task failed"));
+
+        queue.stop().await;
+    }
+
+    // ========================================================================
+    // Concurrency Limiting Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_concurrency_limit_respected() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig {
+            // Only allow 1 concurrent task in Generate lane
+            generate_max_concurrency: 1,
+            ..Default::default()
+        };
+
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+        queue.start().await;
+
+        // Submit 3 slow commands to Generate lane (concurrency = 1)
+        let mut receivers = Vec::new();
+        for i in 0..3 {
+            let cmd = Box::new(SlowCommand {
+                delay_ms: 30,
+                value: serde_json::json!({"index": i}),
+            });
+            receivers.push(queue.submit(SessionLane::Generate, cmd).await);
+        }
+
+        // All should eventually complete (sequentially due to concurrency limit)
+        for rx in receivers {
+            let result = tokio::time::timeout(Duration::from_secs(3), rx)
+                .await
+                .expect("Timeout")
+                .expect("Channel closed");
+            assert!(result.is_ok());
+        }
+
+        queue.stop().await;
+    }
+
+    // ========================================================================
+    // Priority Scheduling Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_control_lane_priority_over_generate() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig {
+            // Only 1 concurrency per lane to force ordering
+            control_max_concurrency: 1,
+            query_max_concurrency: 1,
+            execute_max_concurrency: 1,
+            generate_max_concurrency: 1,
+            lane_handlers: HashMap::new(),
+        };
+
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        // Submit commands to both lanes BEFORE starting scheduler
+        // Control (P0) should be scheduled before Generate (P3)
+        let gen_cmd = Box::new(TestCommand {
+            value: serde_json::json!({"lane": "generate"}),
+        });
+        let gen_rx = queue.submit(SessionLane::Generate, gen_cmd).await;
+
+        let ctrl_cmd = Box::new(TestCommand {
+            value: serde_json::json!({"lane": "control"}),
+        });
+        let ctrl_rx = queue.submit(SessionLane::Control, ctrl_cmd).await;
+
+        // Now start scheduler
+        queue.start().await;
+
+        // Both should complete successfully
+        let ctrl_result = tokio::time::timeout(Duration::from_secs(1), ctrl_rx)
+            .await
+            .expect("Timeout")
+            .expect("Channel closed");
+        assert!(ctrl_result.is_ok());
+        assert_eq!(ctrl_result.unwrap()["lane"], "control");
+
+        let gen_result = tokio::time::timeout(Duration::from_secs(1), gen_rx)
+            .await
+            .expect("Timeout")
+            .expect("Channel closed");
+        assert!(gen_result.is_ok());
+        assert_eq!(gen_result.unwrap()["lane"], "generate");
+
+        queue.stop().await;
+    }
+
+    // ========================================================================
+    // Submit After Stop Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_submit_before_start() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig::default();
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        // Submit without starting - command should remain pending
+        let cmd = Box::new(TestCommand {
+            value: serde_json::json!({"test": true}),
+        });
+        let _rx = queue.submit(SessionLane::Query, cmd).await;
+
+        let stats = queue.stats().await;
+        assert_eq!(stats.total_pending, 1);
+        assert_eq!(stats.total_active, 0);
+
+        // Now start and it should drain
+        queue.start().await;
+
+        // Wait for processing
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let stats = queue.stats().await;
+        assert_eq!(stats.total_pending, 0);
+
+        queue.stop().await;
+    }
+
+    // ========================================================================
+    // External Task Active Count Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_external_task_active_count_decrements_on_complete() {
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let mut config = SessionQueueConfig::default();
+        config.lane_handlers.insert(
+            SessionLane::Execute,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::External,
+                timeout_ms: 60000,
+            },
+        );
+
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+        queue.start().await;
+
+        let cmd = Box::new(TestCommand {
+            value: serde_json::json!({}),
+        });
+        let _rx = queue.submit(SessionLane::Execute, cmd).await;
+
+        // Wait for external task event
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("Timeout")
+            .expect("No event");
+
+        let task_id = match event {
+            AgentEvent::ExternalTaskPending { task_id, .. } => task_id,
+            _ => panic!("Expected ExternalTaskPending"),
+        };
+
+        // Active count should be 1
+        let stats = queue.stats().await;
+        assert_eq!(stats.lanes["Execute"].active, 1);
+
+        // Complete the task
+        queue
+            .complete_external_task(
+                &task_id,
+                ExternalTaskResult {
+                    success: true,
+                    result: serde_json::json!({}),
+                    error: None,
+                },
+            )
+            .await;
+
+        // Active count should be back to 0
+        let stats = queue.stats().await;
+        assert_eq!(stats.lanes["Execute"].active, 0);
+        assert_eq!(stats.external_pending, 0);
+
+        queue.stop().await;
+    }
+
+    // ========================================================================
+    // Test Command Trait Implementations
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_test_command_type_and_payload() {
+        let cmd = TestCommand {
+            value: serde_json::json!({"key": "val"}),
+        };
+
+        assert_eq!(cmd.command_type(), "test");
+        assert_eq!(cmd.payload(), serde_json::json!({"key": "val"}));
+
+        let result = cmd.execute().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), serde_json::json!({"key": "val"}));
+    }
+
+    #[tokio::test]
+    async fn test_failing_command_type() {
+        let cmd = FailingCommand {
+            error_msg: "boom".to_string(),
+        };
+
+        assert_eq!(cmd.command_type(), "failing");
+        assert_eq!(cmd.payload(), serde_json::json!({})); // Default payload
+
+        let result = cmd.execute().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_slow_command_delay() {
+        let cmd = SlowCommand {
+            delay_ms: 30,
+            value: serde_json::json!({"slow": true}),
+        };
+
+        assert_eq!(cmd.command_type(), "slow");
+        assert_eq!(cmd.payload(), serde_json::json!({"slow": true}));
+
+        let start = Instant::now();
+        let result = cmd.execute().await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), serde_json::json!({"slow": true}));
+        assert!(elapsed >= Duration::from_millis(25)); // Allow small jitter
+    }
+
+    // ========================================================================
+    // Multiple Stop / Restart Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_stop_idempotent() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig::default();
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        queue.start().await;
+
+        // Stop multiple times should not panic
+        queue.stop().await;
+        queue.stop().await;
+        queue.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_restart_scheduler() {
+        let (event_tx, _) = broadcast::channel(100);
+        let config = SessionQueueConfig::default();
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        // Start → Stop → Start → execute command
+        queue.start().await;
+        queue.stop().await;
+        // Small delay to let scheduler loop exit
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        queue.start().await;
+
+        let cmd = Box::new(TestCommand {
+            value: serde_json::json!({"restarted": true}),
+        });
+        let rx = queue.submit(SessionLane::Query, cmd).await;
+
+        let result = tokio::time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("Timeout")
+            .expect("Channel closed");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["restarted"], true);
+
+        queue.stop().await;
+    }
+
+    // ========================================================================
+    // External Task Events Test
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_external_task_event_payload() {
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let mut config = SessionQueueConfig::default();
+        config.lane_handlers.insert(
+            SessionLane::Query,
+            LaneHandlerConfig {
+                mode: TaskHandlerMode::External,
+                timeout_ms: 15000,
+            },
+        );
+
+        let queue = SessionCommandQueue::new("my-session", config, event_tx);
+        queue.start().await;
+
+        let cmd = Box::new(TestCommand {
+            value: serde_json::json!({"data": "hello"}),
+        });
+        let _rx = queue.submit(SessionLane::Query, cmd).await;
+
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("Timeout")
+            .expect("No event");
+
+        match event {
+            AgentEvent::ExternalTaskPending {
+                task_id,
+                session_id,
+                lane,
+                command_type,
+                payload,
+                timeout_ms,
+            } => {
+                assert!(!task_id.is_empty());
+                assert_eq!(session_id, "my-session");
+                assert_eq!(lane, SessionLane::Query);
+                assert_eq!(command_type, "test");
+                assert_eq!(payload["data"], "hello");
+                assert_eq!(timeout_ms, 15000);
+            }
+            _ => panic!("Expected ExternalTaskPending"),
+        }
+
+        queue.stop().await;
+    }
+
+    // ========================================================================
+    // Handler Mode Change While Commands Pending
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_handler_mode_change_affects_new_commands() {
+        let (event_tx, mut event_rx) = broadcast::channel(100);
+        let config = SessionQueueConfig::default();
+        let queue = SessionCommandQueue::new("test-session", config, event_tx);
+
+        queue.start().await;
+
+        // First command in Internal mode → executes internally
+        let cmd1 = Box::new(TestCommand {
+            value: serde_json::json!({"phase": 1}),
+        });
+        let rx1 = queue.submit(SessionLane::Execute, cmd1).await;
+        let result1 = tokio::time::timeout(Duration::from_secs(1), rx1)
+            .await
+            .expect("Timeout")
+            .expect("Channel closed");
+        assert!(result1.is_ok());
+
+        // Switch to External mode
+        queue
+            .set_lane_handler(
+                SessionLane::Execute,
+                LaneHandlerConfig {
+                    mode: TaskHandlerMode::External,
+                    timeout_ms: 5000,
+                },
+            )
+            .await;
+
+        // Second command should go through External path
+        let cmd2 = Box::new(TestCommand {
+            value: serde_json::json!({"phase": 2}),
+        });
+        let rx2 = queue.submit(SessionLane::Execute, cmd2).await;
+
+        // Should get ExternalTaskPending event
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("Timeout")
+            .expect("No event");
+
+        let task_id = match event {
+            AgentEvent::ExternalTaskPending { task_id, .. } => task_id,
+            _ => panic!("Expected ExternalTaskPending"),
+        };
+
+        // Complete externally
+        queue
+            .complete_external_task(
+                &task_id,
+                ExternalTaskResult {
+                    success: true,
+                    result: serde_json::json!({"phase": "2_done"}),
+                    error: None,
+                },
+            )
+            .await;
+
+        let result2 = tokio::time::timeout(Duration::from_secs(1), rx2)
+            .await
+            .expect("Timeout")
+            .expect("Channel closed");
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap()["phase"], "2_done");
+
+        // Switch back to Internal
+        queue
+            .set_lane_handler(
+                SessionLane::Execute,
+                LaneHandlerConfig {
+                    mode: TaskHandlerMode::Internal,
+                    timeout_ms: 60000,
+                },
+            )
+            .await;
+
+        // Third command should execute internally again
+        let cmd3 = Box::new(TestCommand {
+            value: serde_json::json!({"phase": 3}),
+        });
+        let rx3 = queue.submit(SessionLane::Execute, cmd3).await;
+        let result3 = tokio::time::timeout(Duration::from_secs(1), rx3)
+            .await
+            .expect("Timeout")
+            .expect("Channel closed");
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap()["phase"], 3);
+
+        queue.stop().await;
+    }
+
+    // ========================================================================
+    // Dynamic Handler Mode Change Tests (existing test kept, adding this section header)
+    // ========================================================================
+
     #[tokio::test]
     async fn test_dynamic_handler_mode_change() {
         let (event_tx, mut event_rx) = broadcast::channel(100);

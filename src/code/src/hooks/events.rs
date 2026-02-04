@@ -20,6 +20,10 @@ pub enum HookEventType {
     SessionStart,
     /// When session is destroyed
     SessionEnd,
+    /// When a skill is loaded
+    SkillLoad,
+    /// When a skill is unloaded
+    SkillUnload,
 }
 
 impl std::fmt::Display for HookEventType {
@@ -31,6 +35,8 @@ impl std::fmt::Display for HookEventType {
             HookEventType::GenerateEnd => write!(f, "generate_end"),
             HookEventType::SessionStart => write!(f, "session_start"),
             HookEventType::SessionEnd => write!(f, "session_end"),
+            HookEventType::SkillLoad => write!(f, "skill_load"),
+            HookEventType::SkillUnload => write!(f, "skill_unload"),
         }
     }
 }
@@ -155,6 +161,32 @@ pub struct SessionEndEvent {
     pub duration_ms: u64,
 }
 
+/// Skill load event payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillLoadEvent {
+    /// Skill name
+    pub skill_name: String,
+    /// Tool names loaded from the skill
+    pub tool_names: Vec<String>,
+    /// Skill version (if available)
+    pub version: Option<String>,
+    /// Skill description (if available)
+    pub description: Option<String>,
+    /// Timestamp when skill was loaded (Unix milliseconds)
+    pub loaded_at: i64,
+}
+
+/// Skill unload event payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillUnloadEvent {
+    /// Skill name
+    pub skill_name: String,
+    /// Tool names that were unloaded
+    pub tool_names: Vec<String>,
+    /// How long the skill was loaded (milliseconds)
+    pub duration_ms: u64,
+}
+
 /// Unified hook event enum
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "payload")]
@@ -171,6 +203,10 @@ pub enum HookEvent {
     SessionStart(SessionStartEvent),
     #[serde(rename = "session_end")]
     SessionEnd(SessionEndEvent),
+    #[serde(rename = "skill_load")]
+    SkillLoad(SkillLoadEvent),
+    #[serde(rename = "skill_unload")]
+    SkillUnload(SkillUnloadEvent),
 }
 
 impl HookEvent {
@@ -183,10 +219,12 @@ impl HookEvent {
             HookEvent::GenerateEnd(_) => HookEventType::GenerateEnd,
             HookEvent::SessionStart(_) => HookEventType::SessionStart,
             HookEvent::SessionEnd(_) => HookEventType::SessionEnd,
+            HookEvent::SkillLoad(_) => HookEventType::SkillLoad,
+            HookEvent::SkillUnload(_) => HookEventType::SkillUnload,
         }
     }
 
-    /// Get the session ID
+    /// Get the session ID (returns empty string for skill events which are global)
     pub fn session_id(&self) -> &str {
         match self {
             HookEvent::PreToolUse(e) => &e.session_id,
@@ -195,6 +233,9 @@ impl HookEvent {
             HookEvent::GenerateEnd(e) => &e.session_id,
             HookEvent::SessionStart(e) => &e.session_id,
             HookEvent::SessionEnd(e) => &e.session_id,
+            // Skill events are global (not session-specific)
+            HookEvent::SkillLoad(_) => "",
+            HookEvent::SkillUnload(_) => "",
         }
     }
 
@@ -215,6 +256,15 @@ impl HookEvent {
             _ => None,
         }
     }
+
+    /// Get the skill name (for skill events)
+    pub fn skill_name(&self) -> Option<&str> {
+        match self {
+            HookEvent::SkillLoad(e) => Some(&e.skill_name),
+            HookEvent::SkillUnload(e) => Some(&e.skill_name),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +279,8 @@ mod tests {
         assert_eq!(HookEventType::GenerateEnd.to_string(), "generate_end");
         assert_eq!(HookEventType::SessionStart.to_string(), "session_start");
         assert_eq!(HookEventType::SessionEnd.to_string(), "session_end");
+        assert_eq!(HookEventType::SkillLoad.to_string(), "skill_load");
+        assert_eq!(HookEventType::SkillUnload.to_string(), "skill_unload");
     }
 
     #[test]
@@ -348,5 +400,89 @@ mod tests {
         assert_eq!(start_event.event_type(), HookEventType::SessionStart);
         assert_eq!(end_event.event_type(), HookEventType::SessionEnd);
         assert!(start_event.tool_name().is_none());
+    }
+
+    #[test]
+    fn test_skill_load_event() {
+        let event = SkillLoadEvent {
+            skill_name: "test-skill".to_string(),
+            tool_names: vec!["tool1".to_string(), "tool2".to_string()],
+            version: Some("1.0.0".to_string()),
+            description: Some("A test skill".to_string()),
+            loaded_at: 1234567890,
+        };
+
+        assert_eq!(event.skill_name, "test-skill");
+        assert_eq!(event.tool_names.len(), 2);
+        assert_eq!(event.version, Some("1.0.0".to_string()));
+        assert_eq!(event.loaded_at, 1234567890);
+    }
+
+    #[test]
+    fn test_skill_unload_event() {
+        let event = SkillUnloadEvent {
+            skill_name: "test-skill".to_string(),
+            tool_names: vec!["tool1".to_string(), "tool2".to_string()],
+            duration_ms: 60000,
+        };
+
+        assert_eq!(event.skill_name, "test-skill");
+        assert_eq!(event.tool_names.len(), 2);
+        assert_eq!(event.duration_ms, 60000);
+    }
+
+    #[test]
+    fn test_hook_event_skill_name() {
+        let load_event = HookEvent::SkillLoad(SkillLoadEvent {
+            skill_name: "my-skill".to_string(),
+            tool_names: vec!["tool1".to_string()],
+            version: None,
+            description: None,
+            loaded_at: 0,
+        });
+
+        let unload_event = HookEvent::SkillUnload(SkillUnloadEvent {
+            skill_name: "my-skill".to_string(),
+            tool_names: vec!["tool1".to_string()],
+            duration_ms: 1000,
+        });
+
+        assert_eq!(load_event.event_type(), HookEventType::SkillLoad);
+        assert_eq!(load_event.skill_name(), Some("my-skill"));
+        assert_eq!(load_event.session_id(), ""); // Skills are global
+
+        assert_eq!(unload_event.event_type(), HookEventType::SkillUnload);
+        assert_eq!(unload_event.skill_name(), Some("my-skill"));
+        assert_eq!(unload_event.session_id(), ""); // Skills are global
+
+        // Non-skill events return None for skill_name
+        let pre_tool = HookEvent::PreToolUse(PreToolUseEvent {
+            session_id: "s1".to_string(),
+            tool: "Bash".to_string(),
+            args: serde_json::json!({}),
+            working_directory: "/".to_string(),
+            recent_tools: vec![],
+        });
+        assert!(pre_tool.skill_name().is_none());
+    }
+
+    #[test]
+    fn test_skill_event_serialization() {
+        let event = HookEvent::SkillLoad(SkillLoadEvent {
+            skill_name: "test-skill".to_string(),
+            tool_names: vec!["tool1".to_string()],
+            version: Some("1.0.0".to_string()),
+            description: None,
+            loaded_at: 1234567890,
+        });
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("skill_load"));
+        assert!(json.contains("test-skill"));
+        assert!(json.contains("1.0.0"));
+
+        let parsed: HookEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.event_type(), HookEventType::SkillLoad);
+        assert_eq!(parsed.skill_name(), Some("test-skill"));
     }
 }
