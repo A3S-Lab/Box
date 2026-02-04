@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <em>Hardware-isolated execution environment for running untrusted AI agent code safely</em>
+  <em>Infrastructure layer — hardware-isolated execution environment with Python and TypeScript SDKs</em>
 </p>
 
 <p align="center">
