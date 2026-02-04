@@ -122,10 +122,8 @@ test:
     print_header "🧪 A3S Box Test Suite"
     echo ""
 
-    # Test each crate
+    # Test each crate (queue extracted to lane, code is standalone)
     run_tests "a3s-box-core"    "core"
-    run_tests "a3s-box-queue"   "queue"
-    run_tests "a3s-box-code"    "code"
     run_tests "a3s-box-runtime" "runtime"
 
     # Summary
@@ -144,39 +142,23 @@ test:
 
 # Run tests without progress (raw cargo output)
 test-raw:
-    cd src && cargo test -p a3s-box-code -p a3s-box-core -p a3s-box-queue -p a3s-box-runtime --lib
+    cd src && cargo test -p a3s-box-core -p a3s-box-runtime --lib
 
 # Run tests with verbose output
 test-v:
-    cd src && cargo test -p a3s-box-code -p a3s-box-core -p a3s-box-queue -p a3s-box-runtime --lib -- --nocapture
+    cd src && cargo test -p a3s-box-core -p a3s-box-runtime --lib -- --nocapture
 
 # ============================================================================
 # Test Subsets
 # ============================================================================
 
-# Test a3s-box-code
-test-code:
-    cd src && cargo test -p a3s-box-code --lib
-
-# Test queue and HITL
-test-queue:
-    cd src && cargo test -p a3s-box-code --lib -- queue::tests hitl::tests
-
-# Test permissions
-test-permissions:
-    cd src && cargo test -p a3s-box-code --lib -- permissions::tests
-
-# Test skill system
-test-skills:
-    cd src && cargo test -p a3s-box-code --lib -- skill_loader::tests
-
-# Test tools (builtin + dynamic)
-test-tools:
-    cd src && cargo test -p a3s-box-code --lib -- tools::
-
 # Test a3s-box-core
 test-core:
     cd src && cargo test -p a3s-box-core --lib
+
+# Test skill system (in runtime)
+test-skills:
+    cd src && cargo test -p a3s-box-runtime --lib -- skill
 
 # Test a3s-box-runtime (check only, requires libkrun for actual tests)
 test-runtime:
@@ -389,8 +371,6 @@ test-cov:
     echo ""
 
     run_cov_realtime "a3s-box-core" "core"
-    run_cov_realtime "a3s-box-queue" "queue"
-    run_cov_realtime "a3s-box-code" "code"
     run_cov_realtime "a3s-box-runtime" "runtime"
 
     # Print grand total summary
@@ -466,7 +446,7 @@ cov:
     echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
     echo "┃                    🧪 Running Tests with Coverage                     ┃"
     echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-    cd src && cargo llvm-cov --lib -p a3s-box-code -p a3s-box-core -p a3s-box-queue \
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime \
         --lcov --output-path "$COV_FILE" 2>&1 | grep -E "^test result"
     echo ""
     echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
@@ -477,19 +457,19 @@ cov:
 
 # Coverage for specific module
 cov-module MOD:
-    cd src && cargo llvm-cov --lib -p a3s-box-code -- {{MOD}}::
+    cd src && cargo llvm-cov --lib -p a3s-box-core -- {{MOD}}::
 
 # Coverage with HTML report (opens in browser)
 cov-html:
-    cd src && cargo llvm-cov --lib -p a3s-box-code -p a3s-box-core -p a3s-box-queue --html --open
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime --html --open
 
 # Coverage with detailed file-by-file table
 cov-table:
-    cd src && cargo llvm-cov --lib -p a3s-box-code -p a3s-box-core -p a3s-box-queue
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime
 
 # Coverage for CI (generates lcov.info)
 cov-ci:
-    cd src && cargo llvm-cov --lib -p a3s-box-code -p a3s-box-core -p a3s-box-queue --lcov --output-path lcov.info
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime --lcov --output-path lcov.info
 
 # ============================================================================
 # Code Quality
@@ -519,12 +499,6 @@ core *ARGS:
 runtime *ARGS:
     just -f src/runtime/justfile {{ARGS}}
 
-code *ARGS:
-    just -f src/code/justfile {{ARGS}}
-
-queue *ARGS:
-    just -f src/queue/justfile {{ARGS}}
-
 sdk-python *ARGS:
     just -f src/sdk/python/justfile {{ARGS}}
 
@@ -546,4 +520,30 @@ doc:
 # Clean artifacts
 clean:
     cd src && cargo clean
+
+# ============================================================================
+# Docker / OCI Image
+# ============================================================================
+
+# Build Docker image for agent
+docker-build tag="a3s-box-agent:latest":
+    docker build -t {{tag}} .
+
+# Build Docker image with specific platform
+docker-build-linux tag="a3s-box-agent:latest":
+    docker build --platform linux/amd64 -t {{tag}} .
+
+# Push Docker image to registry
+docker-push tag="a3s-box-agent:latest" registry="ghcr.io/a3s-lab":
+    docker tag {{tag}} {{registry}}/{{tag}}
+    docker push {{registry}}/{{tag}}
+
+# Export Docker image as OCI tarball
+docker-export tag="a3s-box-agent:latest" output="a3s-box-agent.tar":
+    docker save {{tag}} -o {{output}}
+
+# Build and export OCI image
+oci-build tag="a3s-box-agent:latest" output="a3s-box-agent.tar":
+    just docker-build-linux {{tag}}
+    just docker-export {{tag}} {{output}}
 
