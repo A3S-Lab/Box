@@ -1,0 +1,52 @@
+# Build artifacts
+target/
+**/target/
+
+# Git
+.git/
+.gitignore
+.gitmodules
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation (not needed for build)
+docs/
+*.md
+!src/code/README.md
+
+# Examples
+examples/
+
+# Temporary files
+temp/
+*.tmp
+*.log
+
+# Claude/AI files
+.claude/
+.a3s/
+CLAUDE.md
+
+# SDK build artifacts (not needed for agent image)
+src/sdk/python/target/
+src/sdk/typescript/target/
+src/sdk/python/*.so
+src/sdk/typescript/*.node
+
+# Test files
+**/tests/
+**/*_test.rs
+
+# Scripts
+.scripts/
+
+# License (not needed in build context)
+LICENSE
