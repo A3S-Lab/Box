@@ -53,6 +53,9 @@ pub struct OciRootfsBuilder {
 
     /// Path to guest init binary (optional)
     guest_init_path: Option<PathBuf>,
+
+    /// Path to nsexec binary (optional)
+    nsexec_path: Option<PathBuf>,
 }
 
 impl OciRootfsBuilder {
@@ -66,6 +69,7 @@ impl OciRootfsBuilder {
             rootfs_path: rootfs_path.into(),
             composition: RootfsComposition::default(),
             guest_init_path: None,
+            nsexec_path: None,
         }
     }
 
@@ -102,6 +106,15 @@ impl OciRootfsBuilder {
         self
     }
 
+    /// Set the path to the nsexec binary.
+    ///
+    /// If set, the nsexec binary will be installed at `/usr/bin/nsexec` in the rootfs.
+    /// This allows the agent to execute business code in isolated namespaces.
+    pub fn with_nsexec(mut self, path: impl Into<PathBuf>) -> Self {
+        self.nsexec_path = Some(path.into());
+        self
+    }
+
     /// Build the rootfs by extracting OCI images.
     ///
     /// # Process
@@ -110,7 +123,8 @@ impl OciRootfsBuilder {
     /// 2. Extract agent image layers to agent target directory
     /// 3. Extract business image layers to business target directory (if provided)
     /// 4. Install guest init binary (if provided)
-    /// 5. Create essential system files
+    /// 5. Install nsexec binary (if provided)
+    /// 6. Create essential system files
     ///
     /// # Errors
     ///
@@ -126,9 +140,7 @@ impl OciRootfsBuilder {
 
         // Validate agent image is set
         if self.composition.agent_image.as_os_str().is_empty() {
-            return Err(BoxError::Other(
-                "Agent OCI image path not set".to_string(),
-            ));
+            return Err(BoxError::Other("Agent OCI image path not set".to_string()));
         }
 
         // Create base directory structure
@@ -145,6 +157,11 @@ impl OciRootfsBuilder {
         // Install guest init if provided
         if self.guest_init_path.is_some() {
             self.install_guest_init()?;
+        }
+
+        // Install nsexec if provided
+        if self.nsexec_path.is_some() {
+            self.install_nsexec()?;
         }
 
         // Create essential system files
@@ -252,12 +269,8 @@ impl OciRootfsBuilder {
 
         // Create /sbin directory
         let sbin_dir = self.rootfs_path.join("sbin");
-        std::fs::create_dir_all(&sbin_dir).map_err(|e| {
-            BoxError::Other(format!(
-                "Failed to create /sbin directory: {}",
-                e
-            ))
-        })?;
+        std::fs::create_dir_all(&sbin_dir)
+            .map_err(|e| BoxError::Other(format!("Failed to create /sbin directory: {}", e)))?;
 
         // Copy guest init to /sbin/init
         let init_path = sbin_dir.join("init");
@@ -285,6 +298,61 @@ impl OciRootfsBuilder {
             src = %guest_init_src.display(),
             dst = %init_path.display(),
             "Installed guest init"
+        );
+
+        Ok(())
+    }
+
+    /// Install nsexec binary to /usr/bin/nsexec.
+    fn install_nsexec(&self) -> Result<()> {
+        let nsexec_src = self
+            .nsexec_path
+            .as_ref()
+            .ok_or_else(|| BoxError::Other("Nsexec path not set".to_string()))?;
+
+        // Validate source exists
+        if !nsexec_src.exists() {
+            return Err(BoxError::Other(format!(
+                "Nsexec binary not found: {}",
+                nsexec_src.display()
+            )));
+        }
+
+        // Create /usr/bin directory
+        let usr_bin_dir = self.rootfs_path.join("usr/bin");
+        std::fs::create_dir_all(&usr_bin_dir).map_err(|e| {
+            BoxError::Other(format!(
+                "Failed to create /usr/bin directory: {}",
+                e
+            ))
+        })?;
+
+        // Copy nsexec to /usr/bin/nsexec
+        let nsexec_path = usr_bin_dir.join("nsexec");
+        std::fs::copy(nsexec_src, &nsexec_path).map_err(|e| {
+            BoxError::Other(format!(
+                "Failed to copy nsexec to {}: {}",
+                nsexec_path.display(),
+                e
+            ))
+        })?;
+
+        // Make executable (chmod +x)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&nsexec_path)
+                .map_err(|e| BoxError::Other(format!("Failed to get permissions: {}", e)))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&nsexec_path, perms)
+                .map_err(|e| BoxError::Other(format!("Failed to set permissions: {}", e)))?;
+        }
+
+        tracing::info!(
+            src = %nsexec_src.display(),
+            dst = %nsexec_path.display(),
+            "Installed nsexec"
         );
 
         Ok(())
@@ -371,18 +439,10 @@ pub fn agent_executable_path(agent_target: &str, entrypoint: &[String]) -> Strin
     // If entrypoint is absolute path, use it directly
     if executable.starts_with('/') {
         // Prepend agent target to make it relative to agent's root
-        format!(
-            "{}{}",
-            agent_target.trim_end_matches('/'),
-            executable
-        )
+        format!("{}{}", agent_target.trim_end_matches('/'), executable)
     } else {
         // Relative path, prepend agent target
-        format!(
-            "{}/{}",
-            agent_target.trim_end_matches('/'),
-            executable
-        )
+        format!("{}/{}", agent_target.trim_end_matches('/'), executable)
     }
 }
 
@@ -402,8 +462,7 @@ mod tests {
         // Create a minimal agent image
         create_test_oci_image(&agent_image);
 
-        let builder = OciRootfsBuilder::new(&rootfs_path)
-            .with_agent_image(&agent_image);
+        let builder = OciRootfsBuilder::new(&rootfs_path).with_agent_image(&agent_image);
 
         builder.build().unwrap();
 
@@ -425,8 +484,7 @@ mod tests {
 
         create_test_oci_image(&agent_image);
 
-        let builder = OciRootfsBuilder::new(&rootfs_path)
-            .with_agent_image(&agent_image);
+        let builder = OciRootfsBuilder::new(&rootfs_path).with_agent_image(&agent_image);
 
         builder.build().unwrap();
 
@@ -450,8 +508,7 @@ mod tests {
         // Create agent image with a test file
         create_test_oci_image_with_file(&agent_image, "agent.py", b"print('hello')");
 
-        let builder = OciRootfsBuilder::new(&rootfs_path)
-            .with_agent_image(&agent_image);
+        let builder = OciRootfsBuilder::new(&rootfs_path).with_agent_image(&agent_image);
 
         builder.build().unwrap();
 
@@ -559,11 +616,7 @@ mod tests {
         fs::create_dir_all(path.join("blobs/sha256")).unwrap();
 
         // Create oci-layout
-        fs::write(
-            path.join("oci-layout"),
-            r#"{"imageLayoutVersion":"1.0.0"}"#,
-        )
-        .unwrap();
+        fs::write(path.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
 
         // Create layer blob with the specified file
         let layer_hash = "layer123";

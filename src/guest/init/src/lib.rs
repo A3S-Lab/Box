@@ -5,4 +5,4 @@
 
 pub mod namespace;
 
-pub use namespace::{NamespaceConfig, NamespaceError, spawn_isolated};
+pub use namespace::{spawn_isolated, NamespaceConfig, NamespaceError};

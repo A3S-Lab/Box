@@ -28,8 +28,8 @@ impl AgentConfig {
     /// - A3S_AGENT_ARGS: agent arguments (space-separated)
     /// - A3S_AGENT_ENV_*: agent environment variables
     fn from_env() -> Self {
-        let executable = std::env::var("A3S_AGENT_EXEC")
-            .unwrap_or_else(|_| "/agent/bin/agent".to_string());
+        let executable =
+            std::env::var("A3S_AGENT_EXEC").unwrap_or_else(|_| "/agent/bin/agent".to_string());
 
         let args: Vec<String> = std::env::var("A3S_AGENT_ARGS")
             .map(|s| s.split_whitespace().map(String::from).collect())
@@ -220,7 +220,9 @@ fn wait_for_children() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Child process {} exited with status {}", pid, status);
                 if status != 0 {
                     error!("Child process failed");
-                    return Err(format!("Child process {} failed with status {}", pid, status).into());
+                    return Err(
+                        format!("Child process {} failed with status {}", pid, status).into(),
+                    );
                 }
             }
             Ok(WaitStatus::Signaled(pid, signal, _)) => {

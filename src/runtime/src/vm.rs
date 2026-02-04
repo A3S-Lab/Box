@@ -306,7 +306,10 @@ impl VmManager {
                     .with_business_target("/workspace");
 
                 // Add business image if specified
-                if let BusinessType::OciImage { path: business_path } = &self.config.business {
+                if let BusinessType::OciImage {
+                    path: business_path,
+                } = &self.config.business
+                {
                     builder = builder.with_business_image(business_path);
                 }
 
@@ -317,6 +320,16 @@ impl VmManager {
                         "Using guest init for namespace isolation"
                     );
                     builder = builder.with_guest_init(guest_init_path);
+
+                    // Also add nsexec if available
+                    if let Ok(nsexec_path) = Self::find_nsexec() {
+                        tracing::info!(
+                            nsexec = %nsexec_path.display(),
+                            "Installing nsexec for business code execution"
+                        );
+                        builder = builder.with_nsexec(nsexec_path);
+                    }
+
                     true
                 } else {
                     false
@@ -390,6 +403,48 @@ impl VmManager {
         })
     }
 
+    /// Find the nsexec binary in common locations.
+    ///
+    /// Searches in order:
+    /// 1. Same directory as current executable
+    /// 2. target/debug or target/release (for development)
+    /// 3. PATH
+    fn find_nsexec() -> Result<PathBuf> {
+        // Try same directory as current executable
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let nsexec = exe_dir.join("a3s-box-nsexec");
+                if nsexec.exists() {
+                    return Ok(nsexec);
+                }
+            }
+        }
+
+        // Try target/debug or target/release (for development)
+        let target_dirs = ["target/debug", "target/release"];
+        for dir in &target_dirs {
+            let nsexec = PathBuf::from(dir).join("a3s-box-nsexec");
+            if nsexec.exists() {
+                return Ok(nsexec);
+            }
+        }
+
+        // Try PATH
+        if let Ok(path_var) = std::env::var("PATH") {
+            for path in std::env::split_paths(&path_var) {
+                let nsexec = path.join("a3s-box-nsexec");
+                if nsexec.exists() {
+                    return Ok(nsexec);
+                }
+            }
+        }
+
+        Err(BoxError::BoxBootError {
+            message: "Nsexec binary not found".to_string(),
+            hint: Some("Build with: cargo build -p a3s-box-guest-init --bin a3s-box-nsexec".to_string()),
+        })
+    }
+
     /// Build InstanceSpec from config and layout.
     fn build_instance_spec(&self, layout: &BoxLayout) -> Result<InstanceSpec> {
         // Build filesystem mounts
@@ -412,7 +467,11 @@ impl VmManager {
             // Pass agent configuration via environment variables
             let (agent_exec, agent_args, agent_env) = match &layout.agent_oci_config {
                 Some(oci_config) => {
-                    let oci_entrypoint = oci_config.entrypoint.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+                    let oci_entrypoint = oci_config
+                        .entrypoint
+                        .as_ref()
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
                     let oci_cmd = oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
 
                     let exec = if !oci_entrypoint.is_empty() {
@@ -433,7 +492,10 @@ impl VmManager {
                 }
                 None => (
                     GUEST_AGENT_PATH.to_string(),
-                    vec!["--listen".to_string(), format!("vsock://{}", AGENT_VSOCK_PORT)],
+                    vec![
+                        "--listen".to_string(),
+                        format!("vsock://{}", AGENT_VSOCK_PORT),
+                    ],
                     vec![],
                 ),
             };
@@ -464,7 +526,11 @@ impl VmManager {
             match &layout.agent_oci_config {
                 Some(oci_config) => {
                     // Use OCI image config for entrypoint
-                    let oci_entrypoint = oci_config.entrypoint.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+                    let oci_entrypoint = oci_config
+                        .entrypoint
+                        .as_ref()
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
                     let oci_cmd = oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
 
                     // Combine entrypoint and cmd
@@ -519,9 +585,10 @@ impl VmManager {
 
         // Determine workdir
         let workdir = match &layout.agent_oci_config {
-            Some(oci_config) => {
-                oci_config.working_dir.clone().unwrap_or_else(|| GUEST_WORKDIR.to_string())
-            }
+            Some(oci_config) => oci_config
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| GUEST_WORKDIR.to_string()),
             None => GUEST_WORKDIR.to_string(),
         };
 
