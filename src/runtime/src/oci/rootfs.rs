@@ -40,6 +40,7 @@ impl Default for RootfsComposition {
 /// Supports composing rootfs from:
 /// - Single agent OCI image
 /// - Agent + business code OCI images
+/// - Optional guest init binary for namespace isolation
 ///
 /// Each image is extracted to its own target directory within the rootfs,
 /// providing isolation between agent and business code environments.
@@ -49,6 +50,9 @@ pub struct OciRootfsBuilder {
 
     /// Composition configuration
     composition: RootfsComposition,
+
+    /// Path to guest init binary (optional)
+    guest_init_path: Option<PathBuf>,
 }
 
 impl OciRootfsBuilder {
@@ -61,6 +65,7 @@ impl OciRootfsBuilder {
         Self {
             rootfs_path: rootfs_path.into(),
             composition: RootfsComposition::default(),
+            guest_init_path: None,
         }
     }
 
@@ -88,6 +93,15 @@ impl OciRootfsBuilder {
         self
     }
 
+    /// Set the path to the guest init binary.
+    ///
+    /// If set, the guest init binary will be installed at `/sbin/init` in the rootfs.
+    /// This enables namespace isolation for agent and business code.
+    pub fn with_guest_init(mut self, path: impl Into<PathBuf>) -> Self {
+        self.guest_init_path = Some(path.into());
+        self
+    }
+
     /// Build the rootfs by extracting OCI images.
     ///
     /// # Process
@@ -95,7 +109,8 @@ impl OciRootfsBuilder {
     /// 1. Create base directory structure
     /// 2. Extract agent image layers to agent target directory
     /// 3. Extract business image layers to business target directory (if provided)
-    /// 4. Create essential system files
+    /// 4. Install guest init binary (if provided)
+    /// 5. Create essential system files
     ///
     /// # Errors
     ///
@@ -125,6 +140,11 @@ impl OciRootfsBuilder {
         // Extract business image if provided
         if self.composition.business_image.is_some() {
             self.extract_business_image()?;
+        }
+
+        // Install guest init if provided
+        if self.guest_init_path.is_some() {
+            self.install_guest_init()?;
         }
 
         // Create essential system files
@@ -215,6 +235,61 @@ impl OciRootfsBuilder {
         Ok(())
     }
 
+    /// Install guest init binary to /sbin/init.
+    fn install_guest_init(&self) -> Result<()> {
+        let guest_init_src = self
+            .guest_init_path
+            .as_ref()
+            .ok_or_else(|| BoxError::Other("Guest init path not set".to_string()))?;
+
+        // Validate source exists
+        if !guest_init_src.exists() {
+            return Err(BoxError::Other(format!(
+                "Guest init binary not found: {}",
+                guest_init_src.display()
+            )));
+        }
+
+        // Create /sbin directory
+        let sbin_dir = self.rootfs_path.join("sbin");
+        std::fs::create_dir_all(&sbin_dir).map_err(|e| {
+            BoxError::Other(format!(
+                "Failed to create /sbin directory: {}",
+                e
+            ))
+        })?;
+
+        // Copy guest init to /sbin/init
+        let init_path = sbin_dir.join("init");
+        std::fs::copy(guest_init_src, &init_path).map_err(|e| {
+            BoxError::Other(format!(
+                "Failed to copy guest init to {}: {}",
+                init_path.display(),
+                e
+            ))
+        })?;
+
+        // Make executable (chmod +x)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&init_path)
+                .map_err(|e| BoxError::Other(format!("Failed to get permissions: {}", e)))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&init_path, perms)
+                .map_err(|e| BoxError::Other(format!("Failed to set permissions: {}", e)))?;
+        }
+
+        tracing::info!(
+            src = %guest_init_src.display(),
+            dst = %init_path.display(),
+            "Installed guest init"
+        );
+
+        Ok(())
+    }
+
     /// Create essential system files.
     fn create_essential_files(&self) -> Result<()> {
         // /etc/passwd - minimal user database
@@ -277,6 +352,11 @@ impl OciRootfsBuilder {
             }
             None => Ok(None),
         }
+    }
+
+    /// Check if guest init is configured.
+    pub fn has_guest_init(&self) -> bool {
+        self.guest_init_path.is_some()
     }
 }
 

@@ -47,6 +47,8 @@ struct BoxLayout {
     console_output: Option<PathBuf>,
     /// OCI image config for agent (if using OCI image)
     agent_oci_config: Option<OciImageConfig>,
+    /// Whether guest init is installed for namespace isolation
+    has_guest_init: bool,
 }
 
 /// VM manager - orchestrates VM lifecycle.
@@ -286,7 +288,7 @@ impl VmManager {
         }
 
         // Prepare rootfs based on agent type
-        let (rootfs_path, agent_oci_config) = match &self.config.agent {
+        let (rootfs_path, agent_oci_config, has_guest_init) = match &self.config.agent {
             AgentType::OciImage { path: agent_path } => {
                 // Use OCI image for agent
                 let rootfs_path = box_dir.join("rootfs");
@@ -308,18 +310,30 @@ impl VmManager {
                     builder = builder.with_business_image(business_path);
                 }
 
+                // Add guest init if available
+                let has_guest_init = if let Ok(guest_init_path) = Self::find_guest_init() {
+                    tracing::info!(
+                        guest_init = %guest_init_path.display(),
+                        "Using guest init for namespace isolation"
+                    );
+                    builder = builder.with_guest_init(guest_init_path);
+                    true
+                } else {
+                    false
+                };
+
                 // Build the rootfs
                 builder.build()?;
 
                 // Get agent OCI config for entrypoint/env extraction
                 let agent_config = builder.agent_config()?;
 
-                (rootfs_path, Some(agent_config))
+                (rootfs_path, Some(agent_config), has_guest_init)
             }
             AgentType::A3sCode | AgentType::LocalBinary { .. } | AgentType::RemoteBinary { .. } => {
                 // Use default guest-rootfs (must be set up separately)
                 let rootfs_path = self.home_dir.join("guest-rootfs");
-                (rootfs_path, None)
+                (rootfs_path, None, false)
             }
         };
 
@@ -330,6 +344,49 @@ impl VmManager {
             skills_path,
             console_output: Some(logs_dir.join("console.log")),
             agent_oci_config,
+            has_guest_init,
+        })
+    }
+
+    /// Find the guest init binary in common locations.
+    ///
+    /// Searches in order:
+    /// 1. Same directory as current executable
+    /// 2. target/debug or target/release (for development)
+    /// 3. PATH
+    fn find_guest_init() -> Result<PathBuf> {
+        // Try same directory as current executable
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let guest_init = exe_dir.join("a3s-box-guest-init");
+                if guest_init.exists() {
+                    return Ok(guest_init);
+                }
+            }
+        }
+
+        // Try target/debug or target/release (for development)
+        let target_dirs = ["target/debug", "target/release"];
+        for dir in &target_dirs {
+            let guest_init = PathBuf::from(dir).join("a3s-box-guest-init");
+            if guest_init.exists() {
+                return Ok(guest_init);
+            }
+        }
+
+        // Try PATH
+        if let Ok(path_var) = std::env::var("PATH") {
+            for path in std::env::split_paths(&path_var) {
+                let guest_init = path.join("a3s-box-guest-init");
+                if guest_init.exists() {
+                    return Ok(guest_init);
+                }
+            }
+        }
+
+        Err(BoxError::BoxBootError {
+            message: "Guest init binary not found".to_string(),
+            hint: Some("Build with: cargo build -p a3s-box-guest-init".to_string()),
         })
     }
 
@@ -350,57 +407,112 @@ impl VmManager {
         ];
 
         // Build entrypoint based on agent type and OCI config
-        let entrypoint = match &layout.agent_oci_config {
-            Some(oci_config) => {
-                // Use OCI image config for entrypoint
-                let oci_entrypoint = oci_config.entrypoint.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-                let oci_cmd = oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+        let entrypoint = if layout.has_guest_init {
+            // Use guest init as entrypoint for namespace isolation
+            // Pass agent configuration via environment variables
+            let (agent_exec, agent_args, agent_env) = match &layout.agent_oci_config {
+                Some(oci_config) => {
+                    let oci_entrypoint = oci_config.entrypoint.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+                    let oci_cmd = oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
 
-                // Combine entrypoint and cmd
-                let executable = if !oci_entrypoint.is_empty() {
-                    // Prepend /agent to make path relative to agent's root
-                    let exec = &oci_entrypoint[0];
-                    if exec.starts_with('/') {
-                        format!("/agent{}", exec)
+                    let exec = if !oci_entrypoint.is_empty() {
+                        let e = &oci_entrypoint[0];
+                        if e.starts_with('/') {
+                            format!("/agent{}", e)
+                        } else {
+                            format!("/agent/{}", e)
+                        }
                     } else {
-                        format!("/agent/{}", exec)
-                    }
-                } else {
-                    // Default agent path
-                    "/agent/bin/agent".to_string()
-                };
+                        "/agent/bin/agent".to_string()
+                    };
 
-                // Build args from entrypoint[1:] + cmd
-                let mut args: Vec<String> = oci_entrypoint.iter().skip(1).cloned().collect();
-                args.extend(oci_cmd.iter().cloned());
+                    let mut args: Vec<String> = oci_entrypoint.iter().skip(1).cloned().collect();
+                    args.extend(oci_cmd.iter().cloned());
 
-                // Use environment variables from OCI config
-                let env = oci_config.env.clone();
-
-                tracing::debug!(
-                    executable = %executable,
-                    args = ?args,
-                    env_count = env.len(),
-                    workdir = ?oci_config.working_dir,
-                    "Using OCI image entrypoint"
-                );
-
-                Entrypoint {
-                    executable,
-                    args,
-                    env,
+                    (exec, args, oci_config.env.clone())
                 }
+                None => (
+                    GUEST_AGENT_PATH.to_string(),
+                    vec!["--listen".to_string(), format!("vsock://{}", AGENT_VSOCK_PORT)],
+                    vec![],
+                ),
+            };
+
+            // Build environment for guest init
+            let mut env: Vec<(String, String)> = vec![
+                ("A3S_AGENT_EXEC".to_string(), agent_exec),
+                ("A3S_AGENT_ARGS".to_string(), agent_args.join(" ")),
+            ];
+
+            // Add agent environment variables with A3S_AGENT_ENV_ prefix
+            for (key, value) in agent_env {
+                env.push((format!("A3S_AGENT_ENV_{}", key), value));
             }
-            None => {
-                // Use default A3S agent entrypoint
-                // The guest agent listens on vsock for gRPC commands
-                Entrypoint {
-                    executable: GUEST_AGENT_PATH.to_string(),
-                    args: vec![
-                        "--listen".to_string(),
-                        format!("vsock://{}", AGENT_VSOCK_PORT),
-                    ],
-                    env: vec![],
+
+            tracing::debug!(
+                env = ?env,
+                "Using guest init with agent configuration"
+            );
+
+            Entrypoint {
+                executable: "/sbin/init".to_string(),
+                args: vec![],
+                env,
+            }
+        } else {
+            // Direct agent execution (no namespace isolation)
+            match &layout.agent_oci_config {
+                Some(oci_config) => {
+                    // Use OCI image config for entrypoint
+                    let oci_entrypoint = oci_config.entrypoint.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+                    let oci_cmd = oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+
+                    // Combine entrypoint and cmd
+                    let executable = if !oci_entrypoint.is_empty() {
+                        // Prepend /agent to make path relative to agent's root
+                        let exec = &oci_entrypoint[0];
+                        if exec.starts_with('/') {
+                            format!("/agent{}", exec)
+                        } else {
+                            format!("/agent/{}", exec)
+                        }
+                    } else {
+                        // Default agent path
+                        "/agent/bin/agent".to_string()
+                    };
+
+                    // Build args from entrypoint[1:] + cmd
+                    let mut args: Vec<String> = oci_entrypoint.iter().skip(1).cloned().collect();
+                    args.extend(oci_cmd.iter().cloned());
+
+                    // Use environment variables from OCI config
+                    let env = oci_config.env.clone();
+
+                    tracing::debug!(
+                        executable = %executable,
+                        args = ?args,
+                        env_count = env.len(),
+                        workdir = ?oci_config.working_dir,
+                        "Using OCI image entrypoint"
+                    );
+
+                    Entrypoint {
+                        executable,
+                        args,
+                        env,
+                    }
+                }
+                None => {
+                    // Use default A3S agent entrypoint
+                    // The guest agent listens on vsock for gRPC commands
+                    Entrypoint {
+                        executable: GUEST_AGENT_PATH.to_string(),
+                        args: vec![
+                            "--listen".to_string(),
+                            format!("vsock://{}", AGENT_VSOCK_PORT),
+                        ],
+                        env: vec![],
+                    }
                 }
             }
         };
