@@ -60,6 +60,11 @@ libc = { workspace = true }
 sysinfo = { workspace = true }
 dirs = { workspace = true }
 
+# OCI image support
+oci-spec = "0.6"
+tar = "0.4"
+flate2 = "1.0"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

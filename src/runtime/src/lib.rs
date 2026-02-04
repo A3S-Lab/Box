@@ -10,6 +10,7 @@ pub mod grpc;
 pub mod host_check;
 pub mod krun;
 pub mod metrics;
+pub mod oci;
 pub mod rootfs;
 pub mod session;
 pub mod skill;
@@ -18,6 +19,7 @@ pub mod vmm;
 
 // Re-export common types
 pub use host_check::{check_virtualization_support, VirtualizationSupport};
+pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
 pub use session::{Session, SessionId, SessionManager};
 pub use skill::{LimitFilter, NameFilter, NoFilter, SkillFilter, SkillManager, SkillPackage};

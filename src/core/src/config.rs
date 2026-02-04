@@ -2,9 +2,79 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Agent type configuration - specifies how the coding agent is loaded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentType {
+    /// Built-in A3S Code agent (default)
+    A3sCode,
+
+    /// OCI image containing the agent
+    OciImage {
+        /// Path to OCI image directory
+        path: PathBuf,
+    },
+
+    /// Local binary agent
+    LocalBinary {
+        /// Path to the binary
+        path: PathBuf,
+        /// Arguments to pass to the binary
+        args: Vec<String>,
+    },
+
+    /// Remote binary (downloaded on first use)
+    RemoteBinary {
+        /// URL to download the binary
+        url: String,
+        /// SHA256 checksum for verification
+        checksum: String,
+    },
+}
+
+impl Default for AgentType {
+    fn default() -> Self {
+        Self::A3sCode
+    }
+}
+
+/// Business code configuration - specifies how business code is loaded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BusinessType {
+    /// No business code (default)
+    None,
+
+    /// OCI image containing business code
+    OciImage {
+        /// Path to OCI image directory
+        path: PathBuf,
+    },
+
+    /// Directory to mount as workspace
+    Directory {
+        /// Path to the directory
+        path: PathBuf,
+    },
+}
+
+impl Default for BusinessType {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Box configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxConfig {
+    /// Agent type (how the coding agent is loaded)
+    #[serde(default)]
+    pub agent: AgentType,
+
+    /// Business code type (how business code is loaded)
+    #[serde(default)]
+    pub business: BusinessType,
+
     /// Workspace directory (mounted to /a3s/workspace/)
     pub workspace: PathBuf,
 
@@ -30,6 +100,8 @@ pub struct BoxConfig {
 impl Default for BoxConfig {
     fn default() -> Self {
         Self {
+            agent: AgentType::default(),
+            business: BusinessType::default(),
             workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             skills: vec![PathBuf::from("./skills")],
             model: ModelConfig::default(),
@@ -232,6 +304,8 @@ mod tests {
     fn test_box_config_default() {
         let config = BoxConfig::default();
 
+        assert_eq!(config.agent, AgentType::A3sCode);
+        assert_eq!(config.business, BusinessType::None);
         assert!(!config.workspace.as_os_str().is_empty());
         assert_eq!(config.skills.len(), 1);
         assert_eq!(config.model.provider, "anthropic");
@@ -342,16 +416,10 @@ mod tests {
 
     #[test]
     fn test_log_level_conversion() {
-        assert_eq!(
-            tracing::Level::from(LogLevel::Debug),
-            tracing::Level::DEBUG
-        );
+        assert_eq!(tracing::Level::from(LogLevel::Debug), tracing::Level::DEBUG);
         assert_eq!(tracing::Level::from(LogLevel::Info), tracing::Level::INFO);
         assert_eq!(tracing::Level::from(LogLevel::Warn), tracing::Level::WARN);
-        assert_eq!(
-            tracing::Level::from(LogLevel::Error),
-            tracing::Level::ERROR
-        );
+        assert_eq!(tracing::Level::from(LogLevel::Error), tracing::Level::ERROR);
     }
 
     #[test]
@@ -383,7 +451,10 @@ mod tests {
     fn test_context_strategy_variants() {
         assert_eq!(ContextStrategy::Summarize, ContextStrategy::Summarize);
         assert_eq!(ContextStrategy::Truncate, ContextStrategy::Truncate);
-        assert_eq!(ContextStrategy::SlidingWindow, ContextStrategy::SlidingWindow);
+        assert_eq!(
+            ContextStrategy::SlidingWindow,
+            ContextStrategy::SlidingWindow
+        );
         assert_ne!(ContextStrategy::Summarize, ContextStrategy::Truncate);
     }
 
@@ -477,15 +548,17 @@ mod tests {
 
     #[test]
     fn test_log_level_serialization() {
-        let levels = vec![LogLevel::Debug, LogLevel::Info, LogLevel::Warn, LogLevel::Error];
+        let levels = vec![
+            LogLevel::Debug,
+            LogLevel::Info,
+            LogLevel::Warn,
+            LogLevel::Error,
+        ];
 
         for level in levels {
             let json = serde_json::to_string(&level).unwrap();
             let parsed: LogLevel = serde_json::from_str(&json).unwrap();
-            assert_eq!(
-                tracing::Level::from(parsed),
-                tracing::Level::from(level)
-            );
+            assert_eq!(tracing::Level::from(parsed), tracing::Level::from(level));
         }
     }
 
@@ -538,5 +611,134 @@ mod tests {
         assert!(debug_str.contains("BoxConfig"));
         assert!(debug_str.contains("workspace"));
         assert!(debug_str.contains("model"));
+    }
+
+    #[test]
+    fn test_agent_type_default() {
+        let agent = AgentType::default();
+        assert_eq!(agent, AgentType::A3sCode);
+    }
+
+    #[test]
+    fn test_agent_type_oci_image() {
+        let agent = AgentType::OciImage {
+            path: PathBuf::from("/path/to/agent-image"),
+        };
+
+        match agent {
+            AgentType::OciImage { path } => {
+                assert_eq!(path, PathBuf::from("/path/to/agent-image"));
+            }
+            _ => panic!("Expected OciImage variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_type_local_binary() {
+        let agent = AgentType::LocalBinary {
+            path: PathBuf::from("/usr/bin/agent"),
+            args: vec!["--listen".to_string(), "vsock://4088".to_string()],
+        };
+
+        match agent {
+            AgentType::LocalBinary { path, args } => {
+                assert_eq!(path, PathBuf::from("/usr/bin/agent"));
+                assert_eq!(args.len(), 2);
+            }
+            _ => panic!("Expected LocalBinary variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_type_remote_binary() {
+        let agent = AgentType::RemoteBinary {
+            url: "https://example.com/agent".to_string(),
+            checksum: "abc123".to_string(),
+        };
+
+        match agent {
+            AgentType::RemoteBinary { url, checksum } => {
+                assert_eq!(url, "https://example.com/agent");
+                assert_eq!(checksum, "abc123");
+            }
+            _ => panic!("Expected RemoteBinary variant"),
+        }
+    }
+
+    #[test]
+    fn test_business_type_default() {
+        let business = BusinessType::default();
+        assert_eq!(business, BusinessType::None);
+    }
+
+    #[test]
+    fn test_business_type_oci_image() {
+        let business = BusinessType::OciImage {
+            path: PathBuf::from("/path/to/business-image"),
+        };
+
+        match business {
+            BusinessType::OciImage { path } => {
+                assert_eq!(path, PathBuf::from("/path/to/business-image"));
+            }
+            _ => panic!("Expected OciImage variant"),
+        }
+    }
+
+    #[test]
+    fn test_business_type_directory() {
+        let business = BusinessType::Directory {
+            path: PathBuf::from("/path/to/app"),
+        };
+
+        match business {
+            BusinessType::Directory { path } => {
+                assert_eq!(path, PathBuf::from("/path/to/app"));
+            }
+            _ => panic!("Expected Directory variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_type_serialization() {
+        let agent = AgentType::OciImage {
+            path: PathBuf::from("/images/agent"),
+        };
+
+        let json = serde_json::to_string(&agent).unwrap();
+        let parsed: AgentType = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed, agent);
+    }
+
+    #[test]
+    fn test_business_type_serialization() {
+        let business = BusinessType::OciImage {
+            path: PathBuf::from("/images/business"),
+        };
+
+        let json = serde_json::to_string(&business).unwrap();
+        let parsed: BusinessType = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed, business);
+    }
+
+    #[test]
+    fn test_box_config_with_oci_images() {
+        let config = BoxConfig {
+            agent: AgentType::OciImage {
+                path: PathBuf::from("/images/agent"),
+            },
+            business: BusinessType::OciImage {
+                path: PathBuf::from("/images/business"),
+            },
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: BoxConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.agent, config.agent);
+        assert_eq!(parsed.business, config.business);
     }
 }
