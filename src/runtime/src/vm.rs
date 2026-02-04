@@ -3,12 +3,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use a3s_box_core::config::BoxConfig;
+use a3s_box_core::config::{AgentType, BoxConfig, BusinessType};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::{BoxEvent, EventEmitter};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
 use crate::vmm::{Entrypoint, FsMount, InstanceSpec, VmController, VmHandler};
 use crate::AGENT_VSOCK_PORT;
@@ -44,6 +45,8 @@ struct BoxLayout {
     skills_path: PathBuf,
     /// Path to console output file (optional)
     console_output: Option<PathBuf>,
+    /// OCI image config for agent (if using OCI image)
+    agent_oci_config: Option<OciImageConfig>,
 }
 
 /// VM manager - orchestrates VM lifecycle.
@@ -282,8 +285,43 @@ impl VmManager {
             })?;
         }
 
-        // Guest rootfs path (must be set up separately)
-        let rootfs_path = self.home_dir.join("guest-rootfs");
+        // Prepare rootfs based on agent type
+        let (rootfs_path, agent_oci_config) = match &self.config.agent {
+            AgentType::OciImage { path: agent_path } => {
+                // Use OCI image for agent
+                let rootfs_path = box_dir.join("rootfs");
+
+                tracing::info!(
+                    agent_image = %agent_path.display(),
+                    rootfs = %rootfs_path.display(),
+                    "Building rootfs from OCI images"
+                );
+
+                // Build rootfs using OciRootfsBuilder
+                let mut builder = OciRootfsBuilder::new(&rootfs_path)
+                    .with_agent_image(agent_path)
+                    .with_agent_target("/agent")
+                    .with_business_target("/workspace");
+
+                // Add business image if specified
+                if let BusinessType::OciImage { path: business_path } = &self.config.business {
+                    builder = builder.with_business_image(business_path);
+                }
+
+                // Build the rootfs
+                builder.build()?;
+
+                // Get agent OCI config for entrypoint/env extraction
+                let agent_config = builder.agent_config()?;
+
+                (rootfs_path, Some(agent_config))
+            }
+            AgentType::A3sCode | AgentType::LocalBinary { .. } | AgentType::RemoteBinary { .. } => {
+                // Use default guest-rootfs (must be set up separately)
+                let rootfs_path = self.home_dir.join("guest-rootfs");
+                (rootfs_path, None)
+            }
+        };
 
         Ok(BoxLayout {
             rootfs_path,
@@ -291,6 +329,7 @@ impl VmManager {
             workspace_path,
             skills_path,
             console_output: Some(logs_dir.join("console.log")),
+            agent_oci_config,
         })
     }
 
@@ -310,15 +349,68 @@ impl VmManager {
             },
         ];
 
-        // Build entrypoint
-        // The guest agent listens on vsock for gRPC commands
-        let entrypoint = Entrypoint {
-            executable: GUEST_AGENT_PATH.to_string(),
-            args: vec![
-                "--listen".to_string(),
-                format!("vsock://{}", AGENT_VSOCK_PORT),
-            ],
-            env: vec![],
+        // Build entrypoint based on agent type and OCI config
+        let entrypoint = match &layout.agent_oci_config {
+            Some(oci_config) => {
+                // Use OCI image config for entrypoint
+                let oci_entrypoint = oci_config.entrypoint.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+                let oci_cmd = oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+
+                // Combine entrypoint and cmd
+                let executable = if !oci_entrypoint.is_empty() {
+                    // Prepend /agent to make path relative to agent's root
+                    let exec = &oci_entrypoint[0];
+                    if exec.starts_with('/') {
+                        format!("/agent{}", exec)
+                    } else {
+                        format!("/agent/{}", exec)
+                    }
+                } else {
+                    // Default agent path
+                    "/agent/bin/agent".to_string()
+                };
+
+                // Build args from entrypoint[1:] + cmd
+                let mut args: Vec<String> = oci_entrypoint.iter().skip(1).cloned().collect();
+                args.extend(oci_cmd.iter().cloned());
+
+                // Use environment variables from OCI config
+                let env = oci_config.env.clone();
+
+                tracing::debug!(
+                    executable = %executable,
+                    args = ?args,
+                    env_count = env.len(),
+                    workdir = ?oci_config.working_dir,
+                    "Using OCI image entrypoint"
+                );
+
+                Entrypoint {
+                    executable,
+                    args,
+                    env,
+                }
+            }
+            None => {
+                // Use default A3S agent entrypoint
+                // The guest agent listens on vsock for gRPC commands
+                Entrypoint {
+                    executable: GUEST_AGENT_PATH.to_string(),
+                    args: vec![
+                        "--listen".to_string(),
+                        format!("vsock://{}", AGENT_VSOCK_PORT),
+                    ],
+                    env: vec![],
+                }
+            }
+        };
+
+        // Determine workdir
+        let workdir = match &layout.agent_oci_config {
+            Some(oci_config) => {
+                oci_config.working_dir.clone().unwrap_or_else(|| GUEST_WORKDIR.to_string())
+            }
+            None => GUEST_WORKDIR.to_string(),
         };
 
         Ok(InstanceSpec {
@@ -330,7 +422,7 @@ impl VmManager {
             fs_mounts,
             entrypoint,
             console_output: layout.console_output.clone(),
-            workdir: GUEST_WORKDIR.to_string(),
+            workdir,
         })
     }
 

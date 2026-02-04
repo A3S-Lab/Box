@@ -3,7 +3,7 @@
 //! Handles composing rootfs from multiple OCI images for agent and business code.
 
 use a3s_box_core::error::{BoxError, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::image::OciImage;
 use super::layers::extract_layer;
@@ -310,6 +310,7 @@ pub fn agent_executable_path(agent_target: &str, entrypoint: &[String]) -> Strin
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     #[test]
