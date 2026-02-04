@@ -1,0 +1,25 @@
+[package]
+name = "a3s-box-guest-init"
+version = "0.1.0"
+edition = "2021"
+description = "Guest init process for a3s-box VM with namespace isolation"
+license = "MIT"
+
+[lib]
+name = "a3s_box_guest_init"
+path = "src/lib.rs"
+
+[[bin]]
+name = "a3s-box-guest-init"
+path = "src/main.rs"
+
+[dependencies]
+nix = { version = "0.29", features = ["process", "sched", "mount", "signal"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
+
+[features]
+default = []

@@ -5,6 +5,7 @@ members = [
     "code",
     "queue",
     "shim",
+    "guest/init",
     "sdk/python",
     "sdk/typescript",
     "deps/libkrun-sys",
