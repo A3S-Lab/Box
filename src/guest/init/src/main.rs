@@ -10,6 +10,50 @@ use a3s_box_guest_init::namespace;
 use std::process;
 use tracing::{error, info};
 
+/// Agent configuration parsed from environment variables.
+struct AgentConfig {
+    /// Agent executable path
+    executable: String,
+    /// Agent arguments
+    args: Vec<String>,
+    /// Agent environment variables
+    env: Vec<(String, String)>,
+}
+
+impl AgentConfig {
+    /// Parse agent configuration from environment variables.
+    ///
+    /// Expected environment variables:
+    /// - A3S_AGENT_EXEC: agent executable path
+    /// - A3S_AGENT_ARGS: agent arguments (space-separated)
+    /// - A3S_AGENT_ENV_*: agent environment variables
+    fn from_env() -> Self {
+        let executable = std::env::var("A3S_AGENT_EXEC")
+            .unwrap_or_else(|_| "/agent/bin/agent".to_string());
+
+        let args: Vec<String> = std::env::var("A3S_AGENT_ARGS")
+            .map(|s| s.split_whitespace().map(String::from).collect())
+            .unwrap_or_else(|_| vec!["--listen".to_string(), "vsock://4088".to_string()]);
+
+        // Collect A3S_AGENT_ENV_* variables
+        let env: Vec<(String, String)> = std::env::vars()
+            .filter_map(|(key, value)| {
+                if let Some(stripped) = key.strip_prefix("A3S_AGENT_ENV_") {
+                    Some((stripped.to_string(), value))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Self {
+            executable,
+            args,
+            env,
+        }
+    }
+}
+
 fn main() {
     // Initialize logging
     tracing_subscriber::fmt()
@@ -37,23 +81,41 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     // Step 2: Mount virtio-fs shares
     mount_virtio_fs_shares()?;
 
-    // Step 3: Create namespace for agent
-    info!("Creating isolated namespace for agent");
-    let agent_config = namespace::NamespaceConfig::default();
+    // Step 3: Parse agent configuration from environment
+    let agent_config = AgentConfig::from_env();
+    info!(
+        executable = %agent_config.executable,
+        args = ?agent_config.args,
+        env_count = agent_config.env.len(),
+        "Agent configuration loaded"
+    );
 
-    // Step 4: Launch agent in isolated namespace
+    // Step 4: Create namespace for agent
+    info!("Creating isolated namespace for agent");
+    let namespace_config = namespace::NamespaceConfig::default();
+
+    // Step 5: Launch agent in isolated namespace
     info!("Launching agent process");
+
+    // Convert args to &str for spawn_isolated
+    let args_refs: Vec<&str> = agent_config.args.iter().map(|s| s.as_str()).collect();
+    let env_refs: Vec<(&str, &str)> = agent_config
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+
     let agent_pid = namespace::spawn_isolated(
-        &agent_config,
-        "/agent/bin/agent",
-        &["--listen", "vsock://4088"],
-        &[],
+        &namespace_config,
+        &agent_config.executable,
+        &args_refs,
+        &env_refs,
         "/agent",
     )?;
 
     info!("Agent started with PID {}", agent_pid);
 
-    // Step 5: Wait for agent process (reap zombies)
+    // Step 6: Wait for agent process (reap zombies)
     wait_for_children()?;
 
     Ok(())
