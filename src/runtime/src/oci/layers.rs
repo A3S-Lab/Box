@@ -103,10 +103,7 @@ mod tests {
         // Create layer with test files
         create_test_layer(
             &layer_path,
-            &[
-                ("file1.txt", b"content1"),
-                ("dir/file2.txt", b"content2"),
-            ],
+            &[("file1.txt", b"content1"), ("dir/file2.txt", b"content2")],
         );
 
         // Extract layer

@@ -6,6 +6,8 @@ use a3s_box_core::error::{BoxError, Result};
 use oci_spec::image::{ImageConfiguration, ImageIndex, ImageManifest};
 use std::path::{Path, PathBuf};
 
+use super::labels::AgentLabels;
+
 /// Represents an OCI image loaded from disk.
 #[derive(Debug)]
 pub struct OciImage {
@@ -146,6 +148,14 @@ impl OciImage {
         self.config.labels.get(key).map(|s| s.as_str())
     }
 
+    /// Parse agent configuration from image labels.
+    ///
+    /// Returns parsed agent configuration including LLM settings, workspace path,
+    /// and environment variables from `a3s.box.*` labels.
+    pub fn agent_labels(&self) -> AgentLabels {
+        AgentLabels::from_labels(&self.config.labels)
+    }
+
     /// Validate that the directory contains a valid OCI layout.
     fn validate_oci_layout(root_dir: &Path) -> Result<()> {
         // Check oci-layout file exists
@@ -189,9 +199,8 @@ impl OciImage {
             ))
         })?;
 
-        serde_json::from_str(&content).map_err(|e| {
-            BoxError::Other(format!("Failed to parse index.json: {}", e))
-        })
+        serde_json::from_str(&content)
+            .map_err(|e| BoxError::Other(format!("Failed to parse index.json: {}", e)))
     }
 
     /// Load the image manifest from blobs.
@@ -205,9 +214,8 @@ impl OciImage {
             ))
         })?;
 
-        serde_json::from_str(&content).map_err(|e| {
-            BoxError::Other(format!("Failed to parse manifest: {}", e))
-        })
+        serde_json::from_str(&content)
+            .map_err(|e| BoxError::Other(format!("Failed to parse manifest: {}", e)))
     }
 
     /// Load the image configuration from blobs.
@@ -221,9 +229,8 @@ impl OciImage {
             ))
         })?;
 
-        let oci_config: ImageConfiguration = serde_json::from_str(&content).map_err(|e| {
-            BoxError::Other(format!("Failed to parse config: {}", e))
-        })?;
+        let oci_config: ImageConfiguration = serde_json::from_str(&content)
+            .map_err(|e| BoxError::Other(format!("Failed to parse config: {}", e)))?;
 
         // Convert to our config type
         Ok(OciImageConfig::from_oci_config(&oci_config))
@@ -383,10 +390,7 @@ mod tests {
         let image = OciImage::from_path(temp_dir.path()).unwrap();
 
         // Verify config was parsed
-        assert_eq!(
-            image.entrypoint(),
-            Some(&["/bin/agent".to_string()][..])
-        );
+        assert_eq!(image.entrypoint(), Some(&["/bin/agent".to_string()][..]));
         assert_eq!(
             image.cmd(),
             Some(&["--listen".to_string(), "vsock://4088".to_string()][..])
@@ -395,7 +399,9 @@ mod tests {
 
         // Verify env was parsed
         let env = image.env();
-        assert!(env.iter().any(|(k, v)| k == "PATH" && v.contains("/usr/bin")));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "PATH" && v.contains("/usr/bin")));
 
         // Verify labels
         assert_eq!(image.label("a3s.type"), Some("agent"));
@@ -413,11 +419,7 @@ mod tests {
 
     // Helper function to create minimal OCI layout structure
     fn create_minimal_oci_layout(path: &Path) {
-        fs::write(
-            path.join("oci-layout"),
-            r#"{"imageLayoutVersion":"1.0.0"}"#,
-        )
-        .unwrap();
+        fs::write(path.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
 
         fs::write(path.join("index.json"), "{}").unwrap();
 
@@ -430,11 +432,7 @@ mod tests {
         fs::create_dir_all(path.join("blobs/sha256")).unwrap();
 
         // Create oci-layout
-        fs::write(
-            path.join("oci-layout"),
-            r#"{"imageLayoutVersion":"1.0.0"}"#,
-        )
-        .unwrap();
+        fs::write(path.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
 
         // Create config blob
         let config_content = r#"{

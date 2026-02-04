@@ -25,9 +25,11 @@
 //! ```
 
 mod image;
+mod labels;
 mod layers;
 mod rootfs;
 
 pub use image::{OciImage, OciImageConfig};
+pub use labels::AgentLabels;
 pub use layers::extract_layer;
 pub use rootfs::{OciRootfsBuilder, RootfsComposition};
