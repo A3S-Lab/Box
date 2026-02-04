@@ -378,8 +378,8 @@ fn fix_macos_libs(lib_dir: &Path, lib_prefix: &str) -> Result<(), String> {
         let filename = path.file_name().unwrap().to_string_lossy().to_string();
 
         if filename.starts_with(lib_prefix) && filename.contains(".dylib") {
-            let metadata =
-                fs::symlink_metadata(&path).map_err(|e| format!("Failed to get metadata: {}", e))?;
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|e| format!("Failed to get metadata: {}", e))?;
 
             if metadata.file_type().is_symlink() {
                 continue;
@@ -430,10 +430,7 @@ fn download_libkrunfw_prebuilt(out_dir: &Path) -> PathBuf {
     extract_tarball(&tarball_path, &extract_dir)
         .unwrap_or_else(|e| panic!("Failed to extract libkrunfw: {}", e));
 
-    println!(
-        "cargo:warning=Extracted libkrunfw to {}",
-        src_dir.display()
-    );
+    println!("cargo:warning=Extracted libkrunfw to {}", src_dir.display());
     src_dir
 }
 
@@ -500,16 +497,14 @@ fn build() {
 
 #[cfg(target_os = "linux")]
 fn fix_linux_libs(lib_dir: &Path, lib_prefix: &str) -> Result<(), String> {
-    for entry in
-        fs::read_dir(lib_dir).map_err(|e| format!("Failed to read directory: {}", e))?
-    {
+    for entry in fs::read_dir(lib_dir).map_err(|e| format!("Failed to read directory: {}", e))? {
         let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
         let path = entry.path();
         let filename = path.file_name().unwrap().to_string_lossy().to_string();
 
         if filename.starts_with(lib_prefix) && filename.contains(".so") {
-            let metadata =
-                fs::symlink_metadata(&path).map_err(|e| format!("Failed to get metadata: {}", e))?;
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|e| format!("Failed to get metadata: {}", e))?;
 
             if metadata.file_type().is_symlink() {
                 continue;

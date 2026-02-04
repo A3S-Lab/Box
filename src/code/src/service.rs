@@ -171,9 +171,9 @@ impl CodeAgentService for CodeAgentServiceImpl {
 
         Ok(Response::new(GetCapabilitiesResponse {
             info: Some(AgentInfo {
-                name: "a3s-box-code".to_string(),
+                name: "a3s-code".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                description: "A3S Box Code Agent - Rust implementation".to_string(),
+                description: "A3S Code Agent - Rust implementation".to_string(),
                 author: "A3S Team".to_string(),
                 license: "MIT".to_string(),
                 homepage: "https://github.com/anthropics/a3s-box".to_string(),
@@ -222,9 +222,9 @@ impl CodeAgentService for CodeAgentServiceImpl {
             success: true,
             message: "Agent initialized successfully".to_string(),
             info: Some(AgentInfo {
-                name: "a3s-box-code".to_string(),
+                name: "a3s-code".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
-                description: "A3S Box Code Agent".to_string(),
+                description: "A3S Code Agent".to_string(),
                 author: "A3S Team".to_string(),
                 license: "MIT".to_string(),
                 homepage: "https://github.com/anthropics/a3s-box".to_string(),

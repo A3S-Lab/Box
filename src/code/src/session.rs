@@ -122,6 +122,8 @@ pub struct Session {
     pub permission_policy: Arc<RwLock<PermissionPolicy>>,
     /// Event broadcaster for this session
     event_tx: broadcast::Sender<AgentEvent>,
+    /// Context providers for augmenting prompts with external context
+    pub context_providers: Vec<Arc<dyn a3s_box_core::context::ContextProvider>>,
 }
 
 impl Session {
@@ -167,6 +169,7 @@ impl Session {
             confirmation_manager,
             permission_policy,
             event_tx,
+            context_providers: Vec::new(),
         }
     }
 
@@ -226,6 +229,31 @@ impl Session {
     pub async fn add_ask_rule(&self, rule: &str) {
         let mut p = self.permission_policy.write().await;
         p.ask.push(crate::permissions::PermissionRule::new(rule));
+    }
+
+    /// Add a context provider to the session
+    pub fn add_context_provider(
+        &mut self,
+        provider: Arc<dyn a3s_box_core::context::ContextProvider>,
+    ) {
+        self.context_providers.push(provider);
+    }
+
+    /// Remove a context provider by name
+    ///
+    /// Returns true if a provider was removed, false otherwise.
+    pub fn remove_context_provider(&mut self, name: &str) -> bool {
+        let initial_len = self.context_providers.len();
+        self.context_providers.retain(|p| p.name() != name);
+        self.context_providers.len() < initial_len
+    }
+
+    /// Get the names of all registered context providers
+    pub fn context_provider_names(&self) -> Vec<String> {
+        self.context_providers
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect()
     }
 
     /// Set handler mode for a lane
@@ -605,7 +633,15 @@ impl SessionManager {
         }
 
         // Get session state and LLM client
-        let (history, system, tools, session_llm_client, permission_policy, confirmation_manager) = {
+        let (
+            history,
+            system,
+            tools,
+            session_llm_client,
+            permission_policy,
+            confirmation_manager,
+            context_providers,
+        ) = {
             let session = session_lock.read().await;
             (
                 session.messages.clone(),
@@ -614,6 +650,7 @@ impl SessionManager {
                 session.llm_client.clone(),
                 session.permission_policy.clone(),
                 session.confirmation_manager.clone(),
+                session.context_providers.clone(),
             )
         };
 
@@ -629,19 +666,22 @@ impl SessionManager {
             );
         };
 
-        // Create agent loop with permission policy and confirmation manager
+        // Create agent loop with permission policy, confirmation manager, and context providers
         let config = AgentConfig {
             system_prompt: system,
             tools,
             max_tool_rounds: 50,
             permission_policy: Some(permission_policy),
             confirmation_manager: Some(confirmation_manager),
+            context_providers,
         };
 
         let agent = AgentLoop::new(llm_client, self.tool_executor.clone(), config);
 
-        // Execute
-        let result = agent.execute(&history, prompt, None).await?;
+        // Execute with session context
+        let result = agent
+            .execute_with_session(&history, prompt, Some(session_id), None)
+            .await?;
 
         // Update session
         {
@@ -652,7 +692,11 @@ impl SessionManager {
 
         // Persist to store
         if let Err(e) = self.save_session(session_id).await {
-            tracing::warn!("Failed to persist session {} after generate: {}", session_id, e);
+            tracing::warn!(
+                "Failed to persist session {} after generate: {}",
+                session_id,
+                e
+            );
         }
 
         Ok(result)
@@ -681,7 +725,15 @@ impl SessionManager {
         }
 
         // Get session state and LLM client
-        let (history, system, tools, session_llm_client, permission_policy, confirmation_manager) = {
+        let (
+            history,
+            system,
+            tools,
+            session_llm_client,
+            permission_policy,
+            confirmation_manager,
+            context_providers,
+        ) = {
             let session = session_lock.read().await;
             (
                 session.messages.clone(),
@@ -690,6 +742,7 @@ impl SessionManager {
                 session.llm_client.clone(),
                 session.permission_policy.clone(),
                 session.confirmation_manager.clone(),
+                session.context_providers.clone(),
             )
         };
 
@@ -705,13 +758,14 @@ impl SessionManager {
             );
         };
 
-        // Create agent loop with permission policy and confirmation manager
+        // Create agent loop with permission policy, confirmation manager, and context providers
         let config = AgentConfig {
             system_prompt: system,
             tools,
             max_tool_rounds: 50,
             permission_policy: Some(permission_policy),
             confirmation_manager: Some(confirmation_manager),
+            context_providers,
         };
 
         let agent = AgentLoop::new(llm_client, self.tool_executor.clone(), config);
@@ -745,7 +799,11 @@ impl SessionManager {
                 };
                 let data = session.to_session_data(llm_config);
                 if let Err(e) = store.save(&data).await {
-                    tracing::warn!("Failed to persist session {} after streaming: {}", session_id_owned, e);
+                    tracing::warn!(
+                        "Failed to persist session {} after streaming: {}",
+                        session_id_owned,
+                        e
+                    );
                 }
             }
 
@@ -779,7 +837,11 @@ impl SessionManager {
 
         // Persist to store
         if let Err(e) = self.save_session(session_id).await {
-            tracing::warn!("Failed to persist session {} after clear: {}", session_id, e);
+            tracing::warn!(
+                "Failed to persist session {} after clear: {}",
+                session_id,
+                e
+            );
         }
 
         Ok(())
@@ -807,7 +869,11 @@ impl SessionManager {
                 // Persist after truncation
                 drop(session);
                 if let Err(e) = self.save_session(session_id).await {
-                    tracing::warn!("Failed to persist session {} after compact: {}", session_id, e);
+                    tracing::warn!(
+                        "Failed to persist session {} after compact: {}",
+                        session_id,
+                        e
+                    );
                 }
                 return Ok(());
             };
@@ -817,7 +883,11 @@ impl SessionManager {
 
         // Persist to store
         if let Err(e) = self.save_session(session_id).await {
-            tracing::warn!("Failed to persist session {} after compact: {}", session_id, e);
+            tracing::warn!(
+                "Failed to persist session {} after compact: {}",
+                session_id,
+                e
+            );
         }
 
         Ok(())
@@ -866,7 +936,11 @@ impl SessionManager {
 
         // Persist to store
         if let Err(e) = self.save_session(session_id).await {
-            tracing::warn!("Failed to persist session {} after configure: {}", session_id, e);
+            tracing::warn!(
+                "Failed to persist session {} after configure: {}",
+                session_id,
+                e
+            );
         }
 
         Ok(())
@@ -889,11 +963,7 @@ impl SessionManager {
         if tool_names.is_empty() {
             tracing::warn!("No tools found in skill: {}", skill_name);
         } else {
-            tracing::info!(
-                "Loaded skill {} with tools: {:?}",
-                skill_name,
-                tool_names
-            );
+            tracing::info!("Loaded skill {} with tools: {:?}", skill_name, tool_names);
         }
 
         tool_names
@@ -928,7 +998,11 @@ impl SessionManager {
 
         if paused {
             if let Err(e) = self.save_session(session_id).await {
-                tracing::warn!("Failed to persist session {} after pause: {}", session_id, e);
+                tracing::warn!(
+                    "Failed to persist session {} after pause: {}",
+                    session_id,
+                    e
+                );
             }
         }
 
@@ -945,7 +1019,11 @@ impl SessionManager {
 
         if resumed {
             if let Err(e) = self.save_session(session_id).await {
-                tracing::warn!("Failed to persist session {} after resume: {}", session_id, e);
+                tracing::warn!(
+                    "Failed to persist session {} after resume: {}",
+                    session_id,
+                    e
+                );
             }
         }
 
@@ -1001,7 +1079,11 @@ impl SessionManager {
 
         // Persist to store
         if let Err(e) = self.save_session(session_id).await {
-            tracing::warn!("Failed to persist session {} after set_confirmation_policy: {}", session_id, e);
+            tracing::warn!(
+                "Failed to persist session {} after set_confirmation_policy: {}",
+                session_id,
+                e
+            );
         }
 
         Ok(policy)
@@ -1035,7 +1117,11 @@ impl SessionManager {
 
         // Persist to store
         if let Err(e) = self.save_session(session_id).await {
-            tracing::warn!("Failed to persist session {} after set_permission_policy: {}", session_id, e);
+            tracing::warn!(
+                "Failed to persist session {} after set_permission_policy: {}",
+                session_id,
+                e
+            );
         }
 
         Ok(policy)
@@ -1076,6 +1162,32 @@ impl SessionManager {
             _ => anyhow::bail!("Unknown rule type: {}", rule_type),
         }
         Ok(())
+    }
+
+    /// Add a context provider to a session
+    pub async fn add_context_provider(
+        &self,
+        session_id: &str,
+        provider: Arc<dyn a3s_box_core::context::ContextProvider>,
+    ) -> Result<()> {
+        let session_lock = self.get_session(session_id).await?;
+        let mut session = session_lock.write().await;
+        session.add_context_provider(provider);
+        Ok(())
+    }
+
+    /// Remove a context provider from a session by name
+    pub async fn remove_context_provider(&self, session_id: &str, name: &str) -> Result<bool> {
+        let session_lock = self.get_session(session_id).await?;
+        let mut session = session_lock.write().await;
+        Ok(session.remove_context_provider(name))
+    }
+
+    /// List context provider names for a session
+    pub async fn list_context_providers(&self, session_id: &str) -> Result<Vec<String>> {
+        let session_lock = self.get_session(session_id).await?;
+        let session = session_lock.read().await;
+        Ok(session.context_provider_names())
     }
 
     /// Set lane handler configuration
@@ -2203,5 +2315,240 @@ mod tests {
         manager.resume_session("session-1").await.unwrap();
         manager.clear("session-1").await.unwrap();
         manager.destroy_session("session-1").await.unwrap();
+    }
+
+    // ========================================================================
+    // Context Provider Tests
+    // ========================================================================
+
+    use a3s_box_core::context::{
+        ContextItem, ContextProvider, ContextQuery, ContextResult, ContextType,
+    };
+
+    /// Mock context provider for testing
+    struct MockContextProvider {
+        name: String,
+        items: Vec<ContextItem>,
+    }
+
+    impl MockContextProvider {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                items: Vec::new(),
+            }
+        }
+
+        fn with_items(mut self, items: Vec<ContextItem>) -> Self {
+            self.items = items;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ContextProvider for MockContextProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn query(&self, _query: &ContextQuery) -> anyhow::Result<ContextResult> {
+            let mut result = ContextResult::new(&self.name);
+            for item in &self.items {
+                result.add_item(item.clone());
+            }
+            Ok(result)
+        }
+    }
+
+    #[test]
+    fn test_session_context_providers_default() {
+        let config = SessionConfig::default();
+        let session = Session::new("test-1".to_string(), config, vec![]);
+        assert!(session.context_providers.is_empty());
+        assert!(session.context_provider_names().is_empty());
+    }
+
+    #[test]
+    fn test_session_add_context_provider() {
+        let config = SessionConfig::default();
+        let mut session = Session::new("test-1".to_string(), config, vec![]);
+
+        let provider = Arc::new(MockContextProvider::new("test-provider"));
+        session.add_context_provider(provider);
+
+        assert_eq!(session.context_providers.len(), 1);
+        assert_eq!(session.context_provider_names(), vec!["test-provider"]);
+    }
+
+    #[test]
+    fn test_session_add_multiple_context_providers() {
+        let config = SessionConfig::default();
+        let mut session = Session::new("test-1".to_string(), config, vec![]);
+
+        session.add_context_provider(Arc::new(MockContextProvider::new("provider-1")));
+        session.add_context_provider(Arc::new(MockContextProvider::new("provider-2")));
+        session.add_context_provider(Arc::new(MockContextProvider::new("provider-3")));
+
+        assert_eq!(session.context_providers.len(), 3);
+        let names = session.context_provider_names();
+        assert!(names.contains(&"provider-1".to_string()));
+        assert!(names.contains(&"provider-2".to_string()));
+        assert!(names.contains(&"provider-3".to_string()));
+    }
+
+    #[test]
+    fn test_session_remove_context_provider() {
+        let config = SessionConfig::default();
+        let mut session = Session::new("test-1".to_string(), config, vec![]);
+
+        session.add_context_provider(Arc::new(MockContextProvider::new("keep")));
+        session.add_context_provider(Arc::new(MockContextProvider::new("remove")));
+
+        assert_eq!(session.context_providers.len(), 2);
+
+        // Remove provider
+        let removed = session.remove_context_provider("remove");
+        assert!(removed);
+        assert_eq!(session.context_providers.len(), 1);
+        assert_eq!(session.context_provider_names(), vec!["keep"]);
+
+        // Try to remove non-existent provider
+        let removed = session.remove_context_provider("non-existent");
+        assert!(!removed);
+        assert_eq!(session.context_providers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_add_context_provider() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Initially no providers
+        let names = manager.list_context_providers("session-1").await.unwrap();
+        assert!(names.is_empty());
+
+        // Add provider
+        let provider =
+            Arc::new(
+                MockContextProvider::new("test-provider").with_items(vec![ContextItem::new(
+                    "item-1",
+                    ContextType::Resource,
+                    "Test content",
+                )]),
+            );
+        manager
+            .add_context_provider("session-1", provider)
+            .await
+            .unwrap();
+
+        // Now has provider
+        let names = manager.list_context_providers("session-1").await.unwrap();
+        assert_eq!(names, vec!["test-provider"]);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_remove_context_provider() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config)
+            .await
+            .unwrap();
+
+        // Add providers
+        manager
+            .add_context_provider("session-1", Arc::new(MockContextProvider::new("p1")))
+            .await
+            .unwrap();
+        manager
+            .add_context_provider("session-1", Arc::new(MockContextProvider::new("p2")))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manager
+                .list_context_providers("session-1")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Remove one
+        let removed = manager
+            .remove_context_provider("session-1", "p1")
+            .await
+            .unwrap();
+        assert!(removed);
+
+        let names = manager.list_context_providers("session-1").await.unwrap();
+        assert_eq!(names, vec!["p2"]);
+
+        // Remove non-existent
+        let removed = manager
+            .remove_context_provider("session-1", "non-existent")
+            .await
+            .unwrap();
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_context_provider_session_not_found() {
+        let manager = create_test_session_manager();
+
+        let result = manager.list_context_providers("non-existent").await;
+        assert!(result.is_err());
+
+        let result = manager
+            .add_context_provider("non-existent", Arc::new(MockContextProvider::new("p")))
+            .await;
+        assert!(result.is_err());
+
+        let result = manager.remove_context_provider("non-existent", "p").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_multiple_sessions_independent_context_providers() {
+        let manager = create_test_session_manager();
+
+        let config = SessionConfig::default();
+        manager
+            .create_session("session-1".to_string(), config.clone())
+            .await
+            .unwrap();
+        manager
+            .create_session("session-2".to_string(), config)
+            .await
+            .unwrap();
+
+        // Add different providers to each session
+        manager
+            .add_context_provider(
+                "session-1",
+                Arc::new(MockContextProvider::new("provider-for-1")),
+            )
+            .await
+            .unwrap();
+        manager
+            .add_context_provider(
+                "session-2",
+                Arc::new(MockContextProvider::new("provider-for-2")),
+            )
+            .await
+            .unwrap();
+
+        // Verify independence
+        let names1 = manager.list_context_providers("session-1").await.unwrap();
+        let names2 = manager.list_context_providers("session-2").await.unwrap();
+
+        assert_eq!(names1, vec!["provider-for-1"]);
+        assert_eq!(names2, vec!["provider-for-2"]);
     }
 }

@@ -147,6 +147,13 @@ pub mod events {
     // Queue events
     pub const QUEUE_LANE_PRESSURE: &str = "queue.lane.pressure";
     pub const QUEUE_LANE_IDLE: &str = "queue.lane.idle";
+
+    // Context events
+    pub const CONTEXT_QUERY_STARTED: &str = "context.query.started";
+    pub const CONTEXT_QUERY_COMPLETED: &str = "context.query.completed";
+    pub const CONTEXT_QUERY_FAILED: &str = "context.query.failed";
+    pub const CONTEXT_PROVIDER_REGISTERED: &str = "context.provider.registered";
+    pub const CONTEXT_PROVIDER_REMOVED: &str = "context.provider.removed";
 }
 
 #[cfg(test)]
@@ -378,7 +385,10 @@ mod tests {
         assert_eq!(events::SESSION_CREATED, "session.created");
         assert_eq!(events::SESSION_DESTROYED, "session.destroyed");
         assert_eq!(events::SESSION_CONTEXT_WARNING, "session.context.warning");
-        assert_eq!(events::SESSION_CONTEXT_COMPACTED, "session.context.compacted");
+        assert_eq!(
+            events::SESSION_CONTEXT_COMPACTED,
+            "session.context.compacted"
+        );
     }
 
     #[test]
@@ -410,6 +420,18 @@ mod tests {
     }
 
     #[test]
+    fn test_event_catalog_context_events() {
+        assert_eq!(events::CONTEXT_QUERY_STARTED, "context.query.started");
+        assert_eq!(events::CONTEXT_QUERY_COMPLETED, "context.query.completed");
+        assert_eq!(events::CONTEXT_QUERY_FAILED, "context.query.failed");
+        assert_eq!(
+            events::CONTEXT_PROVIDER_REGISTERED,
+            "context.provider.registered"
+        );
+        assert_eq!(events::CONTEXT_PROVIDER_REMOVED, "context.provider.removed");
+    }
+
+    #[test]
     fn test_event_key_naming_convention() {
         // All event keys should follow dot-separated lowercase format
         let all_events = vec![
@@ -418,6 +440,7 @@ mod tests {
             events::PROMPT_STARTED,
             events::SKILL_ACTIVATED,
             events::QUEUE_LANE_PRESSURE,
+            events::CONTEXT_QUERY_STARTED,
         ];
 
         for event_key in all_events {

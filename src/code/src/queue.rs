@@ -2013,10 +2013,7 @@ mod tests {
             config.handler_config(SessionLane::Query).mode,
             TaskHandlerMode::Internal
         );
-        assert_eq!(
-            config.handler_config(SessionLane::Query).timeout_ms,
-            60_000
-        );
+        assert_eq!(config.handler_config(SessionLane::Query).timeout_ms, 60_000);
 
         assert_eq!(
             config.handler_config(SessionLane::Execute).mode,

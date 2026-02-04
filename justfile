@@ -547,3 +547,162 @@ oci-build tag="a3s-box-agent:latest" output="a3s-box-agent.tar":
     just docker-build-linux {{tag}}
     just docker-export {{tag}} {{output}}
 
+# ============================================================================
+# Publish
+# ============================================================================
+
+# Publish all crates to crates.io (in dependency order)
+publish:
+    #!/usr/bin/env bash
+    set -e
+
+    # Colors
+    BOLD='\033[1m'
+    GREEN='\033[0;32m'
+    BLUE='\033[0;34m'
+    YELLOW='\033[0;33m'
+    RED='\033[0;31m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+
+    print_header() {
+        echo ""
+        echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+        echo -e "${BOLD}  $1${RESET}"
+        echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    }
+
+    print_step() {
+        echo -e "${BLUE}▶${RESET} ${BOLD}$1${RESET}"
+    }
+
+    print_success() {
+        echo -e "${GREEN}✓${RESET} $1"
+    }
+
+    print_error() {
+        echo -e "${RED}✗${RESET} $1"
+        exit 1
+    }
+
+    publish_crate() {
+        local crate=$1
+        local crate_path=$2
+
+        print_header "📦 Publishing ${crate}"
+        echo ""
+
+        # Show version
+        VERSION=$(grep '^version' "src/${crate_path}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        echo -e "  ${DIM}Version:${RESET} ${BOLD}${VERSION}${RESET}"
+        echo ""
+
+        # Dry run first
+        print_step "Verifying ${crate}..."
+        if (cd src && cargo publish -p "$crate" --dry-run); then
+            print_success "Package verification OK"
+        else
+            print_error "Package verification failed for ${crate}."
+        fi
+
+        # Publish
+        print_step "Publishing ${crate}..."
+        if (cd src && cargo publish -p "$crate"); then
+            print_success "Published ${crate} v${VERSION}"
+        else
+            print_error "Publish failed for ${crate}."
+        fi
+
+        # Wait for crates.io to index (important for dependencies)
+        echo -e "  ${DIM}Waiting for crates.io to index...${RESET}"
+        sleep 30
+    }
+
+    print_header "📦 Publishing A3S Box Crates to crates.io"
+    echo ""
+    echo -e "  ${DIM}Crates will be published in dependency order:${RESET}"
+    echo -e "    1. a3s-box-core"
+    echo -e "    2. a3s-box-runtime"
+    echo ""
+
+    # Pre-publish checks
+    print_step "Running pre-publish checks..."
+
+    # Format check
+    print_step "Checking formatting..."
+    if (cd src && cargo fmt --all -- --check); then
+        print_success "Formatting OK"
+    else
+        print_error "Formatting check failed. Run 'just fmt' first."
+    fi
+
+    # Lint
+    print_step "Running clippy..."
+    if (cd src && cargo clippy --all-targets --all-features -- -D warnings); then
+        print_success "Clippy OK"
+    else
+        print_error "Clippy check failed. Fix warnings first."
+    fi
+
+    # Test
+    print_step "Running tests..."
+    if (cd src && cargo test -p a3s-box-core -p a3s-box-runtime --lib); then
+        print_success "Tests OK"
+    else
+        print_error "Tests failed."
+    fi
+
+    # Publish crates in order
+    publish_crate "a3s-box-core" "core"
+    publish_crate "a3s-box-runtime" "runtime"
+
+    print_header "✓ All crates published successfully"
+    echo ""
+
+# Publish dry-run (verify all crates without publishing)
+publish-dry:
+    #!/usr/bin/env bash
+    set -e
+
+    echo ""
+    echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
+    echo "┃                  📦 Publish Dry Run (A3S Box)                          ┃"
+    echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
+    echo ""
+
+    echo "=== a3s-box-core ==="
+    CORE_VERSION=$(grep '^version' src/core/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    echo "Version: ${CORE_VERSION}"
+    cd src && cargo publish -p a3s-box-core --dry-run
+    cd ..
+    echo ""
+
+    echo "=== a3s-box-runtime ==="
+    RUNTIME_VERSION=$(grep '^version' src/runtime/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+    echo "Version: ${RUNTIME_VERSION}"
+    cd src && cargo publish -p a3s-box-runtime --dry-run
+    cd ..
+    echo ""
+
+    echo "✓ Dry run successful. Ready to publish with 'just publish'"
+    echo ""
+
+# Publish a single crate
+publish-crate CRATE:
+    #!/usr/bin/env bash
+    set -e
+    echo ""
+    echo "Publishing {{CRATE}}..."
+    cd src && cargo publish -p {{CRATE}}
+    echo ""
+    echo "✓ Published {{CRATE}}"
+
+# Show versions of all crates
+version:
+    #!/usr/bin/env bash
+    echo ""
+    echo "A3S Box Crate Versions:"
+    echo "  a3s-box-core:    $(grep '^version' src/core/Cargo.toml | head -1 | sed 's/.*\"\(.*\)\".*/\1/')"
+    echo "  a3s-box-runtime: $(grep '^version' src/runtime/Cargo.toml | head -1 | sed 's/.*\"\(.*\)\".*/\1/')"
+    echo ""
+

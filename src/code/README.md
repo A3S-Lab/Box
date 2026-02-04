@@ -1,6 +1,6 @@
-# A3S Box Code Agent
+# A3S Code Agent
 
-Rust implementation of the coding agent that runs inside the guest VM. This is a full-featured agentic coding assistant similar to Pi, with tool calling, streaming, and session management.
+Rust implementation of the coding agent that runs inside the guest VM. This is a full-featured agentic coding assistant, with tool calling, streaming, and session management.
 
 ## Architecture
 
@@ -66,13 +66,13 @@ Full AgentService implementation:
 
 ```bash
 # Build the agent
-cargo build -p a3s-box-code
+cargo build -p a3s-code
 
 # Build release
-cargo build -p a3s-box-code --release
+cargo build -p a3s-code --release
 
 # Run tests
-cargo test -p a3s-box-code --lib
+cargo test -p a3s-code --lib
 ```
 
 ## Environment Variables
@@ -98,7 +98,7 @@ export WORKSPACE="/a3s/workspace"
 export RUST_LOG=info
 
 # Run agent
-/a3s/agent/a3s-box-code
+/a3s/agent/a3s-code
 ```
 
 ### Local Development
@@ -108,7 +108,7 @@ export RUST_LOG=info
 ANTHROPIC_API_KEY=sk-ant-... \
 WORKSPACE=/tmp/workspace \
 LISTEN_ADDR=127.0.0.1:4088 \
-cargo run -p a3s-box-code
+cargo run -p a3s-code
 ```
 
 ## gRPC API

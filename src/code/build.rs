@@ -1,4 +1,4 @@
-//! Build script for a3s-box-code
+//! Build script for a3s-code
 //!
 //! Compiles the gRPC proto definitions from src/proto.
 

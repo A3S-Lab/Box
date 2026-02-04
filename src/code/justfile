@@ -1,4 +1,4 @@
-# A3S Box Code (Guest Agent) - Justfile
+# A3S Code (Guest Agent) - Justfile
 # Most commands available via root: just test, just fmt, just lint
 
 default:
@@ -6,7 +6,7 @@ default:
 
 # Run tests (this crate only)
 test:
-    cargo test -p a3s-box-code
+    cargo test -p a3s-code
 
 # Start agent server (dev mode)
 serve:
@@ -14,31 +14,31 @@ serve:
     set -euo pipefail
     [ -f ../.env ] && export $(grep -v '^#' ../.env | grep -v '^$' | xargs)
     [ -f ../.env.local ] && export $(grep -v '^#' ../.env.local | grep -v '^$' | xargs)
-    RUST_LOG=info cargo run -p a3s-box-code
+    RUST_LOG=info cargo run -p a3s-code
 
 # Run queue and HITL tests
 test-queue:
-    cargo test -p a3s-box-code --lib -- queue::tests hitl::tests
+    cargo test -p a3s-code --lib -- queue::tests hitl::tests
 
 # Run queue tests only
 test-queue-only:
-    cargo test -p a3s-box-code --lib -- queue::tests
+    cargo test -p a3s-code --lib -- queue::tests
 
 # Run HITL tests only (hitl module)
 test-hitl:
-    cargo test -p a3s-box-code --lib -- hitl::tests
+    cargo test -p a3s-code --lib -- hitl::tests
 
 # Run HITL tests in agent loop (agent module)
 test-agent-hitl:
-    cargo test -p a3s-box-code --lib -- agent::tests::test_agent_hitl
+    cargo test -p a3s-code --lib -- agent::tests::test_agent_hitl
 
 # Run all HITL-related tests (hitl + agent)
 test-hitl-all:
-    cargo test -p a3s-box-code --lib -- hitl::tests agent::tests::test_agent_hitl
+    cargo test -p a3s-code --lib -- hitl::tests agent::tests::test_agent_hitl
 
 # Run session tests (includes queue/HITL integration)
 test-session:
-    cargo test -p a3s-box-code --lib -- session::tests
+    cargo test -p a3s-code --lib -- session::tests
 
 # Start agent server (debug logging)
 serve-debug:
@@ -46,4 +46,4 @@ serve-debug:
     set -euo pipefail
     [ -f ../.env ] && export $(grep -v '^#' ../.env | grep -v '^$' | xargs)
     [ -f ../.env.local ] && export $(grep -v '^#' ../.env.local | grep -v '^$' | xargs)
-    RUST_LOG=debug cargo run -p a3s-box-code
+    RUST_LOG=debug cargo run -p a3s-code

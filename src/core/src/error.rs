@@ -62,6 +62,10 @@ pub enum BoxError {
     #[error("Skill error: {0}")]
     SkillError(String),
 
+    /// Context provider error
+    #[error("Context error: {provider} - {message}")]
+    ContextError { provider: String, message: String },
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -148,10 +152,7 @@ mod tests {
     #[test]
     fn test_timeout_error_display() {
         let error = BoxError::TimeoutError("Operation timed out after 30s".to_string());
-        assert_eq!(
-            error.to_string(),
-            "Timeout: Operation timed out after 30s"
-        );
+        assert_eq!(error.to_string(), "Timeout: Operation timed out after 30s");
     }
 
     #[test]
@@ -187,6 +188,18 @@ mod tests {
     fn test_skill_error_display() {
         let error = BoxError::SkillError("Skill parsing failed".to_string());
         assert_eq!(error.to_string(), "Skill error: Skill parsing failed");
+    }
+
+    #[test]
+    fn test_context_error_display() {
+        let error = BoxError::ContextError {
+            provider: "openviking".to_string(),
+            message: "Connection refused".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Context error: openviking - Connection refused"
+        );
     }
 
     #[test]

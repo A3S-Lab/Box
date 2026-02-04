@@ -2,8 +2,6 @@
 members = [
     "core",
     "runtime",
-    "code",
-    "queue",
     "shim",
     "guest/init",
     "sdk/python",

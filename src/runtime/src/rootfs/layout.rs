@@ -3,7 +3,8 @@
 //! Defines the directory structure inside the guest VM.
 
 /// Path to the guest agent binary inside the VM.
-pub const GUEST_AGENT_PATH: &str = "/a3s/agent/a3s-box-code";
+/// The agent binary is provided externally (e.g., from OCI image or mounted volume).
+pub const GUEST_AGENT_PATH: &str = "/a3s/agent/a3s-code";
 
 /// Working directory inside the guest VM.
 pub const GUEST_WORKDIR: &str = "/workspace";

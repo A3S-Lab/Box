@@ -1,5 +1,5 @@
 [package]
-name = "a3s-box-code"
+name = "a3s-code"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,11 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "a3s_box_code"
+name = "a3s_code"
 path = "src/lib.rs"
 
 [[bin]]
-name = "a3s-box-code"
+name = "a3s-code"
 path = "src/main.rs"
 
 [dependencies]
