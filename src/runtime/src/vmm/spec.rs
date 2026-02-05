@@ -25,6 +25,15 @@ pub struct Entrypoint {
     pub env: Vec<(String, String)>,
 }
 
+/// TEE instance configuration for the shim.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeeInstanceConfig {
+    /// Path to TEE configuration JSON file
+    pub config_path: PathBuf,
+    /// TEE type identifier (e.g., "snp")
+    pub tee_type: String,
+}
+
 /// Complete configuration for a VM instance.
 ///
 /// This struct is serialized and passed to the shim subprocess,
@@ -58,6 +67,9 @@ pub struct InstanceSpec {
 
     /// Working directory inside the VM
     pub workdir: String,
+
+    /// TEE configuration (None for standard VM)
+    pub tee_config: Option<TeeInstanceConfig>,
 }
 
 impl Default for InstanceSpec {
@@ -76,6 +88,7 @@ impl Default for InstanceSpec {
             },
             console_output: None,
             workdir: "/".to_string(),
+            tee_config: None,
         }
     }
 }

@@ -224,6 +224,30 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.set_console_output(console_str)?;
     }
 
+    // Configure TEE if specified
+    if let Some(ref tee_config) = spec.tee_config {
+        tracing::info!(
+            tee_type = %tee_config.tee_type,
+            config_path = %tee_config.config_path.display(),
+            "Configuring TEE"
+        );
+
+        // Enable split IRQ chip (required for TEE)
+        ctx.enable_split_irqchip()?;
+
+        // Set TEE configuration file
+        let tee_config_str = tee_config
+            .config_path
+            .to_str()
+            .ok_or_else(|| BoxError::TeeConfig(format!(
+                "Invalid TEE config path: {}",
+                tee_config.config_path.display()
+            )))?;
+        ctx.set_tee_config(tee_config_str)?;
+
+        tracing::info!("TEE configured successfully");
+    }
+
     // Start VM (process takeover - never returns on success)
     tracing::info!(box_id = %spec.box_id, "Starting VM (process takeover)");
     let status = ctx.start_enter();

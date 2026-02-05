@@ -152,6 +152,10 @@ extern "C" {
     /// Set the gid before starting the microVM.
     pub fn krun_setgid(ctx_id: u32, gid: libc::gid_t) -> i32;
 
+    /// Set the file path to the TEE configuration file.
+    /// Only available in libkrun-sev builds.
+    pub fn krun_set_tee_config_file(ctx_id: u32, filepath: *const c_char) -> i32;
+
     /// Configure a root filesystem backed by a block device with automatic remount.
     pub fn krun_set_root_disk_remount(
         ctx_id: u32,

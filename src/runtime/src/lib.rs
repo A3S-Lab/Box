@@ -14,6 +14,7 @@ pub mod oci;
 pub mod rootfs;
 pub mod session;
 pub mod skill;
+pub mod tee;
 pub mod vm;
 pub mod vmm;
 
@@ -23,8 +24,9 @@ pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
 pub use session::{Session, SessionId, SessionManager};
 pub use skill::{LimitFilter, NameFilter, NoFilter, SkillFilter, SkillManager, SkillPackage};
+pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
 pub use vm::{BoxState, VmManager};
-pub use vmm::{Entrypoint, FsMount, InstanceSpec, VmController, VmHandler, VmMetrics};
+pub use vmm::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig, VmController, VmHandler, VmMetrics};
 
 /// A3S Box Runtime version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

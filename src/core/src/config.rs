@@ -2,6 +2,45 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// TEE (Trusted Execution Environment) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TeeConfig {
+    /// No TEE (standard VM)
+    #[default]
+    None,
+
+    /// AMD SEV-SNP (Secure Encrypted Virtualization - Secure Nested Paging)
+    SevSnp {
+        /// Workload identifier for attestation
+        workload_id: String,
+        /// CPU generation: "milan" or "genoa"
+        #[serde(default)]
+        generation: SevSnpGeneration,
+    },
+}
+
+/// AMD SEV-SNP CPU generation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SevSnpGeneration {
+    /// AMD EPYC Milan (3rd gen)
+    #[default]
+    Milan,
+    /// AMD EPYC Genoa (4th gen)
+    Genoa,
+}
+
+impl SevSnpGeneration {
+    /// Get the generation as a string for TEE config.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SevSnpGeneration::Milan => "milan",
+            SevSnpGeneration::Genoa => "genoa",
+        }
+    }
+}
+
 /// Agent type configuration - specifies how the coding agent is loaded.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -95,6 +134,10 @@ pub struct BoxConfig {
 
     /// Enable gRPC debug logging
     pub debug_grpc: bool,
+
+    /// TEE (Trusted Execution Environment) configuration
+    #[serde(default)]
+    pub tee: TeeConfig,
 }
 
 impl Default for BoxConfig {
@@ -109,6 +152,7 @@ impl Default for BoxConfig {
             lanes: Self::default_lanes(),
             log_level: LogLevel::Info,
             debug_grpc: false,
+            tee: TeeConfig::default(),
         }
     }
 }
@@ -740,5 +784,95 @@ mod tests {
 
         assert_eq!(parsed.agent, config.agent);
         assert_eq!(parsed.business, config.business);
+    }
+
+    #[test]
+    fn test_tee_config_default() {
+        let tee = TeeConfig::default();
+        assert_eq!(tee, TeeConfig::None);
+    }
+
+    #[test]
+    fn test_tee_config_sev_snp() {
+        let tee = TeeConfig::SevSnp {
+            workload_id: "test-agent".to_string(),
+            generation: SevSnpGeneration::Milan,
+        };
+
+        match tee {
+            TeeConfig::SevSnp {
+                workload_id,
+                generation,
+            } => {
+                assert_eq!(workload_id, "test-agent");
+                assert_eq!(generation, SevSnpGeneration::Milan);
+            }
+            _ => panic!("Expected SevSnp variant"),
+        }
+    }
+
+    #[test]
+    fn test_sev_snp_generation_as_str() {
+        assert_eq!(SevSnpGeneration::Milan.as_str(), "milan");
+        assert_eq!(SevSnpGeneration::Genoa.as_str(), "genoa");
+    }
+
+    #[test]
+    fn test_sev_snp_generation_default() {
+        let gen = SevSnpGeneration::default();
+        assert_eq!(gen, SevSnpGeneration::Milan);
+    }
+
+    #[test]
+    fn test_tee_config_serialization() {
+        let tee = TeeConfig::SevSnp {
+            workload_id: "my-workload".to_string(),
+            generation: SevSnpGeneration::Genoa,
+        };
+
+        let json = serde_json::to_string(&tee).unwrap();
+        let parsed: TeeConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed, tee);
+    }
+
+    #[test]
+    fn test_tee_config_none_serialization() {
+        let tee = TeeConfig::None;
+        let json = serde_json::to_string(&tee).unwrap();
+        let parsed: TeeConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed, TeeConfig::None);
+    }
+
+    #[test]
+    fn test_box_config_with_tee() {
+        let config = BoxConfig {
+            tee: TeeConfig::SevSnp {
+                workload_id: "secure-agent".to_string(),
+                generation: SevSnpGeneration::Milan,
+            },
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: BoxConfig = serde_json::from_str(&json).unwrap();
+
+        match parsed.tee {
+            TeeConfig::SevSnp {
+                workload_id,
+                generation,
+            } => {
+                assert_eq!(workload_id, "secure-agent");
+                assert_eq!(generation, SevSnpGeneration::Milan);
+            }
+            _ => panic!("Expected SevSnp TEE config"),
+        }
+    }
+
+    #[test]
+    fn test_box_config_default_has_no_tee() {
+        let config = BoxConfig::default();
+        assert_eq!(config.tee, TeeConfig::None);
     }
 }

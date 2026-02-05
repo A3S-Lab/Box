@@ -1,9 +1,9 @@
 //! VM Manager - Lifecycle management for MicroVM instances.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use a3s_box_core::config::{AgentType, BoxConfig, BusinessType};
+use a3s_box_core::config::{AgentType, BoxConfig, BusinessType, TeeConfig};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::{BoxEvent, EventEmitter};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 
 use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
-use crate::vmm::{Entrypoint, FsMount, InstanceSpec, VmController, VmHandler};
+use crate::vmm::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig, VmController, VmHandler};
 use crate::AGENT_VSOCK_PORT;
 
 /// Box state machine.
@@ -49,6 +49,8 @@ struct BoxLayout {
     agent_oci_config: Option<OciImageConfig>,
     /// Whether guest init is installed for namespace isolation
     has_guest_init: bool,
+    /// TEE instance configuration (if TEE is enabled)
+    tee_instance_config: Option<TeeInstanceConfig>,
 }
 
 /// VM manager - orchestrates VM lifecycle.
@@ -350,6 +352,9 @@ impl VmManager {
             }
         };
 
+        // Generate TEE configuration if enabled
+        let tee_instance_config = self.generate_tee_config(&box_dir)?;
+
         Ok(BoxLayout {
             rootfs_path,
             socket_path: socket_dir.join("grpc.sock"),
@@ -358,7 +363,55 @@ impl VmManager {
             console_output: Some(logs_dir.join("console.log")),
             agent_oci_config,
             has_guest_init,
+            tee_instance_config,
         })
+    }
+
+    /// Generate TEE configuration file if TEE is enabled.
+    fn generate_tee_config(&self, box_dir: &Path) -> Result<Option<TeeInstanceConfig>> {
+        match &self.config.tee {
+            TeeConfig::None => Ok(None),
+            TeeConfig::SevSnp {
+                workload_id,
+                generation,
+            } => {
+                // Verify hardware support
+                crate::tee::require_sev_snp_support()?;
+
+                // Generate TEE config JSON
+                let config = serde_json::json!({
+                    "workload_id": workload_id,
+                    "cpus": self.config.resources.vcpus,
+                    "ram_mib": self.config.resources.memory_mb,
+                    "tee": "snp",
+                    "tee_data": format!(r#"{{"gen":"{}"}}"#, generation.as_str()),
+                    "attestation_url": ""  // Phase 2: Remote attestation
+                });
+
+                let config_path = box_dir.join("tee-config.json");
+                std::fs::write(&config_path, serde_json::to_string_pretty(&config)?).map_err(
+                    |e| {
+                        BoxError::TeeConfig(format!(
+                            "Failed to write TEE config to {}: {}",
+                            config_path.display(),
+                            e
+                        ))
+                    },
+                )?;
+
+                tracing::info!(
+                    workload_id = %workload_id,
+                    generation = %generation.as_str(),
+                    config_path = %config_path.display(),
+                    "Generated TEE configuration"
+                );
+
+                Ok(Some(TeeInstanceConfig {
+                    config_path,
+                    tee_type: "snp".to_string(),
+                }))
+            }
+        }
     }
 
     /// Find the guest init binary in common locations.
@@ -602,6 +655,7 @@ impl VmManager {
             entrypoint,
             console_output: layout.console_output.clone(),
             workdir,
+            tee_config: layout.tee_instance_config.clone(),
         })
     }
 

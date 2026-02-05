@@ -66,6 +66,14 @@ pub enum BoxError {
     #[error("Context error: {provider} - {message}")]
     ContextError { provider: String, message: String },
 
+    /// TEE configuration error
+    #[error("TEE configuration error: {0}")]
+    TeeConfig(String),
+
+    /// TEE hardware not available
+    #[error("TEE hardware not available: {0}")]
+    TeeNotSupported(String),
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -206,6 +214,24 @@ mod tests {
     fn test_other_error_display() {
         let error = BoxError::Other("Unknown error occurred".to_string());
         assert_eq!(error.to_string(), "Unknown error occurred");
+    }
+
+    #[test]
+    fn test_tee_config_error_display() {
+        let error = BoxError::TeeConfig("Failed to set TEE config file".to_string());
+        assert_eq!(
+            error.to_string(),
+            "TEE configuration error: Failed to set TEE config file"
+        );
+    }
+
+    #[test]
+    fn test_tee_not_supported_error_display() {
+        let error = BoxError::TeeNotSupported("AMD SEV-SNP not available".to_string());
+        assert_eq!(
+            error.to_string(),
+            "TEE hardware not available: AMD SEV-SNP not available"
+        );
     }
 
     #[test]

@@ -46,6 +46,7 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **Guest Init**: Custom PID 1 process for VM initialization and process management
 - **Cross-Platform**: macOS (Apple Silicon) and Linux (x86_64/ARM64)
 - **No Root Required**: Runs without elevated privileges using Apple HVF or KVM
+- **TEE Support**: AMD SEV-SNP for hardware-enforced memory encryption (Phase 1)
 
 ## Quick Start
 
@@ -135,8 +136,8 @@ cd src && cargo build --release
 
 | Crate | Purpose |
 |-------|---------|
-| `core` | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ContextProvider` |
-| `runtime` | VM lifecycle, OCI image parsing, rootfs composition |
+| `core` | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ContextProvider`, `TeeConfig` |
+| `runtime` | VM lifecycle, OCI image parsing, rootfs composition, TEE hardware detection |
 | `guest/init` | Guest init (PID 1) and `nsexec` for namespace isolation |
 | `shim` | CRI shim for Kubernetes integration |
 
@@ -189,6 +190,28 @@ A3S is a modular ecosystem for building and running secure AI agents. Each compo
 |----------|-------------|---------|
 | `A3S_DEPS_STUB` | Enable stub mode (skip libkrun) | - |
 | `RUST_LOG` | Log level | info |
+
+### TEE Configuration (AMD SEV-SNP)
+
+Enable hardware-enforced memory encryption for confidential computing:
+
+```rust
+use a3s_box_core::config::{BoxConfig, TeeConfig, SevSnpGeneration};
+
+let config = BoxConfig {
+    tee: TeeConfig::SevSnp {
+        workload_id: "my-secure-agent".to_string(),
+        generation: SevSnpGeneration::Milan,  // or Genoa
+    },
+    ..Default::default()
+};
+```
+
+**Hardware Requirements for TEE:**
+- AMD EPYC CPU (Milan 3rd gen or Genoa 4th gen) with SEV-SNP support
+- Linux kernel 5.19+ with SEV-SNP patches
+- `/dev/sev` device accessible
+- libkrun built with `SEV=1` flag
 
 ## Roadmap
 
@@ -254,7 +277,23 @@ A3S is a modular ecosystem for building and running secure AI agents. Each compo
 - [ ] Network isolation policies
 - [ ] Audit logging
 
-### Phase 6: Elastic Scaling 📋
+### Phase 6: TEE (Trusted Execution Environment) 🚧
+
+**Phase 6.1: Basic TEE Support ✅**
+- [x] AMD SEV-SNP hardware detection
+- [x] TEE configuration types (`TeeConfig`, `SevSnpGeneration`)
+- [x] TEE error types (`TeeConfig`, `TeeNotSupported`)
+- [x] KrunContext TEE methods (`enable_split_irqchip`, `set_tee_config`)
+- [x] TEE config file generation for libkrun
+- [x] Shim TEE configuration before VM start
+
+**Phase 6.2: Remote Attestation 📋**
+- [ ] KBS (Key Broker Service) integration
+- [ ] Attestation report generation
+- [ ] Secret provisioning via attestation
+- [ ] Certificate chain verification
+
+### Phase 7: Elastic Scaling 📋
 
 - [ ] Metrics collector (queue depth, latency)
 - [ ] Autoscaler with reactive scaling
