@@ -66,7 +66,6 @@ impl ShimHandler {
     ///
     /// Used when reconnecting to a running box. We don't have a Child handle,
     /// so we manage the process by PID only.
-    #[allow(dead_code)]
     pub fn from_pid(pid: u32, box_id: String) -> Self {
         Self {
             pid,
@@ -77,7 +76,6 @@ impl ShimHandler {
     }
 
     /// Get the box ID.
-    #[allow(dead_code)]
     pub fn box_id(&self) -> &str {
         &self.box_id
     }

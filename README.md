@@ -39,9 +39,11 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 
 ## Features
 
+- **Docker-like CLI**: Familiar `run`, `stop`, `ps`, `logs`, `exec`, `images` commands
 - **Hardware Isolation**: Each sandbox runs in its own MicroVM via libkrun
 - **Instant Boot**: Sub-second VM startup (~200ms cold start)
 - **OCI Image Support**: Load sandboxes from standard OCI container images
+- **Image Registry**: Pull images from any OCI registry with local LRU cache
 - **Namespace Isolation**: Agent and business code run in separate Linux namespaces
 - **Guest Init**: Custom PID 1 process for VM initialization and process management
 - **Cross-Platform**: macOS (Apple Silicon) and Linux (x86_64/ARM64)
@@ -95,6 +97,56 @@ cd src && cargo build --release
 | **Full Build** | `cargo build` | Development with VM support |
 | **Stub Mode** | `A3S_DEPS_STUB=1 cargo build` | CI/testing without VM |
 
+## CLI Usage
+
+The `a3s-box` CLI provides a Docker-like interface for managing MicroVM sandboxes:
+
+```bash
+# Image management
+a3s-box pull alpine:latest       # Pull an image from a registry
+a3s-box images                   # List cached images
+a3s-box rmi alpine:latest        # Remove a cached image
+
+# Box lifecycle
+a3s-box run -d --name dev --cpus 2 --memory 1g alpine:latest
+a3s-box create --name staging alpine:latest
+a3s-box start staging
+a3s-box stop staging
+a3s-box rm staging
+
+# Observability
+a3s-box ps                       # List running boxes
+a3s-box ps -a                    # List all boxes (including stopped)
+a3s-box logs dev -f              # Follow box console output
+a3s-box inspect dev              # Show detailed box info as JSON
+
+# System info
+a3s-box version
+a3s-box info                     # Virtualization support, cache stats
+```
+
+### Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `run <image>` | Pull + create + start a box (`-d` for detached, `--rm` for auto-remove) |
+| `create <image>` | Create a box without starting |
+| `start <box>` | Start a created or stopped box |
+| `stop <box>` | Graceful stop (SIGTERM then SIGKILL after `-t` timeout) |
+| `kill <box>` | Force-kill a running box |
+| `rm <box>` | Remove a box (`-f` to force-remove running boxes) |
+| `ps` | List boxes (`-a` for all, default shows running only) |
+| `logs <box>` | View console logs (`-f` to follow, `--tail N` for last N lines) |
+| `exec <box> -- <cmd>` | Execute a command in a running box |
+| `inspect <box>` | Show detailed box information as JSON |
+| `images` | List cached OCI images |
+| `pull <image>` | Pull an image from a container registry |
+| `rmi <image>` | Remove a cached image |
+| `version` | Show version |
+| `info` | Show system information |
+
+Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible resolution).
+
 ## Architecture
 
 ```
@@ -136,12 +188,14 @@ cd src && cargo build --release
 
 ### Crates
 
-| Crate | Purpose |
-|-------|---------|
-| `core` | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ContextProvider`, `TeeConfig` |
-| `runtime` | VM lifecycle, OCI image parsing, rootfs composition, TEE hardware detection |
-| `guest/init` | Guest init (PID 1) and `nsexec` for namespace isolation |
-| `shim` | CRI shim for Kubernetes integration |
+| Crate | Binary | Purpose |
+|-------|--------|---------|
+| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (74 unit tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ContextProvider`, `TeeConfig` |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, TEE hardware detection |
+| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1) and `nsexec` for namespace isolation |
+| `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
+| `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration |
 
 ### A3S Ecosystem
 
@@ -234,8 +288,14 @@ let config = BoxConfig {
 - [x] Namespace isolation (Mount, PID, IPC, UTS)
 - [x] Nsexec tool for executing code in isolated namespaces
 
-### Phase 3: Ecosystem Integration 🚧
+### Phase 3: CLI & Ecosystem Integration 🚧
 
+- [x] Docker-like CLI (`a3s-box`) with 15 commands: run, create, start, stop, rm, kill, ps, logs, exec, inspect, images, pull, rmi, version, info
+- [x] Box state management with atomic persistence (`~/.a3s/boxes.json`)
+- [x] Docker-compatible name/ID/prefix resolution
+- [x] PID-based liveness reconciliation for dead box detection
+- [x] Auto-generated Docker-style names (adjective_noun)
+- [x] OCI image pulling with local LRU cache
 - [ ] OCI image format definition (Dockerfile for Box images)
 - [ ] Agent configuration from OCI labels
 - [ ] Pre-built `a3s-code` guest image for AI coding agent
@@ -482,11 +542,13 @@ A3S Box provides the secure infrastructure layer for [SafeClaw](../safeclaw/READ
 # Build
 just build              # Build all
 just release            # Release build
+cargo build -p a3s-box-cli  # Build CLI only
 
 # Test
 just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
+cargo test -p a3s-box-cli   # CLI tests (74 tests)
 
 # Lint
 just fmt                # Format code
@@ -499,9 +561,16 @@ just ci                 # Full CI checks
 ```
 box/
 ├── src/
+│   ├── cli/            # Docker-like CLI (a3s-box binary)
+│   │   └── src/
+│   │       ├── commands/   # 15 subcommands (run, stop, ps, logs, etc.)
+│   │       ├── state.rs    # Box state persistence (~/.a3s/boxes.json)
+│   │       ├── resolve.rs  # Docker-style name/ID resolution
+│   │       └── output.rs   # Table formatting and memory parsing
 │   ├── core/           # Config, error types, events, context provider trait
-│   ├── runtime/        # VM lifecycle, OCI support
-│   ├── shim/           # CRI shim
+│   ├── runtime/        # VM lifecycle, OCI support, gRPC client
+│   ├── shim/           # VM subprocess shim (libkrun bridge)
+│   ├── cri/            # CRI runtime for Kubernetes
 │   └── guest/
 │       └── init/       # Guest init (PID 1) and nsexec
 ├── docs/               # Documentation

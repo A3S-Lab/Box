@@ -1,0 +1,290 @@
+//! Table formatting helpers for CLI output.
+
+use comfy_table::{ContentArrangement, Table};
+
+/// Create a styled table with the given headers.
+pub fn new_table(headers: &[&str]) -> Table {
+    let mut table = Table::new();
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.load_preset(comfy_table::presets::NOTHING);
+    table.set_header(headers);
+    table
+}
+
+/// Format a byte count as a human-readable string.
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Format a chrono timestamp as a relative "ago" string.
+pub fn format_ago(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    let now = chrono::Utc::now();
+    let duration = now.signed_duration_since(*dt);
+
+    let secs = duration.num_seconds();
+    if secs < 0 {
+        return "just now".to_string();
+    }
+
+    if secs < 60 {
+        return format!("{secs} seconds ago");
+    }
+
+    let mins = duration.num_minutes();
+    if mins < 60 {
+        return format!("{mins} minutes ago");
+    }
+
+    let hours = duration.num_hours();
+    if hours < 24 {
+        return format!("{hours} hours ago");
+    }
+
+    let days = duration.num_days();
+    if days < 30 {
+        return format!("{days} days ago");
+    }
+
+    let months = days / 30;
+    if months < 12 {
+        return format!("{months} months ago");
+    }
+
+    let years = days / 365;
+    format!("{years} years ago")
+}
+
+/// Parse a memory string like "512m", "2g" into megabytes.
+pub fn parse_memory(s: &str) -> Result<u32, String> {
+    let s = s.trim().to_lowercase();
+    if s.is_empty() {
+        return Err("empty memory value".to_string());
+    }
+
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix('g') {
+        (n, 1024u32)
+    } else if let Some(n) = s.strip_suffix("gb") {
+        (n, 1024)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, 1)
+    } else if let Some(n) = s.strip_suffix("mb") {
+        (n, 1)
+    } else {
+        // Assume megabytes if no suffix
+        (s.as_str(), 1)
+    };
+
+    let num: u32 = num_str
+        .parse()
+        .map_err(|_| format!("invalid memory value: {s}"))?;
+
+    Ok(num * multiplier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- format_bytes tests ---
+
+    #[test]
+    fn test_format_bytes_zero() {
+        assert_eq!(format_bytes(0), "0 B");
+    }
+
+    #[test]
+    fn test_format_bytes_small() {
+        assert_eq!(format_bytes(1), "1 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_bytes_kilobytes() {
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(10240), "10.0 KB");
+    }
+
+    #[test]
+    fn test_format_bytes_megabytes() {
+        assert_eq!(format_bytes(1048576), "1.0 MB");
+        assert_eq!(format_bytes(1048576 + 524288), "1.5 MB");
+        assert_eq!(format_bytes(100 * 1048576), "100.0 MB");
+    }
+
+    #[test]
+    fn test_format_bytes_gigabytes() {
+        assert_eq!(format_bytes(1073741824), "1.0 GB");
+        assert_eq!(format_bytes(10 * 1073741824), "10.0 GB");
+    }
+
+    // --- parse_memory tests ---
+
+    #[test]
+    fn test_parse_memory_megabytes() {
+        assert_eq!(parse_memory("512m").unwrap(), 512);
+        assert_eq!(parse_memory("512M").unwrap(), 512);
+        assert_eq!(parse_memory("1024mb").unwrap(), 1024);
+        assert_eq!(parse_memory("256MB").unwrap(), 256);
+    }
+
+    #[test]
+    fn test_parse_memory_gigabytes() {
+        assert_eq!(parse_memory("1g").unwrap(), 1024);
+        assert_eq!(parse_memory("2G").unwrap(), 2048);
+        assert_eq!(parse_memory("4gb").unwrap(), 4096);
+        assert_eq!(parse_memory("4GB").unwrap(), 4096);
+    }
+
+    #[test]
+    fn test_parse_memory_no_suffix() {
+        assert_eq!(parse_memory("512").unwrap(), 512);
+        assert_eq!(parse_memory("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn test_parse_memory_with_whitespace() {
+        assert_eq!(parse_memory("  512m  ").unwrap(), 512);
+        assert_eq!(parse_memory("  2g ").unwrap(), 2048);
+    }
+
+    #[test]
+    fn test_parse_memory_invalid_empty() {
+        assert!(parse_memory("").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_invalid_letters() {
+        assert!(parse_memory("abc").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_invalid_float() {
+        assert!(parse_memory("12.5m").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_invalid_negative() {
+        assert!(parse_memory("-512m").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_zero() {
+        assert_eq!(parse_memory("0m").unwrap(), 0);
+        assert_eq!(parse_memory("0").unwrap(), 0);
+    }
+
+    // --- new_table tests ---
+
+    #[test]
+    fn test_new_table() {
+        let table = new_table(&["ID", "NAME", "STATUS"]);
+        let output = table.to_string();
+        assert!(output.contains("ID"));
+        assert!(output.contains("NAME"));
+        assert!(output.contains("STATUS"));
+    }
+
+    #[test]
+    fn test_new_table_with_rows() {
+        let mut table = new_table(&["COL1", "COL2"]);
+        table.add_row(&["hello", "world"]);
+        table.add_row(&["foo", "bar"]);
+        let output = table.to_string();
+        assert!(output.contains("hello"));
+        assert!(output.contains("world"));
+        assert!(output.contains("foo"));
+        assert!(output.contains("bar"));
+    }
+
+    #[test]
+    fn test_new_table_single_header() {
+        let table = new_table(&["SINGLE"]);
+        let output = table.to_string();
+        assert!(output.contains("SINGLE"));
+    }
+
+    // --- format_ago tests ---
+
+    #[test]
+    fn test_format_ago_seconds() {
+        let now = chrono::Utc::now();
+        assert_eq!(format_ago(&now), "0 seconds ago");
+
+        let thirty_sec = now - chrono::Duration::seconds(30);
+        assert_eq!(format_ago(&thirty_sec), "30 seconds ago");
+    }
+
+    #[test]
+    fn test_format_ago_minutes() {
+        let now = chrono::Utc::now();
+        let one_min = now - chrono::Duration::minutes(1);
+        assert_eq!(format_ago(&one_min), "1 minutes ago");
+
+        let five_min = now - chrono::Duration::minutes(5);
+        assert_eq!(format_ago(&five_min), "5 minutes ago");
+
+        let fifty_nine_min = now - chrono::Duration::minutes(59);
+        assert_eq!(format_ago(&fifty_nine_min), "59 minutes ago");
+    }
+
+    #[test]
+    fn test_format_ago_hours() {
+        let now = chrono::Utc::now();
+        let one_hour = now - chrono::Duration::hours(1);
+        assert_eq!(format_ago(&one_hour), "1 hours ago");
+
+        let two_hours = now - chrono::Duration::hours(2);
+        assert_eq!(format_ago(&two_hours), "2 hours ago");
+
+        let twenty_three_hours = now - chrono::Duration::hours(23);
+        assert_eq!(format_ago(&twenty_three_hours), "23 hours ago");
+    }
+
+    #[test]
+    fn test_format_ago_days() {
+        let now = chrono::Utc::now();
+        let one_day = now - chrono::Duration::days(1);
+        assert_eq!(format_ago(&one_day), "1 days ago");
+
+        let three_days = now - chrono::Duration::days(3);
+        assert_eq!(format_ago(&three_days), "3 days ago");
+
+        let twenty_nine_days = now - chrono::Duration::days(29);
+        assert_eq!(format_ago(&twenty_nine_days), "29 days ago");
+    }
+
+    #[test]
+    fn test_format_ago_months() {
+        let now = chrono::Utc::now();
+        let two_months = now - chrono::Duration::days(60);
+        assert_eq!(format_ago(&two_months), "2 months ago");
+    }
+
+    #[test]
+    fn test_format_ago_years() {
+        let now = chrono::Utc::now();
+        let two_years = now - chrono::Duration::days(730);
+        assert_eq!(format_ago(&two_years), "2 years ago");
+    }
+
+    #[test]
+    fn test_format_ago_future() {
+        let now = chrono::Utc::now();
+        let future = now + chrono::Duration::hours(1);
+        assert_eq!(format_ago(&future), "just now");
+    }
+}

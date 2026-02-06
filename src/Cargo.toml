@@ -6,6 +6,7 @@ members = [
     "guest/init",
     "deps/libkrun-sys",
     "cri",
+    "cli",
 ]
 resolver = "2"
 
@@ -25,6 +26,9 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.11"
 tonic-build = "0.11"
 prost = "0.12"
+tower = "0.4"
+http = "0.2"
+hyper = { version = "0.14", features = ["client"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -84,3 +88,9 @@ tempfile = "3.10"
 
 # OCI distribution
 oci-distribution = "0.11"
+
+# Table formatting
+comfy-table = "7"
+
+# Random
+rand = "0.8"
