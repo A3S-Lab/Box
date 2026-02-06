@@ -144,6 +144,10 @@ pub struct BoxConfig {
     /// TEE (Trusted Execution Environment) configuration
     #[serde(default)]
     pub tee: TeeConfig,
+
+    /// Command override (replaces OCI CMD when set)
+    #[serde(default)]
+    pub cmd: Vec<String>,
 }
 
 impl Default for BoxConfig {
@@ -159,6 +163,7 @@ impl Default for BoxConfig {
             log_level: LogLevel::Info,
             debug_grpc: false,
             tee: TeeConfig::default(),
+            cmd: vec![],
         }
     }
 }

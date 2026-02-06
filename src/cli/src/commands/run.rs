@@ -66,6 +66,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             memory_mb,
             ..Default::default()
         },
+        cmd: args.cmd.clone(),
         ..Default::default()
     };
 
@@ -77,6 +78,9 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating box {} ({})...", name, &BoxRecord::make_short_id(&box_id));
 
     vm.boot().await?;
+
+    // Get PID from the running VM
+    let pid = vm.pid().await;
 
     // Determine PID from handler metrics (handler holds PID internally)
     // We use the box directory structure to find PID
@@ -92,7 +96,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         name: name.clone(),
         image: args.image.clone(),
         status: "running".to_string(),
-        pid: None, // PID is managed internally by VmManager
+        pid,
         cpus: args.cpus,
         memory_mb,
         volumes: args.volumes.clone(),

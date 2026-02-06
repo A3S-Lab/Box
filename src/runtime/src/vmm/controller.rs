@@ -37,7 +37,107 @@ impl VmController {
             });
         }
 
+        // On macOS, ensure the shim has the Hypervisor.framework entitlement
+        #[cfg(target_os = "macos")]
+        Self::ensure_entitlement(&shim_path)?;
+
         Ok(Self { shim_path })
+    }
+
+    /// Ensure the shim binary has the com.apple.security.hypervisor entitlement.
+    ///
+    /// On macOS, Hypervisor.framework requires this entitlement. If the binary
+    /// was built with `cargo build` directly (without `just build`), it won't
+    /// have the entitlement. This method checks and signs it if needed.
+    #[cfg(target_os = "macos")]
+    fn ensure_entitlement(shim_path: &std::path::Path) -> Result<()> {
+        // Check if the binary already has the entitlement
+        let output = Command::new("codesign")
+            .args(["-d", "--entitlements", "-", "--xml"])
+            .arg(shim_path)
+            .output()
+            .map_err(|e| BoxError::BoxBootError {
+                message: format!("Failed to check entitlements: {}", e),
+                hint: None,
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("com.apple.security.hypervisor") {
+            return Ok(());
+        }
+
+        tracing::info!("Signing shim with Hypervisor.framework entitlement");
+
+        // Find the entitlements plist next to the shim or in the source tree
+        let entitlements_path = Self::find_entitlements_plist(shim_path)?;
+
+        let status = Command::new("codesign")
+            .args(["--entitlements"])
+            .arg(&entitlements_path)
+            .args(["--force", "-s", "-"])
+            .arg(shim_path)
+            .status()
+            .map_err(|e| BoxError::BoxBootError {
+                message: format!("Failed to codesign shim: {}", e),
+                hint: None,
+            })?;
+
+        if !status.success() {
+            return Err(BoxError::BoxBootError {
+                message: "Failed to sign shim with Hypervisor entitlement".to_string(),
+                hint: Some(format!(
+                    "Try manually: codesign --entitlements {} --force -s - {}",
+                    entitlements_path.display(),
+                    shim_path.display()
+                )),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Find the entitlements.plist file.
+    #[cfg(target_os = "macos")]
+    fn find_entitlements_plist(shim_path: &std::path::Path) -> Result<PathBuf> {
+        // Try next to the shim binary
+        if let Some(dir) = shim_path.parent() {
+            let plist = dir.join("entitlements.plist");
+            if plist.exists() {
+                return Ok(plist);
+            }
+        }
+
+        // Try the source tree relative to the shim binary
+        // target/debug/a3s-box-shim -> ../../shim/entitlements.plist
+        if let Some(dir) = shim_path.parent() {
+            for ancestor in dir.ancestors().take(5) {
+                let plist = ancestor.join("shim").join("entitlements.plist");
+                if plist.exists() {
+                    return Ok(plist);
+                }
+            }
+        }
+
+        // Generate a temporary entitlements plist as fallback
+        let tmp_plist = std::env::temp_dir().join("a3s-box-entitlements.plist");
+        std::fs::write(
+            &tmp_plist,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.hypervisor</key>
+    <true/>
+</dict>
+</plist>
+"#,
+        )
+        .map_err(|e| BoxError::BoxBootError {
+            message: format!("Failed to write temporary entitlements plist: {}", e),
+            hint: None,
+        })?;
+
+        Ok(tmp_plist)
     }
 
     /// Find the shim binary in common locations.

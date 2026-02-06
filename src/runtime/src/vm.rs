@@ -9,6 +9,7 @@ use a3s_box_core::event::{BoxEvent, EventEmitter};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::grpc::AgentClient;
 use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
 use crate::vmm::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig, VmController, VmHandler};
@@ -51,6 +52,9 @@ struct BoxLayout {
     has_guest_init: bool,
     /// TEE instance configuration (if TEE is enabled)
     tee_instance_config: Option<TeeInstanceConfig>,
+    /// Whether the OCI image is extracted at rootfs root (true) or under /agent (false).
+    /// Images from OCI registries are extracted at root so absolute symlinks work.
+    image_at_root: bool,
 }
 
 /// VM manager - orchestrates VM lifecycle.
@@ -73,6 +77,9 @@ pub struct VmManager {
     /// VM handler (runtime operations on running VM)
     handler: Arc<RwLock<Option<Box<dyn VmHandler>>>>,
 
+    /// gRPC client for communicating with the guest agent
+    agent_client: Option<AgentClient>,
+
     /// A3S home directory (~/.a3s)
     home_dir: PathBuf,
 }
@@ -90,6 +97,7 @@ impl VmManager {
             event_emitter,
             controller: None,
             handler: Arc::new(RwLock::new(None)),
+            agent_client: None,
             home_dir,
         }
     }
@@ -105,6 +113,7 @@ impl VmManager {
             event_emitter,
             controller: None,
             handler: Arc::new(RwLock::new(None)),
+            agent_client: None,
             home_dir,
         }
     }
@@ -119,12 +128,19 @@ impl VmManager {
         *self.state.read().await
     }
 
+    /// Get the agent client, if connected.
+    pub fn agent_client(&self) -> Option<&AgentClient> {
+        self.agent_client.as_ref()
+    }
+
     /// Boot the VM.
     pub async fn boot(&mut self) -> Result<()> {
-        let mut state = self.state.write().await;
-
-        if *state != BoxState::Created {
-            return Err(BoxError::Other("VM already booted".to_string()));
+        // Check and transition state: Created → booting
+        {
+            let state = self.state.read().await;
+            if *state != BoxState::Created {
+                return Err(BoxError::Other("VM already booted".to_string()));
+            }
         }
 
         tracing::info!(box_id = %self.box_id, "Booting VM");
@@ -146,11 +162,17 @@ impl VmManager {
         // Store handler
         *self.handler.write().await = Some(handler);
 
-        // 5. Wait for guest ready (gRPC health check)
-        self.wait_for_guest_ready(&layout.socket_path).await?;
+        // 5. Wait for guest ready
+        if layout.image_at_root {
+            // Generic OCI image (no a3s agent) - just wait for the VM process to stabilize
+            self.wait_for_vm_running().await?;
+        } else {
+            // A3S agent image - wait for gRPC health check
+            self.wait_for_guest_ready(&layout.socket_path).await?;
+        }
 
-        // 6. Update state
-        *state = BoxState::Ready;
+        // 6. Update state to Ready
+        *self.state.write().await = BoxState::Ready;
 
         // Emit ready event
         self.event_emitter.emit(BoxEvent::empty("box.ready"));
@@ -245,6 +267,15 @@ impl VmManager {
             .map(|handler| handler.metrics())
     }
 
+    /// Get the PID of the VM shim process.
+    pub async fn pid(&self) -> Option<u32> {
+        self.handler
+            .read()
+            .await
+            .as_ref()
+            .map(|handler| handler.pid())
+    }
+
     /// Prepare the filesystem layout for the VM.
     fn prepare_layout(&self) -> Result<BoxLayout> {
         // Create box-specific directories
@@ -289,10 +320,33 @@ impl VmManager {
             })?;
         }
 
+        // Canonicalize paths to absolute (libkrun requires absolute paths for virtiofs)
+        let workspace_path =
+            workspace_path
+                .canonicalize()
+                .map_err(|e| BoxError::BoxBootError {
+                    message: format!(
+                        "Failed to resolve workspace path {}: {}",
+                        workspace_path.display(),
+                        e
+                    ),
+                    hint: None,
+                })?;
+        let skills_path = skills_path
+            .canonicalize()
+            .map_err(|e| BoxError::BoxBootError {
+                message: format!(
+                    "Failed to resolve skills path {}: {}",
+                    skills_path.display(),
+                    e
+                ),
+                hint: None,
+            })?;
+
         // Prepare rootfs based on agent type
-        let (rootfs_path, agent_oci_config, has_guest_init) = match &self.config.agent {
+        let (rootfs_path, agent_oci_config, has_guest_init, image_at_root) = match &self.config.agent {
             AgentType::OciImage { path: agent_path } => {
-                // Use OCI image for agent
+                // Use OCI image for agent (extracted under /agent)
                 let rootfs_path = box_dir.join("rootfs");
 
                 tracing::info!(
@@ -343,10 +397,11 @@ impl VmManager {
                 // Get agent OCI config for entrypoint/env extraction
                 let agent_config = builder.agent_config()?;
 
-                (rootfs_path, Some(agent_config), has_guest_init)
+                (rootfs_path, Some(agent_config), has_guest_init, false)
             }
             AgentType::OciRegistry { reference } => {
-                // Pull image from registry, then proceed as OCI image
+                // Pull image from registry and extract at rootfs root.
+                // This preserves absolute symlinks and dynamic linker paths.
                 let images_dir = self.home_dir.join("images");
                 let store = crate::oci::ImageStore::new(&images_dir, 10 * 1024 * 1024 * 1024)?;
                 let puller = crate::oci::ImagePuller::new(
@@ -372,9 +427,10 @@ impl VmManager {
                     "Building rootfs from pulled OCI image"
                 );
 
+                // Extract at root ("/") so absolute symlinks and library paths work
                 let mut builder = OciRootfsBuilder::new(&rootfs_path)
                     .with_agent_image(&agent_path)
-                    .with_agent_target("/agent")
+                    .with_agent_target("/")
                     .with_business_target("/workspace");
 
                 if let BusinessType::OciImage {
@@ -407,12 +463,12 @@ impl VmManager {
                 builder.build()?;
                 let agent_config = builder.agent_config()?;
 
-                (rootfs_path, Some(agent_config), has_guest_init)
+                (rootfs_path, Some(agent_config), has_guest_init, true)
             }
             AgentType::A3sCode | AgentType::LocalBinary { .. } | AgentType::RemoteBinary { .. } => {
                 // Use default guest-rootfs (must be set up separately)
                 let rootfs_path = self.home_dir.join("guest-rootfs");
-                (rootfs_path, None, false)
+                (rootfs_path, None, false, false)
             }
         };
 
@@ -428,6 +484,7 @@ impl VmManager {
             agent_oci_config,
             has_guest_init,
             tee_instance_config,
+            image_at_root,
         })
     }
 
@@ -484,39 +541,26 @@ impl VmManager {
     /// 1. Same directory as current executable
     /// 2. target/debug or target/release (for development)
     /// 3. PATH
+    ///
+    /// The binary must be a Linux ELF executable since it runs inside the VM.
     fn find_guest_init() -> Result<PathBuf> {
-        // Try same directory as current executable
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let guest_init = exe_dir.join("a3s-box-guest-init");
-                if guest_init.exists() {
-                    return Ok(guest_init);
-                }
+        let candidates = Self::find_binary_candidates("a3s-box-guest-init");
+        for path in candidates {
+            if Self::is_linux_elf(&path) {
+                return Ok(path);
             }
-        }
-
-        // Try target/debug or target/release (for development)
-        let target_dirs = ["target/debug", "target/release"];
-        for dir in &target_dirs {
-            let guest_init = PathBuf::from(dir).join("a3s-box-guest-init");
-            if guest_init.exists() {
-                return Ok(guest_init);
-            }
-        }
-
-        // Try PATH
-        if let Ok(path_var) = std::env::var("PATH") {
-            for path in std::env::split_paths(&path_var) {
-                let guest_init = path.join("a3s-box-guest-init");
-                if guest_init.exists() {
-                    return Ok(guest_init);
-                }
-            }
+            tracing::debug!(
+                path = %path.display(),
+                "Skipping guest init (not a Linux ELF binary)"
+            );
         }
 
         Err(BoxError::BoxBootError {
-            message: "Guest init binary not found".to_string(),
-            hint: Some("Build with: cargo build -p a3s-box-guest-init".to_string()),
+            message: "Linux guest init binary not found".to_string(),
+            hint: Some(
+                "Cross-compile with: cargo build -p a3s-box-guest-init --target aarch64-unknown-linux-musl"
+                    .to_string(),
+            ),
         })
     }
 
@@ -526,40 +570,89 @@ impl VmManager {
     /// 1. Same directory as current executable
     /// 2. target/debug or target/release (for development)
     /// 3. PATH
+    ///
+    /// The binary must be a Linux ELF executable since it runs inside the VM.
     fn find_nsexec() -> Result<PathBuf> {
+        let candidates = Self::find_binary_candidates("a3s-box-nsexec");
+        for path in candidates {
+            if Self::is_linux_elf(&path) {
+                return Ok(path);
+            }
+            tracing::debug!(
+                path = %path.display(),
+                "Skipping nsexec (not a Linux ELF binary)"
+            );
+        }
+
+        Err(BoxError::BoxBootError {
+            message: "Linux nsexec binary not found".to_string(),
+            hint: Some(
+                "Cross-compile with: cargo build -p a3s-box-guest-init --bin a3s-box-nsexec --target aarch64-unknown-linux-musl"
+                    .to_string(),
+            ),
+        })
+    }
+
+    /// Search common locations for a binary by name.
+    fn find_binary_candidates(name: &str) -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+
         // Try same directory as current executable
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                let nsexec = exe_dir.join("a3s-box-nsexec");
-                if nsexec.exists() {
-                    return Ok(nsexec);
+                let path = exe_dir.join(name);
+                if path.exists() {
+                    candidates.push(path);
                 }
             }
         }
 
-        // Try target/debug or target/release (for development)
-        let target_dirs = ["target/debug", "target/release"];
+        // Try cross-compilation target directories (for development)
+        let target_dirs = [
+            "target/aarch64-unknown-linux-musl/debug",
+            "target/aarch64-unknown-linux-musl/release",
+            "target/x86_64-unknown-linux-musl/debug",
+            "target/x86_64-unknown-linux-musl/release",
+            "target/debug",
+            "target/release",
+        ];
         for dir in &target_dirs {
-            let nsexec = PathBuf::from(dir).join("a3s-box-nsexec");
-            if nsexec.exists() {
-                return Ok(nsexec);
+            let path = PathBuf::from(dir).join(name);
+            if path.exists() {
+                candidates.push(path);
             }
         }
 
         // Try PATH
         if let Ok(path_var) = std::env::var("PATH") {
-            for path in std::env::split_paths(&path_var) {
-                let nsexec = path.join("a3s-box-nsexec");
-                if nsexec.exists() {
-                    return Ok(nsexec);
+            for dir in std::env::split_paths(&path_var) {
+                let path = dir.join(name);
+                if path.exists() {
+                    candidates.push(path);
                 }
             }
         }
 
-        Err(BoxError::BoxBootError {
-            message: "Nsexec binary not found".to_string(),
-            hint: Some("Build with: cargo build -p a3s-box-guest-init --bin a3s-box-nsexec".to_string()),
-        })
+        candidates
+    }
+
+    /// Check if a file is a Linux ELF binary by reading its magic bytes.
+    fn is_linux_elf(path: &std::path::Path) -> bool {
+        let Ok(file) = std::fs::File::open(path) else {
+            return false;
+        };
+        use std::io::Read;
+        let mut header = [0u8; 18];
+        let Ok(_) = (&file).read_exact(&mut header) else {
+            return false;
+        };
+        // ELF magic: 0x7f 'E' 'L' 'F'
+        if header[0..4] != [0x7f, b'E', b'L', b'F'] {
+            return false;
+        }
+        // EI_OSABI (byte 7): 0x00 = ELFOSABI_NONE (System V / Linux)
+        // or 0x03 = ELFOSABI_LINUX
+        matches!(header[7], 0x00 | 0x03)
     }
 
     /// Build InstanceSpec from config and layout.
@@ -584,27 +677,7 @@ impl VmManager {
             // Pass agent configuration via environment variables
             let (agent_exec, agent_args, agent_env) = match &layout.agent_oci_config {
                 Some(oci_config) => {
-                    let oci_entrypoint = oci_config
-                        .entrypoint
-                        .as_ref()
-                        .map(|v| v.as_slice())
-                        .unwrap_or(&[]);
-                    let oci_cmd = oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-
-                    let exec = if !oci_entrypoint.is_empty() {
-                        let e = &oci_entrypoint[0];
-                        if e.starts_with('/') {
-                            format!("/agent{}", e)
-                        } else {
-                            format!("/agent/{}", e)
-                        }
-                    } else {
-                        "/agent/bin/agent".to_string()
-                    };
-
-                    let mut args: Vec<String> = oci_entrypoint.iter().skip(1).cloned().collect();
-                    args.extend(oci_cmd.iter().cloned());
-
+                    let (exec, args) = Self::resolve_oci_entrypoint(oci_config, layout.image_at_root, &self.config.cmd);
                     (exec, args, oci_config.env.clone())
                 }
                 None => (
@@ -642,33 +715,7 @@ impl VmManager {
             // Direct agent execution (no namespace isolation)
             match &layout.agent_oci_config {
                 Some(oci_config) => {
-                    // Use OCI image config for entrypoint
-                    let oci_entrypoint = oci_config
-                        .entrypoint
-                        .as_ref()
-                        .map(|v| v.as_slice())
-                        .unwrap_or(&[]);
-                    let oci_cmd = oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-
-                    // Combine entrypoint and cmd
-                    let executable = if !oci_entrypoint.is_empty() {
-                        // Prepend /agent to make path relative to agent's root
-                        let exec = &oci_entrypoint[0];
-                        if exec.starts_with('/') {
-                            format!("/agent{}", exec)
-                        } else {
-                            format!("/agent/{}", exec)
-                        }
-                    } else {
-                        // Default agent path
-                        "/agent/bin/agent".to_string()
-                    };
-
-                    // Build args from entrypoint[1:] + cmd
-                    let mut args: Vec<String> = oci_entrypoint.iter().skip(1).cloned().collect();
-                    args.extend(oci_cmd.iter().cloned());
-
-                    // Use environment variables from OCI config
+                    let (executable, args) = Self::resolve_oci_entrypoint(oci_config, layout.image_at_root, &self.config.cmd);
                     let env = oci_config.env.clone();
 
                     tracing::debug!(
@@ -723,10 +770,96 @@ impl VmManager {
         })
     }
 
+    /// Resolve the executable and args from an OCI image config.
+    ///
+    /// Follows Docker semantics:
+    /// - If ENTRYPOINT is set: executable = ENTRYPOINT[0], args = ENTRYPOINT[1:] + CMD
+    /// - If only CMD is set: executable = CMD[0], args = CMD[1:]
+    /// - If neither: fall back to default agent path
+    /// - If `cmd_override` is non-empty, it replaces the OCI CMD
+    ///
+    /// When `image_at_root` is false, paths are prefixed with `/agent` since the
+    /// image is extracted under that directory. When true, paths are used as-is.
+    fn resolve_oci_entrypoint(
+        oci_config: &OciImageConfig,
+        image_at_root: bool,
+        cmd_override: &[String],
+    ) -> (String, Vec<String>) {
+        let oci_entrypoint = oci_config
+            .entrypoint
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let oci_cmd = if cmd_override.is_empty() {
+            oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[])
+        } else {
+            cmd_override
+        };
+
+        let maybe_prefix = |path: &str| -> String {
+            if image_at_root {
+                path.to_string()
+            } else {
+                Self::prefix_agent_path(path)
+            }
+        };
+
+        if !oci_entrypoint.is_empty() {
+            // ENTRYPOINT is set: use it as executable, CMD as additional args
+            let exec = maybe_prefix(&oci_entrypoint[0]);
+            let mut args: Vec<String> = oci_entrypoint.iter().skip(1).cloned().collect();
+            args.extend(oci_cmd.iter().cloned());
+            (exec, args)
+        } else if !oci_cmd.is_empty() {
+            // Only CMD is set: use CMD[0] as executable, CMD[1:] as args
+            let exec = maybe_prefix(&oci_cmd[0]);
+            let args: Vec<String> = oci_cmd.iter().skip(1).cloned().collect();
+            (exec, args)
+        } else {
+            // Neither set: fall back to default agent path
+            (GUEST_AGENT_PATH.to_string(), vec![])
+        }
+    }
+
+    /// Prefix a path with /agent to make it relative to the agent rootfs.
+    fn prefix_agent_path(path: &str) -> String {
+        if path.starts_with('/') {
+            format!("/agent{}", path)
+        } else {
+            format!("/agent/{}", path)
+        }
+    }
+
+    /// Wait for the VM process to be running (for generic OCI images without an agent).
+    ///
+    /// Gives the VM a brief moment to start, then verifies the process hasn't exited.
+    async fn wait_for_vm_running(&self) -> Result<()> {
+        const STABILIZE_MS: u64 = 1000;
+
+        tracing::debug!("Waiting for VM process to stabilize");
+        tokio::time::sleep(tokio::time::Duration::from_millis(STABILIZE_MS)).await;
+
+        if let Some(ref handler) = *self.handler.read().await {
+            if !handler.is_running() {
+                return Err(BoxError::BoxBootError {
+                    message: "VM process exited immediately after start".to_string(),
+                    hint: Some("Check console output for errors".to_string()),
+                });
+            }
+        }
+
+        tracing::debug!("VM process is running");
+        Ok(())
+    }
+
     /// Wait for the guest agent to become ready.
-    async fn wait_for_guest_ready(&self, socket_path: &std::path::Path) -> Result<()> {
+    ///
+    /// Phase 1: Wait for the Unix socket file to appear on disk.
+    /// Phase 2: Connect via gRPC and perform a health check with retries.
+    async fn wait_for_guest_ready(&mut self, socket_path: &std::path::Path) -> Result<()> {
         const MAX_WAIT_MS: u64 = 30000;
         const POLL_INTERVAL_MS: u64 = 100;
+        const HEALTH_CHECK_INTERVAL_MS: u64 = 250;
 
         tracing::debug!(
             socket_path = %socket_path.display(),
@@ -735,13 +868,17 @@ impl VmManager {
 
         let start = std::time::Instant::now();
 
-        while start.elapsed().as_millis() < MAX_WAIT_MS as u128 {
-            // Check if socket exists
+        // Phase 1: Wait for socket file to appear
+        loop {
+            if start.elapsed().as_millis() >= MAX_WAIT_MS as u128 {
+                return Err(BoxError::TimeoutError(
+                    "Timed out waiting for gRPC socket to appear".to_string(),
+                ));
+            }
+
             if socket_path.exists() {
-                // TODO: Perform actual gRPC health check
-                // For now, just check socket existence
-                tracing::debug!("gRPC socket created, guest agent ready");
-                return Ok(());
+                tracing::debug!("gRPC socket file detected");
+                break;
             }
 
             // Check if VM is still running
@@ -757,9 +894,52 @@ impl VmManager {
             tokio::time::sleep(tokio::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
 
-        Err(BoxError::TimeoutError(
-            "Timed out waiting for guest agent to become ready".to_string(),
-        ))
+        // Phase 2: Connect and perform gRPC health check with retries
+        let mut last_err = None;
+        while start.elapsed().as_millis() < MAX_WAIT_MS as u128 {
+            match AgentClient::connect(socket_path).await {
+                Ok(client) => {
+                    match client.health_check().await {
+                        Ok(true) => {
+                            tracing::debug!("Guest agent health check passed");
+                            self.agent_client = Some(client);
+                            return Ok(());
+                        }
+                        Ok(false) => {
+                            tracing::debug!("Guest agent reported unhealthy, retrying");
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "Health check RPC failed, retrying");
+                            last_err = Some(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "Failed to connect to agent, retrying");
+                    last_err = Some(e);
+                }
+            }
+
+            // Check if VM is still running
+            if let Some(ref handler) = *self.handler.read().await {
+                if !handler.is_running() {
+                    return Err(BoxError::BoxBootError {
+                        message: "VM process exited during health check".to_string(),
+                        hint: Some("Check console output for errors".to_string()),
+                    });
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(HEALTH_CHECK_INTERVAL_MS))
+                .await;
+        }
+
+        Err(BoxError::TimeoutError(format!(
+            "Timed out waiting for guest agent health check (last error: {})",
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        )))
     }
 }
 

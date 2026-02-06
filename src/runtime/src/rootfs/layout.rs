@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_guest_agent_path_constant() {
-        assert_eq!(GUEST_AGENT_PATH, "/a3s/agent/a3s-box-code");
+        assert_eq!(GUEST_AGENT_PATH, "/a3s/agent/a3s-code");
         // Agent path should be under agent_dir
         let layout = GuestLayout::default();
         assert!(GUEST_AGENT_PATH.starts_with(layout.agent_dir));

@@ -14,12 +14,24 @@ cz:
 # Build all (Rust + SDKs)
 build:
     cd src && cargo build --workspace
+    just sign-shim debug
     just sdk-ts build
     just sdk-python build
 
 # Build release
 release:
     cd src && cargo build --workspace --release
+    just sign-shim release
+
+# Sign the shim binary with Hypervisor.framework entitlement (macOS)
+[macos]
+sign-shim profile="debug":
+    @codesign --entitlements src/shim/entitlements.plist --force -s - src/target/{{profile}}/a3s-box-shim
+    @echo "✓ Signed a3s-box-shim with Hypervisor entitlement"
+
+[linux]
+sign-shim profile="debug":
+    @echo "✓ No signing needed on Linux"
 
 # ============================================================================
 # Test (unified command with progress display)

@@ -351,7 +351,7 @@ mod tests {
         builder.build().unwrap();
 
         // Verify agent binary was copied
-        let dest = rootfs_path.join("a3s/agent/a3s-box-code");
+        let dest = rootfs_path.join("a3s/agent/a3s-code");
         assert!(dest.exists());
 
         // Verify content matches
@@ -428,7 +428,7 @@ mod tests {
 
         // First build
         builder.build().unwrap();
-        let dest = rootfs_path.join("a3s/agent/a3s-box-code");
+        let dest = rootfs_path.join("a3s/agent/a3s-code");
         let first_mtime = fs::metadata(&dest).unwrap().modified().unwrap();
 
         // Small delay to ensure different mtime if file is rewritten
