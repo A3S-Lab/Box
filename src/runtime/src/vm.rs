@@ -345,6 +345,70 @@ impl VmManager {
 
                 (rootfs_path, Some(agent_config), has_guest_init)
             }
+            AgentType::OciRegistry { reference } => {
+                // Pull image from registry, then proceed as OCI image
+                let images_dir = self.home_dir.join("images");
+                let store = crate::oci::ImageStore::new(&images_dir, 10 * 1024 * 1024 * 1024)?;
+                let puller = crate::oci::ImagePuller::new(
+                    std::sync::Arc::new(store),
+                    crate::oci::RegistryAuth::from_env(),
+                );
+
+                tracing::info!(
+                    reference = %reference,
+                    "Pulling OCI image from registry"
+                );
+
+                let oci_image = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(puller.pull(reference))
+                })?;
+
+                let agent_path = oci_image.root_dir().to_path_buf();
+                let rootfs_path = box_dir.join("rootfs");
+
+                tracing::info!(
+                    agent_image = %agent_path.display(),
+                    rootfs = %rootfs_path.display(),
+                    "Building rootfs from pulled OCI image"
+                );
+
+                let mut builder = OciRootfsBuilder::new(&rootfs_path)
+                    .with_agent_image(&agent_path)
+                    .with_agent_target("/agent")
+                    .with_business_target("/workspace");
+
+                if let BusinessType::OciImage {
+                    path: business_path,
+                } = &self.config.business
+                {
+                    builder = builder.with_business_image(business_path);
+                }
+
+                let has_guest_init = if let Ok(guest_init_path) = Self::find_guest_init() {
+                    tracing::info!(
+                        guest_init = %guest_init_path.display(),
+                        "Using guest init for namespace isolation"
+                    );
+                    builder = builder.with_guest_init(guest_init_path);
+
+                    if let Ok(nsexec_path) = Self::find_nsexec() {
+                        tracing::info!(
+                            nsexec = %nsexec_path.display(),
+                            "Installing nsexec for business code execution"
+                        );
+                        builder = builder.with_nsexec(nsexec_path);
+                    }
+
+                    true
+                } else {
+                    false
+                };
+
+                builder.build()?;
+                let agent_config = builder.agent_config()?;
+
+                (rootfs_path, Some(agent_config), has_guest_init)
+            }
             AgentType::A3sCode | AgentType::LocalBinary { .. } | AgentType::RemoteBinary { .. } => {
                 // Use default guest-rootfs (must be set up separately)
                 let rootfs_path = self.home_dir.join("guest-rootfs");

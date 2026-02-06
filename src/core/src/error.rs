@@ -74,6 +74,14 @@ pub enum BoxError {
     #[error("TEE hardware not available: {0}")]
     TeeNotSupported(String),
 
+    /// OCI image error
+    #[error("OCI image error: {0}")]
+    OciImageError(String),
+
+    /// Container registry error
+    #[error("Registry error: {registry} - {message}")]
+    RegistryError { registry: String, message: String },
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -231,6 +239,24 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "TEE hardware not available: AMD SEV-SNP not available"
+        );
+    }
+
+    #[test]
+    fn test_oci_image_error_display() {
+        let error = BoxError::OciImageError("Invalid manifest".to_string());
+        assert_eq!(error.to_string(), "OCI image error: Invalid manifest");
+    }
+
+    #[test]
+    fn test_registry_error_display() {
+        let error = BoxError::RegistryError {
+            registry: "ghcr.io".to_string(),
+            message: "Authentication failed".to_string(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Registry error: ghcr.io - Authentication failed"
         );
     }
 

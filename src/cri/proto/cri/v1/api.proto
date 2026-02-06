@@ -1,0 +1,670 @@
+// CRI v1 API - Subset of Kubernetes Container Runtime Interface
+// Source: https://github.com/kubernetes/cri-api/blob/master/pkg/apis/runtime/v1/api.proto
+// License: Apache-2.0
+
+syntax = "proto3";
+
+package runtime.v1;
+
+option go_package = "k8s.io/cri-api/pkg/apis/runtime/v1";
+
+// RuntimeService defines the public APIs for remote container runtimes.
+service RuntimeService {
+    // Version returns the runtime name, runtime version, and runtime API version.
+    rpc Version(VersionRequest) returns (VersionResponse) {}
+
+    // RunPodSandbox creates and starts a pod-level sandbox.
+    rpc RunPodSandbox(RunPodSandboxRequest) returns (RunPodSandboxResponse) {}
+    // StopPodSandbox stops any running process that is part of the sandbox.
+    rpc StopPodSandbox(StopPodSandboxRequest) returns (StopPodSandboxResponse) {}
+    // RemovePodSandbox removes the sandbox.
+    rpc RemovePodSandbox(RemovePodSandboxRequest) returns (RemovePodSandboxResponse) {}
+    // PodSandboxStatus returns the status of the PodSandbox.
+    rpc PodSandboxStatus(PodSandboxStatusRequest) returns (PodSandboxStatusResponse) {}
+    // ListPodSandbox returns a list of PodSandboxes.
+    rpc ListPodSandbox(ListPodSandboxRequest) returns (ListPodSandboxResponse) {}
+
+    // CreateContainer creates a new container in specified PodSandbox.
+    rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse) {}
+    // StartContainer starts the container.
+    rpc StartContainer(StartContainerRequest) returns (StartContainerResponse) {}
+    // StopContainer stops a running container.
+    rpc StopContainer(StopContainerRequest) returns (StopContainerResponse) {}
+    // RemoveContainer removes the container.
+    rpc RemoveContainer(RemoveContainerRequest) returns (RemoveContainerResponse) {}
+    // ListContainers lists all containers by filters.
+    rpc ListContainers(ListContainersRequest) returns (ListContainersResponse) {}
+    // ContainerStatus returns status of the container.
+    rpc ContainerStatus(ContainerStatusRequest) returns (ContainerStatusResponse) {}
+
+    // ExecSync runs a command in a container synchronously.
+    rpc ExecSync(ExecSyncRequest) returns (ExecSyncResponse) {}
+    // Exec prepares a streaming endpoint to execute a command in the container.
+    rpc Exec(ExecRequest) returns (ExecResponse) {}
+    // Attach prepares a streaming endpoint to attach to a running container.
+    rpc Attach(AttachRequest) returns (AttachResponse) {}
+    // PortForward prepares a streaming endpoint to forward ports from a PodSandbox.
+    rpc PortForward(PortForwardRequest) returns (PortForwardResponse) {}
+
+    // UpdateContainerResources updates ContainerConfig of the container.
+    rpc UpdateContainerResources(UpdateContainerResourcesRequest) returns (UpdateContainerResourcesResponse) {}
+    // ReopenContainerLog asks runtime to reopen the stdout/stderr log file for the container.
+    rpc ReopenContainerLog(ReopenContainerLogRequest) returns (ReopenContainerLogResponse) {}
+
+    // Status returns the status of the runtime.
+    rpc Status(StatusRequest) returns (StatusResponse) {}
+    // UpdateRuntimeConfig updates the runtime configuration.
+    rpc UpdateRuntimeConfig(UpdateRuntimeConfigRequest) returns (UpdateRuntimeConfigResponse) {}
+}
+
+// ImageService defines the public APIs for managing images.
+service ImageService {
+    // ListImages lists existing images.
+    rpc ListImages(ListImagesRequest) returns (ListImagesResponse) {}
+    // ImageStatus returns the status of the image.
+    rpc ImageStatus(ImageStatusRequest) returns (ImageStatusResponse) {}
+    // PullImage pulls an image with authentication config.
+    rpc PullImage(PullImageRequest) returns (PullImageResponse) {}
+    // RemoveImage removes the image.
+    rpc RemoveImage(RemoveImageRequest) returns (RemoveImageResponse) {}
+    // ImageFsInfo returns information of the filesystem that is used to store images.
+    rpc ImageFsInfo(ImageFsInfoRequest) returns (ImageFsInfoResponse) {}
+}
+
+// VersionRequest
+message VersionRequest {
+    string version = 1;
+}
+
+message VersionResponse {
+    string version = 1;
+    string runtime_name = 2;
+    string runtime_version = 3;
+    string runtime_api_version = 4;
+}
+
+// DNSConfig specifies the DNS servers and search domains of a sandbox.
+message DNSConfig {
+    repeated string servers = 1;
+    repeated string searches = 2;
+    repeated string options = 3;
+}
+
+// PortMapping specifies the port mapping configurations of a sandbox.
+message PortMapping {
+    enum Protocol {
+        TCP = 0;
+        UDP = 1;
+        SCTP = 2;
+    }
+    Protocol protocol = 1;
+    int32 container_port = 2;
+    int32 host_port = 3;
+    string host_ip = 4;
+}
+
+// Mount specifies a host volume to mount into a container.
+message Mount {
+    string container_path = 1;
+    string host_path = 2;
+    bool readonly = 3;
+    bool selinux_relabel = 4;
+    enum MountPropagation {
+        PROPAGATION_PRIVATE = 0;
+        PROPAGATION_HOST_TO_CONTAINER = 1;
+        PROPAGATION_BIDIRECTIONAL = 2;
+    }
+    MountPropagation propagation = 5;
+}
+
+// NamespaceOption provides options for Linux namespaces.
+message NamespaceOption {
+    enum NamespaceMode {
+        POD = 0;
+        CONTAINER = 1;
+        NODE = 2;
+        TARGET = 3;
+    }
+    NamespaceMode network = 1;
+    NamespaceMode pid = 2;
+    NamespaceMode ipc = 3;
+    string target_id = 4;
+    NamespaceMode user = 5;
+}
+
+// LinuxSandboxSecurityContext holds linux security configuration.
+message LinuxSandboxSecurityContext {
+    NamespaceOption namespace_options = 1;
+    SELinuxOption selinux_options = 2;
+    Int64Value run_as_user = 3;
+    Int64Value run_as_group = 4;
+    bool readonly_rootfs = 5;
+    repeated int64 supplemental_groups = 6;
+    bool privileged = 7;
+    string seccomp_profile_path = 8;
+}
+
+// SELinuxOption are the labels to be applied to the container.
+message SELinuxOption {
+    string user = 1;
+    string role = 2;
+    string type = 3;
+    string level = 4;
+}
+
+// Int64Value wrapper.
+message Int64Value {
+    int64 value = 1;
+}
+
+// LinuxPodSandboxConfig holds platform-specific configurations for Linux.
+message LinuxPodSandboxConfig {
+    string cgroup_parent = 1;
+    LinuxSandboxSecurityContext security_context = 2;
+    map<string, string> sysctls = 3;
+}
+
+// PodSandboxMetadata holds all necessary information for building the sandbox name.
+message PodSandboxMetadata {
+    string name = 1;
+    string uid = 2;
+    string namespace = 3;
+    uint32 attempt = 4;
+}
+
+// PodSandboxConfig holds all the required and optional fields for creating a sandbox.
+message PodSandboxConfig {
+    PodSandboxMetadata metadata = 1;
+    string hostname = 2;
+    string log_directory = 3;
+    DNSConfig dns_config = 4;
+    repeated PortMapping port_mappings = 5;
+    map<string, string> labels = 6;
+    map<string, string> annotations = 7;
+    LinuxPodSandboxConfig linux = 8;
+}
+
+// RunPodSandboxRequest
+message RunPodSandboxRequest {
+    PodSandboxConfig config = 1;
+    string runtime_handler = 2;
+}
+
+message RunPodSandboxResponse {
+    string pod_sandbox_id = 1;
+}
+
+// StopPodSandboxRequest
+message StopPodSandboxRequest {
+    string pod_sandbox_id = 1;
+}
+
+message StopPodSandboxResponse {}
+
+// RemovePodSandboxRequest
+message RemovePodSandboxRequest {
+    string pod_sandbox_id = 1;
+}
+
+message RemovePodSandboxResponse {}
+
+// PodSandboxStatusRequest
+message PodSandboxStatusRequest {
+    string pod_sandbox_id = 1;
+    bool verbose = 2;
+}
+
+enum PodSandboxState {
+    SANDBOX_READY = 0;
+    SANDBOX_NOTREADY = 1;
+}
+
+// PodSandboxNetworkStatus is the status of the network for a PodSandbox.
+message PodSandboxNetworkStatus {
+    string ip = 1;
+    repeated PodIP additional_ips = 2;
+}
+
+message PodIP {
+    string ip = 1;
+}
+
+// Namespace contains paths to the namespaces.
+message Namespace {
+    NamespaceOption options = 2;
+}
+
+// LinuxPodSandboxStatus contains status specific to Linux sandboxes.
+message LinuxPodSandboxStatus {
+    Namespace namespaces = 1;
+}
+
+// PodSandboxStatus contains the status of the PodSandbox.
+message PodSandboxStatus {
+    string id = 1;
+    PodSandboxMetadata metadata = 2;
+    PodSandboxState state = 3;
+    int64 created_at = 4;
+    PodSandboxNetworkStatus network = 5;
+    LinuxPodSandboxStatus linux = 6;
+    map<string, string> labels = 7;
+    map<string, string> annotations = 8;
+    string runtime_handler = 9;
+}
+
+message PodSandboxStatusResponse {
+    PodSandboxStatus status = 1;
+    map<string, string> info = 2;
+}
+
+// PodSandboxFilter is used to filter a list of PodSandboxes.
+message PodSandboxFilter {
+    string id = 1;
+    PodSandboxState state = 2;
+    map<string, string> label_selector = 3;
+}
+
+// ListPodSandboxRequest
+message ListPodSandboxRequest {
+    PodSandboxFilter filter = 1;
+}
+
+// PodSandbox contains minimal information about a sandbox.
+message PodSandbox {
+    string id = 1;
+    PodSandboxMetadata metadata = 2;
+    PodSandboxState state = 3;
+    int64 created_at = 4;
+    map<string, string> labels = 5;
+    map<string, string> annotations = 6;
+    string runtime_handler = 7;
+}
+
+message ListPodSandboxResponse {
+    repeated PodSandbox items = 1;
+}
+
+// ImageSpec is an internal representation of an image.
+message ImageSpec {
+    string image = 1;
+    map<string, string> annotations = 2;
+}
+
+// KeyValue is a key-value pair.
+message KeyValue {
+    string key = 1;
+    string value = 2;
+}
+
+// LinuxContainerSecurityContext holds linux security configuration.
+message LinuxContainerSecurityContext {
+    NamespaceOption namespace_options = 1;
+    SELinuxOption selinux_options = 2;
+    Int64Value run_as_user = 3;
+    string run_as_username = 4;
+    Int64Value run_as_group = 5;
+    bool readonly_rootfs = 6;
+    repeated int64 supplemental_groups = 7;
+    bool privileged = 8;
+    bool no_new_privs = 9;
+}
+
+// LinuxContainerConfig contains platform-specific configuration for Linux-based containers.
+message LinuxContainerConfig {
+    LinuxContainerResources resources = 1;
+    LinuxContainerSecurityContext security_context = 2;
+}
+
+// LinuxContainerResources specifies Linux specific configuration for resources.
+message LinuxContainerResources {
+    int64 cpu_period = 1;
+    int64 cpu_quota = 2;
+    int64 cpu_shares = 3;
+    int64 memory_limit_in_bytes = 4;
+    int64 oom_score_adj = 5;
+    string cpuset_cpus = 6;
+    string cpuset_mems = 7;
+    repeated HugepageLimit hugepage_limits = 8;
+    map<string, string> unified = 9;
+    int64 memory_swap_limit_in_bytes = 10;
+}
+
+// HugepageLimit corresponds to the Linux cgroup hugetlb limit.
+message HugepageLimit {
+    string page_size = 1;
+    uint64 limit = 2;
+}
+
+// ContainerMetadata holds all necessary information for building the container name.
+message ContainerMetadata {
+    string name = 1;
+    uint32 attempt = 2;
+}
+
+// Device specifies a host device to mount into a container.
+message Device {
+    string container_path = 1;
+    string host_path = 2;
+    string permissions = 3;
+}
+
+// ContainerConfig holds all the required and optional fields for creating a container.
+message ContainerConfig {
+    ContainerMetadata metadata = 1;
+    ImageSpec image = 2;
+    repeated string command = 3;
+    repeated string args = 4;
+    string working_dir = 5;
+    repeated KeyValue envs = 6;
+    repeated Mount mounts = 7;
+    repeated Device devices = 8;
+    map<string, string> labels = 9;
+    map<string, string> annotations = 10;
+    string log_path = 11;
+    bool stdin = 12;
+    bool stdin_once = 13;
+    bool tty = 14;
+    LinuxContainerConfig linux = 15;
+}
+
+// CreateContainerRequest
+message CreateContainerRequest {
+    string pod_sandbox_id = 1;
+    ContainerConfig config = 2;
+    PodSandboxConfig sandbox_config = 3;
+}
+
+message CreateContainerResponse {
+    string container_id = 1;
+}
+
+// StartContainerRequest
+message StartContainerRequest {
+    string container_id = 1;
+}
+
+message StartContainerResponse {}
+
+// StopContainerRequest
+message StopContainerRequest {
+    string container_id = 1;
+    int64 timeout = 2;
+}
+
+message StopContainerResponse {}
+
+// RemoveContainerRequest
+message RemoveContainerRequest {
+    string container_id = 1;
+}
+
+message RemoveContainerResponse {}
+
+// ContainerStateValue is the wrapper of ContainerState.
+message ContainerStateValue {
+    ContainerState state = 1;
+}
+
+enum ContainerState {
+    CONTAINER_CREATED = 0;
+    CONTAINER_RUNNING = 1;
+    CONTAINER_EXITED = 2;
+    CONTAINER_UNKNOWN = 3;
+}
+
+// ContainerFilter is used to filter containers.
+message ContainerFilter {
+    string id = 1;
+    ContainerStateValue state = 2;
+    string pod_sandbox_id = 3;
+    map<string, string> label_selector = 4;
+}
+
+// ListContainersRequest
+message ListContainersRequest {
+    ContainerFilter filter = 1;
+}
+
+// Container provides the runtime information for a container.
+message Container {
+    string id = 1;
+    string pod_sandbox_id = 2;
+    ContainerMetadata metadata = 3;
+    ImageSpec image = 4;
+    string image_ref = 5;
+    ContainerState state = 6;
+    int64 created_at = 7;
+    map<string, string> labels = 8;
+    map<string, string> annotations = 9;
+}
+
+message ListContainersResponse {
+    repeated Container containers = 1;
+}
+
+// ContainerStatusRequest
+message ContainerStatusRequest {
+    string container_id = 1;
+    bool verbose = 2;
+}
+
+// ContainerStatus represents the status of a container.
+message ContainerStatus {
+    string id = 1;
+    ContainerMetadata metadata = 2;
+    ContainerState state = 3;
+    int64 created_at = 4;
+    int64 started_at = 5;
+    int64 finished_at = 6;
+    int32 exit_code = 7;
+    ImageSpec image = 8;
+    string image_ref = 9;
+    string reason = 10;
+    string message = 11;
+    map<string, string> labels = 12;
+    map<string, string> annotations = 13;
+    repeated Mount mounts = 14;
+    string log_path = 15;
+}
+
+message ContainerStatusResponse {
+    ContainerStatus status = 1;
+    map<string, string> info = 2;
+}
+
+// ExecSyncRequest
+message ExecSyncRequest {
+    string container_id = 1;
+    repeated string cmd = 2;
+    int64 timeout = 3;
+}
+
+message ExecSyncResponse {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    int32 exit_code = 3;
+}
+
+// ExecRequest
+message ExecRequest {
+    string container_id = 1;
+    repeated string cmd = 2;
+    bool tty = 3;
+    bool stdin = 4;
+    bool stdout = 5;
+    bool stderr = 6;
+}
+
+message ExecResponse {
+    string url = 1;
+}
+
+// AttachRequest
+message AttachRequest {
+    string container_id = 1;
+    bool stdin = 2;
+    bool tty = 3;
+    bool stdout = 4;
+    bool stderr = 5;
+}
+
+message AttachResponse {
+    string url = 1;
+}
+
+// PortForwardRequest
+message PortForwardRequest {
+    string pod_sandbox_id = 1;
+    repeated int32 port = 2;
+}
+
+message PortForwardResponse {
+    string url = 1;
+}
+
+// UpdateContainerResourcesRequest
+message UpdateContainerResourcesRequest {
+    string container_id = 1;
+    LinuxContainerResources linux = 2;
+    map<string, string> annotations = 4;
+}
+
+message UpdateContainerResourcesResponse {}
+
+// ReopenContainerLogRequest
+message ReopenContainerLogRequest {
+    string container_id = 1;
+}
+
+message ReopenContainerLogResponse {}
+
+// StatusRequest
+message StatusRequest {
+    bool verbose = 1;
+}
+
+// RuntimeCondition contains condition information for the runtime.
+message RuntimeCondition {
+    string type = 1;
+    bool status = 2;
+    string reason = 3;
+    string message = 4;
+}
+
+// RuntimeStatus is information about the current status of the runtime.
+message RuntimeStatus {
+    repeated RuntimeCondition conditions = 1;
+}
+
+message StatusResponse {
+    RuntimeStatus status = 1;
+    map<string, string> info = 2;
+}
+
+// UpdateRuntimeConfigRequest
+message UpdateRuntimeConfigRequest {
+    RuntimeConfig runtime_config = 1;
+}
+
+// RuntimeConfig is the configuration for the runtime.
+message RuntimeConfig {
+    NetworkConfig network_config = 1;
+}
+
+// NetworkConfig is the configuration for the runtime network.
+message NetworkConfig {
+    string pod_cidr = 1;
+}
+
+message UpdateRuntimeConfigResponse {}
+
+// AuthConfig contains authentication information for a registry.
+message AuthConfig {
+    string username = 1;
+    string password = 2;
+    string auth = 3;
+    string server_address = 4;
+    string identity_token = 5;
+    string registry_token = 6;
+}
+
+// ListImagesRequest
+message ListImagesRequest {
+    ImageFilter filter = 1;
+}
+
+// ImageFilter is used to filter images.
+message ImageFilter {
+    ImageSpec image = 1;
+}
+
+// ListImagesResponse
+message ListImagesResponse {
+    repeated Image images = 1;
+}
+
+// Image contains basic information about a container image.
+message Image {
+    string id = 1;
+    repeated string repo_tags = 2;
+    repeated string repo_digests = 3;
+    uint64 size = 4;
+    Int64Value uid = 5;
+    string username = 6;
+    ImageSpec spec = 7;
+    bool pinned = 8;
+}
+
+// ImageStatusRequest
+message ImageStatusRequest {
+    ImageSpec image = 1;
+    bool verbose = 2;
+}
+
+message ImageStatusResponse {
+    Image image = 1;
+    map<string, string> info = 2;
+}
+
+// PullImageRequest
+message PullImageRequest {
+    ImageSpec image = 1;
+    AuthConfig auth = 2;
+    PodSandboxConfig sandbox_config = 3;
+}
+
+message PullImageResponse {
+    string image_ref = 1;
+}
+
+// RemoveImageRequest
+message RemoveImageRequest {
+    ImageSpec image = 1;
+}
+
+message RemoveImageResponse {}
+
+// ImageFsInfoRequest
+message ImageFsInfoRequest {}
+
+// UInt64Value wrapper.
+message UInt64Value {
+    uint64 value = 1;
+}
+
+// FilesystemIdentifier uniquely identifies the filesystem.
+message FilesystemIdentifier {
+    string mountpoint = 1;
+}
+
+// FilesystemUsage provides the filesystem usage information.
+message FilesystemUsage {
+    int64 timestamp = 1;
+    FilesystemIdentifier fs_id = 2;
+    UInt64Value used_bytes = 3;
+    UInt64Value inodes_used = 4;
+}
+
+message ImageFsInfoResponse {
+    repeated FilesystemUsage image_filesystems = 1;
+}

@@ -27,9 +27,17 @@
 mod image;
 mod labels;
 mod layers;
+mod pull;
+pub mod reference;
+pub mod registry;
 mod rootfs;
+pub mod store;
 
 pub use image::{OciImage, OciImageConfig};
 pub use labels::AgentLabels;
 pub use layers::extract_layer;
+pub use pull::ImagePuller;
+pub use reference::ImageReference;
+pub use registry::{RegistryAuth, RegistryPuller};
 pub use rootfs::{OciRootfsBuilder, RootfsComposition};
+pub use store::{ImageStore, StoredImage};

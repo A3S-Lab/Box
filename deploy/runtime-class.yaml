@@ -1,0 +1,10 @@
+# A3S Box RuntimeClass
+# Tells kubelet to use the a3s-box CRI runtime for pods that request it.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: a3s-box
+handler: a3s-box
+scheduling:
+  nodeSelector:
+    a3s.box/runtime: "true"

@@ -1,0 +1,63 @@
+# A3S Box CRI DaemonSet
+# Runs the a3s-box-cri binary on every node labeled with a3s.box/runtime=true.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: a3s-box-cri
+  namespace: kube-system
+  labels:
+    app: a3s-box-cri
+spec:
+  selector:
+    matchLabels:
+      app: a3s-box-cri
+  template:
+    metadata:
+      labels:
+        app: a3s-box-cri
+    spec:
+      nodeSelector:
+        a3s.box/runtime: "true"
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: a3s-box-cri
+          image: ghcr.io/a3s-lab/a3s-box-cri:latest
+          args:
+            - --socket=/var/run/a3s-box/a3s-box.sock
+            - --image-dir=/var/lib/a3s-box/images
+            - --image-cache-size=10737418240
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: cri-socket
+              mountPath: /var/run/a3s-box
+            - name: image-store
+              mountPath: /var/lib/a3s-box
+            - name: dev-kvm
+              mountPath: /dev/kvm
+          env:
+            - name: RUST_LOG
+              value: "info"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: cri-socket
+          hostPath:
+            path: /var/run/a3s-box
+            type: DirectoryOrCreate
+        - name: image-store
+          hostPath:
+            path: /var/lib/a3s-box
+            type: DirectoryOrCreate
+        - name: dev-kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice

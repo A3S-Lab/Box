@@ -21,6 +21,7 @@ pub mod vmm;
 // Re-export common types
 pub use host_check::{check_virtualization_support, VirtualizationSupport};
 pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
+pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller, StoredImage};
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
 pub use session::{Session, SessionId, SessionManager};
 pub use skill::{LimitFilter, NameFilter, NoFilter, SkillFilter, SkillManager, SkillPackage};

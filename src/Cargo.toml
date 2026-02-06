@@ -4,9 +4,8 @@ members = [
     "runtime",
     "shim",
     "guest/init",
-    "sdk/python",
-    "sdk/typescript",
     "deps/libkrun-sys",
+    "cri",
 ]
 resolver = "2"
 
@@ -82,3 +81,6 @@ dirs = "5.0"
 
 # Testing
 tempfile = "3.10"
+
+# OCI distribution
+oci-distribution = "0.11"

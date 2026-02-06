@@ -69,6 +69,12 @@ pub enum AgentType {
         /// SHA256 checksum for verification
         checksum: String,
     },
+
+    /// OCI image from a container registry (pulled on first use)
+    OciRegistry {
+        /// Image reference (e.g., "ghcr.io/a3s-box/code:v0.1.0")
+        reference: String,
+    },
 }
 
 impl Default for AgentType {
@@ -707,6 +713,32 @@ mod tests {
             }
             _ => panic!("Expected RemoteBinary variant"),
         }
+    }
+
+    #[test]
+    fn test_agent_type_oci_registry() {
+        let agent = AgentType::OciRegistry {
+            reference: "ghcr.io/a3s-box/code:v0.1.0".to_string(),
+        };
+
+        match agent {
+            AgentType::OciRegistry { reference } => {
+                assert_eq!(reference, "ghcr.io/a3s-box/code:v0.1.0");
+            }
+            _ => panic!("Expected OciRegistry variant"),
+        }
+    }
+
+    #[test]
+    fn test_agent_type_oci_registry_serialization() {
+        let agent = AgentType::OciRegistry {
+            reference: "docker.io/library/nginx:latest".to_string(),
+        };
+
+        let json = serde_json::to_string(&agent).unwrap();
+        let parsed: AgentType = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed, agent);
     }
 
     #[test]

@@ -1,17 +1,21 @@
 [package]
-name = "a3s-box-runtime"
+name = "a3s-box-cri"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "a3s-box-cri"
+path = "src/main.rs"
+
 [lib]
-name = "a3s_box_runtime"
+name = "a3s_box_cri"
 path = "src/lib.rs"
 
 [dependencies]
 a3s-box-core = { path = "../core" }
-libkrun-sys = { path = "../deps/libkrun-sys" }
+a3s-box-runtime = { path = "../runtime" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -26,24 +30,16 @@ prost = { workspace = true }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
 
 # Error handling
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
-# File system
-notify = { workspace = true }
-
-# Cryptography
-sha2 = { workspace = true }
-hex = { workspace = true }
-
-# HTTP client
-reqwest = { workspace = true }
+# CLI
+clap = { workspace = true }
 
 # Time
 chrono = { workspace = true }
@@ -56,18 +52,10 @@ parking_lot = { workspace = true }
 dashmap = { workspace = true }
 
 # System
-libc = { workspace = true }
-sysinfo = { workspace = true }
 dirs = { workspace = true }
-
-# OCI image support
-oci-spec = "0.6"
-oci-distribution = { workspace = true }
-tar = "0.4"
-flate2 = "1.0"
-
-[dev-dependencies]
-tempfile = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
