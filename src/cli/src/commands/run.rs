@@ -67,6 +67,8 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
         cmd: args.cmd.clone(),
+        volumes: args.volumes.clone(),
+        extra_env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         ..Default::default()
     };
 

@@ -172,7 +172,7 @@ fn mount_essential_filesystems() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Mount virtio-fs shares for workspace and skills.
+/// Mount virtio-fs shares for workspace, skills, and user volumes.
 fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
     info!("Mounting virtio-fs shares");
 
@@ -197,11 +197,74 @@ fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
             MsFlags::MS_RDONLY,
             None::<&str>,
         )?;
+
+        // Mount user-defined volumes from environment variables
+        // Format: A3S_VOL_<index>=<tag>:<guest_path>[:ro]
+        mount_user_volumes()?;
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         info!("Skipping virtio-fs mount on non-Linux platform (development mode)");
+    }
+
+    Ok(())
+}
+
+/// Mount user-defined volumes passed via A3S_VOL_* environment variables.
+///
+/// Each variable has the format: `<tag>:<guest_path>[:ro]`
+#[cfg(target_os = "linux")]
+fn mount_user_volumes() -> Result<(), Box<dyn std::error::Error>> {
+    use nix::mount::{mount, MsFlags};
+
+    let mut index = 0;
+    loop {
+        let env_key = format!("A3S_VOL_{}", index);
+        match std::env::var(&env_key) {
+            Ok(value) => {
+                let parts: Vec<&str> = value.split(':').collect();
+                if parts.len() < 2 {
+                    error!("Invalid volume spec in {}: {}", env_key, value);
+                    index += 1;
+                    continue;
+                }
+
+                let tag = parts[0];
+                let guest_path = parts[1];
+                let read_only = parts.get(2).map(|&m| m == "ro").unwrap_or(false);
+
+                info!(
+                    tag = tag,
+                    guest_path = guest_path,
+                    read_only = read_only,
+                    "Mounting user volume"
+                );
+
+                // Ensure mount point exists
+                std::fs::create_dir_all(guest_path)?;
+
+                let flags = if read_only {
+                    MsFlags::MS_RDONLY
+                } else {
+                    MsFlags::empty()
+                };
+                mount(
+                    Some(tag),
+                    guest_path,
+                    Some("virtiofs"),
+                    flags,
+                    None::<&str>,
+                )?;
+
+                index += 1;
+            }
+            Err(_) => break,
+        }
+    }
+
+    if index > 0 {
+        info!("Mounted {} user volume(s)", index);
     }
 
     Ok(())

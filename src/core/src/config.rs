@@ -148,6 +148,14 @@ pub struct BoxConfig {
     /// Command override (replaces OCI CMD when set)
     #[serde(default)]
     pub cmd: Vec<String>,
+
+    /// Extra volume mounts (host_path:guest_path or host_path:guest_path:ro)
+    #[serde(default)]
+    pub volumes: Vec<String>,
+
+    /// Extra environment variables for the entrypoint
+    #[serde(default)]
+    pub extra_env: Vec<(String, String)>,
 }
 
 impl Default for BoxConfig {
@@ -164,6 +172,8 @@ impl Default for BoxConfig {
             debug_grpc: false,
             tee: TeeConfig::default(),
             cmd: vec![],
+            volumes: vec![],
+            extra_env: vec![],
         }
     }
 }

@@ -658,7 +658,7 @@ impl VmManager {
     /// Build InstanceSpec from config and layout.
     fn build_instance_spec(&self, layout: &BoxLayout) -> Result<InstanceSpec> {
         // Build filesystem mounts
-        let fs_mounts = vec![
+        let mut fs_mounts = vec![
             FsMount {
                 tag: "workspace".to_string(),
                 host_path: layout.workspace_path.clone(),
@@ -671,8 +671,14 @@ impl VmManager {
             },
         ];
 
+        // Add user-specified volume mounts (-v host:guest or -v host:guest:ro)
+        for (i, vol) in self.config.volumes.iter().enumerate() {
+            let mount = Self::parse_volume_mount(vol, i)?;
+            fs_mounts.push(mount);
+        }
+
         // Build entrypoint based on agent type and OCI config
-        let entrypoint = if layout.has_guest_init {
+        let mut entrypoint = if layout.has_guest_init {
             // Use guest init as entrypoint for namespace isolation
             // Pass agent configuration via environment variables
             let (agent_exec, agent_args, agent_env) = match &layout.agent_oci_config {
@@ -699,6 +705,17 @@ impl VmManager {
             // Add agent environment variables with A3S_AGENT_ENV_ prefix
             for (key, value) in agent_env {
                 env.push((format!("A3S_AGENT_ENV_{}", key), value));
+            }
+
+            // Pass user volume mounts to guest init for mounting inside the VM
+            // Format: A3S_VOL_<index>=<tag>:<guest_path>[:ro]
+            for (i, vol) in self.config.volumes.iter().enumerate() {
+                let parts: Vec<&str> = vol.split(':').collect();
+                if parts.len() >= 2 {
+                    let guest_path = parts[1];
+                    let mode = if parts.len() >= 3 && parts[2] == "ro" { ":ro" } else { "" };
+                    env.push((format!("A3S_VOL_{}", i), format!("vol{}:{}{}", i, guest_path, mode)));
+                }
             }
 
             tracing::debug!(
@@ -746,6 +763,20 @@ impl VmManager {
                 }
             }
         };
+
+        // Append user-specified environment variables (-e KEY=VALUE)
+        if !self.config.extra_env.is_empty() {
+            let mut env = entrypoint.env;
+            for (key, value) in &self.config.extra_env {
+                // Override existing keys or append new ones
+                if let Some(existing) = env.iter_mut().find(|(k, _)| k == key) {
+                    existing.1 = value.clone();
+                } else {
+                    env.push((key.clone(), value.clone()));
+                }
+            }
+            entrypoint.env = env;
+        }
 
         // Determine workdir
         let workdir = match &layout.agent_oci_config {
@@ -828,6 +859,77 @@ impl VmManager {
         } else {
             format!("/agent/{}", path)
         }
+    }
+
+    /// Parse a volume mount string into an FsMount.
+    ///
+    /// Supported formats:
+    /// - `host_path:guest_path` (read-write)
+    /// - `host_path:guest_path:ro` (read-only)
+    /// - `host_path:guest_path:rw` (read-write, explicit)
+    fn parse_volume_mount(volume: &str, index: usize) -> Result<FsMount> {
+        let parts: Vec<&str> = volume.split(':').collect();
+
+        let (host_path_str, _guest_path, read_only) = match parts.len() {
+            2 => (parts[0], parts[1], false),
+            3 => {
+                let ro = match parts[2] {
+                    "ro" => true,
+                    "rw" => false,
+                    other => {
+                        return Err(BoxError::Other(format!(
+                            "Invalid volume mode '{}' (expected 'ro' or 'rw'): {}",
+                            other, volume
+                        )));
+                    }
+                };
+                (parts[0], parts[1], ro)
+            }
+            _ => {
+                return Err(BoxError::Other(format!(
+                    "Invalid volume format (expected host:guest[:ro|rw]): {}",
+                    volume
+                )));
+            }
+        };
+
+        // Resolve and validate host path
+        let host_path = PathBuf::from(host_path_str);
+        if !host_path.exists() {
+            std::fs::create_dir_all(&host_path).map_err(|e| BoxError::BoxBootError {
+                message: format!(
+                    "Failed to create volume host directory {}: {}",
+                    host_path.display(),
+                    e
+                ),
+                hint: None,
+            })?;
+        }
+        let host_path = host_path.canonicalize().map_err(|e| BoxError::BoxBootError {
+            message: format!(
+                "Failed to resolve volume path {}: {}",
+                host_path.display(),
+                e
+            ),
+            hint: None,
+        })?;
+
+        // Use a unique tag for each user volume
+        let tag = format!("vol{}", index);
+
+        tracing::info!(
+            tag = %tag,
+            host = %host_path.display(),
+            guest = _guest_path,
+            read_only,
+            "Adding user volume mount"
+        );
+
+        Ok(FsMount {
+            tag,
+            host_path,
+            read_only,
+        })
     }
 
     /// Wait for the VM process to be running (for generic OCI images without an agent).
@@ -978,5 +1080,169 @@ impl From<&BoxConfig> for VmConfig {
             kernel_path: "/path/to/kernel".to_string(),
             init_cmd: vec![GUEST_AGENT_PATH.to_string()],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_parse_volume_mount_host_guest() {
+        let temp = TempDir::new().unwrap();
+        let host_path = temp.path().to_str().unwrap();
+        let volume = format!("{}:/data", host_path);
+
+        let mount = VmManager::parse_volume_mount(&volume, 0).unwrap();
+        assert_eq!(mount.tag, "vol0");
+        assert_eq!(mount.host_path, temp.path().canonicalize().unwrap());
+        assert!(!mount.read_only);
+    }
+
+    #[test]
+    fn test_parse_volume_mount_read_only() {
+        let temp = TempDir::new().unwrap();
+        let host_path = temp.path().to_str().unwrap();
+        let volume = format!("{}:/data:ro", host_path);
+
+        let mount = VmManager::parse_volume_mount(&volume, 1).unwrap();
+        assert_eq!(mount.tag, "vol1");
+        assert!(mount.read_only);
+    }
+
+    #[test]
+    fn test_parse_volume_mount_explicit_rw() {
+        let temp = TempDir::new().unwrap();
+        let host_path = temp.path().to_str().unwrap();
+        let volume = format!("{}:/data:rw", host_path);
+
+        let mount = VmManager::parse_volume_mount(&volume, 2).unwrap();
+        assert_eq!(mount.tag, "vol2");
+        assert!(!mount.read_only);
+    }
+
+    #[test]
+    fn test_parse_volume_mount_invalid_mode() {
+        let temp = TempDir::new().unwrap();
+        let host_path = temp.path().to_str().unwrap();
+        let volume = format!("{}:/data:invalid", host_path);
+
+        let result = VmManager::parse_volume_mount(&volume, 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid volume mode"));
+    }
+
+    #[test]
+    fn test_parse_volume_mount_invalid_format() {
+        let result = VmManager::parse_volume_mount("invalid", 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid volume format"));
+    }
+
+    #[test]
+    fn test_parse_volume_mount_creates_missing_dir() {
+        let temp = TempDir::new().unwrap();
+        let host_path = temp.path().join("nonexistent");
+        let volume = format!("{}:/data", host_path.display());
+
+        assert!(!host_path.exists());
+        let mount = VmManager::parse_volume_mount(&volume, 0).unwrap();
+        assert!(host_path.exists());
+        assert_eq!(mount.host_path, host_path.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn test_resolve_oci_entrypoint_with_entrypoint_and_cmd() {
+        let config = OciImageConfig {
+            entrypoint: Some(vec!["/bin/app".to_string()]),
+            cmd: Some(vec!["--flag".to_string()]),
+            env: vec![],
+            working_dir: None,
+            user: None,
+            exposed_ports: vec![],
+            labels: std::collections::HashMap::new(),
+        };
+
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[]);
+        assert_eq!(exec, "/bin/app");
+        assert_eq!(args, vec!["--flag"]);
+    }
+
+    #[test]
+    fn test_resolve_oci_entrypoint_cmd_only() {
+        let config = OciImageConfig {
+            entrypoint: None,
+            cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), "echo hi".to_string()]),
+            env: vec![],
+            working_dir: None,
+            user: None,
+            exposed_ports: vec![],
+            labels: std::collections::HashMap::new(),
+        };
+
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[]);
+        assert_eq!(exec, "/bin/sh");
+        assert_eq!(args, vec!["-c", "echo hi"]);
+    }
+
+    #[test]
+    fn test_resolve_oci_entrypoint_neither() {
+        let config = OciImageConfig {
+            entrypoint: None,
+            cmd: None,
+            env: vec![],
+            working_dir: None,
+            user: None,
+            exposed_ports: vec![],
+            labels: std::collections::HashMap::new(),
+        };
+
+        let (exec, _args) = VmManager::resolve_oci_entrypoint(&config, true, &[]);
+        assert_eq!(exec, GUEST_AGENT_PATH);
+    }
+
+    #[test]
+    fn test_resolve_oci_entrypoint_cmd_override() {
+        let config = OciImageConfig {
+            entrypoint: None,
+            cmd: Some(vec!["/bin/sh".to_string()]),
+            env: vec![],
+            working_dir: None,
+            user: None,
+            exposed_ports: vec![],
+            labels: std::collections::HashMap::new(),
+        };
+
+        let override_cmd = vec!["sleep".to_string(), "3600".to_string()];
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &override_cmd);
+        assert_eq!(exec, "sleep");
+        assert_eq!(args, vec!["3600"]);
+    }
+
+    #[test]
+    fn test_resolve_oci_entrypoint_image_not_at_root() {
+        let config = OciImageConfig {
+            entrypoint: None,
+            cmd: Some(vec!["/bin/sh".to_string()]),
+            env: vec![],
+            working_dir: None,
+            user: None,
+            exposed_ports: vec![],
+            labels: std::collections::HashMap::new(),
+        };
+
+        let (exec, _) = VmManager::resolve_oci_entrypoint(&config, false, &[]);
+        assert_eq!(exec, "/agent/bin/sh");
+    }
+
+    #[test]
+    fn test_prefix_agent_path_absolute() {
+        assert_eq!(VmManager::prefix_agent_path("/bin/sh"), "/agent/bin/sh");
+    }
+
+    #[test]
+    fn test_prefix_agent_path_relative() {
+        assert_eq!(VmManager::prefix_agent_path("bin/sh"), "/agent/bin/sh");
     }
 }

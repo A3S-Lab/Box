@@ -33,6 +33,16 @@ sign-shim profile="debug":
 sign-shim profile="debug":
     @echo "✓ No signing needed on Linux"
 
+# Build guest binaries (cross-compile for Linux aarch64 musl)
+build-guest profile="release":
+    cd src && cargo build -p a3s-box-guest-init --target aarch64-unknown-linux-musl --{{profile}}
+    @if [ "{{profile}}" = "release" ]; then \
+        aarch64-linux-musl-strip src/target/aarch64-unknown-linux-musl/release/a3s-box-guest-init; \
+        aarch64-linux-musl-strip src/target/aarch64-unknown-linux-musl/release/a3s-box-nsexec; \
+    fi
+    @echo "Guest binaries built at src/target/aarch64-unknown-linux-musl/{{profile}}/"
+    @ls -lh src/target/aarch64-unknown-linux-musl/{{profile}}/a3s-box-guest-init src/target/aarch64-unknown-linux-musl/{{profile}}/a3s-box-nsexec 2>/dev/null || true
+
 # ============================================================================
 # Test (unified command with progress display)
 # ============================================================================
