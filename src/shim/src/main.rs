@@ -224,7 +224,8 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.set_console_output(console_str)?;
     }
 
-    // Configure TEE if specified
+    // Configure TEE if specified (only available on Linux with SEV support)
+    #[cfg(target_os = "linux")]
     if let Some(ref tee_config) = spec.tee_config {
         tracing::info!(
             tee_type = %tee_config.tee_type,
@@ -246,6 +247,11 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.set_tee_config(tee_config_str)?;
 
         tracing::info!("TEE configured successfully");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if spec.tee_config.is_some() {
+        tracing::warn!("TEE configuration is only supported on Linux; ignoring");
     }
 
     // Start VM (process takeover - never returns on success)

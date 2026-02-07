@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
 use oci_distribution::client::{ClientConfig, ClientProtocol};
-use oci_distribution::manifest::{OciImageManifest, OciManifest};
+use oci_distribution::manifest::{ImageIndexEntry, OciImageManifest};
 use oci_distribution::secrets::RegistryAuth as OciRegistryAuth;
 use oci_distribution::{Client, Reference};
 
@@ -77,6 +77,7 @@ impl RegistryPuller {
     pub fn with_auth(auth: RegistryAuth) -> Self {
         let config = ClientConfig {
             protocol: ClientProtocol::Https,
+            platform_resolver: Some(Box::new(linux_platform_resolver)),
             ..Default::default()
         };
         let client = Client::new(config);
@@ -110,11 +111,11 @@ impl RegistryPuller {
             message: format!("Failed to create blobs directory: {}", e),
         })?;
 
-        // Pull manifest and config
+        // Pull manifest (resolves multi-arch image indexes to current platform)
         let auth = self.auth.to_oci_auth();
-        let (manifest, manifest_digest) = self
+        let (image_manifest, manifest_digest) = self
             .client
-            .pull_manifest(&oci_ref, &auth)
+            .pull_image_manifest(&oci_ref, &auth)
             .await
             .map_err(|e| BoxError::RegistryError {
                 registry: reference.registry.clone(),
@@ -122,7 +123,7 @@ impl RegistryPuller {
             })?;
 
         // Write manifest blob
-        let manifest_json = serde_json::to_vec(&manifest)?;
+        let manifest_json = serde_json::to_vec(&image_manifest)?;
         let manifest_digest_hex = manifest_digest
             .strip_prefix("sha256:")
             .unwrap_or(&manifest_digest);
@@ -133,26 +134,14 @@ impl RegistryPuller {
             }
         })?;
 
-        // Pull image config and layers based on manifest type
-        match manifest {
-            OciManifest::Image(image_manifest) => {
-                self.pull_image_content(
-                    &oci_ref,
-                    &image_manifest,
-                    &blobs_dir,
-                    &reference.registry,
-                )
-                .await?;
-            }
-            OciManifest::ImageIndex(_) => {
-                return Err(BoxError::RegistryError {
-                    registry: reference.registry.clone(),
-                    message:
-                        "Unsupported manifest type (only OCI image manifests are supported)"
-                            .to_string(),
-                });
-            }
-        }
+        // Pull image config and layers
+        self.pull_image_content(
+            &oci_ref,
+            &image_manifest,
+            &blobs_dir,
+            &reference.registry,
+        )
+        .await?;
 
         // Write oci-layout file
         std::fs::write(
@@ -299,6 +288,27 @@ impl RegistryPuller {
             ))
         })
     }
+}
+
+/// Platform resolver that always selects linux images matching the host architecture.
+///
+/// Container images run inside a Linux microVM regardless of the host OS,
+/// so we always look for `os: "linux"` with the host's CPU architecture.
+fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+
+    manifests
+        .iter()
+        .find(|entry| {
+            entry.platform.as_ref().map_or(false, |p| {
+                p.os == "linux" && p.architecture == arch
+            })
+        })
+        .map(|entry| entry.digest.clone())
 }
 
 #[cfg(test)]

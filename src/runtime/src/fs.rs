@@ -70,20 +70,24 @@ impl FsManager {
         &self.mounts
     }
 
-    /// Apply mounts to VM (placeholder)
+    /// Validate and log all configured mounts.
+    ///
+    /// The actual virtio-fs device setup is handled by the shim via `InstanceSpec`.
+    /// This method validates that mount source paths exist on the host.
     pub async fn apply_mounts(&self) -> Result<()> {
-        // TODO: Implement actual virtio-fs mount setup with libkrun
-        // This would involve:
-        // 1. Creating virtio-fs devices for each mount
-        // 2. Configuring the VM to expose these devices
-        // 3. Guest kernel automatically mounts them
-
         for mount in &self.mounts {
-            tracing::debug!(
-                "Mount: {} -> {} (readonly: {})",
-                mount.host_path.display(),
-                mount.guest_path.display(),
-                mount.readonly
+            if !mount.host_path.exists() {
+                return Err(BoxError::ConfigError(format!(
+                    "Mount source does not exist: {}",
+                    mount.host_path.display()
+                )));
+            }
+
+            tracing::info!(
+                host = %mount.host_path.display(),
+                guest = %mount.guest_path.display(),
+                readonly = mount.readonly,
+                "Configured virtio-fs mount"
             );
         }
 

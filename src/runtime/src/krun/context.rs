@@ -13,8 +13,7 @@ use a3s_box_core::error::{BoxError, Result};
 use libkrun_sys::{
     krun_add_virtiofs, krun_add_vsock_port2, krun_create_ctx, krun_free_ctx, krun_init_log,
     krun_set_console_output, krun_set_env, krun_set_exec, krun_set_rlimits, krun_set_root,
-    krun_set_tee_config_file, krun_set_vm_config, krun_set_workdir, krun_split_irqchip,
-    krun_start_enter,
+    krun_set_vm_config, krun_set_workdir, krun_split_irqchip, krun_start_enter,
 };
 
 /// Thin wrapper that owns a libkrun context.
@@ -307,14 +306,15 @@ impl KrunContext {
     /// * `config_path` - Path to the TEE configuration JSON file
     ///
     /// # Note
-    /// This function is only available when libkrun is built with SEV support.
+    /// This function is only available on Linux when libkrun is built with SEV support.
     /// Call `enable_split_irqchip()` before this function.
+    #[cfg(target_os = "linux")]
     pub unsafe fn set_tee_config(&self, config_path: &str) -> Result<()> {
         tracing::debug!(config_path, "Setting TEE configuration file");
         let path_c = CString::new(config_path).map_err(|e| BoxError::TeeConfig(format!(
             "Invalid TEE config path: {}", e
         )))?;
-        let ret = krun_set_tee_config_file(self.ctx_id, path_c.as_ptr());
+        let ret = libkrun_sys::krun_set_tee_config_file(self.ctx_id, path_c.as_ptr());
         if ret < 0 {
             return Err(BoxError::TeeConfig(format!(
                 "Failed to set TEE config file '{}': error code {}",

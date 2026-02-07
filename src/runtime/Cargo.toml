@@ -22,6 +22,9 @@ async-trait = { workspace = true }
 # gRPC
 tonic = { workspace = true }
 prost = { workspace = true }
+tower = { workspace = true }
+http = { workspace = true }
+hyper = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

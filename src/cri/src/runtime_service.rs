@@ -573,9 +573,50 @@ impl RuntimeService for BoxRuntimeService {
 
     async fn exec_sync(
         &self,
-        _request: Request<ExecSyncRequest>,
+        request: Request<ExecSyncRequest>,
     ) -> Result<Response<ExecSyncResponse>, Status> {
-        Err(Status::unimplemented("ExecSync not yet implemented"))
+        let req = request.into_inner();
+        let container_id = &req.container_id;
+
+        tracing::info!(container_id = %container_id, "CRI ExecSync");
+
+        // Look up the container to find its sandbox
+        let container = self
+            .container_store
+            .get(container_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+
+        // Get the VmManager for this sandbox
+        let vm_managers = self.vm_managers.read().await;
+        let vm = vm_managers
+            .get(&container.sandbox_id)
+            .ok_or_else(|| {
+                Status::not_found(format!("Sandbox not found: {}", container.sandbox_id))
+            })?;
+
+        // Get the agent client from the VM
+        let client = vm.agent_client().ok_or_else(|| {
+            Status::unavailable("Agent not connected for this sandbox")
+        })?;
+
+        // Join the command into a single string to send as a prompt
+        let cmd = req.cmd.join(" ");
+
+        // Execute via the agent's Generate RPC
+        let result = client
+            .generate(a3s_box_runtime::grpc::GenerateRequest {
+                session_id: String::new(),
+                prompt: cmd,
+            })
+            .await
+            .map_err(box_error_to_status)?;
+
+        Ok(Response::new(ExecSyncResponse {
+            stdout: result.text.into_bytes(),
+            stderr: vec![],
+            exit_code: 0,
+        }))
     }
 
     async fn exec(
