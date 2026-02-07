@@ -122,17 +122,11 @@ impl RootfsBuilder {
 
     /// Copy the guest agent binary to the rootfs.
     ///
-    /// **Note**: The guest agent (`a3s-code`) is now a standalone project at `code/`.
+    /// **Note**: The guest agent (`a3s-code`) is a separate project.
     /// This method expects the binary to be provided externally via:
     /// - A3S_AGENT_PATH environment variable
     /// - Pre-built binary in standard locations
     /// - OCI image layer (for container-based deployments)
-    ///
-    /// For development, build the agent separately:
-    /// ```bash
-    /// cd code && cargo build --release
-    /// export A3S_AGENT_PATH=$PWD/target/release/a3s-code
-    /// ```
     fn copy_agent_binary(&self, source: &Path) -> Result<()> {
         if !source.exists() {
             return Err(BoxError::Other(format!(
@@ -208,17 +202,13 @@ impl RootfsBuilder {
 
 /// Find the guest agent binary.
 ///
-/// **Note**: The guest agent is now a standalone project. Build it separately:
-/// ```bash
-/// cd code && cargo build --release
-/// export A3S_AGENT_PATH=$PWD/target/release/a3s-code
-/// ```
+/// The guest agent (`a3s-code`) is a separate project.
+/// Set `A3S_AGENT_PATH` to point to the pre-built binary.
 ///
 /// Searches in the following order:
 /// 1. A3S_AGENT_PATH environment variable
 /// 2. Same directory as the current executable
 /// 3. Common installation paths
-/// 4. Standalone project build directory (code/target/release/)
 pub fn find_agent_binary() -> Result<PathBuf> {
     // Check environment variable
     if let Ok(path) = std::env::var("A3S_AGENT_PATH") {
@@ -238,14 +228,12 @@ pub fn find_agent_binary() -> Result<PathBuf> {
         }
     }
 
-    // Check common paths (including standalone project)
+    // Check common paths
     let common_paths = [
         "/usr/local/bin/a3s-code",
         "/usr/bin/a3s-code",
-        "./code/target/release/a3s-code",  // Standalone project release
-        "./code/target/debug/a3s-code",    // Standalone project debug
-        "./target/release/a3s-code",       // Legacy location
-        "./target/debug/a3s-code",         // Legacy location
+        "./target/release/a3s-code",
+        "./target/debug/a3s-code",
     ];
 
     for path in common_paths {
@@ -257,8 +245,7 @@ pub fn find_agent_binary() -> Result<PathBuf> {
 
     Err(BoxError::Other(
         "Guest agent binary (a3s-code) not found. \
-         Build it first: cd code && cargo build --release\n\
-         Then set A3S_AGENT_PATH=code/target/release/a3s-code"
+         Set A3S_AGENT_PATH to the path of the pre-built a3s-code binary."
             .to_string(),
     ))
 }
