@@ -600,23 +600,20 @@ impl RuntimeService for BoxRuntimeService {
             Status::unavailable("Agent not connected for this sandbox")
         })?;
 
-        // Join the command into a single string to send as a prompt
-        let cmd = req.cmd.join(" ");
-
-        // Execute via the agent's Generate RPC
-        let result = client
-            .generate(a3s_box_runtime::grpc::GenerateRequest {
-                session_id: String::new(),
-                prompt: cmd,
-            })
+        // Verify the agent is healthy
+        let healthy = client
+            .health_check()
             .await
             .map_err(box_error_to_status)?;
 
-        Ok(Response::new(ExecSyncResponse {
-            stdout: result.text.into_bytes(),
-            stderr: vec![],
-            exit_code: 0,
-        }))
+        if !healthy {
+            return Err(Status::unavailable("Agent is not healthy"));
+        }
+
+        // ExecSync requires the a3s-code agent protocol (not yet integrated into CRI)
+        Err(Status::unimplemented(
+            "ExecSync requires the a3s-code agent protocol",
+        ))
     }
 
     async fn exec(

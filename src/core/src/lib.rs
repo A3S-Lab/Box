@@ -10,15 +10,11 @@
 //! - **a3s-code**: AI coding agent (standalone)
 
 pub mod config;
-pub mod context;
 pub mod error;
 pub mod event;
 
 // Re-export commonly used types
-pub use config::{BoxConfig, LaneConfig, ModelConfig, ResourceConfig};
-pub use context::{
-    ContextDepth, ContextItem, ContextProvider, ContextQuery, ContextResult, ContextType,
-};
+pub use config::{BoxConfig, ResourceConfig};
 pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
 

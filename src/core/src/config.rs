@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// TEE (Trusted Execution Environment) configuration.
@@ -126,14 +125,8 @@ pub struct BoxConfig {
     /// Skill directories (mounted to /a3s/skills/)
     pub skills: Vec<PathBuf>,
 
-    /// Model configuration
-    pub model: ModelConfig,
-
     /// Resource limits
     pub resources: ResourceConfig,
-
-    /// Lane configurations
-    pub lanes: HashMap<String, LaneConfig>,
 
     /// Log level
     pub log_level: LogLevel,
@@ -165,105 +158,13 @@ impl Default for BoxConfig {
             business: BusinessType::default(),
             workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             skills: vec![PathBuf::from("./skills")],
-            model: ModelConfig::default(),
             resources: ResourceConfig::default(),
-            lanes: Self::default_lanes(),
             log_level: LogLevel::Info,
             debug_grpc: false,
             tee: TeeConfig::default(),
             cmd: vec![],
             volumes: vec![],
             extra_env: vec![],
-        }
-    }
-}
-
-impl BoxConfig {
-    /// Default lane configurations
-    fn default_lanes() -> HashMap<String, LaneConfig> {
-        let mut lanes = HashMap::new();
-
-        // System lane (fixed concurrency)
-        lanes.insert(
-            "system".to_string(),
-            LaneConfig {
-                min_concurrency: 1,
-                max_concurrency: 1,
-            },
-        );
-
-        // Control lane
-        lanes.insert(
-            "control".to_string(),
-            LaneConfig {
-                min_concurrency: 1,
-                max_concurrency: 8,
-            },
-        );
-
-        // Query lane
-        lanes.insert(
-            "query".to_string(),
-            LaneConfig {
-                min_concurrency: 1,
-                max_concurrency: 8,
-            },
-        );
-
-        // Session lane
-        lanes.insert(
-            "session".to_string(),
-            LaneConfig {
-                min_concurrency: 1,
-                max_concurrency: 4,
-            },
-        );
-
-        // Skill lane
-        lanes.insert(
-            "skill".to_string(),
-            LaneConfig {
-                min_concurrency: 1,
-                max_concurrency: 4,
-            },
-        );
-
-        // Prompt lane
-        lanes.insert(
-            "prompt".to_string(),
-            LaneConfig {
-                min_concurrency: 1,
-                max_concurrency: 1,
-            },
-        );
-
-        lanes
-    }
-}
-
-/// Model configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig {
-    /// Provider (anthropic, openai, google, bedrock, mistral, etc.)
-    pub provider: String,
-
-    /// Model name
-    pub name: String,
-
-    /// Base URL (optional)
-    pub base_url: Option<String>,
-
-    /// API key (optional, falls back to environment variable)
-    pub api_key: Option<String>,
-}
-
-impl Default for ModelConfig {
-    fn default() -> Self {
-        Self {
-            provider: "anthropic".to_string(),
-            name: "claude-sonnet-4-20250514".to_string(),
-            base_url: None,
-            api_key: None,
         }
     }
 }
@@ -295,16 +196,6 @@ impl Default for ResourceConfig {
     }
 }
 
-/// Lane configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LaneConfig {
-    /// Minimum concurrency (reserved slots)
-    pub min_concurrency: usize,
-
-    /// Maximum concurrency (ceiling)
-    pub max_concurrency: usize,
-}
-
 /// Log level
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum LogLevel {
@@ -325,42 +216,6 @@ impl From<LogLevel> for tracing::Level {
     }
 }
 
-/// Session configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionConfig {
-    /// System prompt
-    pub system: Option<String>,
-
-    /// Context threshold for auto-compaction (0.0 to 1.0)
-    pub context_threshold: f32,
-
-    /// Context compaction strategy
-    pub context_strategy: ContextStrategy,
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            system: None,
-            context_threshold: 0.75,
-            context_strategy: ContextStrategy::Summarize,
-        }
-    }
-}
-
-/// Context compaction strategy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ContextStrategy {
-    /// LLM generates a summary of conversation history
-    Summarize,
-
-    /// Drop oldest turns
-    Truncate,
-
-    /// Keep system prompt + LLM summary + recent turns
-    SlidingWindow,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,74 +228,8 @@ mod tests {
         assert_eq!(config.business, BusinessType::None);
         assert!(!config.workspace.as_os_str().is_empty());
         assert_eq!(config.skills.len(), 1);
-        assert_eq!(config.model.provider, "anthropic");
         assert_eq!(config.resources.vcpus, 2);
         assert!(!config.debug_grpc);
-    }
-
-    #[test]
-    fn test_box_config_default_lanes() {
-        let config = BoxConfig::default();
-
-        assert!(config.lanes.contains_key("system"));
-        assert!(config.lanes.contains_key("control"));
-        assert!(config.lanes.contains_key("query"));
-        assert!(config.lanes.contains_key("session"));
-        assert!(config.lanes.contains_key("skill"));
-        assert!(config.lanes.contains_key("prompt"));
-        assert_eq!(config.lanes.len(), 6);
-    }
-
-    #[test]
-    fn test_box_config_system_lane() {
-        let config = BoxConfig::default();
-        let system_lane = config.lanes.get("system").unwrap();
-
-        assert_eq!(system_lane.min_concurrency, 1);
-        assert_eq!(system_lane.max_concurrency, 1);
-    }
-
-    #[test]
-    fn test_box_config_control_lane() {
-        let config = BoxConfig::default();
-        let control_lane = config.lanes.get("control").unwrap();
-
-        assert_eq!(control_lane.min_concurrency, 1);
-        assert_eq!(control_lane.max_concurrency, 8);
-    }
-
-    #[test]
-    fn test_box_config_prompt_lane() {
-        let config = BoxConfig::default();
-        let prompt_lane = config.lanes.get("prompt").unwrap();
-
-        // Prompt lane should have max concurrency of 1 (serial execution)
-        assert_eq!(prompt_lane.max_concurrency, 1);
-    }
-
-    #[test]
-    fn test_model_config_default() {
-        let config = ModelConfig::default();
-
-        assert_eq!(config.provider, "anthropic");
-        assert_eq!(config.name, "claude-sonnet-4-20250514");
-        assert!(config.base_url.is_none());
-        assert!(config.api_key.is_none());
-    }
-
-    #[test]
-    fn test_model_config_custom() {
-        let config = ModelConfig {
-            provider: "openai".to_string(),
-            name: "gpt-4o".to_string(),
-            base_url: Some("https://api.openai.com/v1".to_string()),
-            api_key: Some("sk-test-key".to_string()),
-        };
-
-        assert_eq!(config.provider, "openai");
-        assert_eq!(config.name, "gpt-4o");
-        assert!(config.base_url.is_some());
-        assert!(config.api_key.is_some());
     }
 
     #[test]
@@ -469,17 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lane_config() {
-        let config = LaneConfig {
-            min_concurrency: 2,
-            max_concurrency: 16,
-        };
-
-        assert_eq!(config.min_concurrency, 2);
-        assert_eq!(config.max_concurrency, 16);
-    }
-
-    #[test]
     fn test_log_level_conversion() {
         assert_eq!(tracing::Level::from(LogLevel::Debug), tracing::Level::DEBUG);
         assert_eq!(tracing::Level::from(LogLevel::Info), tracing::Level::INFO);
@@ -488,50 +266,12 @@ mod tests {
     }
 
     #[test]
-    fn test_session_config_default() {
-        let config = SessionConfig::default();
-
-        assert!(config.system.is_none());
-        assert_eq!(config.context_threshold, 0.75);
-        assert_eq!(config.context_strategy, ContextStrategy::Summarize);
-    }
-
-    #[test]
-    fn test_session_config_custom() {
-        let config = SessionConfig {
-            system: Some("You are a helpful assistant.".to_string()),
-            context_threshold: 0.9,
-            context_strategy: ContextStrategy::SlidingWindow,
-        };
-
-        assert_eq!(
-            config.system,
-            Some("You are a helpful assistant.".to_string())
-        );
-        assert_eq!(config.context_threshold, 0.9);
-        assert_eq!(config.context_strategy, ContextStrategy::SlidingWindow);
-    }
-
-    #[test]
-    fn test_context_strategy_variants() {
-        assert_eq!(ContextStrategy::Summarize, ContextStrategy::Summarize);
-        assert_eq!(ContextStrategy::Truncate, ContextStrategy::Truncate);
-        assert_eq!(
-            ContextStrategy::SlidingWindow,
-            ContextStrategy::SlidingWindow
-        );
-        assert_ne!(ContextStrategy::Summarize, ContextStrategy::Truncate);
-    }
-
-    #[test]
     fn test_box_config_serialization() {
         let config = BoxConfig::default();
         let json = serde_json::to_string(&config).unwrap();
 
         assert!(json.contains("workspace"));
-        assert!(json.contains("model"));
         assert!(json.contains("resources"));
-        assert!(json.contains("lanes"));
     }
 
     #[test]
@@ -539,45 +279,20 @@ mod tests {
         let json = r#"{
             "workspace": "/tmp/workspace",
             "skills": ["/tmp/skills"],
-            "model": {
-                "provider": "openai",
-                "name": "gpt-4",
-                "base_url": null,
-                "api_key": null
-            },
             "resources": {
                 "vcpus": 4,
                 "memory_mb": 2048,
                 "disk_mb": 8192,
                 "timeout": 1800
             },
-            "lanes": {},
             "log_level": "Debug",
             "debug_grpc": true
         }"#;
 
         let config: BoxConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.workspace.to_str().unwrap(), "/tmp/workspace");
-        assert_eq!(config.model.provider, "openai");
         assert_eq!(config.resources.vcpus, 4);
         assert!(config.debug_grpc);
-    }
-
-    #[test]
-    fn test_model_config_serialization() {
-        let config = ModelConfig {
-            provider: "anthropic".to_string(),
-            name: "claude-3-opus".to_string(),
-            base_url: Some("https://api.anthropic.com".to_string()),
-            api_key: None,
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: ModelConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.provider, config.provider);
-        assert_eq!(parsed.name, config.name);
-        assert_eq!(parsed.base_url, config.base_url);
     }
 
     #[test]
@@ -598,20 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lane_config_serialization() {
-        let config = LaneConfig {
-            min_concurrency: 1,
-            max_concurrency: 4,
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: LaneConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.min_concurrency, 1);
-        assert_eq!(parsed.max_concurrency, 4);
-    }
-
-    #[test]
     fn test_log_level_serialization() {
         let levels = vec![
             LogLevel::Debug,
@@ -628,43 +329,11 @@ mod tests {
     }
 
     #[test]
-    fn test_context_strategy_serialization() {
-        let strategies = vec![
-            ContextStrategy::Summarize,
-            ContextStrategy::Truncate,
-            ContextStrategy::SlidingWindow,
-        ];
-
-        for strategy in strategies {
-            let json = serde_json::to_string(&strategy).unwrap();
-            let parsed: ContextStrategy = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, strategy);
-        }
-    }
-
-    #[test]
-    fn test_session_config_serialization() {
-        let config = SessionConfig {
-            system: Some("Test system prompt".to_string()),
-            context_threshold: 0.8,
-            context_strategy: ContextStrategy::Truncate,
-        };
-
-        let json = serde_json::to_string(&config).unwrap();
-        let parsed: SessionConfig = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.system, config.system);
-        assert_eq!(parsed.context_threshold, 0.8);
-        assert_eq!(parsed.context_strategy, ContextStrategy::Truncate);
-    }
-
-    #[test]
     fn test_config_clone() {
         let config = BoxConfig::default();
         let cloned = config.clone();
 
         assert_eq!(config.workspace, cloned.workspace);
-        assert_eq!(config.model.provider, cloned.model.provider);
         assert_eq!(config.resources.vcpus, cloned.resources.vcpus);
     }
 
@@ -675,7 +344,6 @@ mod tests {
 
         assert!(debug_str.contains("BoxConfig"));
         assert!(debug_str.contains("workspace"));
-        assert!(debug_str.contains("model"));
     }
 
     #[test]

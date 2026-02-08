@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use a3s_box_core::config::{
-    AgentType, BoxConfig, ModelConfig, ResourceConfig, SessionConfig, TeeConfig,
+    AgentType, BoxConfig, ResourceConfig, TeeConfig,
 };
 use a3s_box_core::error::{BoxError, Result};
 
@@ -24,8 +24,6 @@ const ANN_MEMORY_MB: &str = "a3s.box/memory-mb";
 const ANN_DISK_MB: &str = "a3s.box/disk-mb";
 const ANN_TEE: &str = "a3s.box/tee";
 const ANN_TEE_WORKLOAD_ID: &str = "a3s.box/tee-workload-id";
-const ANN_MODEL_PROVIDER: &str = "a3s.box/model-provider";
-const ANN_MODEL_NAME: &str = "a3s.box/model-name";
 
 /// Convert a CRI PodSandboxConfig to an A3S BoxConfig.
 pub fn pod_sandbox_config_to_box_config(
@@ -36,7 +34,6 @@ pub fn pod_sandbox_config_to_box_config(
     let agent = parse_agent_type(annotations)?;
     let resources = parse_resources(annotations);
     let tee = parse_tee_config(annotations)?;
-    let model = parse_model_config(annotations);
 
     let workspace = if config.log_directory.is_empty() {
         PathBuf::from("/tmp/a3s-workspace")
@@ -49,26 +46,8 @@ pub fn pod_sandbox_config_to_box_config(
         workspace,
         resources,
         tee,
-        model,
         ..Default::default()
     })
-}
-
-/// Convert CRI ContainerConfig annotations to a SessionConfig.
-pub fn container_annotations_to_session_config(
-    annotations: &HashMap<String, String>,
-) -> SessionConfig {
-    let system = annotations.get("a3s.box/system-prompt").cloned();
-    let context_threshold = annotations
-        .get("a3s.box/context-threshold")
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.75);
-
-    SessionConfig {
-        system,
-        context_threshold,
-        ..Default::default()
-    }
 }
 
 /// Parse agent type from annotations.
@@ -156,25 +135,6 @@ fn parse_tee_config(annotations: &HashMap<String, String>) -> Result<TeeConfig> 
             "Unknown TEE type: '{}'. Expected: none, sev-snp",
             other
         ))),
-    }
-}
-
-/// Parse model configuration from annotations.
-fn parse_model_config(annotations: &HashMap<String, String>) -> ModelConfig {
-    let provider = annotations
-        .get(ANN_MODEL_PROVIDER)
-        .cloned()
-        .unwrap_or_else(|| "anthropic".to_string());
-
-    let name = annotations
-        .get(ANN_MODEL_NAME)
-        .cloned()
-        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-
-    ModelConfig {
-        provider,
-        name,
-        ..Default::default()
     }
 }
 
@@ -273,19 +233,5 @@ mod tests {
         )]);
         let config = make_config(annotations);
         assert!(pod_sandbox_config_to_box_config(&config).is_err());
-    }
-
-    #[test]
-    fn test_session_config_from_annotations() {
-        let annotations = HashMap::from([
-            (
-                "a3s.box/system-prompt".to_string(),
-                "You are helpful.".to_string(),
-            ),
-            ("a3s.box/context-threshold".to_string(), "0.9".to_string()),
-        ]);
-        let session = container_annotations_to_session_config(&annotations);
-        assert_eq!(session.system, Some("You are helpful.".to_string()));
-        assert_eq!(session.context_threshold, 0.9);
     }
 }

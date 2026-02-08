@@ -15,31 +15,16 @@ libkrun-sys = { path = "../deps/libkrun-sys" }
 
 # Async runtime
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
-futures = { workspace = true }
-async-trait = { workspace = true }
-
-# gRPC
-tonic = { workspace = true }
-prost = { workspace = true }
-tower = { workspace = true }
-http = { workspace = true }
-hyper = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
 
 # Error handling
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
-
-# File system
-notify = { workspace = true }
 
 # Cryptography
 sha2 = { workspace = true }
@@ -71,6 +56,3 @@ flate2 = "1.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-
-[build-dependencies]
-tonic-build = { workspace = true }

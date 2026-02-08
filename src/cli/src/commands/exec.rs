@@ -1,7 +1,7 @@
 //! `a3s-box exec` command — Execute a command in a running box.
 //!
-//! Interim implementation: uses the existing Generate gRPC RPC to send
-//! commands. A proper Exec RPC will be added in Layer 2.
+//! This command requires the a3s-code agent to be running inside the box.
+//! A proper Exec RPC will be added when the agent protocol is finalized.
 
 use clap::Args;
 
@@ -35,17 +35,12 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         ).into());
     }
 
-    // Connect to the agent via gRPC
+    // Verify the agent is reachable
     let client = a3s_box_runtime::AgentClient::connect(socket_path).await?;
+    let healthy = client.health_check().await?;
+    if !healthy {
+        return Err(format!("Agent in box {} is not healthy", record.name).into());
+    }
 
-    // Use Generate RPC as interim exec mechanism
-    let cmd_str = args.cmd.join(" ");
-    let request = a3s_box_runtime::grpc::GenerateRequest {
-        session_id: String::new(),
-        prompt: cmd_str,
-    };
-    let result = client.generate(request).await?;
-
-    println!("{}", result.text);
-    Ok(())
+    Err("exec command requires the a3s-code agent protocol (not yet integrated into Box CLI)".into())
 }
