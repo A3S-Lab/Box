@@ -325,6 +325,13 @@ let config = BoxConfig {
 
 ### Phase 5: Production 📋
 
+**Cold Start Optimization**
+- [ ] VM snapshot/restore (save "model loaded" state to SSD, restore < 500ms)
+- [ ] VM warm pool (maintain N pre-booted idle MicroVMs for instant allocation)
+- [ ] Layered model cache (L1: VM memory, L2: host SSD mmap, L3: MinIO object storage)
+- [ ] Snapshot TTL management and automatic refresh
+- [ ] `cold_start_strategy` field in A3sfile deployment block
+
 **Performance**
 - [ ] Image caching and preloading
 - [ ] VM instance pooling
@@ -332,8 +339,10 @@ let config = BoxConfig {
 - [ ] Resource usage optimization
 
 **Observability**
-- [ ] Prometheus metrics export
-- [ ] OpenTelemetry integration
+- [ ] Prometheus metrics export (VM boot time, memory usage, CPU utilization)
+- [ ] OpenTelemetry integration (VM lifecycle spans: create → boot → ready)
+- [ ] Cold start latency histograms (p50/p90/p95/p99)
+- [ ] Warm pool utilization metrics
 
 **Security**
 - [ ] Resource limits enforcement
@@ -508,11 +517,12 @@ A3S Box provides the secure infrastructure layer for [SafeClaw](../safeclaw/READ
 
 ### Phase 8: Elastic Scaling 📋
 
-- [ ] Metrics collector (queue depth, latency)
+- [ ] Metrics collector (queue depth, latency, cold start frequency)
 - [ ] Autoscaler with reactive scaling
-- [ ] Warm pool management
-- [ ] Scale to zero support
+- [ ] Warm pool management (auto-replenish on allocation)
+- [ ] Scale to zero support (with snapshot persistence)
 - [ ] Kubernetes Operator (BoxAutoscaler CRD)
+- [ ] Integration with Knative cold_start_strategy config
 
 ---
 
