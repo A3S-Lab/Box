@@ -190,12 +190,12 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 
 | Crate | Binary | Purpose |
 |-------|--------|---------|
-| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (74 unit tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ContextProvider`, `TeeConfig` |
-| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, TEE hardware detection |
-| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1) and `nsexec` for namespace isolation |
+| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (74 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `TeeConfig` (77 tests) |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking (111 tests) |
+| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1) and `nsexec` for namespace isolation (3 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
-| `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration |
+| `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
 
 ### A3S Ecosystem
 
@@ -549,6 +549,7 @@ just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
 cargo test -p a3s-box-cli   # CLI tests (74 tests)
+cargo test -p a3s-box-core  # Core tests (77 tests)
 
 # Lint
 just fmt                # Format code
@@ -567,8 +568,8 @@ box/
 │   │       ├── state.rs    # Box state persistence (~/.a3s/boxes.json)
 │   │       ├── resolve.rs  # Docker-style name/ID resolution
 │   │       └── output.rs   # Table formatting and memory parsing
-│   ├── core/           # Config, error types, events, context provider trait
-│   ├── runtime/        # VM lifecycle, OCI support, gRPC client
+│   ├── core/           # Config, error types, events
+│   ├── runtime/        # VM lifecycle, OCI support, health checking
 │   ├── shim/           # VM subprocess shim (libkrun bridge)
 │   ├── cri/            # CRI runtime for Kubernetes
 │   └── guest/
