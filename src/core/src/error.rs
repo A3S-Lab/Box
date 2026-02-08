@@ -10,37 +10,9 @@ pub enum BoxError {
         hint: Option<String>,
     },
 
-    /// Session-related error
-    #[error("Session error: {0}")]
-    SessionError(String),
-
-    /// Skill tool download failed
-    #[error("Tool download failed: {url} -> {status_code}")]
-    ToolDownloadError {
-        url: String,
-        status_code: u16,
-        message: String,
-    },
-
-    /// Context window overflow
-    #[error("Context overflow: {used}/{max} tokens")]
-    ContextOverflowError { used: usize, max: usize },
-
-    /// LLM API error
-    #[error("Model error: {provider} {status_code} - {message}")]
-    ModelError {
-        provider: String,
-        status_code: u16,
-        message: String,
-    },
-
     /// Timeout error
     #[error("Timeout: {0}")]
     TimeoutError(String),
-
-    /// gRPC communication error
-    #[error("gRPC error: {0}")]
-    GrpcError(#[from] tonic::Status),
 
     /// I/O error
     #[error("I/O error: {0}")]
@@ -53,18 +25,6 @@ pub enum BoxError {
     /// Configuration error
     #[error("Configuration error: {0}")]
     ConfigError(String),
-
-    /// Queue error
-    #[error("Queue error: {0}")]
-    QueueError(String),
-
-    /// Skill error
-    #[error("Skill error: {0}")]
-    SkillError(String),
-
-    /// Context provider error
-    #[error("Context error: {provider} - {message}")]
-    ContextError { provider: String, message: String },
 
     /// TEE configuration error
     #[error("TEE configuration error: {0}")]
@@ -125,47 +85,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_error_display() {
-        let error = BoxError::SessionError("Session not found".to_string());
-        assert_eq!(error.to_string(), "Session error: Session not found");
-    }
-
-    #[test]
-    fn test_tool_download_error_display() {
-        let error = BoxError::ToolDownloadError {
-            url: "https://example.com/tool".to_string(),
-            status_code: 404,
-            message: "Not Found".to_string(),
-        };
-        assert_eq!(
-            error.to_string(),
-            "Tool download failed: https://example.com/tool -> 404"
-        );
-    }
-
-    #[test]
-    fn test_context_overflow_error_display() {
-        let error = BoxError::ContextOverflowError {
-            used: 150000,
-            max: 128000,
-        };
-        assert_eq!(error.to_string(), "Context overflow: 150000/128000 tokens");
-    }
-
-    #[test]
-    fn test_model_error_display() {
-        let error = BoxError::ModelError {
-            provider: "anthropic".to_string(),
-            status_code: 429,
-            message: "Rate limit exceeded".to_string(),
-        };
-        assert_eq!(
-            error.to_string(),
-            "Model error: anthropic 429 - Rate limit exceeded"
-        );
-    }
-
-    #[test]
     fn test_timeout_error_display() {
         let error = BoxError::TimeoutError("Operation timed out after 30s".to_string());
         assert_eq!(error.to_string(), "Timeout: Operation timed out after 30s");
@@ -191,30 +110,6 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "Configuration error: Missing required field"
-        );
-    }
-
-    #[test]
-    fn test_queue_error_display() {
-        let error = BoxError::QueueError("Lane not found".to_string());
-        assert_eq!(error.to_string(), "Queue error: Lane not found");
-    }
-
-    #[test]
-    fn test_skill_error_display() {
-        let error = BoxError::SkillError("Skill parsing failed".to_string());
-        assert_eq!(error.to_string(), "Skill error: Skill parsing failed");
-    }
-
-    #[test]
-    fn test_context_error_display() {
-        let error = BoxError::ContextError {
-            provider: "openviking".to_string(),
-            message: "Connection refused".to_string(),
-        };
-        assert_eq!(
-            error.to_string(),
-            "Context error: openviking - Connection refused"
         );
     }
 
@@ -294,8 +189,8 @@ mod tests {
 
     #[test]
     fn test_error_is_debug() {
-        let error = BoxError::SessionError("test".to_string());
+        let error = BoxError::Other("test".to_string());
         let debug_str = format!("{:?}", error);
-        assert!(debug_str.contains("SessionError"));
+        assert!(debug_str.contains("Other"));
     }
 }

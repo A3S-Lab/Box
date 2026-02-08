@@ -1,13 +1,7 @@
 //! A3S Box Core - Foundational Types and Abstractions
 //!
 //! This module provides the foundational types, traits, and abstractions
-//! used across the A3S Box ecosystem.
-//!
-//! ## Related Crates
-//!
-//! - **a3s-lane**: Priority-based command queue system (extracted)
-//! - **a3s-context**: Hierarchical context management (standalone)
-//! - **a3s-code**: AI coding agent (standalone)
+//! used across the A3S Box MicroVM runtime.
 
 pub mod config;
 pub mod error;

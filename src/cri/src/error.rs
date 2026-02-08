@@ -13,7 +13,6 @@ pub fn box_error_to_status(err: BoxError) -> Status {
             };
             Status::internal(msg)
         }
-        BoxError::SessionError(msg) => Status::not_found(msg),
         BoxError::OciImageError(msg) => Status::not_found(msg),
         BoxError::RegistryError { registry, message } => {
             Status::unavailable(format!("{}: {}", registry, message))
@@ -21,7 +20,6 @@ pub fn box_error_to_status(err: BoxError) -> Status {
         BoxError::TimeoutError(msg) => Status::deadline_exceeded(msg),
         BoxError::ConfigError(msg) => Status::invalid_argument(msg),
         BoxError::IoError(e) => Status::internal(e.to_string()),
-        BoxError::GrpcError(status) => status,
         BoxError::TeeConfig(msg) => Status::failed_precondition(msg),
         BoxError::TeeNotSupported(msg) => Status::failed_precondition(msg),
         other => Status::internal(other.to_string()),
@@ -50,13 +48,6 @@ mod tests {
         };
         let status = box_error_to_status(err);
         assert!(status.message().contains("hint"));
-    }
-
-    #[test]
-    fn test_session_error_maps_to_not_found() {
-        let err = BoxError::SessionError("not found".to_string());
-        let status = box_error_to_status(err);
-        assert_eq!(status.code(), tonic::Code::NotFound);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! A3S Box Runtime - MicroVM runtime implementation.
 //!
 //! This module provides the actual runtime implementation for A3S Box,
-//! including VM management, session handling, skill execution, and gRPC communication.
+//! including VM management, OCI image handling, rootfs building, and gRPC health checks.
 
 #![allow(clippy::result_large_err)]
 

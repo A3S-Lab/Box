@@ -18,7 +18,7 @@ pub enum EventPayload {
 /// Box event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxEvent {
-    /// Event key (e.g., "box.ready", "session.created")
+    /// Event key (e.g., "box.ready", "box.error")
     pub key: EventKey,
 
     /// Event payload
@@ -113,47 +113,15 @@ impl EventStream {
     }
 }
 
-/// Event catalog - predefined event keys
+/// Event catalog - predefined event keys for Box runtime events.
+///
+/// Agent-level events (session, prompt, skill, queue, context) belong
+/// in the a3s-code crate, not the Box runtime.
 pub mod events {
-    // Box events
+    // Box lifecycle events
     pub const BOX_READY: &str = "box.ready";
     pub const BOX_ERROR: &str = "box.error";
     pub const BOX_TIMEOUT: &str = "box.timeout";
-
-    // Session events
-    pub const SESSION_CREATED: &str = "session.created";
-    pub const SESSION_DESTROYED: &str = "session.destroyed";
-    pub const SESSION_CONTEXT_WARNING: &str = "session.context.warning";
-    pub const SESSION_CONTEXT_COMPACTED: &str = "session.context.compacted";
-
-    // Prompt events
-    pub const PROMPT_STARTED: &str = "prompt.started";
-    pub const PROMPT_COMPLETED: &str = "prompt.completed";
-    pub const PROMPT_CANCELLED: &str = "prompt.cancelled";
-    pub const PROMPT_TEXT_DELTA: &str = "prompt.text.delta";
-    pub const PROMPT_TOOL_CALLED: &str = "prompt.tool.called";
-    pub const PROMPT_TOOL_COMPLETED: &str = "prompt.tool.completed";
-    pub const PROMPT_STEP_STARTED: &str = "prompt.step.started";
-    pub const PROMPT_STEP_COMPLETED: &str = "prompt.step.completed";
-
-    // Skill events
-    pub const SKILL_ACTIVATING: &str = "skill.activating";
-    pub const SKILL_ACTIVATED: &str = "skill.activated";
-    pub const SKILL_DEACTIVATED: &str = "skill.deactivated";
-    pub const SKILL_TOOL_DOWNLOADING: &str = "skill.tool.downloading";
-    pub const SKILL_TOOL_DOWNLOADED: &str = "skill.tool.downloaded";
-    pub const SKILL_TOOL_FAILED: &str = "skill.tool.failed";
-
-    // Queue events
-    pub const QUEUE_LANE_PRESSURE: &str = "queue.lane.pressure";
-    pub const QUEUE_LANE_IDLE: &str = "queue.lane.idle";
-
-    // Context events
-    pub const CONTEXT_QUERY_STARTED: &str = "context.query.started";
-    pub const CONTEXT_QUERY_COMPLETED: &str = "context.query.completed";
-    pub const CONTEXT_QUERY_FAILED: &str = "context.query.failed";
-    pub const CONTEXT_PROVIDER_REGISTERED: &str = "context.provider.registered";
-    pub const CONTEXT_PROVIDER_REMOVED: &str = "context.provider.removed";
 }
 
 #[cfg(test)]
@@ -178,9 +146,9 @@ mod tests {
 
     #[test]
     fn test_box_event_with_string() {
-        let event = BoxEvent::with_string("session.error", "Connection lost");
+        let event = BoxEvent::with_string("box.error", "Connection lost");
 
-        assert_eq!(event.key, "session.error");
+        assert_eq!(event.key, "box.error");
         if let EventPayload::String(msg) = &event.payload {
             assert_eq!(msg, "Connection lost");
         } else {
@@ -191,15 +159,15 @@ mod tests {
     #[test]
     fn test_box_event_with_map() {
         let mut map = HashMap::new();
-        map.insert("session_id".to_string(), serde_json::json!("sess-123"));
-        map.insert("tokens".to_string(), serde_json::json!(1500));
+        map.insert("box_id".to_string(), serde_json::json!("box-123"));
+        map.insert("vcpus".to_string(), serde_json::json!(4));
 
-        let event = BoxEvent::with_map("session.created", map);
+        let event = BoxEvent::with_map("box.ready", map);
 
-        assert_eq!(event.key, "session.created");
+        assert_eq!(event.key, "box.ready");
         if let EventPayload::Map(m) = &event.payload {
-            assert_eq!(m.get("session_id").unwrap(), &serde_json::json!("sess-123"));
-            assert_eq!(m.get("tokens").unwrap(), &serde_json::json!(1500));
+            assert_eq!(m.get("box_id").unwrap(), &serde_json::json!("box-123"));
+            assert_eq!(m.get("vcpus").unwrap(), &serde_json::json!(4));
         } else {
             panic!("Expected map payload");
         }
@@ -275,19 +243,18 @@ mod tests {
     #[tokio::test]
     async fn test_event_stream_filtered() {
         let emitter = EventEmitter::new(100);
-        let mut stream = emitter.subscribe_filtered(|e| e.key.starts_with("session."));
+        let mut stream = emitter.subscribe_filtered(|e| e.key.starts_with("box."));
 
         emitter.emit(BoxEvent::empty("box.ready"));
-        emitter.emit(BoxEvent::empty("session.created"));
-        emitter.emit(BoxEvent::empty("prompt.started"));
-        emitter.emit(BoxEvent::empty("session.destroyed"));
+        emitter.emit(BoxEvent::empty("other.event"));
+        emitter.emit(BoxEvent::empty("box.error"));
 
-        // Should only receive session events
+        // Should only receive box events
         let event1 = stream.recv().await.unwrap();
-        assert_eq!(event1.key, "session.created");
+        assert_eq!(event1.key, "box.ready");
 
         let event2 = stream.recv().await.unwrap();
-        assert_eq!(event2.key, "session.destroyed");
+        assert_eq!(event2.key, "box.error");
     }
 
     #[tokio::test]
@@ -381,66 +348,12 @@ mod tests {
     }
 
     #[test]
-    fn test_event_catalog_session_events() {
-        assert_eq!(events::SESSION_CREATED, "session.created");
-        assert_eq!(events::SESSION_DESTROYED, "session.destroyed");
-        assert_eq!(events::SESSION_CONTEXT_WARNING, "session.context.warning");
-        assert_eq!(
-            events::SESSION_CONTEXT_COMPACTED,
-            "session.context.compacted"
-        );
-    }
-
-    #[test]
-    fn test_event_catalog_prompt_events() {
-        assert_eq!(events::PROMPT_STARTED, "prompt.started");
-        assert_eq!(events::PROMPT_COMPLETED, "prompt.completed");
-        assert_eq!(events::PROMPT_CANCELLED, "prompt.cancelled");
-        assert_eq!(events::PROMPT_TEXT_DELTA, "prompt.text.delta");
-        assert_eq!(events::PROMPT_TOOL_CALLED, "prompt.tool.called");
-        assert_eq!(events::PROMPT_TOOL_COMPLETED, "prompt.tool.completed");
-        assert_eq!(events::PROMPT_STEP_STARTED, "prompt.step.started");
-        assert_eq!(events::PROMPT_STEP_COMPLETED, "prompt.step.completed");
-    }
-
-    #[test]
-    fn test_event_catalog_skill_events() {
-        assert_eq!(events::SKILL_ACTIVATING, "skill.activating");
-        assert_eq!(events::SKILL_ACTIVATED, "skill.activated");
-        assert_eq!(events::SKILL_DEACTIVATED, "skill.deactivated");
-        assert_eq!(events::SKILL_TOOL_DOWNLOADING, "skill.tool.downloading");
-        assert_eq!(events::SKILL_TOOL_DOWNLOADED, "skill.tool.downloaded");
-        assert_eq!(events::SKILL_TOOL_FAILED, "skill.tool.failed");
-    }
-
-    #[test]
-    fn test_event_catalog_queue_events() {
-        assert_eq!(events::QUEUE_LANE_PRESSURE, "queue.lane.pressure");
-        assert_eq!(events::QUEUE_LANE_IDLE, "queue.lane.idle");
-    }
-
-    #[test]
-    fn test_event_catalog_context_events() {
-        assert_eq!(events::CONTEXT_QUERY_STARTED, "context.query.started");
-        assert_eq!(events::CONTEXT_QUERY_COMPLETED, "context.query.completed");
-        assert_eq!(events::CONTEXT_QUERY_FAILED, "context.query.failed");
-        assert_eq!(
-            events::CONTEXT_PROVIDER_REGISTERED,
-            "context.provider.registered"
-        );
-        assert_eq!(events::CONTEXT_PROVIDER_REMOVED, "context.provider.removed");
-    }
-
-    #[test]
     fn test_event_key_naming_convention() {
         // All event keys should follow dot-separated lowercase format
         let all_events = vec![
             events::BOX_READY,
-            events::SESSION_CREATED,
-            events::PROMPT_STARTED,
-            events::SKILL_ACTIVATED,
-            events::QUEUE_LANE_PRESSURE,
-            events::CONTEXT_QUERY_STARTED,
+            events::BOX_ERROR,
+            events::BOX_TIMEOUT,
         ];
 
         for event_key in all_events {
