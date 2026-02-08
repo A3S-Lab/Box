@@ -191,11 +191,11 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (74 tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `TeeConfig` (77 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `TeeConfig` (65 tests) |
 | `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking (111 tests) |
 | `guest/init` | `a3s-box-guest-init` | Guest init (PID 1) and `nsexec` for namespace isolation (3 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
-| `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
+| `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (27 tests) |
 
 ### A3S Ecosystem
 
@@ -296,6 +296,7 @@ let config = BoxConfig {
 - [x] PID-based liveness reconciliation for dead box detection
 - [x] Auto-generated Docker-style names (adjective_noun)
 - [x] OCI image pulling with local LRU cache
+- [x] Agent-level code cleanup (removed session/skill/context/proto — Box is VM runtime only)
 - [ ] OCI image format definition (Dockerfile for Box images)
 - [ ] Agent configuration from OCI labels
 - [ ] Pre-built `a3s-code` guest image for AI coding agent
@@ -549,7 +550,7 @@ just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
 cargo test -p a3s-box-cli   # CLI tests (74 tests)
-cargo test -p a3s-box-core  # Core tests (77 tests)
+cargo test -p a3s-box-core  # Core tests (65 tests)
 
 # Lint
 just fmt                # Format code
