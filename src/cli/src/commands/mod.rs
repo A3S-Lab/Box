@@ -9,10 +9,12 @@ mod kill;
 mod logs;
 mod ps;
 mod pull;
+mod restart;
 mod rm;
 mod rmi;
 mod run;
 mod start;
+mod stats;
 mod stop;
 mod version;
 
@@ -37,12 +39,16 @@ pub enum Command {
     Start(start::StartArgs),
     /// Gracefully stop a running box
     Stop(stop::StopArgs),
+    /// Restart a running box
+    Restart(restart::RestartArgs),
     /// Remove a box
     Rm(rm::RmArgs),
     /// Force-kill a running box
     Kill(kill::KillArgs),
     /// List boxes
     Ps(ps::PsArgs),
+    /// Display resource usage statistics
+    Stats(stats::StatsArgs),
     /// View box logs
     Logs(logs::LogsArgs),
     /// Execute a command in a running box
@@ -70,9 +76,11 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Create(args) => create::execute(args).await,
         Command::Start(args) => start::execute(args).await,
         Command::Stop(args) => stop::execute(args).await,
+        Command::Restart(args) => restart::execute(args).await,
         Command::Rm(args) => rm::execute(args).await,
         Command::Kill(args) => kill::execute(args).await,
         Command::Ps(args) => ps::execute(args).await,
+        Command::Stats(args) => stats::execute(args).await,
         Command::Logs(args) => logs::execute(args).await,
         Command::Exec(args) => exec::execute(args).await,
         Command::Inspect(args) => inspect::execute(args).await,

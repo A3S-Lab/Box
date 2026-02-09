@@ -44,6 +44,7 @@ uuid = { workspace = true }
 # System
 dirs = { workspace = true }
 libc = { workspace = true }
+sysinfo = { workspace = true }
 
 # Table formatting
 comfy-table = { workspace = true }
