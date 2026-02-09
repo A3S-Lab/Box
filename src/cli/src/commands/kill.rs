@@ -1,4 +1,4 @@
-//! `a3s-box kill` command — Force-kill a running box.
+//! `a3s-box kill` command — Send a signal to a running box.
 
 use clap::Args;
 
@@ -9,6 +9,43 @@ use crate::state::StateFile;
 pub struct KillArgs {
     /// Box name or ID
     pub r#box: String,
+
+    /// Signal to send to the box process
+    #[arg(short = 's', long, default_value = "KILL")]
+    pub signal: String,
+}
+
+/// Parse a signal name or number into a libc signal constant.
+///
+/// Supports common signal names with or without the "SIG" prefix:
+/// KILL/SIGKILL, TERM/SIGTERM, INT/SIGINT, HUP/SIGHUP, QUIT/SIGQUIT,
+/// USR1/SIGUSR1, USR2/SIGUSR2, STOP/SIGSTOP, CONT/SIGCONT.
+/// Also accepts numeric signal values (e.g., "9" for SIGKILL).
+fn parse_signal(name: &str) -> Result<i32, String> {
+    // Strip optional "SIG" prefix for matching
+    let normalized = name
+        .to_uppercase()
+        .strip_prefix("SIG")
+        .map(String::from)
+        .unwrap_or_else(|| name.to_uppercase());
+
+    match normalized.as_str() {
+        "KILL" => Ok(libc::SIGKILL),
+        "TERM" => Ok(libc::SIGTERM),
+        "INT" => Ok(libc::SIGINT),
+        "HUP" => Ok(libc::SIGHUP),
+        "QUIT" => Ok(libc::SIGQUIT),
+        "USR1" => Ok(libc::SIGUSR1),
+        "USR2" => Ok(libc::SIGUSR2),
+        "STOP" => Ok(libc::SIGSTOP),
+        "CONT" => Ok(libc::SIGCONT),
+        other => {
+            // Try parsing as a numeric signal
+            other
+                .parse::<i32>()
+                .map_err(|_| format!("Unknown signal: {}", name))
+        }
+    }
 }
 
 pub async fn execute(args: KillArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -22,16 +59,87 @@ pub async fn execute(args: KillArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let box_id = record.id.clone();
     let name = record.name.clone();
+    let signal = parse_signal(&args.signal)?;
 
     if let Some(pid) = record.pid {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+        unsafe {
+            libc::kill(pid as i32, signal);
+        }
     }
 
-    let record = resolve::resolve_mut(&mut state, &box_id)?;
-    record.status = "stopped".to_string();
-    record.pid = None;
-    state.save()?;
+    // Only update state to stopped for terminating signals
+    if signal == libc::SIGKILL || signal == libc::SIGTERM {
+        let record = resolve::resolve_mut(&mut state, &box_id)?;
+        record.status = "stopped".to_string();
+        record.pid = None;
+        state.save()?;
+    }
 
     println!("{name}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_signal_kill() {
+        assert_eq!(parse_signal("KILL").unwrap(), libc::SIGKILL);
+        assert_eq!(parse_signal("SIGKILL").unwrap(), libc::SIGKILL);
+        assert_eq!(parse_signal("kill").unwrap(), libc::SIGKILL);
+        assert_eq!(parse_signal("sigkill").unwrap(), libc::SIGKILL);
+    }
+
+    #[test]
+    fn test_parse_signal_term() {
+        assert_eq!(parse_signal("TERM").unwrap(), libc::SIGTERM);
+        assert_eq!(parse_signal("SIGTERM").unwrap(), libc::SIGTERM);
+        assert_eq!(parse_signal("term").unwrap(), libc::SIGTERM);
+    }
+
+    #[test]
+    fn test_parse_signal_int() {
+        assert_eq!(parse_signal("INT").unwrap(), libc::SIGINT);
+        assert_eq!(parse_signal("SIGINT").unwrap(), libc::SIGINT);
+    }
+
+    #[test]
+    fn test_parse_signal_hup() {
+        assert_eq!(parse_signal("HUP").unwrap(), libc::SIGHUP);
+        assert_eq!(parse_signal("SIGHUP").unwrap(), libc::SIGHUP);
+    }
+
+    #[test]
+    fn test_parse_signal_quit() {
+        assert_eq!(parse_signal("QUIT").unwrap(), libc::SIGQUIT);
+        assert_eq!(parse_signal("SIGQUIT").unwrap(), libc::SIGQUIT);
+    }
+
+    #[test]
+    fn test_parse_signal_usr() {
+        assert_eq!(parse_signal("USR1").unwrap(), libc::SIGUSR1);
+        assert_eq!(parse_signal("SIGUSR1").unwrap(), libc::SIGUSR1);
+        assert_eq!(parse_signal("USR2").unwrap(), libc::SIGUSR2);
+        assert_eq!(parse_signal("SIGUSR2").unwrap(), libc::SIGUSR2);
+    }
+
+    #[test]
+    fn test_parse_signal_stop_cont() {
+        assert_eq!(parse_signal("STOP").unwrap(), libc::SIGSTOP);
+        assert_eq!(parse_signal("CONT").unwrap(), libc::SIGCONT);
+    }
+
+    #[test]
+    fn test_parse_signal_numeric() {
+        assert_eq!(parse_signal("9").unwrap(), 9);
+        assert_eq!(parse_signal("15").unwrap(), 15);
+    }
+
+    #[test]
+    fn test_parse_signal_unknown() {
+        assert!(parse_signal("INVALID").is_err());
+        assert!(parse_signal("SIGFOO").is_err());
+        assert!(parse_signal("").is_err());
+    }
 }

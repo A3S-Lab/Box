@@ -14,13 +14,21 @@ pub struct VmMetrics {
     pub memory_bytes: Option<u64>,
 }
 
+/// Default shutdown timeout in milliseconds (10 seconds).
+///
+/// Matches the CLI's default `--timeout` for `a3s-box stop`.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
+
 /// Trait for runtime operations on a running VM.
 ///
 /// Separates runtime operations (stop, metrics) from spawning operations (VmController).
 /// This allows reconnection to existing VMs by creating a handler directly from PID.
 pub trait VmHandler: Send + Sync {
-    /// Stop the VM.
-    fn stop(&mut self) -> Result<()>;
+    /// Stop the VM with a timeout for graceful shutdown.
+    ///
+    /// Sends SIGTERM first, waits up to `timeout_ms` for the process to exit,
+    /// then sends SIGKILL if it hasn't stopped.
+    fn stop(&mut self, timeout_ms: u64) -> Result<()>;
 
     /// Get VM metrics (CPU, memory usage).
     fn metrics(&self) -> VmMetrics;
@@ -86,10 +94,9 @@ impl VmHandler for ShimHandler {
         self.pid
     }
 
-    fn stop(&mut self) -> Result<()> {
+    fn stop(&mut self, timeout_ms: u64) -> Result<()> {
         // Graceful shutdown: SIGTERM first, wait, then SIGKILL if needed.
         // This gives libkrun time to flush its virtio-blk buffers to disk.
-        const GRACEFUL_SHUTDOWN_TIMEOUT_MS: u64 = 2000;
 
         if let Some(mut process) = self.process.take() {
             // Step 1: Send SIGTERM for graceful shutdown
@@ -109,9 +116,10 @@ impl VmHandler for ShimHandler {
                     }
                     Ok(None) => {
                         // Still running, check timeout
-                        if start.elapsed().as_millis() > GRACEFUL_SHUTDOWN_TIMEOUT_MS as u128 {
+                        if start.elapsed().as_millis() > timeout_ms as u128 {
                             tracing::warn!(
                                 pid,
+                                timeout_ms,
                                 "VM process did not exit gracefully, sending SIGKILL"
                             );
                             let _ = process.kill();
@@ -154,9 +162,10 @@ impl VmHandler for ShimHandler {
                     }
                 }
 
-                if start.elapsed().as_millis() > GRACEFUL_SHUTDOWN_TIMEOUT_MS as u128 {
+                if start.elapsed().as_millis() > timeout_ms as u128 {
                     tracing::warn!(
                         pid = self.pid,
+                        timeout_ms,
                         "VM process did not exit gracefully, sending SIGKILL"
                     );
                     unsafe {

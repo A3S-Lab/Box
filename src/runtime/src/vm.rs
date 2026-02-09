@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use crate::grpc::{AgentClient, ExecClient};
 use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
-use crate::vmm::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig, VmController, VmHandler};
+use crate::vmm::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig, VmController, VmHandler, DEFAULT_SHUTDOWN_TIMEOUT_MS};
 use crate::cache::RootfsCache;
 use crate::AGENT_VSOCK_PORT;
 
@@ -238,19 +238,27 @@ impl VmManager {
         Ok(())
     }
 
-    /// Destroy the VM.
+    /// Destroy the VM with the default shutdown timeout.
     pub async fn destroy(&mut self) -> Result<()> {
+        self.destroy_with_timeout(DEFAULT_SHUTDOWN_TIMEOUT_MS).await
+    }
+
+    /// Destroy the VM with a custom shutdown timeout.
+    ///
+    /// Sends SIGTERM to the shim process and waits up to `timeout_ms` for it
+    /// to exit gracefully before sending SIGKILL.
+    pub async fn destroy_with_timeout(&mut self, timeout_ms: u64) -> Result<()> {
         let mut state = self.state.write().await;
 
         if *state == BoxState::Stopped {
             return Ok(());
         }
 
-        tracing::info!(box_id = %self.box_id, "Destroying VM");
+        tracing::info!(box_id = %self.box_id, timeout_ms, "Destroying VM");
 
         // Stop the VM handler
         if let Some(mut handler) = self.handler.write().await.take() {
-            handler.stop()?;
+            handler.stop(timeout_ms)?;
         }
 
         *state = BoxState::Stopped;

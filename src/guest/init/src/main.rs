@@ -5,10 +5,12 @@
 //! - Creating isolated namespaces for agent and business code
 //! - Launching the agent process
 //! - Managing process lifecycle
+//! - Handling SIGTERM for graceful shutdown
 
 use a3s_box_guest_init::{exec_server, namespace};
 use std::process;
-use tracing::{error, info};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracing::{error, info, warn};
 
 /// Agent configuration parsed from environment variables.
 struct AgentConfig {
@@ -54,6 +56,37 @@ impl AgentConfig {
     }
 }
 
+/// Global flag set by the SIGTERM handler to request graceful shutdown.
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Register a SIGTERM handler that sets the shutdown flag.
+///
+/// As PID 1 inside the VM, we must explicitly handle SIGTERM — the kernel
+/// does not deliver unhandled signals to init. When the host kills the shim
+/// process, libkrun triggers a guest shutdown and the kernel sends SIGTERM
+/// to PID 1.
+#[cfg(target_os = "linux")]
+fn register_sigterm_handler() -> Result<(), Box<dyn std::error::Error>> {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+
+    let handler = SigHandler::Handler(sigterm_handler);
+    let action = SigAction::new(handler, SaFlags::empty(), SigSet::empty());
+    unsafe { sigaction(Signal::SIGTERM, &action)? };
+    info!("Registered SIGTERM handler");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+extern "C" fn sigterm_handler(_: libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn register_sigterm_handler() -> Result<(), Box<dyn std::error::Error>> {
+    info!("Skipping SIGTERM handler on non-Linux platform (development mode)");
+    Ok(())
+}
+
 fn main() {
     // Initialize logging
     tracing_subscriber::fmt()
@@ -81,7 +114,10 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     // Step 2: Mount virtio-fs shares
     mount_virtio_fs_shares()?;
 
-    // Step 3: Parse agent configuration from environment
+    // Step 3: Register SIGTERM handler before spawning any children
+    register_sigterm_handler()?;
+
+    // Step 4: Parse agent configuration from environment
     let agent_config = AgentConfig::from_env();
     info!(
         executable = %agent_config.executable,
@@ -90,11 +126,11 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
         "Agent configuration loaded"
     );
 
-    // Step 4: Create namespace for agent
+    // Step 5: Create namespace for agent
     info!("Creating isolated namespace for agent");
     let namespace_config = namespace::NamespaceConfig::default();
 
-    // Step 5: Launch agent in isolated namespace
+    // Step 6: Launch agent in isolated namespace
     info!("Launching agent process");
 
     // Convert args to &str for spawn_isolated
@@ -115,14 +151,14 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Agent started with PID {}", agent_pid);
 
-    // Step 6: Start exec server in background thread
+    // Step 7: Start exec server in background thread
     std::thread::spawn(|| {
         if let Err(e) = exec_server::run_exec_server() {
             error!("Exec server failed: {}", e);
         }
     });
 
-    // Step 7: Wait for agent process (reap zombies)
+    // Step 8: Wait for agent process (reap zombies, handle SIGTERM)
     wait_for_children()?;
 
     Ok(())
@@ -278,13 +314,29 @@ fn mount_user_volumes() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Wait for all child processes and reap zombies.
+///
+/// When SIGTERM is received (via the global `SHUTDOWN_REQUESTED` flag):
+/// 1. Forward SIGTERM to all child processes
+/// 2. Wait up to 5 seconds for children to exit
+/// 3. Send SIGKILL to any remaining children
+/// 4. Call sync() to flush filesystem buffers
 fn wait_for_children() -> Result<(), Box<dyn std::error::Error>> {
     use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
     use nix::unistd::Pid;
 
+    /// Maximum time to wait for children after forwarding SIGTERM (5 seconds).
+    const CHILD_SHUTDOWN_TIMEOUT_MS: u64 = 5000;
+
     info!("Waiting for child processes");
 
     loop {
+        // Check if shutdown was requested via SIGTERM
+        if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            info!("SIGTERM received, initiating graceful shutdown");
+            graceful_shutdown(CHILD_SHUTDOWN_TIMEOUT_MS);
+            return Ok(());
+        }
+
         match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::Exited(pid, status)) => {
                 info!("Child process {} exited with status {}", pid, status);
@@ -296,8 +348,13 @@ fn wait_for_children() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(WaitStatus::Signaled(pid, signal, _)) => {
-                error!("Child process {} killed by signal {:?}", pid, signal);
-                return Err(format!("Child process {} killed by signal {:?}", pid, signal).into());
+                // If we're shutting down, a child killed by signal is expected
+                if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                    info!("Child process {} terminated by signal {:?} during shutdown", pid, signal);
+                } else {
+                    error!("Child process {} killed by signal {:?}", pid, signal);
+                    return Err(format!("Child process {} killed by signal {:?}", pid, signal).into());
+                }
             }
             Ok(WaitStatus::StillAlive) => {
                 // No children to reap, sleep briefly
@@ -318,4 +375,71 @@ fn wait_for_children() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Perform graceful shutdown: forward SIGTERM to children, wait, then force-kill.
+fn graceful_shutdown(timeout_ms: u64) {
+    // Step 1: Send SIGTERM to all processes (except ourselves, PID 1)
+    #[cfg(target_os = "linux")]
+    {
+        info!("Forwarding SIGTERM to all child processes");
+        // kill(-1, SIGTERM) sends to all processes except PID 1
+        unsafe {
+            libc::kill(-1, libc::SIGTERM);
+        }
+    }
+
+    // Step 2: Wait for children to exit with timeout
+    let start = std::time::Instant::now();
+    loop {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+        use nix::unistd::Pid;
+
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(pid, status)) => {
+                info!("Child {} exited with status {} during shutdown", pid, status);
+            }
+            Ok(WaitStatus::Signaled(pid, signal, _)) => {
+                info!("Child {} terminated by {:?} during shutdown", pid, signal);
+            }
+            Ok(WaitStatus::StillAlive) => {
+                if start.elapsed().as_millis() > timeout_ms as u128 {
+                    warn!("Shutdown timeout reached, sending SIGKILL to remaining children");
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        libc::kill(-1, libc::SIGKILL);
+                    }
+                    // Reap any remaining
+                    loop {
+                        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                            Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::ECHILD) => break,
+                            _ => continue,
+                        }
+                    }
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(_) => {
+                // Other status, continue
+            }
+            Err(nix::errno::Errno::ECHILD) => {
+                info!("All children exited during shutdown");
+                break;
+            }
+            Err(e) => {
+                warn!("waitpid error during shutdown: {}", e);
+                break;
+            }
+        }
+    }
+
+    // Step 3: Sync filesystem buffers
+    info!("Syncing filesystem buffers");
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::sync();
+    }
+
+    info!("Graceful shutdown complete");
 }
