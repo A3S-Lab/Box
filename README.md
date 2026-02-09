@@ -44,13 +44,15 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **Instant Boot**: Sub-second VM startup (~200ms cold start)
 - **OCI Image Support**: Load sandboxes from standard OCI container images
 - **Image Registry**: Pull images from any OCI registry with local LRU cache
+- **Exec in Running VMs**: Execute commands inside running boxes via dedicated exec server
+- **CRI Runtime**: Kubernetes-compatible CRI RuntimeService and ImageService
+- **Warm Pool**: Pre-booted idle MicroVMs for instant allocation
+- **Rootfs Caching**: Content-addressable rootfs cache with TTL/size pruning
 - **Namespace Isolation**: Agent and business code run in separate Linux namespaces
 - **Guest Init**: Custom PID 1 process for VM initialization and process management
 - **Cross-Platform**: macOS (Apple Silicon) and Linux (x86_64/ARM64)
 - **No Root Required**: Runs without elevated privileges using Apple HVF or KVM
 - **TEE Support**: AMD SEV-SNP for hardware-enforced memory encryption
-- **Local LLM Runtime**: Run Qwen3/DeepSeek models inside TEE (planned)
-- **Distributed TEE**: Multi-TEE orchestration for SafeClaw security (planned)
 
 ## Quick Start
 
@@ -191,11 +193,11 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (74 tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `TeeConfig` (65 tests) |
-| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking (111 tests) |
-| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1) and `nsexec` for namespace isolation (3 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (88 tests) |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, exec client (205 tests) |
+| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (13 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
-| `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (27 tests) |
+| `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
 
 ### A3S Ecosystem
 
@@ -288,64 +290,64 @@ let config = BoxConfig {
 - [x] Namespace isolation (Mount, PID, IPC, UTS)
 - [x] Nsexec tool for executing code in isolated namespaces
 
-### Phase 3: CLI & Ecosystem Integration 🚧
+### Phase 3: CLI & Ecosystem Integration ✅
 
 - [x] Docker-like CLI (`a3s-box`) with 15 commands: run, create, start, stop, rm, kill, ps, logs, exec, inspect, images, pull, rmi, version, info
 - [x] Box state management with atomic persistence (`~/.a3s/boxes.json`)
 - [x] Docker-compatible name/ID/prefix resolution
 - [x] PID-based liveness reconciliation for dead box detection
 - [x] Auto-generated Docker-style names (adjective_noun)
-- [x] OCI image pulling with local LRU cache
+- [x] OCI image pulling from registries with local LRU cache
 - [x] Agent-level code cleanup (removed session/skill/context/proto — Box is VM runtime only)
+- [x] Exec command execution in running boxes via dedicated exec server (vsock port 4089)
 - [ ] OCI image format definition (Dockerfile for Box images)
 - [ ] Agent configuration from OCI labels
 - [ ] Pre-built `a3s-code` guest image for AI coding agent
 - [ ] Host SDK for spawning and communicating with guest agents
 - [ ] Python SDK (`a3s-box-python`) for easy integration
 
-### Phase 4: CRI Runtime Integration 📋
+### Phase 4: CRI Runtime Integration ✅
 
 **CRI RuntimeService**
-- [ ] CRI gRPC server structure
-- [ ] Pod Sandbox lifecycle (create, start, stop, remove)
-- [ ] Container lifecycle (create, start, stop, remove)
-- [ ] Pod/Container status and listing
-- [ ] Exec and attach support
+- [x] CRI gRPC server on Unix domain socket
+- [x] Pod Sandbox lifecycle (create, start, stop, remove)
+- [x] Container lifecycle (create, start, stop, remove)
+- [x] Pod/Container status and listing with label filtering
+- [x] ExecSync via guest exec server (vsock port 4089)
+- [x] Config mapper (PodSandboxConfig → BoxConfig)
+- [x] Sandbox and container state stores
 
 **CRI ImageService**
-- [ ] Image management (list, pull, remove)
-- [ ] Image cache with LRU eviction
-- [ ] Image status and filesystem usage
+- [x] Image pull from OCI registries
+- [x] Image list, status, and remove
+- [x] Image store with LRU eviction and size limits
 
 **Deployment**
 - [ ] RuntimeClass configuration
 - [ ] DaemonSet deployment manifests
-- [ ] kubelet integration
+- [ ] kubelet integration testing
 - [ ] Integration tests with crictl
 
-### Phase 5: Production 📋
+### Phase 5: Production 🚧
 
 **Cold Start Optimization**
+- [x] Rootfs caching with SHA256 content-addressable keys and TTL/size pruning
+- [x] Layer cache for OCI image layers (deduplication across images)
+- [x] VM warm pool (pre-booted idle MicroVMs for instant allocation)
+- [x] Pool maintenance with configurable TTL and auto-replenish
 - [ ] VM snapshot/restore (save "model loaded" state to SSD, restore < 500ms)
-- [ ] VM warm pool (maintain N pre-booted idle MicroVMs for instant allocation)
 - [ ] Layered model cache (L1: VM memory, L2: host SSD mmap, L3: MinIO object storage)
 - [ ] Snapshot TTL management and automatic refresh
-- [ ] `cold_start_strategy` field in A3sfile deployment block
-
-**Performance**
-- [ ] Image caching and preloading
-- [ ] VM instance pooling
-- [ ] Fast boot optimization
-- [ ] Resource usage optimization
 
 **Observability**
 - [ ] Prometheus metrics export (VM boot time, memory usage, CPU utilization)
 - [ ] OpenTelemetry integration (VM lifecycle spans: create → boot → ready)
 - [ ] Cold start latency histograms (p50/p90/p95/p99)
 - [ ] Warm pool utilization metrics
+- [ ] Structured log aggregation
 
 **Security**
-- [ ] Resource limits enforcement
+- [ ] Resource limits enforcement (CPU, memory, disk)
 - [ ] Network isolation policies
 - [ ] Audit logging
 
@@ -560,7 +562,7 @@ just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
 cargo test -p a3s-box-cli   # CLI tests (74 tests)
-cargo test -p a3s-box-core  # Core tests (65 tests)
+cargo test -p a3s-box-core  # Core tests (88 tests)
 
 # Lint
 just fmt                # Format code
