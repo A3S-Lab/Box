@@ -170,7 +170,12 @@ impl VmManager {
             BoxError::ExecError("Exec client not connected".to_string())
         })?;
 
-        let request = a3s_box_core::exec::ExecRequest { cmd, timeout_ns };
+        let request = a3s_box_core::exec::ExecRequest {
+            cmd,
+            timeout_ns,
+            env: vec![],
+            working_dir: None,
+        };
         client.exec_command(&request).await
     }
 

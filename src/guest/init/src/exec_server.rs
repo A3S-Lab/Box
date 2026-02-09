@@ -122,7 +122,7 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
     };
 
     // Execute the command
-    let output = execute_command(&exec_req.cmd, exec_req.timeout_ns);
+    let output = execute_command(&exec_req.cmd, exec_req.timeout_ns, &exec_req.env, exec_req.working_dir.as_deref());
 
     // Send HTTP response with JSON body
     let response_body = serde_json::to_string(&output)?;
@@ -156,10 +156,10 @@ fn send_error_response(
     stream.write_all(response.as_bytes())
 }
 
-/// Execute a command with timeout and capture output.
+/// Execute a command with timeout, environment variables, and working directory.
 ///
 /// Returns ExecOutput with stdout, stderr, and exit code.
-fn execute_command(cmd: &[String], timeout_ns: u64) -> ExecOutput {
+fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir: Option<&str>) -> ExecOutput {
     if cmd.is_empty() {
         return ExecOutput {
             stdout: vec![],
@@ -175,11 +175,25 @@ fn execute_command(cmd: &[String], timeout_ns: u64) -> ExecOutput {
     };
     let timeout = Duration::from_nanos(timeout_ns);
 
-    let mut child = match std::process::Command::new(&cmd[0])
+    let mut command = std::process::Command::new(&cmd[0]);
+    command
         .args(&cmd[1..])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+
+    // Apply environment variables (KEY=VALUE format)
+    for entry in env {
+        if let Some((key, value)) = entry.split_once('=') {
+            command.env(key, value);
+        }
+    }
+
+    // Apply working directory
+    if let Some(dir) = working_dir {
+        command.current_dir(dir);
+    }
+
+    let mut child = match command.spawn()
     {
         Ok(child) => child,
         Err(e) => {
@@ -294,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_echo() {
-        let output = execute_command(&["echo".to_string(), "hello".to_string()], 0);
+        let output = execute_command(&["echo".to_string(), "hello".to_string()], 0, &[], None);
         assert_eq!(output.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
         assert!(output.stderr.is_empty());
@@ -305,6 +319,8 @@ mod tests {
         let output = execute_command(
             &["this_command_does_not_exist_a3s_test".to_string()],
             0,
+            &[],
+            None,
         );
         assert_ne!(output.exit_code, 0);
         assert!(!output.stderr.is_empty());
@@ -312,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_empty() {
-        let output = execute_command(&[], 0);
+        let output = execute_command(&[], 0, &[], None);
         assert_eq!(output.exit_code, 1);
         assert_eq!(output.stderr, b"Empty command");
     }
@@ -322,6 +338,8 @@ mod tests {
         let output = execute_command(
             &["sh".to_string(), "-c".to_string(), "exit 42".to_string()],
             0,
+            &[],
+            None,
         );
         assert_eq!(output.exit_code, 42);
     }
@@ -335,9 +353,40 @@ mod tests {
                 "echo error >&2".to_string(),
             ],
             0,
+            &[],
+            None,
         );
         assert_eq!(output.exit_code, 0);
         assert!(String::from_utf8_lossy(&output.stderr).contains("error"));
+    }
+
+    #[test]
+    fn test_execute_command_with_env() {
+        let output = execute_command(
+            &["sh".to_string(), "-c".to_string(), "echo $TEST_VAR".to_string()],
+            0,
+            &["TEST_VAR=hello_from_env".to_string()],
+            None,
+        );
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "hello_from_env"
+        );
+    }
+
+    #[test]
+    fn test_execute_command_with_working_dir() {
+        let output = execute_command(
+            &["pwd".to_string()],
+            0,
+            &[],
+            Some("/tmp"),
+        );
+        assert_eq!(output.exit_code, 0);
+        // On macOS /tmp is a symlink to /private/tmp
+        let pwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert!(pwd == "/tmp" || pwd == "/private/tmp");
     }
 
     #[test]

@@ -18,6 +18,12 @@ pub struct ExecRequest {
     pub cmd: Vec<String>,
     /// Timeout in nanoseconds. 0 means use the default.
     pub timeout_ns: u64,
+    /// Additional environment variables (KEY=VALUE pairs).
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// Working directory for the command.
+    #[serde(default)]
+    pub working_dir: Option<String>,
 }
 
 /// Output from an executed command.
@@ -40,11 +46,15 @@ mod tests {
         let req = ExecRequest {
             cmd: vec!["ls".to_string(), "-la".to_string()],
             timeout_ns: 3_000_000_000,
+            env: vec!["FOO=bar".to_string()],
+            working_dir: Some("/tmp".to_string()),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.cmd, vec!["ls", "-la"]);
         assert_eq!(parsed.timeout_ns, 3_000_000_000);
+        assert_eq!(parsed.env, vec!["FOO=bar"]);
+        assert_eq!(parsed.working_dir, Some("/tmp".to_string()));
     }
 
     #[test]
@@ -89,11 +99,25 @@ mod tests {
         let req = ExecRequest {
             cmd: vec![],
             timeout_ns: 0,
+            env: vec![],
+            working_dir: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
         assert!(parsed.cmd.is_empty());
         assert_eq!(parsed.timeout_ns, 0);
+        assert!(parsed.env.is_empty());
+        assert!(parsed.working_dir.is_none());
+    }
+
+    #[test]
+    fn test_exec_request_backward_compatible_deserialization() {
+        // Old format without env/working_dir should still parse
+        let json = r#"{"cmd":["ls"],"timeout_ns":0}"#;
+        let parsed: ExecRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.cmd, vec!["ls"]);
+        assert!(parsed.env.is_empty());
+        assert!(parsed.working_dir.is_none());
     }
 
     #[test]

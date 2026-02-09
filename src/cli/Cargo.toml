@@ -55,5 +55,8 @@ a3s-updater = { workspace = true }
 # Random (for name generation)
 rand = { workspace = true }
 
+# Base64 (for cp command)
+base64 = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }

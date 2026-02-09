@@ -1,5 +1,6 @@
 //! CLI command definitions and dispatch.
 
+mod cp;
 mod create;
 mod exec;
 mod image_inspect;
@@ -19,6 +20,7 @@ mod run;
 mod start;
 mod stats;
 mod stop;
+mod system_prune;
 mod version;
 
 use std::path::PathBuf;
@@ -80,6 +82,10 @@ pub enum Command {
     ImagePrune(image_prune::ImagePruneArgs),
     /// Create a tag that refers to an existing image
     Tag(image_tag::ImageTagArgs),
+    /// Copy files between host and a running box
+    Cp(cp::CpArgs),
+    /// Remove all unused data (stopped boxes and unused images)
+    SystemPrune(system_prune::SystemPruneArgs),
     /// Show version information
     Version(version::VersionArgs),
     /// Show system information
@@ -135,6 +141,8 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::ImageInspect(args) => image_inspect::execute(args).await,
         Command::ImagePrune(args) => image_prune::execute(args).await,
         Command::Tag(args) => image_tag::execute(args).await,
+        Command::Cp(args) => cp::execute(args).await,
+        Command::SystemPrune(args) => system_prune::execute(args).await,
         Command::Version(args) => version::execute(args).await,
         Command::Info(args) => info::execute(args).await,
         Command::Update => {

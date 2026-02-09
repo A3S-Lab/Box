@@ -20,6 +20,14 @@ pub struct ExecArgs {
     #[arg(long, default_value = "5")]
     pub timeout: u64,
 
+    /// Set environment variables (KEY=VALUE), can be repeated
+    #[arg(short, long = "env")]
+    pub envs: Vec<String>,
+
+    /// Working directory inside the box
+    #[arg(short, long)]
+    pub workdir: Option<String>,
+
     /// Command and arguments to execute
     #[arg(last = true, required = true)]
     pub cmd: Vec<String>,
@@ -63,6 +71,8 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     let request = ExecRequest {
         cmd: args.cmd,
         timeout_ns,
+        env: args.envs,
+        working_dir: args.workdir,
     };
 
     // Execute command
