@@ -1,0 +1,32 @@
+# Simple Alpine pod running inside an A3S Box MicroVM.
+#
+# Deploy:
+#   kubectl apply -f deploy/examples/alpine-pod.yaml
+#
+# Verify:
+#   kubectl get pod hello-a3s-box
+#   kubectl exec hello-a3s-box -- uname -a
+#
+# Cleanup:
+#   kubectl delete pod hello-a3s-box
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello-a3s-box
+  labels:
+    app: hello-a3s-box
+spec:
+  # Select the a3s-box MicroVM runtime instead of the default container runtime
+  runtimeClassName: a3s-box
+  containers:
+    - name: alpine
+      image: alpine:latest
+      command: ["sleep", "3600"]
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "128Mi"
+        limits:
+          cpu: "1"
+          memory: "512Mi"
+  restartPolicy: Never

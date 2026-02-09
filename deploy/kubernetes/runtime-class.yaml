@@ -1,0 +1,26 @@
+# RuntimeClass allows pods to select a3s-box as their container runtime.
+#
+# Usage in pod spec:
+#   spec:
+#     runtimeClassName: a3s-box
+#
+# The handler name must match the runtime name configured in containerd/CRI-O.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: a3s-box
+  labels:
+    app.kubernetes.io/name: a3s-box
+    app.kubernetes.io/part-of: a3s
+# handler must match the runtime handler name in the container runtime config.
+# For containerd: [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.a3s-box]
+handler: a3s-box
+overhead:
+  # MicroVM overhead: ~30Mi for the VM itself + guest kernel
+  podFixed:
+    memory: "30Mi"
+    cpu: "50m"
+scheduling:
+  # Only schedule on nodes that have a3s-box installed and KVM available
+  nodeSelector:
+    a3s-box.io/runtime: "true"

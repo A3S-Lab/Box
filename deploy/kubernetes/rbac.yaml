@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: a3s-box-cri
+  namespace: a3s-box-system
+  labels:
+    app.kubernetes.io/name: a3s-box
+    app.kubernetes.io/component: cri-runtime
+---
+# a3s-box-cri needs no cluster-level permissions — it only serves CRI RPCs
+# on a Unix socket. kubelet connects to it directly. This minimal RBAC
+# exists so the DaemonSet pod has a dedicated identity for audit logging.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: a3s-box-cri
+  labels:
+    app.kubernetes.io/name: a3s-box
+    app.kubernetes.io/component: cri-runtime
+rules:
+  # Read nodes to detect KVM/hardware capabilities (optional)
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: a3s-box-cri
+  labels:
+    app.kubernetes.io/name: a3s-box
+    app.kubernetes.io/component: cri-runtime
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: a3s-box-cri
+subjects:
+  - kind: ServiceAccount
+    name: a3s-box-cri
+    namespace: a3s-box-system

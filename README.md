@@ -323,10 +323,12 @@ let config = BoxConfig {
 - [x] Image store with LRU eviction and size limits
 
 **Deployment**
-- [ ] RuntimeClass configuration
-- [ ] DaemonSet deployment manifests
-- [ ] kubelet integration testing
-- [ ] Integration tests with crictl
+- [x] RuntimeClass configuration (`deploy/kubernetes/runtime-class.yaml`)
+- [x] DaemonSet deployment manifests (`deploy/kubernetes/daemonset.yaml`)
+- [x] Kustomize base with RBAC, ConfigMap, namespace
+- [x] kubelet integration guide (`deploy/kubernetes/README.md`)
+- [x] crictl smoke test script (`deploy/scripts/crictl-smoke-test.sh`)
+- [x] Example pod specs (alpine, AI agent)
 
 ### Phase 5: Production 🚧
 

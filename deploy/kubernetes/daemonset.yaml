@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: a3s-box-cri
+  namespace: a3s-box-system
+  labels:
+    app.kubernetes.io/name: a3s-box
+    app.kubernetes.io/component: cri-runtime
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: a3s-box
+      app.kubernetes.io/component: cri-runtime
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: a3s-box
+        app.kubernetes.io/component: cri-runtime
+    spec:
+      serviceAccountName: a3s-box-cri
+      hostPID: false
+      hostNetwork: false
+      # Only run on nodes labeled with a3s-box runtime support
+      nodeSelector:
+        a3s-box.io/runtime: "true"
+      tolerations:
+        # Allow scheduling on control-plane nodes if labeled
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: a3s-box-cri
+          image: ghcr.io/a3s-lab/a3s-box-cri:latest
+          args:
+            - "--socket=/var/run/a3s-box/a3s-box.sock"
+            - "--image-dir=/var/lib/a3s-box/images"
+            - "--image-cache-size=10737418240"
+          env:
+            - name: RUST_LOG
+              valueFrom:
+                configMapKeyRef:
+                  name: a3s-box-config
+                  key: log-level
+          securityContext:
+            privileged: true  # Required for /dev/kvm access
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            # CRI socket directory — kubelet connects here
+            - name: run-a3s-box
+              mountPath: /var/run/a3s-box
+            # Image cache — persisted across restarts
+            - name: image-store
+              mountPath: /var/lib/a3s-box/images
+            # KVM device — required for MicroVM creation
+            - name: dev-kvm
+              mountPath: /dev/kvm
+            # Box working directory — VM rootfs, sockets, logs
+            - name: a3s-home
+              mountPath: /root/.a3s
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -S /var/run/a3s-box/a3s-box.sock"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -S /var/run/a3s-box/a3s-box.sock"
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: run-a3s-box
+          hostPath:
+            path: /var/run/a3s-box
+            type: DirectoryOrCreate
+        - name: image-store
+          hostPath:
+            path: /var/lib/a3s-box/images
+            type: DirectoryOrCreate
+        - name: dev-kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
+        - name: a3s-home
+          hostPath:
+            path: /var/lib/a3s-box/home
+            type: DirectoryOrCreate

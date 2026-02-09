@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a3s-box-config
+  namespace: a3s-box-system
+  labels:
+    app.kubernetes.io/name: a3s-box
+    app.kubernetes.io/component: cri-runtime
+data:
+  # Path to the CRI Unix domain socket
+  socket-path: "/var/run/a3s-box/a3s-box.sock"
+  # Maximum image cache size in bytes (10 GB)
+  image-cache-size: "10737418240"
+  # Log level (trace, debug, info, warn, error)
+  log-level: "info"

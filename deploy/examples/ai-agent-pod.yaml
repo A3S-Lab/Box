@@ -1,0 +1,80 @@
+# AI agent pod running inside an A3S Box MicroVM with hardware isolation.
+#
+# This example shows how to run an AI coding agent with:
+# - Dedicated vCPUs and memory for LLM inference
+# - Workspace volume for persistent code storage
+# - Environment variables for LLM configuration
+#
+# Deploy:
+#   kubectl apply -f deploy/examples/ai-agent-pod.yaml
+#
+# Check logs:
+#   kubectl logs ai-agent -f
+#
+# Exec into the agent:
+#   kubectl exec -it ai-agent -- /bin/sh
+#
+# Cleanup:
+#   kubectl delete pod ai-agent
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ai-agent
+  labels:
+    app: ai-agent
+    a3s.box/type: agent
+spec:
+  # Run inside a hardware-isolated MicroVM
+  runtimeClassName: a3s-box
+  containers:
+    - name: agent
+      image: ghcr.io/a3s-lab/a3s-code:latest
+      env:
+        - name: RUST_LOG
+          value: "info"
+        - name: LLM_PROVIDER
+          value: "anthropic"
+        - name: LLM_MODEL
+          value: "claude-sonnet-4-20250514"
+        - name: LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: llm-credentials
+              key: api-key
+      resources:
+        requests:
+          cpu: "2"
+          memory: "2Gi"
+        limits:
+          cpu: "4"
+          memory: "4Gi"
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  volumes:
+    - name: workspace
+      persistentVolumeClaim:
+        claimName: agent-workspace
+  restartPolicy: OnFailure
+---
+# PersistentVolumeClaim for the agent workspace
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-workspace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Secret for LLM API credentials (create separately)
+# kubectl create secret generic llm-credentials --from-literal=api-key=sk-...
+apiVersion: v1
+kind: Secret
+metadata:
+  name: llm-credentials
+type: Opaque
+stringData:
+  api-key: "REPLACE_WITH_YOUR_API_KEY"

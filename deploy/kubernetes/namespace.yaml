@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: a3s-box-system
+  labels:
+    app.kubernetes.io/name: a3s-box
+    app.kubernetes.io/part-of: a3s
