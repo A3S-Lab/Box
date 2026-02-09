@@ -66,6 +66,51 @@ pub fn format_ago(dt: &chrono::DateTime<chrono::Utc>) -> String {
     format!("{years} years ago")
 }
 
+/// Parse a size string like "500m", "10g", "1t" into bytes.
+///
+/// Supported suffixes (case-insensitive): `b`, `k`/`kb`, `m`/`mb`, `g`/`gb`, `t`/`tb`.
+/// No suffix assumes bytes.
+pub fn parse_size_bytes(s: &str) -> Result<u64, String> {
+    let s = s.trim().to_lowercase();
+    if s.is_empty() {
+        return Err("empty size value".to_string());
+    }
+
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    const TB: u64 = 1024 * GB;
+
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix("tb") {
+        (n, TB)
+    } else if let Some(n) = s.strip_suffix('t') {
+        (n, TB)
+    } else if let Some(n) = s.strip_suffix("gb") {
+        (n, GB)
+    } else if let Some(n) = s.strip_suffix('g') {
+        (n, GB)
+    } else if let Some(n) = s.strip_suffix("mb") {
+        (n, MB)
+    } else if let Some(n) = s.strip_suffix('m') {
+        (n, MB)
+    } else if let Some(n) = s.strip_suffix("kb") {
+        (n, KB)
+    } else if let Some(n) = s.strip_suffix('k') {
+        (n, KB)
+    } else if let Some(n) = s.strip_suffix('b') {
+        (n, 1u64)
+    } else {
+        // Assume bytes if no suffix
+        (s.as_str(), 1u64)
+    };
+
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid size value: {s}"))?;
+
+    Ok(num * multiplier)
+}
+
 /// Parse a memory string like "512m", "2g" into megabytes.
 pub fn parse_memory(s: &str) -> Result<u32, String> {
     let s = s.trim().to_lowercase();
@@ -185,6 +230,78 @@ mod tests {
     fn test_parse_memory_zero() {
         assert_eq!(parse_memory("0m").unwrap(), 0);
         assert_eq!(parse_memory("0").unwrap(), 0);
+    }
+
+    // --- parse_size_bytes tests ---
+
+    #[test]
+    fn test_parse_size_bytes_bytes() {
+        assert_eq!(parse_size_bytes("0").unwrap(), 0);
+        assert_eq!(parse_size_bytes("1024").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("100b").unwrap(), 100);
+        assert_eq!(parse_size_bytes("100B").unwrap(), 100);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_kilobytes() {
+        assert_eq!(parse_size_bytes("1k").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("1K").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("1kb").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("1KB").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("512k").unwrap(), 512 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_megabytes() {
+        assert_eq!(parse_size_bytes("1m").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_bytes("1M").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_bytes("500mb").unwrap(), 500 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("500MB").unwrap(), 500 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_gigabytes() {
+        assert_eq!(parse_size_bytes("1g").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("1G").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("10gb").unwrap(), 10 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("10GB").unwrap(), 10 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_terabytes() {
+        assert_eq!(
+            parse_size_bytes("1t").unwrap(),
+            1024 * 1024 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_size_bytes("1TB").unwrap(),
+            1024 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn test_parse_size_bytes_whitespace() {
+        assert_eq!(parse_size_bytes("  10g  ").unwrap(), 10 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_size_bytes_invalid_empty() {
+        assert!(parse_size_bytes("").is_err());
+    }
+
+    #[test]
+    fn test_parse_size_bytes_invalid_letters() {
+        assert!(parse_size_bytes("abc").is_err());
+    }
+
+    #[test]
+    fn test_parse_size_bytes_invalid_float() {
+        assert!(parse_size_bytes("1.5g").is_err());
+    }
+
+    #[test]
+    fn test_parse_size_bytes_invalid_negative() {
+        assert!(parse_size_bytes("-10g").is_err());
     }
 
     // --- new_table tests ---

@@ -26,7 +26,12 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 /// Default maximum image store size: 10 GB.
-const IMAGE_STORE_MAX_SIZE: u64 = 10 * 1024 * 1024 * 1024;
+const DEFAULT_IMAGE_STORE_MAX_SIZE: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Environment variable to override the image cache size limit.
+///
+/// Accepts human-readable sizes: `500m`, `10g`, `1t`, etc.
+const IMAGE_CACHE_SIZE_ENV: &str = "A3S_IMAGE_CACHE_SIZE";
 
 /// A3S Box — Docker-like MicroVM runtime.
 #[derive(Parser)]
@@ -92,9 +97,20 @@ pub(crate) fn images_dir() -> PathBuf {
 }
 
 /// Open the shared image store.
+///
+/// The cache size limit can be configured via the `A3S_IMAGE_CACHE_SIZE`
+/// environment variable (e.g., `500m`, `20g`). Defaults to 10 GB.
 pub(crate) fn open_image_store() -> Result<a3s_box_runtime::ImageStore, Box<dyn std::error::Error>> {
     let dir = images_dir();
-    let store = a3s_box_runtime::ImageStore::new(&dir, IMAGE_STORE_MAX_SIZE)?;
+    let max_size = match std::env::var(IMAGE_CACHE_SIZE_ENV) {
+        Ok(val) => crate::output::parse_size_bytes(&val).map_err(|e| {
+            format!(
+                "Invalid {IMAGE_CACHE_SIZE_ENV}={val:?}: {e} (examples: 500m, 10g, 1t)"
+            )
+        })?,
+        Err(_) => DEFAULT_IMAGE_STORE_MAX_SIZE,
+    };
+    let store = a3s_box_runtime::ImageStore::new(&dir, max_size)?;
     Ok(store)
 }
 
