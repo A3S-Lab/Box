@@ -39,11 +39,12 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 
 ## Features
 
-- **Docker-like CLI**: Familiar `run`, `stop`, `ps`, `logs`, `exec`, `images` commands
+- **Docker-like CLI**: Familiar `run`, `stop`, `ps`, `logs`, `exec`, `images`, `tag` commands
 - **Hardware Isolation**: Each sandbox runs in its own MicroVM via libkrun
 - **Instant Boot**: Sub-second VM startup (~200ms cold start)
 - **OCI Image Support**: Load sandboxes from standard OCI container images
 - **Image Registry**: Pull images from any OCI registry with local LRU cache
+- **Image Management**: Inspect metadata, prune unused images, tag aliases, configurable cache size
 - **Exec in Running VMs**: Execute commands inside running boxes via dedicated exec server
 - **CRI Runtime**: Kubernetes-compatible CRI RuntimeService and ImageService
 - **Warm Pool**: Pre-booted idle MicroVMs for instant allocation
@@ -107,7 +108,13 @@ The `a3s-box` CLI provides a Docker-like interface for managing MicroVM sandboxe
 # Image management
 a3s-box pull alpine:latest       # Pull an image from a registry
 a3s-box images                   # List cached images
+a3s-box images -q                # List image references only
+a3s-box images --format '{{.Repository}}:{{.Tag}}'  # Custom format
 a3s-box rmi alpine:latest        # Remove a cached image
+a3s-box rmi -f img1 img2 img3   # Force-remove multiple images
+a3s-box image-inspect alpine:latest  # Show detailed image metadata as JSON
+a3s-box tag alpine:latest myalpine:v1  # Create an image alias
+a3s-box image-prune -f           # Remove unused images
 
 # Box lifecycle
 a3s-box run -d --name dev --cpus 2 --memory 1g alpine:latest
@@ -141,9 +148,12 @@ a3s-box info                     # Virtualization support, cache stats
 | `logs <box>` | View console logs (`-f` to follow, `--tail N` for last N lines) |
 | `exec <box> -- <cmd>` | Execute a command in a running box |
 | `inspect <box>` | Show detailed box information as JSON |
-| `images` | List cached OCI images |
+| `images` | List cached OCI images (`-q` for quiet, `--format` for custom output) |
 | `pull <image>` | Pull an image from a container registry |
-| `rmi <image>` | Remove a cached image |
+| `rmi <image>...` | Remove one or more cached images (`-f` to ignore not-found errors) |
+| `image-inspect <image>` | Show detailed image metadata as JSON (config, layers, labels) |
+| `image-prune` | Remove unused images (`-a` for all, `-f` to skip confirmation) |
+| `tag <source> <target>` | Create a tag that refers to an existing image |
 | `version` | Show version |
 | `info` | Show system information |
 
@@ -192,7 +202,7 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 
 | Crate | Binary | Purpose |
 |-------|--------|---------|
-| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (74 tests) |
+| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (93 tests) |
 | `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (88 tests) |
 | `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, exec client (205 tests) |
 | `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (13 tests) |
@@ -247,6 +257,7 @@ A3S is a modular ecosystem for building and running secure AI agents. Each compo
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `A3S_DEPS_STUB` | Enable stub mode (skip libkrun) | - |
+| `A3S_IMAGE_CACHE_SIZE` | Maximum image cache size (e.g., `500m`, `20g`, `1t`) | `10g` |
 | `RUST_LOG` | Log level | info |
 
 ### TEE Configuration (AMD SEV-SNP)
@@ -292,7 +303,7 @@ let config = BoxConfig {
 
 ### Phase 3: CLI & Ecosystem Integration ✅
 
-- [x] Docker-like CLI (`a3s-box`) with 15 commands: run, create, start, stop, rm, kill, ps, logs, exec, inspect, images, pull, rmi, version, info
+- [x] Docker-like CLI (`a3s-box`) with 18 commands: run, create, start, stop, rm, kill, ps, logs, exec, inspect, images, pull, rmi, image-inspect, image-prune, tag, version, info
 - [x] Box state management with atomic persistence (`~/.a3s/boxes.json`)
 - [x] Docker-compatible name/ID/prefix resolution
 - [x] PID-based liveness reconciliation for dead box detection
@@ -563,7 +574,7 @@ cargo build -p a3s-box-cli  # Build CLI only
 just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
-cargo test -p a3s-box-cli   # CLI tests (74 tests)
+cargo test -p a3s-box-cli   # CLI tests (93 tests)
 cargo test -p a3s-box-core  # Core tests (88 tests)
 
 # Lint
@@ -579,10 +590,10 @@ box/
 ├── src/
 │   ├── cli/            # Docker-like CLI (a3s-box binary)
 │   │   └── src/
-│   │       ├── commands/   # 15 subcommands (run, stop, ps, logs, etc.)
+│   │       ├── commands/   # 18 subcommands (run, stop, ps, images, image-inspect, tag, etc.)
 │   │       ├── state.rs    # Box state persistence (~/.a3s/boxes.json)
 │   │       ├── resolve.rs  # Docker-style name/ID resolution
-│   │       └── output.rs   # Table formatting and memory parsing
+│   │       └── output.rs   # Table formatting, size parsing, memory parsing
 │   ├── core/           # Config, error types, events
 │   ├── runtime/        # VM lifecycle, OCI support, health checking
 │   ├── shim/           # VM subprocess shim (libkrun bridge)
