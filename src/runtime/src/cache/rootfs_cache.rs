@@ -542,4 +542,304 @@ mod tests {
         assert_eq!(key.len(), 64);
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    #[test]
+    fn test_compute_key_layer_order_matters() {
+        let key1 = RootfsCache::compute_key(
+            "img",
+            &["sha256:aaa".to_string(), "sha256:bbb".to_string()],
+            &[],
+            &[],
+        );
+        let key2 = RootfsCache::compute_key(
+            "img",
+            &["sha256:bbb".to_string(), "sha256:aaa".to_string()],
+            &[],
+            &[],
+        );
+        // Layer order matters (different filesystem result)
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_compute_key_entrypoint_order_matters() {
+        let key1 = RootfsCache::compute_key(
+            "img",
+            &[],
+            &["/bin/sh".to_string(), "-c".to_string()],
+            &[],
+        );
+        let key2 = RootfsCache::compute_key(
+            "img",
+            &[],
+            &["-c".to_string(), "/bin/sh".to_string()],
+            &[],
+        );
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_compute_key_with_special_characters() {
+        let key = RootfsCache::compute_key(
+            "registry.example.com/org/image:v1.0-beta+build.123",
+            &["sha256:abc/def".to_string()],
+            &["/bin/sh".to_string(), "-c".to_string(), "echo 'hello world'".to_string()],
+            &[("PATH".to_string(), "/usr/bin:/usr/local/bin".to_string())],
+        );
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_compute_key_empty_all_params() {
+        let key = RootfsCache::compute_key("", &[], &[], &[]);
+        assert_eq!(key.len(), 64);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_rootfs_cache_get_updates_last_accessed() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        let key = "access_test";
+
+        let source = tmp.path().join("source");
+        create_test_rootfs(&source, &[("f.txt", "data")]);
+        cache.put(key, &source, "test").unwrap();
+
+        // Read initial metadata
+        let meta_path = tmp.path().join(format!("{}.meta.json", key));
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        let meta_before: RootfsMeta = serde_json::from_str(&content).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Access the cache entry
+        cache.get(key).unwrap();
+
+        // Read updated metadata
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        let meta_after: RootfsMeta = serde_json::from_str(&content).unwrap();
+
+        assert!(meta_after.last_accessed >= meta_before.last_accessed);
+        assert_eq!(meta_after.cached_at, meta_before.cached_at);
+    }
+
+    #[test]
+    fn test_rootfs_cache_get_directory_without_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        let key = "no_meta";
+
+        // Create rootfs directory but no metadata file
+        std::fs::create_dir_all(tmp.path().join(key)).unwrap();
+
+        let result = cache.get(key).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_rootfs_cache_get_metadata_without_directory() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        let key = "no_dir";
+
+        // Create metadata file but no rootfs directory
+        let meta = RootfsMeta {
+            key: key.to_string(),
+            description: "orphan".to_string(),
+            size_bytes: 0,
+            cached_at: 0,
+            last_accessed: 0,
+        };
+        std::fs::write(
+            tmp.path().join(format!("{}.meta.json", key)),
+            serde_json::to_string(&meta).unwrap(),
+        ).unwrap();
+
+        let result = cache.get(key).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_rootfs_cache_get_corrupted_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        let key = "corrupted";
+
+        // Create rootfs directory and corrupted metadata
+        std::fs::create_dir_all(tmp.path().join(key)).unwrap();
+        std::fs::write(
+            tmp.path().join(format!("{}.meta.json", key)),
+            "not valid json!!!",
+        ).unwrap();
+
+        // Should still return Some (directory + meta file both exist)
+        let result = cache.get(key).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_rootfs_cache_put_source_not_exists() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+
+        let nonexistent = tmp.path().join("does_not_exist");
+        let result = cache.put("bad_key", &nonexistent, "bad source");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rootfs_cache_put_overwrites_existing() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        let key = "overwrite";
+
+        // Put first version
+        let s1 = tmp.path().join("v1");
+        create_test_rootfs(&s1, &[("v1.txt", "version 1")]);
+        cache.put(key, &s1, "first").unwrap();
+
+        // Put second version
+        let s2 = tmp.path().join("v2");
+        create_test_rootfs(&s2, &[("v2.txt", "version 2")]);
+        let cached = cache.put(key, &s2, "second").unwrap();
+
+        assert!(!cached.join("v1.txt").exists());
+        assert!(cached.join("v2.txt").is_file());
+
+        // Metadata should reflect second put
+        let meta_path = tmp.path().join(format!("{}.meta.json", key));
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        let meta: RootfsMeta = serde_json::from_str(&content).unwrap();
+        assert_eq!(meta.description, "second");
+    }
+
+    #[test]
+    fn test_rootfs_cache_prune_both_constraints() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+
+        // Add 5 entries with 100 bytes each
+        for i in 0..5 {
+            let source = tmp.path().join(format!("s{}", i));
+            create_test_rootfs(&source, &[("f.txt", &"x".repeat(100))]);
+            cache.put(&format!("key{}", i), &source, &format!("entry {}", i)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Prune with both constraints: max 3 entries AND max 200 bytes
+        // Both constraints should be satisfied
+        let evicted = cache.prune(3, 200).unwrap();
+        assert!(evicted >= 2);
+        let remaining = cache.entry_count().unwrap();
+        assert!(remaining <= 3);
+    }
+
+    #[test]
+    fn test_rootfs_cache_prune_zero_limits() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+
+        let source = tmp.path().join("source");
+        create_test_rootfs(&source, &[("f.txt", "data")]);
+        cache.put("k1", &source, "one").unwrap();
+        cache.put("k2", &source, "two").unwrap();
+
+        // Prune with 0 entries limit — should evict all
+        let evicted = cache.prune(0, u64::MAX).unwrap();
+        assert_eq!(evicted, 2);
+        assert_eq!(cache.entry_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_rootfs_cache_list_entries_ignores_non_meta_files() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+
+        // Add a valid entry
+        let source = tmp.path().join("source");
+        create_test_rootfs(&source, &[("f.txt", "data")]);
+        cache.put("valid_key", &source, "valid").unwrap();
+
+        // Add noise files
+        std::fs::write(tmp.path().join("random.txt"), "noise").unwrap();
+        std::fs::write(tmp.path().join("other.json"), "{}").unwrap();
+        std::fs::create_dir_all(tmp.path().join("random_dir")).unwrap();
+
+        let entries = cache.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "valid_key");
+    }
+
+    #[test]
+    fn test_rootfs_cache_list_entries_skips_invalid_json() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+
+        // Add a valid entry
+        let source = tmp.path().join("source");
+        create_test_rootfs(&source, &[("f.txt", "data")]);
+        cache.put("valid_key", &source, "valid").unwrap();
+
+        // Add corrupted .meta.json
+        std::fs::write(
+            tmp.path().join("corrupted.meta.json"),
+            "not json",
+        ).unwrap();
+
+        let entries = cache.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "valid_key");
+    }
+
+    #[test]
+    fn test_rootfs_cache_put_preserves_content() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+
+        let source = tmp.path().join("source");
+        create_test_rootfs(&source, &[
+            ("bin/agent", "binary_content"),
+            ("etc/config.json", r#"{"key":"value"}"#),
+            ("lib/deep/nested.so", "shared_object"),
+        ]);
+
+        let cached = cache.put("content_key", &source, "content test").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(cached.join("bin/agent")).unwrap(),
+            "binary_content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cached.join("etc/config.json")).unwrap(),
+            r#"{"key":"value"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(cached.join("lib/deep/nested.so")).unwrap(),
+            "shared_object"
+        );
+    }
+
+    #[test]
+    fn test_rootfs_cache_invalidate_then_put_same_key() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        let key = "reuse_key";
+
+        let s1 = tmp.path().join("s1");
+        create_test_rootfs(&s1, &[("v1.txt", "first")]);
+        cache.put(key, &s1, "first").unwrap();
+
+        cache.invalidate(key).unwrap();
+        assert!(cache.get(key).unwrap().is_none());
+
+        let s2 = tmp.path().join("s2");
+        create_test_rootfs(&s2, &[("v2.txt", "second")]);
+        let cached = cache.put(key, &s2, "second").unwrap();
+
+        assert!(cache.get(key).unwrap().is_some());
+        assert!(cached.join("v2.txt").is_file());
+        assert!(!cached.join("v1.txt").exists());
+    }
 }

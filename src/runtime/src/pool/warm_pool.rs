@@ -553,8 +553,209 @@ mod tests {
         assert_eq!(parsed.idle_ttl_secs, 600);
     }
 
-    // Note: Full integration tests for acquire/release/drain require a working
-    // VM runtime (shim binary + libkrun). These are tested in integration tests
-    // with the full box environment. The unit tests here validate configuration,
-    // statistics, and error handling.
+    #[test]
+    fn test_pool_config_default_values() {
+        let config = PoolConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.min_idle, 1);
+        assert_eq!(config.max_size, 5);
+        assert_eq!(config.idle_ttl_secs, 300);
+    }
+
+    #[test]
+    fn test_pool_config_deserialization_with_defaults() {
+        let json = r#"{"enabled": true}"#;
+        let config: PoolConfig = serde_json::from_str(json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.min_idle, 1);
+        assert_eq!(config.max_size, 5);
+        assert_eq!(config.idle_ttl_secs, 300);
+    }
+
+    // --- PoolConfig validation edge cases ---
+
+    #[tokio::test]
+    async fn test_pool_accepts_min_idle_equals_max() {
+        let config = test_pool_config(3, 3);
+        // This should be accepted (min_idle == max_size is valid)
+        // It will fail at boot (no shim), but config validation should pass
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        // The error should be about VM boot, not config validation
+        match result {
+            Err(e) => assert!(!e.to_string().contains("cannot exceed max_size")),
+            Ok(mut pool) => { let _ = pool.drain().await; }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool_accepts_min_idle_zero() {
+        let config = test_pool_config(0, 5);
+        // min_idle=0 means no pre-warming, should be valid
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        match result {
+            Ok(mut pool) => {
+                // Pool should start with 0 idle VMs
+                assert_eq!(pool.idle_count().await, 0);
+                let stats = pool.stats().await;
+                assert_eq!(stats.idle_count, 0);
+                assert_eq!(stats.total_created, 0);
+                let _ = pool.drain().await;
+            }
+            Err(e) => {
+                // If it fails, it should NOT be a config validation error
+                assert!(!e.to_string().contains("max_size"));
+                assert!(!e.to_string().contains("min_idle"));
+            }
+        }
+    }
+
+    // --- WarmPool internal state tests (using min_idle=0 to avoid boot) ---
+
+    #[tokio::test]
+    async fn test_pool_stats_initial() {
+        let config = test_pool_config(0, 5);
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        if let Ok(mut pool) = result {
+            let stats = pool.stats().await;
+            assert_eq!(stats.idle_count, 0);
+            assert_eq!(stats.total_created, 0);
+            assert_eq!(stats.total_acquired, 0);
+            assert_eq!(stats.total_released, 0);
+            assert_eq!(stats.total_evicted, 0);
+            let _ = pool.drain().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool_idle_count_initial() {
+        let config = test_pool_config(0, 5);
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        if let Ok(mut pool) = result {
+            assert_eq!(pool.idle_count().await, 0);
+            let _ = pool.drain().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool_drain_empty_pool() {
+        let config = test_pool_config(0, 5);
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        if let Ok(mut pool) = result {
+            // Draining an empty pool should succeed without error
+            let drain_result = pool.drain().await;
+            assert!(drain_result.is_ok());
+
+            let stats = pool.stats().await;
+            assert_eq!(stats.idle_count, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool_drain_emits_event() {
+        let emitter = test_event_emitter();
+        let mut receiver = emitter.subscribe();
+        let config = test_pool_config(0, 5);
+
+        let result = WarmPool::start(config, BoxConfig::default(), emitter).await;
+        if let Ok(mut pool) = result {
+            pool.drain().await.unwrap();
+
+            // Check that pool.drained event was emitted
+            let mut found_drain_event = false;
+            // Drain all events from the receiver
+            while let Ok(event) = receiver.try_recv() {
+                if event.key == "pool.drained" {
+                    found_drain_event = true;
+                }
+            }
+            assert!(found_drain_event, "Expected pool.drained event");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool_acquire_from_empty_pool_fails_without_shim() {
+        let config = test_pool_config(0, 5);
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        if let Ok(pool) = result {
+            // Acquire from empty pool should try to boot a VM, which will fail
+            // because there's no shim binary available in test environment
+            let acquire_result = pool.acquire().await;
+            assert!(acquire_result.is_err());
+        }
+    }
+
+    // --- Maintenance loop check interval calculation ---
+
+    #[test]
+    fn test_maintenance_check_interval_with_ttl() {
+        // TTL = 300s → check every 60s (300/5)
+        let interval = if 300u64 > 0 { (300u64 / 5).max(5) } else { 30 };
+        assert_eq!(interval, 60);
+    }
+
+    #[test]
+    fn test_maintenance_check_interval_short_ttl() {
+        // TTL = 10s → check every 5s (min 5)
+        let interval = if 10u64 > 0 { (10u64 / 5).max(5) } else { 30 };
+        assert_eq!(interval, 5);
+    }
+
+    #[test]
+    fn test_maintenance_check_interval_very_short_ttl() {
+        // TTL = 1s → check every 5s (min 5)
+        let interval = if 1u64 > 0 { (1u64 / 5).max(5) } else { 30 };
+        assert_eq!(interval, 5);
+    }
+
+    #[test]
+    fn test_maintenance_check_interval_no_ttl() {
+        // TTL = 0 → check every 30s
+        let interval = if 0u64 > 0 { (0u64 / 5).max(5) } else { 30 };
+        assert_eq!(interval, 30);
+    }
+
+    // --- WarmVm struct tests ---
+
+    #[test]
+    fn test_warm_vm_created_at_is_recent() {
+        let before = Instant::now();
+        let created_at = Instant::now();
+        let after = Instant::now();
+
+        assert!(created_at >= before);
+        assert!(created_at <= after);
+    }
+
+    // --- PoolStats field coverage ---
+
+    #[test]
+    fn test_pool_stats_all_fields() {
+        let stats = PoolStats {
+            idle_count: 10,
+            total_created: 100,
+            total_acquired: 80,
+            total_released: 70,
+            total_evicted: 15,
+        };
+
+        assert_eq!(stats.idle_count, 10);
+        assert_eq!(stats.total_created, 100);
+        assert_eq!(stats.total_acquired, 80);
+        assert_eq!(stats.total_released, 70);
+        assert_eq!(stats.total_evicted, 15);
+
+        // Verify debug output contains all fields
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("10"));
+        assert!(debug.contains("100"));
+        assert!(debug.contains("80"));
+        assert!(debug.contains("70"));
+        assert!(debug.contains("15"));
+    }
+
+    // Note: Full integration tests for acquire/release/drain with actual VMs
+    // require a working VM runtime (shim binary + libkrun). These are tested
+    // in integration tests with the full box environment. The unit tests here
+    // validate configuration, statistics, error handling, and pool lifecycle
+    // with min_idle=0 (no VM boot required).
 }

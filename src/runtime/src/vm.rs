@@ -1365,4 +1365,171 @@ mod tests {
     fn test_prefix_agent_path_relative() {
         assert_eq!(VmManager::prefix_agent_path("bin/sh"), "/agent/bin/sh");
     }
+
+    // --- Cache integration tests ---
+
+    fn make_vm_manager_with_home(home_dir: &Path) -> VmManager {
+        use a3s_box_core::event::EventEmitter;
+        let config = BoxConfig::default();
+        let emitter = EventEmitter::new(10);
+        VmManager {
+            config,
+            box_id: "test-box".to_string(),
+            state: Arc::new(RwLock::new(BoxState::Created)),
+            event_emitter: emitter,
+            controller: None,
+            handler: Arc::new(RwLock::new(None)),
+            agent_client: None,
+            home_dir: home_dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_cache_dir_default() {
+        let tmp = TempDir::new().unwrap();
+        let vm = make_vm_manager_with_home(tmp.path());
+
+        let cache_dir = vm.resolve_cache_dir();
+        assert_eq!(cache_dir, tmp.path().join("cache"));
+    }
+
+    #[test]
+    fn test_resolve_cache_dir_custom() {
+        let tmp = TempDir::new().unwrap();
+        let mut vm = make_vm_manager_with_home(tmp.path());
+        vm.config.cache.cache_dir = Some(PathBuf::from("/custom/cache"));
+
+        let cache_dir = vm.resolve_cache_dir();
+        assert_eq!(cache_dir, PathBuf::from("/custom/cache"));
+    }
+
+    #[test]
+    fn test_try_rootfs_cache_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let mut vm = make_vm_manager_with_home(tmp.path());
+        vm.config.cache.enabled = false;
+
+        let target = tmp.path().join("target");
+        let result = vm.try_rootfs_cache("some_key", &target).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_rootfs_cache_miss() {
+        let tmp = TempDir::new().unwrap();
+        let vm = make_vm_manager_with_home(tmp.path());
+
+        let target = tmp.path().join("target");
+        let result = vm.try_rootfs_cache("nonexistent_key", &target).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_try_rootfs_cache_hit() {
+        let tmp = TempDir::new().unwrap();
+        let vm = make_vm_manager_with_home(tmp.path());
+
+        // Pre-populate the cache
+        let cache_dir = tmp.path().join("cache").join("rootfs");
+        let cache = RootfsCache::new(&cache_dir).unwrap();
+        let source = tmp.path().join("source_rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("agent.bin"), "binary").unwrap();
+        cache.put("test_key", &source, "test").unwrap();
+
+        // Now try_rootfs_cache should hit
+        let target = tmp.path().join("target_rootfs");
+        let result = vm.try_rootfs_cache("test_key", &target).unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), target);
+        assert!(target.join("agent.bin").is_file());
+        assert_eq!(std::fs::read_to_string(target.join("agent.bin")).unwrap(), "binary");
+    }
+
+    #[test]
+    fn test_store_rootfs_cache_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let mut vm = make_vm_manager_with_home(tmp.path());
+        vm.config.cache.enabled = false;
+
+        let source = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("f.txt"), "data").unwrap();
+
+        // Should not store anything
+        vm.store_rootfs_cache("key", &source, "test");
+
+        // Cache directory should not even be created
+        let cache_dir = tmp.path().join("cache").join("rootfs");
+        assert!(!cache_dir.exists());
+    }
+
+    #[test]
+    fn test_store_rootfs_cache_success() {
+        let tmp = TempDir::new().unwrap();
+        let vm = make_vm_manager_with_home(tmp.path());
+
+        let source = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("agent.bin"), "binary").unwrap();
+
+        vm.store_rootfs_cache("store_key", &source, "test image");
+
+        // Verify it was stored
+        let cache_dir = tmp.path().join("cache").join("rootfs");
+        let cache = RootfsCache::new(&cache_dir).unwrap();
+        let result = cache.get("store_key").unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_store_rootfs_cache_prunes_on_store() {
+        let tmp = TempDir::new().unwrap();
+        let mut vm = make_vm_manager_with_home(tmp.path());
+        vm.config.cache.max_rootfs_entries = 2;
+
+        let source = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("f.txt"), "data").unwrap();
+
+        // Store 3 entries (exceeds max_rootfs_entries=2)
+        for i in 0..3 {
+            vm.store_rootfs_cache(&format!("key{}", i), &source, &format!("entry {}", i));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // After pruning, should have at most 2 entries
+        let cache_dir = tmp.path().join("cache").join("rootfs");
+        let cache = RootfsCache::new(&cache_dir).unwrap();
+        assert!(cache.entry_count().unwrap() <= 2);
+    }
+
+    #[test]
+    fn test_try_and_store_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let vm = make_vm_manager_with_home(tmp.path());
+
+        // First call: cache miss
+        let target1 = tmp.path().join("target1");
+        let result = vm.try_rootfs_cache("roundtrip_key", &target1).unwrap();
+        assert!(result.is_none());
+
+        // Build rootfs manually
+        let built_rootfs = tmp.path().join("built");
+        std::fs::create_dir_all(&built_rootfs).unwrap();
+        std::fs::write(built_rootfs.join("init"), "init_binary").unwrap();
+        std::fs::create_dir_all(built_rootfs.join("etc")).unwrap();
+        std::fs::write(built_rootfs.join("etc/config"), "config_data").unwrap();
+
+        // Store in cache
+        vm.store_rootfs_cache("roundtrip_key", &built_rootfs, "roundtrip test");
+
+        // Second call: cache hit
+        let target2 = tmp.path().join("target2");
+        let result = vm.try_rootfs_cache("roundtrip_key", &target2).unwrap();
+        assert!(result.is_some());
+        assert!(target2.join("init").is_file());
+        assert_eq!(std::fs::read_to_string(target2.join("init")).unwrap(), "init_binary");
+        assert_eq!(std::fs::read_to_string(target2.join("etc/config")).unwrap(), "config_data");
+    }
 }

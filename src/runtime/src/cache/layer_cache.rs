@@ -541,4 +541,242 @@ mod tests {
         let size = dir_size(&dir).unwrap();
         assert_eq!(size, 10);
     }
+
+    #[test]
+    fn test_dir_size_empty_directory() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("empty");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let size = dir_size(&dir).unwrap();
+        assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn test_dir_size_nonexistent_returns_zero() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("nonexistent");
+
+        // Not a directory, so returns 0
+        let size = dir_size(&dir).unwrap();
+        assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_empty_directory() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("empty_src");
+        let dst = tmp.path().join("empty_dst");
+        std::fs::create_dir_all(&src).unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+        assert!(dst.is_dir());
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_source_not_exists() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("nonexistent");
+        let dst = tmp.path().join("dst");
+
+        let result = copy_dir_recursive(&src, &dst);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_layer_cache_get_updates_last_accessed() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+        let digest = "sha256:access_test";
+
+        let source = tmp.path().join("source");
+        create_test_layer(&source, &[("f.txt", "data")]);
+        cache.put(digest, &source).unwrap();
+
+        // Read initial metadata
+        let meta_path = tmp.path().join("sha256_access_test.meta.json");
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        let meta_before: LayerMeta = serde_json::from_str(&content).unwrap();
+
+        // Small delay to ensure timestamp difference
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Access the cache entry
+        cache.get(digest).unwrap();
+
+        // Read updated metadata
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        let meta_after: LayerMeta = serde_json::from_str(&content).unwrap();
+
+        assert!(meta_after.last_accessed >= meta_before.last_accessed);
+        // cached_at should not change
+        assert_eq!(meta_after.cached_at, meta_before.cached_at);
+    }
+
+    #[test]
+    fn test_layer_cache_get_corrupted_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+        let digest = "sha256:corrupted";
+        let safe_name = LayerCache::digest_to_dirname(digest);
+
+        // Create layer directory manually
+        let layer_dir = tmp.path().join(&safe_name);
+        std::fs::create_dir_all(&layer_dir).unwrap();
+
+        // Write corrupted metadata
+        let meta_path = tmp.path().join(format!("{}.meta.json", safe_name));
+        std::fs::write(&meta_path, "not valid json!!!").unwrap();
+
+        // get() should still return Some (directory exists, metadata is best-effort)
+        // The directory exists and meta file exists, so it returns the path
+        let result = cache.get(digest).unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_layer_cache_get_directory_without_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+        let digest = "sha256:no_meta";
+        let safe_name = LayerCache::digest_to_dirname(digest);
+
+        // Create layer directory but no metadata file
+        let layer_dir = tmp.path().join(&safe_name);
+        std::fs::create_dir_all(&layer_dir).unwrap();
+
+        // Should return None (metadata missing)
+        let result = cache.get(digest).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_layer_cache_get_metadata_without_directory() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+        let digest = "sha256:no_dir";
+        let safe_name = LayerCache::digest_to_dirname(digest);
+
+        // Create metadata file but no layer directory
+        let meta_path = tmp.path().join(format!("{}.meta.json", safe_name));
+        let meta = LayerMeta {
+            digest: digest.to_string(),
+            size_bytes: 0,
+            cached_at: 0,
+            last_accessed: 0,
+        };
+        std::fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+
+        // Should return None (directory missing)
+        let result = cache.get(digest).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_layer_cache_put_source_not_exists() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+
+        let nonexistent = tmp.path().join("does_not_exist");
+        let result = cache.put("sha256:bad_source", &nonexistent);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_layer_cache_prune_zero_limit() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+
+        let source = tmp.path().join("source");
+        create_test_layer(&source, &[("f.txt", "data")]);
+        cache.put("sha256:entry1", &source).unwrap();
+        cache.put("sha256:entry2", &source).unwrap();
+
+        // Prune with 0 bytes limit — should evict everything
+        let evicted = cache.prune(0).unwrap();
+        assert_eq!(evicted, 2);
+        assert_eq!(cache.list_entries().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_layer_cache_list_entries_ignores_non_meta_files() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+
+        // Add a valid entry
+        let source = tmp.path().join("source");
+        create_test_layer(&source, &[("f.txt", "data")]);
+        cache.put("sha256:valid", &source).unwrap();
+
+        // Add random non-meta files to cache directory
+        std::fs::write(tmp.path().join("random.txt"), "noise").unwrap();
+        std::fs::write(tmp.path().join("other.json"), "{}").unwrap();
+
+        // Should only return the valid entry
+        let entries = cache.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].digest, "sha256:valid");
+    }
+
+    #[test]
+    fn test_layer_cache_list_entries_skips_invalid_json() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+
+        // Add a valid entry
+        let source = tmp.path().join("source");
+        create_test_layer(&source, &[("f.txt", "data")]);
+        cache.put("sha256:valid", &source).unwrap();
+
+        // Add a corrupted .meta.json
+        std::fs::write(
+            tmp.path().join("sha256_corrupted.meta.json"),
+            "not json at all",
+        ).unwrap();
+
+        // Should only return the valid entry, skip corrupted
+        let entries = cache.list_entries().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].digest, "sha256:valid");
+    }
+
+    #[test]
+    fn test_layer_cache_put_preserves_file_content() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+
+        let source = tmp.path().join("source");
+        create_test_layer(&source, &[
+            ("binary.bin", "\x00\x01\x02\x03"),
+            ("text.txt", "hello world\n"),
+        ]);
+
+        let cached = cache.put("sha256:content_check", &source).unwrap();
+
+        assert_eq!(
+            std::fs::read(cached.join("binary.bin")).unwrap(),
+            b"\x00\x01\x02\x03"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cached.join("text.txt")).unwrap(),
+            "hello world\n"
+        );
+    }
+
+    #[test]
+    fn test_layer_cache_multiple_colons_in_digest() {
+        let tmp = TempDir::new().unwrap();
+        let cache = LayerCache::new(tmp.path()).unwrap();
+
+        let digest = "sha256:abc:def:ghi";
+        let source = tmp.path().join("source");
+        create_test_layer(&source, &[("f.txt", "data")]);
+
+        cache.put(digest, &source).unwrap();
+        let result = cache.get(digest).unwrap();
+        assert!(result.is_some());
+
+        cache.invalidate(digest).unwrap();
+        assert!(cache.get(digest).unwrap().is_none());
+    }
 }
