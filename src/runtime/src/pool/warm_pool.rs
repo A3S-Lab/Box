@@ -1,0 +1,560 @@
+//! WarmPool — Pre-warmed pool of ready-to-use MicroVMs.
+//!
+//! Maintains a set of pre-booted VMs in `Ready` state so that
+//! `acquire()` can return a VM instantly without waiting for boot.
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use a3s_box_core::config::{BoxConfig, PoolConfig};
+use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::event::{BoxEvent, EventEmitter};
+use tokio::sync::Mutex;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+use crate::vm::VmManager;
+
+/// A pre-warmed VM waiting in the pool.
+struct WarmVm {
+    /// The ready VM manager instance.
+    vm: VmManager,
+    /// When this VM was added to the pool.
+    created_at: Instant,
+}
+
+/// Statistics about the warm pool.
+#[derive(Debug, Clone)]
+pub struct PoolStats {
+    /// Number of idle VMs ready for acquisition.
+    pub idle_count: usize,
+    /// Total number of VMs created by this pool (including acquired ones).
+    pub total_created: u64,
+    /// Total number of VMs acquired from the pool.
+    pub total_acquired: u64,
+    /// Total number of VMs released back to the pool.
+    pub total_released: u64,
+    /// Total number of VMs evicted due to idle TTL.
+    pub total_evicted: u64,
+}
+
+/// A pre-warmed pool of ready-to-use MicroVMs.
+///
+/// The pool maintains `min_idle` VMs in `Ready` state. When a VM is
+/// acquired, the pool spawns a replacement in the background. Idle VMs
+/// that exceed `idle_ttl_secs` are automatically evicted.
+///
+/// # Usage
+///
+/// ```ignore
+/// let pool = WarmPool::start(pool_config, box_config, emitter).await?;
+/// let vm = pool.acquire().await?;  // Instant if pool has capacity
+/// // ... use vm ...
+/// pool.release(vm).await?;         // Return to pool or destroy
+/// pool.drain().await?;             // Graceful shutdown
+/// ```
+pub struct WarmPool {
+    /// Pool configuration.
+    config: PoolConfig,
+    /// Base BoxConfig template for creating new VMs.
+    box_config: BoxConfig,
+    /// Idle VMs ready for acquisition.
+    idle: Arc<Mutex<Vec<WarmVm>>>,
+    /// Pool statistics.
+    stats: Arc<Mutex<PoolStats>>,
+    /// Event emitter for pool lifecycle events.
+    event_emitter: EventEmitter,
+    /// Background replenishment task handle.
+    replenish_handle: Option<JoinHandle<()>>,
+    /// Shutdown signal sender.
+    shutdown_tx: watch::Sender<bool>,
+    /// Shutdown signal receiver (cloned for background task).
+    shutdown_rx: watch::Receiver<bool>,
+}
+
+impl WarmPool {
+    /// Create and start the warm pool.
+    ///
+    /// Spawns `min_idle` VMs in the background and starts the
+    /// replenishment/eviction loop.
+    pub async fn start(
+        config: PoolConfig,
+        box_config: BoxConfig,
+        event_emitter: EventEmitter,
+    ) -> Result<Self> {
+        if config.max_size == 0 {
+            return Err(BoxError::PoolError(
+                "Pool max_size must be greater than 0".to_string(),
+            ));
+        }
+        if config.min_idle > config.max_size {
+            return Err(BoxError::PoolError(format!(
+                "Pool min_idle ({}) cannot exceed max_size ({})",
+                config.min_idle, config.max_size
+            )));
+        }
+
+        let idle = Arc::new(Mutex::new(Vec::with_capacity(config.max_size)));
+        let stats = Arc::new(Mutex::new(PoolStats {
+            idle_count: 0,
+            total_created: 0,
+            total_acquired: 0,
+            total_released: 0,
+            total_evicted: 0,
+        }));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let mut pool = Self {
+            config,
+            box_config,
+            idle,
+            stats,
+            event_emitter,
+            replenish_handle: None,
+            shutdown_tx,
+            shutdown_rx,
+        };
+
+        // Initial fill
+        pool.fill_to_min().await;
+
+        // Start background maintenance loop
+        let handle = pool.spawn_maintenance_loop();
+        pool.replenish_handle = Some(handle);
+
+        tracing::info!(
+            min_idle = pool.config.min_idle,
+            max_size = pool.config.max_size,
+            idle_ttl_secs = pool.config.idle_ttl_secs,
+            "Warm pool started"
+        );
+
+        Ok(pool)
+    }
+
+    /// Acquire a ready VM from the pool.
+    ///
+    /// If an idle VM is available, returns it immediately.
+    /// Otherwise, boots a new VM on demand (slower path).
+    pub async fn acquire(&self) -> Result<VmManager> {
+        // Try to pop an idle VM
+        {
+            let mut idle = self.idle.lock().await;
+            if let Some(warm_vm) = idle.pop() {
+                let mut stats = self.stats.lock().await;
+                stats.total_acquired += 1;
+                stats.idle_count = idle.len();
+
+                self.event_emitter.emit(BoxEvent::with_string(
+                    "pool.vm.acquired",
+                    format!("Acquired VM {} from pool", warm_vm.vm.box_id()),
+                ));
+
+                tracing::debug!(
+                    box_id = %warm_vm.vm.box_id(),
+                    idle_remaining = idle.len(),
+                    "Acquired VM from warm pool"
+                );
+
+                return Ok(warm_vm.vm);
+            }
+        }
+
+        // No idle VM available — boot one on demand
+        tracing::info!("No idle VM in pool, booting on demand");
+        let vm = self.boot_new_vm().await?;
+
+        let mut stats = self.stats.lock().await;
+        stats.total_acquired += 1;
+
+        Ok(vm)
+    }
+
+    /// Release a VM back to the pool.
+    ///
+    /// If the pool is at capacity, the VM is destroyed instead.
+    pub async fn release(&self, vm: VmManager) -> Result<()> {
+        let mut idle = self.idle.lock().await;
+
+        if idle.len() >= self.config.max_size {
+            // Pool is full — destroy the VM
+            drop(idle); // Release lock before async destroy
+            let mut vm = vm;
+            vm.destroy().await?;
+
+            tracing::debug!(
+                box_id = %vm.box_id(),
+                "Pool full, destroyed released VM"
+            );
+            return Ok(());
+        }
+
+        let box_id = vm.box_id().to_string();
+        idle.push(WarmVm {
+            vm,
+            created_at: Instant::now(),
+        });
+
+        let mut stats = self.stats.lock().await;
+        stats.total_released += 1;
+        stats.idle_count = idle.len();
+
+        self.event_emitter.emit(BoxEvent::with_string(
+            "pool.vm.released",
+            format!("Released VM {} back to pool", box_id),
+        ));
+
+        tracing::debug!(
+            box_id = %box_id,
+            idle_count = idle.len(),
+            "Released VM back to warm pool"
+        );
+
+        Ok(())
+    }
+
+    /// Get current pool statistics.
+    pub async fn stats(&self) -> PoolStats {
+        self.stats.lock().await.clone()
+    }
+
+    /// Get the number of idle VMs currently in the pool.
+    pub async fn idle_count(&self) -> usize {
+        self.idle.lock().await.len()
+    }
+
+    /// Gracefully drain all VMs and stop the pool.
+    pub async fn drain(&mut self) -> Result<()> {
+        // Signal shutdown to background task
+        let _ = self.shutdown_tx.send(true);
+
+        // Wait for background task to finish
+        if let Some(handle) = self.replenish_handle.take() {
+            let _ = handle.await;
+        }
+
+        // Destroy all idle VMs
+        let mut idle = self.idle.lock().await;
+        let count = idle.len();
+
+        for warm_vm in idle.drain(..) {
+            let mut vm = warm_vm.vm;
+            if let Err(e) = vm.destroy().await {
+                tracing::warn!(
+                    box_id = %vm.box_id(),
+                    error = %e,
+                    "Failed to destroy pooled VM during drain"
+                );
+            }
+        }
+
+        let mut stats = self.stats.lock().await;
+        stats.idle_count = 0;
+
+        self.event_emitter
+            .emit(BoxEvent::empty("pool.drained"));
+
+        tracing::info!(destroyed = count, "Warm pool drained");
+
+        Ok(())
+    }
+
+    /// Boot a new VM using the pool's template config.
+    async fn boot_new_vm(&self) -> Result<VmManager> {
+        let mut vm = VmManager::new(self.box_config.clone(), self.event_emitter.clone());
+        vm.boot().await?;
+
+        let mut stats = self.stats.lock().await;
+        stats.total_created += 1;
+
+        self.event_emitter.emit(BoxEvent::with_string(
+            "pool.vm.created",
+            format!("Booted new VM {}", vm.box_id()),
+        ));
+
+        Ok(vm)
+    }
+
+    /// Fill the pool to the minimum idle count.
+    async fn fill_to_min(&self) {
+        let current = self.idle.lock().await.len();
+        let needed = self.config.min_idle.saturating_sub(current);
+
+        if needed == 0 {
+            return;
+        }
+
+        tracing::debug!(
+            current,
+            needed,
+            min_idle = self.config.min_idle,
+            "Replenishing warm pool"
+        );
+
+        for _ in 0..needed {
+            match self.boot_new_vm().await {
+                Ok(vm) => {
+                    let box_id = vm.box_id().to_string();
+                    let mut idle = self.idle.lock().await;
+                    idle.push(WarmVm {
+                        vm,
+                        created_at: Instant::now(),
+                    });
+                    let mut stats = self.stats.lock().await;
+                    stats.idle_count = idle.len();
+
+                    tracing::debug!(box_id = %box_id, "Added VM to warm pool");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to boot VM for warm pool");
+                    break;
+                }
+            }
+        }
+
+        self.event_emitter
+            .emit(BoxEvent::empty("pool.replenish"));
+    }
+
+    /// Spawn the background maintenance loop.
+    ///
+    /// Periodically checks for:
+    /// 1. Pool below min_idle → replenish
+    /// 2. Idle VMs past TTL → evict
+    fn spawn_maintenance_loop(&self) -> JoinHandle<()> {
+        let idle = Arc::clone(&self.idle);
+        let stats = Arc::clone(&self.stats);
+        let config = self.config.clone();
+        let box_config = self.box_config.clone();
+        let event_emitter = self.event_emitter.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
+
+        tokio::spawn(async move {
+            let check_interval = std::time::Duration::from_secs(
+                // Check every 1/5 of TTL, minimum 5 seconds
+                if config.idle_ttl_secs > 0 {
+                    (config.idle_ttl_secs / 5).max(5)
+                } else {
+                    30
+                },
+            );
+
+            loop {
+                tokio::select! {
+                    result = shutdown_rx.changed() => {
+                        if result.is_ok() && *shutdown_rx.borrow() {
+                            tracing::debug!("Pool maintenance loop shutting down");
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(check_interval) => {
+                        // Evict expired VMs
+                        if config.idle_ttl_secs > 0 {
+                            Self::evict_expired_static(
+                                &idle,
+                                &stats,
+                                &event_emitter,
+                                config.idle_ttl_secs,
+                            ).await;
+                        }
+
+                        // Replenish if below min_idle
+                        let current = idle.lock().await.len();
+                        if current < config.min_idle {
+                            let needed = config.min_idle - current;
+                            tracing::debug!(current, needed, "Replenishing warm pool");
+
+                            for _ in 0..needed {
+                                let mut vm = VmManager::new(
+                                    box_config.clone(),
+                                    event_emitter.clone(),
+                                );
+                                match vm.boot().await {
+                                    Ok(()) => {
+                                        let box_id = vm.box_id().to_string();
+                                        let mut pool = idle.lock().await;
+                                        pool.push(WarmVm {
+                                            vm,
+                                            created_at: Instant::now(),
+                                        });
+                                        let mut s = stats.lock().await;
+                                        s.total_created += 1;
+                                        s.idle_count = pool.len();
+
+                                        event_emitter.emit(BoxEvent::with_string(
+                                            "pool.vm.created",
+                                            format!("Replenished VM {}", box_id),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to replenish warm pool"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+
+                            event_emitter.emit(BoxEvent::empty("pool.replenish"));
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Static version of evict_expired for use in the spawned task.
+    async fn evict_expired_static(
+        idle: &Arc<Mutex<Vec<WarmVm>>>,
+        stats: &Arc<Mutex<PoolStats>>,
+        event_emitter: &EventEmitter,
+        idle_ttl_secs: u64,
+    ) {
+        let ttl = std::time::Duration::from_secs(idle_ttl_secs);
+
+        let mut pool = idle.lock().await;
+        let mut kept = Vec::new();
+        let mut expired = Vec::new();
+
+        for warm_vm in pool.drain(..) {
+            if warm_vm.created_at.elapsed() > ttl {
+                expired.push(warm_vm);
+            } else {
+                kept.push(warm_vm);
+            }
+        }
+        *pool = kept;
+        let after_count = pool.len();
+        drop(pool);
+
+        let evicted_count = expired.len();
+        for warm_vm in expired {
+            let mut vm = warm_vm.vm;
+            let _ = vm.destroy().await;
+        }
+
+        if evicted_count > 0 {
+            let mut s = stats.lock().await;
+            s.total_evicted += evicted_count as u64;
+            s.idle_count = after_count;
+
+            event_emitter.emit(BoxEvent::with_string(
+                "pool.vm.evicted",
+                format!("Evicted {} expired VMs", evicted_count),
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use a3s_box_core::config::PoolConfig;
+
+    fn test_pool_config(min_idle: usize, max_size: usize) -> PoolConfig {
+        PoolConfig {
+            enabled: true,
+            min_idle,
+            max_size,
+            idle_ttl_secs: 300,
+        }
+    }
+
+    fn test_event_emitter() -> EventEmitter {
+        EventEmitter::new(100)
+    }
+
+    // --- PoolConfig validation tests ---
+
+    #[tokio::test]
+    async fn test_pool_rejects_zero_max_size() {
+        let config = test_pool_config(0, 0);
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        match result {
+            Err(e) => assert!(e.to_string().contains("max_size must be greater than 0")),
+            Ok(_) => panic!("Expected error for zero max_size"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool_rejects_min_idle_exceeds_max() {
+        let config = test_pool_config(10, 5);
+        let result = WarmPool::start(config, BoxConfig::default(), test_event_emitter()).await;
+        match result {
+            Err(e) => assert!(e.to_string().contains("cannot exceed max_size")),
+            Ok(_) => panic!("Expected error for min_idle > max_size"),
+        }
+    }
+
+    // --- PoolStats tests ---
+
+    #[test]
+    fn test_pool_stats_default() {
+        let stats = PoolStats {
+            idle_count: 0,
+            total_created: 0,
+            total_acquired: 0,
+            total_released: 0,
+            total_evicted: 0,
+        };
+        assert_eq!(stats.idle_count, 0);
+        assert_eq!(stats.total_created, 0);
+    }
+
+    #[test]
+    fn test_pool_stats_clone() {
+        let stats = PoolStats {
+            idle_count: 3,
+            total_created: 10,
+            total_acquired: 7,
+            total_released: 5,
+            total_evicted: 2,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.idle_count, 3);
+        assert_eq!(cloned.total_created, 10);
+        assert_eq!(cloned.total_acquired, 7);
+        assert_eq!(cloned.total_released, 5);
+        assert_eq!(cloned.total_evicted, 2);
+    }
+
+    #[test]
+    fn test_pool_stats_debug() {
+        let stats = PoolStats {
+            idle_count: 1,
+            total_created: 2,
+            total_acquired: 3,
+            total_released: 4,
+            total_evicted: 5,
+        };
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("idle_count"));
+        assert!(debug.contains("total_created"));
+    }
+
+    // --- PoolConfig serialization tests ---
+
+    #[test]
+    fn test_pool_config_roundtrip() {
+        let config = PoolConfig {
+            enabled: true,
+            min_idle: 3,
+            max_size: 10,
+            idle_ttl_secs: 600,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: PoolConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.enabled);
+        assert_eq!(parsed.min_idle, 3);
+        assert_eq!(parsed.max_size, 10);
+        assert_eq!(parsed.idle_ttl_secs, 600);
+    }
+
+    // Note: Full integration tests for acquire/release/drain require a working
+    // VM runtime (shim binary + libkrun). These are tested in integration tests
+    // with the full box environment. The unit tests here validate configuration,
+    // statistics, and error handling.
+}

@@ -5,21 +5,25 @@
 
 #![allow(clippy::result_large_err)]
 
+pub mod cache;
 pub mod fs;
 pub mod grpc;
 pub mod host_check;
 pub mod krun;
 pub mod metrics;
 pub mod oci;
+pub mod pool;
 pub mod rootfs;
 pub mod tee;
 pub mod vm;
 pub mod vmm;
 
 // Re-export common types
+pub use cache::{LayerCache, RootfsCache};
 pub use host_check::{check_virtualization_support, VirtualizationSupport};
 pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
 pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller, StoredImage};
+pub use pool::{PoolStats, WarmPool};
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
 pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
 pub use grpc::AgentClient;

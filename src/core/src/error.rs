@@ -42,6 +42,14 @@ pub enum BoxError {
     #[error("Registry error: {registry} - {message}")]
     RegistryError { registry: String, message: String },
 
+    /// Cache error
+    #[error("Cache error: {0}")]
+    CacheError(String),
+
+    /// Pool error
+    #[error("Pool error: {0}")]
+    PoolError(String),
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -192,5 +200,17 @@ mod tests {
         let error = BoxError::Other("test".to_string());
         let debug_str = format!("{:?}", error);
         assert!(debug_str.contains("Other"));
+    }
+
+    #[test]
+    fn test_cache_error_display() {
+        let error = BoxError::CacheError("Rootfs cache corrupted".to_string());
+        assert_eq!(error.to_string(), "Cache error: Rootfs cache corrupted");
+    }
+
+    #[test]
+    fn test_pool_error_display() {
+        let error = BoxError::PoolError("No idle VMs available".to_string());
+        assert_eq!(error.to_string(), "Pool error: No idle VMs available");
     }
 }

@@ -122,6 +122,19 @@ pub mod events {
     pub const BOX_READY: &str = "box.ready";
     pub const BOX_ERROR: &str = "box.error";
     pub const BOX_TIMEOUT: &str = "box.timeout";
+
+    // Warm pool events
+    pub const POOL_VM_CREATED: &str = "pool.vm.created";
+    pub const POOL_VM_ACQUIRED: &str = "pool.vm.acquired";
+    pub const POOL_VM_RELEASED: &str = "pool.vm.released";
+    pub const POOL_VM_EVICTED: &str = "pool.vm.evicted";
+    pub const POOL_REPLENISH: &str = "pool.replenish";
+    pub const POOL_DRAINED: &str = "pool.drained";
+
+    // Cache events
+    pub const CACHE_HIT: &str = "cache.hit";
+    pub const CACHE_MISS: &str = "cache.miss";
+    pub const CACHE_PRUNED: &str = "cache.pruned";
 }
 
 #[cfg(test)]
@@ -348,12 +361,38 @@ mod tests {
     }
 
     #[test]
+    fn test_event_catalog_pool_events() {
+        assert_eq!(events::POOL_VM_CREATED, "pool.vm.created");
+        assert_eq!(events::POOL_VM_ACQUIRED, "pool.vm.acquired");
+        assert_eq!(events::POOL_VM_RELEASED, "pool.vm.released");
+        assert_eq!(events::POOL_VM_EVICTED, "pool.vm.evicted");
+        assert_eq!(events::POOL_REPLENISH, "pool.replenish");
+        assert_eq!(events::POOL_DRAINED, "pool.drained");
+    }
+
+    #[test]
+    fn test_event_catalog_cache_events() {
+        assert_eq!(events::CACHE_HIT, "cache.hit");
+        assert_eq!(events::CACHE_MISS, "cache.miss");
+        assert_eq!(events::CACHE_PRUNED, "cache.pruned");
+    }
+
+    #[test]
     fn test_event_key_naming_convention() {
         // All event keys should follow dot-separated lowercase format
         let all_events = vec![
             events::BOX_READY,
             events::BOX_ERROR,
             events::BOX_TIMEOUT,
+            events::POOL_VM_CREATED,
+            events::POOL_VM_ACQUIRED,
+            events::POOL_VM_RELEASED,
+            events::POOL_VM_EVICTED,
+            events::POOL_REPLENISH,
+            events::POOL_DRAINED,
+            events::CACHE_HIT,
+            events::CACHE_MISS,
+            events::CACHE_PRUNED,
         ];
 
         for event_key in all_events {

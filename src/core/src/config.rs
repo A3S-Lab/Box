@@ -108,6 +108,91 @@ impl Default for BusinessType {
     }
 }
 
+/// Cache configuration for cold start optimization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Enable rootfs and layer caching (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Cache directory (default: ~/.a3s/cache)
+    pub cache_dir: Option<PathBuf>,
+
+    /// Maximum number of cached rootfs entries (default: 10)
+    #[serde(default = "default_max_rootfs_entries")]
+    pub max_rootfs_entries: usize,
+
+    /// Maximum total cache size in bytes (default: 10 GB)
+    #[serde(default = "default_max_cache_bytes")]
+    pub max_cache_bytes: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_rootfs_entries() -> usize {
+    10
+}
+
+fn default_max_cache_bytes() -> u64 {
+    10 * 1024 * 1024 * 1024 // 10 GB
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_dir: None,
+            max_rootfs_entries: 10,
+            max_cache_bytes: 10 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// Warm pool configuration for pre-booted VMs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolConfig {
+    /// Enable warm pool (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Minimum number of pre-warmed idle VMs to maintain
+    #[serde(default = "default_min_idle")]
+    pub min_idle: usize,
+
+    /// Maximum number of VMs in the pool (idle + in-use)
+    #[serde(default = "default_max_pool_size")]
+    pub max_size: usize,
+
+    /// Time-to-live for idle VMs in seconds (0 = unlimited)
+    #[serde(default = "default_idle_ttl")]
+    pub idle_ttl_secs: u64,
+}
+
+fn default_min_idle() -> usize {
+    1
+}
+
+fn default_max_pool_size() -> usize {
+    5
+}
+
+fn default_idle_ttl() -> u64 {
+    300 // 5 minutes
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_idle: 1,
+            max_size: 5,
+            idle_ttl_secs: 300,
+        }
+    }
+}
+
 /// Box configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxConfig {
@@ -149,6 +234,14 @@ pub struct BoxConfig {
     /// Extra environment variables for the entrypoint
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
+
+    /// Cache configuration for cold start optimization
+    #[serde(default)]
+    pub cache: CacheConfig,
+
+    /// Warm pool configuration for pre-booted VMs
+    #[serde(default)]
+    pub pool: PoolConfig,
 }
 
 impl Default for BoxConfig {
@@ -165,6 +258,8 @@ impl Default for BoxConfig {
             cmd: vec![],
             volumes: vec![],
             extra_env: vec![],
+            cache: CacheConfig::default(),
+            pool: PoolConfig::default(),
         }
     }
 }
@@ -589,5 +684,156 @@ mod tests {
     fn test_box_config_default_has_no_tee() {
         let config = BoxConfig::default();
         assert_eq!(config.tee, TeeConfig::None);
+    }
+
+    // --- CacheConfig tests ---
+
+    #[test]
+    fn test_cache_config_default() {
+        let config = CacheConfig::default();
+        assert!(config.enabled);
+        assert!(config.cache_dir.is_none());
+        assert_eq!(config.max_rootfs_entries, 10);
+        assert_eq!(config.max_cache_bytes, 10 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_cache_config_serialization() {
+        let config = CacheConfig {
+            enabled: false,
+            cache_dir: Some(PathBuf::from("/tmp/cache")),
+            max_rootfs_entries: 5,
+            max_cache_bytes: 1024 * 1024 * 1024,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: CacheConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.cache_dir, Some(PathBuf::from("/tmp/cache")));
+        assert_eq!(parsed.max_rootfs_entries, 5);
+        assert_eq!(parsed.max_cache_bytes, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_cache_config_deserialization_defaults() {
+        let json = "{}";
+        let config: CacheConfig = serde_json::from_str(json).unwrap();
+
+        assert!(config.enabled);
+        assert!(config.cache_dir.is_none());
+        assert_eq!(config.max_rootfs_entries, 10);
+        assert_eq!(config.max_cache_bytes, 10 * 1024 * 1024 * 1024);
+    }
+
+    // --- PoolConfig tests ---
+
+    #[test]
+    fn test_pool_config_default() {
+        let config = PoolConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.min_idle, 1);
+        assert_eq!(config.max_size, 5);
+        assert_eq!(config.idle_ttl_secs, 300);
+    }
+
+    #[test]
+    fn test_pool_config_serialization() {
+        let config = PoolConfig {
+            enabled: true,
+            min_idle: 3,
+            max_size: 10,
+            idle_ttl_secs: 600,
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: PoolConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.enabled);
+        assert_eq!(parsed.min_idle, 3);
+        assert_eq!(parsed.max_size, 10);
+        assert_eq!(parsed.idle_ttl_secs, 600);
+    }
+
+    #[test]
+    fn test_pool_config_deserialization_defaults() {
+        let json = "{}";
+        let config: PoolConfig = serde_json::from_str(json).unwrap();
+
+        assert!(!config.enabled);
+        assert_eq!(config.min_idle, 1);
+        assert_eq!(config.max_size, 5);
+        assert_eq!(config.idle_ttl_secs, 300);
+    }
+
+    // --- BoxConfig with new fields ---
+
+    #[test]
+    fn test_box_config_default_has_cache_and_pool() {
+        let config = BoxConfig::default();
+        assert!(config.cache.enabled);
+        assert!(!config.pool.enabled);
+    }
+
+    #[test]
+    fn test_box_config_with_cache_serialization() {
+        let config = BoxConfig {
+            cache: CacheConfig {
+                enabled: false,
+                cache_dir: Some(PathBuf::from("/custom/cache")),
+                max_rootfs_entries: 20,
+                max_cache_bytes: 5 * 1024 * 1024 * 1024,
+            },
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: BoxConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(!parsed.cache.enabled);
+        assert_eq!(parsed.cache.cache_dir, Some(PathBuf::from("/custom/cache")));
+        assert_eq!(parsed.cache.max_rootfs_entries, 20);
+    }
+
+    #[test]
+    fn test_box_config_with_pool_serialization() {
+        let config = BoxConfig {
+            pool: PoolConfig {
+                enabled: true,
+                min_idle: 2,
+                max_size: 8,
+                idle_ttl_secs: 120,
+            },
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: BoxConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(parsed.pool.enabled);
+        assert_eq!(parsed.pool.min_idle, 2);
+        assert_eq!(parsed.pool.max_size, 8);
+        assert_eq!(parsed.pool.idle_ttl_secs, 120);
+    }
+
+    #[test]
+    fn test_box_config_backward_compatible_deserialization() {
+        // JSON without cache/pool fields should still deserialize with defaults
+        let json = r#"{
+            "workspace": "/tmp/workspace",
+            "skills": ["/tmp/skills"],
+            "resources": {
+                "vcpus": 2,
+                "memory_mb": 1024,
+                "disk_mb": 4096,
+                "timeout": 3600
+            },
+            "log_level": "Info",
+            "debug_grpc": false
+        }"#;
+
+        let config: BoxConfig = serde_json::from_str(json).unwrap();
+        assert!(config.cache.enabled);
+        assert!(!config.pool.enabled);
     }
 }
