@@ -578,7 +578,11 @@ impl RuntimeService for BoxRuntimeService {
         let req = request.into_inner();
         let container_id = &req.container_id;
 
-        tracing::info!(container_id = %container_id, "CRI ExecSync");
+        tracing::info!(
+            container_id = %container_id,
+            cmd = ?req.cmd,
+            "CRI ExecSync"
+        );
 
         // Look up the container to find its sandbox
         let container = self
@@ -595,25 +599,23 @@ impl RuntimeService for BoxRuntimeService {
                 Status::not_found(format!("Sandbox not found: {}", container.sandbox_id))
             })?;
 
-        // Get the agent client from the VM
-        let client = vm.agent_client().ok_or_else(|| {
-            Status::unavailable("Agent not connected for this sandbox")
-        })?;
+        // Execute the command via the exec client
+        let timeout_ns = if req.timeout > 0 {
+            req.timeout as u64 * 1_000_000_000
+        } else {
+            a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS
+        };
 
-        // Verify the agent is healthy
-        let healthy = client
-            .health_check()
+        let output = vm
+            .exec_command(req.cmd, timeout_ns)
             .await
             .map_err(box_error_to_status)?;
 
-        if !healthy {
-            return Err(Status::unavailable("Agent is not healthy"));
-        }
-
-        // ExecSync requires the a3s-code agent protocol (not yet integrated into CRI)
-        Err(Status::unimplemented(
-            "ExecSync requires the a3s-code agent protocol",
-        ))
+        Ok(Response::new(ExecSyncResponse {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_code: output.exit_code,
+        }))
     }
 
     async fn exec(

@@ -106,6 +106,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         cmd: args.cmd.clone(),
         box_dir: box_dir.clone(),
         socket_path: box_dir.join("sockets").join("grpc.sock"),
+        exec_socket_path: box_dir.join("sockets").join("exec.sock"),
         console_log: box_dir.join("logs").join("console.log"),
         created_at: chrono::Utc::now(),
         started_at: Some(chrono::Utc::now()),

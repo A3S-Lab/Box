@@ -9,7 +9,7 @@ use a3s_box_core::event::{BoxEvent, EventEmitter};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::grpc::AgentClient;
+use crate::grpc::{AgentClient, ExecClient};
 use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
 use crate::vmm::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig, VmController, VmHandler};
@@ -41,6 +41,8 @@ struct BoxLayout {
     rootfs_path: PathBuf,
     /// Path to the gRPC Unix socket
     socket_path: PathBuf,
+    /// Path to the exec Unix socket
+    exec_socket_path: PathBuf,
     /// Path to the workspace directory
     workspace_path: PathBuf,
     /// Path to the skills directory
@@ -81,6 +83,9 @@ pub struct VmManager {
     /// gRPC client for communicating with the guest agent
     agent_client: Option<AgentClient>,
 
+    /// Exec client for executing commands in the guest
+    exec_client: Option<ExecClient>,
+
     /// A3S home directory (~/.a3s)
     home_dir: PathBuf,
 }
@@ -99,6 +104,7 @@ impl VmManager {
             controller: None,
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
+            exec_client: None,
             home_dir,
         }
     }
@@ -115,6 +121,7 @@ impl VmManager {
             controller: None,
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
+            exec_client: None,
             home_dir,
         }
     }
@@ -132,6 +139,39 @@ impl VmManager {
     /// Get the agent client, if connected.
     pub fn agent_client(&self) -> Option<&AgentClient> {
         self.agent_client.as_ref()
+    }
+
+    /// Get the exec client, if connected.
+    pub fn exec_client(&self) -> Option<&ExecClient> {
+        self.exec_client.as_ref()
+    }
+
+    /// Execute a command in the guest VM.
+    ///
+    /// Requires the VM to be in Ready, Busy, or Compacting state.
+    pub async fn exec_command(
+        &self,
+        cmd: Vec<String>,
+        timeout_ns: u64,
+    ) -> Result<a3s_box_core::exec::ExecOutput> {
+        let state = self.state.read().await;
+        match *state {
+            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
+            BoxState::Created => {
+                return Err(BoxError::ExecError("VM not yet booted".to_string()));
+            }
+            BoxState::Stopped => {
+                return Err(BoxError::ExecError("VM is stopped".to_string()));
+            }
+        }
+        drop(state);
+
+        let client = self.exec_client.as_ref().ok_or_else(|| {
+            BoxError::ExecError("Exec client not connected".to_string())
+        })?;
+
+        let request = a3s_box_core::exec::ExecRequest { cmd, timeout_ns };
+        client.exec_command(&request).await
     }
 
     /// Boot the VM.
@@ -171,6 +211,9 @@ impl VmManager {
             // A3S agent image - wait for gRPC health check
             self.wait_for_guest_ready(&layout.socket_path).await?;
         }
+
+        // 5b. Wait for exec server to become ready
+        self.wait_for_exec_ready(&layout.exec_socket_path).await?;
 
         // 6. Update state to Ready
         *self.state.write().await = BoxState::Ready;
@@ -523,6 +566,7 @@ impl VmManager {
         Ok(BoxLayout {
             rootfs_path,
             socket_path: socket_dir.join("grpc.sock"),
+            exec_socket_path: socket_dir.join("exec.sock"),
             workspace_path,
             skills_path,
             console_output: Some(logs_dir.join("console.log")),
@@ -913,6 +957,7 @@ impl VmManager {
             memory_mib: self.config.resources.memory_mb,
             rootfs_path: layout.rootfs_path.clone(),
             grpc_socket_path: layout.socket_path.clone(),
+            exec_socket_path: layout.exec_socket_path.clone(),
             fs_mounts,
             entrypoint,
             console_output: layout.console_output.clone(),
@@ -1163,6 +1208,65 @@ impl VmManager {
                 .unwrap_or_else(|| "none".to_string()),
         )))
     }
+
+    /// Wait for the exec server socket to become ready.
+    ///
+    /// Polls for the socket file to appear, then verifies it is connectable.
+    /// This is best-effort: if the exec socket never appears (e.g., older guest
+    /// init without exec server), the VM still boots successfully.
+    async fn wait_for_exec_ready(&mut self, exec_socket_path: &std::path::Path) -> Result<()> {
+        const MAX_WAIT_MS: u64 = 10000;
+        const POLL_INTERVAL_MS: u64 = 200;
+
+        tracing::debug!(
+            socket_path = %exec_socket_path.display(),
+            "Waiting for exec server socket"
+        );
+
+        let start = std::time::Instant::now();
+
+        // Phase 1: Wait for socket file to appear
+        loop {
+            if start.elapsed().as_millis() >= MAX_WAIT_MS as u128 {
+                tracing::warn!("Exec socket did not appear, exec will not be available");
+                return Ok(());
+            }
+
+            if exec_socket_path.exists() {
+                tracing::debug!("Exec socket file detected");
+                break;
+            }
+
+            // Check if VM is still running
+            if let Some(ref handler) = *self.handler.read().await {
+                if !handler.is_running() {
+                    tracing::warn!("VM exited before exec socket appeared");
+                    return Ok(());
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
+
+        // Phase 2: Try to connect
+        while start.elapsed().as_millis() < MAX_WAIT_MS as u128 {
+            match ExecClient::connect(exec_socket_path).await {
+                Ok(client) => {
+                    tracing::debug!("Exec client connected");
+                    self.exec_client = Some(client);
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "Exec connect failed, retrying");
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+        }
+
+        tracing::warn!("Exec socket appeared but connection failed, exec will not be available");
+        Ok(())
+    }
 }
 
 /// Get the A3S home directory (~/.a3s).
@@ -1380,6 +1484,7 @@ mod tests {
             controller: None,
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
+            exec_client: None,
             home_dir: home_dir.to_path_buf(),
         }
     }
@@ -1502,6 +1607,41 @@ mod tests {
         let cache_dir = tmp.path().join("cache").join("rootfs");
         let cache = RootfsCache::new(&cache_dir).unwrap();
         assert!(cache.entry_count().unwrap() <= 2);
+    }
+
+    #[tokio::test]
+    async fn test_exec_command_rejects_created_state() {
+        let tmp = TempDir::new().unwrap();
+        let vm = make_vm_manager_with_home(tmp.path());
+
+        let result = vm.exec_command(vec!["echo".to_string()], 0).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not yet booted"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_command_rejects_stopped_state() {
+        let tmp = TempDir::new().unwrap();
+        let vm = make_vm_manager_with_home(tmp.path());
+        *vm.state.write().await = BoxState::Stopped;
+
+        let result = vm.exec_command(vec!["echo".to_string()], 0).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("stopped"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_command_no_client() {
+        let tmp = TempDir::new().unwrap();
+        let vm = make_vm_manager_with_home(tmp.path());
+        *vm.state.write().await = BoxState::Ready;
+
+        let result = vm.exec_command(vec!["echo".to_string()], 0).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not connected"));
     }
 
     #[test]

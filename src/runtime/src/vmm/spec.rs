@@ -56,6 +56,10 @@ pub struct InstanceSpec {
     /// This socket is bridged to vsock inside the VM
     pub grpc_socket_path: PathBuf,
 
+    /// Path to the Unix socket for exec communication
+    /// This socket is bridged to vsock port 4089 inside the VM
+    pub exec_socket_path: PathBuf,
+
     /// Filesystem mounts (virtio-fs shares)
     pub fs_mounts: Vec<FsMount>,
 
@@ -80,6 +84,7 @@ impl Default for InstanceSpec {
             memory_mib: 512,
             rootfs_path: PathBuf::new(),
             grpc_socket_path: PathBuf::new(),
+            exec_socket_path: PathBuf::new(),
             fs_mounts: Vec::new(),
             entrypoint: Entrypoint {
                 executable: String::new(),

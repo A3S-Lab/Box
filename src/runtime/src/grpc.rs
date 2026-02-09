@@ -1,6 +1,8 @@
-//! gRPC client for host-guest communication over Unix socket.
+//! Host-guest communication clients over Unix socket.
 //!
-//! Provides a minimal client for health-checking the guest agent.
+//! - `AgentClient`: Health-checking the guest agent (port 4088).
+//! - `ExecClient`: Executing commands in the guest (port 4089).
+//!
 //! Agent-level operations (sessions, generation, skills) are handled
 //! by the a3s-code crate, not the Box runtime.
 
@@ -77,13 +79,119 @@ impl AgentClient {
     }
 }
 
+/// Client for executing commands in the guest over Unix socket.
+///
+/// Sends HTTP POST /exec requests with JSON-encoded ExecRequest bodies
+/// and parses JSON ExecOutput responses.
+#[derive(Debug)]
+pub struct ExecClient {
+    socket_path: PathBuf,
+}
+
+impl ExecClient {
+    /// Connect to the exec server via Unix socket.
+    ///
+    /// Verifies the socket is connectable.
+    pub async fn connect(socket_path: &Path) -> Result<Self> {
+        let _stream = UnixStream::connect(socket_path).await.map_err(|e| {
+            BoxError::ExecError(format!(
+                "Failed to connect to exec server at {}: {}",
+                socket_path.display(),
+                e,
+            ))
+        })?;
+
+        Ok(Self {
+            socket_path: socket_path.to_path_buf(),
+        })
+    }
+
+    /// Get the socket path this client is connected to.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Execute a command in the guest.
+    ///
+    /// Sends an HTTP POST /exec request over the Unix socket and returns
+    /// the captured stdout, stderr, and exit code.
+    pub async fn exec_command(
+        &self,
+        request: &a3s_box_core::exec::ExecRequest,
+    ) -> Result<a3s_box_core::exec::ExecOutput> {
+        let body = serde_json::to_string(request).map_err(|e| {
+            BoxError::ExecError(format!("Failed to serialize exec request: {}", e))
+        })?;
+
+        let http_request = format!(
+            "POST /exec HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+
+        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            BoxError::ExecError(format!(
+                "Exec connection failed to {}: {}",
+                self.socket_path.display(),
+                e,
+            ))
+        })?;
+
+        stream.write_all(http_request.as_bytes()).await.map_err(|e| {
+            BoxError::ExecError(format!("Exec request write failed: {}", e))
+        })?;
+
+        // Read full response (up to 32 MiB + headers)
+        let mut response = Vec::with_capacity(4096);
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = stream.read(&mut buf).await.map_err(|e| {
+                BoxError::ExecError(format!("Exec response read failed: {}", e))
+            })?;
+            if n == 0 {
+                break;
+            }
+            response.extend_from_slice(&buf[..n]);
+            // Safety limit: 33 MiB (16 MiB stdout + 16 MiB stderr + headers)
+            if response.len() > 33 * 1024 * 1024 {
+                break;
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+
+        // Find the JSON body after the HTTP headers
+        let body_str = response_str
+            .find("\r\n\r\n")
+            .map(|pos| &response_str[pos + 4..])
+            .ok_or_else(|| {
+                BoxError::ExecError("Malformed exec response: no HTTP body".to_string())
+            })?;
+
+        let output: a3s_box_core::exec::ExecOutput =
+            serde_json::from_str(body_str).map_err(|e| {
+                BoxError::ExecError(format!("Failed to parse exec response: {}", e))
+            })?;
+
+        Ok(output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_connect_nonexistent_socket() {
+    async fn test_agent_connect_nonexistent_socket() {
         let result = AgentClient::connect(Path::new("/tmp/nonexistent-a3s-test.sock")).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_exec_connect_nonexistent_socket() {
+        let result = ExecClient::connect(Path::new("/tmp/nonexistent-a3s-exec-test.sock")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, BoxError::ExecError(_)));
     }
 }

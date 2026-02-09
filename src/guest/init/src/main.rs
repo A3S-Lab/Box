@@ -6,7 +6,7 @@
 //! - Launching the agent process
 //! - Managing process lifecycle
 
-use a3s_box_guest_init::namespace;
+use a3s_box_guest_init::{exec_server, namespace};
 use std::process;
 use tracing::{error, info};
 
@@ -115,7 +115,14 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Agent started with PID {}", agent_pid);
 
-    // Step 6: Wait for agent process (reap zombies)
+    // Step 6: Start exec server in background thread
+    std::thread::spawn(|| {
+        if let Err(e) = exec_server::run_exec_server() {
+            error!("Exec server failed: {}", e);
+        }
+    });
+
+    // Step 7: Wait for agent process (reap zombies)
     wait_for_children()?;
 
     Ok(())

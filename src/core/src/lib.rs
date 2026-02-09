@@ -6,11 +6,13 @@
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod exec;
 
 // Re-export commonly used types
 pub use config::{BoxConfig, ResourceConfig};
 pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
+pub use exec::{ExecOutput, ExecRequest};
 
 /// A3S Box version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

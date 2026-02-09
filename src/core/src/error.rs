@@ -50,6 +50,10 @@ pub enum BoxError {
     #[error("Pool error: {0}")]
     PoolError(String),
 
+    /// Exec error
+    #[error("Exec error: {0}")]
+    ExecError(String),
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -212,5 +216,11 @@ mod tests {
     fn test_pool_error_display() {
         let error = BoxError::PoolError("No idle VMs available".to_string());
         assert_eq!(error.to_string(), "Pool error: No idle VMs available");
+    }
+
+    #[test]
+    fn test_exec_error_display() {
+        let error = BoxError::ExecError("Command not found".to_string());
+        assert_eq!(error.to_string(), "Exec error: Command not found");
     }
 }

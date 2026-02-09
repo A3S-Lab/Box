@@ -38,6 +38,9 @@ pub struct BoxRecord {
     pub box_dir: PathBuf,
     /// Path to gRPC socket
     pub socket_path: PathBuf,
+    /// Path to exec socket
+    #[serde(default)]
+    pub exec_socket_path: PathBuf,
     /// Path to console log
     pub console_log: PathBuf,
     /// Creation timestamp
@@ -240,6 +243,7 @@ mod tests {
             cmd: vec![],
             box_dir: PathBuf::from("/tmp/boxes").join(id),
             socket_path: PathBuf::from("/tmp/boxes").join(id).join("grpc.sock"),
+            exec_socket_path: PathBuf::from("/tmp/boxes").join(id).join("sockets").join("exec.sock"),
             console_log: PathBuf::from("/tmp/boxes").join(id).join("console.log"),
             created_at: Utc::now(),
             started_at: if status == "running" { Some(Utc::now()) } else { None },

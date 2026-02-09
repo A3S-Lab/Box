@@ -135,6 +135,12 @@ pub mod events {
     pub const CACHE_HIT: &str = "cache.hit";
     pub const CACHE_MISS: &str = "cache.miss";
     pub const CACHE_PRUNED: &str = "cache.pruned";
+
+    // Exec events
+    pub const EXEC_COMMAND_STARTED: &str = "exec.command.started";
+    pub const EXEC_COMMAND_COMPLETED: &str = "exec.command.completed";
+    pub const EXEC_COMMAND_FAILED: &str = "exec.command.failed";
+    pub const EXEC_COMMAND_TIMEOUT: &str = "exec.command.timeout";
 }
 
 #[cfg(test)]
@@ -378,6 +384,14 @@ mod tests {
     }
 
     #[test]
+    fn test_event_catalog_exec_events() {
+        assert_eq!(events::EXEC_COMMAND_STARTED, "exec.command.started");
+        assert_eq!(events::EXEC_COMMAND_COMPLETED, "exec.command.completed");
+        assert_eq!(events::EXEC_COMMAND_FAILED, "exec.command.failed");
+        assert_eq!(events::EXEC_COMMAND_TIMEOUT, "exec.command.timeout");
+    }
+
+    #[test]
     fn test_event_key_naming_convention() {
         // All event keys should follow dot-separated lowercase format
         let all_events = vec![
@@ -393,6 +407,10 @@ mod tests {
             events::CACHE_HIT,
             events::CACHE_MISS,
             events::CACHE_PRUNED,
+            events::EXEC_COMMAND_STARTED,
+            events::EXEC_COMMAND_COMPLETED,
+            events::EXEC_COMMAND_FAILED,
+            events::EXEC_COMMAND_TIMEOUT,
         ];
 
         for event_key in all_events {

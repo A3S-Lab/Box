@@ -16,6 +16,7 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_box_runtime::krun::KrunContext;
 use a3s_box_runtime::vmm::InstanceSpec;
 use a3s_box_runtime::AGENT_VSOCK_PORT;
+use a3s_box_runtime::EXEC_VSOCK_PORT;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -211,6 +212,24 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         "Configuring vsock bridge for gRPC"
     );
     ctx.add_vsock_port(AGENT_VSOCK_PORT, grpc_socket_str, true)?;
+
+    // Configure exec communication channel (Unix socket bridged to vsock port 4089)
+    let exec_socket_str = spec
+        .exec_socket_path
+        .to_str()
+        .ok_or_else(|| BoxError::BoxBootError {
+            message: format!(
+                "Invalid exec socket path: {}",
+                spec.exec_socket_path.display()
+            ),
+            hint: None,
+        })?;
+    tracing::debug!(
+        socket_path = exec_socket_str,
+        guest_port = EXEC_VSOCK_PORT,
+        "Configuring vsock bridge for exec"
+    );
+    ctx.add_vsock_port(EXEC_VSOCK_PORT, exec_socket_str, true)?;
 
     // Configure console output if specified
     if let Some(console_path) = &spec.console_output {

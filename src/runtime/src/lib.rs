@@ -26,7 +26,7 @@ pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPul
 pub use pool::{PoolStats, WarmPool};
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
 pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
-pub use grpc::AgentClient;
+pub use grpc::{AgentClient, ExecClient};
 pub use vm::{BoxState, VmManager};
 pub use vmm::{Entrypoint, FsMount, InstanceSpec, ShimHandler, TeeInstanceConfig, VmController, VmHandler, VmMetrics};
 
@@ -35,3 +35,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default vsock port for communication with Guest Agent.
 pub const AGENT_VSOCK_PORT: u32 = 4088;
+
+/// Default vsock port for exec server in the guest.
+pub const EXEC_VSOCK_PORT: u32 = 4089;

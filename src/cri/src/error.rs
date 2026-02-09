@@ -22,6 +22,7 @@ pub fn box_error_to_status(err: BoxError) -> Status {
         BoxError::IoError(e) => Status::internal(e.to_string()),
         BoxError::TeeConfig(msg) => Status::failed_precondition(msg),
         BoxError::TeeNotSupported(msg) => Status::failed_precondition(msg),
+        BoxError::ExecError(msg) => Status::internal(msg),
         other => Status::internal(other.to_string()),
     }
 }
@@ -79,5 +80,13 @@ mod tests {
         let err = BoxError::ConfigError("bad config".to_string());
         let status = box_error_to_status(err);
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_exec_error_maps_to_internal() {
+        let err = BoxError::ExecError("command failed".to_string());
+        let status = box_error_to_status(err);
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert!(status.message().contains("command failed"));
     }
 }
