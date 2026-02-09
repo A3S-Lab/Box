@@ -231,6 +231,12 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     );
     ctx.add_vsock_port(EXEC_VSOCK_PORT, exec_socket_str, true)?;
 
+    // Configure TSI port mappings if specified
+    if !spec.port_map.is_empty() {
+        tracing::info!(port_map = ?spec.port_map, "Configuring TSI port mappings");
+        ctx.set_port_map(&spec.port_map)?;
+    }
+
     // Configure console output if specified
     if let Some(console_path) = &spec.console_output {
         let console_str = console_path

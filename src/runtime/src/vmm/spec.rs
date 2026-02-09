@@ -74,6 +74,11 @@ pub struct InstanceSpec {
 
     /// TEE configuration (None for standard VM)
     pub tee_config: Option<TeeInstanceConfig>,
+
+    /// TSI port mappings: ["host_port:guest_port", ...]
+    /// Maps host ports to guest ports via Transparent Socket Impersonation.
+    #[serde(default)]
+    pub port_map: Vec<String>,
 }
 
 impl Default for InstanceSpec {
@@ -94,6 +99,7 @@ impl Default for InstanceSpec {
             console_output: None,
             workdir: "/".to_string(),
             tee_config: None,
+            port_map: Vec::new(),
         }
     }
 }

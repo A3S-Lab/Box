@@ -242,6 +242,11 @@ pub struct BoxConfig {
     /// Warm pool configuration for pre-booted VMs
     #[serde(default)]
     pub pool: PoolConfig,
+
+    /// Port mappings: "host_port:guest_port" (e.g., "8080:80")
+    /// Maps host ports to guest ports via TSI (Transparent Socket Impersonation).
+    #[serde(default)]
+    pub port_map: Vec<String>,
 }
 
 impl Default for BoxConfig {
@@ -260,6 +265,7 @@ impl Default for BoxConfig {
             extra_env: vec![],
             cache: CacheConfig::default(),
             pool: PoolConfig::default(),
+            port_map: vec![],
         }
     }
 }

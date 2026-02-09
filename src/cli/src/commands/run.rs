@@ -36,6 +36,10 @@ pub struct RunArgs {
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
 
+    /// Publish a port (host_port:guest_port), can be repeated
+    #[arg(short = 'p', long = "publish")]
+    pub publish: Vec<String>,
+
     /// Run in detached mode (background)
     #[arg(short = 'd', long)]
     pub detach: bool,
@@ -69,6 +73,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         cmd: args.cmd.clone(),
         volumes: args.volumes.clone(),
         extra_env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        port_map: args.publish.clone(),
         ..Default::default()
     };
 

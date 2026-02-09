@@ -963,6 +963,7 @@ impl VmManager {
             console_output: layout.console_output.clone(),
             workdir,
             tee_config: layout.tee_instance_config.clone(),
+            port_map: self.config.port_map.clone(),
         })
     }
 

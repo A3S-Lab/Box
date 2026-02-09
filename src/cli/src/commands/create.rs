@@ -32,6 +32,10 @@ pub struct CreateArgs {
     /// Environment variable (KEY=VALUE), can be repeated
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
+
+    /// Publish a port (host_port:guest_port), can be repeated
+    #[arg(short = 'p', long = "publish")]
+    pub publish: Vec<String>,
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {

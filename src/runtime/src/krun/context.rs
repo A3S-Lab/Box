@@ -12,8 +12,8 @@ use super::check_status;
 use a3s_box_core::error::{BoxError, Result};
 use libkrun_sys::{
     krun_add_virtiofs, krun_add_vsock_port2, krun_create_ctx, krun_free_ctx, krun_init_log,
-    krun_set_console_output, krun_set_env, krun_set_exec, krun_set_rlimits, krun_set_root,
-    krun_set_vm_config, krun_set_workdir, krun_split_irqchip, krun_start_enter,
+    krun_set_console_output, krun_set_env, krun_set_exec, krun_set_port_map, krun_set_rlimits,
+    krun_set_root, krun_set_vm_config, krun_set_workdir, krun_split_irqchip, krun_start_enter,
 };
 
 /// Thin wrapper that owns a libkrun context.
@@ -266,6 +266,34 @@ impl KrunContext {
         check_status(
             "krun_add_vsock_port2",
             krun_add_vsock_port2(self.ctx_id, port, socket_path_c.as_ptr(), listen),
+        )
+    }
+
+    /// Configure TSI port mappings for the VM.
+    ///
+    /// Maps host ports to guest ports via TSI (Transparent Socket Impersonation).
+    /// When a guest process listens on a guest port, it becomes accessible on the
+    /// corresponding host port.
+    ///
+    /// # Arguments
+    /// * `port_map` - Slice of "host_port:guest_port" strings (e.g., ["8080:80", "3000:3000"])
+    pub unsafe fn set_port_map(&self, port_map: &[String]) -> Result<()> {
+        tracing::debug!(port_map = ?port_map, "Setting TSI port mappings");
+        let entries: Vec<CString> = port_map
+            .iter()
+            .map(|entry| {
+                CString::new(entry.as_str()).map_err(|e| BoxError::BoxBootError {
+                    message: format!("invalid port map entry: {}", e),
+                    hint: None,
+                })
+            })
+            .collect::<Result<_>>()?;
+        let mut ptrs: Vec<*const std::ffi::c_char> = entries.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(ptr::null());
+
+        check_status(
+            "krun_set_port_map",
+            krun_set_port_map(self.ctx_id, ptrs.as_ptr()),
         )
     }
 
