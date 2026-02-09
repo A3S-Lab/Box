@@ -237,6 +237,11 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.set_port_map(&spec.port_map)?;
     }
 
+    // Configure user/group from OCI USER directive
+    if let Some(ref user) = spec.user {
+        apply_user_config(&ctx, user)?;
+    }
+
     // Configure console output if specified
     if let Some(console_path) = &spec.console_output {
         let console_str = console_path
@@ -302,4 +307,54 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         tracing::info!(exit_status = status, "VM exited");
         Ok(())
     }
+}
+
+/// Apply OCI USER directive to the krun context.
+///
+/// Supports formats:
+/// - "uid" (e.g., "1000")
+/// - "uid:gid" (e.g., "1000:1000")
+/// - Non-numeric names are logged and skipped (would require /etc/passwd lookup)
+unsafe fn apply_user_config(ctx: &KrunContext, user: &str) -> Result<()> {
+    if user.is_empty() {
+        return Ok(());
+    }
+
+    let parts: Vec<&str> = user.split(':').collect();
+    let uid_str = parts[0];
+    let gid_str = parts.get(1).copied();
+
+    // Parse UID
+    match uid_str.parse::<u32>() {
+        Ok(uid) => {
+            tracing::info!(uid, "Setting VM user from OCI USER directive");
+            ctx.set_uid(uid)?;
+        }
+        Err(_) => {
+            // Non-numeric user name — would need /etc/passwd lookup inside rootfs
+            tracing::warn!(
+                user = uid_str,
+                "Non-numeric USER directive; skipping (name lookup not yet supported)"
+            );
+            return Ok(());
+        }
+    }
+
+    // Parse GID if present
+    if let Some(gid_str) = gid_str {
+        match gid_str.parse::<u32>() {
+            Ok(gid) => {
+                tracing::info!(gid, "Setting VM group from OCI USER directive");
+                ctx.set_gid(gid)?;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    group = gid_str,
+                    "Non-numeric group in USER directive; skipping"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }

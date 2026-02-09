@@ -40,6 +40,10 @@ pub struct RunArgs {
     #[arg(short = 'p', long = "publish")]
     pub publish: Vec<String>,
 
+    /// Set custom DNS servers, can be repeated
+    #[arg(long)]
+    pub dns: Vec<String>,
+
     /// Run in detached mode (background)
     #[arg(short = 'd', long)]
     pub detach: bool,
@@ -74,6 +78,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         volumes: args.volumes.clone(),
         extra_env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         port_map: args.publish.clone(),
+        dns: args.dns.clone(),
         ..Default::default()
     };
 

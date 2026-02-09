@@ -4,6 +4,7 @@
 //! used across the A3S Box MicroVM runtime.
 
 pub mod config;
+pub mod dns;
 pub mod error;
 pub mod event;
 pub mod exec;

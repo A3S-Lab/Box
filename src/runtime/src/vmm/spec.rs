@@ -79,6 +79,11 @@ pub struct InstanceSpec {
     /// Maps host ports to guest ports via Transparent Socket Impersonation.
     #[serde(default)]
     pub port_map: Vec<String>,
+
+    /// User to run as inside the VM (from OCI USER directive).
+    /// Format: "uid", "uid:gid", "user", or "user:group"
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 impl Default for InstanceSpec {
@@ -100,6 +105,7 @@ impl Default for InstanceSpec {
             workdir: "/".to_string(),
             tee_config: None,
             port_map: Vec::new(),
+            user: None,
         }
     }
 }

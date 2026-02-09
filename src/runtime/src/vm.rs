@@ -189,6 +189,18 @@ impl VmManager {
         // 1. Prepare filesystem layout
         let layout = self.prepare_layout()?;
 
+        // 1.5. Override /etc/resolv.conf with configured DNS
+        let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
+        let resolv_path = layout.rootfs_path.join("etc/resolv.conf");
+        std::fs::write(&resolv_path, &resolv_content).map_err(|e| {
+            BoxError::Other(format!(
+                "Failed to write {}: {}",
+                resolv_path.display(),
+                e
+            ))
+        })?;
+        tracing::debug!(dns = %resolv_content.trim(), "Configured guest DNS");
+
         // 2. Build InstanceSpec
         let spec = self.build_instance_spec(&layout)?;
 
@@ -951,6 +963,12 @@ impl VmManager {
             None => GUEST_WORKDIR.to_string(),
         };
 
+        // Extract user from OCI config (USER directive)
+        let user = layout
+            .agent_oci_config
+            .as_ref()
+            .and_then(|c| c.user.clone());
+
         Ok(InstanceSpec {
             box_id: self.box_id.clone(),
             vcpus: self.config.resources.vcpus as u8,
@@ -964,6 +982,7 @@ impl VmManager {
             workdir,
             tee_config: layout.tee_instance_config.clone(),
             port_map: self.config.port_map.clone(),
+            user,
         })
     }
 

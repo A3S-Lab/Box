@@ -247,6 +247,11 @@ pub struct BoxConfig {
     /// Maps host ports to guest ports via TSI (Transparent Socket Impersonation).
     #[serde(default)]
     pub port_map: Vec<String>,
+
+    /// Custom DNS servers (e.g., "1.1.1.1").
+    /// If empty, reads from host /etc/resolv.conf, falling back to 8.8.8.8.
+    #[serde(default)]
+    pub dns: Vec<String>,
 }
 
 impl Default for BoxConfig {
@@ -266,6 +271,7 @@ impl Default for BoxConfig {
             cache: CacheConfig::default(),
             pool: PoolConfig::default(),
             port_map: vec![],
+            dns: vec![],
         }
     }
 }

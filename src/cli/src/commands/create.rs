@@ -36,6 +36,10 @@ pub struct CreateArgs {
     /// Publish a port (host_port:guest_port), can be repeated
     #[arg(short = 'p', long = "publish")]
     pub publish: Vec<String>,
+
+    /// Set custom DNS servers, can be repeated
+    #[arg(long)]
+    pub dns: Vec<String>,
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {

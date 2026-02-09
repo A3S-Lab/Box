@@ -13,7 +13,8 @@ use a3s_box_core::error::{BoxError, Result};
 use libkrun_sys::{
     krun_add_virtiofs, krun_add_vsock_port2, krun_create_ctx, krun_free_ctx, krun_init_log,
     krun_set_console_output, krun_set_env, krun_set_exec, krun_set_port_map, krun_set_rlimits,
-    krun_set_root, krun_set_vm_config, krun_set_workdir, krun_split_irqchip, krun_start_enter,
+    krun_set_root, krun_set_vm_config, krun_set_workdir, krun_setgid, krun_setuid,
+    krun_split_irqchip, krun_start_enter,
 };
 
 /// Thin wrapper that owns a libkrun context.
@@ -295,6 +296,22 @@ impl KrunContext {
             "krun_set_port_map",
             krun_set_port_map(self.ctx_id, ptrs.as_ptr()),
         )
+    }
+
+    /// Set the user ID for the VM process.
+    ///
+    /// The UID is applied right before the microVM starts.
+    pub unsafe fn set_uid(&self, uid: libc::uid_t) -> Result<()> {
+        tracing::debug!(uid, "Setting VM uid");
+        check_status("krun_setuid", krun_setuid(self.ctx_id, uid))
+    }
+
+    /// Set the group ID for the VM process.
+    ///
+    /// The GID is applied right before the microVM starts.
+    pub unsafe fn set_gid(&self, gid: libc::gid_t) -> Result<()> {
+        tracing::debug!(gid, "Setting VM gid");
+        check_status("krun_setgid", krun_setgid(self.ctx_id, gid))
     }
 
     /// Redirect VM console output to a file.
