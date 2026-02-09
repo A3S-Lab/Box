@@ -1,23 +1,42 @@
-//! `a3s-box rmi` command.
+//! `a3s-box rmi` command — remove one or more cached images.
 
 use clap::Args;
 
 #[derive(Args)]
 pub struct RmiArgs {
-    /// Image reference to remove
-    pub image: String,
+    /// Image references to remove
+    #[arg(required = true)]
+    pub images: Vec<String>,
+
+    /// Force removal (ignore not-found errors)
+    #[arg(short, long)]
+    pub force: bool,
 }
 
 pub async fn execute(args: RmiArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let home = dirs::home_dir()
-        .map(|h| h.join(".a3s"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".a3s"));
+    let store = super::open_image_store()?;
 
-    let images_dir = home.join("images");
-    let store = a3s_box_runtime::ImageStore::new(&images_dir, 10 * 1024 * 1024 * 1024)?;
+    let mut errors: Vec<String> = Vec::new();
 
-    store.remove(&args.image).await?;
-    println!("Removed: {}", args.image);
+    for reference in &args.images {
+        match store.remove(reference).await {
+            Ok(()) => {
+                println!("Removed: {reference}");
+            }
+            Err(e) => {
+                if args.force {
+                    // Silently skip not-found errors in force mode
+                    continue;
+                }
+                errors.push(format!("{reference}: {e}"));
+            }
+        }
+    }
 
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        let msg = errors.join("\n");
+        Err(format!("Failed to remove image(s):\n{msg}").into())
+    }
 }

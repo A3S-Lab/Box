@@ -2,6 +2,9 @@
 
 mod create;
 mod exec;
+mod image_inspect;
+mod image_prune;
+mod image_tag;
 mod images;
 mod info;
 mod inspect;
@@ -18,7 +21,12 @@ mod stats;
 mod stop;
 mod version;
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
+
+/// Default maximum image store size: 10 GB.
+const IMAGE_STORE_MAX_SIZE: u64 = 10 * 1024 * 1024 * 1024;
 
 /// A3S Box — Docker-like MicroVM runtime.
 #[derive(Parser)]
@@ -59,14 +67,35 @@ pub enum Command {
     Images(images::ImagesArgs),
     /// Pull an image from a registry
     Pull(pull::PullArgs),
-    /// Remove a cached image
+    /// Remove one or more cached images
     Rmi(rmi::RmiArgs),
+    /// Display detailed image information as JSON
+    ImageInspect(image_inspect::ImageInspectArgs),
+    /// Remove unused images
+    ImagePrune(image_prune::ImagePruneArgs),
+    /// Create a tag that refers to an existing image
+    Tag(image_tag::ImageTagArgs),
     /// Show version information
     Version(version::VersionArgs),
     /// Show system information
     Info(info::InfoArgs),
     /// Update a3s-box to the latest version
     Update,
+}
+
+/// Return the path to the image store directory (~/.a3s/images).
+pub(crate) fn images_dir() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".a3s"))
+        .unwrap_or_else(|| PathBuf::from(".a3s"))
+        .join("images")
+}
+
+/// Open the shared image store.
+pub(crate) fn open_image_store() -> Result<a3s_box_runtime::ImageStore, Box<dyn std::error::Error>> {
+    let dir = images_dir();
+    let store = a3s_box_runtime::ImageStore::new(&dir, IMAGE_STORE_MAX_SIZE)?;
+    Ok(store)
 }
 
 /// Dispatch a parsed CLI to the appropriate command handler.
@@ -87,6 +116,9 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Images(args) => images::execute(args).await,
         Command::Pull(args) => pull::execute(args).await,
         Command::Rmi(args) => rmi::execute(args).await,
+        Command::ImageInspect(args) => image_inspect::execute(args).await,
+        Command::ImagePrune(args) => image_prune::execute(args).await,
+        Command::Tag(args) => image_tag::execute(args).await,
         Command::Version(args) => version::execute(args).await,
         Command::Info(args) => info::execute(args).await,
         Command::Update => {

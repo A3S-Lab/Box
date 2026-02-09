@@ -4,6 +4,8 @@ use clap::Args;
 
 use crate::state::StateFile;
 
+use super::images_dir;
+
 #[derive(Args)]
 pub struct InfoArgs;
 
@@ -39,10 +41,9 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     // Image cache stats
-    let images_dir = home.join("images");
+    let images_dir = images_dir();
     if images_dir.exists() {
-        let store = a3s_box_runtime::ImageStore::new(&images_dir, 10 * 1024 * 1024 * 1024);
-        match store {
+        match super::open_image_store() {
             Ok(store) => {
                 let images = store.list().await;
                 let total_size: u64 = images.iter().map(|i| i.size_bytes).sum();

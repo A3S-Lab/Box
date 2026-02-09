@@ -11,15 +11,7 @@ pub struct PullArgs {
 }
 
 pub async fn execute(args: PullArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let home = dirs::home_dir()
-        .map(|h| h.join(".a3s"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".a3s"));
-
-    let images_dir = home.join("images");
-    let store = Arc::new(a3s_box_runtime::ImageStore::new(
-        &images_dir,
-        10 * 1024 * 1024 * 1024,
-    )?);
+    let store = Arc::new(super::open_image_store()?);
 
     let puller = a3s_box_runtime::ImagePuller::new(
         store,
