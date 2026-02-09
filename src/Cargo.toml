@@ -94,3 +94,6 @@ comfy-table = "7"
 
 # Random
 rand = "0.8"
+
+# Self-update
+a3s-updater = { path = "../../updater" }

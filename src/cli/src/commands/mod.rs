@@ -59,6 +59,8 @@ pub enum Command {
     Version(version::VersionArgs),
     /// Show system information
     Info(info::InfoArgs),
+    /// Update a3s-box to the latest version
+    Update,
 }
 
 /// Dispatch a parsed CLI to the appropriate command handler.
@@ -79,5 +81,16 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Rmi(args) => rmi::execute(args).await,
         Command::Version(args) => version::execute(args).await,
         Command::Info(args) => info::execute(args).await,
+        Command::Update => {
+            a3s_updater::run_update(&a3s_updater::UpdateConfig {
+                binary_name: "a3s-box",
+                crate_name: "a3s-box-cli",
+                current_version: env!("CARGO_PKG_VERSION"),
+                github_owner: "a3s-lab",
+                github_repo: "a3s",
+            })
+            .await
+            .map_err(|e| e.into())
+        }
     }
 }
