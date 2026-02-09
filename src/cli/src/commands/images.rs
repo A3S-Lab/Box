@@ -53,7 +53,7 @@ pub async fn execute(args: ImagesArgs) -> Result<(), Box<dyn std::error::Error>>
     // Default: table output
     let mut table = output::new_table(&["REPOSITORY", "TAG", "DIGEST", "SIZE", "PULLED"]);
     for row in &rows {
-        table.add_row(&[
+        table.add_row([
             &row.repository,
             &row.tag,
             &row.digest,

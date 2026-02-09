@@ -100,7 +100,7 @@ impl StateFile {
     /// Save state to disk atomically (write to .tmp, then rename).
     pub fn save(&self) -> Result<(), std::io::Error> {
         let data = serde_json::to_string_pretty(&self.records)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         let tmp_path = self.path.with_extension("json.tmp");
         std::fs::write(&tmp_path, &data)?;
         std::fs::rename(&tmp_path, &self.path)?;

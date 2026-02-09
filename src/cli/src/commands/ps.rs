@@ -55,7 +55,7 @@ pub async fn execute(args: PsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut table = output::new_table(&["BOX ID", "IMAGE", "STATUS", "CREATED", "NAMES"]);
 
     for record in boxes {
-        table.add_row(&[
+        table.add_row([
             &record.short_id,
             &record.image,
             &record.status,

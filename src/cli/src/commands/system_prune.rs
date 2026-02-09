@@ -73,18 +73,12 @@ pub async fn execute(args: SystemPruneArgs) -> Result<(), Box<dyn std::error::Er
             let all_images = store.list().await;
 
             for image in &all_images {
-                let should_remove = if args.all {
-                    !used_images.contains(&image.reference)
-                } else {
-                    !used_images.contains(&image.reference)
-                };
-
-                if should_remove {
-                    if store.remove(&image.reference).await.is_ok() {
-                        space_freed += image.size_bytes;
-                        images_removed += 1;
-                        println!("Removed image: {}", image.reference);
-                    }
+                if !used_images.contains(&image.reference)
+                    && store.remove(&image.reference).await.is_ok()
+                {
+                    space_freed += image.size_bytes;
+                    images_removed += 1;
+                    println!("Removed image: {}", image.reference);
                 }
             }
         }

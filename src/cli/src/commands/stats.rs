@@ -69,7 +69,7 @@ fn print_stats(stats: &[BoxStats]) {
             0.0
         };
 
-        table.add_row(&[
+        table.add_row([
             &s.short_id,
             &s.name,
             &format!("{:.2}%", s.cpu_percent),
