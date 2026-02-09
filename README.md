@@ -39,13 +39,15 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 
 ## Features
 
-- **Docker-like CLI**: Familiar `run`, `stop`, `ps`, `logs`, `exec`, `images`, `tag` commands
+- **Docker-like CLI**: Familiar `run`, `stop`, `ps`, `logs`, `exec`, `images`, `tag`, `cp` commands
 - **Hardware Isolation**: Each sandbox runs in its own MicroVM via libkrun
 - **Instant Boot**: Sub-second VM startup (~200ms cold start)
 - **OCI Image Support**: Load sandboxes from standard OCI container images
 - **Image Registry**: Pull images from any OCI registry with local LRU cache
 - **Image Management**: Inspect metadata, prune unused images, tag aliases, configurable cache size
-- **Exec in Running VMs**: Execute commands inside running boxes via dedicated exec server
+- **Exec in Running VMs**: Execute commands with env vars and working directory support
+- **File Copy**: Transfer files between host and running boxes via `cp`
+- **System Cleanup**: One-command prune of stopped boxes and unused images
 - **CRI Runtime**: Kubernetes-compatible CRI RuntimeService and ImageService
 - **Warm Pool**: Pre-booted idle MicroVMs for instant allocation
 - **Rootfs Caching**: Content-addressable rootfs cache with TTL/size pruning
@@ -120,14 +122,27 @@ a3s-box image-prune -f           # Remove unused images
 a3s-box run -d --name dev --cpus 2 --memory 1g alpine:latest
 a3s-box create --name staging alpine:latest
 a3s-box start staging
-a3s-box stop staging
-a3s-box rm staging
+a3s-box stop dev staging         # Stop multiple boxes
+a3s-box rm -f $(a3s-box ps -aq) # Remove all boxes
+
+# Execute commands
+a3s-box exec dev -- ls -la       # Run a command in a box
+a3s-box exec -e FOO=bar -w /app dev -- python main.py  # With env and workdir
+
+# File copy
+a3s-box cp dev:/var/log/app.log ./app.log   # Box → host
+a3s-box cp ./config.yaml dev:/etc/app/      # Host → box
 
 # Observability
 a3s-box ps                       # List running boxes
 a3s-box ps -a                    # List all boxes (including stopped)
+a3s-box ps -q --filter status=running  # IDs of running boxes
 a3s-box logs dev -f              # Follow box console output
 a3s-box inspect dev              # Show detailed box info as JSON
+a3s-box stats                    # Live resource usage
+
+# Cleanup
+a3s-box system-prune -f          # Remove stopped boxes + unused images
 
 # System info
 a3s-box version
@@ -140,22 +155,27 @@ a3s-box info                     # Virtualization support, cache stats
 |---------|-------------|
 | `run <image>` | Pull + create + start a box (`-d` for detached, `--rm` for auto-remove) |
 | `create <image>` | Create a box without starting |
-| `start <box>` | Start a created or stopped box |
-| `stop <box>` | Graceful stop (SIGTERM then SIGKILL after `-t` timeout) |
-| `kill <box>` | Force-kill a running box |
-| `rm <box>` | Remove a box (`-f` to force-remove running boxes) |
-| `ps` | List boxes (`-a` for all, default shows running only) |
+| `start <box>...` | Start one or more created or stopped boxes |
+| `stop <box>...` | Graceful stop one or more boxes (SIGTERM then SIGKILL after `-t` timeout) |
+| `restart <box>...` | Restart one or more boxes |
+| `kill <box>...` | Force-kill one or more running boxes |
+| `rm <box>...` | Remove one or more boxes (`-f` to force-remove running boxes) |
+| `ps` | List boxes (`-a` all, `-q` quiet, `--filter`, `--format`) |
 | `logs <box>` | View console logs (`-f` to follow, `--tail N` for last N lines) |
-| `exec <box> -- <cmd>` | Execute a command in a running box |
+| `exec <box> -- <cmd>` | Execute a command in a running box (`-e` env, `-w` workdir) |
 | `inspect <box>` | Show detailed box information as JSON |
+| `stats` | Display live resource usage statistics |
+| `cp <src> <dst>` | Copy files between host and a running box |
 | `images` | List cached OCI images (`-q` for quiet, `--format` for custom output) |
 | `pull <image>` | Pull an image from a container registry |
 | `rmi <image>...` | Remove one or more cached images (`-f` to ignore not-found errors) |
 | `image-inspect <image>` | Show detailed image metadata as JSON (config, layers, labels) |
 | `image-prune` | Remove unused images (`-a` for all, `-f` to skip confirmation) |
 | `tag <source> <target>` | Create a tag that refers to an existing image |
+| `system-prune` | Remove all stopped boxes and unused images (`-a`, `-f`) |
 | `version` | Show version |
 | `info` | Show system information |
+| `update` | Update a3s-box to the latest version |
 
 Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible resolution).
 
@@ -203,9 +223,9 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (93 tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (88 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (92 tests) |
 | `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, exec client (205 tests) |
-| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (13 tests) |
+| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (15 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
 | `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
 
@@ -303,14 +323,19 @@ let config = BoxConfig {
 
 ### Phase 3: CLI & Ecosystem Integration ✅
 
-- [x] Docker-like CLI (`a3s-box`) with 18 commands: run, create, start, stop, rm, kill, ps, logs, exec, inspect, images, pull, rmi, image-inspect, image-prune, tag, version, info
+- [x] Docker-like CLI (`a3s-box`) with 23 commands: run, create, start, stop, restart, rm, kill, ps, stats, logs, exec, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update
 - [x] Box state management with atomic persistence (`~/.a3s/boxes.json`)
 - [x] Docker-compatible name/ID/prefix resolution
 - [x] PID-based liveness reconciliation for dead box detection
 - [x] Auto-generated Docker-style names (adjective_noun)
 - [x] OCI image pulling from registries with local LRU cache
 - [x] Agent-level code cleanup (removed session/skill/context/proto — Box is VM runtime only)
-- [x] Exec command execution in running boxes via dedicated exec server (vsock port 4089)
+- [x] Exec command execution in running boxes via dedicated exec server (vsock port 4089) with env vars and working directory support
+- [x] File copy between host and running boxes via exec channel
+- [x] System prune for bulk cleanup of stopped boxes and unused images
+- [x] Multi-target support for start, stop, restart, rm, kill commands
+- [x] Filtering and formatting for ps and images commands
+- [x] Configurable image cache size via `A3S_IMAGE_CACHE_SIZE` environment variable
 - [ ] OCI image format definition (Dockerfile for Box images)
 - [ ] Agent configuration from OCI labels
 - [ ] Pre-built `a3s-code` guest image for AI coding agent
@@ -575,7 +600,7 @@ just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
 cargo test -p a3s-box-cli   # CLI tests (93 tests)
-cargo test -p a3s-box-core  # Core tests (88 tests)
+cargo test -p a3s-box-core  # Core tests (92 tests)
 
 # Lint
 just fmt                # Format code
@@ -590,7 +615,7 @@ box/
 ├── src/
 │   ├── cli/            # Docker-like CLI (a3s-box binary)
 │   │   └── src/
-│   │       ├── commands/   # 18 subcommands (run, stop, ps, images, image-inspect, tag, etc.)
+│   │       ├── commands/   # 23 subcommands (run, create, start, stop, restart, rm, kill, ps, stats, logs, exec, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update)
 │   │       ├── state.rs    # Box state persistence (~/.a3s/boxes.json)
 │   │       ├── resolve.rs  # Docker-style name/ID resolution
 │   │       └── output.rs   # Table formatting, size parsing, memory parsing
