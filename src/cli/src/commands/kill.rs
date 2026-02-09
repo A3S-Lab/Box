@@ -1,4 +1,4 @@
-//! `a3s-box kill` command — Send a signal to a running box.
+//! `a3s-box kill` command — Send a signal to one or more running boxes.
 
 use clap::Args;
 
@@ -7,8 +7,9 @@ use crate::state::StateFile;
 
 #[derive(Args)]
 pub struct KillArgs {
-    /// Box name or ID
-    pub r#box: String,
+    /// Box name(s) or ID(s)
+    #[arg(required = true)]
+    pub boxes: Vec<String>,
 
     /// Signal to send to the box process
     #[arg(short = 's', long, default_value = "KILL")]
@@ -49,9 +50,29 @@ fn parse_signal(name: &str) -> Result<i32, String> {
 }
 
 pub async fn execute(args: KillArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let signal = parse_signal(&args.signal)?;
     let mut state = StateFile::load_default()?;
+    let mut errors: Vec<String> = Vec::new();
 
-    let record = resolve::resolve(&state, &args.r#box)?;
+    for query in &args.boxes {
+        if let Err(e) = kill_one(&mut state, query, signal) {
+            errors.push(format!("{query}: {e}"));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n").into())
+    }
+}
+
+fn kill_one(
+    state: &mut StateFile,
+    query: &str,
+    signal: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let record = resolve::resolve(state, query)?;
 
     if record.status != "running" {
         return Err(format!("Box {} is not running", record.name).into());
@@ -59,7 +80,6 @@ pub async fn execute(args: KillArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let box_id = record.id.clone();
     let name = record.name.clone();
-    let signal = parse_signal(&args.signal)?;
 
     if let Some(pid) = record.pid {
         unsafe {
@@ -69,7 +89,7 @@ pub async fn execute(args: KillArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Only update state to stopped for terminating signals
     if signal == libc::SIGKILL || signal == libc::SIGTERM {
-        let record = resolve::resolve_mut(&mut state, &box_id)?;
+        let record = resolve::resolve_mut(state, &box_id)?;
         record.status = "stopped".to_string();
         record.pid = None;
         state.save()?;

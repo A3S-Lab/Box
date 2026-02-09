@@ -48,15 +48,15 @@ pub enum Command {
     Run(run::RunArgs),
     /// Create a new box without starting it
     Create(create::CreateArgs),
-    /// Start a stopped or created box
+    /// Start one or more stopped or created boxes
     Start(start::StartArgs),
-    /// Gracefully stop a running box
+    /// Gracefully stop one or more running boxes
     Stop(stop::StopArgs),
-    /// Restart a running box
+    /// Restart one or more boxes
     Restart(restart::RestartArgs),
-    /// Remove a box
+    /// Remove one or more boxes
     Rm(rm::RmArgs),
-    /// Force-kill a running box
+    /// Force-kill one or more running boxes
     Kill(kill::KillArgs),
     /// List boxes
     Ps(ps::PsArgs),

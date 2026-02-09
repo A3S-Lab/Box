@@ -1,4 +1,4 @@
-//! `a3s-box restart` command — Restart a running box.
+//! `a3s-box restart` command — Restart one or more boxes.
 //!
 //! Equivalent to `a3s-box stop` followed by `a3s-box start`.
 
@@ -12,8 +12,9 @@ use crate::state::StateFile;
 
 #[derive(Args)]
 pub struct RestartArgs {
-    /// Box name or ID
-    pub r#box: String,
+    /// Box name(s) or ID(s)
+    #[arg(required = true)]
+    pub boxes: Vec<String>,
 
     /// Seconds to wait for stop before force-killing
     #[arg(short = 't', long, default_value = "10")]
@@ -22,8 +23,27 @@ pub struct RestartArgs {
 
 pub async fn execute(args: RestartArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = StateFile::load_default()?;
+    let mut errors: Vec<String> = Vec::new();
 
-    let record = resolve::resolve(&state, &args.r#box)?;
+    for query in &args.boxes {
+        if let Err(e) = restart_one(&mut state, query, args.timeout).await {
+            errors.push(format!("{query}: {e}"));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n").into())
+    }
+}
+
+async fn restart_one(
+    state: &mut StateFile,
+    query: &str,
+    timeout: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let record = resolve::resolve(state, query)?;
 
     let box_id = record.id.clone();
     let name = record.name.clone();
@@ -41,7 +61,7 @@ pub async fn execute(args: RestartArgs) -> Result<(), Box<dyn std::error::Error>
             }
 
             let start = std::time::Instant::now();
-            let timeout_ms = args.timeout * 1000;
+            let timeout_ms = timeout * 1000;
             loop {
                 if !is_process_alive(pid) {
                     break;
@@ -59,7 +79,7 @@ pub async fn execute(args: RestartArgs) -> Result<(), Box<dyn std::error::Error>
         }
 
         // Update state to stopped
-        let record = resolve::resolve_mut(&mut state, &box_id)?;
+        let record = resolve::resolve_mut(state, &box_id)?;
         record.status = "stopped".to_string();
         record.pid = None;
         state.save()?;
@@ -75,9 +95,7 @@ pub async fn execute(args: RestartArgs) -> Result<(), Box<dyn std::error::Error>
 
     // Phase 2: Start the box
     let config = BoxConfig {
-        agent: AgentType::OciRegistry {
-            reference: image,
-        },
+        agent: AgentType::OciRegistry { reference: image },
         resources: ResourceConfig {
             vcpus: cpus,
             memory_mb,
@@ -92,7 +110,7 @@ pub async fn execute(args: RestartArgs) -> Result<(), Box<dyn std::error::Error>
     vm.boot().await?;
 
     // Update record to running
-    let record = resolve::resolve_mut(&mut state, &box_id)?;
+    let record = resolve::resolve_mut(state, &box_id)?;
     record.status = "running".to_string();
     record.pid = vm.pid().await;
     record.started_at = Some(chrono::Utc::now());

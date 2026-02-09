@@ -1,4 +1,4 @@
-//! `a3s-box rm` command — Remove a box.
+//! `a3s-box rm` command — Remove one or more boxes.
 
 use clap::Args;
 
@@ -7,30 +7,53 @@ use crate::state::StateFile;
 
 #[derive(Args)]
 pub struct RmArgs {
-    /// Box name or ID
-    pub r#box: String,
+    /// Box name(s) or ID(s)
+    #[arg(required = true)]
+    pub boxes: Vec<String>,
 
-    /// Force removal of a running box (stops it first)
+    /// Force removal of running boxes (stops them first)
     #[arg(short, long)]
     pub force: bool,
 }
 
 pub async fn execute(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = StateFile::load_default()?;
+    let mut errors: Vec<String> = Vec::new();
 
-    let record = resolve::resolve(&state, &args.r#box)?;
+    for query in &args.boxes {
+        if let Err(e) = rm_one(&mut state, query, args.force) {
+            errors.push(format!("{query}: {e}"));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("\n").into())
+    }
+}
+
+fn rm_one(
+    state: &mut StateFile,
+    query: &str,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let record = resolve::resolve(state, query)?;
 
     if record.status == "running" {
-        if !args.force {
+        if !force {
             return Err(format!(
                 "Box {} is running. Use --force to remove a running box.",
                 record.name
-            ).into());
+            )
+            .into());
         }
 
         // Force-kill the running box
         if let Some(pid) = record.pid {
-            unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
         }
     }
 
