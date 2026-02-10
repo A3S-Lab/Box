@@ -60,6 +60,10 @@ pub struct CreateArgs {
     /// Restart policy: no, always, on-failure, unless-stopped
     #[arg(long, default_value = "no")]
     pub restart: String,
+
+    /// Set metadata labels (KEY=VALUE), can be repeated
+    #[arg(short = 'l', long = "label")]
+    pub labels: Vec<String>,
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,6 +72,8 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
 
     let name = args.name.unwrap_or_else(generate_name);
     let env = parse_env_vars(&args.env)?;
+    let labels = parse_env_vars(&args.labels)
+        .map_err(|e| e.replace("environment variable", "label"))?;
 
     let box_id = uuid::Uuid::new_v4().to_string();
     let short_id = BoxRecord::make_short_id(&box_id);
@@ -110,6 +116,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         workdir: args.workdir,
         restart_policy: args.restart,
         port_map: args.publish,
+        labels,
     };
 
     let mut state = StateFile::load_default()?;

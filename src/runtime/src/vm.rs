@@ -176,6 +176,7 @@ impl VmManager {
             env: vec![],
             working_dir: None,
             stdin: None,
+            user: None,
         };
         client.exec_command(&request).await
     }

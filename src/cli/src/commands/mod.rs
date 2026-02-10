@@ -12,9 +12,11 @@ mod info;
 mod inspect;
 mod kill;
 mod logs;
+mod pause;
 mod port;
 mod ps;
 mod pull;
+mod rename;
 mod restart;
 mod rm;
 mod rmi;
@@ -23,6 +25,8 @@ mod start;
 mod stats;
 mod stop;
 mod system_prune;
+mod top;
+mod unpause;
 mod version;
 mod wait;
 
@@ -60,6 +64,10 @@ pub enum Command {
     Rm(rm::RmArgs),
     /// Force-kill one or more running boxes
     Kill(kill::KillArgs),
+    /// Pause one or more running boxes
+    Pause(pause::PauseArgs),
+    /// Unpause one or more paused boxes
+    Unpause(unpause::UnpauseArgs),
     /// List boxes
     Ps(ps::PsArgs),
     /// Display resource usage statistics
@@ -68,12 +76,16 @@ pub enum Command {
     Logs(logs::LogsArgs),
     /// Execute a command in a running box
     Exec(exec::ExecArgs),
+    /// Display running processes in a box
+    Top(top::TopArgs),
     /// Display detailed box information
     Inspect(inspect::InspectArgs),
     /// Attach to a running box's console output
     Attach(attach::AttachArgs),
     /// Block until one or more boxes stop
     Wait(wait::WaitArgs),
+    /// Rename a box
+    Rename(rename::RenameArgs),
     /// List port mappings for a box
     Port(port::PortArgs),
     /// List cached images
@@ -171,13 +183,17 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Restart(args) => restart::execute(args).await,
         Command::Rm(args) => rm::execute(args).await,
         Command::Kill(args) => kill::execute(args).await,
+        Command::Pause(args) => pause::execute(args).await,
+        Command::Unpause(args) => unpause::execute(args).await,
         Command::Ps(args) => ps::execute(args).await,
         Command::Stats(args) => stats::execute(args).await,
         Command::Logs(args) => logs::execute(args).await,
         Command::Exec(args) => exec::execute(args).await,
+        Command::Top(args) => top::execute(args).await,
         Command::Inspect(args) => inspect::execute(args).await,
         Command::Attach(args) => attach::execute(args).await,
         Command::Wait(args) => wait::execute(args).await,
+        Command::Rename(args) => rename::execute(args).await,
         Command::Port(args) => port::execute(args).await,
         Command::Images(args) => images::execute(args).await,
         Command::Pull(args) => pull::execute(args).await,

@@ -32,6 +32,10 @@ pub struct ExecArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
+    /// Run the command as a specific user (e.g., "root", "1000:1000")
+    #[arg(short = 'u', long)]
+    pub user: Option<String>,
+
     /// Command and arguments to execute
     #[arg(last = true, required = true)]
     pub cmd: Vec<String>,
@@ -88,6 +92,7 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         env: args.envs,
         working_dir: args.workdir,
         stdin: stdin_data,
+        user: args.user,
     };
 
     // Execute command

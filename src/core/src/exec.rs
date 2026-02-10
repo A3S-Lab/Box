@@ -27,6 +27,9 @@ pub struct ExecRequest {
     /// Optional stdin data to pipe to the command.
     #[serde(default)]
     pub stdin: Option<Vec<u8>>,
+    /// User to run the command as (e.g., "root", "1000", "1000:1000").
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// Output from an executed command.
@@ -52,6 +55,7 @@ mod tests {
             env: vec!["FOO=bar".to_string()],
             working_dir: Some("/tmp".to_string()),
             stdin: None,
+            user: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
@@ -60,6 +64,7 @@ mod tests {
         assert_eq!(parsed.env, vec!["FOO=bar"]);
         assert_eq!(parsed.working_dir, Some("/tmp".to_string()));
         assert!(parsed.stdin.is_none());
+        assert!(parsed.user.is_none());
     }
 
     #[test]
@@ -107,6 +112,7 @@ mod tests {
             env: vec![],
             working_dir: None,
             stdin: None,
+            user: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
@@ -114,17 +120,19 @@ mod tests {
         assert_eq!(parsed.timeout_ns, 0);
         assert!(parsed.env.is_empty());
         assert!(parsed.working_dir.is_none());
+        assert!(parsed.user.is_none());
     }
 
     #[test]
     fn test_exec_request_backward_compatible_deserialization() {
-        // Old format without env/working_dir/stdin should still parse
+        // Old format without env/working_dir/stdin/user should still parse
         let json = r#"{"cmd":["ls"],"timeout_ns":0}"#;
         let parsed: ExecRequest = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.cmd, vec!["ls"]);
         assert!(parsed.env.is_empty());
         assert!(parsed.working_dir.is_none());
         assert!(parsed.stdin.is_none());
+        assert!(parsed.user.is_none());
     }
 
     #[test]
@@ -135,10 +143,41 @@ mod tests {
             env: vec![],
             working_dir: None,
             stdin: Some(b"echo hello\n".to_vec()),
+            user: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.stdin, Some(b"echo hello\n".to_vec()));
+    }
+
+    #[test]
+    fn test_exec_request_with_user() {
+        let req = ExecRequest {
+            cmd: vec!["whoami".to_string()],
+            timeout_ns: 0,
+            env: vec![],
+            working_dir: None,
+            stdin: None,
+            user: Some("root".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.user, Some("root".to_string()));
+    }
+
+    #[test]
+    fn test_exec_request_with_user_uid_gid() {
+        let req = ExecRequest {
+            cmd: vec!["id".to_string()],
+            timeout_ns: 0,
+            env: vec![],
+            working_dir: None,
+            stdin: None,
+            user: Some("1000:1000".to_string()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.user, Some("1000:1000".to_string()));
     }
 
     #[test]

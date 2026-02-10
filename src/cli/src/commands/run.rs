@@ -72,6 +72,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub rm: bool,
 
+    /// Set metadata labels (KEY=VALUE), can be repeated
+    #[arg(short = 'l', long = "label")]
+    pub labels: Vec<String>,
+
     /// Command to run (override entrypoint)
     #[arg(last = true)]
     pub cmd: Vec<String>,
@@ -83,6 +87,8 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let name = args.name.unwrap_or_else(generate_name);
     let env = parse_env_vars(&args.env)?;
+    let labels = parse_env_vars(&args.labels)
+        .map_err(|e| e.replace("environment variable", "label"))?;
 
     // Parse entrypoint override: split string into argv
     let entrypoint_override = args.entrypoint.as_ref().map(|ep| {
@@ -153,6 +159,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         workdir: args.workdir.clone(),
         restart_policy: args.restart.clone(),
         port_map: args.publish.clone(),
+        labels,
     };
 
     let mut state = StateFile::load_default()?;

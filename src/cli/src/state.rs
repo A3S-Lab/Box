@@ -67,6 +67,9 @@ pub struct BoxRecord {
     /// Port mappings ("host_port:guest_port" pairs)
     #[serde(default)]
     pub port_map: Vec<String>,
+    /// User-defined labels (key=value metadata)
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 fn default_restart_policy() -> String {
@@ -276,6 +279,7 @@ mod tests {
             workdir: None,
             restart_policy: "no".to_string(),
             port_map: vec![],
+            labels: HashMap::new(),
         }
     }
 

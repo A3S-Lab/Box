@@ -89,6 +89,7 @@ fn matches_filters(record: &BoxRecord, filters: &[String]) -> bool {
             "name" => record.name.contains(value),
             "ancestor" => record.image.contains(value),
             "id" => record.id.starts_with(value) || record.short_id.starts_with(value),
+            "label" => match_label(&record.labels, value),
             _ => true, // Ignore unknown filters
         };
 
@@ -101,6 +102,7 @@ fn matches_filters(record: &BoxRecord, filters: &[String]) -> bool {
 
 /// Apply a format template, replacing `{{.Field}}` placeholders.
 fn apply_format(record: &BoxRecord, fmt: &str) -> String {
+    let labels_str = format_labels(&record.labels);
     fmt.replace("{{.ID}}", &record.short_id)
         .replace("{{.Image}}", &record.image)
         .replace("{{.Status}}", &record.status)
@@ -108,4 +110,219 @@ fn apply_format(record: &BoxRecord, fmt: &str) -> String {
         .replace("{{.Names}}", &record.name)
         .replace("{{.Command}}", &record.cmd.join(" "))
         .replace("{{.Ports}}", &record.port_map.join(", "))
+        .replace("{{.Labels}}", &labels_str)
+}
+
+/// Check if a box's labels match a label filter value.
+///
+/// Supports two forms:
+/// - `label=key` — check if the label key exists
+/// - `label=key=value` — check if the label key has the exact value
+fn match_label(labels: &std::collections::HashMap<String, String>, filter_value: &str) -> bool {
+    if let Some((key, value)) = filter_value.split_once('=') {
+        labels.get(key).map_or(false, |v| v == value)
+    } else {
+        labels.contains_key(filter_value)
+    }
+}
+
+/// Format labels as a comma-separated "key=value" string.
+fn format_labels(labels: &std::collections::HashMap<String, String>) -> String {
+    let mut pairs: Vec<String> = labels
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    pairs.sort();
+    pairs.join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn make_record(name: &str, status: &str, labels: HashMap<String, String>) -> BoxRecord {
+        let id = format!("test-id-{name}");
+        let short_id = BoxRecord::make_short_id(&id);
+        BoxRecord {
+            id: id.clone(),
+            short_id,
+            name: name.to_string(),
+            image: "alpine:latest".to_string(),
+            status: status.to_string(),
+            pid: None,
+            cpus: 2,
+            memory_mb: 512,
+            volumes: vec![],
+            env: HashMap::new(),
+            cmd: vec![],
+            entrypoint: None,
+            box_dir: PathBuf::from("/tmp").join(&id),
+            socket_path: PathBuf::from("/tmp").join(&id).join("grpc.sock"),
+            exec_socket_path: PathBuf::from("/tmp").join(&id).join("sockets").join("exec.sock"),
+            console_log: PathBuf::from("/tmp").join(&id).join("console.log"),
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            auto_remove: false,
+            hostname: None,
+            user: None,
+            workdir: None,
+            restart_policy: "no".to_string(),
+            port_map: vec![],
+            labels,
+        }
+    }
+
+    // --- match_label tests ---
+
+    #[test]
+    fn test_match_label_key_exists() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        assert!(match_label(&labels, "env"));
+    }
+
+    #[test]
+    fn test_match_label_key_not_exists() {
+        let labels = HashMap::new();
+        assert!(!match_label(&labels, "env"));
+    }
+
+    #[test]
+    fn test_match_label_key_value_match() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        assert!(match_label(&labels, "env=prod"));
+    }
+
+    #[test]
+    fn test_match_label_key_value_mismatch() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        assert!(!match_label(&labels, "env=staging"));
+    }
+
+    #[test]
+    fn test_match_label_key_value_key_missing() {
+        let labels = HashMap::new();
+        assert!(!match_label(&labels, "env=prod"));
+    }
+
+    // --- format_labels tests ---
+
+    #[test]
+    fn test_format_labels_empty() {
+        let labels = HashMap::new();
+        assert_eq!(format_labels(&labels), "");
+    }
+
+    #[test]
+    fn test_format_labels_single() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        assert_eq!(format_labels(&labels), "env=prod");
+    }
+
+    #[test]
+    fn test_format_labels_multiple_sorted() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        labels.insert("app".to_string(), "web".to_string());
+        assert_eq!(format_labels(&labels), "app=web,env=prod");
+    }
+
+    // --- matches_filters with label tests ---
+
+    #[test]
+    fn test_filter_label_key_only() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        let record = make_record("box1", "running", labels);
+        assert!(matches_filters(&record, &["label=env".to_string()]));
+    }
+
+    #[test]
+    fn test_filter_label_key_value() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        let record = make_record("box1", "running", labels);
+        assert!(matches_filters(&record, &["label=env=prod".to_string()]));
+        assert!(!matches_filters(&record, &["label=env=dev".to_string()]));
+    }
+
+    #[test]
+    fn test_filter_label_no_labels() {
+        let record = make_record("box1", "running", HashMap::new());
+        assert!(!matches_filters(&record, &["label=env".to_string()]));
+    }
+
+    #[test]
+    fn test_filter_combined_status_and_label() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        let record = make_record("box1", "running", labels);
+        assert!(matches_filters(
+            &record,
+            &["status=running".to_string(), "label=env".to_string()]
+        ));
+        assert!(!matches_filters(
+            &record,
+            &["status=stopped".to_string(), "label=env".to_string()]
+        ));
+    }
+
+    // --- apply_format with labels ---
+
+    #[test]
+    fn test_apply_format_labels() {
+        let mut labels = HashMap::new();
+        labels.insert("env".to_string(), "prod".to_string());
+        let record = make_record("box1", "running", labels);
+        let result = apply_format(&record, "{{.Names}} {{.Labels}}");
+        assert!(result.contains("box1"));
+        assert!(result.contains("env=prod"));
+    }
+
+    #[test]
+    fn test_apply_format_labels_empty() {
+        let record = make_record("box1", "running", HashMap::new());
+        let result = apply_format(&record, "{{.Labels}}");
+        assert_eq!(result, "");
+    }
+
+    // --- existing filter tests ---
+
+    #[test]
+    fn test_filter_status() {
+        let record = make_record("box1", "running", HashMap::new());
+        assert!(matches_filters(&record, &["status=running".to_string()]));
+        assert!(!matches_filters(&record, &["status=stopped".to_string()]));
+    }
+
+    #[test]
+    fn test_filter_name() {
+        let record = make_record("my_box", "running", HashMap::new());
+        assert!(matches_filters(&record, &["name=my".to_string()]));
+        assert!(!matches_filters(&record, &["name=other".to_string()]));
+    }
+
+    #[test]
+    fn test_filter_ancestor() {
+        let record = make_record("box1", "running", HashMap::new());
+        assert!(matches_filters(&record, &["ancestor=alpine".to_string()]));
+        assert!(!matches_filters(&record, &["ancestor=ubuntu".to_string()]));
+    }
+
+    #[test]
+    fn test_filter_no_filters() {
+        let record = make_record("box1", "running", HashMap::new());
+        assert!(matches_filters(&record, &[]));
+    }
+
+    #[test]
+    fn test_filter_unknown_key_ignored() {
+        let record = make_record("box1", "running", HashMap::new());
+        assert!(matches_filters(&record, &["unknown=value".to_string()]));
+    }
 }

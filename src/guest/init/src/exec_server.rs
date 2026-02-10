@@ -122,7 +122,7 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
     };
 
     // Execute the command
-    let output = execute_command(&exec_req.cmd, exec_req.timeout_ns, &exec_req.env, exec_req.working_dir.as_deref(), exec_req.stdin.as_deref());
+    let output = execute_command(&exec_req.cmd, exec_req.timeout_ns, &exec_req.env, exec_req.working_dir.as_deref(), exec_req.stdin.as_deref(), exec_req.user.as_deref());
 
     // Send HTTP response with JSON body
     let response_body = serde_json::to_string(&output)?;
@@ -156,10 +156,11 @@ fn send_error_response(
     stream.write_all(response.as_bytes())
 }
 
-/// Execute a command with timeout, environment variables, working directory, and optional stdin.
+/// Execute a command with timeout, environment variables, working directory, optional stdin, and optional user.
 ///
-/// Returns ExecOutput with stdout, stderr, and exit code.
-fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir: Option<&str>, stdin_data: Option<&[u8]>) -> ExecOutput {
+/// When `user` is specified, the command is wrapped with `su -s /bin/sh <user> -c <cmd>`
+/// to run as the given user inside the guest VM.
+fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir: Option<&str>, stdin_data: Option<&[u8]>, user: Option<&str>) -> ExecOutput {
     if cmd.is_empty() {
         return ExecOutput {
             stdout: vec![],
@@ -175,9 +176,31 @@ fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir:
     };
     let timeout = Duration::from_nanos(timeout_ns);
 
-    let mut command = std::process::Command::new(&cmd[0]);
+    // If a user is specified, wrap the command with `su`
+    let (program, args) = if let Some(user) = user {
+        // Build a shell command string from the original cmd
+        let shell_cmd = cmd
+            .iter()
+            .map(|a| shell_escape(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        (
+            "su".to_string(),
+            vec![
+                "-s".to_string(),
+                "/bin/sh".to_string(),
+                user.to_string(),
+                "-c".to_string(),
+                shell_cmd,
+            ],
+        )
+    } else {
+        (cmd[0].clone(), cmd[1..].to_vec())
+    };
+
+    let mut command = std::process::Command::new(&program);
     command
-        .args(&cmd[1..])
+        .args(&args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -288,6 +311,15 @@ fn truncate_output(mut data: Vec<u8>) -> Vec<u8> {
     data
 }
 
+/// Minimal shell escaping for a single argument.
+fn shell_escape(s: &str) -> String {
+    if s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.') {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_echo() {
-        let output = execute_command(&["echo".to_string(), "hello".to_string()], 0, &[], None, None);
+        let output = execute_command(&["echo".to_string(), "hello".to_string()], 0, &[], None, None, None);
         assert_eq!(output.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
         assert!(output.stderr.is_empty());
@@ -336,6 +368,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         );
         assert_ne!(output.exit_code, 0);
         assert!(!output.stderr.is_empty());
@@ -343,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_empty() {
-        let output = execute_command(&[], 0, &[], None, None);
+        let output = execute_command(&[], 0, &[], None, None, None);
         assert_eq!(output.exit_code, 1);
         assert_eq!(output.stderr, b"Empty command");
     }
@@ -354,6 +387,7 @@ mod tests {
             &["sh".to_string(), "-c".to_string(), "exit 42".to_string()],
             0,
             &[],
+            None,
             None,
             None,
         );
@@ -372,6 +406,7 @@ mod tests {
             &[],
             None,
             None,
+            None,
         );
         assert_eq!(output.exit_code, 0);
         assert!(String::from_utf8_lossy(&output.stderr).contains("error"));
@@ -383,6 +418,7 @@ mod tests {
             &["sh".to_string(), "-c".to_string(), "echo $TEST_VAR".to_string()],
             0,
             &["TEST_VAR=hello_from_env".to_string()],
+            None,
             None,
             None,
         );
@@ -400,6 +436,7 @@ mod tests {
             0,
             &[],
             Some("/tmp"),
+            None,
             None,
         );
         assert_eq!(output.exit_code, 0);
@@ -421,6 +458,7 @@ mod tests {
             &[],
             None,
             Some(b"hello from stdin"),
+            None,
         );
         assert_eq!(output.exit_code, 0);
         assert_eq!(
@@ -437,6 +475,7 @@ mod tests {
             &[],
             None,
             Some(b"line1\nline2\nline3\n"),
+            None,
         );
         assert_eq!(output.exit_code, 0);
         let count = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -452,8 +491,22 @@ mod tests {
             &[],
             None,
             None,
+            None,
         );
         assert_eq!(output.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "no stdin");
+    }
+
+    #[test]
+    fn test_shell_escape_simple() {
+        assert_eq!(shell_escape("hello"), "hello");
+        assert_eq!(shell_escape("/usr/bin/ls"), "/usr/bin/ls");
+        assert_eq!(shell_escape("file.txt"), "file.txt");
+    }
+
+    #[test]
+    fn test_shell_escape_special_chars() {
+        assert_eq!(shell_escape("hello world"), "'hello world'");
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
     }
 }

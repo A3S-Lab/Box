@@ -103,6 +103,7 @@ mod tests {
             workdir: None,
             restart_policy: "no".to_string(),
             port_map: vec![],
+            labels: HashMap::new(),
         }
     }
 
