@@ -54,6 +54,10 @@ pub enum BoxError {
     #[error("Exec error: {0}")]
     ExecError(String),
 
+    /// Build error
+    #[error("Build error: {0}")]
+    BuildError(String),
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -222,5 +226,11 @@ mod tests {
     fn test_exec_error_display() {
         let error = BoxError::ExecError("Command not found".to_string());
         assert_eq!(error.to_string(), "Exec error: Command not found");
+    }
+
+    #[test]
+    fn test_build_error_display() {
+        let error = BoxError::BuildError("Dockerfile parse failed".to_string());
+        assert_eq!(error.to_string(), "Build error: Dockerfile parse failed");
     }
 }

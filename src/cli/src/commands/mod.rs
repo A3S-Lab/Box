@@ -1,9 +1,13 @@
 //! CLI command definitions and dispatch.
 
+mod attach;
+mod build;
 mod cp;
 mod create;
+mod df;
 mod exec;
-mod attach;
+mod export;
+mod history;
 mod image_inspect;
 mod image_prune;
 mod image_tag;
@@ -11,6 +15,7 @@ mod images;
 mod info;
 mod inspect;
 mod kill;
+mod load;
 mod logs;
 mod pause;
 mod port;
@@ -21,6 +26,7 @@ mod restart;
 mod rm;
 mod rmi;
 mod run;
+mod save;
 mod start;
 mod stats;
 mod stop;
@@ -88,6 +94,10 @@ pub enum Command {
     Rename(rename::RenameArgs),
     /// List port mappings for a box
     Port(port::PortArgs),
+    /// Export a box's filesystem to a tar archive
+    Export(export::ExportArgs),
+    /// Build an image from a Dockerfile
+    Build(build::BuildArgs),
     /// List cached images
     Images(images::ImagesArgs),
     /// Pull an image from a registry
@@ -96,12 +106,20 @@ pub enum Command {
     Rmi(rmi::RmiArgs),
     /// Display detailed image information as JSON
     ImageInspect(image_inspect::ImageInspectArgs),
+    /// Show image layer history
+    History(history::HistoryArgs),
     /// Remove unused images
     ImagePrune(image_prune::ImagePruneArgs),
     /// Create a tag that refers to an existing image
     Tag(image_tag::ImageTagArgs),
+    /// Save an image to a tar archive
+    Save(save::SaveArgs),
+    /// Load an image from a tar archive
+    Load(load::LoadArgs),
     /// Copy files between host and a running box
     Cp(cp::CpArgs),
+    /// Show disk usage
+    Df(df::DfArgs),
     /// Remove all unused data (stopped boxes and unused images)
     SystemPrune(system_prune::SystemPruneArgs),
     /// Show version information
@@ -195,13 +213,19 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Wait(args) => wait::execute(args).await,
         Command::Rename(args) => rename::execute(args).await,
         Command::Port(args) => port::execute(args).await,
+        Command::Export(args) => export::execute(args).await,
+        Command::Build(args) => build::execute(args).await,
         Command::Images(args) => images::execute(args).await,
         Command::Pull(args) => pull::execute(args).await,
         Command::Rmi(args) => rmi::execute(args).await,
         Command::ImageInspect(args) => image_inspect::execute(args).await,
+        Command::History(args) => history::execute(args).await,
         Command::ImagePrune(args) => image_prune::execute(args).await,
         Command::Tag(args) => image_tag::execute(args).await,
+        Command::Save(args) => save::execute(args).await,
+        Command::Load(args) => load::execute(args).await,
         Command::Cp(args) => cp::execute(args).await,
+        Command::Df(args) => df::execute(args).await,
         Command::SystemPrune(args) => system_prune::execute(args).await,
         Command::Version(args) => version::execute(args).await,
         Command::Info(args) => info::execute(args).await,

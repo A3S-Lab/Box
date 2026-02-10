@@ -353,7 +353,7 @@ let config = BoxConfig {
 - [x] Configurable image cache size via `A3S_IMAGE_CACHE_SIZE` environment variable
 - [x] Docker CLI alignment Phase 1: pause/unpause, top, rename, label support, exec -u/--user, pull -q/--quiet, cp directories
 - [x] Docker CLI alignment Phase 2: restart policy enforcement, health check support (--health-cmd, status tracking)
-- [ ] OCI image format definition (Dockerfile for Box images)
+- [x] `a3s-box build` — Dockerfile-based image building (FROM, RUN, COPY, WORKDIR, ENV, ENTRYPOINT, CMD, EXPOSE, LABEL, USER, ARG)
 - [ ] Agent configuration from OCI labels
 - [ ] Pre-built `a3s-code` guest image for AI coding agent
 - [ ] Host SDK for spawning and communicating with guest agents

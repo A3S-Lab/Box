@@ -625,6 +625,43 @@ a3s-box exec -it my_box /bin/sh
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2024-02-10
+### `build` - Build an Image from a Dockerfile
+**File:** `cli/src/commands/build.rs`
+
+**Key Arguments:**
+- `path`: Build context directory (default: ".")
+- `-t, --tag`: Image name and tag (e.g., "myimage:latest")
+- `-f, --file`: Dockerfile path (default: `<PATH>/Dockerfile`)
+- `--build-arg`: Build-time variables (KEY=VALUE), repeatable
+- `-q, --quiet`: Suppress build output
+
+**Build Engine:** `runtime/src/oci/build/engine.rs`
+
+**Supported Dockerfile Instructions:**
+- `FROM` — Pull base image from registry
+- `RUN` — Execute commands (Linux only via chroot; skipped on macOS)
+- `COPY` — Copy files from build context into image
+- `WORKDIR` — Set working directory
+- `ENV` — Set environment variables
+- `ENTRYPOINT` — Set entrypoint (exec and shell form)
+- `CMD` — Set default command (exec and shell form)
+- `EXPOSE` — Declare ports
+- `LABEL` — Set metadata labels
+- `USER` — Set user
+- `ARG` — Build-time variables with optional defaults
+
+**Process:**
+1. Parse Dockerfile (`runtime/src/oci/build/dockerfile.rs`)
+2. Pull base image via `ImagePuller`
+3. Extract base layers into temp rootfs
+4. Execute each instruction, creating layers for COPY/RUN
+5. Assemble OCI image (config, manifest, index.json)
+6. Store in local image store via `ImageStore::put()`
+
+**Output:** Standard OCI image layout, usable with `run`, `save`, `image-inspect`, `history`
+
+---
+
+**Document Version:** 1.1
+**Last Updated:** 2025-07-14
 **Author:** AI Assistant (Claude)
