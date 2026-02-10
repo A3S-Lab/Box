@@ -496,7 +496,7 @@ impl VmManager {
                 // Pull image from registry and extract at rootfs root.
                 // This preserves absolute symlinks and dynamic linker paths.
                 let images_dir = self.home_dir.join("images");
-                let store = crate::oci::ImageStore::new(&images_dir, 10 * 1024 * 1024 * 1024)?;
+                let store = crate::oci::ImageStore::new(&images_dir, crate::DEFAULT_IMAGE_CACHE_SIZE)?;
                 let puller = crate::oci::ImagePuller::new(
                     std::sync::Arc::new(store),
                     crate::oci::RegistryAuth::from_env(),

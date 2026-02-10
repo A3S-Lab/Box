@@ -27,9 +27,6 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// Default maximum image store size: 10 GB.
-const DEFAULT_IMAGE_STORE_MAX_SIZE: u64 = 10 * 1024 * 1024 * 1024;
-
 /// Environment variable to override the image cache size limit.
 ///
 /// Accepts human-readable sizes: `500m`, `10g`, `1t`, etc.
@@ -114,7 +111,7 @@ pub(crate) fn open_image_store() -> Result<a3s_box_runtime::ImageStore, Box<dyn 
                 "Invalid {IMAGE_CACHE_SIZE_ENV}={val:?}: {e} (examples: 500m, 10g, 1t)"
             )
         })?,
-        Err(_) => DEFAULT_IMAGE_STORE_MAX_SIZE,
+        Err(_) => a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
     };
     let store = a3s_box_runtime::ImageStore::new(&dir, max_size)?;
     Ok(store)

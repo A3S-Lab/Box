@@ -38,3 +38,6 @@ pub const AGENT_VSOCK_PORT: u32 = 4088;
 
 /// Default vsock port for exec server in the guest.
 pub const EXEC_VSOCK_PORT: u32 = 4089;
+
+/// Default maximum image cache size: 10 GB.
+pub const DEFAULT_IMAGE_CACHE_SIZE: u64 = 10 * 1024 * 1024 * 1024;
