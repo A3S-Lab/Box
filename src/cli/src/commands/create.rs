@@ -40,6 +40,10 @@ pub struct CreateArgs {
     /// Set custom DNS servers, can be repeated
     #[arg(long)]
     pub dns: Vec<String>,
+
+    /// Override the image entrypoint
+    #[arg(long)]
+    pub entrypoint: Option<String>,
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -61,6 +65,10 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     std::fs::create_dir_all(box_dir.join("sockets"))?;
     std::fs::create_dir_all(box_dir.join("logs"))?;
 
+    let entrypoint = args.entrypoint.as_ref().map(|ep| {
+        ep.split_whitespace().map(String::from).collect::<Vec<_>>()
+    });
+
     let record = BoxRecord {
         id: box_id.clone(),
         short_id: short_id.clone(),
@@ -73,6 +81,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         volumes: args.volumes,
         env,
         cmd: vec![],
+        entrypoint,
         box_dir: box_dir.clone(),
         socket_path: box_dir.join("sockets").join("grpc.sock"),
         exec_socket_path: box_dir.join("sockets").join("exec.sock"),

@@ -28,6 +28,10 @@ pub struct ExecArgs {
     #[arg(short, long)]
     pub workdir: Option<String>,
 
+    /// Keep STDIN open (pipe stdin to the command)
+    #[arg(short = 'i', long = "interactive")]
+    pub interactive: bool,
+
     /// Command and arguments to execute
     #[arg(last = true, required = true)]
     pub cmd: Vec<String>,
@@ -68,11 +72,22 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         args.timeout * 1_000_000_000
     };
 
+    // Read stdin if interactive mode
+    let stdin_data = if args.interactive {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        if buf.is_empty() { None } else { Some(buf) }
+    } else {
+        None
+    };
+
     let request = ExecRequest {
         cmd: args.cmd,
         timeout_ns,
         env: args.envs,
         working_dir: args.workdir,
+        stdin: stdin_data,
     };
 
     // Execute command

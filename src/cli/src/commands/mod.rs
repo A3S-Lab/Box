@@ -3,6 +3,7 @@
 mod cp;
 mod create;
 mod exec;
+mod attach;
 mod image_inspect;
 mod image_prune;
 mod image_tag;
@@ -67,6 +68,8 @@ pub enum Command {
     Exec(exec::ExecArgs),
     /// Display detailed box information
     Inspect(inspect::InspectArgs),
+    /// Attach to a running box's console output
+    Attach(attach::AttachArgs),
     /// List cached images
     Images(images::ImagesArgs),
     /// Pull an image from a registry
@@ -117,6 +120,41 @@ pub(crate) fn open_image_store() -> Result<a3s_box_runtime::ImageStore, Box<dyn 
     Ok(store)
 }
 
+/// Tail a file, printing new content as it appears.
+///
+/// Waits for the file to exist, then continuously reads and prints new data.
+/// Used by `run` (foreground mode) and `attach`.
+pub(crate) async fn tail_file(path: &std::path::Path) {
+    use tokio::io::AsyncReadExt;
+
+    // Wait for file to exist
+    loop {
+        if path.exists() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    let mut buf = vec![0u8; 4096];
+    loop {
+        match file.read(&mut buf).await {
+            Ok(0) => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            }
+            Ok(n) => {
+                let text = String::from_utf8_lossy(&buf[..n]);
+                print!("{text}");
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 /// Dispatch a parsed CLI to the appropriate command handler.
 pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
@@ -132,6 +170,7 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Logs(args) => logs::execute(args).await,
         Command::Exec(args) => exec::execute(args).await,
         Command::Inspect(args) => inspect::execute(args).await,
+        Command::Attach(args) => attach::execute(args).await,
         Command::Images(args) => images::execute(args).await,
         Command::Pull(args) => pull::execute(args).await,
         Command::Rmi(args) => rmi::execute(args).await,

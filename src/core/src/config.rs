@@ -227,6 +227,10 @@ pub struct BoxConfig {
     #[serde(default)]
     pub cmd: Vec<String>,
 
+    /// Entrypoint override (replaces OCI ENTRYPOINT when set)
+    #[serde(default)]
+    pub entrypoint_override: Option<Vec<String>>,
+
     /// Extra volume mounts (host_path:guest_path or host_path:guest_path:ro)
     #[serde(default)]
     pub volumes: Vec<String>,
@@ -266,6 +270,7 @@ impl Default for BoxConfig {
             debug_grpc: false,
             tee: TeeConfig::default(),
             cmd: vec![],
+            entrypoint_override: None,
             volumes: vec![],
             extra_env: vec![],
             cache: CacheConfig::default(),

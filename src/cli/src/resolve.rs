@@ -90,6 +90,7 @@ mod tests {
             volumes: vec![],
             env: HashMap::new(),
             cmd: vec![],
+            entrypoint: None,
             box_dir: PathBuf::from("/tmp").join(id),
             socket_path: PathBuf::from("/tmp").join(id).join("grpc.sock"),
             exec_socket_path: PathBuf::from("/tmp").join(id).join("sockets").join("exec.sock"),

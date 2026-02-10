@@ -34,6 +34,9 @@ pub struct BoxRecord {
     pub env: HashMap<String, String>,
     /// Entrypoint override
     pub cmd: Vec<String>,
+    /// Entrypoint override (if set via --entrypoint)
+    #[serde(default)]
+    pub entrypoint: Option<Vec<String>>,
     /// Box working directory (~/.a3s/boxes/<id>/)
     pub box_dir: PathBuf,
     /// Path to gRPC socket
@@ -241,6 +244,7 @@ mod tests {
             volumes: vec![],
             env: HashMap::new(),
             cmd: vec![],
+            entrypoint: None,
             box_dir: PathBuf::from("/tmp/boxes").join(id),
             socket_path: PathBuf::from("/tmp/boxes").join(id).join("grpc.sock"),
             exec_socket_path: PathBuf::from("/tmp/boxes").join(id).join("sockets").join("exec.sock"),

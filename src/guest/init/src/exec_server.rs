@@ -122,7 +122,7 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
     };
 
     // Execute the command
-    let output = execute_command(&exec_req.cmd, exec_req.timeout_ns, &exec_req.env, exec_req.working_dir.as_deref());
+    let output = execute_command(&exec_req.cmd, exec_req.timeout_ns, &exec_req.env, exec_req.working_dir.as_deref(), exec_req.stdin.as_deref());
 
     // Send HTTP response with JSON body
     let response_body = serde_json::to_string(&output)?;
@@ -156,10 +156,10 @@ fn send_error_response(
     stream.write_all(response.as_bytes())
 }
 
-/// Execute a command with timeout, environment variables, and working directory.
+/// Execute a command with timeout, environment variables, working directory, and optional stdin.
 ///
 /// Returns ExecOutput with stdout, stderr, and exit code.
-fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir: Option<&str>) -> ExecOutput {
+fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir: Option<&str>, stdin_data: Option<&[u8]>) -> ExecOutput {
     if cmd.is_empty() {
         return ExecOutput {
             stdout: vec![],
@@ -180,6 +180,11 @@ fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir:
         .args(&cmd[1..])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+
+    // If stdin data is provided, pipe it to the child process
+    if stdin_data.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
 
     // Apply environment variables (KEY=VALUE format)
     for entry in env {
@@ -204,6 +209,15 @@ fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir:
             };
         }
     };
+
+    // Write stdin data to the child process and close the pipe
+    if let Some(data) = stdin_data {
+        if let Some(mut stdin_pipe) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin_pipe.write_all(data);
+            // stdin_pipe is dropped here, closing the pipe
+        }
+    }
 
     // Wait with timeout using a polling loop
     let start = std::time::Instant::now();
@@ -308,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_echo() {
-        let output = execute_command(&["echo".to_string(), "hello".to_string()], 0, &[], None);
+        let output = execute_command(&["echo".to_string(), "hello".to_string()], 0, &[], None, None);
         assert_eq!(output.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
         assert!(output.stderr.is_empty());
@@ -321,6 +335,7 @@ mod tests {
             0,
             &[],
             None,
+            None,
         );
         assert_ne!(output.exit_code, 0);
         assert!(!output.stderr.is_empty());
@@ -328,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_empty() {
-        let output = execute_command(&[], 0, &[], None);
+        let output = execute_command(&[], 0, &[], None, None);
         assert_eq!(output.exit_code, 1);
         assert_eq!(output.stderr, b"Empty command");
     }
@@ -339,6 +354,7 @@ mod tests {
             &["sh".to_string(), "-c".to_string(), "exit 42".to_string()],
             0,
             &[],
+            None,
             None,
         );
         assert_eq!(output.exit_code, 42);
@@ -355,6 +371,7 @@ mod tests {
             0,
             &[],
             None,
+            None,
         );
         assert_eq!(output.exit_code, 0);
         assert!(String::from_utf8_lossy(&output.stderr).contains("error"));
@@ -366,6 +383,7 @@ mod tests {
             &["sh".to_string(), "-c".to_string(), "echo $TEST_VAR".to_string()],
             0,
             &["TEST_VAR=hello_from_env".to_string()],
+            None,
             None,
         );
         assert_eq!(output.exit_code, 0);
@@ -382,6 +400,7 @@ mod tests {
             0,
             &[],
             Some("/tmp"),
+            None,
         );
         assert_eq!(output.exit_code, 0);
         // On macOS /tmp is a symlink to /private/tmp
@@ -392,5 +411,49 @@ mod tests {
     #[test]
     fn test_exec_vsock_port_constant() {
         assert_eq!(EXEC_VSOCK_PORT, 4089);
+    }
+
+    #[test]
+    fn test_execute_command_with_stdin() {
+        let output = execute_command(
+            &["cat".to_string()],
+            0,
+            &[],
+            None,
+            Some(b"hello from stdin"),
+        );
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "hello from stdin"
+        );
+    }
+
+    #[test]
+    fn test_execute_command_with_stdin_multiline() {
+        let output = execute_command(
+            &["wc".to_string(), "-l".to_string()],
+            0,
+            &[],
+            None,
+            Some(b"line1\nline2\nline3\n"),
+        );
+        assert_eq!(output.exit_code, 0);
+        let count = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(count, "3");
+    }
+
+    #[test]
+    fn test_execute_command_without_stdin() {
+        // Without stdin data, command should still work normally
+        let output = execute_command(
+            &["echo".to_string(), "no stdin".to_string()],
+            0,
+            &[],
+            None,
+            None,
+        );
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "no stdin");
     }
 }

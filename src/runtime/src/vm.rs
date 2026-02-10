@@ -175,6 +175,7 @@ impl VmManager {
             timeout_ns,
             env: vec![],
             working_dir: None,
+            stdin: None,
         };
         client.exec_command(&request).await
     }
@@ -872,7 +873,7 @@ impl VmManager {
             // Pass agent configuration via environment variables
             let (agent_exec, agent_args, agent_env) = match &layout.agent_oci_config {
                 Some(oci_config) => {
-                    let (exec, args) = Self::resolve_oci_entrypoint(oci_config, layout.image_at_root, &self.config.cmd);
+                    let (exec, args) = Self::resolve_oci_entrypoint(oci_config, layout.image_at_root, &self.config.cmd, self.config.entrypoint_override.as_deref());
                     (exec, args, oci_config.env.clone())
                 }
                 None => (
@@ -921,7 +922,7 @@ impl VmManager {
             // Direct agent execution (no namespace isolation)
             match &layout.agent_oci_config {
                 Some(oci_config) => {
-                    let (executable, args) = Self::resolve_oci_entrypoint(oci_config, layout.image_at_root, &self.config.cmd);
+                    let (executable, args) = Self::resolve_oci_entrypoint(oci_config, layout.image_at_root, &self.config.cmd, self.config.entrypoint_override.as_deref());
                     let env = oci_config.env.clone();
 
                     tracing::debug!(
@@ -1002,6 +1003,7 @@ impl VmManager {
     /// Resolve the executable and args from an OCI image config.
     ///
     /// Follows Docker semantics:
+    /// - If `entrypoint_override` is set, it replaces the OCI ENTRYPOINT
     /// - If ENTRYPOINT is set: executable = ENTRYPOINT[0], args = ENTRYPOINT[1:] + CMD
     /// - If only CMD is set: executable = CMD[0], args = CMD[1:]
     /// - If neither: fall back to default agent path
@@ -1013,12 +1015,16 @@ impl VmManager {
         oci_config: &OciImageConfig,
         image_at_root: bool,
         cmd_override: &[String],
+        entrypoint_override: Option<&[String]>,
     ) -> (String, Vec<String>) {
-        let oci_entrypoint = oci_config
-            .entrypoint
-            .as_ref()
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
+        let oci_entrypoint = match entrypoint_override {
+            Some(ep) => ep,
+            None => oci_config
+                .entrypoint
+                .as_ref()
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]),
+        };
         let oci_cmd = if cmd_override.is_empty() {
             oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[])
         } else {
@@ -1421,7 +1427,7 @@ mod tests {
             labels: std::collections::HashMap::new(),
         };
 
-        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[]);
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
         assert_eq!(exec, "/bin/app");
         assert_eq!(args, vec!["--flag"]);
     }
@@ -1438,7 +1444,7 @@ mod tests {
             labels: std::collections::HashMap::new(),
         };
 
-        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[]);
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
         assert_eq!(exec, "/bin/sh");
         assert_eq!(args, vec!["-c", "echo hi"]);
     }
@@ -1455,7 +1461,7 @@ mod tests {
             labels: std::collections::HashMap::new(),
         };
 
-        let (exec, _args) = VmManager::resolve_oci_entrypoint(&config, true, &[]);
+        let (exec, _args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
         assert_eq!(exec, GUEST_AGENT_PATH);
     }
 
@@ -1472,7 +1478,7 @@ mod tests {
         };
 
         let override_cmd = vec!["sleep".to_string(), "3600".to_string()];
-        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &override_cmd);
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &override_cmd, None);
         assert_eq!(exec, "sleep");
         assert_eq!(args, vec!["3600"]);
     }
@@ -1489,8 +1495,48 @@ mod tests {
             labels: std::collections::HashMap::new(),
         };
 
-        let (exec, _) = VmManager::resolve_oci_entrypoint(&config, false, &[]);
+        let (exec, _) = VmManager::resolve_oci_entrypoint(&config, false, &[], None);
         assert_eq!(exec, "/agent/bin/sh");
+    }
+
+    #[test]
+    fn test_resolve_oci_entrypoint_with_override() {
+        let config = OciImageConfig {
+            entrypoint: Some(vec!["/bin/app".to_string()]),
+            cmd: Some(vec!["--flag".to_string()]),
+            env: vec![],
+            working_dir: None,
+            user: None,
+            exposed_ports: vec![],
+            labels: std::collections::HashMap::new(),
+        };
+
+        // Override replaces the image entrypoint entirely
+        let override_ep = vec!["/bin/sh".to_string(), "-c".to_string()];
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], Some(&override_ep));
+        assert_eq!(exec, "/bin/sh");
+        // args = entrypoint[1:] + cmd
+        assert_eq!(args, vec!["-c", "--flag"]);
+    }
+
+    #[test]
+    fn test_resolve_oci_entrypoint_override_with_cmd_override() {
+        let config = OciImageConfig {
+            entrypoint: Some(vec!["/bin/app".to_string()]),
+            cmd: Some(vec!["--flag".to_string()]),
+            env: vec![],
+            working_dir: None,
+            user: None,
+            exposed_ports: vec![],
+            labels: std::collections::HashMap::new(),
+        };
+
+        // Both entrypoint and cmd overridden
+        let override_ep = vec!["/bin/sh".to_string()];
+        let cmd_override = vec!["echo".to_string(), "hello".to_string()];
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &cmd_override, Some(&override_ep));
+        assert_eq!(exec, "/bin/sh");
+        assert_eq!(args, vec!["echo", "hello"]);
     }
 
     #[test]

@@ -48,6 +48,10 @@ pub struct RunArgs {
     #[arg(short = 'd', long)]
     pub detach: bool,
 
+    /// Override the image entrypoint
+    #[arg(long)]
+    pub entrypoint: Option<String>,
+
     /// Automatically remove the box when it stops
     #[arg(long)]
     pub rm: bool,
@@ -64,6 +68,11 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let name = args.name.unwrap_or_else(generate_name);
     let env = parse_env_vars(&args.env)?;
 
+    // Parse entrypoint override: split string into argv
+    let entrypoint_override = args.entrypoint.as_ref().map(|ep| {
+        ep.split_whitespace().map(String::from).collect::<Vec<_>>()
+    });
+
     // Build BoxConfig
     let config = BoxConfig {
         agent: AgentType::OciRegistry {
@@ -75,6 +84,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
         cmd: args.cmd.clone(),
+        entrypoint_override: entrypoint_override.clone(),
         volumes: args.volumes.clone(),
         extra_env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         port_map: args.publish.clone(),
@@ -114,6 +124,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         volumes: args.volumes.clone(),
         env,
         cmd: args.cmd.clone(),
+        entrypoint: entrypoint_override.clone(),
         box_dir: box_dir.clone(),
         socket_path: box_dir.join("sockets").join("grpc.sock"),
         exec_socket_path: box_dir.join("sockets").join("exec.sock"),
@@ -139,7 +150,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Tail console log in background
     let log_handle = tokio::spawn(async move {
-        tail_file(&console_log).await;
+        super::tail_file(&console_log).await;
     });
 
     // Wait for Ctrl-C
@@ -180,36 +191,4 @@ fn parse_env_vars(vars: &[String]) -> Result<HashMap<String, String>, String> {
         map.insert(key.to_string(), value.to_string());
     }
     Ok(map)
-}
-
-/// Tail a file, printing new content as it appears.
-async fn tail_file(path: &std::path::Path) {
-    use tokio::io::AsyncReadExt;
-
-    // Wait for file to exist
-    loop {
-        if path.exists() {
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
-
-    let mut file = match tokio::fs::File::open(path).await {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
-    let mut buf = vec![0u8; 4096];
-    loop {
-        match file.read(&mut buf).await {
-            Ok(0) => {
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            }
-            Ok(n) => {
-                let text = String::from_utf8_lossy(&buf[..n]);
-                print!("{text}");
-            }
-            Err(_) => break,
-        }
-    }
 }

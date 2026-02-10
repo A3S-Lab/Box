@@ -81,6 +81,7 @@ async fn copy_from_box(
         timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],
         working_dir: None,
+        stdin: None,
     };
 
     let output = client.exec_command(&request).await?;
@@ -135,6 +136,7 @@ async fn copy_to_box(
         timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],
         working_dir: None,
+        stdin: None,
     };
 
     let output = client.exec_command(&request).await?;
