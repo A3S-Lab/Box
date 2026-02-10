@@ -98,6 +98,11 @@ mod tests {
             created_at: chrono::Utc::now(),
             started_at: None,
             auto_remove: false,
+            hostname: None,
+            user: None,
+            workdir: None,
+            restart_policy: "no".to_string(),
+            port_map: vec![],
         }
     }
 

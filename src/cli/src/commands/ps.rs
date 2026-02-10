@@ -52,14 +52,16 @@ pub async fn execute(args: PsArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Default: table output
-    let mut table = output::new_table(&["BOX ID", "IMAGE", "STATUS", "CREATED", "NAMES"]);
+    let mut table = output::new_table(&["BOX ID", "IMAGE", "STATUS", "CREATED", "PORTS", "NAMES"]);
 
     for record in boxes {
+        let ports = record.port_map.join(", ");
         table.add_row([
             &record.short_id,
             &record.image,
             &record.status,
             &output::format_ago(&record.created_at),
+            &ports,
             &record.name,
         ]);
     }
@@ -105,5 +107,5 @@ fn apply_format(record: &BoxRecord, fmt: &str) -> String {
         .replace("{{.Created}}", &output::format_ago(&record.created_at))
         .replace("{{.Names}}", &record.name)
         .replace("{{.Command}}", &record.cmd.join(" "))
-        .replace("{{.Ports}}", "")
+        .replace("{{.Ports}}", &record.port_map.join(", "))
 }

@@ -52,6 +52,25 @@ pub struct BoxRecord {
     pub started_at: Option<DateTime<Utc>>,
     /// Whether to auto-remove on stop
     pub auto_remove: bool,
+    /// Custom hostname for the box
+    #[serde(default)]
+    pub hostname: Option<String>,
+    /// User to run as inside the box
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Working directory inside the box
+    #[serde(default)]
+    pub workdir: Option<String>,
+    /// Restart policy: "no", "always", "on-failure", "unless-stopped"
+    #[serde(default = "default_restart_policy")]
+    pub restart_policy: String,
+    /// Port mappings ("host_port:guest_port" pairs)
+    #[serde(default)]
+    pub port_map: Vec<String>,
+}
+
+fn default_restart_policy() -> String {
+    "no".to_string()
 }
 
 impl BoxRecord {
@@ -252,6 +271,11 @@ mod tests {
             created_at: Utc::now(),
             started_at: if status == "running" { Some(Utc::now()) } else { None },
             auto_remove: false,
+            hostname: None,
+            user: None,
+            workdir: None,
+            restart_policy: "no".to_string(),
+            port_map: vec![],
         }
     }
 

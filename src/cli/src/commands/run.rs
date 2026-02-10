@@ -52,6 +52,22 @@ pub struct RunArgs {
     #[arg(long)]
     pub entrypoint: Option<String>,
 
+    /// Set the box hostname
+    #[arg(long)]
+    pub hostname: Option<String>,
+
+    /// Run as a specific user (e.g., "root", "1000:1000")
+    #[arg(short = 'u', long)]
+    pub user: Option<String>,
+
+    /// Working directory inside the box
+    #[arg(short = 'w', long)]
+    pub workdir: Option<String>,
+
+    /// Restart policy: no, always, on-failure, unless-stopped
+    #[arg(long, default_value = "no")]
+    pub restart: String,
+
     /// Automatically remove the box when it stops
     #[arg(long)]
     pub rm: bool,
@@ -132,6 +148,11 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         created_at: chrono::Utc::now(),
         started_at: Some(chrono::Utc::now()),
         auto_remove: args.rm,
+        hostname: args.hostname.clone(),
+        user: args.user.clone(),
+        workdir: args.workdir.clone(),
+        restart_policy: args.restart.clone(),
+        port_map: args.publish.clone(),
     };
 
     let mut state = StateFile::load_default()?;

@@ -12,6 +12,7 @@ mod info;
 mod inspect;
 mod kill;
 mod logs;
+mod port;
 mod ps;
 mod pull;
 mod restart;
@@ -23,6 +24,7 @@ mod stats;
 mod stop;
 mod system_prune;
 mod version;
+mod wait;
 
 use std::path::PathBuf;
 
@@ -70,6 +72,10 @@ pub enum Command {
     Inspect(inspect::InspectArgs),
     /// Attach to a running box's console output
     Attach(attach::AttachArgs),
+    /// Block until one or more boxes stop
+    Wait(wait::WaitArgs),
+    /// List port mappings for a box
+    Port(port::PortArgs),
     /// List cached images
     Images(images::ImagesArgs),
     /// Pull an image from a registry
@@ -171,6 +177,8 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Exec(args) => exec::execute(args).await,
         Command::Inspect(args) => inspect::execute(args).await,
         Command::Attach(args) => attach::execute(args).await,
+        Command::Wait(args) => wait::execute(args).await,
+        Command::Port(args) => port::execute(args).await,
         Command::Images(args) => images::execute(args).await,
         Command::Pull(args) => pull::execute(args).await,
         Command::Rmi(args) => rmi::execute(args).await,

@@ -44,6 +44,22 @@ pub struct CreateArgs {
     /// Override the image entrypoint
     #[arg(long)]
     pub entrypoint: Option<String>,
+
+    /// Set the box hostname
+    #[arg(long)]
+    pub hostname: Option<String>,
+
+    /// Run as a specific user (e.g., "root", "1000:1000")
+    #[arg(short = 'u', long)]
+    pub user: Option<String>,
+
+    /// Working directory inside the box
+    #[arg(short = 'w', long)]
+    pub workdir: Option<String>,
+
+    /// Restart policy: no, always, on-failure, unless-stopped
+    #[arg(long, default_value = "no")]
+    pub restart: String,
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -89,6 +105,11 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         created_at: chrono::Utc::now(),
         started_at: None,
         auto_remove: false,
+        hostname: args.hostname,
+        user: args.user,
+        workdir: args.workdir,
+        restart_policy: args.restart,
+        port_map: args.publish,
     };
 
     let mut state = StateFile::load_default()?;
