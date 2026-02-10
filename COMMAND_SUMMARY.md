@@ -558,6 +558,9 @@ a3s-box exec -it my_box /bin/sh
 | `exec -u/--user` | ✅ **Implemented** | User specification via `su` wrapper in guest exec server |
 | `pull -q/--quiet` | ✅ **Implemented** | Quiet mode for pull (path only) |
 | `cp` directories | ✅ **Implemented** | Recursive directory copy via tar + base64 |
+| `--restart` enforcement | ✅ **Implemented** | Reconciliation-based: always, on-failure, unless-stopped policies |
+| `--health-cmd` | ✅ **Implemented** | Health check config with interval/timeout/retries/start-period |
+| Health status in `ps` | ✅ **Implemented** | Shows `running (healthy)` / `running (unhealthy)` in status column |
 | `port` | ⚠️ Pending | Already persists `port_map` in BoxRecord |
 | `wait` | ⚠️ Pending | Poll PID + `waitpid()` for exit code |
 | `attach` | ❌ Hard | Requires PTY support in runtime |
@@ -580,12 +583,15 @@ a3s-box exec -it my_box /bin/sh
    - ✅ `pull -q/--quiet` for quiet mode
    - ✅ `cp` directory support (recursive via tar)
 
-2. **Phase 2: Advanced Features**
-   - Interactive PTY (`-it`) for exec and attach
-   - `--restart` policy enforcement (daemon/monitor)
-   - Health check support (`HEALTHCHECK` directive)
+2. **✅ Phase 2 Complete: Restart & Health Check**
+   - ✅ `--restart` policy enforcement (reconciliation-based: always, on-failure, unless-stopped)
+   - ✅ `stopped_by_user` tracking for unless-stopped policy
+   - ✅ Health check config (`--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`, `--health-start-period`)
+   - ✅ Health status display in `ps` output (e.g., "running (healthy)")
+   - ✅ `pending_restarts()` API for restart candidates
 
-3. **Phase 3: OCI Layer Management**
+3. **Phase 3: Interactive & OCI**
+   - Interactive PTY (`-it`) for exec and attach
    - `diff` (filesystem layer tracking)
    - `commit` (OCI image building from box state)
    - `export` / `import` (rootfs tarball operations)

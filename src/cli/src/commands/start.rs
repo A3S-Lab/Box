@@ -70,6 +70,8 @@ async fn start_one(
     let record = resolve::resolve_mut(state, &box_id)?;
     record.status = "running".to_string();
     record.started_at = Some(chrono::Utc::now());
+    record.stopped_by_user = false;
+    record.restart_count = 0;
     state.save()?;
 
     println!("{name}");

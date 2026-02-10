@@ -47,6 +47,8 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **Image Management**: Inspect metadata, prune unused images, tag aliases, configurable cache size
 - **Exec in Running VMs**: Execute commands with env vars, working directory, and user specification support
 - **File Copy**: Transfer files and directories between host and running boxes via `cp`
+- **Restart Policies**: Automatic restart enforcement (`always`, `on-failure`, `unless-stopped`)
+- **Health Checks**: Configurable health check commands with interval, timeout, retries, and start period
 - **System Cleanup**: One-command prune of stopped boxes and unused images
 - **CRI Runtime**: Kubernetes-compatible CRI RuntimeService and ImageService
 - **Warm Pool**: Pre-booted idle MicroVMs for instant allocation
@@ -121,6 +123,7 @@ a3s-box image-prune -f           # Remove unused images
 
 # Box lifecycle
 a3s-box run -d --name dev --cpus 2 --memory 1g --label env=dev alpine:latest
+a3s-box run -d --name web --restart always --health-cmd "curl -f http://localhost/" nginx:latest
 a3s-box create --name staging --label env=staging alpine:latest
 a3s-box start staging
 a3s-box pause dev                # Pause a running box (SIGSTOP)
@@ -161,8 +164,8 @@ a3s-box info                     # Virtualization support, cache stats
 
 | Command | Description |
 |---------|-------------|
-| `run <image>` | Pull + create + start a box (`-d` detached, `--rm` auto-remove, `-l` labels) |
-| `create <image>` | Create a box without starting (`-l` for labels) |
+| `run <image>` | Pull + create + start a box (`-d` detached, `--rm` auto-remove, `-l` labels, `--restart`, `--health-cmd`) |
+| `create <image>` | Create a box without starting (`-l` for labels, `--health-cmd` for health check) |
 | `start <box>...` | Start one or more created or stopped boxes |
 | `stop <box>...` | Graceful stop one or more boxes (SIGTERM then SIGKILL after `-t` timeout) |
 | `pause <box>...` | Pause one or more running boxes (SIGSTOP) |
@@ -234,7 +237,7 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 
 | Crate | Binary | Purpose |
 |-------|--------|---------|
-| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (162 tests) |
+| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (183 tests) |
 | `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (95 tests) |
 | `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, exec client (207 tests) |
 | `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (20 tests) |
@@ -349,6 +352,7 @@ let config = BoxConfig {
 - [x] Filtering and formatting for ps and images commands
 - [x] Configurable image cache size via `A3S_IMAGE_CACHE_SIZE` environment variable
 - [x] Docker CLI alignment Phase 1: pause/unpause, top, rename, label support, exec -u/--user, pull -q/--quiet, cp directories
+- [x] Docker CLI alignment Phase 2: restart policy enforcement, health check support (--health-cmd, status tracking)
 - [ ] OCI image format definition (Dockerfile for Box images)
 - [ ] Agent configuration from OCI labels
 - [ ] Pre-built `a3s-code` guest image for AI coding agent
@@ -612,7 +616,7 @@ cargo build -p a3s-box-cli  # Build CLI only
 just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
-cargo test -p a3s-box-cli   # CLI tests (162 tests)
+cargo test -p a3s-box-cli   # CLI tests (183 tests)
 cargo test -p a3s-box-core  # Core tests (95 tests)
 
 # Lint

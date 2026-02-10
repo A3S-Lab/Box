@@ -56,10 +56,11 @@ pub async fn execute(args: PsArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     for record in boxes {
         let ports = record.port_map.join(", ");
+        let status = format_status(record);
         table.add_row([
             &record.short_id,
             &record.image,
-            &record.status,
+            &status,
             &output::format_ago(&record.created_at),
             &ports,
             &record.name,
@@ -103,14 +104,24 @@ fn matches_filters(record: &BoxRecord, filters: &[String]) -> bool {
 /// Apply a format template, replacing `{{.Field}}` placeholders.
 fn apply_format(record: &BoxRecord, fmt: &str) -> String {
     let labels_str = format_labels(&record.labels);
+    let status = format_status(record);
     fmt.replace("{{.ID}}", &record.short_id)
         .replace("{{.Image}}", &record.image)
-        .replace("{{.Status}}", &record.status)
+        .replace("{{.Status}}", &status)
         .replace("{{.Created}}", &output::format_ago(&record.created_at))
         .replace("{{.Names}}", &record.name)
         .replace("{{.Command}}", &record.cmd.join(" "))
         .replace("{{.Ports}}", &record.port_map.join(", "))
         .replace("{{.Labels}}", &labels_str)
+}
+
+/// Format box status with health annotation (like Docker: "running (healthy)").
+fn format_status(record: &BoxRecord) -> String {
+    if record.health_check.is_some() && record.health_status != "none" {
+        format!("{} ({})", record.status, record.health_status)
+    } else {
+        record.status.clone()
+    }
 }
 
 /// Check if a box's labels match a label filter value.
@@ -171,6 +182,12 @@ mod tests {
             restart_policy: "no".to_string(),
             port_map: vec![],
             labels,
+            stopped_by_user: false,
+            restart_count: 0,
+            health_check: None,
+            health_status: "none".to_string(),
+            health_retries: 0,
+            health_last_check: None,
         }
     }
 
@@ -324,5 +341,70 @@ mod tests {
     fn test_filter_unknown_key_ignored() {
         let record = make_record("box1", "running", HashMap::new());
         assert!(matches_filters(&record, &["unknown=value".to_string()]));
+    }
+
+    // --- format_status tests ---
+
+    #[test]
+    fn test_format_status_no_health_check() {
+        let record = make_record("box1", "running", HashMap::new());
+        assert_eq!(format_status(&record), "running");
+    }
+
+    #[test]
+    fn test_format_status_with_health_healthy() {
+        let mut record = make_record("box1", "running", HashMap::new());
+        record.health_check = Some(crate::state::HealthCheck {
+            cmd: vec!["true".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        });
+        record.health_status = "healthy".to_string();
+        assert_eq!(format_status(&record), "running (healthy)");
+    }
+
+    #[test]
+    fn test_format_status_with_health_unhealthy() {
+        let mut record = make_record("box1", "running", HashMap::new());
+        record.health_check = Some(crate::state::HealthCheck {
+            cmd: vec!["false".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        });
+        record.health_status = "unhealthy".to_string();
+        assert_eq!(format_status(&record), "running (unhealthy)");
+    }
+
+    #[test]
+    fn test_format_status_with_health_starting() {
+        let mut record = make_record("box1", "running", HashMap::new());
+        record.health_check = Some(crate::state::HealthCheck {
+            cmd: vec!["true".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        });
+        record.health_status = "starting".to_string();
+        assert_eq!(format_status(&record), "running (starting)");
+    }
+
+    #[test]
+    fn test_format_status_health_none_not_shown() {
+        let mut record = make_record("box1", "running", HashMap::new());
+        record.health_check = Some(crate::state::HealthCheck {
+            cmd: vec!["true".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        });
+        record.health_status = "none".to_string();
+        // "none" should not be shown
+        assert_eq!(format_status(&record), "running");
     }
 }

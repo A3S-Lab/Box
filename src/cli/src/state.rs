@@ -70,6 +70,59 @@ pub struct BoxRecord {
     /// User-defined labels (key=value metadata)
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    /// Whether the box was explicitly stopped by the user (for "unless-stopped" policy)
+    #[serde(default)]
+    pub stopped_by_user: bool,
+    /// Number of automatic restarts performed
+    #[serde(default)]
+    pub restart_count: u32,
+    /// Health check configuration
+    #[serde(default)]
+    pub health_check: Option<HealthCheck>,
+    /// Current health status: "none", "starting", "healthy", "unhealthy"
+    #[serde(default = "default_health_status")]
+    pub health_status: String,
+    /// Consecutive health check failures
+    #[serde(default)]
+    pub health_retries: u32,
+    /// Timestamp of last health check
+    #[serde(default)]
+    pub health_last_check: Option<DateTime<Utc>>,
+}
+
+fn default_health_status() -> String {
+    "none".to_string()
+}
+
+/// Health check configuration for a box.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheck {
+    /// Command to run for health check (via exec channel)
+    pub cmd: Vec<String>,
+    /// Check interval in seconds (default: 30)
+    #[serde(default = "default_health_interval")]
+    pub interval_secs: u64,
+    /// Per-check timeout in seconds (default: 5)
+    #[serde(default = "default_health_timeout")]
+    pub timeout_secs: u64,
+    /// Consecutive failures before marking unhealthy (default: 3)
+    #[serde(default = "default_health_retries")]
+    pub retries: u32,
+    /// Grace period after start before checks begin, in seconds (default: 0)
+    #[serde(default)]
+    pub start_period_secs: u64,
+}
+
+fn default_health_interval() -> u64 {
+    30
+}
+
+fn default_health_timeout() -> u64 {
+    5
+}
+
+fn default_health_retries() -> u32 {
+    3
 }
 
 fn default_restart_policy() -> String {
@@ -188,8 +241,13 @@ impl StateFile {
     }
 
     /// Reconcile: check PID liveness for running boxes, mark dead ones.
-    fn reconcile(&mut self) {
+    ///
+    /// Returns a list of box IDs that should be restarted based on their
+    /// restart policy. The caller is responsible for actually restarting them.
+    fn reconcile(&mut self) -> Vec<String> {
         let mut changed = false;
+        let mut restart_candidates = Vec::new();
+
         for record in &mut self.records {
             if record.status == "running" {
                 if let Some(pid) = record.pid {
@@ -197,23 +255,60 @@ impl StateFile {
                         record.status = "dead".to_string();
                         record.pid = None;
                         changed = true;
+
+                        if should_restart(record) {
+                            restart_candidates.push(record.id.clone());
+                        }
                     }
                 } else {
                     // Running but no PID — mark as dead
                     record.status = "dead".to_string();
                     changed = true;
+
+                    if should_restart(record) {
+                        restart_candidates.push(record.id.clone());
+                    }
                 }
             }
         }
         if changed {
             let _ = self.save();
         }
+
+        restart_candidates
+    }
+
+    /// Get box IDs that are pending restart (dead boxes with active restart policy).
+    ///
+    /// This can be called after load to check if any boxes need restarting.
+    pub fn pending_restarts(&self) -> Vec<String> {
+        self.records
+            .iter()
+            .filter(|r| r.status == "dead" && should_restart(r))
+            .map(|r| r.id.clone())
+            .collect()
     }
 }
 
 /// Check if a process is alive by sending signal 0.
 fn is_process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+/// Determine if a box should be automatically restarted based on its restart policy.
+///
+/// Policies:
+/// - `"no"` — never restart
+/// - `"always"` — always restart (even if stopped by user, but we only call this for dead boxes)
+/// - `"on-failure"` — restart only if the box died unexpectedly (not stopped by user)
+/// - `"unless-stopped"` — restart unless the user explicitly stopped it
+fn should_restart(record: &BoxRecord) -> bool {
+    match record.restart_policy.as_str() {
+        "always" => true,
+        "on-failure" => !record.stopped_by_user,
+        "unless-stopped" => !record.stopped_by_user,
+        _ => false, // "no" or unknown
+    }
 }
 
 /// Adjectives for random name generation.
@@ -280,6 +375,12 @@ mod tests {
             restart_policy: "no".to_string(),
             port_map: vec![],
             labels: HashMap::new(),
+            stopped_by_user: false,
+            restart_count: 0,
+            health_check: None,
+            health_status: "none".to_string(),
+            health_retries: 0,
+            health_last_check: None,
         }
     }
 
@@ -758,5 +859,184 @@ mod tests {
     fn test_word_lists_not_empty() {
         assert!(!ADJECTIVES.is_empty());
         assert!(!NOUNS.is_empty());
+    }
+
+    // --- Restart policy tests ---
+
+    #[test]
+    fn test_should_restart_no_policy() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "no".to_string();
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_always() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "always".to_string();
+        assert!(should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_always_even_if_stopped_by_user() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "always".to_string();
+        record.stopped_by_user = true;
+        assert!(should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_on_failure_not_stopped_by_user() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure".to_string();
+        record.stopped_by_user = false;
+        assert!(should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_on_failure_stopped_by_user() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure".to_string();
+        record.stopped_by_user = true;
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_unless_stopped_not_stopped_by_user() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "unless-stopped".to_string();
+        record.stopped_by_user = false;
+        assert!(should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_unless_stopped_stopped_by_user() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "unless-stopped".to_string();
+        record.stopped_by_user = true;
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_unknown_policy() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "unknown".to_string();
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_pending_restarts_empty() {
+        let tmp = TempDir::new().unwrap();
+        let sf = StateFile::load(&test_state_path(&tmp)).unwrap();
+        assert!(sf.pending_restarts().is_empty());
+    }
+
+    #[test]
+    fn test_pending_restarts_dead_with_always() {
+        let tmp = TempDir::new().unwrap();
+        let mut sf = StateFile::load(&test_state_path(&tmp)).unwrap();
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "always".to_string();
+        sf.add(record).unwrap();
+
+        let restarts = sf.pending_restarts();
+        assert_eq!(restarts.len(), 1);
+        assert_eq!(restarts[0], "id-1");
+    }
+
+    #[test]
+    fn test_pending_restarts_dead_with_no_policy() {
+        let tmp = TempDir::new().unwrap();
+        let mut sf = StateFile::load(&test_state_path(&tmp)).unwrap();
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "no".to_string();
+        sf.add(record).unwrap();
+
+        assert!(sf.pending_restarts().is_empty());
+    }
+
+    #[test]
+    fn test_pending_restarts_stopped_not_included() {
+        let tmp = TempDir::new().unwrap();
+        let mut sf = StateFile::load(&test_state_path(&tmp)).unwrap();
+        let mut record = sample_record("id-1", "box1", "stopped");
+        record.restart_policy = "always".to_string();
+        sf.add(record).unwrap();
+
+        // "stopped" boxes are not pending restart — only "dead" ones
+        assert!(sf.pending_restarts().is_empty());
+    }
+
+    // --- Health check config tests ---
+
+    #[test]
+    fn test_health_check_serialization() {
+        let hc = HealthCheck {
+            cmd: vec!["curl".to_string(), "-f".to_string(), "http://localhost/health".to_string()],
+            interval_secs: 10,
+            timeout_secs: 3,
+            retries: 5,
+            start_period_secs: 15,
+        };
+        let json = serde_json::to_string(&hc).unwrap();
+        let parsed: HealthCheck = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.cmd, vec!["curl", "-f", "http://localhost/health"]);
+        assert_eq!(parsed.interval_secs, 10);
+        assert_eq!(parsed.timeout_secs, 3);
+        assert_eq!(parsed.retries, 5);
+        assert_eq!(parsed.start_period_secs, 15);
+    }
+
+    #[test]
+    fn test_health_check_defaults() {
+        let json = r#"{"cmd":["true"]}"#;
+        let parsed: HealthCheck = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.cmd, vec!["true"]);
+        assert_eq!(parsed.interval_secs, 30);
+        assert_eq!(parsed.timeout_secs, 5);
+        assert_eq!(parsed.retries, 3);
+        assert_eq!(parsed.start_period_secs, 0);
+    }
+
+    #[test]
+    fn test_box_record_with_health_check() {
+        let mut record = sample_record("id-1", "box1", "running");
+        record.health_check = Some(HealthCheck {
+            cmd: vec!["test".to_string(), "-f".to_string(), "/tmp/healthy".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        });
+        record.health_status = "healthy".to_string();
+
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: BoxRecord = serde_json::from_str(&json).unwrap();
+        assert!(parsed.health_check.is_some());
+        assert_eq!(parsed.health_status, "healthy");
+    }
+
+    #[test]
+    fn test_box_record_backward_compat_no_health() {
+        // Old records without health fields should deserialize with defaults
+        let mut record = sample_record("id-1", "box1", "created");
+        let json = serde_json::to_string(&record).unwrap();
+
+        // Remove health fields to simulate old format
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val.as_object_mut().unwrap().remove("health_check");
+        val.as_object_mut().unwrap().remove("health_status");
+        val.as_object_mut().unwrap().remove("health_retries");
+        val.as_object_mut().unwrap().remove("health_last_check");
+        val.as_object_mut().unwrap().remove("stopped_by_user");
+        val.as_object_mut().unwrap().remove("restart_count");
+
+        let parsed: BoxRecord = serde_json::from_value(val).unwrap();
+        assert!(parsed.health_check.is_none());
+        assert_eq!(parsed.health_status, "none");
+        assert_eq!(parsed.health_retries, 0);
+        assert!(parsed.health_last_check.is_none());
+        assert!(!parsed.stopped_by_user);
+        assert_eq!(parsed.restart_count, 0);
     }
 }

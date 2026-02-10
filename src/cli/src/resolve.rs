@@ -104,6 +104,12 @@ mod tests {
             restart_policy: "no".to_string(),
             port_map: vec![],
             labels: HashMap::new(),
+            stopped_by_user: false,
+            restart_count: 0,
+            health_check: None,
+            health_status: "none".to_string(),
+            health_retries: 0,
+            health_last_check: None,
         }
     }
 

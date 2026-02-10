@@ -64,6 +64,26 @@ pub struct CreateArgs {
     /// Set metadata labels (KEY=VALUE), can be repeated
     #[arg(short = 'l', long = "label")]
     pub labels: Vec<String>,
+
+    /// Health check command (e.g., "curl -f http://localhost/health")
+    #[arg(long)]
+    pub health_cmd: Option<String>,
+
+    /// Health check interval in seconds (default: 30)
+    #[arg(long, default_value = "30")]
+    pub health_interval: u64,
+
+    /// Health check timeout in seconds (default: 5)
+    #[arg(long, default_value = "5")]
+    pub health_timeout: u64,
+
+    /// Health check retries before unhealthy (default: 3)
+    #[arg(long, default_value = "3")]
+    pub health_retries: u32,
+
+    /// Health check start period in seconds (default: 0)
+    #[arg(long, default_value = "0")]
+    pub health_start_period: u64,
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -74,6 +94,17 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     let env = parse_env_vars(&args.env)?;
     let labels = parse_env_vars(&args.labels)
         .map_err(|e| e.replace("environment variable", "label"))?;
+
+    // Parse health check config
+    let health_check = args.health_cmd.as_ref().map(|cmd| {
+        crate::state::HealthCheck {
+            cmd: vec!["sh".to_string(), "-c".to_string(), cmd.clone()],
+            interval_secs: args.health_interval,
+            timeout_secs: args.health_timeout,
+            retries: args.health_retries,
+            start_period_secs: args.health_start_period,
+        }
+    });
 
     let box_id = uuid::Uuid::new_v4().to_string();
     let short_id = BoxRecord::make_short_id(&box_id);
@@ -117,6 +148,12 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         restart_policy: args.restart,
         port_map: args.publish,
         labels,
+        stopped_by_user: false,
+        restart_count: 0,
+        health_check,
+        health_status: "none".to_string(),
+        health_retries: 0,
+        health_last_check: None,
     };
 
     let mut state = StateFile::load_default()?;
