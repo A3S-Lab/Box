@@ -51,6 +51,8 @@ async fn stop_one(
     let pid = record.pid;
     let auto_remove = record.auto_remove;
     let box_dir = record.box_dir.clone();
+    let network_name = record.network_name.clone();
+    let volume_names = record.volume_names.clone();
 
     // Send SIGTERM, then SIGKILL after timeout
     if let Some(pid) = pid {
@@ -71,6 +73,19 @@ async fn stop_one(
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    // Detach named volumes
+    super::volume::detach_volumes(&volume_names, &box_id);
+
+    // Disconnect from network if connected
+    if let Some(ref net_name) = network_name {
+        if let Ok(net_store) = a3s_box_runtime::NetworkStore::default_path() {
+            if let Ok(Some(mut net_config)) = net_store.get(net_name) {
+                net_config.disconnect(&box_id).ok();
+                net_store.update(&net_config).ok();
+            }
         }
     }
 

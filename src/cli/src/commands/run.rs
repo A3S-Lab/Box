@@ -72,6 +72,14 @@ pub struct RunArgs {
     #[arg(long)]
     pub rm: bool,
 
+    /// Mount a tmpfs (e.g., "/tmp" or "/tmp:size=100m"), can be repeated
+    #[arg(long)]
+    pub tmpfs: Vec<String>,
+
+    /// Connect to a network (e.g., "mynet")
+    #[arg(long)]
+    pub network: Option<String>,
+
     /// Set metadata labels (KEY=VALUE), can be repeated
     #[arg(short = 'l', long = "label")]
     pub labels: Vec<String>,
@@ -131,6 +139,25 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         ep.split_whitespace().map(String::from).collect::<Vec<_>>()
     });
 
+    // Resolve named volumes (e.g., "mydata:/app/data" → "/home/user/.a3s/volumes/mydata:/app/data")
+    let mut resolved_volumes = Vec::new();
+    let mut volume_names = Vec::new();
+    for vol_spec in &args.volumes {
+        let (resolved, vol_name) = super::volume::resolve_named_volume(vol_spec)?;
+        if let Some(name) = vol_name {
+            volume_names.push(name);
+        }
+        resolved_volumes.push(resolved);
+    }
+
+    // Determine network mode
+    let network_mode = match &args.network {
+        Some(name) => a3s_box_core::NetworkMode::Bridge {
+            network: name.clone(),
+        },
+        None => a3s_box_core::NetworkMode::Tsi,
+    };
+
     // Build BoxConfig
     let config = BoxConfig {
         agent: AgentType::OciRegistry {
@@ -143,10 +170,12 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         },
         cmd: args.cmd.clone(),
         entrypoint_override: entrypoint_override.clone(),
-        volumes: args.volumes.clone(),
+        volumes: resolved_volumes.clone(),
         extra_env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         port_map: args.publish.clone(),
         dns: args.dns.clone(),
+        network: network_mode.clone(),
+        tmpfs: args.tmpfs.clone(),
         ..Default::default()
     };
 
@@ -179,7 +208,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         pid,
         cpus: args.cpus,
         memory_mb,
-        volumes: args.volumes.clone(),
+        volumes: resolved_volumes.clone(),
         env,
         cmd: args.cmd.clone(),
         entrypoint: entrypoint_override.clone(),
@@ -202,10 +231,31 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         health_status,
         health_retries: 0,
         health_last_check: None,
+        network_mode: network_mode.clone(),
+        network_name: args.network.clone(),
+        volume_names: volume_names.clone(),
+        tmpfs: args.tmpfs.clone(),
+        anonymous_volumes: vm.anonymous_volumes().to_vec(),
     };
 
     let mut state = StateFile::load_default()?;
     state.add(record)?;
+
+    // Register endpoint in network store if using bridge networking
+    if let Some(ref net_name) = args.network {
+        let net_store = a3s_box_runtime::NetworkStore::default_path()?;
+        let mut net_config = net_store
+            .get(net_name)?
+            .ok_or_else(|| format!("network '{}' not found", net_name))?;
+        let endpoint = net_config
+            .connect(&box_id, &name)
+            .map_err(|e| format!("Failed to connect to network: {e}"))?;
+        net_store.update(&net_config)?;
+        println!("Connected to network {} (IP: {})", net_name, endpoint.ip_address);
+    }
+
+    // Attach named volumes to this box
+    super::volume::attach_volumes(&volume_names, &box_id)?;
 
     if args.detach {
         println!("{box_id}");
@@ -231,6 +281,18 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Destroy VM
     vm.destroy().await?;
+
+    // Detach named volumes
+    super::volume::detach_volumes(&volume_names, &box_id);
+
+    // Disconnect from network if connected
+    if let Some(ref net_name) = args.network {
+        let net_store = a3s_box_runtime::NetworkStore::default_path()?;
+        if let Some(mut net_config) = net_store.get(net_name)? {
+            net_config.disconnect(&box_id).ok();
+            net_store.update(&net_config)?;
+        }
+    }
 
     // Update state
     let mut state = StateFile::load_default()?;

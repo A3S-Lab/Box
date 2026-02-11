@@ -1,8 +1,10 @@
 //! Network management for container-to-container communication.
 //!
 //! Provides `NetworkStore` for persisting network state and
-//! `NetworkManager` for orchestrating passt-based networking.
+//! `PasstManager` for orchestrating passt-based networking.
 
+mod passt;
 mod store;
 
+pub use passt::PasstManager;
 pub use store::NetworkStore;

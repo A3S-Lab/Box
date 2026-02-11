@@ -88,6 +88,21 @@ pub struct BoxRecord {
     /// Timestamp of last health check
     #[serde(default)]
     pub health_last_check: Option<DateTime<Utc>>,
+    /// Network mode for this box
+    #[serde(default)]
+    pub network_mode: a3s_box_core::NetworkMode,
+    /// Network name (if connected to a bridge network)
+    #[serde(default)]
+    pub network_name: Option<String>,
+    /// Named volumes attached to this box
+    #[serde(default)]
+    pub volume_names: Vec<String>,
+    /// tmpfs mounts for this box
+    #[serde(default)]
+    pub tmpfs: Vec<String>,
+    /// Anonymous volumes auto-created from OCI VOLUME directives
+    #[serde(default)]
+    pub anonymous_volumes: Vec<String>,
 }
 
 fn default_health_status() -> String {
@@ -381,6 +396,11 @@ mod tests {
             health_status: "none".to_string(),
             health_retries: 0,
             health_last_check: None,
+            network_mode: a3s_box_core::NetworkMode::default(),
+            network_name: None,
+            volume_names: vec![],
+            tmpfs: vec![],
+            anonymous_volumes: vec![],
         }
     }
 

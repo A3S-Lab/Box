@@ -18,6 +18,7 @@ mod inspect;
 mod kill;
 mod load;
 mod logs;
+mod network;
 mod pause;
 mod port;
 mod ps;
@@ -35,6 +36,7 @@ mod system_prune;
 mod top;
 mod unpause;
 mod version;
+pub mod volume;
 mod wait;
 
 use std::path::PathBuf;
@@ -121,6 +123,10 @@ pub enum Command {
     Load(load::LoadArgs),
     /// Copy files between host and a running box
     Cp(cp::CpArgs),
+    /// Manage networks
+    Network(network::NetworkArgs),
+    /// Manage volumes
+    Volume(volume::VolumeArgs),
     /// Show disk usage
     Df(df::DfArgs),
     /// Remove all unused data (stopped boxes and unused images)
@@ -229,6 +235,8 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Save(args) => save::execute(args).await,
         Command::Load(args) => load::execute(args).await,
         Command::Cp(args) => cp::execute(args).await,
+        Command::Network(args) => network::execute(args).await,
+        Command::Volume(args) => volume::execute(args).await,
         Command::Df(args) => df::execute(args).await,
         Command::SystemPrune(args) => system_prune::execute(args).await,
         Command::Version(args) => version::execute(args).await,

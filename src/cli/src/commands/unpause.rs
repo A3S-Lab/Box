@@ -102,6 +102,11 @@ mod tests {
             health_status: "none".to_string(),
             health_retries: 0,
             health_last_check: None,
+            network_mode: a3s_box_core::NetworkMode::default(),
+            network_name: None,
+            volume_names: vec![],
+            tmpfs: vec![],
+            anonymous_volumes: vec![],
         }
     }
 

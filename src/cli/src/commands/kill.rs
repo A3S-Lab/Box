@@ -80,6 +80,8 @@ fn kill_one(
 
     let box_id = record.id.clone();
     let name = record.name.clone();
+    let network_name = record.network_name.clone();
+    let volume_names = record.volume_names.clone();
 
     if let Some(pid) = record.pid {
         unsafe {
@@ -89,6 +91,19 @@ fn kill_one(
 
     // Only update state to stopped for terminating signals
     if signal == libc::SIGKILL || signal == libc::SIGTERM {
+        // Detach named volumes
+        super::volume::detach_volumes(&volume_names, &box_id);
+
+        // Disconnect from network if connected
+        if let Some(ref net_name) = network_name {
+            if let Ok(net_store) = a3s_box_runtime::NetworkStore::default_path() {
+                if let Ok(Some(mut net_config)) = net_store.get(net_name) {
+                    net_config.disconnect(&box_id).ok();
+                    net_store.update(&net_config).ok();
+                }
+            }
+        }
+
         let record = resolve::resolve_mut(state, &box_id)?;
         record.status = "stopped".to_string();
         record.pid = None;

@@ -261,6 +261,11 @@ pub struct BoxConfig {
     /// Network mode: TSI (default), bridge (passt-based), or none.
     #[serde(default)]
     pub network: NetworkMode,
+
+    /// tmpfs mounts (ephemeral in-guest filesystems).
+    /// Format: "/path" or "/path:size=100m"
+    #[serde(default)]
+    pub tmpfs: Vec<String>,
 }
 
 impl Default for BoxConfig {
@@ -283,6 +288,7 @@ impl Default for BoxConfig {
             port_map: vec![],
             dns: vec![],
             network: NetworkMode::default(),
+            tmpfs: vec![],
         }
     }
 }

@@ -234,6 +234,17 @@ impl NetworkConfig {
     pub fn connected_boxes(&self) -> Vec<&NetworkEndpoint> {
         self.endpoints.values().collect()
     }
+
+    /// Get peer endpoints for DNS discovery (all endpoints except the given box).
+    ///
+    /// Returns `(ip_address, box_name)` pairs for all endpoints other than `exclude_box_id`.
+    pub fn peer_endpoints(&self, exclude_box_id: &str) -> Vec<(String, String)> {
+        self.endpoints
+            .values()
+            .filter(|ep| ep.box_id != exclude_box_id)
+            .map(|ep| (ep.ip_address.to_string(), ep.box_name.clone()))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -471,6 +482,55 @@ mod tests {
         assert_eq!(parsed.subnet, "10.88.0.0/24");
         assert_eq!(parsed.endpoints.len(), 1);
         assert!(parsed.endpoints.contains_key("box-1"));
+    }
+
+    // --- NetworkEndpoint tests ---
+
+    // --- peer_endpoints tests ---
+
+    #[test]
+    fn test_peer_endpoints_excludes_self() {
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        net.connect("box-1", "web").unwrap();
+        net.connect("box-2", "api").unwrap();
+        net.connect("box-3", "db").unwrap();
+
+        let peers = net.peer_endpoints("box-1");
+        assert_eq!(peers.len(), 2);
+        assert!(peers.iter().all(|(_, name)| name != "web"));
+        assert!(peers.iter().any(|(_, name)| name == "api"));
+        assert!(peers.iter().any(|(_, name)| name == "db"));
+    }
+
+    #[test]
+    fn test_peer_endpoints_empty_when_alone() {
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        net.connect("box-1", "web").unwrap();
+
+        let peers = net.peer_endpoints("box-1");
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn test_peer_endpoints_returns_all_others() {
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        net.connect("box-1", "web").unwrap();
+        net.connect("box-2", "api").unwrap();
+
+        let peers = net.peer_endpoints("box-1");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].0, "10.88.0.3");
+        assert_eq!(peers[0].1, "api");
+    }
+
+    #[test]
+    fn test_peer_endpoints_nonexistent_excludes_nothing() {
+        let mut net = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        net.connect("box-1", "web").unwrap();
+        net.connect("box-2", "api").unwrap();
+
+        let peers = net.peer_endpoints("nonexistent");
+        assert_eq!(peers.len(), 2);
     }
 
     // --- NetworkEndpoint tests ---

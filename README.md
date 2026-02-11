@@ -39,7 +39,7 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 
 ## Features
 
-- **Docker-like CLI**: Familiar `run`, `stop`, `pause`, `unpause`, `ps`, `logs`, `exec`, `top`, `rename`, `images`, `tag`, `cp`, `attest` commands with label support
+- **Docker-like CLI**: Familiar `run`, `stop`, `pause`, `unpause`, `ps`, `logs`, `exec`, `top`, `rename`, `images`, `tag`, `cp`, `attest`, `network`, `volume` commands with label support
 - **Hardware Isolation**: Each sandbox runs in its own MicroVM via libkrun
 - **Instant Boot**: Sub-second VM startup (~200ms cold start)
 - **OCI Image Support**: Load sandboxes from standard OCI container images
@@ -47,6 +47,10 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **Image Management**: Inspect metadata, prune unused images, tag aliases, configurable cache size
 - **Exec in Running VMs**: Execute commands with env vars, working directory, and user specification support
 - **File Copy**: Transfer files and directories between host and running boxes via `cp`
+- **Bridge Networking**: Container-to-container communication via passt virtio-net with IPAM, custom networks, DNS service discovery, and `--network` flag
+- **Named Volumes**: Persistent named volumes with `volume create/ls/rm/inspect/prune`, auto-creation on first use, attach/detach tracking, and volume labels
+- **tmpfs Mounts**: Ephemeral in-guest memory-backed filesystems via `--tmpfs`
+- **Anonymous Volumes**: Automatic volume creation for OCI `VOLUME` directives with cleanup on `rm`
 - **Restart Policies**: Automatic restart enforcement (`always`, `on-failure`, `unless-stopped`)
 - **Health Checks**: Configurable health check commands with interval, timeout, retries, and start period
 - **System Cleanup**: One-command prune of stopped boxes and unused images
@@ -245,10 +249,10 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 
 | Crate | Binary | Purpose |
 |-------|--------|---------|
-| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (206 tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (122 tests) |
-| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (320 tests) |
-| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (20 tests) |
+| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (235 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (137 tests) |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (351 tests) |
+| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (24 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
 | `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
 
@@ -595,23 +599,29 @@ A3S Box provides the secure infrastructure layer for [SafeClaw](../safeclaw/READ
 - [ ] Kubernetes Operator (BoxAutoscaler CRD)
 - [ ] Integration with Knative cold_start_strategy config
 
-### Phase 9: Docker Feature Parity 📋
+### Phase 9: Docker Feature Parity 🚧
 
 Remaining gaps between A3S Box and Docker, prioritized by impact.
 
-**9.1 Networking (P0)**
-- [ ] Bridge network driver (container-to-container communication)
-- [ ] Custom networks (`a3s-box network create/ls/rm/inspect/connect/disconnect`)
-- [ ] DNS service discovery (resolve containers by name within a network)
-- [ ] Network isolation policies (inter-network firewall rules)
-- [ ] IPv6 support
+**9.1 Networking (P0) ✅**
+- [x] Bridge network driver (container-to-container communication via passt virtio-net)
+- [x] Custom networks (`a3s-box network create/ls/rm/inspect/connect/disconnect`)
+- [x] `--network` flag on `run`/`create` commands
+- [x] Passt process lifecycle management (spawn/stop/cleanup)
+- [x] Network endpoint tracking with IPAM (IP allocation, MAC generation)
+- [x] Automatic network cleanup on stop/rm/kill
+- [x] DNS service discovery (resolve boxes by name via `/etc/hosts` generation)
+- [ ] Network isolation policies (inter-network firewall rules) — deferred to P1
+- [ ] IPv6 support — deferred to P1
 
-**9.2 Volume Management (P0)**
-- [ ] Named volumes (`a3s-box volume create/ls/rm/inspect/prune`)
-- [ ] Anonymous volumes (`VOLUME` Dockerfile instruction)
-- [ ] tmpfs mounts (`--tmpfs`)
-- [ ] Bind mount propagation modes (shared, slave, private)
-- [ ] Volume labels and filtering
+**9.2 Volume Management (P0) ✅**
+- [x] Named volumes (`a3s-box volume create/ls/rm/inspect/prune`) with auto-creation on first use
+- [x] Named volume resolution in `-v` flag (e.g., `mydata:/app/data`)
+- [x] Volume attach/detach tracking across box lifecycle (run/stop/rm/kill)
+- [x] Volume labels (`--label key=value`)
+- [x] Anonymous volumes (OCI `VOLUME` directive auto-creates volumes, cleaned up on `rm`)
+- [x] tmpfs mounts (`--tmpfs /path` or `--tmpfs /path:size=100m`)
+- ~~Bind mount propagation modes~~ — not meaningful for VMs with virtiofs
 
 **9.3 Registry Push (P1)**
 - [ ] `a3s-box push` — push images to OCI registries
@@ -690,8 +700,8 @@ cargo build -p a3s-box-cli  # Build CLI only
 just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
-cargo test -p a3s-box-cli   # CLI tests (183 tests)
-cargo test -p a3s-box-core  # Core tests (95 tests)
+cargo test -p a3s-box-cli   # CLI tests (235 tests)
+cargo test -p a3s-box-core  # Core tests (137 tests)
 
 # Lint
 just fmt                # Format code

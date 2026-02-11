@@ -47,6 +47,9 @@ pub struct OciImageConfig {
 
     /// Labels
     pub labels: std::collections::HashMap<String, String>,
+
+    /// Volumes declared in the image (OCI VOLUME directive)
+    pub volumes: Vec<String>,
 }
 
 impl OciImage {
@@ -292,6 +295,13 @@ impl OciImageConfig {
             .and_then(|c| c.labels().clone())
             .unwrap_or_default();
 
+        // Parse volumes (OCI VOLUME directive)
+        let volumes = config
+            .as_ref()
+            .and_then(|c| c.volumes().as_ref())
+            .map(|vols| vols.iter().cloned().collect())
+            .unwrap_or_default();
+
         Self {
             entrypoint,
             cmd,
@@ -300,6 +310,7 @@ impl OciImageConfig {
             user,
             exposed_ports,
             labels,
+            volumes,
         }
     }
 }
@@ -507,6 +518,50 @@ mod tests {
             manifest_content.len()
         );
         fs::write(path.join("index.json"), index_content).unwrap();
+    }
+
+    #[test]
+    fn test_from_oci_config_parses_volumes() {
+        // Directly test OciImageConfig::from_oci_config with volumes
+        let config_json = r#"{
+            "architecture": "amd64",
+            "os": "linux",
+            "config": {
+                "Volumes": {
+                    "/data": {},
+                    "/var/log": {}
+                }
+            },
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": []
+            },
+            "history": []
+        }"#;
+        let oci_config: oci_spec::image::ImageConfiguration =
+            serde_json::from_str(config_json).unwrap();
+        let config = OciImageConfig::from_oci_config(&oci_config);
+        assert_eq!(config.volumes.len(), 2);
+        assert!(config.volumes.contains(&"/data".to_string()));
+        assert!(config.volumes.contains(&"/var/log".to_string()));
+    }
+
+    #[test]
+    fn test_from_oci_config_no_volumes() {
+        let config_json = r#"{
+            "architecture": "amd64",
+            "os": "linux",
+            "config": {},
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": []
+            },
+            "history": []
+        }"#;
+        let oci_config: oci_spec::image::ImageConfiguration =
+            serde_json::from_str(config_json).unwrap();
+        let config = OciImageConfig::from_oci_config(&oci_config);
+        assert!(config.volumes.is_empty());
     }
 
     // Helper function to create a test layer (minimal tar.gz)

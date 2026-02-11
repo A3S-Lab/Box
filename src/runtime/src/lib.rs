@@ -18,6 +18,7 @@ pub mod rootfs;
 pub mod tee;
 pub mod vm;
 pub mod vmm;
+pub mod volume;
 
 // Re-export common types
 pub use cache::{LayerCache, RootfsCache};
@@ -32,7 +33,9 @@ pub use tee::{AttestationReport, AttestationRequest, CertificateChain, PlatformI
 pub use tee::{verify_attestation, AttestationPolicy, AmdKdsClient, MinTcbPolicy, PolicyResult, VerificationResult};
 pub use grpc::{AgentClient, AttestationClient, ExecClient};
 pub use network::NetworkStore;
+pub use network::PasstManager;
 pub use vm::{BoxState, VmManager};
+pub use volume::VolumeStore;
 pub use vmm::{Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, ShimHandler, TeeInstanceConfig, VmController, VmHandler, VmMetrics};
 
 /// A3S Box Runtime version.

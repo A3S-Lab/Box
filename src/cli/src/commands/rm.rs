@@ -60,6 +60,33 @@ fn rm_one(
     let box_id = record.id.clone();
     let name = record.name.clone();
     let box_dir = record.box_dir.clone();
+    let network_name = record.network_name.clone();
+    let volume_names = record.volume_names.clone();
+    let anonymous_volumes = record.anonymous_volumes.clone();
+
+    // Detach named volumes
+    super::volume::detach_volumes(&volume_names, &box_id);
+
+    // Remove anonymous volumes (auto-created from OCI VOLUME directives)
+    if !anonymous_volumes.is_empty() {
+        if let Ok(vol_store) = a3s_box_runtime::VolumeStore::default_path() {
+            for anon_name in &anonymous_volumes {
+                if let Err(e) = vol_store.remove(anon_name, true) {
+                    tracing::debug!(volume = anon_name, error = %e, "Failed to remove anonymous volume");
+                }
+            }
+        }
+    }
+
+    // Disconnect from network if connected
+    if let Some(ref net_name) = network_name {
+        if let Ok(net_store) = a3s_box_runtime::NetworkStore::default_path() {
+            if let Ok(Some(mut net_config)) = net_store.get(net_name) {
+                net_config.disconnect(&box_id).ok();
+                net_store.update(&net_config).ok();
+            }
+        }
+    }
 
     // Remove box directory
     if box_dir.exists() {

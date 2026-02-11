@@ -65,6 +65,14 @@ pub struct CreateArgs {
     #[arg(short = 'l', long = "label")]
     pub labels: Vec<String>,
 
+    /// Mount a tmpfs (e.g., "/tmp" or "/tmp:size=100m"), can be repeated
+    #[arg(long)]
+    pub tmpfs: Vec<String>,
+
+    /// Connect to a network (e.g., "mynet")
+    #[arg(long)]
+    pub network: Option<String>,
+
     /// Health check command (e.g., "curl -f http://localhost/health")
     #[arg(long)]
     pub health_cmd: Option<String>,
@@ -118,9 +126,28 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     std::fs::create_dir_all(box_dir.join("sockets"))?;
     std::fs::create_dir_all(box_dir.join("logs"))?;
 
+    // Resolve named volumes
+    let mut resolved_volumes = Vec::new();
+    let mut volume_names = Vec::new();
+    for vol_spec in &args.volumes {
+        let (resolved, vol_name) = super::volume::resolve_named_volume(vol_spec)?;
+        if let Some(name) = vol_name {
+            volume_names.push(name);
+        }
+        resolved_volumes.push(resolved);
+    }
+
     let entrypoint = args.entrypoint.as_ref().map(|ep| {
         ep.split_whitespace().map(String::from).collect::<Vec<_>>()
     });
+
+    // Determine network mode
+    let network_mode = match &args.network {
+        Some(name) => a3s_box_core::NetworkMode::Bridge {
+            network: name.clone(),
+        },
+        None => a3s_box_core::NetworkMode::Tsi,
+    };
 
     let record = BoxRecord {
         id: box_id.clone(),
@@ -131,7 +158,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         pid: None,
         cpus: args.cpus,
         memory_mb,
-        volumes: args.volumes,
+        volumes: resolved_volumes,
         env,
         cmd: vec![],
         entrypoint,
@@ -154,10 +181,18 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         health_status: "none".to_string(),
         health_retries: 0,
         health_last_check: None,
+        network_mode,
+        network_name: args.network,
+        volume_names: volume_names.clone(),
+        tmpfs: args.tmpfs,
+        anonymous_volumes: vec![],
     };
 
     let mut state = StateFile::load_default()?;
     state.add(record)?;
+
+    // Attach named volumes to this box
+    super::volume::attach_volumes(&volume_names, &box_id)?;
 
     println!("{box_id}");
     Ok(())

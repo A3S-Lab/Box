@@ -259,6 +259,22 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             })?;
 
         ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
+
+        // Inject network env vars for guest init to configure eth0
+        let ip_cidr = format!("{}/{}", net_config.ip_address, net_config.prefix_len);
+        ctx.set_env(&[
+            ("A3S_NET_IP".to_string(), ip_cidr),
+            ("A3S_NET_GATEWAY".to_string(), net_config.gateway.to_string()),
+            (
+                "A3S_NET_DNS".to_string(),
+                net_config
+                    .dns_servers
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        ])?;
     }
 
     // Configure user/group from OCI USER directive

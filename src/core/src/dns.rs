@@ -55,6 +55,26 @@ fn read_host_resolv_conf() -> Option<String> {
     Some(nameservers.join("\n") + "\n")
 }
 
+/// Generate /etc/hosts content for DNS service discovery.
+///
+/// Produces a hosts file with:
+/// - localhost entry (127.0.0.1)
+/// - the box's own IP and name
+/// - peer entries for all other boxes on the same network
+pub fn generate_hosts_file(
+    own_ip: &str,
+    own_name: &str,
+    peers: &[(String, String)], // (ip, name)
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("127.0.0.1 localhost".to_string());
+    lines.push(format!("{} {}", own_ip, own_name));
+    for (ip, name) in peers {
+        lines.push(format!("{} {}", ip, name));
+    }
+    lines.join("\n") + "\n"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +96,44 @@ mod tests {
     fn test_single_dns() {
         let result = generate_resolv_conf(&["9.9.9.9".to_string()]);
         assert_eq!(result, "nameserver 9.9.9.9\n");
+    }
+
+    // --- generate_hosts_file tests ---
+
+    #[test]
+    fn test_hosts_file_no_peers() {
+        let result = generate_hosts_file("10.88.0.2", "web", &[]);
+        assert_eq!(result, "127.0.0.1 localhost\n10.88.0.2 web\n");
+    }
+
+    #[test]
+    fn test_hosts_file_with_peers() {
+        let peers = vec![
+            ("10.88.0.3".to_string(), "api".to_string()),
+            ("10.88.0.4".to_string(), "db".to_string()),
+        ];
+        let result = generate_hosts_file("10.88.0.2", "web", &peers);
+        assert_eq!(
+            result,
+            "127.0.0.1 localhost\n10.88.0.2 web\n10.88.0.3 api\n10.88.0.4 db\n"
+        );
+    }
+
+    #[test]
+    fn test_hosts_file_own_entry_present() {
+        let result = generate_hosts_file("192.168.1.5", "mybox", &[]);
+        assert!(result.contains("192.168.1.5 mybox"));
+        assert!(result.contains("127.0.0.1 localhost"));
+    }
+
+    #[test]
+    fn test_hosts_file_deterministic_output() {
+        let peers = vec![
+            ("10.0.0.2".to_string(), "a".to_string()),
+            ("10.0.0.3".to_string(), "b".to_string()),
+        ];
+        let r1 = generate_hosts_file("10.0.0.1", "self", &peers);
+        let r2 = generate_hosts_file("10.0.0.1", "self", &peers);
+        assert_eq!(r1, r2);
     }
 }

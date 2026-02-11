@@ -7,7 +7,7 @@
 //! - Managing process lifecycle
 //! - Handling SIGTERM for graceful shutdown
 
-use a3s_box_guest_init::{exec_server, namespace};
+use a3s_box_guest_init::{exec_server, namespace, network};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info, warn};
@@ -114,10 +114,16 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     // Step 2: Mount virtio-fs shares
     mount_virtio_fs_shares()?;
 
-    // Step 3: Register SIGTERM handler before spawning any children
+    // Step 2.5: Mount tmpfs volumes
+    mount_tmpfs_volumes()?;
+
+    // Step 3: Configure guest network (if passt mode is active)
+    network::configure_guest_network()?;
+
+    // Step 4: Register SIGTERM handler before spawning any children
     register_sigterm_handler()?;
 
-    // Step 4: Parse agent configuration from environment
+    // Step 5: Parse agent configuration from environment
     let agent_config = AgentConfig::from_env();
     info!(
         executable = %agent_config.executable,
@@ -126,11 +132,11 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
         "Agent configuration loaded"
     );
 
-    // Step 5: Create namespace for agent
+    // Step 6: Create namespace for agent
     info!("Creating isolated namespace for agent");
     let namespace_config = namespace::NamespaceConfig::default();
 
-    // Step 6: Launch agent in isolated namespace
+    // Step 7: Launch agent in isolated namespace
     info!("Launching agent process");
 
     // Convert args to &str for spawn_isolated
@@ -151,14 +157,14 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Agent started with PID {}", agent_pid);
 
-    // Step 7: Start exec server in background thread
+    // Step 8: Start exec server in background thread
     std::thread::spawn(|| {
         if let Err(e) = exec_server::run_exec_server() {
             error!("Exec server failed: {}", e);
         }
     });
 
-    // Step 8: Wait for agent process (reap zombies, handle SIGTERM)
+    // Step 9: Wait for agent process (reap zombies, handle SIGTERM)
     wait_for_children()?;
 
     Ok(())
@@ -308,6 +314,62 @@ fn mount_user_volumes() -> Result<(), Box<dyn std::error::Error>> {
 
     if index > 0 {
         info!("Mounted {} user volume(s)", index);
+    }
+
+    Ok(())
+}
+
+/// Mount tmpfs volumes passed via A3S_TMPFS_* environment variables.
+///
+/// Each variable has the format: `<path>[:<options>]`
+/// Options are passed directly to mount (e.g., "size=100m").
+fn mount_tmpfs_volumes() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        use nix::mount::{mount, MsFlags};
+
+        let mut index = 0;
+        loop {
+            let env_key = format!("A3S_TMPFS_{}", index);
+            match std::env::var(&env_key) {
+                Ok(value) => {
+                    // Format: "/path" or "/path:options"
+                    let (path, options) = match value.split_once(':') {
+                        Some((p, opts)) => (p, Some(opts.to_string())),
+                        None => (value.as_str(), None),
+                    };
+
+                    info!(
+                        path = path,
+                        options = ?options,
+                        "Mounting tmpfs"
+                    );
+
+                    // Ensure mount point exists
+                    std::fs::create_dir_all(path)?;
+
+                    mount(
+                        None::<&str>,
+                        path,
+                        Some("tmpfs"),
+                        MsFlags::empty(),
+                        options.as_deref(),
+                    )?;
+
+                    index += 1;
+                }
+                Err(_) => break,
+            }
+        }
+
+        if index > 0 {
+            info!("Mounted {} tmpfs volume(s)", index);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        info!("Skipping tmpfs mount on non-Linux platform (development mode)");
     }
 
     Ok(())

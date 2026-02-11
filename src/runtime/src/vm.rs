@@ -12,8 +12,9 @@ use tokio::sync::RwLock;
 use crate::grpc::{AgentClient, AttestationClient, ExecClient};
 use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
-use crate::vmm::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig, VmController, VmHandler, DEFAULT_SHUTDOWN_TIMEOUT_MS};
+use crate::vmm::{Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmController, VmHandler, DEFAULT_SHUTDOWN_TIMEOUT_MS};
 use crate::cache::RootfsCache;
+use crate::network::PasstManager;
 use crate::AGENT_VSOCK_PORT;
 
 /// Box state machine.
@@ -86,8 +87,14 @@ pub struct VmManager {
     /// Exec client for executing commands in the guest
     exec_client: Option<ExecClient>,
 
+    /// Passt manager for bridge networking (None if TSI mode)
+    passt_manager: Option<PasstManager>,
+
     /// A3S home directory (~/.a3s)
     home_dir: PathBuf,
+
+    /// Anonymous volume names created during boot (from OCI VOLUME directives)
+    anonymous_volumes: Vec<String>,
 }
 
 impl VmManager {
@@ -105,7 +112,9 @@ impl VmManager {
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
             exec_client: None,
+            passt_manager: None,
             home_dir,
+            anonymous_volumes: Vec::new(),
         }
     }
 
@@ -122,7 +131,9 @@ impl VmManager {
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
             exec_client: None,
+            passt_manager: None,
             home_dir,
+            anonymous_volumes: Vec::new(),
         }
     }
 
@@ -144,6 +155,14 @@ impl VmManager {
     /// Get the exec client, if connected.
     pub fn exec_client(&self) -> Option<&ExecClient> {
         self.exec_client.as_ref()
+    }
+
+    /// Get the names of anonymous volumes created during boot.
+    ///
+    /// These are auto-created from OCI VOLUME directives and should be tracked
+    /// for cleanup when the box is removed.
+    pub fn anonymous_volumes(&self) -> &[String] {
+        &self.anonymous_volumes
     }
 
     /// Execute a command in the guest VM.
@@ -209,7 +228,21 @@ impl VmManager {
         tracing::debug!(dns = %resolv_content.trim(), "Configured guest DNS");
 
         // 2. Build InstanceSpec
-        let spec = self.build_instance_spec(&layout)?;
+        let mut spec = self.build_instance_spec(&layout)?;
+
+        // 2.5. Configure bridge networking if requested
+        let bridge_network = match &self.config.network {
+            a3s_box_core::NetworkMode::Bridge { network } => Some(network.clone()),
+            _ => None,
+        };
+        if let Some(network_name) = bridge_network {
+            let net_config = self.setup_bridge_network(&network_name)?;
+
+            // Write /etc/hosts for DNS service discovery
+            self.write_hosts_file(&layout, &network_name)?;
+
+            spec.network = Some(net_config);
+        }
 
         // 3. Initialize controller
         let shim_path = VmController::find_shim()?;
@@ -245,6 +278,121 @@ impl VmManager {
         Ok(())
     }
 
+    /// Set up bridge networking by looking up the network, spawning passt,
+    /// and building the NetworkInstanceConfig for the VM spec.
+    fn setup_bridge_network(
+        &mut self,
+        network_name: &str,
+    ) -> Result<NetworkInstanceConfig> {
+        use crate::network::NetworkStore;
+
+        let store = NetworkStore::default_path()?;
+        let net_config = store
+            .get(network_name)?
+            .ok_or_else(|| BoxError::NetworkError(format!(
+                "network '{}' not found", network_name
+            )))?;
+
+        // Find this box's endpoint in the network
+        let endpoint = net_config
+            .endpoints
+            .get(&self.box_id)
+            .ok_or_else(|| BoxError::NetworkError(format!(
+                "box '{}' is not connected to network '{}'; run with --network or use 'network connect'",
+                self.box_id, network_name
+            )))?;
+
+        let ip = endpoint.ip_address;
+        let gateway = net_config.gateway;
+
+        // Parse prefix length from subnet CIDR
+        let prefix_len: u8 = net_config
+            .subnet
+            .split('/')
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(24);
+
+        // Parse MAC address from hex string "02:42:0a:58:00:02" → [u8; 6]
+        let mac_address = parse_mac(&endpoint.mac_address).map_err(|e| {
+            BoxError::NetworkError(format!("invalid MAC address '{}': {}", endpoint.mac_address, e))
+        })?;
+
+        // Determine DNS servers
+        let dns_servers: Vec<std::net::Ipv4Addr> = if !self.config.dns.is_empty() {
+            self.config.dns.iter()
+                .filter_map(|s| s.parse().ok())
+                .collect()
+        } else {
+            vec![std::net::Ipv4Addr::new(8, 8, 8, 8)]
+        };
+
+        // Spawn passt daemon
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let mut passt = PasstManager::new(&box_dir);
+        passt.spawn(ip, gateway, prefix_len, &dns_servers)?;
+
+        let socket_path = passt.socket_path().to_path_buf();
+        self.passt_manager = Some(passt);
+
+        tracing::info!(
+            network = network_name,
+            ip = %ip,
+            gateway = %gateway,
+            "Bridge networking configured via passt"
+        );
+
+        Ok(NetworkInstanceConfig {
+            passt_socket_path: socket_path,
+            ip_address: ip,
+            gateway,
+            prefix_len,
+            mac_address,
+            dns_servers,
+        })
+    }
+
+    /// Write /etc/hosts to the guest rootfs for DNS service discovery.
+    ///
+    /// Looks up the box's own endpoint and all peer endpoints in the network,
+    /// then generates a hosts file mapping IPs to box names.
+    fn write_hosts_file(
+        &self,
+        layout: &BoxLayout,
+        network_name: &str,
+    ) -> Result<()> {
+        use crate::network::NetworkStore;
+
+        let store = NetworkStore::default_path()?;
+        let net_config = store.get(network_name)?.ok_or_else(|| {
+            BoxError::NetworkError(format!("network '{}' not found", network_name))
+        })?;
+
+        let endpoint = net_config.endpoints.get(&self.box_id).ok_or_else(|| {
+            BoxError::NetworkError(format!(
+                "box '{}' not connected to network '{}'",
+                self.box_id, network_name
+            ))
+        })?;
+
+        let own_ip = endpoint.ip_address.to_string();
+        let own_name = endpoint.box_name.clone();
+        let peers = net_config.peer_endpoints(&self.box_id);
+
+        let hosts_content = a3s_box_core::dns::generate_hosts_file(&own_ip, &own_name, &peers);
+        let hosts_path = layout.rootfs_path.join("etc/hosts");
+        std::fs::write(&hosts_path, &hosts_content).map_err(|e| {
+            BoxError::Other(format!(
+                "Failed to write {}: {}",
+                hosts_path.display(),
+                e
+            ))
+        })?;
+        tracing::debug!(hosts = %hosts_content.trim(), "Configured guest /etc/hosts for DNS discovery");
+
+        Ok(())
+    }
+
     /// Destroy the VM with the default shutdown timeout.
     pub async fn destroy(&mut self) -> Result<()> {
         self.destroy_with_timeout(DEFAULT_SHUTDOWN_TIMEOUT_MS).await
@@ -267,6 +415,12 @@ impl VmManager {
         if let Some(mut handler) = self.handler.write().await.take() {
             handler.stop(timeout_ms)?;
         }
+
+        // Stop passt daemon if running
+        if let Some(ref mut passt) = self.passt_manager {
+            passt.stop();
+        }
+        self.passt_manager = None;
 
         *state = BoxState::Stopped;
 
@@ -906,7 +1060,7 @@ impl VmManager {
     }
 
     /// Build InstanceSpec from config and layout.
-    fn build_instance_spec(&self, layout: &BoxLayout) -> Result<InstanceSpec> {
+    fn build_instance_spec(&mut self, layout: &BoxLayout) -> Result<InstanceSpec> {
         // Build filesystem mounts
         let mut fs_mounts = vec![
             FsMount {
@@ -925,6 +1079,60 @@ impl VmManager {
         for (i, vol) in self.config.volumes.iter().enumerate() {
             let mount = Self::parse_volume_mount(vol, i)?;
             fs_mounts.push(mount);
+        }
+
+        // Auto-create anonymous volumes for OCI VOLUME directives
+        let user_guest_paths: std::collections::HashSet<String> = self
+            .config
+            .volumes
+            .iter()
+            .filter_map(|v| v.split(':').nth(1).map(String::from))
+            .collect();
+        let mut anon_vol_offset = self.config.volumes.len();
+
+        if let Some(ref oci_config) = layout.agent_oci_config {
+            for vol_path in &oci_config.volumes {
+                // Skip if the user already mounted something at this path
+                if user_guest_paths.contains(vol_path) {
+                    tracing::debug!(
+                        path = vol_path,
+                        "Skipping anonymous volume — user volume already covers this path"
+                    );
+                    continue;
+                }
+
+                // Generate a deterministic anonymous volume name
+                let path_hash = &format!("{:x}", md5_simple(vol_path))[..8];
+                let short_box_id = &self.box_id[..8.min(self.box_id.len())];
+                let anon_name = format!("anon_{}_{}", short_box_id, path_hash);
+
+                // Create the volume via VolumeStore (best-effort)
+                match self.create_anonymous_volume(&anon_name) {
+                    Ok(host_path) => {
+                        let tag = format!("vol{}", anon_vol_offset);
+                        fs_mounts.push(FsMount {
+                            tag: tag.clone(),
+                            host_path: PathBuf::from(&host_path),
+                            read_only: false,
+                        });
+                        self.anonymous_volumes.push(anon_name);
+                        anon_vol_offset += 1;
+                        tracing::info!(
+                            volume = %tag,
+                            guest_path = vol_path,
+                            host_path = %host_path,
+                            "Created anonymous volume for OCI VOLUME directive"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = vol_path,
+                            error = %e,
+                            "Failed to create anonymous volume, skipping"
+                        );
+                    }
+                }
+            }
         }
 
         // Build entrypoint based on agent type and OCI config
@@ -966,6 +1174,27 @@ impl VmManager {
                     let mode = if parts.len() >= 3 && parts[2] == "ro" { ":ro" } else { "" };
                     env.push((format!("A3S_VOL_{}", i), format!("vol{}:{}{}", i, guest_path, mode)));
                 }
+            }
+
+            // Pass anonymous volume mounts (from OCI VOLUME directives) to guest init
+            if let Some(ref oci_config) = layout.agent_oci_config {
+                let mut anon_idx = self.config.volumes.len();
+                for vol_path in &oci_config.volumes {
+                    if user_guest_paths.contains(vol_path) {
+                        continue;
+                    }
+                    env.push((
+                        format!("A3S_VOL_{}", anon_idx),
+                        format!("vol{}:{}", anon_idx, vol_path),
+                    ));
+                    anon_idx += 1;
+                }
+            }
+
+            // Pass tmpfs mounts to guest init for mounting inside the VM
+            // Format: A3S_TMPFS_<index>=<path>[:<options>]
+            for (i, tmpfs_spec) in self.config.tmpfs.iter().enumerate() {
+                env.push((format!("A3S_TMPFS_{}", i), tmpfs_spec.clone()));
             }
 
             tracing::debug!(
@@ -1197,6 +1426,26 @@ impl VmManager {
         })
     }
 
+    /// Create an anonymous volume via VolumeStore.
+    ///
+    /// Returns the host path of the created volume.
+    fn create_anonymous_volume(&self, name: &str) -> Result<String> {
+        use crate::volume::VolumeStore;
+
+        let store = VolumeStore::default_path()?;
+
+        // If the volume already exists (e.g., from a previous run), reuse it
+        if let Some(existing) = store.get(name)? {
+            return Ok(existing.mount_point);
+        }
+
+        let mut config = a3s_box_core::volume::VolumeConfig::new(name, "");
+        config.labels.insert("anonymous".to_string(), "true".to_string());
+        config.attach(&self.box_id);
+        let created = store.create(config)?;
+        Ok(created.mount_point)
+    }
+
     /// Wait for the VM process to be running (for generic OCI images without an agent).
     ///
     /// Gives the VM a brief moment to start, then verifies the process hasn't exited.
@@ -1380,6 +1629,31 @@ fn dirs_home() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".a3s"))
 }
 
+/// Simple FNV-1a hash for generating short deterministic hashes from strings.
+fn md5_simple(input: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Parse a MAC address string "02:42:0a:58:00:02" into [u8; 6].
+fn parse_mac(mac_str: &str) -> std::result::Result<[u8; 6], String> {
+    let parts: Vec<&str> = mac_str.split(':').collect();
+    if parts.len() != 6 {
+        return Err(format!("expected 6 octets, got {}", parts.len()));
+    }
+
+    let mut mac = [0u8; 6];
+    for (i, part) in parts.iter().enumerate() {
+        mac[i] = u8::from_str_radix(part, 16)
+            .map_err(|e| format!("invalid octet '{}': {}", part, e))?;
+    }
+    Ok(mac)
+}
+
 /// VM configuration for libkrun (legacy, kept for compatibility).
 #[derive(Debug, Clone)]
 pub struct VmConfig {
@@ -1486,6 +1760,7 @@ mod tests {
             user: None,
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
+            volumes: vec![],
         };
 
         let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
@@ -1503,6 +1778,7 @@ mod tests {
             user: None,
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
+            volumes: vec![],
         };
 
         let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
@@ -1520,6 +1796,7 @@ mod tests {
             user: None,
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
+            volumes: vec![],
         };
 
         let (exec, _args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
@@ -1536,6 +1813,7 @@ mod tests {
             user: None,
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
+            volumes: vec![],
         };
 
         let override_cmd = vec!["sleep".to_string(), "3600".to_string()];
@@ -1554,6 +1832,7 @@ mod tests {
             user: None,
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
+            volumes: vec![],
         };
 
         let (exec, _) = VmManager::resolve_oci_entrypoint(&config, false, &[], None);
@@ -1570,6 +1849,7 @@ mod tests {
             user: None,
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
+            volumes: vec![],
         };
 
         // Override replaces the image entrypoint entirely
@@ -1590,6 +1870,7 @@ mod tests {
             user: None,
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
+            volumes: vec![],
         };
 
         // Both entrypoint and cmd overridden
@@ -1625,7 +1906,9 @@ mod tests {
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
             exec_client: None,
+            passt_manager: None,
             home_dir: home_dir.to_path_buf(),
+            anonymous_volumes: Vec::new(),
         }
     }
 
@@ -1811,5 +2094,38 @@ mod tests {
         assert!(target2.join("init").is_file());
         assert_eq!(std::fs::read_to_string(target2.join("init")).unwrap(), "init_binary");
         assert_eq!(std::fs::read_to_string(target2.join("etc/config")).unwrap(), "config_data");
+    }
+
+    #[test]
+    fn test_parse_mac_valid() {
+        let mac = parse_mac("02:42:0a:58:00:02").unwrap();
+        assert_eq!(mac, [0x02, 0x42, 0x0a, 0x58, 0x00, 0x02]);
+    }
+
+    #[test]
+    fn test_parse_mac_all_zeros() {
+        let mac = parse_mac("00:00:00:00:00:00").unwrap();
+        assert_eq!(mac, [0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_parse_mac_all_ff() {
+        let mac = parse_mac("ff:ff:ff:ff:ff:ff").unwrap();
+        assert_eq!(mac, [0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn test_parse_mac_too_few_octets() {
+        assert!(parse_mac("02:42:0a").is_err());
+    }
+
+    #[test]
+    fn test_parse_mac_too_many_octets() {
+        assert!(parse_mac("02:42:0a:58:00:02:ff").is_err());
+    }
+
+    #[test]
+    fn test_parse_mac_invalid_hex() {
+        assert!(parse_mac("02:42:zz:58:00:02").is_err());
     }
 }

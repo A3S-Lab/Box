@@ -30,3 +30,6 @@ clap = { version = "4.4", features = ["derive"] }
 
 [features]
 default = []
+
+[dev-dependencies]
+serial_test = "3"
