@@ -581,6 +581,66 @@ A3S Box provides the secure infrastructure layer for [SafeClaw](../safeclaw/READ
 - [ ] Kubernetes Operator (BoxAutoscaler CRD)
 - [ ] Integration with Knative cold_start_strategy config
 
+### Phase 9: Docker Feature Parity 📋
+
+Remaining gaps between A3S Box and Docker, prioritized by impact.
+
+**9.1 Networking (P0)**
+- [ ] Bridge network driver (container-to-container communication)
+- [ ] Custom networks (`a3s-box network create/ls/rm/inspect/connect/disconnect`)
+- [ ] DNS service discovery (resolve containers by name within a network)
+- [ ] Network isolation policies (inter-network firewall rules)
+- [ ] IPv6 support
+
+**9.2 Volume Management (P0)**
+- [ ] Named volumes (`a3s-box volume create/ls/rm/inspect/prune`)
+- [ ] Anonymous volumes (`VOLUME` Dockerfile instruction)
+- [ ] tmpfs mounts (`--tmpfs`)
+- [ ] Bind mount propagation modes (shared, slave, private)
+- [ ] Volume labels and filtering
+
+**9.3 Registry Push (P1)**
+- [ ] `a3s-box push` — push images to OCI registries
+- [ ] Registry login/logout (`a3s-box login/logout`)
+- [ ] Image signing and verification (cosign/notation)
+
+**9.4 Resource Limits (P1)**
+- [ ] CPU shares (`--cpu-shares`) and quota (`--cpu-quota`/`--cpu-period`)
+- [ ] CPU pinning (`--cpuset-cpus`)
+- [ ] Memory reservation (`--memory-reservation`)
+- [ ] Memory swap limit (`--memory-swap`)
+- [ ] PID limits (`--pids-limit`)
+- [ ] Block I/O limits (`--blkio-weight`, `--device-read-bps`)
+- [ ] Ulimits (`--ulimit`)
+
+**9.5 Dockerfile Completion (P2)**
+- [ ] `ADD` instruction (URL download, auto-extract tar)
+- [ ] `HEALTHCHECK` instruction
+- [ ] `SHELL` instruction
+- [ ] `STOPSIGNAL` instruction
+- [ ] `VOLUME` instruction (anonymous volumes)
+- [ ] `ONBUILD` instruction (triggers)
+- [ ] Multi-stage builds (`FROM ... AS ...`)
+
+**9.6 Logging (P2)**
+- [ ] Logging drivers (json-file, syslog, journald)
+- [ ] Log rotation (`--log-opt max-size`, `--log-opt max-file`)
+- [ ] Structured JSON log output
+
+**9.7 Security Hardening (P2)**
+- [ ] Seccomp profiles (`--security-opt seccomp=...`)
+- [ ] Linux capabilities management (`--cap-add`, `--cap-drop`)
+- [ ] Read-only rootfs (`--read-only`)
+- [ ] No-new-privileges (`--security-opt no-new-privileges`)
+
+**9.8 Advanced Features (P3)**
+- [ ] Multi-container orchestration (compose-like YAML)
+- [ ] Image export/import (`save`/`load` — partially done)
+- [ ] Buildx multi-platform builds
+- [ ] Secrets management (`--secret`)
+- [ ] CRI streaming API (Exec, Attach, PortForward)
+- [ ] Container events API
+
 ---
 
 ## Development
