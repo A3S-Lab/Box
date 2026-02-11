@@ -39,7 +39,7 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 
 ## Features
 
-- **Docker-like CLI**: Familiar `run`, `stop`, `pause`, `unpause`, `ps`, `logs`, `exec`, `top`, `rename`, `images`, `tag`, `cp` commands with label support
+- **Docker-like CLI**: Familiar `run`, `stop`, `pause`, `unpause`, `ps`, `logs`, `exec`, `top`, `rename`, `images`, `tag`, `cp`, `attest` commands with label support
 - **Hardware Isolation**: Each sandbox runs in its own MicroVM via libkrun
 - **Instant Boot**: Sub-second VM startup (~200ms cold start)
 - **OCI Image Support**: Load sandboxes from standard OCI container images
@@ -58,6 +58,7 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **Cross-Platform**: macOS (Apple Silicon) and Linux (x86_64/ARM64)
 - **No Root Required**: Runs without elevated privileges using Apple HVF or KVM
 - **TEE Support**: AMD SEV-SNP for hardware-enforced memory encryption
+- **Remote Attestation**: SNP attestation report generation, ECDSA-P384 signature verification, certificate chain validation, and configurable policy checks via `a3s-box attest`
 
 ## Quick Start
 
@@ -158,6 +159,12 @@ a3s-box system-prune -f          # Remove stopped boxes + unused images
 # System info
 a3s-box version
 a3s-box info                     # Virtualization support, cache stats
+
+# TEE attestation
+a3s-box attest dev               # Request and verify attestation report
+a3s-box attest dev --policy policy.json  # Verify against custom policy
+a3s-box attest dev --quiet       # Output true/false only (for scripts)
+a3s-box attest dev --raw         # Output raw report without verification
 ```
 
 ### Command Reference
@@ -190,6 +197,7 @@ a3s-box info                     # Virtualization support, cache stats
 | `system-prune` | Remove all stopped boxes and unused images (`-a`, `-f`) |
 | `version` | Show version |
 | `info` | Show system information |
+| `attest <box>` | Request and verify a TEE attestation report (`--policy`, `--nonce`, `--raw`, `--quiet`) |
 | `update` | Update a3s-box to the latest version |
 
 Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible resolution).
@@ -237,9 +245,9 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 
 | Crate | Binary | Purpose |
 |-------|--------|---------|
-| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (183 tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (95 tests) |
-| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, exec client (207 tests) |
+| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (206 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (122 tests) |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (320 tests) |
 | `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (20 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
 | `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
@@ -338,7 +346,7 @@ let config = BoxConfig {
 
 ### Phase 3: CLI & Ecosystem Integration ✅
 
-- [x] Docker-like CLI (`a3s-box`) with 28 commands: run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update
+- [x] Docker-like CLI (`a3s-box`) with 29 commands: run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update, attest
 - [x] Box state management with atomic persistence (`~/.a3s/boxes.json`)
 - [x] Docker-compatible name/ID/prefix resolution
 - [x] PID-based liveness reconciliation for dead box detection
@@ -411,17 +419,23 @@ let config = BoxConfig {
 **Phase 6.1: Basic TEE Support ✅**
 - [x] AMD SEV-SNP hardware detection
 - [x] TEE configuration types (`TeeConfig`, `SevSnpGeneration`)
-- [x] TEE error types (`TeeConfig`, `TeeNotSupported`)
+- [x] TEE error types (`TeeConfig`, `TeeNotSupported`, `AttestationError`)
 - [x] KrunContext TEE methods (`enable_split_irqchip`, `set_tee_config`)
 - [x] TEE config file generation for libkrun
 - [x] Shim TEE configuration before VM start
 
-**Phase 6.2: Remote Attestation 📋**
-- [ ] KBS (Key Broker Service) integration
-- [ ] Attestation report generation
-- [ ] Secret provisioning via attestation
-- [ ] Certificate chain verification
-- [ ] Multi-backend attestation (Intel SGX, AMD SEV, ARM CCA)
+**Phase 6.2: Remote Attestation 🚧**
+- [x] Attestation report types and SNP report parsing (`AttestationRequest`, `AttestationReport`, `PlatformInfo`, `TcbVersion`)
+- [x] Host-guest attestation client via Unix socket (`AttestationClient`)
+- [x] VmManager attestation integration (`request_attestation()`)
+- [x] ECDSA-P384 signature verification using VCEK public key
+- [x] Certificate chain validation (VCEK → ASK → ARK)
+- [x] AMD KDS client for fetching/caching certificates from `kds.amd.com`
+- [x] Configurable attestation policy (measurement, TCB version, debug mode, SMT, policy mask)
+- [x] `a3s-box attest` CLI command with `--policy`, `--nonce`, `--raw`, `--quiet` options
+- [ ] Guest Agent `/attest` endpoint (SNP_GET_REPORT ioctl on `/dev/sev-guest`)
+- [ ] KBS (Key Broker Service) integration for secret provisioning
+- [ ] Periodic re-attestation with configurable interval
 
 **Phase 6.3: Sealed Storage 📋**
 - [ ] MRENCLAVE/MRSIGNER key derivation
@@ -692,7 +706,7 @@ box/
 ├── src/
 │   ├── cli/            # Docker-like CLI (a3s-box binary)
 │   │   └── src/
-│   │       ├── commands/   # 28 subcommands (run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update)
+│   │       ├── commands/   # 29 subcommands (run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update, attest)
 │   │       ├── state.rs    # Box state persistence (~/.a3s/boxes.json)
 │   │       ├── resolve.rs  # Docker-style name/ID resolution
 │   │       └── output.rs   # Table formatting, size parsing, memory parsing
