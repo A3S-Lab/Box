@@ -642,7 +642,7 @@ Remaining gaps between A3S Box and Docker, prioritized by impact.
 - [ ] `HEALTHCHECK` instruction
 - [ ] `SHELL` instruction
 - [ ] `STOPSIGNAL` instruction
-- [ ] `VOLUME` instruction (anonymous volumes)
+- [x] `VOLUME` instruction (anonymous volumes — implemented in Phase 9.2)
 - [ ] `ONBUILD` instruction (triggers)
 - [ ] Multi-stage builds (`FROM ... AS ...`)
 
