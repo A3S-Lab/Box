@@ -9,7 +9,7 @@ use a3s_box_core::event::{BoxEvent, EventEmitter};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::grpc::{AgentClient, ExecClient};
+use crate::grpc::{AgentClient, AttestationClient, ExecClient};
 use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
 use crate::vmm::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig, VmController, VmHandler, DEFAULT_SHUTDOWN_TIMEOUT_MS};
@@ -345,6 +345,65 @@ impl VmManager {
             .await
             .as_ref()
             .map(|handler| handler.pid())
+    }
+
+    /// Request a TEE attestation report from the guest VM.
+    ///
+    /// Connects to the guest agent and requests a hardware-signed SNP
+    /// attestation report. The report proves the VM is running in a genuine
+    /// TEE environment and has not been tampered with.
+    ///
+    /// # Arguments
+    /// * `request` - Attestation request containing the verifier's nonce
+    ///
+    /// # Returns
+    /// * `Ok(AttestationReport)` - Hardware-signed report with cert chain
+    /// * `Err(...)` - If VM is not ready, TEE is not configured, or attestation fails
+    pub async fn request_attestation(
+        &self,
+        request: &crate::tee::AttestationRequest,
+    ) -> Result<crate::tee::AttestationReport> {
+        // Verify VM is in a running state
+        let state = self.state.read().await;
+        match *state {
+            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
+            BoxState::Created => {
+                return Err(BoxError::AttestationError(
+                    "VM not yet booted".to_string(),
+                ));
+            }
+            BoxState::Stopped => {
+                return Err(BoxError::AttestationError("VM is stopped".to_string()));
+            }
+        }
+        drop(state);
+
+        // Verify TEE is configured
+        if matches!(self.config.tee, TeeConfig::None) {
+            return Err(BoxError::AttestationError(
+                "TEE is not configured for this box".to_string(),
+            ));
+        }
+
+        // Connect to the guest agent for attestation
+        let socket_path = self
+            .agent_client
+            .as_ref()
+            .map(|c| c.socket_path().to_path_buf())
+            .ok_or_else(|| {
+                BoxError::AttestationError("Agent client not connected".to_string())
+            })?;
+
+        let attest_client = AttestationClient::connect(&socket_path).await?;
+        let report = attest_client.get_report(request).await?;
+
+        tracing::info!(
+            box_id = %self.box_id,
+            report_size = report.report.len(),
+            "Attestation report received from guest"
+        );
+
+        Ok(report)
     }
 
     /// Prepare the filesystem layout for the VM.

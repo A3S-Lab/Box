@@ -30,6 +30,13 @@ tracing = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
+# TEE attestation verification
+p384 = { workspace = true }
+ecdsa = { workspace = true }
+x509-cert = { workspace = true }
+der = { workspace = true }
+spki = { workspace = true }
+
 # HTTP client
 reqwest = { workspace = true }
 

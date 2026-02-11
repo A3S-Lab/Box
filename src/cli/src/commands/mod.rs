@@ -1,6 +1,7 @@
 //! CLI command definitions and dispatch.
 
 mod attach;
+mod attest;
 mod build;
 mod cp;
 mod create;
@@ -88,6 +89,8 @@ pub enum Command {
     Inspect(inspect::InspectArgs),
     /// Attach to a running box's console output
     Attach(attach::AttachArgs),
+    /// Request and verify a TEE attestation report from a running box
+    Attest(attest::AttestArgs),
     /// Block until one or more boxes stop
     Wait(wait::WaitArgs),
     /// Rename a box
@@ -210,6 +213,7 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Top(args) => top::execute(args).await,
         Command::Inspect(args) => inspect::execute(args).await,
         Command::Attach(args) => attach::execute(args).await,
+        Command::Attest(args) => attest::execute(args).await,
         Command::Wait(args) => wait::execute(args).await,
         Command::Rename(args) => rename::execute(args).await,
         Command::Port(args) => port::execute(args).await,

@@ -12,6 +12,8 @@ use a3s_box_core::error::{BoxError, Result};
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::tee::attestation::{AttestationReport, AttestationRequest};
+
 /// Client for communicating with the guest agent over Unix socket.
 ///
 /// This client only supports health checking. Agent-level operations
@@ -177,6 +179,119 @@ impl ExecClient {
     }
 }
 
+/// Client for requesting attestation reports from the guest VM.
+///
+/// Sends HTTP POST /attest requests over the Unix socket to the guest agent,
+/// which calls the SNP_GET_REPORT ioctl and returns the hardware-signed report.
+#[derive(Debug)]
+pub struct AttestationClient {
+    socket_path: PathBuf,
+}
+
+impl AttestationClient {
+    /// Connect to the guest agent for attestation requests.
+    pub async fn connect(socket_path: &Path) -> Result<Self> {
+        let _stream = UnixStream::connect(socket_path).await.map_err(|e| {
+            BoxError::AttestationError(format!(
+                "Failed to connect to agent at {}: {}",
+                socket_path.display(),
+                e,
+            ))
+        })?;
+
+        Ok(Self {
+            socket_path: socket_path.to_path_buf(),
+        })
+    }
+
+    /// Get the socket path this client is connected to.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Request an attestation report from the guest VM.
+    ///
+    /// The guest agent receives the request, calls `SNP_GET_REPORT` via
+    /// `/dev/sev-guest`, and returns the hardware-signed report with
+    /// the certificate chain.
+    ///
+    /// # Arguments
+    /// * `request` - Attestation request containing the verifier's nonce
+    ///
+    /// # Returns
+    /// * `Ok(AttestationReport)` - Hardware-signed report with cert chain
+    /// * `Err(...)` - If the guest agent is unreachable or SNP is unavailable
+    pub async fn get_report(
+        &self,
+        request: &AttestationRequest,
+    ) -> Result<AttestationReport> {
+        let body = serde_json::to_string(request).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to serialize attestation request: {}", e))
+        })?;
+
+        let http_request = format!(
+            "POST /attest HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+
+        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            BoxError::AttestationError(format!(
+                "Attestation connection failed to {}: {}",
+                self.socket_path.display(),
+                e,
+            ))
+        })?;
+
+        stream.write_all(http_request.as_bytes()).await.map_err(|e| {
+            BoxError::AttestationError(format!("Attestation request write failed: {}", e))
+        })?;
+
+        // Read full response (report + certs can be several KB)
+        let mut response = Vec::with_capacity(8192);
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let n = stream.read(&mut buf).await.map_err(|e| {
+                BoxError::AttestationError(format!("Attestation response read failed: {}", e))
+            })?;
+            if n == 0 {
+                break;
+            }
+            response.extend_from_slice(&buf[..n]);
+            // Safety limit: 1 MiB (report + full cert chain)
+            if response.len() > 1024 * 1024 {
+                break;
+            }
+        }
+
+        let response_str = String::from_utf8_lossy(&response);
+
+        // Find the JSON body after the HTTP headers
+        let body_str = response_str
+            .find("\r\n\r\n")
+            .map(|pos| &response_str[pos + 4..])
+            .ok_or_else(|| {
+                BoxError::AttestationError(
+                    "Malformed attestation response: no HTTP body".to_string(),
+                )
+            })?;
+
+        // Check for HTTP error status
+        if !response_str.starts_with("HTTP/1.1 200") && !response_str.starts_with("HTTP/1.0 200") {
+            return Err(BoxError::AttestationError(format!(
+                "Attestation request failed: {}",
+                body_str.chars().take(200).collect::<String>(),
+            )));
+        }
+
+        let report: AttestationReport = serde_json::from_str(body_str).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to parse attestation response: {}", e))
+        })?;
+
+        Ok(report)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +308,14 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, BoxError::ExecError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_attestation_connect_nonexistent_socket() {
+        let result =
+            AttestationClient::connect(Path::new("/tmp/nonexistent-a3s-attest-test.sock")).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, BoxError::AttestationError(_)));
     }
 }
