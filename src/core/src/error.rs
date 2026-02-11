@@ -34,6 +34,10 @@ pub enum BoxError {
     #[error("TEE hardware not available: {0}")]
     TeeNotSupported(String),
 
+    /// Attestation error
+    #[error("Attestation error: {0}")]
+    AttestationError(String),
+
     /// OCI image error
     #[error("OCI image error: {0}")]
     OciImageError(String),
@@ -57,6 +61,10 @@ pub enum BoxError {
     /// Build error
     #[error("Build error: {0}")]
     BuildError(String),
+
+    /// Network error
+    #[error("Network error: {0}")]
+    NetworkError(String),
 
     /// Generic error
     #[error("{0}")]
@@ -150,6 +158,15 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "TEE hardware not available: AMD SEV-SNP not available"
+        );
+    }
+
+    #[test]
+    fn test_attestation_error_display() {
+        let error = BoxError::AttestationError("Failed to get SNP report".to_string());
+        assert_eq!(
+            error.to_string(),
+            "Attestation error: Failed to get SNP report"
         );
     }
 

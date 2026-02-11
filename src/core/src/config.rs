@@ -1,3 +1,4 @@
+use crate::network::NetworkMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -256,6 +257,10 @@ pub struct BoxConfig {
     /// If empty, reads from host /etc/resolv.conf, falling back to 8.8.8.8.
     #[serde(default)]
     pub dns: Vec<String>,
+
+    /// Network mode: TSI (default), bridge (passt-based), or none.
+    #[serde(default)]
+    pub network: NetworkMode,
 }
 
 impl Default for BoxConfig {
@@ -277,6 +282,7 @@ impl Default for BoxConfig {
             pool: PoolConfig::default(),
             port_map: vec![],
             dns: vec![],
+            network: NetworkMode::default(),
         }
     }
 }
