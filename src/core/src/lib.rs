@@ -12,7 +12,7 @@ pub mod network;
 pub mod volume;
 
 // Re-export commonly used types
-pub use config::{BoxConfig, ResourceConfig};
+pub use config::{BoxConfig, ResourceConfig, ResourceLimits};
 pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
 pub use exec::{ExecOutput, ExecRequest};

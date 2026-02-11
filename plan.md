@@ -1,77 +1,143 @@
-# Plan: `a3s-box build` — Dockerfile-based Image Building
+# Plan: 9.3 Registry Push (P1)
 
-## Goal
+## Context
 
-Implement `a3s-box build` command that parses a Dockerfile, executes instructions to produce an OCI image, and stores it in the local image store. This is the Docker `build` equivalent for a3s-box.
+`oci-distribution` 0.11 already supports `push()`, `push_blob()`, `push_manifest()`. The pull infrastructure (`RegistryPuller`, `RegistryAuth`, `ImageReference`, `ImageStore`) is mature. We need to add push, login, and logout.
 
-## Design Decisions
+## Scope
 
-### Scope: Subset of Dockerfile Instructions
+1. **Credential Store** — Persistent per-registry credentials at `~/.a3s/auth/credentials.json`
+2. **RegistryPusher** — Push local OCI images to registries using `oci-distribution`
+3. **CLI: `a3s-box push`** — Push a local image to a registry
+4. **CLI: `a3s-box login`** — Store registry credentials
+5. **CLI: `a3s-box logout`** — Remove stored credentials
+6. **Wire RegistryAuth** — Load credentials from store (fallback to env vars)
 
-We do NOT need a full Docker BuildKit reimplementation. a3s-box targets AI agent sandboxing, so we support the most commonly used Dockerfile instructions:
+Image signing (cosign/notation) is deferred — it's a separate concern.
 
-| Instruction | Priority | Notes |
-|---|---|---|
-| `FROM` | P0 | Base image (pulls from registry) |
-| `RUN` | P0 | Execute commands in build container |
-| `COPY` | P0 | Copy files from build context |
-| `WORKDIR` | P0 | Set working directory |
-| `ENV` | P0 | Set environment variables |
-| `ENTRYPOINT` | P0 | Set entrypoint |
-| `CMD` | P0 | Set default command |
-| `EXPOSE` | P0 | Declare ports |
-| `LABEL` | P0 | Set metadata labels |
-| `USER` | P0 | Set user |
-| `ARG` | P1 | Build-time variables |
+---
 
-**Phase 1 (this PR):** FROM, COPY, RUN, WORKDIR, ENV, ENTRYPOINT, CMD, EXPOSE, LABEL, USER, ARG
+## Feature 1: Credential Store
 
-### Architecture
+**File:** `runtime/src/oci/credentials.rs` (new)
 
-```
-crates/box/src/
-├── runtime/src/
-│   └── oci/
-│       ├── build/              # NEW: Build engine
-│       │   ├── mod.rs          # Public API + re-exports
-│       │   ├── dockerfile.rs   # Dockerfile parser
-│       │   ├── engine.rs       # Build engine (executes instructions)
-│       │   └── layer.rs        # Layer creation (tar.gz from diff)
-│       └── mod.rs              # Add `pub mod build;`
-├── cli/src/
-│   └── commands/
-│       ├── build.rs            # NEW: CLI command
-│       └── mod.rs              # Register build command
+```rust
+pub struct CredentialStore { path: PathBuf }
+
+impl CredentialStore {
+    pub fn default_path() -> Result<Self>       // ~/.a3s/auth/credentials.json
+    pub fn store(&self, registry: &str, username: &str, password: &str) -> Result<()>
+    pub fn get(&self, registry: &str) -> Result<Option<(String, String)>>
+    pub fn remove(&self, registry: &str) -> Result<bool>
+    pub fn list_registries(&self) -> Result<Vec<String>>
+}
 ```
 
-### How `RUN` Works Without Docker
+- JSON format: `{ "registries": { "docker.io": { "username": "...", "password": "..." }, ... } }`
+- Atomic writes (write tmp, rename)
+- Creates parent directory on first use
+- Tests: store/get/remove/list, overwrite existing, remove nonexistent
 
-For Phase 1, we use **host-side execution**:
+## Feature 2: RegistryPusher
 
-- `RUN` on Linux: execute via `chroot <rootfs> sh -c "cmd"` (requires root or unshare)
-- `RUN` on macOS: **skip execution, emit warning** (base images are Linux; can't chroot into Linux rootfs on macOS)
-- `COPY`, `WORKDIR`, `ENV`, `CMD`, `ENTRYPOINT`, `LABEL`, `EXPOSE`, `USER`: work everywhere (filesystem ops + metadata)
+**File:** `runtime/src/oci/registry.rs` (extend existing)
 
-This means on macOS, `a3s-box build` works for Dockerfiles that only use COPY/ENV/CMD/ENTRYPOINT/LABEL (common for interpreted languages). Full RUN support requires Linux.
+```rust
+pub struct RegistryPusher { client: Client, auth: RegistryAuth }
 
-### Layer Strategy
+impl RegistryPusher {
+    pub fn new() -> Self
+    pub fn with_auth(auth: RegistryAuth) -> Self
+    pub async fn push(&self, reference: &ImageReference, image_dir: &Path) -> Result<PushResult>
+}
 
-Each `RUN` and `COPY` instruction creates a new layer:
-1. Snapshot the rootfs state (file list + mtimes)
-2. Execute the instruction
-3. Diff the filesystem to find changed/added/deleted files
-4. Create a tar.gz layer from the diff
-5. Update the OCI config with the new layer's diff_id
+pub struct PushResult { pub manifest_url: String, pub config_url: String }
+```
 
-### Output
+Push workflow:
+1. Read OCI layout from `image_dir` (index.json -> manifest -> config + layers)
+2. Read each layer blob from `blobs/sha256/`
+3. Read config blob
+4. Call `client.push()` with `ImageLayer` vec, `Config`, and auth
+5. Return URLs
 
-The build produces a standard OCI image layout stored in the local image store, identical to what `a3s-box pull` produces.
+Also extend `RegistryAuth`:
+```rust
+pub fn from_credential_store(registry: &str) -> Self
+```
 
-## Implementation Steps
+Tests: `to_oci_reference` for push, `from_credential_store` fallback chain
 
-### Step 1: Dockerfile Parser (`runtime/src/oci/build/dockerfile.rs`)
-### Step 2: Layer Creator (`runtime/src/oci/build/layer.rs`)
-### Step 3: Build Engine (`runtime/src/oci/build/engine.rs`)
-### Step 4: CLI Command (`cli/src/commands/build.rs`)
-### Step 5: Wire up modules, error types, re-exports
-### Step 6: Documentation & Tests
+## Feature 3: CLI `push` command
+
+**File:** `cli/src/commands/push.rs` (new)
+
+```rust
+pub struct PushArgs {
+    pub image: String,
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+```
+
+Workflow:
+1. Parse image reference
+2. Look up image in local ImageStore
+3. Load auth from CredentialStore (for target registry)
+4. Create RegistryPusher with auth
+5. Push image directory to registry
+6. Print digest/URL
+
+## Feature 4: CLI `login` command
+
+**File:** `cli/src/commands/login.rs` (new)
+
+```rust
+pub struct LoginArgs {
+    pub server: Option<String>,
+    #[arg(short, long)]
+    pub username: Option<String>,
+    #[arg(short, long)]
+    pub password: Option<String>,
+    #[arg(long)]
+    pub password_stdin: bool,
+}
+```
+
+## Feature 5: CLI `logout` command
+
+**File:** `cli/src/commands/logout.rs` (new)
+
+```rust
+pub struct LogoutArgs {
+    pub server: Option<String>,
+}
+```
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `runtime/src/oci/credentials.rs` | New — CredentialStore |
+| `runtime/src/oci/registry.rs` | Add RegistryPusher, extend RegistryAuth |
+| `runtime/src/oci/mod.rs` | Export new types |
+| `runtime/src/lib.rs` | Re-export CredentialStore, RegistryPusher |
+| `cli/src/commands/push.rs` | New — push command |
+| `cli/src/commands/login.rs` | New — login command |
+| `cli/src/commands/logout.rs` | New — logout command |
+| `cli/src/commands/mod.rs` | Register push/login/logout commands |
+| `cli/src/commands/pull.rs` | Use CredentialStore for auth |
+| `crates/box/README.md` | Update roadmap 9.3, features |
+| `README.md` | Update progress |
+
+## Implementation Order
+
+1. Credential Store (isolated, pure TDD)
+2. Extend RegistryAuth with credential store loading
+3. RegistryPusher (extends existing registry.rs)
+4. CLI login/logout (simple, uses CredentialStore)
+5. CLI push (uses RegistryPusher + ImageStore + CredentialStore)
+6. Wire pull command to use CredentialStore
+7. Documentation updates

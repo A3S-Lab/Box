@@ -107,6 +107,7 @@ mod tests {
             volume_names: vec![],
             tmpfs: vec![],
             anonymous_volumes: vec![],
+            resource_limits: a3s_box_core::config::ResourceLimits::default(),
         }
     }
 

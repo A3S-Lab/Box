@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig};
+use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig, ResourceLimits};
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::VmManager;
 use clap::Args;
@@ -107,11 +107,46 @@ pub struct RunArgs {
     /// Command to run (override entrypoint)
     #[arg(last = true)]
     pub cmd: Vec<String>,
+
+    /// Limit PIDs inside the box (--pids-limit)
+    #[arg(long)]
+    pub pids_limit: Option<u64>,
+
+    /// Pin to specific CPUs (e.g., "0,1,3" or "0-3")
+    #[arg(long)]
+    pub cpuset_cpus: Option<String>,
+
+    /// Set ulimit (e.g., "nofile=1024:4096"), can be repeated
+    #[arg(long = "ulimit")]
+    pub ulimits: Vec<String>,
+
+    /// CPU shares (relative weight, 2-262144)
+    #[arg(long)]
+    pub cpu_shares: Option<u64>,
+
+    /// CPU quota in microseconds per cpu-period
+    #[arg(long)]
+    pub cpu_quota: Option<i64>,
+
+    /// CPU period in microseconds (default: 100000)
+    #[arg(long)]
+    pub cpu_period: Option<u64>,
+
+    /// Memory reservation/soft limit (e.g., "256m", "1g")
+    #[arg(long)]
+    pub memory_reservation: Option<String>,
+
+    /// Memory+swap limit (e.g., "1g", "-1" for unlimited)
+    #[arg(long)]
+    pub memory_swap: Option<String>,
 }
 
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let memory_mb = parse_memory(&args.memory)
         .map_err(|e| format!("Invalid --memory: {e}"))?;
+
+    // Build resource limits before any partial moves of args
+    let resource_limits = build_resource_limits(&args)?;
 
     let name = args.name.unwrap_or_else(generate_name);
     let env = parse_env_vars(&args.env)?;
@@ -176,6 +211,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         dns: args.dns.clone(),
         network: network_mode.clone(),
         tmpfs: args.tmpfs.clone(),
+        resource_limits: resource_limits.clone(),
         ..Default::default()
     };
 
@@ -236,6 +272,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         volume_names: volume_names.clone(),
         tmpfs: args.tmpfs.clone(),
         anonymous_volumes: vm.anonymous_volumes().to_vec(),
+        resource_limits,
     };
 
     let mut state = StateFile::load_default()?;
@@ -323,4 +360,61 @@ fn parse_env_vars(vars: &[String]) -> Result<HashMap<String, String>, String> {
         map.insert(key.to_string(), value.to_string());
     }
     Ok(map)
+}
+
+/// Build ResourceLimits from CLI args.
+fn build_resource_limits(args: &RunArgs) -> Result<ResourceLimits, Box<dyn std::error::Error>> {
+    let memory_reservation = match &args.memory_reservation {
+        Some(s) => Some(parse_memory_bytes(s).map_err(|e| format!("Invalid --memory-reservation: {e}"))?),
+        None => None,
+    };
+    let memory_swap = match &args.memory_swap {
+        Some(s) if s == "-1" => Some(-1i64),
+        Some(s) => Some(parse_memory_bytes(s).map_err(|e| format!("Invalid --memory-swap: {e}"))? as i64),
+        None => None,
+    };
+
+    Ok(ResourceLimits {
+        pids_limit: args.pids_limit,
+        cpuset_cpus: args.cpuset_cpus.clone(),
+        ulimits: args.ulimits.clone(),
+        cpu_shares: args.cpu_shares,
+        cpu_quota: args.cpu_quota,
+        cpu_period: args.cpu_period,
+        memory_reservation,
+        memory_swap,
+    })
+}
+
+/// Parse a memory size string (e.g., "256m", "1g", "1073741824") into bytes.
+fn parse_memory_bytes(s: &str) -> Result<u64, String> {
+    let s = s.trim().to_lowercase();
+    if s.is_empty() {
+        return Err("empty value".to_string());
+    }
+
+    if let Ok(bytes) = s.parse::<u64>() {
+        return Ok(bytes);
+    }
+
+    let (num_str, multiplier) = if s.ends_with("gb") || s.ends_with("g") {
+        let num = s.trim_end_matches("gb").trim_end_matches('g');
+        (num, 1024u64 * 1024 * 1024)
+    } else if s.ends_with("mb") || s.ends_with("m") {
+        let num = s.trim_end_matches("mb").trim_end_matches('m');
+        (num, 1024u64 * 1024)
+    } else if s.ends_with("kb") || s.ends_with("k") {
+        let num = s.trim_end_matches("kb").trim_end_matches('k');
+        (num, 1024u64)
+    } else if s.ends_with('b') {
+        let num = s.trim_end_matches('b');
+        (num, 1u64)
+    } else {
+        return Err(format!("unrecognized memory format: {s}"));
+    };
+
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid number: {num_str}"))?;
+    Ok(num * multiplier)
 }

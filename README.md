@@ -53,6 +53,7 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **Anonymous Volumes**: Automatic volume creation for OCI `VOLUME` directives with cleanup on `rm`
 - **Restart Policies**: Automatic restart enforcement (`always`, `on-failure`, `unless-stopped`)
 - **Health Checks**: Configurable health check commands with interval, timeout, retries, and start period
+- **Resource Limits**: PID limits (`--pids-limit`), CPU pinning (`--cpuset-cpus`), custom ulimits (`--ulimit`), CPU shares/quota, memory reservation/swap via cgroup v2 (Linux)
 - **System Cleanup**: One-command prune of stopped boxes and unused images
 - **CRI Runtime**: Kubernetes-compatible CRI RuntimeService and ImageService
 - **Warm Pool**: Pre-booted idle MicroVMs for instant allocation
@@ -250,7 +251,7 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (235 tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (137 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (143 tests) |
 | `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (351 tests) |
 | `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (24 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
@@ -628,14 +629,14 @@ Remaining gaps between A3S Box and Docker, prioritized by impact.
 - [ ] Registry login/logout (`a3s-box login/logout`)
 - [ ] Image signing and verification (cosign/notation)
 
-**9.4 Resource Limits (P1)**
-- [ ] CPU shares (`--cpu-shares`) and quota (`--cpu-quota`/`--cpu-period`)
-- [ ] CPU pinning (`--cpuset-cpus`)
-- [ ] Memory reservation (`--memory-reservation`)
-- [ ] Memory swap limit (`--memory-swap`)
-- [ ] PID limits (`--pids-limit`)
-- [ ] Block I/O limits (`--blkio-weight`, `--device-read-bps`)
-- [ ] Ulimits (`--ulimit`)
+**9.4 Resource Limits (P1) ✅**
+- [x] CPU shares (`--cpu-shares`) and quota (`--cpu-quota`/`--cpu-period`) — cgroup v2 `cpu.weight`/`cpu.max` (Linux)
+- [x] CPU pinning (`--cpuset-cpus`) — `sched_setaffinity()` on shim process (Linux)
+- [x] Memory reservation (`--memory-reservation`) — cgroup v2 `memory.low` (Linux)
+- [x] Memory swap limit (`--memory-swap`) — cgroup v2 `memory.swap.max` (Linux)
+- [x] PID limits (`--pids-limit`) — guest RLIMIT_NPROC via `krun_set_rlimits`
+- [x] Ulimits (`--ulimit`) — custom guest rlimits via `krun_set_rlimits`
+- ~~Block I/O limits (`--blkio-weight`, `--device-read-bps`)~~ — not meaningful for VMs with virtio
 
 **9.5 Dockerfile Completion (P2)**
 - [ ] `ADD` instruction (URL download, auto-extract tar)
@@ -701,7 +702,7 @@ just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
 cargo test -p a3s-box-cli   # CLI tests (235 tests)
-cargo test -p a3s-box-core  # Core tests (137 tests)
+cargo test -p a3s-box-core  # Core tests (143 tests)
 
 # Lint
 just fmt                # Format code

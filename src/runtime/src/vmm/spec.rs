@@ -1,5 +1,6 @@
 //! InstanceSpec - Complete configuration for a VM instance.
 
+use a3s_box_core::config::ResourceLimits;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -113,6 +114,10 @@ pub struct InstanceSpec {
     /// None = TSI mode (default), Some = passt virtio-net mode.
     #[serde(default)]
     pub network: Option<NetworkInstanceConfig>,
+
+    /// Resource limits (PID limits, CPU pinning, ulimits, cgroup controls).
+    #[serde(default)]
+    pub resource_limits: ResourceLimits,
 }
 
 impl Default for InstanceSpec {
@@ -136,6 +141,7 @@ impl Default for InstanceSpec {
             port_map: Vec::new(),
             user: None,
             network: None,
+            resource_limits: ResourceLimits::default(),
         }
     }
 }

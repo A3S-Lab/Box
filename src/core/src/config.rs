@@ -194,6 +194,52 @@ impl Default for PoolConfig {
     }
 }
 
+/// Resource limits for a box instance.
+///
+/// Tier 1 limits (rlimits, cpuset) work on all platforms.
+/// Tier 2 limits (cgroup-based) are Linux-only and best-effort.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ResourceLimits {
+    /// PID limit inside the guest (--pids-limit).
+    /// Maps to RLIMIT_NPROC in guest rlimits.
+    #[serde(default)]
+    pub pids_limit: Option<u64>,
+
+    /// CPU pinning: comma-separated CPU IDs (--cpuset-cpus "0,1,3").
+    /// Applied via sched_setaffinity() on the shim process (Linux only).
+    #[serde(default)]
+    pub cpuset_cpus: Option<String>,
+
+    /// Custom rlimits (--ulimit), format: "RESOURCE=SOFT:HARD".
+    #[serde(default)]
+    pub ulimits: Vec<String>,
+
+    /// CPU shares (--cpu-shares), relative weight 2-262144.
+    /// Applied via cgroup v2 cpu.weight (Linux only).
+    #[serde(default)]
+    pub cpu_shares: Option<u64>,
+
+    /// CPU quota in microseconds per --cpu-period (--cpu-quota).
+    /// Applied via cgroup v2 cpu.max (Linux only).
+    #[serde(default)]
+    pub cpu_quota: Option<i64>,
+
+    /// CPU period in microseconds (--cpu-period, default 100000).
+    /// Applied via cgroup v2 cpu.max (Linux only).
+    #[serde(default)]
+    pub cpu_period: Option<u64>,
+
+    /// Memory reservation/soft limit in bytes (--memory-reservation).
+    /// Applied via cgroup v2 memory.low (Linux only).
+    #[serde(default)]
+    pub memory_reservation: Option<u64>,
+
+    /// Memory+swap limit in bytes (--memory-swap, -1 = unlimited).
+    /// Applied via cgroup v2 memory.swap.max (Linux only).
+    #[serde(default)]
+    pub memory_swap: Option<i64>,
+}
+
 /// Box configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxConfig {
@@ -266,6 +312,10 @@ pub struct BoxConfig {
     /// Format: "/path" or "/path:size=100m"
     #[serde(default)]
     pub tmpfs: Vec<String>,
+
+    /// Resource limits (PID limits, CPU pinning, ulimits, cgroup controls).
+    #[serde(default)]
+    pub resource_limits: ResourceLimits,
 }
 
 impl Default for BoxConfig {
@@ -289,6 +339,7 @@ impl Default for BoxConfig {
             dns: vec![],
             network: NetworkMode::default(),
             tmpfs: vec![],
+            resource_limits: ResourceLimits::default(),
         }
     }
 }
@@ -864,5 +915,105 @@ mod tests {
         let config: BoxConfig = serde_json::from_str(json).unwrap();
         assert!(config.cache.enabled);
         assert!(!config.pool.enabled);
+    }
+
+    // --- ResourceLimits tests ---
+
+    #[test]
+    fn test_resource_limits_default() {
+        let limits = ResourceLimits::default();
+        assert!(limits.pids_limit.is_none());
+        assert!(limits.cpuset_cpus.is_none());
+        assert!(limits.ulimits.is_empty());
+        assert!(limits.cpu_shares.is_none());
+        assert!(limits.cpu_quota.is_none());
+        assert!(limits.cpu_period.is_none());
+        assert!(limits.memory_reservation.is_none());
+        assert!(limits.memory_swap.is_none());
+    }
+
+    #[test]
+    fn test_resource_limits_serialization() {
+        let limits = ResourceLimits {
+            pids_limit: Some(100),
+            cpuset_cpus: Some("0,1".to_string()),
+            ulimits: vec!["nofile=1024:4096".to_string()],
+            cpu_shares: Some(512),
+            cpu_quota: Some(50000),
+            cpu_period: Some(100000),
+            memory_reservation: Some(256 * 1024 * 1024),
+            memory_swap: Some(1024 * 1024 * 1024),
+        };
+
+        let json = serde_json::to_string(&limits).unwrap();
+        let parsed: ResourceLimits = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.pids_limit, Some(100));
+        assert_eq!(parsed.cpuset_cpus, Some("0,1".to_string()));
+        assert_eq!(parsed.ulimits, vec!["nofile=1024:4096"]);
+        assert_eq!(parsed.cpu_shares, Some(512));
+        assert_eq!(parsed.cpu_quota, Some(50000));
+        assert_eq!(parsed.cpu_period, Some(100000));
+        assert_eq!(parsed.memory_reservation, Some(256 * 1024 * 1024));
+        assert_eq!(parsed.memory_swap, Some(1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_resource_limits_deserialization_defaults() {
+        let json = "{}";
+        let limits: ResourceLimits = serde_json::from_str(json).unwrap();
+        assert!(limits.pids_limit.is_none());
+        assert!(limits.ulimits.is_empty());
+    }
+
+    #[test]
+    fn test_resource_limits_memory_swap_unlimited() {
+        let limits = ResourceLimits {
+            memory_swap: Some(-1),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&limits).unwrap();
+        let parsed: ResourceLimits = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.memory_swap, Some(-1));
+    }
+
+    #[test]
+    fn test_box_config_with_resource_limits() {
+        let config = BoxConfig {
+            resource_limits: ResourceLimits {
+                pids_limit: Some(256),
+                cpu_shares: Some(1024),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: BoxConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.resource_limits.pids_limit, Some(256));
+        assert_eq!(parsed.resource_limits.cpu_shares, Some(1024));
+    }
+
+    #[test]
+    fn test_box_config_backward_compat_no_resource_limits() {
+        // Old configs without resource_limits should deserialize with defaults
+        let json = r#"{
+            "workspace": "/tmp/workspace",
+            "skills": ["/tmp/skills"],
+            "resources": {
+                "vcpus": 2,
+                "memory_mb": 1024,
+                "disk_mb": 4096,
+                "timeout": 3600
+            },
+            "log_level": "Info",
+            "debug_grpc": false
+        }"#;
+
+        let config: BoxConfig = serde_json::from_str(json).unwrap();
+        assert!(config.resource_limits.pids_limit.is_none());
+        assert!(config.resource_limits.ulimits.is_empty());
     }
 }

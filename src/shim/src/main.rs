@@ -97,6 +97,282 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// Parse a Docker-style ulimit string into a krun rlimit string.
+///
+/// Input format: "RESOURCE=SOFT:HARD" (e.g., "nofile=1024:4096")
+/// Output format: "RESOURCE_NUM=SOFT:HARD" (e.g., "7=1024:4096")
+///
+/// Returns None if the resource name is unrecognized.
+fn parse_ulimit(ulimit: &str) -> Option<String> {
+    let (name, limits) = ulimit.split_once('=')?;
+    let resource_num = match name.to_lowercase().as_str() {
+        "core" => 4,       // RLIMIT_CORE
+        "cpu" => 0,        // RLIMIT_CPU
+        "data" => 2,       // RLIMIT_DATA
+        "fsize" => 1,      // RLIMIT_FSIZE
+        "locks" => 10,     // RLIMIT_LOCKS
+        "memlock" => 8,    // RLIMIT_MEMLOCK
+        "msgqueue" => 12,  // RLIMIT_MSGQUEUE
+        "nice" => 13,      // RLIMIT_NICE
+        "nofile" => 7,     // RLIMIT_NOFILE
+        "nproc" => 6,      // RLIMIT_NPROC
+        "rss" => 5,        // RLIMIT_RSS
+        "rtprio" => 14,    // RLIMIT_RTPRIO
+        "rttime" => 15,    // RLIMIT_RTTIME
+        "sigpending" => 11, // RLIMIT_SIGPENDING
+        "stack" => 3,      // RLIMIT_STACK
+        _ => return None,
+    };
+    Some(format!("{}={}", resource_num, limits))
+}
+
+/// Apply CPU pinning via sched_setaffinity (Linux only).
+#[cfg(target_os = "linux")]
+fn apply_cpuset(cpuset: &str) -> std::result::Result<(), String> {
+    use std::mem;
+
+    // Parse comma-separated CPU IDs (e.g., "0,1,3" or "0-3")
+    let cpus = parse_cpuset_spec(cpuset)?;
+    if cpus.is_empty() {
+        return Err("empty cpuset specification".to_string());
+    }
+
+    unsafe {
+        let mut set: libc::cpu_set_t = mem::zeroed();
+        libc::CPU_ZERO(&mut set);
+        for cpu in &cpus {
+            libc::CPU_SET(*cpu, &mut set);
+        }
+
+        let ret = libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &set);
+        if ret != 0 {
+            return Err(format!(
+                "sched_setaffinity failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    tracing::info!(cpus = ?cpus, "Applied CPU pinning");
+    Ok(())
+}
+
+/// Parse a cpuset specification like "0,1,3" or "0-3" or "0,2-4,7".
+#[cfg(target_os = "linux")]
+fn parse_cpuset_spec(spec: &str) -> std::result::Result<Vec<usize>, String> {
+    let mut cpus = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.contains('-') {
+            let range: Vec<&str> = part.split('-').collect();
+            if range.len() != 2 {
+                return Err(format!("invalid CPU range: {}", part));
+            }
+            let start: usize = range[0]
+                .parse()
+                .map_err(|_| format!("invalid CPU number: {}", range[0]))?;
+            let end: usize = range[1]
+                .parse()
+                .map_err(|_| format!("invalid CPU number: {}", range[1]))?;
+            if start > end {
+                return Err(format!("invalid CPU range: {}-{}", start, end));
+            }
+            for cpu in start..=end {
+                cpus.push(cpu);
+            }
+        } else {
+            let cpu: usize = part
+                .parse()
+                .map_err(|_| format!("invalid CPU number: {}", part))?;
+            cpus.push(cpu);
+        }
+    }
+    Ok(cpus)
+}
+
+/// Apply cgroup v2 resource limits (Linux only, best-effort).
+///
+/// Creates a cgroup under /sys/fs/cgroup/a3s-box/<box_id>/ and writes
+/// the appropriate control files. Moves the current process into the cgroup.
+#[cfg(target_os = "linux")]
+fn apply_cgroup_limits(spec: &InstanceSpec) {
+    let limits = &spec.resource_limits;
+    let has_cgroup_limits = limits.cpu_shares.is_some()
+        || limits.cpu_quota.is_some()
+        || limits.memory_reservation.is_some()
+        || limits.memory_swap.is_some();
+
+    if !has_cgroup_limits {
+        return;
+    }
+
+    let cgroup_path = format!("/sys/fs/cgroup/a3s-box/{}", spec.box_id);
+
+    // Create cgroup directory
+    if std::fs::create_dir_all(&cgroup_path).is_err() {
+        tracing::debug!(
+            path = cgroup_path,
+            "Cannot create cgroup directory (requires root or cgroup delegation)"
+        );
+        return;
+    }
+
+    // cpu.weight (from --cpu-shares)
+    // Docker shares range: 2-262144, cgroup v2 weight range: 1-10000
+    // Conversion: weight = 1 + ((shares - 2) * 9999) / 262142
+    if let Some(shares) = limits.cpu_shares {
+        let weight = 1 + ((shares.clamp(2, 262144) - 2) * 9999) / 262142;
+        if let Err(e) = std::fs::write(format!("{}/cpu.weight", cgroup_path), weight.to_string()) {
+            tracing::debug!(error = %e, "Failed to set cpu.weight");
+        } else {
+            tracing::info!(shares, weight, "Applied CPU shares");
+        }
+    }
+
+    // cpu.max (from --cpu-quota / --cpu-period)
+    if let Some(quota) = limits.cpu_quota {
+        let period = limits.cpu_period.unwrap_or(100_000);
+        let quota_str = if quota < 0 {
+            "max".to_string()
+        } else {
+            quota.to_string()
+        };
+        let value = format!("{} {}", quota_str, period);
+        if let Err(e) = std::fs::write(format!("{}/cpu.max", cgroup_path), &value) {
+            tracing::debug!(error = %e, "Failed to set cpu.max");
+        } else {
+            tracing::info!(cpu_max = value, "Applied CPU quota");
+        }
+    }
+
+    // memory.low (from --memory-reservation)
+    if let Some(reservation) = limits.memory_reservation {
+        if let Err(e) = std::fs::write(
+            format!("{}/memory.low", cgroup_path),
+            reservation.to_string(),
+        ) {
+            tracing::debug!(error = %e, "Failed to set memory.low");
+        } else {
+            tracing::info!(bytes = reservation, "Applied memory reservation");
+        }
+    }
+
+    // memory.swap.max (from --memory-swap)
+    if let Some(swap) = limits.memory_swap {
+        let value = if swap < 0 {
+            "max".to_string()
+        } else {
+            swap.to_string()
+        };
+        if let Err(e) = std::fs::write(format!("{}/memory.swap.max", cgroup_path), &value) {
+            tracing::debug!(error = %e, "Failed to set memory.swap.max");
+        } else {
+            tracing::info!(memory_swap = value, "Applied memory swap limit");
+        }
+    }
+
+    // Move current process into the cgroup
+    let pid = std::process::id();
+    if let Err(e) = std::fs::write(format!("{}/cgroup.procs", cgroup_path), pid.to_string()) {
+        tracing::debug!(error = %e, "Failed to move process into cgroup");
+    } else {
+        tracing::info!(cgroup = cgroup_path, "Moved shim process into cgroup");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ulimit_nofile() {
+        assert_eq!(parse_ulimit("nofile=1024:4096"), Some("7=1024:4096".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ulimit_nproc() {
+        assert_eq!(parse_ulimit("nproc=256:512"), Some("6=256:512".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ulimit_stack() {
+        assert_eq!(parse_ulimit("stack=8192:8192"), Some("3=8192:8192".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ulimit_core() {
+        assert_eq!(parse_ulimit("core=0:0"), Some("4=0:0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ulimit_case_insensitive() {
+        assert_eq!(parse_ulimit("NOFILE=1024:4096"), Some("7=1024:4096".to_string()));
+        assert_eq!(parse_ulimit("Nproc=100:200"), Some("6=100:200".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ulimit_unknown() {
+        assert_eq!(parse_ulimit("unknown=1:2"), None);
+    }
+
+    #[test]
+    fn test_parse_ulimit_no_equals() {
+        assert_eq!(parse_ulimit("nofile"), None);
+    }
+
+    #[test]
+    fn test_parse_ulimit_all_resources() {
+        assert!(parse_ulimit("cpu=10:20").is_some());
+        assert!(parse_ulimit("fsize=100:200").is_some());
+        assert!(parse_ulimit("data=100:200").is_some());
+        assert!(parse_ulimit("locks=100:200").is_some());
+        assert!(parse_ulimit("memlock=100:200").is_some());
+        assert!(parse_ulimit("msgqueue=100:200").is_some());
+        assert!(parse_ulimit("nice=10:20").is_some());
+        assert!(parse_ulimit("rss=100:200").is_some());
+        assert!(parse_ulimit("rtprio=10:20").is_some());
+        assert!(parse_ulimit("rttime=100:200").is_some());
+        assert!(parse_ulimit("sigpending=100:200").is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_single() {
+        assert_eq!(parse_cpuset_spec("0").unwrap(), vec![0]);
+        assert_eq!(parse_cpuset_spec("3").unwrap(), vec![3]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_list() {
+        assert_eq!(parse_cpuset_spec("0,1,3").unwrap(), vec![0, 1, 3]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_range() {
+        assert_eq!(parse_cpuset_spec("0-3").unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_mixed() {
+        assert_eq!(parse_cpuset_spec("0,2-4,7").unwrap(), vec![0, 2, 3, 4, 7]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_invalid_range() {
+        assert!(parse_cpuset_spec("3-1").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_invalid_number() {
+        assert!(parse_cpuset_spec("abc").is_err());
+    }
+}
+
 /// Configure libkrun context and start the VM.
 ///
 /// # Safety
@@ -140,10 +416,28 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     }
 
     // Configure guest rlimits
-    let rlimits = vec![
-        "6=4096:8192".to_string(),       // RLIMIT_NPROC = 6
+    let mut rlimits = vec![
         "7=1048576:1048576".to_string(), // RLIMIT_NOFILE = 7
     ];
+
+    // Apply pids_limit as RLIMIT_NPROC (resource 6)
+    if let Some(pids_limit) = spec.resource_limits.pids_limit {
+        rlimits.push(format!("6={}:{}", pids_limit, pids_limit));
+        tracing::info!(pids_limit, "Applying PID limit via RLIMIT_NPROC");
+    } else {
+        rlimits.push("6=4096:8192".to_string()); // Default RLIMIT_NPROC
+    }
+
+    // Apply custom ulimits (--ulimit RESOURCE=SOFT:HARD)
+    for ulimit in &spec.resource_limits.ulimits {
+        if let Some(rlimit_str) = parse_ulimit(ulimit) {
+            rlimits.push(rlimit_str);
+            tracing::info!(ulimit, "Applying custom ulimit");
+        } else {
+            tracing::warn!(ulimit, "Ignoring unrecognized ulimit format");
+        }
+    }
+
     tracing::debug!(rlimits = ?rlimits, "Configuring guest rlimits");
     ctx.set_rlimits(&rlimits)?;
 
@@ -323,6 +617,18 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     if spec.tee_config.is_some() {
         tracing::warn!("TEE configuration is only supported on Linux; ignoring");
     }
+
+    // Apply CPU pinning via sched_setaffinity (Linux only)
+    #[cfg(target_os = "linux")]
+    if let Some(ref cpuset) = spec.resource_limits.cpuset_cpus {
+        if let Err(e) = apply_cpuset(cpuset) {
+            tracing::warn!(cpuset = cpuset, error = %e, "Failed to apply CPU pinning");
+        }
+    }
+
+    // Apply cgroup v2 resource limits (Linux only, best-effort)
+    #[cfg(target_os = "linux")]
+    apply_cgroup_limits(&spec);
 
     // Start VM (process takeover - never returns on success)
     tracing::info!(box_id = %spec.box_id, "Starting VM (process takeover)");

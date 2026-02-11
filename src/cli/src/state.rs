@@ -103,6 +103,9 @@ pub struct BoxRecord {
     /// Anonymous volumes auto-created from OCI VOLUME directives
     #[serde(default)]
     pub anonymous_volumes: Vec<String>,
+    /// Resource limits (PID limits, CPU pinning, ulimits, cgroup controls)
+    #[serde(default)]
+    pub resource_limits: a3s_box_core::config::ResourceLimits,
 }
 
 fn default_health_status() -> String {
@@ -401,6 +404,7 @@ mod tests {
             volume_names: vec![],
             tmpfs: vec![],
             anonymous_volumes: vec![],
+            resource_limits: a3s_box_core::config::ResourceLimits::default(),
         }
     }
 
