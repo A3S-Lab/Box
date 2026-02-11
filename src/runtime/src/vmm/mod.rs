@@ -11,4 +11,4 @@ mod spec;
 
 pub use controller::VmController;
 pub use handler::{ShimHandler, VmHandler, VmMetrics, DEFAULT_SHUTDOWN_TIMEOUT_MS};
-pub use spec::{Entrypoint, FsMount, InstanceSpec, TeeInstanceConfig};
+pub use spec::{Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig};

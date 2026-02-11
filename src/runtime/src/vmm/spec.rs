@@ -1,6 +1,7 @@
 //! InstanceSpec - Complete configuration for a VM instance.
 
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 /// A filesystem mount from host to guest via virtio-fs.
@@ -32,6 +33,29 @@ pub struct TeeInstanceConfig {
     pub config_path: PathBuf,
     /// TEE type identifier (e.g., "snp")
     pub tee_type: String,
+}
+
+/// Network instance configuration for passt-based networking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkInstanceConfig {
+    /// Path to the passt Unix socket.
+    pub passt_socket_path: PathBuf,
+
+    /// Assigned IPv4 address for this VM.
+    pub ip_address: Ipv4Addr,
+
+    /// Gateway IPv4 address.
+    pub gateway: Ipv4Addr,
+
+    /// Subnet prefix length (e.g., 24).
+    pub prefix_len: u8,
+
+    /// MAC address as 6 bytes.
+    pub mac_address: [u8; 6],
+
+    /// DNS servers to configure inside the guest.
+    #[serde(default)]
+    pub dns_servers: Vec<Ipv4Addr>,
 }
 
 /// Complete configuration for a VM instance.
@@ -84,6 +108,11 @@ pub struct InstanceSpec {
     /// Format: "uid", "uid:gid", "user", or "user:group"
     #[serde(default)]
     pub user: Option<String>,
+
+    /// Network configuration for passt-based networking.
+    /// None = TSI mode (default), Some = passt virtio-net mode.
+    #[serde(default)]
+    pub network: Option<NetworkInstanceConfig>,
 }
 
 impl Default for InstanceSpec {
@@ -106,6 +135,7 @@ impl Default for InstanceSpec {
             tee_config: None,
             port_map: Vec::new(),
             user: None,
+            network: None,
         }
     }
 }

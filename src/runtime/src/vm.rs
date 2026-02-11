@@ -1057,6 +1057,7 @@ impl VmManager {
             tee_config: layout.tee_instance_config.clone(),
             port_map: self.config.port_map.clone(),
             user,
+            network: None, // Network config is set by CLI when --network is specified
         })
     }
 

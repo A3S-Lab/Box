@@ -11,10 +11,10 @@ use std::{ffi::CString, ptr};
 use super::check_status;
 use a3s_box_core::error::{BoxError, Result};
 use libkrun_sys::{
-    krun_add_virtiofs, krun_add_vsock_port2, krun_create_ctx, krun_free_ctx, krun_init_log,
-    krun_set_console_output, krun_set_env, krun_set_exec, krun_set_port_map, krun_set_rlimits,
-    krun_set_root, krun_set_vm_config, krun_set_workdir, krun_setgid, krun_setuid,
-    krun_split_irqchip, krun_start_enter,
+    krun_add_net_unixstream, krun_add_virtiofs, krun_add_vsock_port2, krun_create_ctx,
+    krun_free_ctx, krun_init_log, krun_set_console_output, krun_set_env, krun_set_exec,
+    krun_set_port_map, krun_set_rlimits, krun_set_root, krun_set_vm_config, krun_set_workdir,
+    krun_setgid, krun_setuid, krun_split_irqchip, krun_start_enter,
 };
 
 /// Thin wrapper that owns a libkrun context.
@@ -295,6 +295,46 @@ impl KrunContext {
         check_status(
             "krun_set_port_map",
             krun_set_port_map(self.ctx_id, ptrs.as_ptr()),
+        )
+    }
+
+    /// Add a virtio-net device connected to a passt Unix stream socket.
+    ///
+    /// This disables TSI and gives the guest a real network interface (eth0).
+    /// Each call adds another interface (eth0, eth1, ...).
+    ///
+    /// # Arguments
+    /// * `socket_path` - Path to the passt Unix stream socket
+    /// * `mac` - MAC address as 6 bytes
+    ///
+    /// # Virtio-net features
+    /// Uses the standard compat features: CSUM, GUEST_CSUM, GUEST_TSO4, GUEST_UFO,
+    /// HOST_TSO4, HOST_UFO.
+    pub unsafe fn add_net_unixstream(&self, socket_path: &str, mac: &[u8; 6]) -> Result<()> {
+        tracing::debug!(socket_path, mac = ?mac, "Adding virtio-net via passt");
+
+        let path_c = CString::new(socket_path).map_err(|e| BoxError::NetworkError(
+            format!("invalid passt socket path: {}", e),
+        ))?;
+
+        // Standard compat features (same as COMPAT_NET_FEATURES in libkrun.h)
+        let features: u32 = (1 << 0)   // NET_FEATURE_CSUM
+            | (1 << 1)                   // NET_FEATURE_GUEST_CSUM
+            | (1 << 7)                   // NET_FEATURE_GUEST_TSO4
+            | (1 << 10)                  // NET_FEATURE_GUEST_UFO
+            | (1 << 11)                  // NET_FEATURE_HOST_TSO4
+            | (1 << 14);                 // NET_FEATURE_HOST_UFO
+
+        check_status(
+            "krun_add_net_unixstream",
+            krun_add_net_unixstream(
+                self.ctx_id,
+                path_c.as_ptr(),
+                -1, // use path, not fd
+                mac.as_ptr(),
+                features,
+                0, // no flags
+            ),
         )
     }
 

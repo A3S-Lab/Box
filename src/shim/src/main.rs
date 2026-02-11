@@ -237,6 +237,30 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.set_port_map(&spec.port_map)?;
     }
 
+    // Configure networking: passt (virtio-net) or TSI (default)
+    if let Some(ref net_config) = spec.network {
+        tracing::info!(
+            ip = %net_config.ip_address,
+            gateway = %net_config.gateway,
+            mac = ?net_config.mac_address,
+            socket = %net_config.passt_socket_path.display(),
+            "Configuring passt virtio-net networking"
+        );
+
+        let socket_str = net_config
+            .passt_socket_path
+            .to_str()
+            .ok_or_else(|| BoxError::BoxBootError {
+                message: format!(
+                    "Invalid passt socket path: {}",
+                    net_config.passt_socket_path.display()
+                ),
+                hint: None,
+            })?;
+
+        ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
+    }
+
     // Configure user/group from OCI USER directive
     if let Some(ref user) = spec.user {
         apply_user_config(&ctx, user)?;

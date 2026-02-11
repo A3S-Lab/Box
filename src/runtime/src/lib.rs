@@ -33,7 +33,7 @@ pub use tee::{verify_attestation, AttestationPolicy, AmdKdsClient, MinTcbPolicy,
 pub use grpc::{AgentClient, AttestationClient, ExecClient};
 pub use network::NetworkStore;
 pub use vm::{BoxState, VmManager};
-pub use vmm::{Entrypoint, FsMount, InstanceSpec, ShimHandler, TeeInstanceConfig, VmController, VmHandler, VmMetrics};
+pub use vmm::{Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, ShimHandler, TeeInstanceConfig, VmController, VmHandler, VmMetrics};
 
 /// A3S Box Runtime version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
