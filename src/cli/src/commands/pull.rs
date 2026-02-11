@@ -17,9 +17,13 @@ pub struct PullArgs {
 pub async fn execute(args: PullArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(super::open_image_store()?);
 
+    // Parse reference to determine registry for credential lookup
+    let reference = a3s_box_runtime::ImageReference::parse(&args.image)?;
+    let auth = a3s_box_runtime::RegistryAuth::from_credential_store(&reference.registry);
+
     let puller = a3s_box_runtime::ImagePuller::new(
         store,
-        a3s_box_runtime::RegistryAuth::from_env(),
+        auth,
     );
 
     if !args.quiet {

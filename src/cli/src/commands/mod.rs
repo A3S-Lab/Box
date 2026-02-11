@@ -17,12 +17,15 @@ mod info;
 mod inspect;
 mod kill;
 mod load;
+mod login;
+mod logout;
 mod logs;
 mod network;
 mod pause;
 mod port;
 mod ps;
 mod pull;
+mod push;
 mod rename;
 mod restart;
 mod rm;
@@ -107,6 +110,12 @@ pub enum Command {
     Images(images::ImagesArgs),
     /// Pull an image from a registry
     Pull(pull::PullArgs),
+    /// Push an image to a registry
+    Push(push::PushArgs),
+    /// Log in to a container registry
+    Login(login::LoginArgs),
+    /// Log out from a container registry
+    Logout(logout::LogoutArgs),
     /// Remove one or more cached images
     Rmi(rmi::RmiArgs),
     /// Display detailed image information as JSON
@@ -227,6 +236,9 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Build(args) => build::execute(args).await,
         Command::Images(args) => images::execute(args).await,
         Command::Pull(args) => pull::execute(args).await,
+        Command::Push(args) => push::execute(args).await,
+        Command::Login(args) => login::execute(args).await,
+        Command::Logout(args) => logout::execute(args).await,
         Command::Rmi(args) => rmi::execute(args).await,
         Command::ImageInspect(args) => image_inspect::execute(args).await,
         Command::History(args) => history::execute(args).await,

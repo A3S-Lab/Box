@@ -25,6 +25,7 @@ pub use cache::{LayerCache, RootfsCache};
 pub use host_check::{check_virtualization_support, VirtualizationSupport};
 pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
 pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller, StoredImage};
+pub use oci::{RegistryPusher, PushResult, CredentialStore};
 pub use oci::{BuildConfig, BuildResult, Dockerfile, Instruction};
 pub use pool::{PoolStats, WarmPool};
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};

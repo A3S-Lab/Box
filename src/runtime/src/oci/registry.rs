@@ -1,16 +1,17 @@
-//! OCI registry client for pulling images.
+//! OCI registry client for pulling and pushing images.
 //!
-//! Uses the `oci-distribution` crate to pull images from container registries
-//! (Docker Hub, GHCR, etc.) and writes them as OCI image layouts on disk.
+//! Uses the `oci-distribution` crate to interact with container registries
+//! (Docker Hub, GHCR, etc.).
 
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
-use oci_distribution::client::{ClientConfig, ClientProtocol};
+use oci_distribution::client::{ClientConfig, ClientProtocol, Config, ImageLayer, PushResponse};
 use oci_distribution::manifest::{ImageIndexEntry, OciImageManifest};
 use oci_distribution::secrets::RegistryAuth as OciRegistryAuth;
 use oci_distribution::{Client, Reference};
 
+use super::credentials::CredentialStore;
 use super::reference::ImageReference;
 
 /// Authentication credentials for a container registry.
@@ -50,6 +51,19 @@ impl RegistryAuth {
         } else {
             Self::anonymous()
         }
+    }
+
+    /// Create authentication from the credential store, falling back to env vars,
+    /// then anonymous.
+    pub fn from_credential_store(registry: &str) -> Self {
+        // Try credential store first
+        if let Ok(store) = CredentialStore::default_path() {
+            if let Ok(Some((username, password))) = store.get(registry) {
+                return Self::basic(username, password);
+            }
+        }
+        // Fall back to env vars, then anonymous
+        Self::from_env()
     }
 
     /// Convert to oci-distribution auth type.
@@ -270,6 +284,163 @@ impl RegistryPuller {
                 reference.registry, reference.repository, digest
             )
         } else if let Some(ref tag) = reference.tag {
+            format!(
+                "{}/{}:{}",
+                reference.registry, reference.repository, tag
+            )
+        } else {
+            format!(
+                "{}/{}:latest",
+                reference.registry, reference.repository
+            )
+        };
+
+        ref_str.parse::<Reference>().map_err(|e| {
+            BoxError::OciImageError(format!(
+                "Invalid OCI reference '{}': {}",
+                ref_str, e
+            ))
+        })
+    }
+}
+
+/// Result of a successful image push.
+#[derive(Debug, Clone)]
+pub struct PushResult {
+    /// URL of the pushed config blob.
+    pub config_url: String,
+    /// URL of the pushed manifest.
+    pub manifest_url: String,
+}
+
+/// Pushes OCI images to container registries.
+pub struct RegistryPusher {
+    client: Client,
+    auth: RegistryAuth,
+}
+
+impl RegistryPusher {
+    /// Create a new registry pusher with anonymous authentication.
+    pub fn new() -> Self {
+        Self::with_auth(RegistryAuth::anonymous())
+    }
+
+    /// Create a new registry pusher with the given authentication.
+    pub fn with_auth(auth: RegistryAuth) -> Self {
+        let config = ClientConfig {
+            protocol: ClientProtocol::Https,
+            ..Default::default()
+        };
+        let client = Client::new(config);
+        Self { client, auth }
+    }
+
+    /// Push a local OCI image layout to a registry.
+    ///
+    /// Reads the OCI layout from `image_dir` (index.json → manifest → config + layers),
+    /// then pushes all blobs and the manifest to the target registry.
+    pub async fn push(
+        &self,
+        reference: &ImageReference,
+        image_dir: &Path,
+    ) -> Result<PushResult> {
+        let oci_ref = self.to_oci_reference(reference)?;
+
+        tracing::info!(
+            reference = %reference,
+            source = %image_dir.display(),
+            "Pushing image to registry"
+        );
+
+        // Read index.json to find the manifest digest
+        let index_path = image_dir.join("index.json");
+        let index_data = std::fs::read_to_string(&index_path).map_err(|e| {
+            BoxError::OciImageError(format!("Failed to read index.json: {}", e))
+        })?;
+        let index: serde_json::Value = serde_json::from_str(&index_data)?;
+
+        let manifest_digest = index["manifests"][0]["digest"]
+            .as_str()
+            .ok_or_else(|| BoxError::OciImageError("No manifest digest in index.json".to_string()))?;
+
+        // Read manifest blob
+        let manifest_digest_hex = manifest_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(manifest_digest);
+        let blobs_dir = image_dir.join("blobs").join("sha256");
+        let manifest_data = std::fs::read(blobs_dir.join(manifest_digest_hex)).map_err(|e| {
+            BoxError::OciImageError(format!("Failed to read manifest blob: {}", e))
+        })?;
+        let manifest: OciImageManifest = serde_json::from_slice(&manifest_data)?;
+
+        // Read config blob
+        let config_digest_hex = manifest
+            .config
+            .digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&manifest.config.digest);
+        let config_data = std::fs::read(blobs_dir.join(config_digest_hex)).map_err(|e| {
+            BoxError::OciImageError(format!("Failed to read config blob: {}", e))
+        })?;
+        let config = Config::new(
+            config_data,
+            manifest.config.media_type.clone(),
+            None,
+        );
+
+        // Read layer blobs
+        let mut layers = Vec::new();
+        for layer_desc in &manifest.layers {
+            let layer_digest_hex = layer_desc
+                .digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&layer_desc.digest);
+            let layer_data = std::fs::read(blobs_dir.join(layer_digest_hex)).map_err(|e| {
+                BoxError::OciImageError(format!(
+                    "Failed to read layer blob {}: {}",
+                    layer_desc.digest, e
+                ))
+            })?;
+
+            tracing::debug!(
+                digest = %layer_desc.digest,
+                size = layer_data.len(),
+                "Read layer for push"
+            );
+
+            layers.push(ImageLayer::new(
+                layer_data,
+                layer_desc.media_type.clone(),
+                None,
+            ));
+        }
+
+        // Push to registry
+        let auth = self.auth.to_oci_auth();
+        let response: PushResponse = self
+            .client
+            .push(&oci_ref, &layers, config, &auth, Some(manifest))
+            .await
+            .map_err(|e| BoxError::RegistryError {
+                registry: reference.registry.clone(),
+                message: format!("Failed to push image: {}", e),
+            })?;
+
+        tracing::info!(
+            reference = %reference,
+            manifest_url = %response.manifest_url,
+            "Image pushed successfully"
+        );
+
+        Ok(PushResult {
+            config_url: response.config_url,
+            manifest_url: response.manifest_url,
+        })
+    }
+
+    /// Convert an ImageReference to an oci-distribution Reference.
+    fn to_oci_reference(&self, reference: &ImageReference) -> Result<Reference> {
+        let ref_str = if let Some(ref tag) = reference.tag {
             format!(
                 "{}/{}:{}",
                 reference.registry, reference.repository, tag

@@ -39,11 +39,12 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 
 ## Features
 
-- **Docker-like CLI**: Familiar `run`, `stop`, `pause`, `unpause`, `ps`, `logs`, `exec`, `top`, `rename`, `images`, `tag`, `cp`, `attest`, `network`, `volume` commands with label support
+- **Docker-like CLI**: Familiar `run`, `stop`, `pause`, `unpause`, `ps`, `logs`, `exec`, `top`, `rename`, `images`, `tag`, `cp`, `attest`, `network`, `volume`, `push`, `login`, `logout` commands with label support
 - **Hardware Isolation**: Each sandbox runs in its own MicroVM via libkrun
 - **Instant Boot**: Sub-second VM startup (~200ms cold start)
 - **OCI Image Support**: Load sandboxes from standard OCI container images
-- **Image Registry**: Pull images from any OCI registry with local LRU cache
+- **Image Registry**: Pull and push images from/to any OCI registry with local LRU cache
+- **Registry Auth**: `login`/`logout` with persistent credential store, env var fallback
 - **Image Management**: Inspect metadata, prune unused images, tag aliases, configurable cache size
 - **Exec in Running VMs**: Execute commands with env vars, working directory, and user specification support
 - **File Copy**: Transfer files and directories between host and running boxes via `cp`
@@ -252,7 +253,7 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 |-------|--------|---------|
 | `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (235 tests) |
 | `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (143 tests) |
-| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (351 tests) |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (361 tests) |
 | `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (24 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
 | `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
@@ -624,10 +625,10 @@ Remaining gaps between A3S Box and Docker, prioritized by impact.
 - [x] tmpfs mounts (`--tmpfs /path` or `--tmpfs /path:size=100m`)
 - ~~Bind mount propagation modes~~ — not meaningful for VMs with virtiofs
 
-**9.3 Registry Push (P1)**
-- [ ] `a3s-box push` — push images to OCI registries
-- [ ] Registry login/logout (`a3s-box login/logout`)
-- [ ] Image signing and verification (cosign/notation)
+**9.3 Registry Push (P1) ✅**
+- [x] `a3s-box push` — push images to OCI registries
+- [x] Registry login/logout (`a3s-box login/logout`) with persistent credential store
+- [ ] Image signing and verification (cosign/notation) — deferred
 
 **9.4 Resource Limits (P1) ✅**
 - [x] CPU shares (`--cpu-shares`) and quota (`--cpu-quota`/`--cpu-period`) — cgroup v2 `cpu.weight`/`cpu.max` (Linux)
