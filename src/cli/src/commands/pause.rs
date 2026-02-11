@@ -98,6 +98,8 @@ mod tests {
             labels: HashMap::new(),
             stopped_by_user: false,
             restart_count: 0,
+            max_restart_count: 0,
+            exit_code: None,
             health_check: None,
             health_status: "none".to_string(),
             health_retries: 0,

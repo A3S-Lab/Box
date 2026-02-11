@@ -115,12 +115,28 @@ fn apply_format(record: &BoxRecord, fmt: &str) -> String {
         .replace("{{.Labels}}", &labels_str)
 }
 
-/// Format box status with health annotation (like Docker: "running (healthy)").
+/// Format box status with health and restart annotations.
+///
+/// Examples:
+/// - "running" (no health check, no restarts)
+/// - "running (healthy)" (health check active)
+/// - "running (Restarting: 3)" (has been restarted)
+/// - "running (healthy, Restarting: 3)" (both)
 fn format_status(record: &BoxRecord) -> String {
+    let mut annotations = Vec::new();
+
     if record.health_check.is_some() && record.health_status != "none" {
-        format!("{} ({})", record.status, record.health_status)
-    } else {
+        annotations.push(record.health_status.clone());
+    }
+
+    if record.restart_count > 0 {
+        annotations.push(format!("Restarting: {}", record.restart_count));
+    }
+
+    if annotations.is_empty() {
         record.status.clone()
+    } else {
+        format!("{} ({})", record.status, annotations.join(", "))
     }
 }
 
@@ -184,6 +200,8 @@ mod tests {
             labels,
             stopped_by_user: false,
             restart_count: 0,
+            max_restart_count: 0,
+            exit_code: None,
             health_check: None,
             health_status: "none".to_string(),
             health_retries: 0,
@@ -412,5 +430,36 @@ mod tests {
         record.health_status = "none".to_string();
         // "none" should not be shown
         assert_eq!(format_status(&record), "running");
+    }
+
+    // --- Restart count in status tests ---
+
+    #[test]
+    fn test_format_status_with_restart_count() {
+        let mut record = make_record("box1", "running", HashMap::new());
+        record.restart_count = 3;
+        assert_eq!(format_status(&record), "running (Restarting: 3)");
+    }
+
+    #[test]
+    fn test_format_status_restart_count_zero_not_shown() {
+        let mut record = make_record("box1", "running", HashMap::new());
+        record.restart_count = 0;
+        assert_eq!(format_status(&record), "running");
+    }
+
+    #[test]
+    fn test_format_status_health_and_restart_count() {
+        let mut record = make_record("box1", "running", HashMap::new());
+        record.health_check = Some(crate::state::HealthCheck {
+            cmd: vec!["true".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        });
+        record.health_status = "healthy".to_string();
+        record.restart_count = 2;
+        assert_eq!(format_status(&record), "running (healthy, Restarting: 2)");
     }
 }

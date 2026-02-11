@@ -128,6 +128,10 @@ pub struct CreateArgs {
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Validate restart policy
+    let (restart_policy, max_restart_count) = crate::state::parse_restart_policy(&args.restart)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
     let memory_mb = parse_memory(&args.memory)
         .map_err(|e| format!("Invalid --memory: {e}"))?;
 
@@ -208,11 +212,13 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         hostname: args.hostname,
         user: args.user,
         workdir: args.workdir,
-        restart_policy: args.restart,
+        restart_policy,
         port_map: args.publish,
         labels,
         stopped_by_user: false,
         restart_count: 0,
+        max_restart_count,
+        exit_code: None,
         health_check,
         health_status: "none".to_string(),
         health_retries: 0,

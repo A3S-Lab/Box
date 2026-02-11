@@ -2,11 +2,9 @@
 //!
 //! Equivalent to `a3s-box stop` followed by `a3s-box start`.
 
-use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig};
-use a3s_box_core::event::EventEmitter;
-use a3s_box_runtime::VmManager;
 use clap::Args;
 
+use crate::boot;
 use crate::resolve;
 use crate::state::StateFile;
 
@@ -47,9 +45,6 @@ async fn restart_one(
 
     let box_id = record.id.clone();
     let name = record.name.clone();
-    let image = record.image.clone();
-    let cpus = record.cpus;
-    let memory_mb = record.memory_mb;
     let was_running = record.status == "running";
     let pid = record.pid;
 
@@ -93,26 +88,14 @@ async fn restart_one(
         }
     }
 
-    // Phase 2: Start the box
-    let config = BoxConfig {
-        agent: AgentType::OciRegistry { reference: image },
-        resources: ResourceConfig {
-            vcpus: cpus,
-            memory_mb,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let emitter = EventEmitter::new(256);
-    let mut vm = VmManager::with_box_id(config, emitter, box_id.clone());
-
-    vm.boot().await?;
+    // Phase 2: Start the box using shared boot logic
+    let record = resolve::resolve(state, &box_id)?;
+    let result = boot::boot_from_record(record).await?;
 
     // Update record to running
     let record = resolve::resolve_mut(state, &box_id)?;
     record.status = "running".to_string();
-    record.pid = vm.pid().await;
+    record.pid = result.pid;
     record.started_at = Some(chrono::Utc::now());
     state.save()?;
 

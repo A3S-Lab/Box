@@ -47,12 +47,13 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **Registry Auth**: `login`/`logout` with persistent credential store, env var fallback
 - **Image Management**: Inspect metadata, prune unused images, tag aliases, configurable cache size
 - **Exec in Running VMs**: Execute commands with env vars, working directory, and user specification support
+- **Interactive PTY**: Full interactive terminal support (`-it` flags) for `exec`, `attach`, and `run` via dedicated PTY server (vsock port 4090)
 - **File Copy**: Transfer files and directories between host and running boxes via `cp`
 - **Bridge Networking**: Container-to-container communication via passt virtio-net with IPAM, custom networks, DNS service discovery, and `--network` flag
 - **Named Volumes**: Persistent named volumes with `volume create/ls/rm/inspect/prune`, auto-creation on first use, attach/detach tracking, and volume labels
 - **tmpfs Mounts**: Ephemeral in-guest memory-backed filesystems via `--tmpfs`
 - **Anonymous Volumes**: Automatic volume creation for OCI `VOLUME` directives with cleanup on `rm`
-- **Restart Policies**: Automatic restart enforcement (`always`, `on-failure`, `unless-stopped`)
+- **Restart Policies**: Automatic restart enforcement (`always`, `on-failure`, `on-failure:N`, `unless-stopped`) with background monitor daemon, exponential backoff, and crash loop prevention
 - **Health Checks**: Configurable health check commands with interval, timeout, retries, and start period
 - **Resource Limits**: PID limits (`--pids-limit`), CPU pinning (`--cpuset-cpus`), custom ulimits (`--ulimit`), CPU shares/quota, memory reservation/swap via cgroup v2 (Linux)
 - **System Cleanup**: One-command prune of stopped boxes and unused images
@@ -131,6 +132,8 @@ a3s-box image-prune -f           # Remove unused images
 # Box lifecycle
 a3s-box run -d --name dev --cpus 2 --memory 1g --label env=dev alpine:latest
 a3s-box run -d --name web --restart always --health-cmd "curl -f http://localhost/" nginx:latest
+a3s-box run -d --name worker --restart on-failure:5 myapp:latest  # Restart up to 5 times on failure
+a3s-box monitor &                # Start restart monitor daemon (required for auto-restart)
 a3s-box create --name staging --label env=staging alpine:latest
 a3s-box start staging
 a3s-box pause dev                # Pause a running box (SIGSTOP)
@@ -141,7 +144,9 @@ a3s-box rm -f $(a3s-box ps -aq) # Remove all boxes
 
 # Execute commands
 a3s-box exec dev -- ls -la       # Run a command in a box
+a3s-box exec -it dev -- /bin/sh  # Interactive shell session
 a3s-box exec -u root -e FOO=bar -w /app dev -- python main.py  # With user, env, workdir
+a3s-box attach -it dev           # Attach interactive PTY to a running box
 a3s-box top dev                  # Display running processes in a box
 
 # File copy
@@ -189,7 +194,7 @@ a3s-box attest dev --raw         # Output raw report without verification
 | `rename <box> <name>` | Rename a box |
 | `ps` | List boxes (`-a` all, `-q` quiet, `--filter status/label`, `--format`) |
 | `logs <box>` | View console logs (`-f` to follow, `--tail N` for last N lines) |
-| `exec <box> -- <cmd>` | Execute a command in a running box (`-u` user, `-e` env, `-w` workdir) |
+| `exec <box> -- <cmd>` | Execute a command in a running box (`-u` user, `-e` env, `-w` workdir, `-it` interactive PTY) |
 | `top <box>` | Display running processes in a box |
 | `inspect <box>` | Show detailed box information as JSON |
 | `stats` | Display live resource usage statistics |
@@ -204,6 +209,7 @@ a3s-box attest dev --raw         # Output raw report without verification
 | `version` | Show version |
 | `info` | Show system information |
 | `attest <box>` | Request and verify a TEE attestation report (`--policy`, `--nonce`, `--raw`, `--quiet`) |
+| `monitor` | Background daemon that monitors and restarts dead boxes according to their restart policy |
 | `update` | Update a3s-box to the latest version |
 
 Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible resolution).
@@ -252,9 +258,9 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 | Crate | Binary | Purpose |
 |-------|--------|---------|
 | `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (235 tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `TeeConfig` (143 tests) |
-| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (361 tests) |
-| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server (24 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `PtyRequest`, `TeeConfig` (154 tests) |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (400 tests) |
+| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server, PTY server (25 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
 | `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
 
@@ -352,7 +358,7 @@ let config = BoxConfig {
 
 ### Phase 3: CLI & Ecosystem Integration ✅
 
-- [x] Docker-like CLI (`a3s-box`) with 29 commands: run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update, attest
+- [x] Docker-like CLI (`a3s-box`) with 30 commands: run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update, attest, monitor
 - [x] Box state management with atomic persistence (`~/.a3s/boxes.json`)
 - [x] Docker-compatible name/ID/prefix resolution
 - [x] PID-based liveness reconciliation for dead box detection
@@ -366,8 +372,9 @@ let config = BoxConfig {
 - [x] Filtering and formatting for ps and images commands
 - [x] Configurable image cache size via `A3S_IMAGE_CACHE_SIZE` environment variable
 - [x] Docker CLI alignment Phase 1: pause/unpause, top, rename, label support, exec -u/--user, pull -q/--quiet, cp directories
-- [x] Docker CLI alignment Phase 2: restart policy enforcement, health check support (--health-cmd, status tracking)
-- [x] `a3s-box build` — Dockerfile-based image building (FROM, RUN, COPY, WORKDIR, ENV, ENTRYPOINT, CMD, EXPOSE, LABEL, USER, ARG)
+- [x] Docker CLI alignment Phase 2: restart policy enforcement with monitor daemon (`always`, `on-failure`, `on-failure:N`, `unless-stopped`, exponential backoff), health check support (--health-cmd, status tracking)
+- [x] Docker CLI alignment Phase 3: interactive PTY support (`-it` flags) for exec, attach, and run via dedicated PTY server (vsock port 4090)
+- [x] `a3s-box build` — Dockerfile-based image building (FROM, RUN, COPY, WORKDIR, ENV, ENTRYPOINT, CMD, EXPOSE, LABEL, USER, ARG, ADD, SHELL, STOPSIGNAL, HEALTHCHECK, ONBUILD, VOLUME, multi-stage builds)
 - [ ] Agent configuration from OCI labels
 - [ ] Pre-built `a3s-code` guest image for AI coding agent
 - [ ] Host SDK for spawning and communicating with guest agents
@@ -449,9 +456,57 @@ let config = BoxConfig {
 - [ ] Secure credential storage API
 - [ ] Encrypted persistent storage
 
-### Phase 7: SafeClaw Security Integration 📋
+### Phase 7: SafeClaw Security Integration 🚧
 
 A3S Box provides the secure infrastructure layer for [SafeClaw](../safeclaw/README.md)'s privacy-focused AI assistant.
+
+> See [SafeClaw Known Architecture Issues](../safeclaw/README.md#known-architecture-issues) and [SafeClaw Architecture Redesign](../safeclaw/README.md#phase-3-architecture-redesign-) for the full design review and plan.
+
+#### Shared Transport Layer (`a3s-transport`)
+
+A unified transport abstraction to replace ad-hoc vsock protocols. See [SafeClaw Phase 3.2](../safeclaw/README.md#phase-32-unified-transport-layer-p0--foundation).
+
+- [ ] **`a3s-transport` crate**: `Transport` trait with `connect`/`send`/`recv`/`close`
+- [ ] **Unified frame protocol**: `[type:u8][length:u32][payload]` — shared across exec, PTY, and TEE channels
+- [ ] **`VsockTransport`**: Real vsock implementation with framing, backpressure, reconnection
+- [ ] **`MockTransport`**: For testing without VM (replaces SafeClaw's `simulate_tee_response`)
+- [ ] **Port allocation** (no conflicts):
+  - 4088: gRPC agent control (unchanged)
+  - 4089: exec server (unchanged)
+  - 4090: PTY server (unchanged)
+  - 4091: TEE secure channel (new, dedicated for SafeClaw)
+- [ ] **Migrate exec server**: Adopt shared framing protocol from `a3s-transport`
+- [ ] **Migrate PTY server**: Adopt shared framing protocol from `a3s-transport`
+
+#### `TeeRuntime` High-Level API
+
+A high-level API that combines VM boot + attestation + secure channel establishment into a single call:
+
+```rust
+pub struct TeeRuntime {
+    vm_manager: VmManager,
+    attestation: AttestationService,
+}
+
+impl TeeRuntime {
+    /// Boot TEE instance, verify attestation, establish secure channel — one call.
+    pub async fn spawn_verified(
+        &self,
+        config: &TeeInstanceConfig,
+    ) -> Result<VerifiedTeeChannel> {
+        let instance = self.vm_manager.boot(config.into()).await?;
+        let report = self.attestation.request_and_verify(&instance).await?;
+        let transport = VsockTransport::connect(instance.vsock_cid(), TEE_PORT).await?;
+        let channel = SecureChannel::establish(transport, &report).await?;
+        Ok(VerifiedTeeChannel { instance, channel })
+    }
+}
+```
+
+- [ ] **`TeeRuntime` struct**: Orchestrates VM + attestation + channel
+- [ ] **`spawn_verified()`**: Single entry point for SafeClaw to get a verified TEE channel
+- [ ] **`VerifiedTeeChannel`**: Wraps `Transport` + attestation proof, ready for SafeClaw use
+- [ ] **Lifecycle management**: Shutdown, re-attestation, channel recovery
 
 #### SafeClaw + A3S Box Security Architecture
 
@@ -639,14 +694,22 @@ Remaining gaps between A3S Box and Docker, prioritized by impact.
 - [x] Ulimits (`--ulimit`) — custom guest rlimits via `krun_set_rlimits`
 - ~~Block I/O limits (`--blkio-weight`, `--device-read-bps`)~~ — not meaningful for VMs with virtio
 
-**9.5 Dockerfile Completion (P2)**
-- [ ] `ADD` instruction (URL download, auto-extract tar)
-- [ ] `HEALTHCHECK` instruction
-- [ ] `SHELL` instruction
-- [ ] `STOPSIGNAL` instruction
+**9.5 Dockerfile Completion (P2)** ✅
+- [x] `ADD` instruction (URL download, auto-extract tar)
+- [x] `HEALTHCHECK` instruction (parse options, emit in OCI config)
+- [x] `SHELL` instruction (override default shell for RUN)
+- [x] `STOPSIGNAL` instruction (set stop signal in OCI config)
 - [x] `VOLUME` instruction (anonymous volumes — implemented in Phase 9.2)
-- [ ] `ONBUILD` instruction (triggers)
-- [ ] Multi-stage builds (`FROM ... AS ...`)
+- [x] `ONBUILD` instruction (triggers stored in image, executed on FROM)
+- [x] Multi-stage builds (`FROM ... AS ...`, `COPY --from=stage`)
+
+**9.5.1 Interactive PTY (P1) ✅**
+- [x] PTY protocol over vsock port 4090 (binary framing: request, data, resize, exit, error)
+- [x] Guest PTY server with `openpty()` + fork/exec, terminal resize, signal handling
+- [x] `exec -it` — interactive shell sessions in running boxes
+- [x] `attach -it` — attach interactive PTY to running boxes
+- [x] `run -it` — start box with interactive terminal session
+- [x] Host terminal raw mode via crossterm (cross-platform)
 
 **9.6 Logging (P2)**
 - [ ] Logging drivers (json-file, syslog, journald)
@@ -718,7 +781,7 @@ box/
 ├── src/
 │   ├── cli/            # Docker-like CLI (a3s-box binary)
 │   │   └── src/
-│   │       ├── commands/   # 29 subcommands (run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update, attest)
+│   │       ├── commands/   # 30 subcommands (run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update, attest, monitor)
 │   │       ├── state.rs    # Box state persistence (~/.a3s/boxes.json)
 │   │       ├── resolve.rs  # Docker-style name/ID resolution
 │   │       └── output.rs   # Table formatting, size parsing, memory parsing

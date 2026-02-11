@@ -6,7 +6,7 @@ mod build;
 mod cp;
 mod create;
 mod df;
-mod exec;
+pub(crate) mod exec;
 mod export;
 mod history;
 mod image_inspect;
@@ -20,6 +20,7 @@ mod load;
 mod login;
 mod logout;
 mod logs;
+mod monitor;
 mod network;
 mod pause;
 mod port;
@@ -144,6 +145,8 @@ pub enum Command {
     Version(version::VersionArgs),
     /// Show system information
     Info(info::InfoArgs),
+    /// Background daemon that monitors and restarts dead boxes
+    Monitor(monitor::MonitorArgs),
     /// Update a3s-box to the latest version
     Update,
 }
@@ -253,6 +256,7 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::SystemPrune(args) => system_prune::execute(args).await,
         Command::Version(args) => version::execute(args).await,
         Command::Info(args) => info::execute(args).await,
+        Command::Monitor(args) => monitor::execute(args).await,
         Command::Update => {
             a3s_updater::run_update(&a3s_updater::UpdateConfig {
                 binary_name: "a3s-box",

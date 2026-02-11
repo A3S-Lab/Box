@@ -141,6 +141,12 @@ pub mod events {
     pub const EXEC_COMMAND_COMPLETED: &str = "exec.command.completed";
     pub const EXEC_COMMAND_FAILED: &str = "exec.command.failed";
     pub const EXEC_COMMAND_TIMEOUT: &str = "exec.command.timeout";
+
+    // Restart events
+    pub const BOX_RESTARTING: &str = "box.restarting";
+    pub const BOX_RESTARTED: &str = "box.restarted";
+    pub const BOX_RESTART_FAILED: &str = "box.restart.failed";
+    pub const BOX_RESTART_BACKOFF: &str = "box.restart.backoff";
 }
 
 #[cfg(test)]
@@ -392,12 +398,24 @@ mod tests {
     }
 
     #[test]
+    fn test_event_catalog_restart_events() {
+        assert_eq!(events::BOX_RESTARTING, "box.restarting");
+        assert_eq!(events::BOX_RESTARTED, "box.restarted");
+        assert_eq!(events::BOX_RESTART_FAILED, "box.restart.failed");
+        assert_eq!(events::BOX_RESTART_BACKOFF, "box.restart.backoff");
+    }
+
+    #[test]
     fn test_event_key_naming_convention() {
         // All event keys should follow dot-separated lowercase format
         let all_events = vec![
             events::BOX_READY,
             events::BOX_ERROR,
             events::BOX_TIMEOUT,
+            events::BOX_RESTARTING,
+            events::BOX_RESTARTED,
+            events::BOX_RESTART_FAILED,
+            events::BOX_RESTART_BACKOFF,
             events::POOL_VM_CREATED,
             events::POOL_VM_ACQUIRED,
             events::POOL_VM_RELEASED,

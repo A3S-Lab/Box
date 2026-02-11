@@ -76,6 +76,12 @@ pub struct BoxRecord {
     /// Number of automatic restarts performed
     #[serde(default)]
     pub restart_count: u32,
+    /// Maximum restart count for "on-failure:N" policy (0 = unlimited)
+    #[serde(default)]
+    pub max_restart_count: u32,
+    /// Exit code from the last run (None if not yet captured)
+    #[serde(default)]
+    pub exit_code: Option<i32>,
     /// Health check configuration
     #[serde(default)]
     pub health_check: Option<HealthCheck>,
@@ -319,13 +325,72 @@ fn is_process_alive(pid: u32) -> bool {
 /// - `"no"` — never restart
 /// - `"always"` — always restart (even if stopped by user, but we only call this for dead boxes)
 /// - `"on-failure"` — restart only if the box died unexpectedly (not stopped by user)
+/// - `"on-failure:N"` — like on-failure, but at most N times
 /// - `"unless-stopped"` — restart unless the user explicitly stopped it
 fn should_restart(record: &BoxRecord) -> bool {
-    match record.restart_policy.as_str() {
+    let policy = record.restart_policy.as_str();
+
+    // Parse "on-failure:N" format
+    if let Some(max_str) = policy.strip_prefix("on-failure:") {
+        if let Ok(max) = max_str.parse::<u32>() {
+            return !record.stopped_by_user && record.restart_count < max;
+        }
+        // Malformed "on-failure:..." — treat as no restart
+        return false;
+    }
+
+    match policy {
         "always" => true,
-        "on-failure" => !record.stopped_by_user,
+        "on-failure" => {
+            if record.stopped_by_user {
+                return false;
+            }
+            if record.max_restart_count > 0 {
+                record.restart_count < record.max_restart_count
+            } else {
+                true
+            }
+        }
         "unless-stopped" => !record.stopped_by_user,
         _ => false, // "no" or unknown
+    }
+}
+
+/// Validate a restart policy string.
+///
+/// Returns `Ok(())` if valid, or an error message describing the problem.
+/// Valid values: "no", "always", "on-failure", "on-failure:N", "unless-stopped".
+pub fn validate_restart_policy(policy: &str) -> Result<(), String> {
+    match policy {
+        "no" | "always" | "on-failure" | "unless-stopped" => Ok(()),
+        _ if policy.starts_with("on-failure:") => {
+            let max_str = &policy["on-failure:".len()..];
+            max_str
+                .parse::<u32>()
+                .map(|_| ())
+                .map_err(|_| format!(
+                    "Invalid restart policy '{policy}': expected 'on-failure:N' where N is a positive integer"
+                ))
+        }
+        _ => Err(format!(
+            "Invalid restart policy '{policy}': must be one of: no, always, on-failure, on-failure:N, unless-stopped"
+        )),
+    }
+}
+
+/// Parse a restart policy string and return (base_policy, max_restart_count).
+///
+/// - `"on-failure:5"` → `("on-failure", 5)`
+/// - `"always"` → `("always", 0)`
+/// - `"no"` → `("no", 0)`
+pub fn parse_restart_policy(policy: &str) -> Result<(String, u32), String> {
+    validate_restart_policy(policy)?;
+
+    if let Some(max_str) = policy.strip_prefix("on-failure:") {
+        let max = max_str.parse::<u32>().unwrap(); // safe: validated above
+        Ok(("on-failure".to_string(), max))
+    } else {
+        Ok((policy.to_string(), 0))
     }
 }
 
@@ -395,6 +460,8 @@ mod tests {
             labels: HashMap::new(),
             stopped_by_user: false,
             restart_count: 0,
+            max_restart_count: 0,
+            exit_code: None,
             health_check: None,
             health_status: "none".to_string(),
             health_retries: 0,
@@ -1043,7 +1110,7 @@ mod tests {
     #[test]
     fn test_box_record_backward_compat_no_health() {
         // Old records without health fields should deserialize with defaults
-        let mut record = sample_record("id-1", "box1", "created");
+        let record = sample_record("id-1", "box1", "created");
         let json = serde_json::to_string(&record).unwrap();
 
         // Remove health fields to simulate old format
@@ -1054,6 +1121,8 @@ mod tests {
         val.as_object_mut().unwrap().remove("health_last_check");
         val.as_object_mut().unwrap().remove("stopped_by_user");
         val.as_object_mut().unwrap().remove("restart_count");
+        val.as_object_mut().unwrap().remove("max_restart_count");
+        val.as_object_mut().unwrap().remove("exit_code");
 
         let parsed: BoxRecord = serde_json::from_value(val).unwrap();
         assert!(parsed.health_check.is_none());
@@ -1062,5 +1131,162 @@ mod tests {
         assert!(parsed.health_last_check.is_none());
         assert!(!parsed.stopped_by_user);
         assert_eq!(parsed.restart_count, 0);
+        assert_eq!(parsed.max_restart_count, 0);
+        assert!(parsed.exit_code.is_none());
+    }
+
+    // --- Restart policy validation tests ---
+
+    #[test]
+    fn test_validate_restart_policy_valid() {
+        assert!(validate_restart_policy("no").is_ok());
+        assert!(validate_restart_policy("always").is_ok());
+        assert!(validate_restart_policy("on-failure").is_ok());
+        assert!(validate_restart_policy("unless-stopped").is_ok());
+        assert!(validate_restart_policy("on-failure:5").is_ok());
+        assert!(validate_restart_policy("on-failure:0").is_ok());
+        assert!(validate_restart_policy("on-failure:100").is_ok());
+    }
+
+    #[test]
+    fn test_validate_restart_policy_invalid() {
+        assert!(validate_restart_policy("").is_err());
+        assert!(validate_restart_policy("never").is_err());
+        assert!(validate_restart_policy("on-failure:").is_err());
+        assert!(validate_restart_policy("on-failure:abc").is_err());
+        assert!(validate_restart_policy("on-failure:-1").is_err());
+        assert!(validate_restart_policy("on-failure:1.5").is_err());
+    }
+
+    #[test]
+    fn test_parse_restart_policy_simple() {
+        assert_eq!(parse_restart_policy("no").unwrap(), ("no".to_string(), 0));
+        assert_eq!(parse_restart_policy("always").unwrap(), ("always".to_string(), 0));
+        assert_eq!(parse_restart_policy("on-failure").unwrap(), ("on-failure".to_string(), 0));
+        assert_eq!(parse_restart_policy("unless-stopped").unwrap(), ("unless-stopped".to_string(), 0));
+    }
+
+    #[test]
+    fn test_parse_restart_policy_on_failure_with_max() {
+        assert_eq!(parse_restart_policy("on-failure:5").unwrap(), ("on-failure".to_string(), 5));
+        assert_eq!(parse_restart_policy("on-failure:0").unwrap(), ("on-failure".to_string(), 0));
+        assert_eq!(parse_restart_policy("on-failure:100").unwrap(), ("on-failure".to_string(), 100));
+    }
+
+    #[test]
+    fn test_parse_restart_policy_invalid() {
+        assert!(parse_restart_policy("invalid").is_err());
+        assert!(parse_restart_policy("on-failure:abc").is_err());
+    }
+
+    // --- Enhanced should_restart tests ---
+
+    #[test]
+    fn test_should_restart_on_failure_with_max_under_limit() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure:5".to_string();
+        record.restart_count = 3;
+        assert!(should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_on_failure_with_max_at_limit() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure:5".to_string();
+        record.restart_count = 5;
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_on_failure_with_max_over_limit() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure:3".to_string();
+        record.restart_count = 10;
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_on_failure_with_max_stopped_by_user() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure:5".to_string();
+        record.restart_count = 0;
+        record.stopped_by_user = true;
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_on_failure_with_max_restart_count_field() {
+        // Test the max_restart_count field on plain "on-failure" policy
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure".to_string();
+        record.max_restart_count = 3;
+        record.restart_count = 3;
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_on_failure_max_restart_count_zero_means_unlimited() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure".to_string();
+        record.max_restart_count = 0;
+        record.restart_count = 100;
+        assert!(should_restart(&record));
+    }
+
+    #[test]
+    fn test_should_restart_malformed_on_failure_colon() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure:abc".to_string();
+        assert!(!should_restart(&record));
+    }
+
+    #[test]
+    fn test_pending_restarts_respects_max_count() {
+        let tmp = TempDir::new().unwrap();
+        let mut sf = StateFile::load(&test_state_path(&tmp)).unwrap();
+
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure:2".to_string();
+        record.restart_count = 2;
+        sf.add(record).unwrap();
+
+        // At limit — should NOT be pending
+        assert!(sf.pending_restarts().is_empty());
+    }
+
+    #[test]
+    fn test_pending_restarts_under_max_count() {
+        let tmp = TempDir::new().unwrap();
+        let mut sf = StateFile::load(&test_state_path(&tmp)).unwrap();
+
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.restart_policy = "on-failure:5".to_string();
+        record.restart_count = 2;
+        sf.add(record).unwrap();
+
+        // Under limit — should be pending
+        assert_eq!(sf.pending_restarts().len(), 1);
+    }
+
+    // --- Exit code field tests ---
+
+    #[test]
+    fn test_box_record_exit_code_serialization() {
+        let mut record = sample_record("id-1", "box1", "dead");
+        record.exit_code = Some(137);
+
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: BoxRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.exit_code, Some(137));
+    }
+
+    #[test]
+    fn test_box_record_exit_code_none() {
+        let record = sample_record("id-1", "box1", "running");
+        assert!(record.exit_code.is_none());
+
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: BoxRecord = serde_json::from_str(&json).unwrap();
+        assert!(parsed.exit_code.is_none());
     }
 }

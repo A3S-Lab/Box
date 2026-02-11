@@ -107,6 +107,7 @@ fn kill_one(
         let record = resolve::resolve_mut(state, &box_id)?;
         record.status = "stopped".to_string();
         record.pid = None;
+        record.stopped_by_user = true;
         state.save()?;
     }
 

@@ -1,10 +1,8 @@
 //! `a3s-box start` command — Start one or more created/stopped boxes.
 
-use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig};
-use a3s_box_core::event::EventEmitter;
-use a3s_box_runtime::VmManager;
 use clap::Args;
 
+use crate::boot;
 use crate::resolve;
 use crate::state::StateFile;
 
@@ -47,28 +45,13 @@ async fn start_one(
     let box_id = record.id.clone();
     let name = record.name.clone();
 
-    // Reconstruct BoxConfig from record
-    let config = BoxConfig {
-        agent: AgentType::OciRegistry {
-            reference: record.image.clone(),
-        },
-        resources: ResourceConfig {
-            vcpus: record.cpus,
-            memory_mb: record.memory_mb,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
-    let emitter = EventEmitter::new(256);
-    let mut vm = VmManager::with_box_id(config, emitter, box_id.clone());
-
     println!("Starting box {name}...");
-    vm.boot().await?;
+    let result = boot::boot_from_record(record).await?;
 
     // Update record
     let record = resolve::resolve_mut(state, &box_id)?;
     record.status = "running".to_string();
+    record.pid = result.pid;
     record.started_at = Some(chrono::Utc::now());
     record.stopped_by_user = false;
     record.restart_count = 0;

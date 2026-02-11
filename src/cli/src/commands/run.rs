@@ -48,6 +48,14 @@ pub struct RunArgs {
     #[arg(short = 'd', long)]
     pub detach: bool,
 
+    /// Keep STDIN open
+    #[arg(short = 'i', long = "interactive")]
+    pub interactive: bool,
+
+    /// Allocate a pseudo-TTY
+    #[arg(short = 't', long = "tty")]
+    pub tty: bool,
+
     /// Override the image entrypoint
     #[arg(long)]
     pub entrypoint: Option<String>,
@@ -142,6 +150,15 @@ pub struct RunArgs {
 }
 
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Validate restart policy
+    let (restart_policy, max_restart_count) = crate::state::parse_restart_policy(&args.restart)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    // Reject conflicting --rm + --restart
+    if args.rm && restart_policy != "no" {
+        return Err("Conflicting options: --rm and --restart cannot be used together".into());
+    }
+
     let memory_mb = parse_memory(&args.memory)
         .map_err(|e| format!("Invalid --memory: {e}"))?;
 
@@ -258,11 +275,13 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         hostname: args.hostname.clone(),
         user: args.user.clone(),
         workdir: args.workdir.clone(),
-        restart_policy: args.restart.clone(),
+        restart_policy: restart_policy.clone(),
         port_map: args.publish.clone(),
         labels,
         stopped_by_user: false,
         restart_count: 0,
+        max_restart_count,
+        exit_code: None,
         health_check,
         health_status,
         health_retries: 0,
@@ -296,6 +315,77 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.detach {
         println!("{box_id}");
+        return Ok(());
+    }
+
+    // Interactive PTY mode: open a shell session instead of tailing console log
+    if args.tty {
+        use a3s_box_core::pty::PtyRequest;
+        use a3s_box_runtime::PtyClient;
+        use crossterm::terminal;
+
+        let pty_socket_path = box_dir.join("sockets").join("pty.sock");
+
+        // Wait for PTY socket to appear
+        let start = std::time::Instant::now();
+        while !pty_socket_path.exists() {
+            if start.elapsed().as_secs() > 10 {
+                return Err("PTY socket did not appear (guest may not support interactive mode)".into());
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        let mut client = PtyClient::connect(&pty_socket_path).await?;
+
+        // Use the box's CMD/entrypoint or default to /bin/sh
+        let pty_cmd = if args.cmd.is_empty() {
+            vec!["/bin/sh".to_string()]
+        } else {
+            args.cmd.clone()
+        };
+
+        let request = PtyRequest {
+            cmd: pty_cmd,
+            env: vec![],
+            working_dir: None,
+            user: None,
+            cols,
+            rows,
+        };
+        client.send_request(&request).await?;
+
+        terminal::enable_raw_mode()?;
+        let (read_half, write_half) = client.into_split();
+        let exit_code = super::exec::run_pty_session(read_half, write_half).await;
+        terminal::disable_raw_mode()?;
+
+        // Cleanup after PTY session ends
+        println!("\nStopping box {}...", name);
+        vm.destroy().await?;
+        super::volume::detach_volumes(&volume_names, &box_id);
+        if let Some(ref net_name) = args.network {
+            let net_store = a3s_box_runtime::NetworkStore::default_path()?;
+            if let Some(mut net_config) = net_store.get(net_name)? {
+                net_config.disconnect(&box_id).ok();
+                net_store.update(&net_config)?;
+            }
+        }
+        let mut state = StateFile::load_default()?;
+        if let Some(rec) = state.find_by_id_mut(&box_id) {
+            rec.status = "stopped".to_string();
+            rec.pid = None;
+        }
+        if args.rm {
+            state.remove(&box_id)?;
+            let _ = std::fs::remove_dir_all(&box_dir);
+        } else {
+            state.save()?;
+        }
+
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
         return Ok(());
     }
 
