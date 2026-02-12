@@ -1,11 +1,11 @@
 # A3S Box
 
 <p align="center">
-  <strong>MicroVM Sandbox Runtime for AI Agents</strong>
+  <strong>A3S Operating System — MicroVM Sandbox Runtime</strong>
 </p>
 
 <p align="center">
-  <em>Infrastructure layer — hardware-isolated execution environment with Python and TypeScript SDKs</em>
+  <em>Hardware-isolated execution environment — SafeClaw (the OS main application) runs inside a3s-box MicroVMs</em>
 </p>
 
 <p align="center">
@@ -19,16 +19,18 @@
 
 ## Overview
 
-**A3S Box** is a MicroVM-based sandbox runtime that provides hardware-isolated execution environments for AI agents. It handles VM lifecycle, OCI image management, and namespace isolation — allowing any AI agent to run securely inside a dedicated virtual machine.
+**A3S Box** is a MicroVM-based sandbox runtime that provides hardware-isolated execution environments for the A3S Agent OS. In the A3S architecture, SafeClaw (the OS main application) runs inside a3s-box MicroVMs, providing hardware-level security boundaries for all agent operations. Box handles VM lifecycle, OCI image management, WarmPool pre-warming, and namespace isolation.
 
-Box is **not** an AI agent itself. It provides the secure sandbox infrastructure that agents run inside.
+Box is **not** an AI agent itself. It provides the secure sandbox infrastructure that SafeClaw and agents run inside.
 
 ### What Box Does
 
-- **VM Isolation**: Each sandbox runs in its own MicroVM with a dedicated Linux kernel
+- **VM Isolation**: Each sandbox runs in its own MicroVM with a dedicated Linux kernel (~200ms cold start)
 - **OCI Images**: Load agent code and dependencies from standard container images
+- **WarmPool**: Pre-warmed VM pool for instant deployment (`min_idle` / `max_size` / `idle_ttl`)
 - **Namespace Isolation**: Further isolate agent code from business code within the VM
-- **CRI Integration**: Run as a Kubernetes container runtime (planned)
+- **CRI Integration**: Run as a Kubernetes container runtime
+- **TEE Support**: AMD SEV-SNP hardware memory encryption + remote attestation
 
 ### What Box Does NOT Do
 

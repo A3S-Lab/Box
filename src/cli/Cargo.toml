@@ -58,6 +58,9 @@ rand = { workspace = true }
 # Base64 (for cp command)
 base64 = { workspace = true }
 
+# Terminal (for interactive PTY)
+crossterm = "0.28"
+
 # Archive support (for save/load commands)
 tar = "0.4"
 

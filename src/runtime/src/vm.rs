@@ -44,6 +44,8 @@ struct BoxLayout {
     socket_path: PathBuf,
     /// Path to the exec Unix socket
     exec_socket_path: PathBuf,
+    /// Path to the PTY Unix socket
+    pty_socket_path: PathBuf,
     /// Path to the workspace directory
     workspace_path: PathBuf,
     /// Path to the skills directory
@@ -807,6 +809,7 @@ impl VmManager {
             rootfs_path,
             socket_path: socket_dir.join("grpc.sock"),
             exec_socket_path: socket_dir.join("exec.sock"),
+            pty_socket_path: socket_dir.join("pty.sock"),
             workspace_path,
             skills_path,
             console_output: Some(logs_dir.join("console.log")),
@@ -1155,10 +1158,22 @@ impl VmManager {
             };
 
             // Build environment for guest init
+            // Pass args as individual env vars to avoid spaces in values
+            // being truncated by libkrun's env serialization
             let mut env: Vec<(String, String)> = vec![
                 ("A3S_AGENT_EXEC".to_string(), agent_exec),
-                ("A3S_AGENT_ARGS".to_string(), agent_args.join(" ")),
+                ("A3S_AGENT_ARGC".to_string(), agent_args.len().to_string()),
             ];
+            for (i, arg) in agent_args.iter().enumerate() {
+                env.push((format!("A3S_AGENT_ARG_{}", i), arg.clone()));
+            }
+
+            // Pass the OCI working directory to guest init
+            if let Some(ref oci_config) = layout.agent_oci_config {
+                if let Some(ref wd) = oci_config.working_dir {
+                    env.push(("A3S_AGENT_WORKDIR".to_string(), wd.clone()));
+                }
+            }
 
             // Add agent environment variables with A3S_AGENT_ENV_ prefix
             for (key, value) in agent_env {
@@ -1279,6 +1294,7 @@ impl VmManager {
             rootfs_path: layout.rootfs_path.clone(),
             grpc_socket_path: layout.socket_path.clone(),
             exec_socket_path: layout.exec_socket_path.clone(),
+            pty_socket_path: layout.pty_socket_path.clone(),
             fs_mounts,
             entrypoint,
             console_output: layout.console_output.clone(),
@@ -1762,6 +1778,9 @@ mod tests {
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
             volumes: vec![],
+            stop_signal: None,
+            health_check: None,
+            onbuild: vec![],
         };
 
         let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
@@ -1780,6 +1799,9 @@ mod tests {
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
             volumes: vec![],
+            stop_signal: None,
+            health_check: None,
+            onbuild: vec![],
         };
 
         let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
@@ -1798,6 +1820,9 @@ mod tests {
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
             volumes: vec![],
+            stop_signal: None,
+            health_check: None,
+            onbuild: vec![],
         };
 
         let (exec, _args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
@@ -1815,6 +1840,9 @@ mod tests {
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
             volumes: vec![],
+            stop_signal: None,
+            health_check: None,
+            onbuild: vec![],
         };
 
         let override_cmd = vec!["sleep".to_string(), "3600".to_string()];
@@ -1834,6 +1862,9 @@ mod tests {
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
             volumes: vec![],
+            stop_signal: None,
+            health_check: None,
+            onbuild: vec![],
         };
 
         let (exec, _) = VmManager::resolve_oci_entrypoint(&config, false, &[], None);
@@ -1851,6 +1882,9 @@ mod tests {
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
             volumes: vec![],
+            stop_signal: None,
+            health_check: None,
+            onbuild: vec![],
         };
 
         // Override replaces the image entrypoint entirely
@@ -1872,6 +1906,9 @@ mod tests {
             exposed_ports: vec![],
             labels: std::collections::HashMap::new(),
             volumes: vec![],
+            stop_signal: None,
+            health_check: None,
+            onbuild: vec![],
         };
 
         // Both entrypoint and cmd overridden

@@ -48,7 +48,7 @@ pub struct RunArgs {
     #[arg(short = 'd', long)]
     pub detach: bool,
 
-    /// Keep STDIN open
+    /// Keep STDIN open (interactive mode)
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
@@ -150,15 +150,6 @@ pub struct RunArgs {
 }
 
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
-    // Validate restart policy
-    let (restart_policy, max_restart_count) = crate::state::parse_restart_policy(&args.restart)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    // Reject conflicting --rm + --restart
-    if args.rm && restart_policy != "no" {
-        return Err("Conflicting options: --rm and --restart cannot be used together".into());
-    }
-
     let memory_mb = parse_memory(&args.memory)
         .map_err(|e| format!("Invalid --memory: {e}"))?;
 
@@ -239,6 +230,19 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating box {} ({})...", name, &BoxRecord::make_short_id(&box_id));
 
+    // Register endpoint in network store BEFORE boot so the VM can find its IP
+    if let Some(ref net_name) = args.network {
+        let net_store = a3s_box_runtime::NetworkStore::default_path()?;
+        let mut net_config = net_store
+            .get(net_name)?
+            .ok_or_else(|| format!("network '{}' not found", net_name))?;
+        let endpoint = net_config
+            .connect(&box_id, &name)
+            .map_err(|e| format!("Failed to connect to network: {e}"))?;
+        net_store.update(&net_config)?;
+        println!("Connected to network {} (IP: {})", net_name, endpoint.ip_address);
+    }
+
     vm.boot().await?;
 
     // Get PID from the running VM
@@ -275,13 +279,11 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         hostname: args.hostname.clone(),
         user: args.user.clone(),
         workdir: args.workdir.clone(),
-        restart_policy: restart_policy.clone(),
+        restart_policy: args.restart.clone(),
         port_map: args.publish.clone(),
         labels,
         stopped_by_user: false,
         restart_count: 0,
-        max_restart_count,
-        exit_code: None,
         health_check,
         health_status,
         health_retries: 0,
@@ -292,33 +294,26 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         tmpfs: args.tmpfs.clone(),
         anonymous_volumes: vm.anonymous_volumes().to_vec(),
         resource_limits,
+        max_restart_count: 0,
+        exit_code: None,
     };
 
     let mut state = StateFile::load_default()?;
     state.add(record)?;
 
-    // Register endpoint in network store if using bridge networking
-    if let Some(ref net_name) = args.network {
-        let net_store = a3s_box_runtime::NetworkStore::default_path()?;
-        let mut net_config = net_store
-            .get(net_name)?
-            .ok_or_else(|| format!("network '{}' not found", net_name))?;
-        let endpoint = net_config
-            .connect(&box_id, &name)
-            .map_err(|e| format!("Failed to connect to network: {e}"))?;
-        net_store.update(&net_config)?;
-        println!("Connected to network {} (IP: {})", net_name, endpoint.ip_address);
-    }
-
     // Attach named volumes to this box
     super::volume::attach_volumes(&volume_names, &box_id)?;
+
+    if args.detach && args.tty {
+        return Err("Cannot use -t (tty) with -d (detach)".into());
+    }
 
     if args.detach {
         println!("{box_id}");
         return Ok(());
     }
 
-    // Interactive PTY mode: open a shell session instead of tailing console log
+    // Interactive PTY mode: connect to the guest PTY server
     if args.tty {
         use a3s_box_core::pty::PtyRequest;
         use a3s_box_runtime::PtyClient;
@@ -326,42 +321,46 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         let pty_socket_path = box_dir.join("sockets").join("pty.sock");
 
-        // Wait for PTY socket to appear
-        let start = std::time::Instant::now();
-        while !pty_socket_path.exists() {
-            if start.elapsed().as_secs() > 10 {
-                return Err("PTY socket did not appear (guest may not support interactive mode)".into());
+        // Wait for PTY socket to appear (guest init may still be starting)
+        for _ in 0..50 {
+            if pty_socket_path.exists() {
+                break;
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        if !pty_socket_path.exists() {
+            return Err(format!(
+                "PTY socket not found at {} (guest may not support interactive mode)",
+                pty_socket_path.display()
+            ).into());
+        }
+
+        // Build the command for the PTY session: use cmd override, entrypoint, or /bin/sh
+        let pty_cmd = if !args.cmd.is_empty() {
+            args.cmd.clone()
+        } else if let Some(ref ep) = entrypoint_override {
+            ep.clone()
+        } else {
+            vec!["/bin/sh".to_string()]
+        };
 
         let (cols, rows) = terminal::size().unwrap_or((80, 24));
         let mut client = PtyClient::connect(&pty_socket_path).await?;
-
-        // Use the box's CMD/entrypoint or default to /bin/sh
-        let pty_cmd = if args.cmd.is_empty() {
-            vec!["/bin/sh".to_string()]
-        } else {
-            args.cmd.clone()
-        };
-
-        let request = PtyRequest {
+        client.send_request(&PtyRequest {
             cmd: pty_cmd,
-            env: vec![],
-            working_dir: None,
-            user: None,
+            env: args.env.clone(),
+            working_dir: args.workdir.clone(),
+            user: args.user.clone(),
             cols,
             rows,
-        };
-        client.send_request(&request).await?;
+        }).await?;
 
         terminal::enable_raw_mode()?;
         let (read_half, write_half) = client.into_split();
         let exit_code = super::exec::run_pty_session(read_half, write_half).await;
         terminal::disable_raw_mode()?;
 
-        // Cleanup after PTY session ends
-        println!("\nStopping box {}...", name);
+        // Clean up: destroy VM
         vm.destroy().await?;
         super::volume::detach_volumes(&volume_names, &box_id);
         if let Some(ref net_name) = args.network {
@@ -371,6 +370,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
                 net_store.update(&net_config)?;
             }
         }
+
         let mut state = StateFile::load_default()?;
         if let Some(rec) = state.find_by_id_mut(&box_id) {
             rec.status = "stopped".to_string();

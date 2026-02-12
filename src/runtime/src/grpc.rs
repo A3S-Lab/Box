@@ -292,6 +292,108 @@ impl AttestationClient {
     }
 }
 
+/// Client for interactive PTY sessions in the guest over Unix socket.
+///
+/// Connects to the PTY server (vsock port 4090) and provides async
+/// frame-based communication for bidirectional terminal I/O.
+#[derive(Debug)]
+pub struct PtyClient {
+    stream: tokio::net::UnixStream,
+}
+
+impl PtyClient {
+    /// Connect to the PTY server via Unix socket.
+    pub async fn connect(socket_path: &Path) -> Result<Self> {
+        let stream = tokio::net::UnixStream::connect(socket_path).await.map_err(|e| {
+            BoxError::ExecError(format!(
+                "Failed to connect to PTY server at {}: {}",
+                socket_path.display(),
+                e,
+            ))
+        })?;
+
+        Ok(Self { stream })
+    }
+
+    /// Send a PtyRequest to start an interactive session.
+    pub async fn send_request(&mut self, req: &a3s_box_core::pty::PtyRequest) -> Result<()> {
+        let payload = serde_json::to_vec(req).map_err(|e| {
+            BoxError::ExecError(format!("Failed to serialize PtyRequest: {}", e))
+        })?;
+        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_REQUEST, &payload).await
+    }
+
+    /// Send terminal data to the guest.
+    pub async fn send_data(&mut self, data: &[u8]) -> Result<()> {
+        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_DATA, data).await
+    }
+
+    /// Send a terminal resize notification.
+    pub async fn send_resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        let resize = a3s_box_core::pty::PtyResize { cols, rows };
+        let payload = serde_json::to_vec(&resize).map_err(|e| {
+            BoxError::ExecError(format!("Failed to serialize PtyResize: {}", e))
+        })?;
+        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_RESIZE, &payload).await
+    }
+
+    /// Read the next frame from the guest.
+    ///
+    /// Returns `Ok(None)` on EOF (guest disconnected).
+    pub async fn read_frame(&mut self) -> Result<Option<(u8, Vec<u8>)>> {
+        let mut header = [0u8; 5];
+        match self.stream.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => {
+                return Err(BoxError::ExecError(format!("PTY frame read failed: {}", e)));
+            }
+        }
+
+        let frame_type = header[0];
+        let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+
+        if len > a3s_box_core::pty::MAX_FRAME_PAYLOAD {
+            return Err(BoxError::ExecError(format!(
+                "PTY frame too large: {} bytes",
+                len
+            )));
+        }
+
+        let mut payload = vec![0u8; len];
+        if len > 0 {
+            self.stream.read_exact(&mut payload).await.map_err(|e| {
+                BoxError::ExecError(format!("PTY frame payload read failed: {}", e))
+            })?;
+        }
+
+        Ok(Some((frame_type, payload)))
+    }
+
+    /// Split the underlying stream into read and write halves for concurrent I/O.
+    pub fn into_split(self) -> (tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf) {
+        self.stream.into_split()
+    }
+
+    /// Write a raw frame: [type: u8] [length: u32 BE] [payload].
+    async fn write_raw_frame(&mut self, frame_type: u8, payload: &[u8]) -> Result<()> {
+        let len = payload.len() as u32;
+        self.stream.write_all(&[frame_type]).await.map_err(|e| {
+            BoxError::ExecError(format!("PTY frame write failed: {}", e))
+        })?;
+        self.stream.write_all(&len.to_be_bytes()).await.map_err(|e| {
+            BoxError::ExecError(format!("PTY frame write failed: {}", e))
+        })?;
+        self.stream.write_all(payload).await.map_err(|e| {
+            BoxError::ExecError(format!("PTY frame write failed: {}", e))
+        })?;
+        self.stream.flush().await.map_err(|e| {
+            BoxError::ExecError(format!("PTY frame flush failed: {}", e))
+        })?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
