@@ -17,6 +17,7 @@ use a3s_box_runtime::krun::KrunContext;
 use a3s_box_runtime::vmm::InstanceSpec;
 use a3s_box_runtime::AGENT_VSOCK_PORT;
 use a3s_box_runtime::EXEC_VSOCK_PORT;
+use a3s_box_runtime::PTY_VSOCK_PORT;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -524,6 +525,26 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         "Configuring vsock bridge for exec"
     );
     ctx.add_vsock_port(EXEC_VSOCK_PORT, exec_socket_str, true)?;
+
+    // Configure PTY communication channel (Unix socket bridged to vsock port 4090)
+    if !spec.pty_socket_path.as_os_str().is_empty() {
+        let pty_socket_str = spec
+            .pty_socket_path
+            .to_str()
+            .ok_or_else(|| BoxError::BoxBootError {
+                message: format!(
+                    "Invalid PTY socket path: {}",
+                    spec.pty_socket_path.display()
+                ),
+                hint: None,
+            })?;
+        tracing::debug!(
+            socket_path = pty_socket_str,
+            guest_port = PTY_VSOCK_PORT,
+            "Configuring vsock bridge for PTY"
+        );
+        ctx.add_vsock_port(PTY_VSOCK_PORT, pty_socket_str, true)?;
+    }
 
     // Configure TSI port mappings if specified
     if !spec.port_map.is_empty() {

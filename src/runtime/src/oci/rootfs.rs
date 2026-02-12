@@ -273,7 +273,17 @@ impl OciRootfsBuilder {
             .map_err(|e| BoxError::Other(format!("Failed to create /sbin directory: {}", e)))?;
 
         // Copy guest init to /sbin/init
+        // Remove any existing file/symlink first (e.g., busybox symlink in Alpine)
         let init_path = sbin_dir.join("init");
+        if init_path.exists() || init_path.symlink_metadata().is_ok() {
+            std::fs::remove_file(&init_path).map_err(|e| {
+                BoxError::Other(format!(
+                    "Failed to remove existing {}: {}",
+                    init_path.display(),
+                    e
+                ))
+            })?;
+        }
         std::fs::copy(guest_init_src, &init_path).map_err(|e| {
             BoxError::Other(format!(
                 "Failed to copy guest init to {}: {}",
@@ -328,7 +338,11 @@ impl OciRootfsBuilder {
         })?;
 
         // Copy nsexec to /usr/bin/nsexec
+        // Remove any existing file/symlink first
         let nsexec_path = usr_bin_dir.join("nsexec");
+        if nsexec_path.exists() || nsexec_path.symlink_metadata().is_ok() {
+            std::fs::remove_file(&nsexec_path).ok();
+        }
         std::fs::copy(nsexec_src, &nsexec_path).map_err(|e| {
             BoxError::Other(format!(
                 "Failed to copy nsexec to {}: {}",
@@ -359,15 +373,22 @@ impl OciRootfsBuilder {
     }
 
     /// Create essential system files.
+    ///
+    /// For /etc/passwd and /etc/group: preserve existing entries from the OCI
+    /// image (e.g., nginx user in nginx:alpine) and only ensure essential
+    /// entries (root, nobody) exist.
     fn create_essential_files(&self) -> Result<()> {
-        // /etc/passwd - minimal user database
-        let passwd_content =
-            "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/false\n";
-        self.write_file("etc/passwd", passwd_content)?;
+        // /etc/passwd - ensure essential entries exist, preserve image entries
+        self.ensure_passwd_entries(&[
+            ("root", "root:x:0:0:root:/root:/bin/sh"),
+            ("nobody", "nobody:x:65534:65534:nobody:/:/bin/false"),
+        ])?;
 
-        // /etc/group - minimal group database
-        let group_content = "root:x:0:\nnogroup:x:65534:\n";
-        self.write_file("etc/group", group_content)?;
+        // /etc/group - ensure essential entries exist, preserve image entries
+        self.ensure_group_entries(&[
+            ("root", "root:x:0:"),
+            ("nogroup", "nogroup:x:65534:"),
+        ])?;
 
         // /etc/hosts - basic hosts file
         let hosts_content = "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n";
@@ -382,6 +403,52 @@ impl OciRootfsBuilder {
         self.write_file("etc/nsswitch.conf", nsswitch_content)?;
 
         Ok(())
+    }
+
+    /// Ensure essential entries exist in /etc/passwd, preserving image entries.
+    fn ensure_passwd_entries(&self, required: &[(&str, &str)]) -> Result<()> {
+        let passwd_path = self.rootfs_path.join("etc/passwd");
+        let existing = std::fs::read_to_string(&passwd_path).unwrap_or_default();
+
+        let mut content = existing.clone();
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+
+        for (username, entry) in required {
+            let has_user = existing
+                .lines()
+                .any(|line| line.split(':').next() == Some(username));
+            if !has_user {
+                content.push_str(entry);
+                content.push('\n');
+            }
+        }
+
+        self.write_file("etc/passwd", &content)
+    }
+
+    /// Ensure essential entries exist in /etc/group, preserving image entries.
+    fn ensure_group_entries(&self, required: &[(&str, &str)]) -> Result<()> {
+        let group_path = self.rootfs_path.join("etc/group");
+        let existing = std::fs::read_to_string(&group_path).unwrap_or_default();
+
+        let mut content = existing.clone();
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+
+        for (groupname, entry) in required {
+            let has_group = existing
+                .lines()
+                .any(|line| line.split(':').next() == Some(groupname));
+            if !has_group {
+                content.push_str(entry);
+                content.push('\n');
+            }
+        }
+
+        self.write_file("etc/group", &content)
     }
 
     /// Write a file to the rootfs.

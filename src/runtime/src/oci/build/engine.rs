@@ -70,6 +70,16 @@ struct BuildState {
     history: Vec<HistoryEntry>,
     /// Build arguments
     build_args: HashMap<String, String>,
+    /// Shell override (default: ["/bin/sh", "-c"])
+    shell: Vec<String>,
+    /// Stop signal
+    stop_signal: Option<String>,
+    /// Health check configuration
+    health_check: Option<OciHealthCheck>,
+    /// ONBUILD triggers to store in the image config
+    onbuild: Vec<String>,
+    /// Volumes declared via VOLUME instruction
+    volumes: Vec<String>,
 }
 
 /// A single history entry for the OCI config.
@@ -77,6 +87,16 @@ struct BuildState {
 struct HistoryEntry {
     created_by: String,
     empty_layer: bool,
+}
+
+/// Health check configuration for OCI image config.
+#[derive(Debug, Clone)]
+pub struct OciHealthCheck {
+    pub test: Vec<String>,
+    pub interval: Option<u64>,
+    pub timeout: Option<u64>,
+    pub retries: Option<u32>,
+    pub start_period: Option<u64>,
 }
 
 impl BuildState {
@@ -93,6 +113,11 @@ impl BuildState {
             diff_ids: Vec::new(),
             history: Vec::new(),
             build_args,
+            shell: vec!["/bin/sh".to_string(), "-c".to_string()],
+            stop_signal: None,
+            health_check: None,
+            onbuild: Vec::new(),
+            volumes: Vec::new(),
         }
     }
 }
@@ -107,6 +132,10 @@ impl BuildState {
 /// 4. Execute each instruction, creating layers as needed
 /// 5. Assemble the final OCI image layout
 /// 6. Store in the image store with the given tag
+///
+/// Supports multi-stage builds: each FROM starts a new stage. Only the final
+/// stage produces the output image. `COPY --from=<stage>` copies from a
+/// previous stage's rootfs.
 pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildResult> {
     // Parse Dockerfile
     let dockerfile = Dockerfile::from_file(&config.dockerfile_path)?;
@@ -118,234 +147,397 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         );
     }
 
-    let mut state = BuildState::new(config.build_args.clone());
+    // Split instructions into stages by FROM
+    let stages = split_into_stages(&dockerfile.instructions);
+    let total_stages = stages.len();
+
+    // Track completed stages: (alias, rootfs_path)
+    let mut completed_stages: Vec<(Option<String>, PathBuf)> = Vec::new();
 
     // Create temp directory for build workspace
     let build_dir = tempfile::TempDir::new().map_err(|e| {
         BoxError::BuildError(format!("Failed to create build directory: {}", e))
     })?;
-    let rootfs_dir = build_dir.path().join("rootfs");
-    let layers_dir = build_dir.path().join("layers");
-    std::fs::create_dir_all(&rootfs_dir).map_err(|e| {
-        BoxError::BuildError(format!("Failed to create rootfs directory: {}", e))
-    })?;
-    std::fs::create_dir_all(&layers_dir).map_err(|e| {
-        BoxError::BuildError(format!("Failed to create layers directory: {}", e))
-    })?;
 
-    // Track base image layer info for the final image
-    let mut base_layers: Vec<LayerInfo> = Vec::new();
-    let mut base_diff_ids: Vec<String> = Vec::new();
+    let mut final_state = BuildState::new(config.build_args.clone());
+    let mut final_base_layers: Vec<LayerInfo> = Vec::new();
+    let mut final_base_diff_ids: Vec<String> = Vec::new();
 
-    // Process instructions
-    let total = dockerfile.instructions.len();
-    for (idx, instruction) in dockerfile.instructions.iter().enumerate() {
-        let step = idx + 1;
+    let total_instructions = dockerfile.instructions.len();
+    let mut global_step = 0;
 
-        match instruction {
-            Instruction::From { image, .. } => {
-                if !config.quiet {
-                    println!("Step {}/{}: FROM {}", step, total, image);
-                }
-                let (layers, diff_ids, base_config) = handle_from(
-                    image,
-                    &rootfs_dir,
-                    &layers_dir,
-                    &store,
-                    &state.build_args,
-                )
-                .await?;
-                base_layers = layers;
-                base_diff_ids = diff_ids;
+    for (stage_idx, stage) in stages.iter().enumerate() {
+        let is_final_stage = stage_idx == total_stages - 1;
 
-                // Inherit config from base image
-                apply_base_config(&mut state, &base_config);
+        let rootfs_dir = build_dir.path().join(format!("rootfs_{}", stage_idx));
+        let layers_dir = build_dir.path().join(format!("layers_{}", stage_idx));
+        std::fs::create_dir_all(&rootfs_dir).map_err(|e| {
+            BoxError::BuildError(format!("Failed to create rootfs directory: {}", e))
+        })?;
+        std::fs::create_dir_all(&layers_dir).map_err(|e| {
+            BoxError::BuildError(format!("Failed to create layers directory: {}", e))
+        })?;
 
-                state.history.push(HistoryEntry {
-                    created_by: format!("FROM {}", image),
-                    empty_layer: true,
-                });
-            }
+        let mut state = BuildState::new(config.build_args.clone());
+        let mut base_layers: Vec<LayerInfo> = Vec::new();
+        let mut base_diff_ids: Vec<String> = Vec::new();
 
-            Instruction::Copy { src, dst, from } => {
-                if from.is_some() {
+        for instruction in &stage.instructions {
+            global_step += 1;
+            let step = global_step;
+
+            match instruction {
+                Instruction::From { image, alias } => {
                     if !config.quiet {
-                        println!(
-                            "Step {}/{}: COPY --from (skipped, multi-stage not supported)",
-                            step, total
-                        );
+                        if total_stages > 1 {
+                            println!(
+                                "Step {}/{}: FROM {} (stage {}/{}{})",
+                                step, total_instructions, image,
+                                stage_idx + 1, total_stages,
+                                alias.as_ref().map(|a| format!(" as {}", a)).unwrap_or_default()
+                            );
+                        } else {
+                            println!("Step {}/{}: FROM {}", step, total_instructions, image);
+                        }
                     }
+                    let (layers, diff_ids, base_config) = handle_from(
+                        image,
+                        &rootfs_dir,
+                        &layers_dir,
+                        &store,
+                        &state.build_args,
+                    )
+                    .await?;
+                    base_layers = layers;
+                    base_diff_ids = diff_ids;
+
+                    // Inherit config from base image
+                    apply_base_config(&mut state, &base_config);
+
+                    // Execute ONBUILD triggers from base image
+                    if !base_config.onbuild.is_empty() && !config.quiet {
+                        println!("  Executing {} ONBUILD trigger(s) from base image", base_config.onbuild.len());
+                    }
+                    for trigger in &base_config.onbuild {
+                        execute_onbuild_trigger(
+                            trigger,
+                            &mut state,
+                            &config,
+                            &rootfs_dir,
+                            &layers_dir,
+                            &base_layers,
+                            &completed_stages,
+                        )?;
+                    }
+
                     state.history.push(HistoryEntry {
-                        created_by: format!("COPY --from={} {} {}", from.as_deref().unwrap_or("?"), src.join(" "), dst),
+                        created_by: format!("FROM {}", image),
                         empty_layer: true,
                     });
-                    continue;
                 }
 
-                if !config.quiet {
-                    println!("Step {}/{}: COPY {} {}", step, total, src.join(" "), dst);
+                Instruction::Copy { src, dst, from } => {
+                    if let Some(from_ref) = from {
+                        if !config.quiet {
+                            println!(
+                                "Step {}/{}: COPY --from={} {} {}",
+                                step, total_instructions, from_ref, src.join(" "), dst
+                            );
+                        }
+                        let from_rootfs = resolve_stage_rootfs(from_ref, &completed_stages)?;
+                        let layer_info = handle_copy(
+                            src,
+                            dst,
+                            from_rootfs,
+                            &rootfs_dir,
+                            &layers_dir,
+                            &state.workdir,
+                            state.layers.len() + base_layers.len(),
+                        )?;
+                        state.diff_ids.push(compute_diff_id(&layer_info.path)?);
+                        state.layers.push(layer_info);
+                        state.history.push(HistoryEntry {
+                            created_by: format!("COPY --from={} {} {}", from_ref, src.join(" "), dst),
+                            empty_layer: false,
+                        });
+                    } else {
+                        if !config.quiet {
+                            println!("Step {}/{}: COPY {} {}", step, total_instructions, src.join(" "), dst);
+                        }
+                        let layer_info = handle_copy(
+                            src,
+                            dst,
+                            &config.context_dir,
+                            &rootfs_dir,
+                            &layers_dir,
+                            &state.workdir,
+                            state.layers.len() + base_layers.len(),
+                        )?;
+                        state.diff_ids.push(compute_diff_id(&layer_info.path)?);
+                        state.layers.push(layer_info);
+                        state.history.push(HistoryEntry {
+                            created_by: format!("COPY {} {}", src.join(" "), dst),
+                            empty_layer: false,
+                        });
+                    }
                 }
-                let layer_info = handle_copy(
-                    src,
-                    dst,
-                    &config.context_dir,
-                    &rootfs_dir,
-                    &layers_dir,
-                    &state.workdir,
-                    state.layers.len() + base_layers.len(),
-                )?;
-                state.diff_ids.push(compute_diff_id(&layer_info.path)?);
-                state.layers.push(layer_info);
-                state.history.push(HistoryEntry {
-                    created_by: format!("COPY {} {}", src.join(" "), dst),
-                    empty_layer: false,
-                });
-            }
 
-            Instruction::Run { command } => {
-                if !config.quiet {
-                    println!("Step {}/{}: RUN {}", step, total, command);
-                }
-                let layer_opt = handle_run(
-                    command,
-                    &rootfs_dir,
-                    &layers_dir,
-                    &state.workdir,
-                    &state.env,
-                    state.layers.len() + base_layers.len(),
-                    config.quiet,
-                )?;
-                if let Some(layer_info) = layer_opt {
+                Instruction::Add { src, dst, chown } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: ADD {} {}", step, total_instructions, src.join(" "), dst);
+                    }
+                    let layer_info = handle_add(
+                        src,
+                        dst,
+                        chown.as_deref(),
+                        &config.context_dir,
+                        &rootfs_dir,
+                        &layers_dir,
+                        &state.workdir,
+                        state.layers.len() + base_layers.len(),
+                    )?;
                     state.diff_ids.push(compute_diff_id(&layer_info.path)?);
                     state.layers.push(layer_info);
                     state.history.push(HistoryEntry {
-                        created_by: format!("RUN {}", command),
+                        created_by: format!("ADD {} {}", src.join(" "), dst),
                         empty_layer: false,
                     });
-                } else {
+                }
+
+                Instruction::Run { command } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: RUN {}", step, total_instructions, command);
+                    }
+                    let layer_opt = handle_run(
+                        command,
+                        &rootfs_dir,
+                        &layers_dir,
+                        &state.workdir,
+                        &state.env,
+                        &state.shell,
+                        state.layers.len() + base_layers.len(),
+                        config.quiet,
+                    )?;
+                    if let Some(layer_info) = layer_opt {
+                        state.diff_ids.push(compute_diff_id(&layer_info.path)?);
+                        state.layers.push(layer_info);
+                        state.history.push(HistoryEntry {
+                            created_by: format!("RUN {}", command),
+                            empty_layer: false,
+                        });
+                    } else {
+                        state.history.push(HistoryEntry {
+                            created_by: format!("RUN {}", command),
+                            empty_layer: true,
+                        });
+                    }
+                }
+
+                Instruction::Workdir { path } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: WORKDIR {}", step, total_instructions, path);
+                    }
+                    state.workdir = resolve_path(&state.workdir, path);
+                    let full = rootfs_dir.join(state.workdir.trim_start_matches('/'));
+                    let _ = std::fs::create_dir_all(&full);
                     state.history.push(HistoryEntry {
-                        created_by: format!("RUN {}", command),
+                        created_by: format!("WORKDIR {}", path),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::Env { key, value } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: ENV {}={}", step, total_instructions, key, value);
+                    }
+                    let expanded_value = expand_args(value, &state.build_args);
+                    if let Some(existing) = state.env.iter_mut().find(|(k, _)| k == key) {
+                        existing.1 = expanded_value;
+                    } else {
+                        state.env.push((key.clone(), expanded_value));
+                    }
+                    state.history.push(HistoryEntry {
+                        created_by: format!("ENV {}={}", key, value),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::Entrypoint { exec } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: ENTRYPOINT {:?}", step, total_instructions, exec);
+                    }
+                    state.entrypoint = Some(exec.clone());
+                    state.history.push(HistoryEntry {
+                        created_by: format!("ENTRYPOINT {:?}", exec),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::Cmd { exec } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: CMD {:?}", step, total_instructions, exec);
+                    }
+                    state.cmd = Some(exec.clone());
+                    state.history.push(HistoryEntry {
+                        created_by: format!("CMD {:?}", exec),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::Expose { port } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: EXPOSE {}", step, total_instructions, port);
+                    }
+                    state.exposed_ports.push(port.clone());
+                    state.history.push(HistoryEntry {
+                        created_by: format!("EXPOSE {}", port),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::Label { key, value } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: LABEL {}={}", step, total_instructions, key, value);
+                    }
+                    state.labels.insert(key.clone(), value.clone());
+                    state.history.push(HistoryEntry {
+                        created_by: format!("LABEL {}={}", key, value),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::User { user } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: USER {}", step, total_instructions, user);
+                    }
+                    state.user = Some(user.clone());
+                    state.history.push(HistoryEntry {
+                        created_by: format!("USER {}", user),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::Arg { name, default } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: ARG {}", step, total_instructions, name);
+                    }
+                    if !state.build_args.contains_key(name) {
+                        if let Some(val) = default {
+                            state.build_args.insert(name.clone(), val.clone());
+                        }
+                    }
+                    state.history.push(HistoryEntry {
+                        created_by: format!("ARG {}", name),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::Shell { exec } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: SHELL {:?}", step, total_instructions, exec);
+                    }
+                    state.shell = exec.clone();
+                    state.history.push(HistoryEntry {
+                        created_by: format!("SHELL {:?}", exec),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::StopSignal { signal } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: STOPSIGNAL {}", step, total_instructions, signal);
+                    }
+                    state.stop_signal = Some(signal.clone());
+                    state.history.push(HistoryEntry {
+                        created_by: format!("STOPSIGNAL {}", signal),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::HealthCheck { cmd, interval, timeout, retries, start_period } => {
+                    if !config.quiet {
+                        if cmd.is_some() {
+                            println!("Step {}/{}: HEALTHCHECK CMD ...", step, total_instructions);
+                        } else {
+                            println!("Step {}/{}: HEALTHCHECK NONE", step, total_instructions);
+                        }
+                    }
+                    state.health_check = cmd.as_ref().map(|c| OciHealthCheck {
+                        test: c.clone(),
+                        interval: *interval,
+                        timeout: *timeout,
+                        retries: *retries,
+                        start_period: *start_period,
+                    });
+                    state.history.push(HistoryEntry {
+                        created_by: if cmd.is_some() {
+                            "HEALTHCHECK CMD ...".to_string()
+                        } else {
+                            "HEALTHCHECK NONE".to_string()
+                        },
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::OnBuild { instruction } => {
+                    let trigger = format!("{:?}", instruction);
+                    if !config.quiet {
+                        println!("Step {}/{}: ONBUILD {}", step, total_instructions, trigger);
+                    }
+                    // Store the raw instruction text for the image config
+                    state.onbuild.push(instruction_to_string(instruction));
+                    state.history.push(HistoryEntry {
+                        created_by: format!("ONBUILD {}", instruction_to_string(instruction)),
+                        empty_layer: true,
+                    });
+                }
+
+                Instruction::Volume { paths } => {
+                    if !config.quiet {
+                        println!("Step {}/{}: VOLUME {}", step, total_instructions, paths.join(" "));
+                    }
+                    for p in paths {
+                        if !state.volumes.contains(p) {
+                            state.volumes.push(p.clone());
+                        }
+                    }
+                    // Create volume directories in rootfs
+                    for p in paths {
+                        let full = rootfs_dir.join(p.trim_start_matches('/'));
+                        let _ = std::fs::create_dir_all(&full);
+                    }
+                    state.history.push(HistoryEntry {
+                        created_by: format!("VOLUME {}", paths.join(" ")),
                         empty_layer: true,
                     });
                 }
             }
+        }
 
-            Instruction::Workdir { path } => {
-                if !config.quiet {
-                    println!("Step {}/{}: WORKDIR {}", step, total, path);
-                }
-                state.workdir = resolve_path(&state.workdir, path);
-                // Create the directory in rootfs
-                let full = rootfs_dir.join(state.workdir.trim_start_matches('/'));
-                let _ = std::fs::create_dir_all(&full);
-                state.history.push(HistoryEntry {
-                    created_by: format!("WORKDIR {}", path),
-                    empty_layer: true,
-                });
-            }
+        // Store completed stage rootfs for COPY --from
+        completed_stages.push((stage.alias.clone(), rootfs_dir.clone()));
 
-            Instruction::Env { key, value } => {
-                if !config.quiet {
-                    println!("Step {}/{}: ENV {}={}", step, total, key, value);
-                }
-                // Replace existing or add new
-                let expanded_value = expand_args(value, &state.build_args);
-                if let Some(existing) = state.env.iter_mut().find(|(k, _)| k == key) {
-                    existing.1 = expanded_value;
-                } else {
-                    state.env.push((key.clone(), expanded_value));
-                }
-                state.history.push(HistoryEntry {
-                    created_by: format!("ENV {}={}", key, value),
-                    empty_layer: true,
-                });
-            }
-
-            Instruction::Entrypoint { exec } => {
-                if !config.quiet {
-                    println!("Step {}/{}: ENTRYPOINT {:?}", step, total, exec);
-                }
-                state.entrypoint = Some(exec.clone());
-                state.history.push(HistoryEntry {
-                    created_by: format!("ENTRYPOINT {:?}", exec),
-                    empty_layer: true,
-                });
-            }
-
-            Instruction::Cmd { exec } => {
-                if !config.quiet {
-                    println!("Step {}/{}: CMD {:?}", step, total, exec);
-                }
-                state.cmd = Some(exec.clone());
-                state.history.push(HistoryEntry {
-                    created_by: format!("CMD {:?}", exec),
-                    empty_layer: true,
-                });
-            }
-
-            Instruction::Expose { port } => {
-                if !config.quiet {
-                    println!("Step {}/{}: EXPOSE {}", step, total, port);
-                }
-                state.exposed_ports.push(port.clone());
-                state.history.push(HistoryEntry {
-                    created_by: format!("EXPOSE {}", port),
-                    empty_layer: true,
-                });
-            }
-
-            Instruction::Label { key, value } => {
-                if !config.quiet {
-                    println!("Step {}/{}: LABEL {}={}", step, total, key, value);
-                }
-                state.labels.insert(key.clone(), value.clone());
-                state.history.push(HistoryEntry {
-                    created_by: format!("LABEL {}={}", key, value),
-                    empty_layer: true,
-                });
-            }
-
-            Instruction::User { user } => {
-                if !config.quiet {
-                    println!("Step {}/{}: USER {}", step, total, user);
-                }
-                state.user = Some(user.clone());
-                state.history.push(HistoryEntry {
-                    created_by: format!("USER {}", user),
-                    empty_layer: true,
-                });
-            }
-
-            Instruction::Arg { name, default } => {
-                if !config.quiet {
-                    println!("Step {}/{}: ARG {}", step, total, name);
-                }
-                // Only set if not already provided via --build-arg
-                if !state.build_args.contains_key(name) {
-                    if let Some(val) = default {
-                        state.build_args.insert(name.clone(), val.clone());
-                    }
-                }
-                state.history.push(HistoryEntry {
-                    created_by: format!("ARG {}", name),
-                    empty_layer: true,
-                });
-            }
+        if is_final_stage {
+            final_state = state;
+            final_base_layers = base_layers;
+            final_base_diff_ids = base_diff_ids;
         }
     }
 
-    // Assemble the final OCI image
+    // Assemble the final OCI image from the last stage
     let reference = config
         .tag
         .clone()
         .unwrap_or_else(|| "a3s-build:latest".to_string());
 
+    let final_layers_dir = build_dir.path().join(format!("layers_{}", total_stages - 1));
+
     let result = assemble_image(
         &reference,
-        &state,
-        &base_layers,
-        &base_diff_ids,
-        &layers_dir,
+        &final_state,
+        &final_base_layers,
+        &final_base_diff_ids,
+        &final_layers_dir,
         &store,
     )
     .await?;
@@ -360,6 +552,82 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
     }
 
     Ok(result)
+}
+
+// =============================================================================
+// Multi-stage support
+// =============================================================================
+
+/// A build stage: a FROM instruction followed by its body instructions.
+struct BuildStage {
+    alias: Option<String>,
+    instructions: Vec<Instruction>,
+}
+
+/// Split a flat list of instructions into stages, each starting with FROM.
+fn split_into_stages(instructions: &[Instruction]) -> Vec<BuildStage> {
+    let mut stages = Vec::new();
+    let mut current: Option<BuildStage> = None;
+
+    for instr in instructions {
+        if let Instruction::From { alias, .. } = instr {
+            if let Some(stage) = current.take() {
+                stages.push(stage);
+            }
+            current = Some(BuildStage {
+                alias: alias.clone(),
+                instructions: vec![instr.clone()],
+            });
+        } else if let Some(ref mut stage) = current {
+            stage.instructions.push(instr.clone());
+        }
+        // Instructions before first FROM (only ARG allowed) are attached to first stage
+    }
+
+    if let Some(stage) = current {
+        stages.push(stage);
+    }
+
+    stages
+}
+
+/// Resolve a stage reference (name or index) to its rootfs path.
+fn resolve_stage_rootfs<'a>(
+    from_ref: &str,
+    completed_stages: &'a [(Option<String>, PathBuf)],
+) -> Result<&'a Path> {
+    // Try by alias first
+    for (alias, rootfs) in completed_stages {
+        if let Some(a) = alias {
+            if a == from_ref {
+                return Ok(rootfs);
+            }
+        }
+    }
+
+    // Try by index
+    if let Ok(idx) = from_ref.parse::<usize>() {
+        if idx < completed_stages.len() {
+            return Ok(&completed_stages[idx].1);
+        }
+    }
+
+    Err(BoxError::BuildError(format!(
+        "COPY --from={}: stage not found (available: {})",
+        from_ref,
+        completed_stages
+            .iter()
+            .enumerate()
+            .map(|(i, (alias, _))| {
+                if let Some(a) = alias {
+                    format!("{} ({})", i, a)
+                } else {
+                    i.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 // =============================================================================
@@ -510,6 +778,7 @@ fn handle_run(
     _layers_dir: &Path,
     _workdir: &str,
     _env: &[(String, String)],
+    _shell: &[String],
     _layer_index: usize,
     quiet: bool,
 ) -> Result<Option<LayerInfo>> {
@@ -531,15 +800,25 @@ fn handle_run(
         let rootfs_dir = _rootfs_dir;
         let layers_dir = _layers_dir;
         let env = _env;
+        let shell = _shell;
         let layer_index = _layer_index;
 
         let before = DirSnapshot::capture(rootfs_dir)?;
 
-        // Build the command
+        // Build the command using the configured shell
         let mut cmd = std::process::Command::new("chroot");
         cmd.arg(rootfs_dir);
-        cmd.arg("/bin/sh");
-        cmd.arg("-c");
+        if shell.len() >= 2 {
+            cmd.arg(&shell[0]);
+            for arg in &shell[1..] {
+                cmd.arg(arg);
+            }
+        } else if shell.len() == 1 {
+            cmd.arg(&shell[0]);
+        } else {
+            cmd.arg("/bin/sh");
+            cmd.arg("-c");
+        }
         cmd.arg(command);
 
         // Set environment
@@ -588,6 +867,283 @@ fn handle_run(
 
     #[cfg(not(target_os = "linux"))]
     Ok(None)
+}
+
+/// Handle ADD: like COPY but supports URL download and tar auto-extraction.
+fn handle_add(
+    src_patterns: &[String],
+    dst: &str,
+    _chown: Option<&str>,
+    context_dir: &Path,
+    rootfs_dir: &Path,
+    layers_dir: &Path,
+    workdir: &str,
+    layer_index: usize,
+) -> Result<LayerInfo> {
+    let resolved_dst = resolve_path(workdir, dst);
+    let dst_in_rootfs = rootfs_dir.join(resolved_dst.trim_start_matches('/'));
+
+    // Ensure destination directory exists
+    if dst.ends_with('/') || src_patterns.len() > 1 {
+        std::fs::create_dir_all(&dst_in_rootfs).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to create ADD destination {}: {}",
+                dst_in_rootfs.display(),
+                e
+            ))
+        })?;
+    } else if let Some(parent) = dst_in_rootfs.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to create parent directory: {}",
+                e
+            ))
+        })?;
+    }
+
+    for src in src_patterns {
+        if src.starts_with("http://") || src.starts_with("https://") {
+            // URL download — not supported in offline build, create placeholder
+            tracing::warn!(
+                url = src.as_str(),
+                "ADD URL download not supported in offline build, skipping"
+            );
+            continue;
+        }
+
+        let src_path = context_dir.join(src);
+        if !src_path.exists() {
+            return Err(BoxError::BuildError(format!(
+                "ADD source not found: {} (in context {})",
+                src,
+                context_dir.display()
+            )));
+        }
+
+        // Check if it's a tar archive that should be auto-extracted
+        if is_tar_archive(src) && !src_path.is_dir() {
+            extract_tar_to_dst(&src_path, &dst_in_rootfs)?;
+        } else if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_in_rootfs)?;
+        } else {
+            let target = if dst_in_rootfs.is_dir() {
+                dst_in_rootfs.join(
+                    src_path
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new(src)),
+                )
+            } else {
+                dst_in_rootfs.clone()
+            };
+            std::fs::copy(&src_path, &target).map_err(|e| {
+                BoxError::BuildError(format!(
+                    "Failed to copy {} to {}: {}",
+                    src_path.display(),
+                    target.display(),
+                    e
+                ))
+            })?;
+        }
+    }
+
+    // Create a layer from the destination
+    let layer_path = layers_dir.join(format!("layer_{}.tar.gz", layer_index));
+    let target_prefix = Path::new(resolved_dst.trim_start_matches('/'));
+    if dst_in_rootfs.is_dir() {
+        create_layer_from_dir(&dst_in_rootfs, target_prefix, &layer_path)
+    } else if dst_in_rootfs.parent().is_some() {
+        let changed = vec![PathBuf::from(
+            dst_in_rootfs
+                .strip_prefix(rootfs_dir)
+                .unwrap_or(target_prefix),
+        )];
+        create_layer(rootfs_dir, &changed, &layer_path)
+    } else {
+        Err(BoxError::BuildError(
+            "Invalid ADD destination".to_string(),
+        ))
+    }
+}
+
+/// Check if a filename looks like a tar archive.
+fn is_tar_archive(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".tar")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".tgz")
+        || lower.ends_with(".tar.bz2")
+        || lower.ends_with(".tar.xz")
+}
+
+/// Extract a tar archive to a destination directory.
+fn extract_tar_to_dst(archive_path: &Path, dst: &Path) -> Result<()> {
+    use flate2::read::GzDecoder;
+    use std::io::BufReader;
+
+    std::fs::create_dir_all(dst).map_err(|e| {
+        BoxError::BuildError(format!(
+            "Failed to create extraction directory {}: {}",
+            dst.display(),
+            e
+        ))
+    })?;
+
+    let file = std::fs::File::open(archive_path).map_err(|e| {
+        BoxError::BuildError(format!(
+            "Failed to open archive {}: {}",
+            archive_path.display(),
+            e
+        ))
+    })?;
+
+    let name = archive_path
+        .to_str()
+        .unwrap_or("")
+        .to_lowercase();
+
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        let decoder = GzDecoder::new(BufReader::new(file));
+        let mut archive = tar::Archive::new(decoder);
+        archive.unpack(dst).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to extract tar.gz {}: {}",
+                archive_path.display(),
+                e
+            ))
+        })?;
+    } else if name.ends_with(".tar") {
+        let mut archive = tar::Archive::new(BufReader::new(file));
+        archive.unpack(dst).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to extract tar {}: {}",
+                archive_path.display(),
+                e
+            ))
+        })?;
+    } else {
+        // .tar.bz2, .tar.xz — not supported yet, fall back to plain copy
+        tracing::warn!(
+            path = archive_path.to_str().unwrap_or(""),
+            "Unsupported archive format for auto-extraction, copying as-is"
+        );
+        let target = dst.join(
+            archive_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("archive")),
+        );
+        std::fs::copy(archive_path, &target).map_err(|e| {
+            BoxError::BuildError(format!("Failed to copy archive: {}", e))
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Execute an ONBUILD trigger instruction.
+fn execute_onbuild_trigger(
+    trigger: &str,
+    state: &mut BuildState,
+    _config: &BuildConfig,
+    _rootfs_dir: &Path,
+    _layers_dir: &Path,
+    _base_layers: &[LayerInfo],
+    _completed_stages: &[(Option<String>, PathBuf)],
+) -> Result<()> {
+    // Parse the trigger as an instruction
+    let instruction = super::dockerfile::parse_single_instruction(trigger)?;
+
+    // Only handle metadata instructions in ONBUILD triggers for now
+    // (RUN/COPY would need full execution context)
+    match &instruction {
+        Instruction::Env { key, value } => {
+            let expanded = expand_args(value, &state.build_args);
+            if let Some(existing) = state.env.iter_mut().find(|(k, _)| k == key) {
+                existing.1 = expanded;
+            } else {
+                state.env.push((key.clone(), expanded));
+            }
+        }
+        Instruction::Label { key, value } => {
+            state.labels.insert(key.clone(), value.clone());
+        }
+        Instruction::Workdir { path } => {
+            state.workdir = resolve_path(&state.workdir, path);
+        }
+        Instruction::Expose { port } => {
+            state.exposed_ports.push(port.clone());
+        }
+        Instruction::User { user } => {
+            state.user = Some(user.clone());
+        }
+        _ => {
+            tracing::warn!(
+                trigger = trigger,
+                "ONBUILD trigger requires execution context, skipping"
+            );
+        }
+    }
+
+    state.history.push(HistoryEntry {
+        created_by: format!("ONBUILD {}", trigger),
+        empty_layer: true,
+    });
+
+    Ok(())
+}
+
+/// Convert an Instruction back to a string representation for ONBUILD storage.
+fn instruction_to_string(instr: &Instruction) -> String {
+    match instr {
+        Instruction::Run { command } => format!("RUN {}", command),
+        Instruction::Copy { src, dst, from } => {
+            if let Some(f) = from {
+                format!("COPY --from={} {} {}", f, src.join(" "), dst)
+            } else {
+                format!("COPY {} {}", src.join(" "), dst)
+            }
+        }
+        Instruction::Add { src, dst, chown } => {
+            if let Some(c) = chown {
+                format!("ADD --chown={} {} {}", c, src.join(" "), dst)
+            } else {
+                format!("ADD {} {}", src.join(" "), dst)
+            }
+        }
+        Instruction::Workdir { path } => format!("WORKDIR {}", path),
+        Instruction::Env { key, value } => format!("ENV {}={}", key, value),
+        Instruction::Entrypoint { exec } => format!("ENTRYPOINT {:?}", exec),
+        Instruction::Cmd { exec } => format!("CMD {:?}", exec),
+        Instruction::Expose { port } => format!("EXPOSE {}", port),
+        Instruction::Label { key, value } => format!("LABEL {}={}", key, value),
+        Instruction::User { user } => format!("USER {}", user),
+        Instruction::Arg { name, default } => {
+            if let Some(d) = default {
+                format!("ARG {}={}", name, d)
+            } else {
+                format!("ARG {}", name)
+            }
+        }
+        Instruction::Shell { exec } => format!("SHELL {:?}", exec),
+        Instruction::StopSignal { signal } => format!("STOPSIGNAL {}", signal),
+        Instruction::HealthCheck { cmd, .. } => {
+            if let Some(c) = cmd {
+                format!("HEALTHCHECK CMD {}", c.join(" "))
+            } else {
+                "HEALTHCHECK NONE".to_string()
+            }
+        }
+        Instruction::OnBuild { instruction } => {
+            format!("ONBUILD {}", instruction_to_string(instruction))
+        }
+        Instruction::Volume { paths } => format!("VOLUME {}", paths.join(" ")),
+        Instruction::From { image, alias } => {
+            if let Some(a) = alias {
+                format!("FROM {} AS {}", image, a)
+            } else {
+                format!("FROM {}", image)
+            }
+        }
+    }
 }
 
 // =============================================================================
@@ -718,6 +1274,39 @@ async fn assemble_image(
     if !state.labels.is_empty() {
         config_section.insert("Labels".to_string(), serde_json::json!(state.labels));
     }
+    if let Some(ref sig) = state.stop_signal {
+        config_section.insert("StopSignal".to_string(), serde_json::json!(sig));
+    }
+    if let Some(ref hc) = state.health_check {
+        let mut hc_obj = serde_json::json!({
+            "Test": hc.test,
+        });
+        if let Some(interval) = hc.interval {
+            // OCI stores intervals in nanoseconds
+            hc_obj["Interval"] = serde_json::json!(interval * 1_000_000_000);
+        }
+        if let Some(timeout) = hc.timeout {
+            hc_obj["Timeout"] = serde_json::json!(timeout * 1_000_000_000);
+        }
+        if let Some(retries) = hc.retries {
+            hc_obj["Retries"] = serde_json::json!(retries);
+        }
+        if let Some(start_period) = hc.start_period {
+            hc_obj["StartPeriod"] = serde_json::json!(start_period * 1_000_000_000);
+        }
+        config_section.insert("Healthcheck".to_string(), hc_obj);
+    }
+    if !state.onbuild.is_empty() {
+        config_section.insert("OnBuild".to_string(), serde_json::json!(state.onbuild));
+    }
+    if !state.volumes.is_empty() {
+        let vols: HashMap<String, serde_json::Value> = state
+            .volumes
+            .iter()
+            .map(|v| (v.clone(), serde_json::json!({})))
+            .collect();
+        config_section.insert("Volumes".to_string(), serde_json::json!(vols));
+    }
 
     // Write config blob
     let config_bytes = serde_json::to_vec_pretty(&config_obj)?;
@@ -800,6 +1389,19 @@ fn apply_base_config(state: &mut BuildState, config: &OciImageConfig) {
     if let Some(ref wd) = config.working_dir {
         state.workdir = wd.clone();
     }
+    if let Some(ref sig) = config.stop_signal {
+        state.stop_signal = Some(sig.clone());
+    }
+    if let Some(ref hc) = config.health_check {
+        state.health_check = Some(hc.clone());
+    }
+    // Inherit volumes from base image
+    for v in &config.volumes {
+        if !state.volumes.contains(v) {
+            state.volumes.push(v.clone());
+        }
+    }
+    // Note: onbuild triggers are NOT inherited — they are executed, not stored
 }
 
 /// Resolve a path relative to a working directory.

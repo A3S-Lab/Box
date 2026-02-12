@@ -8,6 +8,7 @@
 pub mod exec_server;
 pub mod namespace;
 pub mod network;
+pub mod pty_server;
 
 pub use namespace::{spawn_isolated, NamespaceConfig, NamespaceError};
 pub use network::configure_guest_network;

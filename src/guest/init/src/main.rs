@@ -7,7 +7,7 @@
 //! - Managing process lifecycle
 //! - Handling SIGTERM for graceful shutdown
 
-use a3s_box_guest_init::{exec_server, namespace, network};
+use a3s_box_guest_init::{exec_server, namespace, network, pty_server};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info, warn};
@@ -20,6 +20,8 @@ struct AgentConfig {
     args: Vec<String>,
     /// Agent environment variables
     env: Vec<(String, String)>,
+    /// Working directory
+    workdir: String,
 }
 
 impl AgentConfig {
@@ -27,15 +29,27 @@ impl AgentConfig {
     ///
     /// Expected environment variables:
     /// - A3S_AGENT_EXEC: agent executable path
-    /// - A3S_AGENT_ARGS: agent arguments (space-separated)
+    /// - A3S_AGENT_ARGC: number of arguments
+    /// - A3S_AGENT_ARG_<n>: individual argument values
     /// - A3S_AGENT_ENV_*: agent environment variables
+    /// - A3S_AGENT_WORKDIR: working directory (defaults to "/")
     fn from_env() -> Self {
         let executable =
             std::env::var("A3S_AGENT_EXEC").unwrap_or_else(|_| "/agent/bin/agent".to_string());
 
-        let args: Vec<String> = std::env::var("A3S_AGENT_ARGS")
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_else(|_| vec!["--listen".to_string(), "vsock://4088".to_string()]);
+        // Parse args from individual env vars (A3S_AGENT_ARGC + A3S_AGENT_ARG_0..N)
+        let args: Vec<String> = match std::env::var("A3S_AGENT_ARGC")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            Some(argc) => (0..argc)
+                .filter_map(|i| std::env::var(format!("A3S_AGENT_ARG_{}", i)).ok())
+                .collect(),
+            None => vec!["--listen".to_string(), "vsock://4088".to_string()],
+        };
+
+        let workdir =
+            std::env::var("A3S_AGENT_WORKDIR").unwrap_or_else(|_| "/".to_string());
 
         // Collect A3S_AGENT_ENV_* variables
         let env: Vec<(String, String)> = std::env::vars()
@@ -52,6 +66,7 @@ impl AgentConfig {
             executable,
             args,
             env,
+            workdir,
         }
     }
 }
@@ -128,13 +143,23 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         executable = %agent_config.executable,
         args = ?agent_config.args,
+        workdir = %agent_config.workdir,
         env_count = agent_config.env.len(),
         "Agent configuration loaded"
     );
 
-    // Step 6: Create namespace for agent
-    info!("Creating isolated namespace for agent");
-    let namespace_config = namespace::NamespaceConfig::default();
+    // Step 6: Create namespace config for agent
+    // Disable namespace isolation inside the MicroVM — the VM itself provides
+    // isolation, and unshare can interfere with the lightweight kernel's
+    // limited namespace support.
+    info!("Creating namespace config for agent");
+    let namespace_config = namespace::NamespaceConfig {
+        mount: false,
+        pid: false,
+        ipc: false,
+        uts: false,
+        net: false,
+    };
 
     // Step 7: Launch agent in isolated namespace
     info!("Launching agent process");
@@ -152,7 +177,7 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
         &agent_config.executable,
         &args_refs,
         &env_refs,
-        "/agent",
+        &agent_config.workdir,
     )?;
 
     info!("Agent started with PID {}", agent_pid);
@@ -161,6 +186,13 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::spawn(|| {
         if let Err(e) = exec_server::run_exec_server() {
             error!("Exec server failed: {}", e);
+        }
+    });
+
+    // Step 8.5: Start PTY server in background thread
+    std::thread::spawn(|| {
+        if let Err(e) = pty_server::run_pty_server() {
+            error!("PTY server failed: {}", e);
         }
     });
 
@@ -183,32 +215,50 @@ fn mount_essential_filesystems() -> Result<(), Box<dyn std::error::Error>> {
     {
         use nix::mount::{mount, MsFlags};
 
-        // Mount /proc
-        mount(
+        // Mount /proc (ignore EBUSY — kernel may have already mounted it)
+        match mount(
             Some("proc"),
             "/proc",
             Some("proc"),
             MsFlags::empty(),
             None::<&str>,
-        )?;
+        ) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::EBUSY) => {
+                info!("/proc already mounted, skipping");
+            }
+            Err(e) => return Err(e.into()),
+        }
 
-        // Mount /sys
-        mount(
+        // Mount /sys (ignore EBUSY)
+        match mount(
             Some("sysfs"),
             "/sys",
             Some("sysfs"),
             MsFlags::empty(),
             None::<&str>,
-        )?;
+        ) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::EBUSY) => {
+                info!("/sys already mounted, skipping");
+            }
+            Err(e) => return Err(e.into()),
+        }
 
-        // Mount /dev (devtmpfs)
-        mount(
+        // Mount /dev (devtmpfs, ignore EBUSY)
+        match mount(
             Some("devtmpfs"),
             "/dev",
             Some("devtmpfs"),
             MsFlags::empty(),
             None::<&str>,
-        )?;
+        ) {
+            Ok(()) => {}
+            Err(nix::errno::Errno::EBUSY) => {
+                info!("/dev already mounted, skipping");
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -228,6 +278,10 @@ fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         use nix::mount::{mount, MsFlags};
+
+        // Ensure mount points exist
+        std::fs::create_dir_all("/workspace").ok();
+        std::fs::create_dir_all("/skills").ok();
 
         // Mount workspace share
         mount(

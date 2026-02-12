@@ -64,20 +64,29 @@ impl GuestNetConfig {
     }
 }
 
-/// Configure the guest network interface if passt networking is active.
+/// Configure the guest network interface.
 ///
 /// This function:
-/// 1. Checks for A3S_NET_IP env var (absent = TSI mode, skip)
-/// 2. Brings up lo (loopback)
-/// 3. Assigns IP to eth0
-/// 4. Brings up eth0
-/// 5. Adds default route via gateway
-/// 6. Writes /etc/resolv.conf
+/// 1. Always brings up lo (loopback) — required for listen() even in TSI mode
+/// 2. If A3S_NET_IP is set (passt mode):
+///    a. Assigns IP to eth0
+///    b. Brings up eth0
+///    c. Adds default route via gateway
+///    d. Writes /etc/resolv.conf
 pub fn configure_guest_network() -> Result<(), Box<dyn std::error::Error>> {
+    // Always bring up loopback — needed for listen() on 0.0.0.0 even in TSI mode
+    #[cfg(target_os = "linux")]
+    {
+        info!("Bringing up loopback interface");
+        if let Err(e) = set_interface_up("lo") {
+            tracing::warn!("Failed to bring up loopback: {}", e);
+        }
+    }
+
     let config = match GuestNetConfig::from_env() {
         Some(c) => c,
         None => {
-            info!("No A3S_NET_IP set, using TSI networking (no interface setup needed)");
+            info!("No A3S_NET_IP set, using TSI networking");
             return Ok(());
         }
     };
@@ -109,8 +118,6 @@ pub fn configure_guest_network() -> Result<(), Box<dyn std::error::Error>> {
 /// since the guest rootfs may not have iproute2 installed.
 #[cfg(target_os = "linux")]
 fn configure_interfaces(config: &GuestNetConfig) -> Result<(), Box<dyn std::error::Error>> {
-    use std::ffi::CString;
-
     // Step 1: Bring up loopback
     info!("Bringing up loopback interface");
     set_interface_up("lo")?;
@@ -177,7 +184,7 @@ fn set_interface_up(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Get current flags
-    if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) } < 0 {
+    if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) } < 0 {
         unsafe { libc::close(sock) };
         return Err(Box::new(NetError::CommandFailed(format!(
             "SIOCGIFFLAGS failed for {}",
@@ -190,7 +197,7 @@ fn set_interface_up(name: &str) -> Result<(), Box<dyn std::error::Error>> {
         ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as i16;
     }
 
-    if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) } < 0 {
+    if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) } < 0 {
         unsafe { libc::close(sock) };
         return Err(Box::new(NetError::CommandFailed(format!(
             "SIOCSIFFLAGS failed for {}",
@@ -247,7 +254,7 @@ fn add_address(ifname: &str, ip_cidr: &str) -> Result<(), Box<dyn std::error::Er
             std::mem::size_of::<libc::sockaddr_in>(),
         );
     }
-    if unsafe { libc::ioctl(sock, libc::SIOCSIFADDR, &ifr) } < 0 {
+    if unsafe { libc::ioctl(sock, libc::SIOCSIFADDR as _, &ifr) } < 0 {
         unsafe { libc::close(sock) };
         return Err(Box::new(NetError::CommandFailed(format!(
             "SIOCSIFADDR failed for {}: {}",
@@ -265,7 +272,7 @@ fn add_address(ifname: &str, ip_cidr: &str) -> Result<(), Box<dyn std::error::Er
             std::mem::size_of::<libc::sockaddr_in>(),
         );
     }
-    if unsafe { libc::ioctl(sock, libc::SIOCSIFNETMASK, &ifr) } < 0 {
+    if unsafe { libc::ioctl(sock, libc::SIOCSIFNETMASK as _, &ifr) } < 0 {
         unsafe { libc::close(sock) };
         return Err(Box::new(NetError::CommandFailed(format!(
             "SIOCSIFNETMASK failed for {}: /{}",

@@ -41,6 +41,28 @@ pub enum Instruction {
         name: String,
         default: Option<String>,
     },
+    /// `ADD [--chown=<user>] <src>... <dst>`
+    Add {
+        src: Vec<String>,
+        dst: String,
+        chown: Option<String>,
+    },
+    /// `SHELL ["executable", "param1", ...]`
+    Shell { exec: Vec<String> },
+    /// `STOPSIGNAL <signal>`
+    StopSignal { signal: String },
+    /// `HEALTHCHECK [OPTIONS] CMD command` or `HEALTHCHECK NONE`
+    HealthCheck {
+        cmd: Option<Vec<String>>,
+        interval: Option<u64>,
+        timeout: Option<u64>,
+        retries: Option<u32>,
+        start_period: Option<u64>,
+    },
+    /// `ONBUILD <instruction>`
+    OnBuild { instruction: Box<Instruction> },
+    /// `VOLUME <path>...`
+    Volume { paths: Vec<String> },
 }
 
 /// Parsed Dockerfile: a list of instructions in order.
@@ -142,16 +164,21 @@ fn parse_instruction(line: &str, line_num: usize) -> Result<Instruction> {
         "LABEL" => parse_label(rest, line_num),
         "USER" => parse_user(rest, line_num),
         "ARG" => parse_arg(rest, line_num),
+        "ADD" => parse_add(rest, line_num),
+        "SHELL" => parse_shell(rest, line_num),
+        "STOPSIGNAL" => parse_stopsignal(rest, line_num),
+        "HEALTHCHECK" => parse_healthcheck(rest, line_num),
+        "ONBUILD" => parse_onbuild(rest, line_num),
+        "VOLUME" => parse_volume(rest, line_num),
         // Silently ignore unsupported instructions with a warning
-        "ADD" | "VOLUME" | "SHELL" | "STOPSIGNAL" | "HEALTHCHECK" | "ONBUILD" | "MAINTAINER" => {
+        "MAINTAINER" => {
             tracing::warn!(
                 line = line_num,
                 instruction = keyword_upper.as_str(),
-                "Unsupported Dockerfile instruction, skipping"
+                "Deprecated Dockerfile instruction, skipping"
             );
-            // Return a RUN with empty command that the engine will skip
             Ok(Instruction::Label {
-                key: format!("a3s.build.skipped.{}", keyword_upper.to_lowercase()),
+                key: "a3s.build.skipped.maintainer".to_string(),
                 value: rest.to_string(),
             })
         }
@@ -401,6 +428,239 @@ fn parse_arg(rest: &str, line_num: usize) -> Result<Instruction> {
     }
 }
 
+fn parse_add(rest: &str, line_num: usize) -> Result<Instruction> {
+    if rest.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: ADD requires source and destination",
+            line_num
+        )));
+    }
+
+    // Check for --chown=<user> flag
+    let (chown, remaining) = if rest.starts_with("--chown=") {
+        let (flag, after) = split_first_word(rest);
+        let user = flag
+            .strip_prefix("--chown=")
+            .unwrap_or("")
+            .to_string();
+        (Some(user), after)
+    } else {
+        (None, rest)
+    };
+
+    // Split remaining into src... dst (last element is dst)
+    let parts: Vec<&str> = shell_split(remaining);
+    if parts.len() < 2 {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: ADD requires at least one source and a destination",
+            line_num
+        )));
+    }
+
+    let dst = parts.last().unwrap().to_string();
+    let src: Vec<String> = parts[..parts.len() - 1]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    Ok(Instruction::Add { src, dst, chown })
+}
+
+fn parse_shell(rest: &str, line_num: usize) -> Result<Instruction> {
+    if rest.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: SHELL requires a JSON array argument",
+            line_num
+        )));
+    }
+
+    if !rest.starts_with('[') {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: SHELL must use JSON array form (e.g., SHELL [\"/bin/bash\", \"-c\"])",
+            line_num
+        )));
+    }
+
+    let exec = parse_json_array(rest, line_num)?;
+    if exec.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: SHELL requires at least one element",
+            line_num
+        )));
+    }
+
+    Ok(Instruction::Shell { exec })
+}
+
+fn parse_stopsignal(rest: &str, line_num: usize) -> Result<Instruction> {
+    if rest.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: STOPSIGNAL requires a signal",
+            line_num
+        )));
+    }
+
+    Ok(Instruction::StopSignal {
+        signal: rest.trim().to_string(),
+    })
+}
+
+fn parse_healthcheck(rest: &str, line_num: usize) -> Result<Instruction> {
+    if rest.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: HEALTHCHECK requires CMD or NONE",
+            line_num
+        )));
+    }
+
+    // HEALTHCHECK NONE
+    if rest.trim().eq_ignore_ascii_case("NONE") {
+        return Ok(Instruction::HealthCheck {
+            cmd: None,
+            interval: None,
+            timeout: None,
+            retries: None,
+            start_period: None,
+        });
+    }
+
+    // Parse options and CMD
+    let mut interval = None;
+    let mut timeout = None;
+    let mut retries = None;
+    let mut start_period = None;
+    let mut remaining = rest;
+
+    loop {
+        let trimmed = remaining.trim_start();
+        if trimmed.starts_with("--interval=") {
+            let (flag, after) = split_first_word(trimmed);
+            interval = Some(parse_duration_secs(
+                flag.strip_prefix("--interval=").unwrap_or("30s"),
+                line_num,
+            )?);
+            remaining = after;
+        } else if trimmed.starts_with("--timeout=") {
+            let (flag, after) = split_first_word(trimmed);
+            timeout = Some(parse_duration_secs(
+                flag.strip_prefix("--timeout=").unwrap_or("30s"),
+                line_num,
+            )?);
+            remaining = after;
+        } else if trimmed.starts_with("--retries=") {
+            let (flag, after) = split_first_word(trimmed);
+            let val = flag.strip_prefix("--retries=").unwrap_or("3");
+            retries = Some(val.parse::<u32>().map_err(|_| {
+                BoxError::BuildError(format!(
+                    "Line {}: Invalid --retries value: {}",
+                    line_num, val
+                ))
+            })?);
+            remaining = after;
+        } else if trimmed.starts_with("--start-period=") {
+            let (flag, after) = split_first_word(trimmed);
+            start_period = Some(parse_duration_secs(
+                flag.strip_prefix("--start-period=").unwrap_or("0s"),
+                line_num,
+            )?);
+            remaining = after;
+        } else {
+            break;
+        }
+    }
+
+    // Expect CMD keyword
+    let trimmed = remaining.trim_start();
+    let (keyword, cmd_rest) = split_first_word(trimmed);
+    if !keyword.eq_ignore_ascii_case("CMD") {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: HEALTHCHECK expected CMD, got '{}'",
+            line_num, keyword
+        )));
+    }
+
+    if cmd_rest.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: HEALTHCHECK CMD requires a command",
+            line_num
+        )));
+    }
+
+    let cmd = if cmd_rest.starts_with('[') {
+        parse_json_array(cmd_rest, line_num)?
+    } else {
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            cmd_rest.to_string(),
+        ]
+    };
+
+    Ok(Instruction::HealthCheck {
+        cmd: Some(cmd),
+        interval,
+        timeout,
+        retries,
+        start_period,
+    })
+}
+
+fn parse_onbuild(rest: &str, line_num: usize) -> Result<Instruction> {
+    if rest.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: ONBUILD requires an instruction",
+            line_num
+        )));
+    }
+
+    // Parse the inner instruction recursively
+    let inner = parse_instruction(rest, line_num)?;
+
+    // ONBUILD ONBUILD is not allowed
+    if matches!(inner, Instruction::OnBuild { .. }) {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: ONBUILD ONBUILD is not allowed",
+            line_num
+        )));
+    }
+
+    // ONBUILD FROM is not allowed
+    if matches!(inner, Instruction::From { .. }) {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: ONBUILD FROM is not allowed",
+            line_num
+        )));
+    }
+
+    Ok(Instruction::OnBuild {
+        instruction: Box::new(inner),
+    })
+}
+
+fn parse_volume(rest: &str, line_num: usize) -> Result<Instruction> {
+    if rest.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: VOLUME requires at least one path",
+            line_num
+        )));
+    }
+
+    let paths = if rest.starts_with('[') {
+        parse_json_array(rest, line_num)?
+    } else {
+        rest.split_whitespace().map(|s| s.to_string()).collect()
+    };
+
+    if paths.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: VOLUME requires at least one path",
+            line_num
+        )));
+    }
+
+    Ok(Instruction::Volume { paths })
+}
+
 // --- Helpers ---
 
 /// Parse a JSON array string like `["a", "b", "c"]` into a Vec<String>.
@@ -427,6 +687,51 @@ fn unquote(s: &str) -> String {
 /// Simple whitespace-based split that respects quoted strings.
 fn shell_split(s: &str) -> Vec<&str> {
     s.split_whitespace().collect()
+}
+
+/// Parse a single instruction line (used by ONBUILD trigger execution).
+pub fn parse_single_instruction(line: &str) -> Result<Instruction> {
+    parse_instruction(line.trim(), 0)
+}
+
+/// Parse a duration string like "30s", "5m", "1h" into seconds.
+/// Plain numbers are treated as seconds.
+fn parse_duration_secs(s: &str, line_num: usize) -> Result<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(0);
+    }
+
+    if let Ok(n) = s.parse::<u64>() {
+        return Ok(n);
+    }
+
+    let (num_str, suffix) = if s.ends_with('s') {
+        (&s[..s.len() - 1], "s")
+    } else if s.ends_with('m') {
+        (&s[..s.len() - 1], "m")
+    } else if s.ends_with('h') {
+        (&s[..s.len() - 1], "h")
+    } else {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: Invalid duration '{}' (use s/m/h suffix)",
+            line_num, s
+        )));
+    };
+
+    let num: u64 = num_str.parse().map_err(|_| {
+        BoxError::BuildError(format!(
+            "Line {}: Invalid duration number '{}'",
+            line_num, num_str
+        ))
+    })?;
+
+    match suffix {
+        "s" => Ok(num),
+        "m" => Ok(num * 60),
+        "h" => Ok(num * 3600),
+        _ => unreachable!(),
+    }
 }
 
 #[cfg(test)]
@@ -872,5 +1177,370 @@ CMD ["app.py"]
     #[test]
     fn test_unquote_mismatched() {
         assert_eq!(unquote(r#""hello'"#), r#""hello'"#);
+    }
+
+    // --- parse_add ---
+
+    #[test]
+    fn test_parse_add_simple() {
+        let result = parse_add("app.tar.gz /app/", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Add {
+                src: vec!["app.tar.gz".to_string()],
+                dst: "/app/".to_string(),
+                chown: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_add_with_chown() {
+        let result = parse_add("--chown=1000:1000 files/ /data/", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Add {
+                src: vec!["files/".to_string()],
+                dst: "/data/".to_string(),
+                chown: Some("1000:1000".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_add_url() {
+        let result = parse_add("https://example.com/file.tar.gz /tmp/", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Add {
+                src: vec!["https://example.com/file.tar.gz".to_string()],
+                dst: "/tmp/".to_string(),
+                chown: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_add_empty() {
+        assert!(parse_add("", 1).is_err());
+    }
+
+    #[test]
+    fn test_parse_add_single_arg() {
+        assert!(parse_add("onlysource", 1).is_err());
+    }
+
+    // --- parse_shell ---
+
+    #[test]
+    fn test_parse_shell_bash() {
+        let result = parse_shell(r#"["/bin/bash", "-c"]"#, 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Shell {
+                exec: vec!["/bin/bash".to_string(), "-c".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_shell_powershell() {
+        let result =
+            parse_shell(r#"["powershell", "-command"]"#, 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Shell {
+                exec: vec!["powershell".to_string(), "-command".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_shell_empty() {
+        assert!(parse_shell("", 1).is_err());
+    }
+
+    #[test]
+    fn test_parse_shell_not_json() {
+        assert!(parse_shell("/bin/bash -c", 1).is_err());
+    }
+
+    #[test]
+    fn test_parse_shell_empty_array() {
+        assert!(parse_shell("[]", 1).is_err());
+    }
+
+    // --- parse_stopsignal ---
+
+    #[test]
+    fn test_parse_stopsignal_name() {
+        let result = parse_stopsignal("SIGTERM", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::StopSignal {
+                signal: "SIGTERM".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_stopsignal_number() {
+        let result = parse_stopsignal("9", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::StopSignal {
+                signal: "9".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_stopsignal_empty() {
+        assert!(parse_stopsignal("", 1).is_err());
+    }
+
+    // --- parse_healthcheck ---
+
+    #[test]
+    fn test_parse_healthcheck_none() {
+        let result = parse_healthcheck("NONE", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::HealthCheck {
+                cmd: None,
+                interval: None,
+                timeout: None,
+                retries: None,
+                start_period: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_healthcheck_simple_cmd() {
+        let result = parse_healthcheck("CMD curl -f http://localhost/", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::HealthCheck {
+                cmd: Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "curl -f http://localhost/".to_string(),
+                ]),
+                interval: None,
+                timeout: None,
+                retries: None,
+                start_period: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_healthcheck_with_options() {
+        let result = parse_healthcheck(
+            "--interval=10s --timeout=5s --retries=5 --start-period=30s CMD curl -f http://localhost/",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::HealthCheck {
+                cmd: Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "curl -f http://localhost/".to_string(),
+                ]),
+                interval: Some(10),
+                timeout: Some(5),
+                retries: Some(5),
+                start_period: Some(30),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_healthcheck_json_cmd() {
+        let result =
+            parse_healthcheck(r#"CMD ["curl", "-f", "http://localhost/"]"#, 1).unwrap();
+        if let Instruction::HealthCheck { cmd, .. } = &result {
+            assert_eq!(
+                cmd.as_ref().unwrap(),
+                &vec!["curl".to_string(), "-f".to_string(), "http://localhost/".to_string()]
+            );
+        } else {
+            panic!("Expected HealthCheck");
+        }
+    }
+
+    #[test]
+    fn test_parse_healthcheck_empty() {
+        assert!(parse_healthcheck("", 1).is_err());
+    }
+
+    #[test]
+    fn test_parse_healthcheck_no_cmd() {
+        assert!(parse_healthcheck("--interval=10s", 1).is_err());
+    }
+
+    // --- parse_onbuild ---
+
+    #[test]
+    fn test_parse_onbuild_run() {
+        let result = parse_onbuild("RUN echo hello", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::OnBuild {
+                instruction: Box::new(Instruction::Run {
+                    command: "echo hello".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_onbuild_copy() {
+        let result = parse_onbuild("COPY . /app", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::OnBuild {
+                instruction: Box::new(Instruction::Copy {
+                    src: vec![".".to_string()],
+                    dst: "/app".to_string(),
+                    from: None,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_onbuild_empty() {
+        assert!(parse_onbuild("", 1).is_err());
+    }
+
+    #[test]
+    fn test_parse_onbuild_onbuild() {
+        assert!(parse_onbuild("ONBUILD RUN echo", 1).is_err());
+    }
+
+    #[test]
+    fn test_parse_onbuild_from() {
+        assert!(parse_onbuild("FROM alpine", 1).is_err());
+    }
+
+    // --- parse_volume ---
+
+    #[test]
+    fn test_parse_volume_single() {
+        let result = parse_volume("/data", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Volume {
+                paths: vec!["/data".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_volume_multiple() {
+        let result = parse_volume("/data /var/log", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Volume {
+                paths: vec!["/data".to_string(), "/var/log".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_volume_json() {
+        let result = parse_volume(r#"["/data", "/var/log"]"#, 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Volume {
+                paths: vec!["/data".to_string(), "/var/log".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_volume_empty() {
+        assert!(parse_volume("", 1).is_err());
+    }
+
+    // --- parse_duration_secs ---
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        assert_eq!(parse_duration_secs("30s", 1).unwrap(), 30);
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        assert_eq!(parse_duration_secs("5m", 1).unwrap(), 300);
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        assert_eq!(parse_duration_secs("1h", 1).unwrap(), 3600);
+    }
+
+    #[test]
+    fn test_parse_duration_plain_number() {
+        assert_eq!(parse_duration_secs("30", 1).unwrap(), 30);
+    }
+
+    #[test]
+    fn test_parse_duration_empty() {
+        assert_eq!(parse_duration_secs("", 1).unwrap(), 0);
+    }
+
+    // --- Dockerfile with new instructions ---
+
+    #[test]
+    fn test_parse_dockerfile_with_shell() {
+        let content = "FROM alpine\nSHELL [\"/bin/bash\", \"-c\"]\nRUN echo hello";
+        let df = Dockerfile::parse(content).unwrap();
+        assert_eq!(df.instructions.len(), 3);
+        assert!(matches!(&df.instructions[1], Instruction::Shell { exec } if exec.len() == 2));
+    }
+
+    #[test]
+    fn test_parse_dockerfile_with_healthcheck() {
+        let content = "FROM alpine\nHEALTHCHECK CMD curl -f http://localhost/";
+        let df = Dockerfile::parse(content).unwrap();
+        assert_eq!(df.instructions.len(), 2);
+        assert!(matches!(&df.instructions[1], Instruction::HealthCheck { cmd: Some(_), .. }));
+    }
+
+    #[test]
+    fn test_parse_dockerfile_with_volume() {
+        let content = "FROM alpine\nVOLUME /data";
+        let df = Dockerfile::parse(content).unwrap();
+        assert_eq!(df.instructions.len(), 2);
+        assert!(matches!(&df.instructions[1], Instruction::Volume { paths } if paths == &["/data".to_string()]));
+    }
+
+    #[test]
+    fn test_parse_dockerfile_with_add() {
+        let content = "FROM alpine\nADD app.tar.gz /app/";
+        let df = Dockerfile::parse(content).unwrap();
+        assert_eq!(df.instructions.len(), 2);
+        assert!(matches!(&df.instructions[1], Instruction::Add { .. }));
+    }
+
+    #[test]
+    fn test_parse_dockerfile_with_stopsignal() {
+        let content = "FROM alpine\nSTOPSIGNAL SIGKILL";
+        let df = Dockerfile::parse(content).unwrap();
+        assert_eq!(df.instructions.len(), 2);
+        assert!(matches!(&df.instructions[1], Instruction::StopSignal { signal } if signal == "SIGKILL"));
+    }
+
+    #[test]
+    fn test_parse_dockerfile_with_onbuild() {
+        let content = "FROM alpine\nONBUILD RUN echo triggered";
+        let df = Dockerfile::parse(content).unwrap();
+        assert_eq!(df.instructions.len(), 2);
+        assert!(matches!(&df.instructions[1], Instruction::OnBuild { .. }));
     }
 }

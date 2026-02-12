@@ -40,7 +40,7 @@ fn run_vsock_server() -> Result<(), Box<dyn std::error::Error>> {
     use nix::sys::socket::{
         accept, bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, VsockAddr,
     };
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use tracing::error;
 
     // Create vsock socket
@@ -81,7 +81,7 @@ fn run_vsock_server() -> Result<(), Box<dyn std::error::Error>> {
 /// Handle a single connection: read HTTP request, execute command, send response.
 #[cfg(target_os = "linux")]
 fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use a3s_box_core::exec::ExecRequest;
     use tracing::debug;
 

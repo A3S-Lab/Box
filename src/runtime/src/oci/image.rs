@@ -24,6 +24,8 @@ pub struct OciImage {
     layer_paths: Vec<PathBuf>,
 }
 
+use super::build::engine::OciHealthCheck;
+
 /// Parsed OCI image configuration with entrypoint and environment.
 #[derive(Debug, Clone)]
 pub struct OciImageConfig {
@@ -50,6 +52,15 @@ pub struct OciImageConfig {
 
     /// Volumes declared in the image (OCI VOLUME directive)
     pub volumes: Vec<String>,
+
+    /// Stop signal
+    pub stop_signal: Option<String>,
+
+    /// Health check configuration
+    pub health_check: Option<OciHealthCheck>,
+
+    /// ONBUILD triggers
+    pub onbuild: Vec<String>,
 }
 
 impl OciImage {
@@ -302,6 +313,18 @@ impl OciImageConfig {
             .map(|vols| vols.iter().cloned().collect())
             .unwrap_or_default();
 
+        // Parse stop signal
+        let stop_signal = config.as_ref().and_then(|c| c.stop_signal().clone());
+
+        // Parse ONBUILD triggers
+        // oci_spec doesn't expose OnBuild directly, parse from raw JSON
+        let onbuild = Vec::new(); // Will be populated from raw config if needed
+
+        // Parse health check from raw config JSON
+        // oci_spec doesn't expose Healthcheck directly, so we leave it None
+        // and let the build engine populate it
+        let health_check = None;
+
         Self {
             entrypoint,
             cmd,
@@ -311,6 +334,9 @@ impl OciImageConfig {
             exposed_ports,
             labels,
             volumes,
+            stop_signal,
+            health_check,
+            onbuild,
         }
     }
 }

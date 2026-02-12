@@ -32,7 +32,7 @@ pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH
 pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
 pub use tee::{AttestationReport, AttestationRequest, CertificateChain, PlatformInfo, TcbVersion};
 pub use tee::{verify_attestation, AttestationPolicy, AmdKdsClient, MinTcbPolicy, PolicyResult, VerificationResult};
-pub use grpc::{AgentClient, AttestationClient, ExecClient};
+pub use grpc::{AgentClient, AttestationClient, ExecClient, PtyClient};
 pub use network::NetworkStore;
 pub use network::PasstManager;
 pub use vm::{BoxState, VmManager};
@@ -47,6 +47,9 @@ pub const AGENT_VSOCK_PORT: u32 = 4088;
 
 /// Default vsock port for exec server in the guest.
 pub const EXEC_VSOCK_PORT: u32 = 4089;
+
+/// Default vsock port for PTY server in the guest.
+pub const PTY_VSOCK_PORT: u32 = 4090;
 
 /// Default maximum image cache size: 10 GB.
 pub const DEFAULT_IMAGE_CACHE_SIZE: u64 = 10 * 1024 * 1024 * 1024;
