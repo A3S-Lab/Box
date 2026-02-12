@@ -26,6 +26,13 @@ pub async fn boot_from_record(record: &BoxRecord) -> Result<BootResult, Box<dyn 
 
     vm.boot().await?;
 
+    // Create rootfs baseline snapshot for `diff` command (best-effort)
+    let rootfs_dir = record.box_dir.join("rootfs");
+    let snapshot_path = record.box_dir.join("rootfs_snapshot.json");
+    if rootfs_dir.exists() && !snapshot_path.exists() {
+        let _ = crate::commands::diff::create_snapshot(&rootfs_dir, &snapshot_path);
+    }
+
     // Spawn structured log processor (json-file driver writes container.json)
     let log_dir = record.box_dir.join("logs");
     let _ = std::fs::create_dir_all(&log_dir);

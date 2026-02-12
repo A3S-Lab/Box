@@ -70,5 +70,9 @@ tempfile = { workspace = true }
 # OCI image spec (for history command)
 oci-spec = "0.6"
 
+# Hashing and compression (for commit command)
+sha2 = { workspace = true }
+flate2 = "1.0"
+
 [dev-dependencies]
 tempfile = { workspace = true }

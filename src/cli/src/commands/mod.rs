@@ -3,10 +3,14 @@
 mod attach;
 mod attest;
 mod build;
+mod commit;
+mod container_update;
 mod cp;
 mod create;
 mod df;
+pub(crate) mod diff;
 pub(crate) mod exec;
+mod events;
 mod export;
 mod history;
 mod image_inspect;
@@ -105,6 +109,14 @@ pub enum Command {
     Port(port::PortArgs),
     /// Export a box's filesystem to a tar archive
     Export(export::ExportArgs),
+    /// Create an image from a box's changes
+    Commit(commit::CommitArgs),
+    /// Show filesystem changes in a box
+    Diff(diff::DiffArgs),
+    /// Stream real-time system events
+    Events(events::EventsArgs),
+    /// Update resource limits of a box
+    ContainerUpdate(container_update::ContainerUpdateArgs),
     /// Build an image from a Dockerfile
     Build(build::BuildArgs),
     /// List cached images
@@ -236,6 +248,10 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Rename(args) => rename::execute(args).await,
         Command::Port(args) => port::execute(args).await,
         Command::Export(args) => export::execute(args).await,
+        Command::Commit(args) => commit::execute(args).await,
+        Command::Diff(args) => diff::execute(args).await,
+        Command::Events(args) => events::execute(args).await,
+        Command::ContainerUpdate(args) => container_update::execute(args).await,
         Command::Build(args) => build::execute(args).await,
         Command::Images(args) => images::execute(args).await,
         Command::Pull(args) => pull::execute(args).await,
