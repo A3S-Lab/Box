@@ -309,3 +309,96 @@ fn parse_memory_bytes(s: &str) -> Result<u64, String> {
         .map_err(|_| format!("invalid number: {num_str}"))?;
     Ok(num * multiplier)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_env_vars() {
+        let vars = vec!["KEY1=value1".to_string(), "KEY2=value2".to_string()];
+        let result = parse_env_vars(&vars).unwrap();
+        assert_eq!(result.get("KEY1"), Some(&"value1".to_string()));
+        assert_eq!(result.get("KEY2"), Some(&"value2".to_string()));
+    }
+
+    #[test]
+    fn test_parse_env_vars_empty() {
+        let vars: Vec<String> = vec![];
+        let result = parse_env_vars(&vars).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_parse_env_vars_invalid() {
+        let vars = vec!["INVALID".to_string()];
+        let result = parse_env_vars(&vars);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid environment variable"));
+    }
+
+    #[test]
+    fn test_parse_env_vars_with_equals_in_value() {
+        let vars = vec!["KEY=value=with=equals".to_string()];
+        let result = parse_env_vars(&vars).unwrap();
+        assert_eq!(result.get("KEY"), Some(&"value=with=equals".to_string()));
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_raw_number() {
+        assert_eq!(parse_memory_bytes("1073741824").unwrap(), 1073741824);
+        assert_eq!(parse_memory_bytes("512").unwrap(), 512);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_kilobytes() {
+        assert_eq!(parse_memory_bytes("1k").unwrap(), 1024);
+        assert_eq!(parse_memory_bytes("512kb").unwrap(), 512 * 1024);
+        assert_eq!(parse_memory_bytes("2K").unwrap(), 2048);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_megabytes() {
+        assert_eq!(parse_memory_bytes("1m").unwrap(), 1024 * 1024);
+        assert_eq!(parse_memory_bytes("512mb").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_memory_bytes("2M").unwrap(), 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_gigabytes() {
+        assert_eq!(parse_memory_bytes("1g").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_memory_bytes("2gb").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(parse_memory_bytes("4G").unwrap(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_bytes() {
+        assert_eq!(parse_memory_bytes("1024b").unwrap(), 1024);
+        assert_eq!(parse_memory_bytes("512B").unwrap(), 512);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_empty() {
+        assert!(parse_memory_bytes("").is_err());
+        assert!(parse_memory_bytes("   ").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_invalid_format() {
+        assert!(parse_memory_bytes("abc").is_err());
+        assert!(parse_memory_bytes("123x").is_err());
+        assert!(parse_memory_bytes("m512").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_invalid_number() {
+        assert!(parse_memory_bytes("abcm").is_err());
+        assert!(parse_memory_bytes("12.5g").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_whitespace() {
+        assert_eq!(parse_memory_bytes("  512m  ").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_memory_bytes("\t1g\n").unwrap(), 1024 * 1024 * 1024);
+    }
+}

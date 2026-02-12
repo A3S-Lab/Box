@@ -135,3 +135,140 @@ mod dirs {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_fs_manager_new_empty() {
+        let mgr = FsManager::new();
+        assert!(mgr.mounts().is_empty());
+    }
+
+    #[test]
+    fn test_fs_manager_default() {
+        let mgr = FsManager::default();
+        assert!(mgr.mounts().is_empty());
+    }
+
+    #[test]
+    fn test_add_mount() {
+        let mut mgr = FsManager::new();
+        mgr.add_mount("/host/path", "/guest/path", false);
+
+        assert_eq!(mgr.mounts().len(), 1);
+        assert_eq!(mgr.mounts()[0].host_path, PathBuf::from("/host/path"));
+        assert_eq!(mgr.mounts()[0].guest_path, PathBuf::from("/guest/path"));
+        assert!(!mgr.mounts()[0].readonly);
+    }
+
+    #[test]
+    fn test_add_mount_readonly() {
+        let mut mgr = FsManager::new();
+        mgr.add_mount("/data", "/mnt/data", true);
+
+        assert!(mgr.mounts()[0].readonly);
+    }
+
+    #[test]
+    fn test_add_multiple_mounts() {
+        let mut mgr = FsManager::new();
+        mgr.add_mount("/a", "/ga", false);
+        mgr.add_mount("/b", "/gb", true);
+        mgr.add_mount("/c", "/gc", false);
+
+        assert_eq!(mgr.mounts().len(), 3);
+    }
+
+    #[test]
+    fn test_setup_default_mounts() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let cache = tmp.path().join("cache");
+        let skill1 = tmp.path().join("skill1");
+        let skill2 = tmp.path().join("skill2");
+
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::create_dir_all(&skill1).unwrap();
+        // skill2 does NOT exist — should be skipped
+
+        let mut mgr = FsManager::new();
+        mgr.setup_default_mounts(&workspace, &[skill1, skill2], &cache).unwrap();
+
+        // workspace + 1 skill (skill2 skipped) + cache = 3
+        assert_eq!(mgr.mounts().len(), 3);
+
+        // Workspace is read-write
+        assert!(!mgr.mounts()[0].readonly);
+        assert_eq!(mgr.mounts()[0].guest_path, PathBuf::from("/a3s/workspace"));
+
+        // Skill is read-only
+        assert!(mgr.mounts()[1].readonly);
+        assert_eq!(mgr.mounts()[1].guest_path, PathBuf::from("/a3s/skills/0"));
+
+        // Cache is read-write
+        assert!(!mgr.mounts()[2].readonly);
+        assert_eq!(mgr.mounts()[2].guest_path, PathBuf::from("/a3s/cache"));
+    }
+
+    #[test]
+    fn test_setup_default_mounts_no_skills() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+
+        let mut mgr = FsManager::new();
+        mgr.setup_default_mounts(&workspace, &[], &cache).unwrap();
+
+        // workspace + cache = 2
+        assert_eq!(mgr.mounts().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_apply_mounts_valid() {
+        let tmp = TempDir::new().unwrap();
+        let host_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&host_dir).unwrap();
+
+        let mut mgr = FsManager::new();
+        mgr.add_mount(&host_dir, "/guest/data", false);
+
+        assert!(mgr.apply_mounts().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_apply_mounts_missing_host_path() {
+        let mut mgr = FsManager::new();
+        mgr.add_mount("/nonexistent/path/12345", "/guest", false);
+
+        let result = mgr.apply_mounts().await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("Mount source does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_ensure_cache_dir() {
+        let dir = ensure_cache_dir().await.unwrap();
+        assert!(dir.exists());
+        assert!(dir.to_string_lossy().contains("a3s-box"));
+    }
+
+    #[test]
+    fn test_mount_point_debug() {
+        let mp = MountPoint {
+            host_path: PathBuf::from("/host"),
+            guest_path: PathBuf::from("/guest"),
+            readonly: true,
+        };
+        let debug = format!("{:?}", mp);
+        assert!(debug.contains("host"));
+        assert!(debug.contains("guest"));
+        assert!(debug.contains("true"));
+    }
+}

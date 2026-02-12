@@ -211,3 +211,72 @@ impl VmHandler for ShimHandler {
         unsafe { libc::kill(self.pid as i32, 0) == 0 }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vm_metrics_default() {
+        let m = VmMetrics::default();
+        assert!(m.cpu_percent.is_none());
+        assert!(m.memory_bytes.is_none());
+    }
+
+    #[test]
+    fn test_vm_metrics_clone() {
+        let m = VmMetrics {
+            cpu_percent: Some(50.0),
+            memory_bytes: Some(1024 * 1024),
+        };
+        let cloned = m.clone();
+        assert_eq!(cloned.cpu_percent, Some(50.0));
+        assert_eq!(cloned.memory_bytes, Some(1024 * 1024));
+    }
+
+    #[test]
+    fn test_shim_handler_from_pid() {
+        let handler = ShimHandler::from_pid(12345, "box-abc".to_string());
+        assert_eq!(handler.pid(), 12345);
+        assert_eq!(handler.box_id(), "box-abc");
+    }
+
+    #[test]
+    fn test_shim_handler_is_running_nonexistent_pid() {
+        // PID 999999999 should not exist
+        let handler = ShimHandler::from_pid(999_999_999, "test".to_string());
+        assert!(!handler.is_running());
+    }
+
+    #[test]
+    fn test_shim_handler_metrics_nonexistent_pid() {
+        let handler = ShimHandler::from_pid(999_999_999, "test".to_string());
+        let m = handler.metrics();
+        // Non-existent process should return default metrics
+        assert!(m.cpu_percent.is_none() || m.cpu_percent == Some(0.0));
+    }
+
+    #[test]
+    fn test_shim_handler_is_running_current_process() {
+        // Current process PID should be running
+        let pid = std::process::id();
+        let handler = ShimHandler::from_pid(pid, "self".to_string());
+        assert!(handler.is_running());
+    }
+
+    #[test]
+    fn test_default_shutdown_timeout() {
+        assert_eq!(DEFAULT_SHUTDOWN_TIMEOUT_MS, 10_000);
+    }
+
+    #[test]
+    fn test_vm_metrics_debug() {
+        let m = VmMetrics {
+            cpu_percent: Some(25.5),
+            memory_bytes: Some(512),
+        };
+        let debug = format!("{:?}", m);
+        assert!(debug.contains("25.5"));
+        assert!(debug.contains("512"));
+    }
+}

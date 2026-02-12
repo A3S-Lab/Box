@@ -397,6 +397,7 @@ impl PtyClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::UnixListener;
 
     #[tokio::test]
     async fn test_agent_connect_nonexistent_socket() {
@@ -419,5 +420,267 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, BoxError::AttestationError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_agent_connect_and_socket_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("agent.sock");
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = AgentClient::connect(&sock_path).await.unwrap();
+        assert_eq!(client.socket_path(), sock_path);
+    }
+
+    #[tokio::test]
+    async fn test_exec_connect_and_socket_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("exec.sock");
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        assert_eq!(client.socket_path(), sock_path);
+    }
+
+    #[tokio::test]
+    async fn test_attestation_connect_and_socket_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("attest.sock");
+        let _listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = AttestationClient::connect(&sock_path).await.unwrap();
+        assert_eq!(client.socket_path(), sock_path);
+    }
+
+    #[tokio::test]
+    async fn test_agent_health_check_empty_response() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("health.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        // Mock server: accept connect, then accept health_check but read request and close
+        tokio::spawn(async move {
+            // First accept: connect() verification
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            // Second accept: health_check() — read the request, then close without responding
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 1024];
+                let _ = stream.read(&mut buf).await; // consume the request
+                drop(stream); // close → 0 bytes response
+            }
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let client = AgentClient::connect(&sock_path).await.unwrap();
+        let result = client.health_check().await.unwrap();
+        assert!(!result); // Empty response → false
+    }
+
+    #[tokio::test]
+    async fn test_agent_health_check_200_response() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("health200.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            // Accept connect verification
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            // Accept health check and respond with 200
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK").await.unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let client = AgentClient::connect(&sock_path).await.unwrap();
+        let result = client.health_check().await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_agent_health_check_500_response() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("health500.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n").await.unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let client = AgentClient::connect(&sock_path).await.unwrap();
+        let result = client.health_check().await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_pty_client_connect_nonexistent() {
+        let result = PtyClient::connect(Path::new("/tmp/nonexistent-pty-test.sock")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pty_frame_roundtrip() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("pty.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let sock_path_clone = sock_path.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Read a frame: [type:1][len:4][payload]
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            let frame_type = header[0];
+            let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+            let mut payload = vec![0u8; len];
+            if len > 0 {
+                stream.read_exact(&mut payload).await.unwrap();
+            }
+            // Echo it back
+            stream.write_all(&header).await.unwrap();
+            stream.write_all(&payload).await.unwrap();
+            (frame_type, payload)
+        });
+
+        let mut client = PtyClient::connect(&sock_path_clone).await.unwrap();
+        client.send_data(b"hello world").await.unwrap();
+
+        let frame = client.read_frame().await.unwrap().unwrap();
+        assert_eq!(frame.0, a3s_box_core::pty::FRAME_PTY_DATA);
+        assert_eq!(&frame.1[..], b"hello world");
+
+        let (server_type, server_payload) = server.await.unwrap();
+        assert_eq!(server_type, a3s_box_core::pty::FRAME_PTY_DATA);
+        assert_eq!(&server_payload[..], b"hello world");
+    }
+
+    #[tokio::test]
+    async fn test_pty_send_resize() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("pty_resize.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            let frame_type = header[0];
+            let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+            let mut payload = vec![0u8; len];
+            stream.read_exact(&mut payload).await.unwrap();
+
+            assert_eq!(frame_type, a3s_box_core::pty::FRAME_PTY_RESIZE);
+            let resize: a3s_box_core::pty::PtyResize = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(resize.cols, 120);
+            assert_eq!(resize.rows, 40);
+        });
+
+        let mut client = PtyClient::connect(&sock_path).await.unwrap();
+        client.send_resize(120, 40).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pty_read_frame_eof() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("pty_eof.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream); // Close immediately → EOF
+        });
+
+        let mut client = PtyClient::connect(&sock_path).await.unwrap();
+        let frame = client.read_frame().await.unwrap();
+        assert!(frame.is_none()); // EOF
+    }
+
+    #[tokio::test]
+    async fn test_exec_client_exec_command() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("exec_cmd.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            // Accept connect verification
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            // Accept exec request
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            // Build a proper ExecOutput JSON (stdout/stderr are Vec<u8> → JSON arrays)
+            let output = a3s_box_core::exec::ExecOutput {
+                stdout: b"hello\n".to_vec(),
+                stderr: vec![],
+                exit_code: 0,
+            };
+            let response_body = serde_json::to_string(&output).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let req = a3s_box_core::exec::ExecRequest {
+            cmd: vec!["echo".to_string(), "hello".to_string()],
+            env: vec![],
+            working_dir: None,
+            user: None,
+            stdin: None,
+            timeout_ns: 0,
+        };
+        let output = client.exec_command(&req).await.unwrap();
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(&output.stdout[..], b"hello\n");
+        assert!(output.stderr.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_exec_client_malformed_response() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("exec_bad.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = stream.read(&mut buf).await;
+            // No \r\n\r\n separator → malformed
+            stream.write_all(b"garbage").await.unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let req = a3s_box_core::exec::ExecRequest {
+            cmd: vec!["test".to_string()],
+            env: vec![],
+            working_dir: None,
+            user: None,
+            stdin: None,
+            timeout_ns: 0,
+        };
+        let result = client.exec_command(&req).await;
+        assert!(result.is_err());
     }
 }

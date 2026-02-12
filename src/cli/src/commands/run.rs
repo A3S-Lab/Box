@@ -541,3 +541,240 @@ fn parse_memory_bytes(s: &str) -> Result<u64, String> {
         .map_err(|_| format!("invalid number: {num_str}"))?;
     Ok(num * multiplier)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- parse_env_vars tests ---
+
+    #[test]
+    fn test_parse_env_vars_valid() {
+        let vars = vec!["FOO=bar".to_string(), "BAZ=qux".to_string()];
+        let map = parse_env_vars(&vars).unwrap();
+        assert_eq!(map.get("FOO").unwrap(), "bar");
+        assert_eq!(map.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
+    fn test_parse_env_vars_empty() {
+        let map = parse_env_vars(&[]).unwrap();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_parse_env_vars_value_with_equals() {
+        let vars = vec!["KEY=val=ue".to_string()];
+        let map = parse_env_vars(&vars).unwrap();
+        assert_eq!(map.get("KEY").unwrap(), "val=ue");
+    }
+
+    #[test]
+    fn test_parse_env_vars_invalid_no_equals() {
+        let vars = vec!["INVALID".to_string()];
+        let result = parse_env_vars(&vars);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("KEY=VALUE"));
+    }
+
+    #[test]
+    fn test_parse_env_vars_empty_value() {
+        let vars = vec!["KEY=".to_string()];
+        let map = parse_env_vars(&vars).unwrap();
+        assert_eq!(map.get("KEY").unwrap(), "");
+    }
+
+    // --- parse_memory_bytes tests ---
+
+    #[test]
+    fn test_parse_memory_bytes_raw_number() {
+        assert_eq!(parse_memory_bytes("1073741824").unwrap(), 1073741824);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_megabytes() {
+        assert_eq!(parse_memory_bytes("512m").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_memory_bytes("512mb").unwrap(), 512 * 1024 * 1024);
+        assert_eq!(parse_memory_bytes("512M").unwrap(), 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_gigabytes() {
+        assert_eq!(parse_memory_bytes("2g").unwrap(), 2 * 1024 * 1024 * 1024);
+        assert_eq!(parse_memory_bytes("2gb").unwrap(), 2 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_kilobytes() {
+        assert_eq!(parse_memory_bytes("100k").unwrap(), 100 * 1024);
+        assert_eq!(parse_memory_bytes("100kb").unwrap(), 100 * 1024);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_bytes_suffix() {
+        assert_eq!(parse_memory_bytes("4096b").unwrap(), 4096);
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_empty() {
+        assert!(parse_memory_bytes("").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_invalid_format() {
+        assert!(parse_memory_bytes("abc").is_err());
+        assert!(parse_memory_bytes("12x").is_err());
+    }
+
+    #[test]
+    fn test_parse_memory_bytes_whitespace() {
+        assert_eq!(parse_memory_bytes("  512m  ").unwrap(), 512 * 1024 * 1024);
+    }
+
+    // --- build_resource_limits tests ---
+
+    #[test]
+    fn test_build_resource_limits_defaults() {
+        let args = RunArgs {
+            image: "test".to_string(),
+            name: None,
+            cpus: 2,
+            memory: "512m".to_string(),
+            volumes: vec![],
+            env: vec![],
+            publish: vec![],
+            dns: vec![],
+            detach: false,
+            interactive: false,
+            tty: false,
+            entrypoint: None,
+            hostname: None,
+            user: None,
+            workdir: None,
+            restart: "no".to_string(),
+            rm: false,
+            tmpfs: vec![],
+            network: None,
+            labels: vec![],
+            health_cmd: None,
+            health_interval: 30,
+            health_timeout: 5,
+            health_retries: 3,
+            health_start_period: 0,
+            cmd: vec![],
+            pids_limit: None,
+            cpuset_cpus: None,
+            ulimits: vec![],
+            cpu_shares: None,
+            cpu_quota: None,
+            cpu_period: None,
+            memory_reservation: None,
+            memory_swap: None,
+            log_driver: "json-file".to_string(),
+            log_opts: vec![],
+        };
+
+        let limits = build_resource_limits(&args).unwrap();
+        assert!(limits.pids_limit.is_none());
+        assert!(limits.cpuset_cpus.is_none());
+        assert!(limits.cpu_shares.is_none());
+        assert!(limits.memory_reservation.is_none());
+        assert!(limits.memory_swap.is_none());
+    }
+
+    #[test]
+    fn test_build_resource_limits_with_values() {
+        let args = RunArgs {
+            image: "test".to_string(),
+            name: None,
+            cpus: 2,
+            memory: "512m".to_string(),
+            volumes: vec![],
+            env: vec![],
+            publish: vec![],
+            dns: vec![],
+            detach: false,
+            interactive: false,
+            tty: false,
+            entrypoint: None,
+            hostname: None,
+            user: None,
+            workdir: None,
+            restart: "no".to_string(),
+            rm: false,
+            tmpfs: vec![],
+            network: None,
+            labels: vec![],
+            health_cmd: None,
+            health_interval: 30,
+            health_timeout: 5,
+            health_retries: 3,
+            health_start_period: 0,
+            cmd: vec![],
+            pids_limit: Some(100),
+            cpuset_cpus: Some("0-3".to_string()),
+            ulimits: vec!["nofile=1024:4096".to_string()],
+            cpu_shares: Some(512),
+            cpu_quota: Some(50000),
+            cpu_period: Some(100000),
+            memory_reservation: Some("256m".to_string()),
+            memory_swap: Some("-1".to_string()),
+            log_driver: "json-file".to_string(),
+            log_opts: vec![],
+        };
+
+        let limits = build_resource_limits(&args).unwrap();
+        assert_eq!(limits.pids_limit, Some(100));
+        assert_eq!(limits.cpuset_cpus, Some("0-3".to_string()));
+        assert_eq!(limits.cpu_shares, Some(512));
+        assert_eq!(limits.cpu_quota, Some(50000));
+        assert_eq!(limits.cpu_period, Some(100000));
+        assert_eq!(limits.memory_reservation, Some(256 * 1024 * 1024));
+        assert_eq!(limits.memory_swap, Some(-1));
+    }
+
+    #[test]
+    fn test_build_resource_limits_memory_swap_value() {
+        let args = RunArgs {
+            image: "test".to_string(),
+            name: None,
+            cpus: 2,
+            memory: "512m".to_string(),
+            volumes: vec![],
+            env: vec![],
+            publish: vec![],
+            dns: vec![],
+            detach: false,
+            interactive: false,
+            tty: false,
+            entrypoint: None,
+            hostname: None,
+            user: None,
+            workdir: None,
+            restart: "no".to_string(),
+            rm: false,
+            tmpfs: vec![],
+            network: None,
+            labels: vec![],
+            health_cmd: None,
+            health_interval: 30,
+            health_timeout: 5,
+            health_retries: 3,
+            health_start_period: 0,
+            cmd: vec![],
+            pids_limit: None,
+            cpuset_cpus: None,
+            ulimits: vec![],
+            cpu_shares: None,
+            cpu_quota: None,
+            cpu_period: None,
+            memory_reservation: None,
+            memory_swap: Some("1g".to_string()),
+            log_driver: "json-file".to_string(),
+            log_opts: vec![],
+        };
+
+        let limits = build_resource_limits(&args).unwrap();
+        assert_eq!(limits.memory_swap, Some(1024 * 1024 * 1024));
+    }
+}
