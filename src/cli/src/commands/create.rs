@@ -125,6 +125,74 @@ pub struct CreateArgs {
     /// Memory+swap limit (e.g., "1g", "-1" for unlimited)
     #[arg(long)]
     pub memory_swap: Option<String>,
+
+    /// Read environment variables from a file, can be repeated
+    #[arg(long)]
+    pub env_file: Vec<String>,
+
+    /// Add a custom host-to-IP mapping (host:ip), can be repeated
+    #[arg(long)]
+    pub add_host: Vec<String>,
+
+    /// Set target platform (e.g., "linux/amd64", "linux/arm64")
+    #[arg(long)]
+    pub platform: Option<String>,
+
+    /// Run an init process (tini) as PID 1
+    #[arg(long)]
+    pub init: bool,
+
+    /// Mount the root filesystem as read-only
+    #[arg(long)]
+    pub read_only: bool,
+
+    /// Add a Linux capability, can be repeated
+    #[arg(long)]
+    pub cap_add: Vec<String>,
+
+    /// Drop a Linux capability, can be repeated
+    #[arg(long)]
+    pub cap_drop: Vec<String>,
+
+    /// Security options (e.g., "seccomp=unconfined"), can be repeated
+    #[arg(long)]
+    pub security_opt: Vec<String>,
+
+    /// Give extended privileges to the box
+    #[arg(long)]
+    pub privileged: bool,
+
+    /// Add a host device to the box (host_path[:guest_path[:perms]]), can be repeated
+    #[arg(long)]
+    pub device: Vec<String>,
+
+    /// GPU devices to add (e.g., "all", "0,1")
+    #[arg(long)]
+    pub gpus: Option<String>,
+
+    /// Size of /dev/shm (e.g., "64m", "1g")
+    #[arg(long)]
+    pub shm_size: Option<String>,
+
+    /// Override the default signal to stop the box
+    #[arg(long)]
+    pub stop_signal: Option<String>,
+
+    /// Timeout (in seconds) to stop the box before killing
+    #[arg(long)]
+    pub stop_timeout: Option<u64>,
+
+    /// Disable any healthcheck defined in the image
+    #[arg(long)]
+    pub no_healthcheck: bool,
+
+    /// Disable OOM Killer for the box
+    #[arg(long)]
+    pub oom_kill_disable: bool,
+
+    /// Tune the host OOM score adjustment (-1000 to 1000)
+    #[arg(long)]
+    pub oom_score_adj: Option<i32>,
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -139,20 +207,39 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     let resource_limits = build_resource_limits(&args)?;
 
     let name = args.name.unwrap_or_else(generate_name);
-    let env = parse_env_vars(&args.env)?;
+    let mut env = parse_env_vars(&args.env)?;
+
+    // Load --env-file entries (merged into env, CLI --env takes precedence)
+    for env_file in &args.env_file {
+        let file_env = parse_env_file(env_file)?;
+        for (k, v) in file_env {
+            env.entry(k).or_insert(v);
+        }
+    }
+
     let labels = parse_env_vars(&args.labels)
         .map_err(|e| e.replace("environment variable", "label"))?;
 
-    // Parse health check config
-    let health_check = args.health_cmd.as_ref().map(|cmd| {
-        crate::state::HealthCheck {
-            cmd: vec!["sh".to_string(), "-c".to_string(), cmd.clone()],
-            interval_secs: args.health_interval,
-            timeout_secs: args.health_timeout,
-            retries: args.health_retries,
-            start_period_secs: args.health_start_period,
-        }
-    });
+    // Parse health check config (--no-healthcheck disables)
+    let health_check = if args.no_healthcheck {
+        None
+    } else {
+        args.health_cmd.as_ref().map(|cmd| {
+            crate::state::HealthCheck {
+                cmd: vec!["sh".to_string(), "-c".to_string(), cmd.clone()],
+                interval_secs: args.health_interval,
+                timeout_secs: args.health_timeout,
+                retries: args.health_retries,
+                start_period_secs: args.health_start_period,
+            }
+        })
+    };
+
+    // Parse --shm-size
+    let shm_size = match &args.shm_size {
+        Some(s) => Some(parse_memory_bytes(s).map_err(|e| format!("Invalid --shm-size: {e}"))?),
+        None => None,
+    };
 
     let box_id = uuid::Uuid::new_v4().to_string();
     let short_id = BoxRecord::make_short_id(&box_id);
@@ -230,6 +317,21 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         anonymous_volumes: vec![],
         resource_limits,
         log_config: a3s_box_core::log::LogConfig::default(),
+        add_host: args.add_host,
+        platform: args.platform,
+        init: args.init,
+        read_only: args.read_only,
+        cap_add: args.cap_add,
+        cap_drop: args.cap_drop,
+        security_opt: args.security_opt,
+        privileged: args.privileged,
+        devices: args.device,
+        gpus: args.gpus,
+        shm_size,
+        stop_signal: args.stop_signal,
+        stop_timeout: args.stop_timeout,
+        oom_kill_disable: args.oom_kill_disable,
+        oom_score_adj: args.oom_score_adj,
     };
 
     let mut state = StateFile::load_default()?;
@@ -249,6 +351,27 @@ fn parse_env_vars(vars: &[String]) -> Result<HashMap<String, String>, String> {
             .split_once('=')
             .ok_or_else(|| format!("Invalid environment variable (expected KEY=VALUE): {var}"))?;
         map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
+}
+
+/// Load environment variables from a file.
+///
+/// Each line should be KEY=VALUE. Empty lines and lines starting with '#' are skipped.
+fn parse_env_file(path: &str) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read env file '{}': {}", path, e))?;
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = trimmed.split_once('=') {
+            map.insert(key.trim().to_string(), value.trim().to_string());
+        } else {
+            map.insert(trimmed.to_string(), String::new());
+        }
     }
     Ok(map)
 }
@@ -400,5 +523,60 @@ mod tests {
     fn test_parse_memory_bytes_whitespace() {
         assert_eq!(parse_memory_bytes("  512m  ").unwrap(), 512 * 1024 * 1024);
         assert_eq!(parse_memory_bytes("\t1g\n").unwrap(), 1024 * 1024 * 1024);
+    }
+
+    // --- parse_env_file tests ---
+
+    #[test]
+    fn test_parse_env_file_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("env");
+        std::fs::write(&path, "FOO=bar\nBAZ=qux\n").unwrap();
+        let map = parse_env_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(map.get("FOO").unwrap(), "bar");
+        assert_eq!(map.get("BAZ").unwrap(), "qux");
+    }
+
+    #[test]
+    fn test_parse_env_file_comments_and_blanks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("env");
+        std::fs::write(&path, "# comment\n\nKEY=val\n  \n# another\n").unwrap();
+        let map = parse_env_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("KEY").unwrap(), "val");
+    }
+
+    #[test]
+    fn test_parse_env_file_key_without_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("env");
+        std::fs::write(&path, "STANDALONE\n").unwrap();
+        let map = parse_env_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(map.get("STANDALONE").unwrap(), "");
+    }
+
+    #[test]
+    fn test_parse_env_file_value_with_equals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("env");
+        std::fs::write(&path, "CONN=postgres://host?opt=1\n").unwrap();
+        let map = parse_env_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(map.get("CONN").unwrap(), "postgres://host?opt=1");
+    }
+
+    #[test]
+    fn test_parse_env_file_missing_file() {
+        let result = parse_env_file("/nonexistent/path/env");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_env_file_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("env");
+        std::fs::write(&path, "").unwrap();
+        let map = parse_env_file(path.to_str().unwrap()).unwrap();
+        assert!(map.is_empty());
     }
 }

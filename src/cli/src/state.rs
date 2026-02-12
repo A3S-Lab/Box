@@ -115,6 +115,51 @@ pub struct BoxRecord {
     /// Logging configuration
     #[serde(default)]
     pub log_config: a3s_box_core::log::LogConfig,
+    /// Custom host-to-IP mappings (host:ip)
+    #[serde(default)]
+    pub add_host: Vec<String>,
+    /// Target platform (e.g., "linux/amd64")
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Use init process as PID 1
+    #[serde(default)]
+    pub init: bool,
+    /// Read-only root filesystem
+    #[serde(default)]
+    pub read_only: bool,
+    /// Added Linux capabilities
+    #[serde(default)]
+    pub cap_add: Vec<String>,
+    /// Dropped Linux capabilities
+    #[serde(default)]
+    pub cap_drop: Vec<String>,
+    /// Security options
+    #[serde(default)]
+    pub security_opt: Vec<String>,
+    /// Extended privileges
+    #[serde(default)]
+    pub privileged: bool,
+    /// Device mappings (host_path:guest_path:perms)
+    #[serde(default)]
+    pub devices: Vec<String>,
+    /// GPU devices
+    #[serde(default)]
+    pub gpus: Option<String>,
+    /// Shared memory size in bytes
+    #[serde(default)]
+    pub shm_size: Option<u64>,
+    /// Signal to stop the box
+    #[serde(default)]
+    pub stop_signal: Option<String>,
+    /// Timeout to stop the box before killing
+    #[serde(default)]
+    pub stop_timeout: Option<u64>,
+    /// OOM killer disabled
+    #[serde(default)]
+    pub oom_kill_disable: bool,
+    /// OOM score adjustment
+    #[serde(default)]
+    pub oom_score_adj: Option<i32>,
 }
 
 fn default_health_status() -> String {
@@ -476,6 +521,21 @@ mod tests {
             anonymous_volumes: vec![],
             resource_limits: a3s_box_core::config::ResourceLimits::default(),
             log_config: a3s_box_core::log::LogConfig::default(),
+            add_host: vec![],
+            platform: None,
+            init: false,
+            read_only: false,
+            cap_add: vec![],
+            cap_drop: vec![],
+            security_opt: vec![],
+            privileged: false,
+            devices: vec![],
+            gpus: None,
+            shm_size: None,
+            stop_signal: None,
+            stop_timeout: None,
+            oom_kill_disable: false,
+            oom_score_adj: None,
         }
     }
 

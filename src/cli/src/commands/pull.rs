@@ -12,6 +12,10 @@ pub struct PullArgs {
     /// Suppress progress output
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Set target platform (e.g., "linux/amd64", "linux/arm64")
+    #[arg(long)]
+    pub platform: Option<String>,
 }
 
 pub async fn execute(args: PullArgs) -> Result<(), Box<dyn std::error::Error>> {

@@ -213,6 +213,21 @@ mod tests {
             anonymous_volumes: vec![],
             resource_limits: a3s_box_core::config::ResourceLimits::default(),
             log_config: a3s_box_core::log::LogConfig::default(),
+            add_host: vec![],
+            platform: None,
+            init: false,
+            read_only: false,
+            cap_add: vec![],
+            cap_drop: vec![],
+            security_opt: vec![],
+            privileged: false,
+            devices: vec![],
+            gpus: None,
+            shm_size: None,
+            stop_signal: None,
+            stop_timeout: None,
+            oom_kill_disable: false,
+            oom_score_adj: None,
         }
     }
 
