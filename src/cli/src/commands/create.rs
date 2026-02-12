@@ -229,6 +229,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         tmpfs: args.tmpfs,
         anonymous_volumes: vec![],
         resource_limits,
+        log_config: a3s_box_core::log::LogConfig::default(),
     };
 
     let mut state = StateFile::load_default()?;

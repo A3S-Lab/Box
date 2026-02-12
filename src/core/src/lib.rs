@@ -8,6 +8,7 @@ pub mod dns;
 pub mod error;
 pub mod event;
 pub mod exec;
+pub mod log;
 pub mod network;
 pub mod pty;
 pub mod volume;

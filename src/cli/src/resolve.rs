@@ -118,6 +118,7 @@ mod tests {
             tmpfs: vec![],
             anonymous_volumes: vec![],
             resource_limits: a3s_box_core::config::ResourceLimits::default(),
+            log_config: a3s_box_core::log::LogConfig::default(),
         }
     }
 

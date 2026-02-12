@@ -112,6 +112,9 @@ pub struct BoxRecord {
     /// Resource limits (PID limits, CPU pinning, ulimits, cgroup controls)
     #[serde(default)]
     pub resource_limits: a3s_box_core::config::ResourceLimits,
+    /// Logging configuration
+    #[serde(default)]
+    pub log_config: a3s_box_core::log::LogConfig,
 }
 
 fn default_health_status() -> String {
@@ -472,6 +475,7 @@ mod tests {
             tmpfs: vec![],
             anonymous_volumes: vec![],
             resource_limits: a3s_box_core::config::ResourceLimits::default(),
+            log_config: a3s_box_core::log::LogConfig::default(),
         }
     }
 

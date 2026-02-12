@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use chrono::{DateTime, Utc};
 use clap::Args;
 
+use a3s_box_core::log::{LogDriver, LogEntry};
+
 use crate::resolve;
 use crate::state::StateFile;
 
@@ -38,7 +40,20 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;
 
-    let log_path = &record.console_log;
+    // If logging is disabled, tell the user
+    if record.log_config.driver == LogDriver::None {
+        return Err(format!(
+            "Logging is disabled for box {} (log-driver=none)",
+            record.name
+        ).into());
+    }
+
+    // Prefer structured JSON log (container.json) when available
+    let log_dir = record.box_dir.join("logs");
+    let json_log = a3s_box_runtime::log::json_log_path(&log_dir);
+    let use_json = json_log.exists();
+
+    let log_path = if use_json { &json_log } else { &record.console_log };
     if !log_path.exists() {
         return Err(format!("No logs found for box {}", record.name).into());
     }
@@ -49,37 +64,41 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let has_time_filter = since.is_some() || until.is_some();
 
     if let Some(tail_n) = args.tail {
-        // Print last N lines
         let file = std::fs::File::open(log_path)?;
         let reader = BufReader::new(file);
         let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
         let start = lines.len().saturating_sub(tail_n);
         for line in &lines[start..] {
-            if has_time_filter && !line_in_range(line, since.as_ref(), until.as_ref()) {
-                continue;
+            if use_json {
+                print_json_line(line, args.timestamps, has_time_filter, since.as_ref(), until.as_ref());
+            } else {
+                if has_time_filter && !line_in_range(line, since.as_ref(), until.as_ref()) {
+                    continue;
+                }
+                print_line(line, args.timestamps);
             }
-            print_line(line, args.timestamps);
         }
     } else if !args.follow {
-        // Print entire file (with optional time filtering)
         let file = std::fs::File::open(log_path)?;
         let reader = BufReader::new(file);
         for line in reader.lines() {
             let line = line?;
-            if has_time_filter && !line_in_range(&line, since.as_ref(), until.as_ref()) {
-                continue;
+            if use_json {
+                print_json_line(&line, args.timestamps, has_time_filter, since.as_ref(), until.as_ref());
+            } else {
+                if has_time_filter && !line_in_range(&line, since.as_ref(), until.as_ref()) {
+                    continue;
+                }
+                print_line(&line, args.timestamps);
             }
-            print_line(&line, args.timestamps);
         }
     }
 
     if args.follow {
-        // Follow mode: seek to end and poll for new content
         let file = std::fs::File::open(log_path)?;
         let mut reader = BufReader::new(file);
 
         if args.tail.is_none() {
-            // Start from the end
             reader.seek(SeekFrom::End(0))?;
         }
 
@@ -91,13 +110,17 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Ok(_) => {
                     let trimmed = line.trim_end();
-                    if has_time_filter && !line_in_range(trimmed, since.as_ref(), until.as_ref()) {
-                        continue;
-                    }
-                    if args.timestamps {
-                        print!("{} {}", Utc::now().to_rfc3339(), line);
+                    if use_json {
+                        print_json_line(trimmed, args.timestamps, has_time_filter, since.as_ref(), until.as_ref());
                     } else {
-                        print!("{line}");
+                        if has_time_filter && !line_in_range(trimmed, since.as_ref(), until.as_ref()) {
+                            continue;
+                        }
+                        if args.timestamps {
+                            print!("{} {}", Utc::now().to_rfc3339(), line);
+                        } else {
+                            print!("{line}");
+                        }
                     }
                 }
                 Err(e) => {
@@ -108,6 +131,43 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Print a structured JSON log line, extracting the message and optional timestamp.
+fn print_json_line(
+    raw: &str,
+    timestamps: bool,
+    has_time_filter: bool,
+    since: Option<&DateTime<Utc>>,
+    until: Option<&DateTime<Utc>>,
+) {
+    let entry: LogEntry = match serde_json::from_str(raw) {
+        Ok(e) => e,
+        Err(_) => {
+            // Fallback: print raw line if not valid JSON
+            println!("{raw}");
+            return;
+        }
+    };
+
+    // Time filtering using the embedded timestamp
+    if has_time_filter {
+        if let Ok(ts) = entry.time.parse::<DateTime<Utc>>() {
+            if let Some(s) = since {
+                if ts < *s { return; }
+            }
+            if let Some(u) = until {
+                if ts > *u { return; }
+            }
+        }
+    }
+
+    // The log field already contains the trailing newline
+    if timestamps {
+        print!("{} {}", entry.time, entry.log);
+    } else {
+        print!("{}", entry.log);
+    }
 }
 
 /// Print a log line, optionally prepending a timestamp.

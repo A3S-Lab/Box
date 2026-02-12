@@ -10,6 +10,7 @@ pub mod fs;
 pub mod grpc;
 pub mod host_check;
 pub mod krun;
+pub mod log;
 pub mod metrics;
 pub mod network;
 pub mod oci;

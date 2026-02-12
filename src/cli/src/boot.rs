@@ -26,6 +26,15 @@ pub async fn boot_from_record(record: &BoxRecord) -> Result<BootResult, Box<dyn 
 
     vm.boot().await?;
 
+    // Spawn structured log processor (json-file driver writes container.json)
+    let log_dir = record.box_dir.join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let _log_handle = a3s_box_runtime::log::spawn_log_processor(
+        record.console_log.clone(),
+        log_dir,
+        record.log_config.clone(),
+    );
+
     let pid = vm.pid().await;
     Ok(BootResult { pid })
 }
@@ -109,6 +118,7 @@ mod tests {
             tmpfs: vec!["/tmp".to_string()],
             anonymous_volumes: vec![],
             resource_limits: a3s_box_core::config::ResourceLimits::default(),
+            log_config: a3s_box_core::log::LogConfig::default(),
         }
     }
 

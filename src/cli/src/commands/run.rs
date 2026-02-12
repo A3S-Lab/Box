@@ -148,6 +148,14 @@ pub struct RunArgs {
     /// Memory+swap limit (e.g., "1g", "-1" for unlimited)
     #[arg(long)]
     pub memory_swap: Option<String>,
+
+    /// Logging driver (json-file, none) [default: json-file]
+    #[arg(long, default_value = "json-file")]
+    pub log_driver: String,
+
+    /// Log driver options (KEY=VALUE), can be repeated
+    #[arg(long = "log-opt")]
+    pub log_opts: Vec<String>,
 }
 
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -156,6 +164,16 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Build resource limits before any partial moves of args
     let resource_limits = build_resource_limits(&args)?;
+
+    // Parse logging config
+    let log_driver: a3s_box_core::log::LogDriver = args.log_driver.parse()
+        .map_err(|e: String| format!("Invalid --log-driver: {e}"))?;
+    let log_opts = parse_env_vars(&args.log_opts)
+        .map_err(|e| e.replace("environment variable", "log option"))?;
+    let log_config = a3s_box_core::log::LogConfig {
+        driver: log_driver,
+        options: log_opts,
+    };
 
     let name = args.name.unwrap_or_else(generate_name);
     let env = parse_env_vars(&args.env)?;
@@ -295,12 +313,22 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         tmpfs: args.tmpfs.clone(),
         anonymous_volumes: vm.anonymous_volumes().to_vec(),
         resource_limits,
+        log_config: log_config.clone(),
         max_restart_count: 0,
         exit_code: None,
     };
 
     let mut state = StateFile::load_default()?;
     state.add(record)?;
+
+    // Spawn structured log processor (json-file driver writes container.json)
+    let log_dir = box_dir.join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let _log_handle = a3s_box_runtime::log::spawn_log_processor(
+        box_dir.join("logs").join("console.log"),
+        log_dir,
+        log_config,
+    );
 
     // Attach named volumes to this box
     super::volume::attach_volumes(&volume_names, &box_id)?;
