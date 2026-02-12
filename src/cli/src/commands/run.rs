@@ -1,6 +1,7 @@
 //! `a3s-box run` command — Pull + Create + Start.
 
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig, ResourceLimits};
@@ -306,6 +307,10 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if args.detach && args.tty {
         return Err("Cannot use -t (tty) with -d (detach)".into());
+    }
+
+    if args.tty && !std::io::stdin().is_terminal() {
+        return Err("The -t flag requires a terminal (stdin is not a TTY)".into());
     }
 
     if args.detach {
