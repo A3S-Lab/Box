@@ -48,6 +48,14 @@ pub struct RunArgs {
     #[arg(short = 'd', long)]
     pub detach: bool,
 
+    /// Keep STDIN open (interactive mode)
+    #[arg(short = 'i', long = "interactive")]
+    pub interactive: bool,
+
+    /// Allocate a pseudo-TTY
+    #[arg(short = 't', long = "tty")]
+    pub tty: bool,
+
     /// Override the image entrypoint
     #[arg(long)]
     pub entrypoint: Option<String>,
@@ -222,6 +230,19 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating box {} ({})...", name, &BoxRecord::make_short_id(&box_id));
 
+    // Register endpoint in network store BEFORE boot so the VM can find its IP
+    if let Some(ref net_name) = args.network {
+        let net_store = a3s_box_runtime::NetworkStore::default_path()?;
+        let mut net_config = net_store
+            .get(net_name)?
+            .ok_or_else(|| format!("network '{}' not found", net_name))?;
+        let endpoint = net_config
+            .connect(&box_id, &name)
+            .map_err(|e| format!("Failed to connect to network: {e}"))?;
+        net_store.update(&net_config)?;
+        println!("Connected to network {} (IP: {})", net_name, endpoint.ip_address);
+    }
+
     vm.boot().await?;
 
     // Get PID from the running VM
@@ -278,24 +299,91 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut state = StateFile::load_default()?;
     state.add(record)?;
 
-    // Register endpoint in network store if using bridge networking
-    if let Some(ref net_name) = args.network {
-        let net_store = a3s_box_runtime::NetworkStore::default_path()?;
-        let mut net_config = net_store
-            .get(net_name)?
-            .ok_or_else(|| format!("network '{}' not found", net_name))?;
-        let endpoint = net_config
-            .connect(&box_id, &name)
-            .map_err(|e| format!("Failed to connect to network: {e}"))?;
-        net_store.update(&net_config)?;
-        println!("Connected to network {} (IP: {})", net_name, endpoint.ip_address);
-    }
-
     // Attach named volumes to this box
     super::volume::attach_volumes(&volume_names, &box_id)?;
 
+    if args.detach && args.tty {
+        return Err("Cannot use -t (tty) with -d (detach)".into());
+    }
+
     if args.detach {
         println!("{box_id}");
+        return Ok(());
+    }
+
+    // Interactive PTY mode: connect to the guest PTY server
+    if args.tty {
+        use a3s_box_core::pty::PtyRequest;
+        use a3s_box_runtime::PtyClient;
+        use crossterm::terminal;
+
+        let pty_socket_path = box_dir.join("sockets").join("pty.sock");
+
+        // Wait for PTY socket to appear (guest init may still be starting)
+        for _ in 0..50 {
+            if pty_socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        if !pty_socket_path.exists() {
+            return Err(format!(
+                "PTY socket not found at {} (guest may not support interactive mode)",
+                pty_socket_path.display()
+            ).into());
+        }
+
+        // Build the command for the PTY session: use cmd override, entrypoint, or /bin/sh
+        let pty_cmd = if !args.cmd.is_empty() {
+            args.cmd.clone()
+        } else if let Some(ref ep) = entrypoint_override {
+            ep.clone()
+        } else {
+            vec!["/bin/sh".to_string()]
+        };
+
+        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        let mut client = PtyClient::connect(&pty_socket_path).await?;
+        client.send_request(&PtyRequest {
+            cmd: pty_cmd,
+            env: args.env.clone(),
+            working_dir: args.workdir.clone(),
+            user: args.user.clone(),
+            cols,
+            rows,
+        }).await?;
+
+        terminal::enable_raw_mode()?;
+        let (read_half, write_half) = client.into_split();
+        let exit_code = super::exec::run_pty_session(read_half, write_half).await;
+        terminal::disable_raw_mode()?;
+
+        // Clean up: destroy VM
+        vm.destroy().await?;
+        super::volume::detach_volumes(&volume_names, &box_id);
+        if let Some(ref net_name) = args.network {
+            let net_store = a3s_box_runtime::NetworkStore::default_path()?;
+            if let Some(mut net_config) = net_store.get(net_name)? {
+                net_config.disconnect(&box_id).ok();
+                net_store.update(&net_config)?;
+            }
+        }
+
+        let mut state = StateFile::load_default()?;
+        if let Some(rec) = state.find_by_id_mut(&box_id) {
+            rec.status = "stopped".to_string();
+            rec.pid = None;
+        }
+        if args.rm {
+            state.remove(&box_id)?;
+            let _ = std::fs::remove_dir_all(&box_dir);
+        } else {
+            state.save()?;
+        }
+
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
         return Ok(());
     }
 
