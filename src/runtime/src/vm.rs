@@ -681,6 +681,132 @@ impl VmManager {
 
         Ok(result)
     }
+
+    /// Seal data inside the TEE via RA-TLS.
+    ///
+    /// Connects to the guest's RA-TLS attestation server, verifies the TEE
+    /// during the TLS handshake, then sends data to be encrypted with a key
+    /// derived from the TEE's identity (measurement + chip_id).
+    ///
+    /// # Arguments
+    /// * `data` - Raw data to seal
+    /// * `context` - Application-specific context for key derivation
+    /// * `policy` - Sealing policy ("MeasurementAndChip", "MeasurementOnly", "ChipOnly")
+    /// * `allow_simulated` - Whether to accept simulated TEE reports
+    pub async fn seal_data(
+        &self,
+        data: &[u8],
+        context: &str,
+        policy: &str,
+        allow_simulated: bool,
+    ) -> Result<crate::grpc::SealResult> {
+        // Verify VM is in a running state
+        let state = self.state.read().await;
+        match *state {
+            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
+            BoxState::Created => {
+                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
+            }
+            BoxState::Stopped => {
+                return Err(BoxError::AttestationError("VM is stopped".to_string()));
+            }
+        }
+        drop(state);
+
+        // Verify TEE is configured
+        if matches!(self.config.tee, TeeConfig::None) {
+            return Err(BoxError::AttestationError(
+                "TEE is not configured for this box".to_string(),
+            ));
+        }
+
+        let socket_path = self
+            .attest_socket_path
+            .as_ref()
+            .ok_or_else(|| {
+                BoxError::AttestationError(
+                    "Attestation socket not available".to_string(),
+                )
+            })?;
+
+        let attestation_policy = crate::tee::AttestationPolicy::default();
+        let client = crate::grpc::SealClient::new(socket_path);
+        let result = client
+            .seal(data, context, policy, attestation_policy, allow_simulated)
+            .await?;
+
+        tracing::info!(
+            box_id = %self.box_id,
+            context = context,
+            policy = policy,
+            "Data sealed inside TEE"
+        );
+
+        Ok(result)
+    }
+
+    /// Unseal data inside the TEE via RA-TLS.
+    ///
+    /// Connects to the guest's RA-TLS attestation server, verifies the TEE
+    /// during the TLS handshake, then sends the sealed blob to be decrypted
+    /// with the TEE-bound key.
+    ///
+    /// # Arguments
+    /// * `blob` - Base64-encoded sealed blob (from a previous seal operation)
+    /// * `context` - Context used during sealing
+    /// * `policy` - Sealing policy used during sealing
+    /// * `allow_simulated` - Whether to accept simulated TEE reports
+    pub async fn unseal_data(
+        &self,
+        blob: &str,
+        context: &str,
+        policy: &str,
+        allow_simulated: bool,
+    ) -> Result<Vec<u8>> {
+        // Verify VM is in a running state
+        let state = self.state.read().await;
+        match *state {
+            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
+            BoxState::Created => {
+                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
+            }
+            BoxState::Stopped => {
+                return Err(BoxError::AttestationError("VM is stopped".to_string()));
+            }
+        }
+        drop(state);
+
+        // Verify TEE is configured
+        if matches!(self.config.tee, TeeConfig::None) {
+            return Err(BoxError::AttestationError(
+                "TEE is not configured for this box".to_string(),
+            ));
+        }
+
+        let socket_path = self
+            .attest_socket_path
+            .as_ref()
+            .ok_or_else(|| {
+                BoxError::AttestationError(
+                    "Attestation socket not available".to_string(),
+                )
+            })?;
+
+        let attestation_policy = crate::tee::AttestationPolicy::default();
+        let client = crate::grpc::SealClient::new(socket_path);
+        let result = client
+            .unseal(blob, context, policy, attestation_policy, allow_simulated)
+            .await?;
+
+        tracing::info!(
+            box_id = %self.box_id,
+            context = context,
+            policy = policy,
+            "Data unsealed inside TEE"
+        );
+
+        Ok(result)
+    }
     fn prepare_layout(&self) -> Result<BoxLayout> {
         // Create box-specific directories
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);

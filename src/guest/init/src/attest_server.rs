@@ -84,8 +84,9 @@ fn run_ratls_server() -> Result<(), Box<dyn std::error::Error>> {
     use tracing::error;
 
     // Step 1: Generate key pair and RA-TLS certificate
-    let (tls_config, cert_der) = generate_ratls_config()?;
+    let (tls_config, cert_der, snp_report) = generate_ratls_config()?;
     let tls_config = Arc::new(tls_config);
+    let snp_report = Arc::new(snp_report);
 
     info!(
         cert_size = cert_der.len(),
@@ -112,7 +113,8 @@ fn run_ratls_server() -> Result<(), Box<dyn std::error::Error>> {
             Ok(client_fd) => {
                 let client = unsafe { OwnedFd::from_raw_fd(client_fd) };
                 let config = Arc::clone(&tls_config);
-                if let Err(e) = handle_tls_connection(client, config) {
+                let report = Arc::clone(&snp_report);
+                if let Err(e) = handle_tls_connection(client, config, report) {
                     warn!("RA-TLS connection failed: {}", e);
                 }
             }
@@ -136,9 +138,9 @@ fn run_ratls_server() -> Result<(), Box<dyn std::error::Error>> {
 /// 4. Embed the report in a self-signed X.509 certificate
 /// 5. Build a rustls ServerConfig
 ///
-/// Returns (ServerConfig, cert_der) so the cert can be logged/inspected.
+/// Returns (ServerConfig, cert_der, report_bytes).
 #[cfg(target_os = "linux")]
-fn generate_ratls_config() -> Result<(rustls::ServerConfig, Vec<u8>), Box<dyn std::error::Error>> {
+fn generate_ratls_config() -> Result<(rustls::ServerConfig, Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
     use rcgen::{
         CertificateParams, CustomExtension, DistinguishedName, DnType, KeyPair,
         PKCS_ECDSA_P384_SHA384,
@@ -180,6 +182,7 @@ fn generate_ratls_config() -> Result<(rustls::ServerConfig, Vec<u8>), Box<dyn st
     params.distinguished_name = dn;
 
     // Add SNP report as custom extension
+    let snp_report = report_bytes.clone();
     let report_ext = CustomExtension::from_oid_content(OID_SNP_REPORT, report_bytes);
     params.custom_extensions.push(report_ext);
 
@@ -205,7 +208,7 @@ fn generate_ratls_config() -> Result<(rustls::ServerConfig, Vec<u8>), Box<dyn st
         .with_single_cert(vec![tls_cert], tls_key)
         .map_err(|e| format!("Failed to create TLS config: {}", e))?;
 
-    Ok((config, cert_der))
+    Ok((config, cert_der, snp_report))
 }
 
 /// Directory where injected secrets are stored (tmpfs, never persisted to disk).
@@ -222,10 +225,13 @@ const SECRETS_DIR: &str = "/run/secrets";
 /// then routes the request:
 /// - `GET /status` — Returns TEE status
 /// - `POST /secrets` — Receives and stores secrets
+/// - `POST /seal` — Seal data bound to TEE identity
+/// - `POST /unseal` — Unseal previously sealed data
 #[cfg(target_os = "linux")]
 fn handle_tls_connection(
     fd: std::os::fd::OwnedFd,
     config: std::sync::Arc<rustls::ServerConfig>,
+    snp_report: std::sync::Arc<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use tracing::debug;
@@ -250,6 +256,10 @@ fn handle_tls_connection(
 
             if request.starts_with("POST /secrets") {
                 handle_secret_injection(&request, &mut tls);
+            } else if request.starts_with("POST /seal") {
+                handle_seal_request(&request, &snp_report, &mut tls);
+            } else if request.starts_with("POST /unseal") {
+                handle_unseal_request(&request, &snp_report, &mut tls);
             } else {
                 // Default: status response
                 send_json_response(&mut tls, 200, b"{\"status\":\"ok\",\"tee\":true}");
@@ -401,6 +411,311 @@ fn is_valid_secret_name(name: &str) -> bool {
         && !name.contains('\0')
         && !name.starts_with('.')
         && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+// ============================================================================
+// Sealed storage (guest-side)
+// ============================================================================
+
+/// Seal request from the host.
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize)]
+struct SealRequest {
+    /// Data to seal (base64-encoded).
+    data: String,
+    /// Application-specific context for key derivation.
+    context: String,
+    /// Sealing policy: "MeasurementAndChip", "MeasurementOnly", or "ChipOnly".
+    #[serde(default = "default_policy")]
+    policy: String,
+}
+
+#[cfg(target_os = "linux")]
+fn default_policy() -> String {
+    "MeasurementAndChip".to_string()
+}
+
+/// Seal response returned to the host.
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+struct SealResponse {
+    /// Sealed blob (base64-encoded): nonce || ciphertext || tag.
+    blob: String,
+    /// Policy used for sealing.
+    policy: String,
+    /// Context used for key derivation.
+    context: String,
+}
+
+/// Unseal request from the host.
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize)]
+struct UnsealRequest {
+    /// Sealed blob (base64-encoded).
+    blob: String,
+    /// Context used during sealing.
+    context: String,
+    /// Sealing policy used during sealing.
+    #[serde(default = "default_policy")]
+    policy: String,
+}
+
+/// Unseal response returned to the host.
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+struct UnsealResponse {
+    /// Decrypted data (base64-encoded).
+    data: String,
+}
+
+/// HKDF salt — must match runtime/src/tee/sealed.rs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const HKDF_SALT: &[u8] = b"a3s-sealed-storage-v1";
+
+/// Handle a POST /seal request: encrypt data bound to TEE identity.
+#[cfg(target_os = "linux")]
+fn handle_seal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
+    use base64::Engine;
+    use ring::aead::{self, Aad, BoundKey, Nonce, NonceSequence, NONCE_LEN};
+    use ring::hkdf;
+
+    let body = match request.find("\r\n\r\n") {
+        Some(pos) => &request[pos + 4..],
+        None => {
+            send_json_response(tls, 400, b"{\"error\":\"Malformed HTTP request\"}");
+            return;
+        }
+    };
+
+    let req: SealRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            let err = format!("{{\"error\":\"Invalid JSON: {}\"}}", e);
+            send_json_response(tls, 400, err.as_bytes());
+            return;
+        }
+    };
+
+    // Decode plaintext from base64
+    let plaintext = match base64::engine::general_purpose::STANDARD.decode(&req.data) {
+        Ok(d) => d,
+        Err(e) => {
+            let err = format!("{{\"error\":\"Invalid base64 data: {}\"}}", e);
+            send_json_response(tls, 400, err.as_bytes());
+            return;
+        }
+    };
+
+    // Derive sealing key
+    let key = match derive_guest_sealing_key(snp_report, &req.context, &req.policy) {
+        Ok(k) => k,
+        Err(e) => {
+            let err = format!("{{\"error\":\"{}\"}}", e);
+            send_json_response(tls, 500, err.as_bytes());
+            return;
+        }
+    };
+
+    // Generate random nonce
+    let rng = ring::rand::SystemRandom::new();
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    if ring::rand::SecureRandom::fill(&rng, &mut nonce_bytes).is_err() {
+        send_json_response(tls, 500, b"{\"error\":\"Failed to generate nonce\"}");
+        return;
+    }
+
+    // Encrypt with AES-256-GCM
+    let mut in_out = plaintext;
+    let unbound_key = match aead::UnboundKey::new(&aead::AES_256_GCM, &key) {
+        Ok(k) => k,
+        Err(_) => {
+            send_json_response(tls, 500, b"{\"error\":\"Failed to create encryption key\"}");
+            return;
+        }
+    };
+
+    struct SingleNonce(Option<[u8; 12]>);
+    impl NonceSequence for SingleNonce {
+        fn advance(&mut self) -> std::result::Result<Nonce, ring::error::Unspecified> {
+            self.0.take().map(Nonce::assume_unique_for_key).ok_or(ring::error::Unspecified)
+        }
+    }
+
+    let mut sealing_key = aead::SealingKey::new(unbound_key, SingleNonce(Some(nonce_bytes)));
+    if sealing_key
+        .seal_in_place_append_tag(Aad::from(req.context.as_bytes()), &mut in_out)
+        .is_err()
+    {
+        send_json_response(tls, 500, b"{\"error\":\"Encryption failed\"}");
+        return;
+    }
+
+    // Build blob: nonce || ciphertext || tag
+    let mut blob = Vec::with_capacity(NONCE_LEN + in_out.len());
+    blob.extend_from_slice(&nonce_bytes);
+    blob.extend_from_slice(&in_out);
+
+    let response = SealResponse {
+        blob: base64::engine::general_purpose::STANDARD.encode(&blob),
+        policy: req.policy,
+        context: req.context,
+    };
+
+    let body = serde_json::to_vec(&response).unwrap_or_else(|_| b"{\"error\":\"serialize\"}".to_vec());
+    send_json_response(tls, 200, &body);
+    info!("Sealed {} bytes of data", blob.len());
+}
+
+/// Handle a POST /unseal request: decrypt data using TEE identity.
+#[cfg(target_os = "linux")]
+fn handle_unseal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
+    use base64::Engine;
+    use ring::aead::{self, Aad, BoundKey, Nonce, NonceSequence, NONCE_LEN};
+
+    let body = match request.find("\r\n\r\n") {
+        Some(pos) => &request[pos + 4..],
+        None => {
+            send_json_response(tls, 400, b"{\"error\":\"Malformed HTTP request\"}");
+            return;
+        }
+    };
+
+    let req: UnsealRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            let err = format!("{{\"error\":\"Invalid JSON: {}\"}}", e);
+            send_json_response(tls, 400, err.as_bytes());
+            return;
+        }
+    };
+
+    // Decode sealed blob from base64
+    let blob = match base64::engine::general_purpose::STANDARD.decode(&req.blob) {
+        Ok(d) => d,
+        Err(e) => {
+            let err = format!("{{\"error\":\"Invalid base64 blob: {}\"}}", e);
+            send_json_response(tls, 400, err.as_bytes());
+            return;
+        }
+    };
+
+    if blob.len() < NONCE_LEN + aead::AES_256_GCM.tag_len() {
+        send_json_response(tls, 400, b"{\"error\":\"Sealed blob too short\"}");
+        return;
+    }
+
+    // Derive sealing key
+    let key = match derive_guest_sealing_key(snp_report, &req.context, &req.policy) {
+        Ok(k) => k,
+        Err(e) => {
+            let err = format!("{{\"error\":\"{}\"}}", e);
+            send_json_response(tls, 500, err.as_bytes());
+            return;
+        }
+    };
+
+    // Split nonce and ciphertext
+    let nonce_bytes: [u8; NONCE_LEN] = match blob[..NONCE_LEN].try_into() {
+        Ok(n) => n,
+        Err(_) => {
+            send_json_response(tls, 400, b"{\"error\":\"Invalid nonce\"}");
+            return;
+        }
+    };
+    let mut in_out = blob[NONCE_LEN..].to_vec();
+
+    // Decrypt with AES-256-GCM
+    let unbound_key = match aead::UnboundKey::new(&aead::AES_256_GCM, &key) {
+        Ok(k) => k,
+        Err(_) => {
+            send_json_response(tls, 500, b"{\"error\":\"Failed to create decryption key\"}");
+            return;
+        }
+    };
+
+    struct SingleNonce(Option<[u8; 12]>);
+    impl NonceSequence for SingleNonce {
+        fn advance(&mut self) -> std::result::Result<Nonce, ring::error::Unspecified> {
+            self.0.take().map(Nonce::assume_unique_for_key).ok_or(ring::error::Unspecified)
+        }
+    }
+
+    let mut opening_key = aead::OpeningKey::new(unbound_key, SingleNonce(Some(nonce_bytes)));
+    let plaintext = match opening_key.open_in_place(Aad::from(req.context.as_bytes()), &mut in_out) {
+        Ok(pt) => pt,
+        Err(_) => {
+            send_json_response(
+                tls,
+                403,
+                b"{\"error\":\"Unseal failed: TEE identity mismatch or data corrupted\"}",
+            );
+            return;
+        }
+    };
+
+    let response = UnsealResponse {
+        data: base64::engine::general_purpose::STANDARD.encode(plaintext),
+    };
+
+    let body = serde_json::to_vec(&response).unwrap_or_else(|_| b"{\"error\":\"serialize\"}".to_vec());
+    send_json_response(tls, 200, &body);
+    info!("Unsealed data successfully");
+}
+
+/// Derive a 256-bit sealing key from the SNP report using HKDF-SHA256.
+///
+/// Algorithm matches `runtime/src/tee/sealed.rs::derive_sealing_key`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn derive_guest_sealing_key(
+    report: &[u8],
+    context: &str,
+    policy: &str,
+) -> std::result::Result<[u8; 32], String> {
+    use ring::hkdf;
+
+    if report.len() < 0x1E0 {
+        return Err("Report too short to extract sealing identity".to_string());
+    }
+
+    let measurement = &report[0x90..0xC0]; // 48 bytes
+    let chip_id = &report[0x1A0..0x1E0]; // 64 bytes
+
+    let ikm = match policy {
+        "MeasurementAndChip" => {
+            let mut v = Vec::with_capacity(112);
+            v.extend_from_slice(measurement);
+            v.extend_from_slice(chip_id);
+            v
+        }
+        "MeasurementOnly" => measurement.to_vec(),
+        "ChipOnly" => chip_id.to_vec(),
+        _ => {
+            let mut v = Vec::with_capacity(112);
+            v.extend_from_slice(measurement);
+            v.extend_from_slice(chip_id);
+            v
+        }
+    };
+
+    struct HkdfLen(usize);
+    impl hkdf::KeyType for HkdfLen {
+        fn len(&self) -> usize {
+            self.0
+        }
+    }
+
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, HKDF_SALT);
+    let prk = salt.extract(&ikm);
+    let info = [context.as_bytes()];
+    let okm = prk
+        .expand(&info, HkdfLen(32))
+        .map_err(|_| "HKDF expand failed".to_string())?;
+
+    let mut key = [0u8; 32];
+    okm.fill(&mut key)
+        .map_err(|_| "HKDF fill failed".to_string())?;
+
+    Ok(key)
 }
 
 // ============================================================================
@@ -833,5 +1148,103 @@ mod tests {
     #[test]
     fn test_secrets_dir_constant() {
         assert_eq!(SECRETS_DIR, "/run/secrets");
+    }
+
+    #[test]
+    fn test_hkdf_salt_matches_runtime() {
+        assert_eq!(HKDF_SALT, b"a3s-sealed-storage-v1");
+    }
+
+    /// Build a fake 1184-byte report with known measurement and chip_id.
+    fn make_test_report() -> Vec<u8> {
+        let mut report = vec![0u8; 1184];
+        for i in 0..48 {
+            report[0x90 + i] = (i as u8).wrapping_mul(0xA3);
+        }
+        for b in &mut report[0x1A0..0x1E0] {
+            *b = 0xA3;
+        }
+        report
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_measurement_and_chip() {
+        let report = make_test_report();
+        let key = derive_guest_sealing_key(&report, "test-ctx", "MeasurementAndChip").unwrap();
+        assert_eq!(key.len(), 32);
+        // Key should be deterministic
+        let key2 = derive_guest_sealing_key(&report, "test-ctx", "MeasurementAndChip").unwrap();
+        assert_eq!(key, key2);
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_measurement_only() {
+        let report = make_test_report();
+        let key = derive_guest_sealing_key(&report, "ctx", "MeasurementOnly").unwrap();
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_chip_only() {
+        let report = make_test_report();
+        let key = derive_guest_sealing_key(&report, "ctx", "ChipOnly").unwrap();
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_different_contexts() {
+        let report = make_test_report();
+        let key_a = derive_guest_sealing_key(&report, "context-a", "MeasurementAndChip").unwrap();
+        let key_b = derive_guest_sealing_key(&report, "context-b", "MeasurementAndChip").unwrap();
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_different_policies() {
+        let report = make_test_report();
+        let key_mc = derive_guest_sealing_key(&report, "ctx", "MeasurementAndChip").unwrap();
+        let key_m = derive_guest_sealing_key(&report, "ctx", "MeasurementOnly").unwrap();
+        let key_c = derive_guest_sealing_key(&report, "ctx", "ChipOnly").unwrap();
+        assert_ne!(key_mc, key_m);
+        assert_ne!(key_mc, key_c);
+        assert_ne!(key_m, key_c);
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_report_too_short() {
+        let short = vec![0u8; 100];
+        let result = derive_guest_sealing_key(&short, "ctx", "MeasurementAndChip");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_unknown_policy_defaults() {
+        let report = make_test_report();
+        // Unknown policy falls back to MeasurementAndChip
+        let key_unknown = derive_guest_sealing_key(&report, "ctx", "Unknown").unwrap();
+        let key_default = derive_guest_sealing_key(&report, "ctx", "MeasurementAndChip").unwrap();
+        assert_eq!(key_unknown, key_default);
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_chip_only_survives_measurement_change() {
+        let report = make_test_report();
+        let key1 = derive_guest_sealing_key(&report, "ctx", "ChipOnly").unwrap();
+
+        let mut changed = report.clone();
+        changed[0x90] = 0xFF; // change measurement
+        let key2 = derive_guest_sealing_key(&changed, "ctx", "ChipOnly").unwrap();
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_derive_guest_sealing_key_measurement_only_survives_chip_change() {
+        let report = make_test_report();
+        let key1 = derive_guest_sealing_key(&report, "ctx", "MeasurementOnly").unwrap();
+
+        let mut changed = report.clone();
+        changed[0x1A0] = 0xFF; // change chip_id
+        let key2 = derive_guest_sealing_key(&changed, "ctx", "MeasurementOnly").unwrap();
+        assert_eq!(key1, key2);
     }
 }

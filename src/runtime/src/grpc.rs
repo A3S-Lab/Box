@@ -546,6 +546,228 @@ impl SecretInjector {
     }
 }
 
+/// Result of a seal operation from the guest.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SealResult {
+    /// Sealed blob (base64-encoded): nonce || ciphertext || tag.
+    pub blob: String,
+    /// Policy used for sealing.
+    pub policy: String,
+    /// Context used for key derivation.
+    pub context: String,
+}
+
+/// Result of an unseal operation from the guest.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct UnsealResult {
+    /// Decrypted data (base64-encoded).
+    pub data: String,
+}
+
+/// Client for seal/unseal operations in the TEE via RA-TLS.
+///
+/// Connects to the guest's RA-TLS attestation server, verifies the TEE
+/// during the TLS handshake, then sends seal/unseal requests over the
+/// encrypted channel. The guest performs the actual crypto using keys
+/// derived from its TEE identity (measurement + chip_id).
+#[derive(Debug)]
+pub struct SealClient {
+    socket_path: PathBuf,
+}
+
+impl SealClient {
+    /// Create a new seal client for the given attestation socket.
+    pub fn new(socket_path: &Path) -> Self {
+        Self {
+            socket_path: socket_path.to_path_buf(),
+        }
+    }
+
+    /// Seal data inside the TEE via RA-TLS.
+    ///
+    /// 1. Connects to the guest attestation server
+    /// 2. TLS handshake verifies the TEE
+    /// 3. Sends plaintext (base64) over the encrypted channel
+    /// 4. Guest encrypts with AES-256-GCM bound to TEE identity
+    ///
+    /// # Arguments
+    /// * `data` - Raw data to seal
+    /// * `context` - Application-specific context for key derivation
+    /// * `policy` - Sealing policy name ("MeasurementAndChip", "MeasurementOnly", "ChipOnly")
+    /// * `attestation_policy` - Attestation policy for TEE verification
+    /// * `allow_simulated` - Whether to accept simulated TEE reports
+    pub async fn seal(
+        &self,
+        data: &[u8],
+        context: &str,
+        policy: &str,
+        attestation_policy: crate::tee::AttestationPolicy,
+        allow_simulated: bool,
+    ) -> Result<SealResult> {
+        use base64::Engine;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let client_config =
+            crate::tee::ratls::create_client_config(attestation_policy, allow_simulated)?;
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            BoxError::AttestationError(format!(
+                "Failed to connect to RA-TLS server at {}: {}",
+                self.socket_path.display(),
+                e,
+            ))
+        })?;
+
+        let server_name = rustls::pki_types::ServerName::try_from("localhost")
+            .map_err(|e| BoxError::AttestationError(format!("Invalid server name: {}", e)))?;
+
+        let mut tls_stream = connector.connect(server_name, stream).await.map_err(|e| {
+            BoxError::AttestationError(format!("RA-TLS handshake failed: {}", e))
+        })?;
+
+        let body = serde_json::json!({
+            "data": base64::engine::general_purpose::STANDARD.encode(data),
+            "context": context,
+            "policy": policy,
+        });
+        let body_str = serde_json::to_string(&body).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to serialize seal request: {}", e))
+        })?;
+
+        let request = format!(
+            "POST /seal HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body_str.len(),
+            body_str,
+        );
+
+        tls_stream.write_all(request.as_bytes()).await.map_err(|e| {
+            BoxError::AttestationError(format!("Failed to send seal request: {}", e))
+        })?;
+
+        let mut response = Vec::with_capacity(4096);
+        tls_stream.read_to_end(&mut response).await.map_err(|e| {
+            BoxError::AttestationError(format!("Failed to read seal response: {}", e))
+        })?;
+
+        let response_str = String::from_utf8_lossy(&response);
+        let body_str = response_str
+            .find("\r\n\r\n")
+            .map(|pos| &response_str[pos + 4..])
+            .ok_or_else(|| {
+                BoxError::AttestationError("Malformed seal response".to_string())
+            })?;
+
+        if !response_str.starts_with("HTTP/1.1 200") {
+            return Err(BoxError::AttestationError(format!(
+                "Seal request failed: {}",
+                body_str.chars().take(200).collect::<String>(),
+            )));
+        }
+
+        let result: SealResult = serde_json::from_str(body_str).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to parse seal response: {}", e))
+        })?;
+
+        Ok(result)
+    }
+
+    /// Unseal data inside the TEE via RA-TLS.
+    ///
+    /// 1. Connects to the guest attestation server
+    /// 2. TLS handshake verifies the TEE
+    /// 3. Sends sealed blob over the encrypted channel
+    /// 4. Guest decrypts with the TEE-bound key
+    ///
+    /// # Arguments
+    /// * `blob` - Base64-encoded sealed blob
+    /// * `context` - Context used during sealing
+    /// * `policy` - Sealing policy used during sealing
+    /// * `attestation_policy` - Attestation policy for TEE verification
+    /// * `allow_simulated` - Whether to accept simulated TEE reports
+    pub async fn unseal(
+        &self,
+        blob: &str,
+        context: &str,
+        policy: &str,
+        attestation_policy: crate::tee::AttestationPolicy,
+        allow_simulated: bool,
+    ) -> Result<Vec<u8>> {
+        use base64::Engine;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let client_config =
+            crate::tee::ratls::create_client_config(attestation_policy, allow_simulated)?;
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            BoxError::AttestationError(format!(
+                "Failed to connect to RA-TLS server at {}: {}",
+                self.socket_path.display(),
+                e,
+            ))
+        })?;
+
+        let server_name = rustls::pki_types::ServerName::try_from("localhost")
+            .map_err(|e| BoxError::AttestationError(format!("Invalid server name: {}", e)))?;
+
+        let mut tls_stream = connector.connect(server_name, stream).await.map_err(|e| {
+            BoxError::AttestationError(format!("RA-TLS handshake failed: {}", e))
+        })?;
+
+        let body = serde_json::json!({
+            "blob": blob,
+            "context": context,
+            "policy": policy,
+        });
+        let body_str = serde_json::to_string(&body).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to serialize unseal request: {}", e))
+        })?;
+
+        let request = format!(
+            "POST /unseal HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body_str.len(),
+            body_str,
+        );
+
+        tls_stream.write_all(request.as_bytes()).await.map_err(|e| {
+            BoxError::AttestationError(format!("Failed to send unseal request: {}", e))
+        })?;
+
+        let mut response = Vec::with_capacity(4096);
+        tls_stream.read_to_end(&mut response).await.map_err(|e| {
+            BoxError::AttestationError(format!("Failed to read unseal response: {}", e))
+        })?;
+
+        let response_str = String::from_utf8_lossy(&response);
+        let body_str = response_str
+            .find("\r\n\r\n")
+            .map(|pos| &response_str[pos + 4..])
+            .ok_or_else(|| {
+                BoxError::AttestationError("Malformed unseal response".to_string())
+            })?;
+
+        if !response_str.starts_with("HTTP/1.1 200") {
+            return Err(BoxError::AttestationError(format!(
+                "Unseal request failed: {}",
+                body_str.chars().take(200).collect::<String>(),
+            )));
+        }
+
+        let result: UnsealResult = serde_json::from_str(body_str).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to parse unseal response: {}", e))
+        })?;
+
+        let plaintext = base64::engine::general_purpose::STANDARD
+            .decode(&result.data)
+            .map_err(|e| {
+                BoxError::AttestationError(format!("Failed to decode unsealed data: {}", e))
+            })?;
+
+        Ok(plaintext)
+    }
+}
+
 /// Client for interactive PTY sessions in the guest over Unix socket.
 ///
 /// Connects to the PTY server (vsock port 4090) and provides async
