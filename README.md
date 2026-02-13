@@ -41,7 +41,7 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 
 ## Features
 
-- **Docker-like CLI**: Familiar `run`, `stop`, `pause`, `unpause`, `ps`, `logs`, `exec`, `top`, `rename`, `images`, `tag`, `cp`, `attest`, `network`, `volume`, `push`, `login`, `logout` commands with label support
+- **Docker-like CLI**: Familiar `run`, `stop`, `pause`, `unpause`, `ps`, `logs`, `exec`, `top`, `rename`, `images`, `tag`, `cp`, `attest`, `network`, `volume`, `push`, `login`, `logout`, `commit`, `diff`, `events`, `container-update` commands with label support
 - **Hardware Isolation**: Each sandbox runs in its own MicroVM via libkrun
 - **Instant Boot**: Sub-second VM startup (~200ms cold start)
 - **OCI Image Support**: Load sandboxes from standard OCI container images
@@ -58,6 +58,12 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **Restart Policies**: Automatic restart enforcement (`always`, `on-failure`, `on-failure:N`, `unless-stopped`) with background monitor daemon, exponential backoff, and crash loop prevention
 - **Health Checks**: Configurable health check commands with interval, timeout, retries, and start period
 - **Resource Limits**: PID limits (`--pids-limit`), CPU pinning (`--cpuset-cpus`), custom ulimits (`--ulimit`), CPU shares/quota, memory reservation/swap via cgroup v2 (Linux)
+- **Security Options**: Capabilities management (`--cap-add`, `--cap-drop`), read-only rootfs (`--read-only`), privileged mode (`--privileged`), security options (`--security-opt`), device mapping (`--device`), GPU access (`--gpus`)
+- **Logging Drivers**: Structured JSON logging (`--log-driver json-file`) with rotation (`--log-opt max-size`, `--log-opt max-file`), or disable logging (`--log-driver none`)
+- **Container Commit**: Create new OCI images from box filesystem changes (`commit` with `--change`, `--message`, `--author`)
+- **Filesystem Diff**: Show added/changed/deleted files vs baseline (`diff`)
+- **System Events**: Real-time event streaming with filtering (`events` with `--filter`, `--json`)
+- **Live Resource Update**: Hot-update CPU, memory, restart policy without restart (`container-update`)
 - **System Cleanup**: One-command prune of stopped boxes and unused images
 - **CRI Runtime**: Kubernetes-compatible CRI RuntimeService and ImageService
 - **Warm Pool**: Pre-booted idle MicroVMs for instant allocation
@@ -165,6 +171,17 @@ a3s-box ps --filter label=env=dev      # Filter by label
 a3s-box logs dev -f              # Follow box console output
 a3s-box inspect dev              # Show detailed box info as JSON
 a3s-box stats                    # Live resource usage
+a3s-box diff dev                 # Show filesystem changes (A/C/D)
+a3s-box events                   # Stream real-time system events
+a3s-box events --filter event=start --json  # Filtered JSON events
+
+# Image creation
+a3s-box commit dev myimage:v1    # Create image from box changes
+a3s-box commit -m "added config" -c "CMD /start" dev myimage:v2
+
+# Live updates
+a3s-box container-update dev --cpus 4 --memory 2g  # Update resource limits
+a3s-box container-update dev --restart always       # Change restart policy
 
 # Cleanup
 a3s-box system-prune -f          # Remove stopped boxes + unused images
@@ -184,8 +201,8 @@ a3s-box attest dev --raw         # Output raw report without verification
 
 | Command | Description |
 |---------|-------------|
-| `run <image>` | Pull + create + start a box (`-d` detached, `--rm` auto-remove, `-l` labels, `--restart`, `--health-cmd`) |
-| `create <image>` | Create a box without starting (`-l` for labels, `--health-cmd` for health check) |
+| `run <image>` | Pull + create + start a box (`-d` detached, `--rm` auto-remove, `-l` labels, `--restart`, `--health-cmd`, `--cap-add/drop`, `--privileged`, `--read-only`, `--device`, `--gpus`, `--init`, `--env-file`, `--add-host`, `--platform`) |
+| `create <image>` | Create a box without starting (same flags as `run`) |
 | `start <box>...` | Start one or more created or stopped boxes |
 | `stop <box>...` | Graceful stop one or more boxes (SIGTERM then SIGKILL after `-t` timeout) |
 | `pause <box>...` | Pause one or more running boxes (SIGSTOP) |
@@ -201,6 +218,10 @@ a3s-box attest dev --raw         # Output raw report without verification
 | `inspect <box>` | Show detailed box information as JSON |
 | `stats` | Display live resource usage statistics |
 | `cp <src> <dst>` | Copy files or directories between host and a running box |
+| `commit <box> [repo:tag]` | Create an image from a box's changes (`-m` message, `-a` author, `-c` change) |
+| `diff <box>` | Show filesystem changes in a box (Added/Changed/Deleted) |
+| `events` | Stream real-time system events (`--filter`, `--json`, `--since`, `--until`) |
+| `container-update <box>` | Update resource limits of a running box (`--cpus`, `--memory`, `--restart`, `--pids-limit`) |
 | `images` | List cached OCI images (`-q` for quiet, `--format` for custom output) |
 | `pull <image>` | Pull an image from a container registry (`-q` for quiet mode) |
 | `rmi <image>...` | Remove one or more cached images (`-f` to ignore not-found errors) |
@@ -259,9 +280,9 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 
 | Crate | Binary | Purpose |
 |-------|--------|---------|
-| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (235 tests) |
-| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `PtyRequest`, `TeeConfig` (154 tests) |
-| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (400 tests) |
+| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (354 tests) |
+| `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `PtyRequest`, `TeeConfig` (160 tests) |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (442 tests) |
 | `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server, PTY server (25 tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
 | `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
@@ -360,7 +381,7 @@ let config = BoxConfig {
 
 ### Phase 3: CLI & Ecosystem Integration ✅
 
-- [x] Docker-like CLI (`a3s-box`) with 30 commands: run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update, attest, monitor
+- [x] Docker-like CLI (`a3s-box`) with 47 commands: run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, push, rmi, image-inspect, image-prune, tag, save, load, export, build, commit, diff, events, container-update, network, volume, df, system-prune, login, logout, history, port, wait, attach, version, info, update, attest, monitor
 - [x] Box state management with atomic persistence (`~/.a3s/boxes.json`)
 - [x] Docker-compatible name/ID/prefix resolution
 - [x] PID-based liveness reconciliation for dead box detection
@@ -422,10 +443,10 @@ let config = BoxConfig {
 - [ ] OpenTelemetry integration (VM lifecycle spans: create → boot → ready)
 - [ ] Cold start latency histograms (p50/p90/p95/p99)
 - [ ] Warm pool utilization metrics
-- [ ] Structured log aggregation
+- [x] Structured log aggregation (json-file logging driver with rotation)
 
 **Security**
-- [ ] Resource limits enforcement (CPU, memory, disk)
+- [x] Resource limits enforcement (CPU, memory, disk via cgroup v2)
 - [ ] Network isolation policies
 - [ ] Audit logging
 
@@ -713,24 +734,44 @@ Remaining gaps between A3S Box and Docker, prioritized by impact.
 - [x] `run -it` — start box with interactive terminal session
 - [x] Host terminal raw mode via crossterm (cross-platform)
 
-**9.6 Logging (P2)**
-- [ ] Logging drivers (json-file, syslog, journald)
-- [ ] Log rotation (`--log-opt max-size`, `--log-opt max-file`)
-- [ ] Structured JSON log output
+**9.6 Logging (P2) ✅**
+- [x] Logging drivers (`--log-driver json-file` with structured JSON output, `--log-driver none` to disable)
+- [x] Log rotation (`--log-opt max-size`, `--log-opt max-file`)
+- [x] Structured JSON log output (`container.json` with timestamps, stream tags)
 
-**9.7 Security Hardening (P2)**
-- [ ] Seccomp profiles (`--security-opt seccomp=...`)
-- [ ] Linux capabilities management (`--cap-add`, `--cap-drop`)
-- [ ] Read-only rootfs (`--read-only`)
-- [ ] No-new-privileges (`--security-opt no-new-privileges`)
+**9.7 Security Hardening (P2) ✅**
+- [x] Linux capabilities management (`--cap-add`, `--cap-drop`)
+- [x] Read-only rootfs (`--read-only`)
+- [x] Privileged mode (`--privileged`)
+- [x] Security options (`--security-opt`)
+- [x] Device mapping (`--device`)
+- [x] GPU access (`--gpus`)
+- [x] Init process (`--init`)
+- [x] OOM controls (`--oom-kill-disable`, `--oom-score-adj`)
+- [x] Stop signal/timeout (`--stop-signal`, `--stop-timeout`)
+- [ ] Seccomp profiles (`--security-opt seccomp=...`) — runtime enforcement deferred
+- [ ] No-new-privileges (`--security-opt no-new-privileges`) — runtime enforcement deferred
 
-**9.8 Advanced Features (P3)**
+**9.8 Missing Commands (P2) ✅**
+- [x] `commit` — Create OCI image from box filesystem changes (`--change`, `--message`, `--author`)
+- [x] `diff` — Show filesystem changes (Added/Changed/Deleted) vs baseline snapshot
+- [x] `events` — Real-time system event streaming (`--filter`, `--json`, `--since`, `--until`)
+- [x] `container-update` — Hot-update resource limits (CPU, memory, restart policy, pids-limit)
+
+**9.9 Additional Flags (P2) ✅**
+- [x] `--env-file` — Load environment variables from file
+- [x] `--add-host` — Add custom host-to-IP mappings
+- [x] `--platform` — Set target platform for pull/run/create
+- [x] `--shm-size` — Configure shared memory size
+- [x] `--no-healthcheck` — Disable image healthcheck
+
+**9.10 Advanced Features (P3)**
 - [ ] Multi-container orchestration (compose-like YAML)
-- [ ] Image export/import (`save`/`load` — partially done)
+- [x] Image export/import (`save`/`load`)
 - [ ] Buildx multi-platform builds
 - [ ] Secrets management (`--secret`)
 - [ ] CRI streaming API (Exec, Attach, PortForward)
-- [ ] Container events API
+- [x] Container events API (`a3s-box events`)
 
 ---
 
@@ -767,8 +808,8 @@ cargo build -p a3s-box-cli  # Build CLI only
 just test               # All tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
-cargo test -p a3s-box-cli   # CLI tests (235 tests)
-cargo test -p a3s-box-core  # Core tests (143 tests)
+cargo test -p a3s-box-cli   # CLI tests (354 tests)
+cargo test -p a3s-box-core  # Core tests (160 tests)
 
 # Lint
 just fmt                # Format code
@@ -783,7 +824,7 @@ box/
 ├── src/
 │   ├── cli/            # Docker-like CLI (a3s-box binary)
 │   │   └── src/
-│   │       ├── commands/   # 30 subcommands (run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, rmi, image-inspect, image-prune, tag, system-prune, version, info, update, attest, monitor)
+│   │       ├── commands/   # 47 subcommands (run, create, start, stop, pause, unpause, restart, rm, kill, rename, ps, stats, logs, exec, top, inspect, cp, images, pull, push, rmi, image-inspect, image-prune, tag, save, load, export, build, commit, diff, events, container-update, network, volume, df, system-prune, login, logout, history, port, wait, attach, version, info, update, attest, monitor)
 │   │       ├── state.rs    # Box state persistence (~/.a3s/boxes.json)
 │   │       ├── resolve.rs  # Docker-style name/ID resolution
 │   │       └── output.rs   # Table formatting, size parsing, memory parsing
