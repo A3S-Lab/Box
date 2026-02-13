@@ -90,6 +90,11 @@ pub struct InstanceSpec {
     #[serde(default)]
     pub pty_socket_path: PathBuf,
 
+    /// Path to the Unix socket for TEE attestation communication
+    /// This socket is bridged to vsock port 4091 inside the VM
+    #[serde(default)]
+    pub attest_socket_path: PathBuf,
+
     /// Filesystem mounts (virtio-fs shares)
     pub fs_mounts: Vec<FsMount>,
 
@@ -135,6 +140,7 @@ impl Default for InstanceSpec {
             grpc_socket_path: PathBuf::new(),
             exec_socket_path: PathBuf::new(),
             pty_socket_path: PathBuf::new(),
+            attest_socket_path: PathBuf::new(),
             fs_mounts: Vec::new(),
             entrypoint: Entrypoint {
                 executable: String::new(),
@@ -181,6 +187,7 @@ mod tests {
             grpc_socket_path: PathBuf::from("/tmp/grpc.sock"),
             exec_socket_path: PathBuf::from("/tmp/exec.sock"),
             pty_socket_path: PathBuf::from("/tmp/pty.sock"),
+            attest_socket_path: PathBuf::from("/tmp/attest.sock"),
             fs_mounts: vec![FsMount {
                 tag: "workspace".to_string(),
                 host_path: PathBuf::from("/home/user/project"),

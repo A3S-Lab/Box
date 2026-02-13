@@ -7,7 +7,7 @@
 //! - Managing process lifecycle
 //! - Handling SIGTERM for graceful shutdown
 
-use a3s_box_guest_init::{exec_server, namespace, network, pty_server};
+use a3s_box_guest_init::{attest_server, exec_server, namespace, network, pty_server};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info, warn};
@@ -189,6 +189,13 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::spawn(|| {
         if let Err(e) = pty_server::run_pty_server() {
             error!("PTY server failed: {}", e);
+        }
+    });
+
+    // Step 8.6: Start attestation server in background thread (TEE environments only)
+    std::thread::spawn(|| {
+        if let Err(e) = attest_server::run_attest_server() {
+            error!("Attestation server failed: {}", e);
         }
     });
 

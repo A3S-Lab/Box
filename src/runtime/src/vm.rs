@@ -49,6 +49,8 @@ struct BoxLayout {
     exec_socket_path: PathBuf,
     /// Path to the PTY Unix socket
     pty_socket_path: PathBuf,
+    /// Path to the attestation Unix socket
+    attest_socket_path: PathBuf,
     /// Path to the workspace directory
     workspace_path: PathBuf,
     /// Path to the skills directory
@@ -100,6 +102,9 @@ pub struct VmManager {
 
     /// Anonymous volume names created during boot (from OCI VOLUME directives)
     anonymous_volumes: Vec<String>,
+
+    /// Path to the attestation Unix socket (set during boot if TEE is enabled)
+    attest_socket_path: Option<PathBuf>,
 }
 
 impl VmManager {
@@ -120,6 +125,7 @@ impl VmManager {
             passt_manager: None,
             home_dir,
             anonymous_volumes: Vec::new(),
+            attest_socket_path: None,
         }
     }
 
@@ -139,6 +145,7 @@ impl VmManager {
             passt_manager: None,
             home_dir,
             anonymous_volumes: Vec::new(),
+            attest_socket_path: None,
         }
     }
 
@@ -268,6 +275,11 @@ impl VmManager {
 
         // 5b. Wait for exec server to become ready
         self.wait_for_exec_ready(&layout.exec_socket_path).await?;
+
+        // 5c. Store attestation socket path for TEE environments
+        if layout.tee_instance_config.is_some() {
+            self.attest_socket_path = Some(layout.attest_socket_path.clone());
+        }
 
         // 6. Update state to Ready
         *self.state.write().await = BoxState::Ready;
@@ -531,14 +543,18 @@ impl VmManager {
             ));
         }
 
-        // Connect to the guest agent for attestation
+        // Connect to the guest attestation server via dedicated socket
         let socket_path = self
-            .agent_client
+            .attest_socket_path
             .as_ref()
-            .map(|c| c.socket_path().to_path_buf())
-            .ok_or_else(|| BoxError::AttestationError("Agent client not connected".to_string()))?;
+            .ok_or_else(|| {
+                BoxError::AttestationError(
+                    "Attestation socket not available (TEE not configured or VM not booted)"
+                        .to_string(),
+                )
+            })?;
 
-        let attest_client = AttestationClient::connect(&socket_path).await?;
+        let attest_client = AttestationClient::connect(socket_path).await?;
         let report = attest_client.get_report(request).await?;
 
         tracing::info!(
@@ -801,6 +817,7 @@ impl VmManager {
             socket_path: socket_dir.join("grpc.sock"),
             exec_socket_path: socket_dir.join("exec.sock"),
             pty_socket_path: socket_dir.join("pty.sock"),
+            attest_socket_path: socket_dir.join("attest.sock"),
             workspace_path,
             skills_path,
             console_output: Some(logs_dir.join("console.log")),
@@ -1303,6 +1320,7 @@ impl VmManager {
             grpc_socket_path: layout.socket_path.clone(),
             exec_socket_path: layout.exec_socket_path.clone(),
             pty_socket_path: layout.pty_socket_path.clone(),
+            attest_socket_path: layout.attest_socket_path.clone(),
             fs_mounts,
             entrypoint,
             console_output: layout.console_output.clone(),
@@ -1964,6 +1982,7 @@ mod tests {
             passt_manager: None,
             home_dir: home_dir.to_path_buf(),
             anonymous_volumes: Vec::new(),
+            attest_socket_path: None,
         }
     }
 

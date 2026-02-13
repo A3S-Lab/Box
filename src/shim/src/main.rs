@@ -16,6 +16,7 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_box_runtime::krun::KrunContext;
 use a3s_box_runtime::vmm::InstanceSpec;
 use a3s_box_runtime::AGENT_VSOCK_PORT;
+use a3s_box_runtime::ATTEST_VSOCK_PORT;
 use a3s_box_runtime::EXEC_VSOCK_PORT;
 use a3s_box_runtime::PTY_VSOCK_PORT;
 use clap::Parser;
@@ -451,6 +452,26 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             "Configuring vsock bridge for PTY"
         );
         ctx.add_vsock_port(PTY_VSOCK_PORT, pty_socket_str, true)?;
+    }
+
+    // Configure attestation communication channel (Unix socket bridged to vsock port 4091)
+    if !spec.attest_socket_path.as_os_str().is_empty() {
+        let attest_socket_str =
+            spec.attest_socket_path
+                .to_str()
+                .ok_or_else(|| BoxError::BoxBootError {
+                    message: format!(
+                        "Invalid attestation socket path: {}",
+                        spec.attest_socket_path.display()
+                    ),
+                    hint: None,
+                })?;
+        tracing::debug!(
+            socket_path = attest_socket_str,
+            guest_port = ATTEST_VSOCK_PORT,
+            "Configuring vsock bridge for attestation"
+        );
+        ctx.add_vsock_port(ATTEST_VSOCK_PORT, attest_socket_str, true)?;
     }
 
     // Configure TSI port mappings if specified

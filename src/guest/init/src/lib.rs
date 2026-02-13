@@ -5,6 +5,7 @@
 //! host-to-guest command execution, and network configuration for
 //! passt-based virtio-net interfaces.
 
+pub mod attest_server;
 pub mod exec_server;
 pub mod namespace;
 pub mod network;

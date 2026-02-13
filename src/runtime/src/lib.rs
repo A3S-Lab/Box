@@ -58,5 +58,8 @@ pub const EXEC_VSOCK_PORT: u32 = 4089;
 /// Default vsock port for PTY server in the guest.
 pub const PTY_VSOCK_PORT: u32 = 4090;
 
+/// Default vsock port for TEE attestation server in the guest.
+pub const ATTEST_VSOCK_PORT: u32 = 4091;
+
 /// Default maximum image cache size: 10 GB.
 pub const DEFAULT_IMAGE_CACHE_SIZE: u64 = 10 * 1024 * 1024 * 1024;
