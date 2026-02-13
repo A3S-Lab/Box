@@ -74,6 +74,9 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **No Root Required**: Runs without elevated privileges using Apple HVF or KVM
 - **TEE Support**: AMD SEV-SNP for hardware-enforced memory encryption
 - **Remote Attestation**: SNP attestation report generation, ECDSA-P384 signature verification, certificate chain validation, and configurable policy checks via `a3s-box attest`
+- **RA-TLS**: Remote attestation over TLS — SNP report embedded in X.509 certificate extensions, verified during TLS handshake
+- **Secret Injection**: Inject secrets into TEE via RA-TLS channel, stored in `/run/secrets/` (tmpfs, mode 0400)
+- **Sealed Storage**: AES-256-GCM encryption with HKDF-SHA256 keys derived from TEE identity, three sealing policies (MeasurementAndChip, MeasurementOnly, ChipOnly)
 
 ## Quick Start
 
@@ -469,14 +472,20 @@ let config = BoxConfig {
 - [x] AMD KDS client for fetching/caching certificates from `kds.amd.com`
 - [x] Configurable attestation policy (measurement, TCB version, debug mode, SMT, policy mask)
 - [x] `a3s-box attest` CLI command with `--policy`, `--nonce`, `--raw`, `--quiet` options
-- [ ] Guest Agent `/attest` endpoint (SNP_GET_REPORT ioctl on `/dev/sev-guest`)
+- [x] Guest attestation server with SNP_GET_REPORT ioctl on `/dev/sev-guest` (vsock port 4091)
+- [x] TEE simulation mode for local development (`A3S_TEE_SIMULATE=1`)
+- [x] RA-TLS module: SNP report embedded in X.509 certificate extensions (P-384 ECDSA)
+- [x] RA-TLS end-to-end: guest TLS server + host `RaTlsAttestationClient` with `--ratls` CLI flag
+- [x] Secret injection via RA-TLS channel (`SecretInjector`, `/run/secrets/`, env var support)
 - [ ] KBS (Key Broker Service) integration for secret provisioning
 - [ ] Periodic re-attestation with configurable interval
 
-**Phase 6.3: Sealed Storage 📋**
-- [ ] MRENCLAVE/MRSIGNER key derivation
+**Phase 6.3: Sealed Storage 🚧**
+- [x] HKDF-SHA256 key derivation from TEE identity (measurement + chip_id)
+- [x] AES-256-GCM sealed storage with three policies (MeasurementAndChip, MeasurementOnly, ChipOnly)
+- [x] Guest-side seal/unseal service via RA-TLS (`POST /seal`, `POST /unseal`)
+- [x] Host-side `SealClient` + `VmManager.seal_data()`/`unseal_data()` methods
 - [ ] Version-based rollback protection
-- [ ] Secure credential storage API
 - [ ] Encrypted persistent storage
 
 ### Phase 7: SafeClaw Security Integration 🚧
