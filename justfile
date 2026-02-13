@@ -188,6 +188,43 @@ test-runtime:
     cd src && A3S_DEPS_STUB=1 cargo clippy -p a3s-box-runtime -p a3s-box-shim -- -D warnings
     @echo "✓ Runtime compilation passed (actual tests require libkrun)"
 
+# Run VM integration tests (requires built binary + HVF/KVM)
+# Usage: just test-vm              # run all integration tests
+#        just test-vm <test_name>  # run a specific test
+test-vm *ARGS:
+    #!/usr/bin/env bash
+    set -e
+    cd src
+
+    # Locate libkrun/libkrunfw dynamic libraries from cargo build output
+    LIBKRUN_LIB=$(ls -td target/debug/build/libkrun-sys-*/out/libkrun/lib 2>/dev/null | head -1)
+    LIBKRUNFW_LIB=$(ls -td target/debug/build/libkrun-sys-*/out/libkrunfw/lib 2>/dev/null | head -1)
+
+    if [ -z "$LIBKRUN_LIB" ] || [ -z "$LIBKRUNFW_LIB" ]; then
+        echo "❌ libkrun not found. Run 'just build' first."
+        exit 1
+    fi
+
+    export DYLD_LIBRARY_PATH="${LIBKRUN_LIB}:${LIBKRUNFW_LIB}"
+    export LD_LIBRARY_PATH="${LIBKRUN_LIB}:${LIBKRUNFW_LIB}"
+
+    # Verify binary works
+    if ! target/debug/a3s-box version >/dev/null 2>&1; then
+        echo "❌ a3s-box binary not working. Run 'just build' first."
+        exit 1
+    fi
+
+    echo "🚀 Running VM integration tests..."
+    echo "   DYLD_LIBRARY_PATH=${LIBKRUN_LIB}:${LIBKRUNFW_LIB}"
+    echo ""
+
+    ARGS="{{ARGS}}"
+    if [ -n "$ARGS" ]; then
+        cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture "$ARGS"
+    else
+        cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture
+    fi
+
 # ============================================================================
 # Coverage (requires: cargo install cargo-llvm-cov, brew install lcov)
 # ============================================================================
