@@ -59,9 +59,10 @@ pub async fn execute(args: CpArgs) -> Result<(), Box<dyn std::error::Error>> {
         (Endpoint::Host(host_path), Endpoint::Box { name, path }) => {
             copy_to_box(&host_path, &name, &path).await
         }
-        (Endpoint::Host(_), Endpoint::Host(_)) => {
-            Err("Both source and destination are host paths. One must be a box path (BOX:/path).".into())
-        }
+        (Endpoint::Host(_), Endpoint::Host(_)) => Err(
+            "Both source and destination are host paths. One must be a box path (BOX:/path)."
+                .into(),
+        ),
         (Endpoint::Box { .. }, Endpoint::Box { .. }) => {
             Err("Copying between two boxes is not supported. Copy to host first.".into())
         }
@@ -89,8 +90,8 @@ async fn copy_to_box(
     box_name: &str,
     box_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let meta = std::fs::metadata(host_path)
-        .map_err(|e| format!("Failed to stat {host_path}: {e}"))?;
+    let meta =
+        std::fs::metadata(host_path).map_err(|e| format!("Failed to stat {host_path}: {e}"))?;
 
     let client = connect_exec(box_name).await?;
 
@@ -107,11 +108,7 @@ async fn is_directory_in_box(
     box_path: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let request = ExecRequest {
-        cmd: vec![
-            "test".to_string(),
-            "-d".to_string(),
-            box_path.to_string(),
-        ],
+        cmd: vec!["test".to_string(), "-d".to_string(), box_path.to_string()],
         timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],
         working_dir: None,
@@ -164,7 +161,10 @@ async fn copy_file_from_box(
     std::fs::write(host_path, &decoded)
         .map_err(|e| format!("Failed to write to {host_path}: {e}"))?;
 
-    println!("{box_name}:{box_path} → {host_path} ({} bytes)", decoded.len());
+    println!(
+        "{box_name}:{box_path} → {host_path} ({} bytes)",
+        decoded.len()
+    );
     Ok(())
 }
 
@@ -175,8 +175,8 @@ async fn copy_file_to_box(
     box_name: &str,
     box_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read(host_path)
-        .map_err(|e| format!("Failed to read {host_path}: {e}"))?;
+    let content =
+        std::fs::read(host_path).map_err(|e| format!("Failed to read {host_path}: {e}"))?;
 
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
@@ -205,7 +205,10 @@ async fn copy_file_to_box(
         return Err(format!("Failed to write {box_path} in box: {stderr}").into());
     }
 
-    println!("{host_path} → {box_name}:{box_path} ({} bytes)", content.len());
+    println!(
+        "{host_path} → {box_name}:{box_path} ({} bytes)",
+        content.len()
+    );
     Ok(())
 }
 
@@ -381,7 +384,9 @@ async fn connect_exec(box_name: &str) -> Result<ExecClient, Box<dyn std::error::
         .into());
     }
 
-    ExecClient::connect(&exec_socket_path).await.map_err(|e| e.into())
+    ExecClient::connect(&exec_socket_path)
+        .await
+        .map_err(|e| e.into())
 }
 
 /// Minimal shell escaping for a file path.
@@ -445,7 +450,10 @@ mod tests {
 
     #[test]
     fn test_shell_escape_with_spaces() {
-        assert_eq!(shell_escape("/path/with spaces/file"), "'/path/with spaces/file'");
+        assert_eq!(
+            shell_escape("/path/with spaces/file"),
+            "'/path/with spaces/file'"
+        );
     }
 
     // --- Tar helper tests ---
@@ -473,7 +481,11 @@ mod tests {
         // Create test content
         std::fs::write(src_dir.path().join("hello.txt"), "hello world").unwrap();
         std::fs::create_dir(src_dir.path().join("sub")).unwrap();
-        std::fs::write(src_dir.path().join("sub").join("nested.txt"), "nested content").unwrap();
+        std::fs::write(
+            src_dir.path().join("sub").join("nested.txt"),
+            "nested content",
+        )
+        .unwrap();
 
         // Tar and extract
         let tar_data = create_tar_from_dir(src_dir.path().to_str().unwrap()).unwrap();
@@ -483,7 +495,8 @@ mod tests {
         let hello = std::fs::read_to_string(dst_dir.path().join("hello.txt")).unwrap();
         assert_eq!(hello, "hello world");
 
-        let nested = std::fs::read_to_string(dst_dir.path().join("sub").join("nested.txt")).unwrap();
+        let nested =
+            std::fs::read_to_string(dst_dir.path().join("sub").join("nested.txt")).unwrap();
         assert_eq!(nested, "nested content");
     }
 

@@ -5,8 +5,7 @@
 //! outputs the result as JSON.
 
 use a3s_box_runtime::{
-    AttestationClient, AttestationPolicy, AttestationRequest,
-    verify_attestation,
+    verify_attestation, AttestationClient, AttestationPolicy, AttestationRequest,
 };
 use clap::Args;
 use std::path::PathBuf;
@@ -112,12 +111,10 @@ pub async fn execute(args: AttestArgs) -> Result<(), Box<dyn std::error::Error>>
     // Load or create verification policy
     let policy = match &args.policy {
         Some(path) => {
-            let data = std::fs::read_to_string(path).map_err(|e| {
-                format!("Failed to read policy file {}: {}", path.display(), e)
-            })?;
-            serde_json::from_str::<AttestationPolicy>(&data).map_err(|e| {
-                format!("Failed to parse policy file {}: {}", path.display(), e)
-            })?
+            let data = std::fs::read_to_string(path)
+                .map_err(|e| format!("Failed to read policy file {}: {}", path.display(), e))?;
+            serde_json::from_str::<AttestationPolicy>(&data)
+                .map_err(|e| format!("Failed to parse policy file {}: {}", path.display(), e))?
         }
         None => AttestationPolicy::default(),
     };
@@ -170,7 +167,7 @@ fn generate_random_nonce() -> Vec<u8> {
 /// Decode a hex string to bytes.
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let hex = hex.trim().trim_start_matches("0x");
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("Hex string must have even length".into());
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);

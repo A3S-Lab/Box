@@ -3,9 +3,9 @@
 //! Listens on vsock port 4089 and accepts HTTP POST /exec requests
 //! with JSON-encoded ExecRequest bodies. Returns ExecOutput as JSON.
 
+use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::io::Write;
-use std::io::Read;
 use std::time::Duration;
 
 use a3s_box_core::exec::{ExecOutput, DEFAULT_EXEC_TIMEOUT_NS, MAX_OUTPUT_BYTES};
@@ -81,8 +81,8 @@ fn run_vsock_server() -> Result<(), Box<dyn std::error::Error>> {
 /// Handle a single connection: read HTTP request, execute command, send response.
 #[cfg(target_os = "linux")]
 fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::fd::{AsRawFd, FromRawFd};
     use a3s_box_core::exec::ExecRequest;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use tracing::debug;
 
     let raw_fd = fd.as_raw_fd();
@@ -122,7 +122,14 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
     };
 
     // Execute the command
-    let output = execute_command(&exec_req.cmd, exec_req.timeout_ns, &exec_req.env, exec_req.working_dir.as_deref(), exec_req.stdin.as_deref(), exec_req.user.as_deref());
+    let output = execute_command(
+        &exec_req.cmd,
+        exec_req.timeout_ns,
+        &exec_req.env,
+        exec_req.working_dir.as_deref(),
+        exec_req.stdin.as_deref(),
+        exec_req.user.as_deref(),
+    );
 
     // Send HTTP response with JSON body
     let response_body = serde_json::to_string(&output)?;
@@ -160,7 +167,15 @@ fn send_error_response(
 ///
 /// When `user` is specified, the command is wrapped with `su -s /bin/sh <user> -c <cmd>`
 /// to run as the given user inside the guest VM.
-fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir: Option<&str>, stdin_data: Option<&[u8]>, user: Option<&str>) -> ExecOutput {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn execute_command(
+    cmd: &[String],
+    timeout_ns: u64,
+    env: &[String],
+    working_dir: Option<&str>,
+    stdin_data: Option<&[u8]>,
+    user: Option<&str>,
+) -> ExecOutput {
     if cmd.is_empty() {
         return ExecOutput {
             stdout: vec![],
@@ -221,8 +236,7 @@ fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir:
         command.current_dir(dir);
     }
 
-    let mut child = match command.spawn()
-    {
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
             return ExecOutput {
@@ -304,6 +318,7 @@ fn execute_command(cmd: &[String], timeout_ns: u64, env: &[String], working_dir:
 }
 
 /// Truncate output to MAX_OUTPUT_BYTES if it exceeds the limit.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn truncate_output(mut data: Vec<u8>) -> Vec<u8> {
     if data.len() > MAX_OUTPUT_BYTES {
         data.truncate(MAX_OUTPUT_BYTES);
@@ -312,8 +327,11 @@ fn truncate_output(mut data: Vec<u8>) -> Vec<u8> {
 }
 
 /// Minimal shell escaping for a single argument.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn shell_escape(s: &str) -> String {
-    if s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.') {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '/' || c == '.')
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -354,7 +372,14 @@ mod tests {
 
     #[test]
     fn test_execute_command_echo() {
-        let output = execute_command(&["echo".to_string(), "hello".to_string()], 0, &[], None, None, None);
+        let output = execute_command(
+            &["echo".to_string(), "hello".to_string()],
+            0,
+            &[],
+            None,
+            None,
+            None,
+        );
         assert_eq!(output.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
         assert!(output.stderr.is_empty());
@@ -415,7 +440,11 @@ mod tests {
     #[test]
     fn test_execute_command_with_env() {
         let output = execute_command(
-            &["sh".to_string(), "-c".to_string(), "echo $TEST_VAR".to_string()],
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo $TEST_VAR".to_string(),
+            ],
             0,
             &["TEST_VAR=hello_from_env".to_string()],
             None,
@@ -431,14 +460,7 @@ mod tests {
 
     #[test]
     fn test_execute_command_with_working_dir() {
-        let output = execute_command(
-            &["pwd".to_string()],
-            0,
-            &[],
-            Some("/tmp"),
-            None,
-            None,
-        );
+        let output = execute_command(&["pwd".to_string()], 0, &[], Some("/tmp"), None, None);
         assert_eq!(output.exit_code, 0);
         // On macOS /tmp is a symlink to /private/tmp
         let pwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -461,10 +483,7 @@ mod tests {
             None,
         );
         assert_eq!(output.exit_code, 0);
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            "hello from stdin"
-        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "hello from stdin");
     }
 
     #[test]

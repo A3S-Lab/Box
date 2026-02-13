@@ -82,9 +82,7 @@ fn run_vsock_pty_server() -> Result<(), Box<dyn std::error::Error>> {
 /// 6. On process exit → send PtyExit frame
 #[cfg(target_os = "linux")]
 fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
-    use a3s_box_core::pty::{
-        parse_frame, read_frame, write_error, write_exit, PtyFrame,
-    };
+    use a3s_box_core::pty::{parse_frame, read_frame, write_error, write_exit, PtyFrame};
     use nix::pty::openpty;
     use nix::unistd::{close, dup2, execvp, fork, setsid, ForkResult};
     use std::ffi::CString;
@@ -188,9 +186,8 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
                 (request.cmd[0].clone(), request.cmd[1..].to_vec())
             };
 
-            let c_program = CString::new(program.as_str()).unwrap_or_else(|_| {
-                CString::new("/bin/sh").unwrap()
-            });
+            let c_program =
+                CString::new(program.as_str()).unwrap_or_else(|_| CString::new("/bin/sh").unwrap());
             let c_args: Vec<CString> = std::iter::once(c_program.clone())
                 .chain(args.iter().map(|a| {
                     CString::new(a.as_str()).unwrap_or_else(|_| CString::new("").unwrap())

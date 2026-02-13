@@ -56,7 +56,10 @@ mod tests {
             entrypoint: None,
             box_dir: PathBuf::from("/tmp").join(id),
             socket_path: PathBuf::from("/tmp").join(id).join("grpc.sock"),
-            exec_socket_path: PathBuf::from("/tmp").join(id).join("sockets").join("exec.sock"),
+            exec_socket_path: PathBuf::from("/tmp")
+                .join(id)
+                .join("sockets")
+                .join("exec.sock"),
             console_log: PathBuf::from("/tmp").join(id).join("console.log"),
             created_at: chrono::Utc::now(),
             started_at: None,

@@ -75,18 +75,13 @@ impl SandboxStore {
     }
 
     /// List sandboxes, optionally filtered by labels.
-    pub async fn list(
-        &self,
-        label_filter: Option<&HashMap<String, String>>,
-    ) -> Vec<PodSandbox> {
+    pub async fn list(&self, label_filter: Option<&HashMap<String, String>>) -> Vec<PodSandbox> {
         let store = self.sandboxes.read().await;
         store
             .values()
             .filter(|sb| {
                 if let Some(filter) = label_filter {
-                    filter
-                        .iter()
-                        .all(|(k, v)| sb.labels.get(k).map_or(false, |sv| sv == v))
+                    filter.iter().all(|(k, v)| sb.labels.get(k) == Some(v))
                 } else {
                     true
                 }

@@ -71,14 +71,19 @@ impl PasstManager {
         }
 
         let mut cmd = Command::new("passt");
-        cmd.arg("--socket").arg(&self.socket_path)
-            .arg("--pid").arg(&self.pid_file)
+        cmd.arg("--socket")
+            .arg(&self.socket_path)
+            .arg("--pid")
+            .arg(&self.pid_file)
             // Run in foreground (we manage the process)
             .arg("--foreground")
             // Configure the network
-            .arg("--address").arg(ip.to_string())
-            .arg("--gateway").arg(gateway.to_string())
-            .arg("--netmask").arg(format!("{}", prefix_to_netmask(prefix_len)));
+            .arg("--address")
+            .arg(ip.to_string())
+            .arg("--gateway")
+            .arg(gateway.to_string())
+            .arg("--netmask")
+            .arg(format!("{}", prefix_to_netmask(prefix_len)));
 
         // Add DNS servers
         for dns in dns_servers {

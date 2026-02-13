@@ -79,12 +79,7 @@ impl AmdKdsClient {
     /// Fetch the VCEK certificate from AMD KDS.
     ///
     /// URL format: `https://kds.amd.com/vcek/v1/{product}/{chip_id}?blSPL={bl}&teeSPL={tee}&snpSPL={snp}&ucodeSPL={ucode}`
-    async fn fetch_vcek(
-        &self,
-        chip_id: &str,
-        tcb: &TcbVersion,
-        product: &str,
-    ) -> Result<Vec<u8>> {
+    async fn fetch_vcek(&self, chip_id: &str, tcb: &TcbVersion, product: &str) -> Result<Vec<u8>> {
         let url = format!(
             "{}/{}/{}/{}?blSPL={}&teeSPL={}&snpSPL={}&ucodeSPL={}",
             AMD_KDS_BASE_URL,
@@ -116,9 +111,11 @@ impl AmdKdsClient {
             )));
         }
 
-        response.bytes().await.map(|b| b.to_vec()).map_err(|e| {
-            BoxError::AttestationError(format!("Failed to read VCEK response: {}", e))
-        })
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| BoxError::AttestationError(format!("Failed to read VCEK response: {}", e)))
     }
 
     /// Fetch the ASK and ARK certificates from AMD KDS.
@@ -196,11 +193,7 @@ impl AmdKdsClient {
     }
 
     /// Try to load a cached certificate chain.
-    async fn load_from_cache(
-        &self,
-        chip_id: &str,
-        tcb: &TcbVersion,
-    ) -> Option<CertificateChain> {
+    async fn load_from_cache(&self, chip_id: &str, tcb: &TcbVersion) -> Option<CertificateChain> {
         let cache_dir = self.cache_dir.as_ref()?;
         let cache_key = Self::cache_key(chip_id, tcb);
         let cache_path = cache_dir.join(&cache_key);
@@ -210,12 +203,7 @@ impl AmdKdsClient {
     }
 
     /// Save a certificate chain to the local cache.
-    async fn save_to_cache(
-        &self,
-        chip_id: &str,
-        tcb: &TcbVersion,
-        chain: &CertificateChain,
-    ) {
+    async fn save_to_cache(&self, chip_id: &str, tcb: &TcbVersion, chain: &CertificateChain) {
         let Some(cache_dir) = &self.cache_dir else {
             return;
         };
@@ -363,9 +351,6 @@ mod tests {
         assert!(client.cache_dir.is_none());
 
         let client = AmdKdsClient::new(Some(PathBuf::from("/tmp/test-certs")));
-        assert_eq!(
-            client.cache_dir,
-            Some(PathBuf::from("/tmp/test-certs"))
-        );
+        assert_eq!(client.cache_dir, Some(PathBuf::from("/tmp/test-certs")));
     }
 }

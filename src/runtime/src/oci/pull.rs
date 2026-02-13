@@ -85,9 +85,7 @@ impl ImagePuller {
                 "Image content already cached under different reference"
             );
             // Store under the new reference too
-            self.store
-                .put(&full_ref, &digest, &stored.path)
-                .await?;
+            self.store.put(&full_ref, &digest, &stored.path).await?;
             return OciImage::from_path(&stored.path);
         }
 
@@ -134,18 +132,14 @@ mod tests {
     #[test]
     fn test_image_puller_creation() {
         let tmp = TempDir::new().unwrap();
-        let store = Arc::new(
-            ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap(),
-        );
+        let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         let _puller = ImagePuller::new(store, RegistryAuth::anonymous());
     }
 
     #[tokio::test]
     async fn test_is_cached_empty_store() {
         let tmp = TempDir::new().unwrap();
-        let store = Arc::new(
-            ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap(),
-        );
+        let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         let puller = ImagePuller::new(store, RegistryAuth::anonymous());
         assert!(!puller.is_cached("nginx:latest").await);
     }
@@ -153,9 +147,7 @@ mod tests {
     #[tokio::test]
     async fn test_is_cached_invalid_reference() {
         let tmp = TempDir::new().unwrap();
-        let store = Arc::new(
-            ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap(),
-        );
+        let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         let puller = ImagePuller::new(store, RegistryAuth::anonymous());
         assert!(!puller.is_cached("").await);
     }

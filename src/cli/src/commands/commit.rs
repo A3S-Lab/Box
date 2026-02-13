@@ -46,33 +46,47 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
         return Err(format!("Rootfs not found at {}", rootfs_dir.display()).into());
     }
 
-    let reference = args
-        .repository
-        .unwrap_or_else(|| format!("{}:latest", record.image.split(':').next().unwrap_or("committed")));
+    let reference = args.repository.unwrap_or_else(|| {
+        format!(
+            "{}:latest",
+            record.image.split(':').next().unwrap_or("committed")
+        )
+    });
 
     println!("Committing {}...", record.name);
 
     // Create a temporary directory for the OCI image layout
-    let tmp = tempfile::tempdir()
-        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+    let tmp = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
     let image_dir = tmp.path();
 
     // Build OCI image layout
-    build_oci_image(image_dir, &rootfs_dir, &reference, &args.message, &args.author, &args.change)?;
+    build_oci_image(
+        image_dir,
+        &rootfs_dir,
+        &reference,
+        &args.message,
+        &args.author,
+        &args.change,
+    )?;
 
     // Compute image digest from manifest
-    let manifest_bytes = std::fs::read(image_dir.join("manifest.json"))
-        .or_else(|_| {
-            // Read the actual manifest blob
-            find_manifest_blob(image_dir)
-        })?;
+    let manifest_bytes = std::fs::read(image_dir.join("manifest.json")).or_else(|_| {
+        // Read the actual manifest blob
+        find_manifest_blob(image_dir)
+    })?;
     let digest = format!("sha256:{:x}", Sha256::digest(&manifest_bytes));
 
     // Store in image store
     let store = Arc::new(super::open_image_store()?);
     let stored = store.put(&reference, &digest, image_dir).await?;
 
-    println!("sha256:{}", &stored.digest.strip_prefix("sha256:").unwrap_or(&stored.digest));
+    println!(
+        "sha256:{}",
+        &stored
+            .digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&stored.digest)
+    );
 
     Ok(())
 }
@@ -379,10 +393,14 @@ mod tests {
         assert!(output.path().join("blobs/sha256").exists());
 
         // Verify index.json is valid
-        let index: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(output.path().join("index.json")).unwrap())
-                .unwrap();
+        let index: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(output.path().join("index.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(index["schemaVersion"], 2);
-        assert!(index["manifests"][0]["digest"].as_str().unwrap().starts_with("sha256:"));
+        assert!(index["manifests"][0]["digest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
     }
 }

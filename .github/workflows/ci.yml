@@ -28,11 +28,11 @@ jobs:
       A3S_DEPS_STUB: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src
@@ -46,9 +46,15 @@ jobs:
       A3S_DEPS_STUB: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Create stub libkrun for linking
+        run: |
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
+          sudo cp /tmp/libkrun.so /usr/lib/
+          sudo ldconfig
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src
@@ -72,7 +78,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential pkg-config libssl-dev \
-            musl-tools libclang-dev patchelf
+            musl-tools libclang-dev patchelf protobuf-compiler
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -128,7 +134,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential pkg-config libssl-dev \
-            musl-tools libclang-dev patchelf
+            musl-tools libclang-dev patchelf protobuf-compiler
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -181,7 +187,9 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install lld llvm filosottile/musl-cross/musl-cross
+          brew install lld llvm protobuf
+          pip3 install --break-system-packages ziglang
+          cargo install cargo-zigbuild
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -200,7 +208,7 @@ jobs:
       - name: Build guest binaries
         run: |
           cd src
-          cargo build --release \
+          cargo zigbuild --release \
             -p a3s-box-guest-init \
             --target aarch64-unknown-linux-musl
 

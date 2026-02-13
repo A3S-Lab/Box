@@ -330,12 +330,8 @@ impl OciRootfsBuilder {
 
         // Create /usr/bin directory
         let usr_bin_dir = self.rootfs_path.join("usr/bin");
-        std::fs::create_dir_all(&usr_bin_dir).map_err(|e| {
-            BoxError::Other(format!(
-                "Failed to create /usr/bin directory: {}",
-                e
-            ))
-        })?;
+        std::fs::create_dir_all(&usr_bin_dir)
+            .map_err(|e| BoxError::Other(format!("Failed to create /usr/bin directory: {}", e)))?;
 
         // Copy nsexec to /usr/bin/nsexec
         // Remove any existing file/symlink first
@@ -385,10 +381,7 @@ impl OciRootfsBuilder {
         ])?;
 
         // /etc/group - ensure essential entries exist, preserve image entries
-        self.ensure_group_entries(&[
-            ("root", "root:x:0:"),
-            ("nogroup", "nogroup:x:65534:"),
-        ])?;
+        self.ensure_group_entries(&[("root", "root:x:0:"), ("nogroup", "nogroup:x:65534:")])?;
 
         // /etc/hosts - basic hosts file
         let hosts_content = "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n";
@@ -496,6 +489,7 @@ impl OciRootfsBuilder {
 }
 
 /// Get the full path to agent executable within rootfs.
+#[allow(dead_code)]
 pub fn agent_executable_path(agent_target: &str, entrypoint: &[String]) -> String {
     if entrypoint.is_empty() {
         return format!("{}/bin/agent", agent_target);

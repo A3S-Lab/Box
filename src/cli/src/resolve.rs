@@ -93,7 +93,10 @@ mod tests {
             entrypoint: None,
             box_dir: PathBuf::from("/tmp").join(id),
             socket_path: PathBuf::from("/tmp").join(id).join("grpc.sock"),
-            exec_socket_path: PathBuf::from("/tmp").join(id).join("sockets").join("exec.sock"),
+            exec_socket_path: PathBuf::from("/tmp")
+                .join(id)
+                .join("sockets")
+                .join("exec.sock"),
             console_log: PathBuf::from("/tmp").join(id).join("console.log"),
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -151,18 +154,14 @@ mod tests {
 
     #[test]
     fn test_resolve_by_name() {
-        let (_tmp, state) = setup_state(vec![
-            make_record("abc-123", "my_box"),
-        ]);
+        let (_tmp, state) = setup_state(vec![make_record("abc-123", "my_box")]);
         let result = resolve(&state, "my_box").unwrap();
         assert_eq!(result.id, "abc-123");
     }
 
     #[test]
     fn test_resolve_by_exact_id() {
-        let (_tmp, state) = setup_state(vec![
-            make_record("abc-123", "my_box"),
-        ]);
+        let (_tmp, state) = setup_state(vec![make_record("abc-123", "my_box")]);
         let result = resolve(&state, "abc-123").unwrap();
         assert_eq!(result.name, "my_box");
     }
@@ -189,9 +188,7 @@ mod tests {
 
     #[test]
     fn test_resolve_not_found() {
-        let (_tmp, state) = setup_state(vec![
-            make_record("abc-123", "my_box"),
-        ]);
+        let (_tmp, state) = setup_state(vec![make_record("abc-123", "my_box")]);
         let err = resolve(&state, "nonexistent").unwrap_err();
         assert!(matches!(err, ResolveError::NotFound(_)));
     }
@@ -215,9 +212,10 @@ mod tests {
 
     #[test]
     fn test_resolve_by_short_id_prefix() {
-        let (_tmp, state) = setup_state(vec![
-            make_record("550e8400-e29b-41d4-a716-446655440000", "box1"),
-        ]);
+        let (_tmp, state) = setup_state(vec![make_record(
+            "550e8400-e29b-41d4-a716-446655440000",
+            "box1",
+        )]);
         // short_id is "550e8400e29b" — match by its prefix
         let result = resolve(&state, "550e84").unwrap();
         assert_eq!(result.name, "box1");
@@ -242,9 +240,7 @@ mod tests {
 
     #[test]
     fn test_resolve_mut_by_name() {
-        let (_tmp, mut state) = setup_state(vec![
-            make_record("id-1", "my_box"),
-        ]);
+        let (_tmp, mut state) = setup_state(vec![make_record("id-1", "my_box")]);
         let record = resolve_mut(&mut state, "my_box").unwrap();
         assert_eq!(record.id, "id-1");
 
@@ -255,9 +251,7 @@ mod tests {
 
     #[test]
     fn test_resolve_mut_by_id() {
-        let (_tmp, mut state) = setup_state(vec![
-            make_record("id-1", "my_box"),
-        ]);
+        let (_tmp, mut state) = setup_state(vec![make_record("id-1", "my_box")]);
         let record = resolve_mut(&mut state, "id-1").unwrap();
         record.cpus = 8;
         assert_eq!(state.find_by_id("id-1").unwrap().cpus, 8);
@@ -265,9 +259,7 @@ mod tests {
 
     #[test]
     fn test_resolve_mut_not_found() {
-        let (_tmp, mut state) = setup_state(vec![
-            make_record("id-1", "my_box"),
-        ]);
+        let (_tmp, mut state) = setup_state(vec![make_record("id-1", "my_box")]);
         let err = resolve_mut(&mut state, "nonexistent").unwrap_err();
         assert!(matches!(err, ResolveError::NotFound(_)));
     }

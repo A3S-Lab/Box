@@ -7,6 +7,7 @@ members = [
     "deps/libkrun-sys",
     "cri",
     "cli",
+    "updater",
 ]
 resolver = "2"
 
@@ -106,4 +107,4 @@ rand = "0.8"
 base64 = "0.22"
 
 # Self-update
-a3s-updater = { path = "../../updater" }
+a3s-updater = { path = "updater" }

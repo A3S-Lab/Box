@@ -143,9 +143,7 @@ impl ImageService for BoxImageService {
             fs_id: Some(FilesystemIdentifier {
                 mountpoint: self.image_store.store_dir().to_string_lossy().to_string(),
             }),
-            used_bytes: Some(UInt64Value {
-                value: total_bytes,
-            }),
+            used_bytes: Some(UInt64Value { value: total_bytes }),
             inodes_used: None,
         };
 

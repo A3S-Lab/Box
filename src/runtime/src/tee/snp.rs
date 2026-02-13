@@ -73,7 +73,9 @@ pub fn require_sev_snp_support() -> Result<()> {
     let support = check_sev_snp_support()?;
     if !support.available {
         return Err(BoxError::TeeNotSupported(
-            support.reason.unwrap_or_else(|| "Unknown reason".to_string()),
+            support
+                .reason
+                .unwrap_or_else(|| "Unknown reason".to_string()),
         ));
     }
     Ok(())

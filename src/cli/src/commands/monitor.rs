@@ -15,6 +15,7 @@ use crate::boot;
 use crate::state::StateFile;
 
 /// Poll interval for checking box liveness.
+#[allow(dead_code)]
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Minimum backoff delay before retrying a restart.
@@ -100,9 +101,7 @@ impl BackoffTracker {
 
     /// Check if a box is ready for a restart attempt.
     pub fn ready(&self, box_id: &str) -> bool {
-        self.entries
-            .get(box_id)
-            .map_or(true, |e| e.ready())
+        self.entries.get(box_id).is_none_or(|e| e.ready())
     }
 
     /// Record a restart attempt for a box.
@@ -129,15 +128,14 @@ impl BackoffTracker {
     }
 
     /// Remove tracking for a box (e.g., when removed from state).
+    #[allow(dead_code)]
     pub fn remove(&mut self, box_id: &str) {
         self.entries.remove(box_id);
     }
 
     /// Get the current backoff delay for a box.
     pub fn current_delay(&self, box_id: &str) -> Duration {
-        self.entries
-            .get(box_id)
-            .map_or(MIN_BACKOFF, |e| e.delay)
+        self.entries.get(box_id).map_or(MIN_BACKOFF, |e| e.delay)
     }
 }
 
@@ -145,7 +143,10 @@ pub async fn execute(args: MonitorArgs) -> Result<(), Box<dyn std::error::Error>
     let interval = Duration::from_secs(args.interval);
     let mut tracker = BackoffTracker::new();
 
-    println!("a3s-box monitor started (poll interval: {}s)", args.interval);
+    println!(
+        "a3s-box monitor started (poll interval: {}s)",
+        args.interval
+    );
 
     loop {
         if let Err(e) = poll_once(&mut tracker).await {
@@ -205,8 +206,10 @@ async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::erro
                 }
                 state.save()?;
                 tracker.record_attempt(&box_id);
-                println!("monitor: box {name} ({short_id}) restarted (count: {})",
-                    state.find_by_id(&box_id).map_or(0, |r| r.restart_count));
+                println!(
+                    "monitor: box {name} ({short_id}) restarted (count: {})",
+                    state.find_by_id(&box_id).map_or(0, |r| r.restart_count)
+                );
             }
             Err(e) => {
                 tracker.record_attempt(&box_id);
@@ -270,7 +273,10 @@ mod tests {
         }
 
         let delay = tracker.current_delay("box-1");
-        assert!(delay <= MAX_BACKOFF, "delay={delay:?} should be <= {MAX_BACKOFF:?}");
+        assert!(
+            delay <= MAX_BACKOFF,
+            "delay={delay:?} should be <= {MAX_BACKOFF:?}"
+        );
     }
 
     #[test]

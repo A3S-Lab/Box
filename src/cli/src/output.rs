@@ -269,19 +269,16 @@ mod tests {
 
     #[test]
     fn test_parse_size_bytes_terabytes() {
-        assert_eq!(
-            parse_size_bytes("1t").unwrap(),
-            1024 * 1024 * 1024 * 1024
-        );
-        assert_eq!(
-            parse_size_bytes("1TB").unwrap(),
-            1024 * 1024 * 1024 * 1024
-        );
+        assert_eq!(parse_size_bytes("1t").unwrap(), 1024 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size_bytes("1TB").unwrap(), 1024 * 1024 * 1024 * 1024);
     }
 
     #[test]
     fn test_parse_size_bytes_whitespace() {
-        assert_eq!(parse_size_bytes("  10g  ").unwrap(), 10 * 1024 * 1024 * 1024);
+        assert_eq!(
+            parse_size_bytes("  10g  ").unwrap(),
+            10 * 1024 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -318,8 +315,8 @@ mod tests {
     #[test]
     fn test_new_table_with_rows() {
         let mut table = new_table(&["COL1", "COL2"]);
-        table.add_row(&["hello", "world"]);
-        table.add_row(&["foo", "bar"]);
+        table.add_row(["hello", "world"]);
+        table.add_row(["foo", "bar"]);
         let output = table.to_string();
         assert!(output.contains("hello"));
         assert!(output.contains("world"));

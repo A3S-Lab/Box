@@ -343,22 +343,29 @@ fn add_default_route(gateway: &str) -> Result<(), Box<dyn std::error::Error>> {
     rtm.rtm_family = libc::AF_INET as u8;
     rtm.rtm_dst_len = 0; // default route
     rtm.rtm_src_len = 0;
-    rtm.rtm_table = libc::RT_TABLE_MAIN as u8;
-    rtm.rtm_protocol = libc::RTPROT_BOOT as u8;
+    #[allow(clippy::unnecessary_cast)]
+    {
+        rtm.rtm_table = libc::RT_TABLE_MAIN as u8;
+        rtm.rtm_protocol = libc::RTPROT_BOOT as u8;
+    }
     rtm.rtm_scope = libc::RT_SCOPE_UNIVERSE;
-    rtm.rtm_type = libc::RTN_UNICAST as u8;
+    #[allow(clippy::unnecessary_cast)]
+    {
+        rtm.rtm_type = libc::RTN_UNICAST as u8;
+    }
 
     // RTA_GATEWAY attribute
     let rta_offset = rtm_offset + std::mem::size_of::<RtMsg>();
     let rta = unsafe { &mut *(buf.as_mut_ptr().add(rta_offset) as *mut RtAttr) };
     rta.rta_len = rta_len as u16;
-    rta.rta_type = libc::RTA_GATEWAY as u16;
+    #[allow(clippy::unnecessary_cast)]
+    {
+        rta.rta_type = libc::RTA_GATEWAY as u16;
+    }
     buf[rta_offset + 4..rta_offset + 8].copy_from_slice(&gw_octets);
 
     // Send
-    let sent = unsafe {
-        libc::send(sock, buf.as_ptr() as *const _, buf.len(), 0)
-    };
+    let sent = unsafe { libc::send(sock, buf.as_ptr() as *const _, buf.len(), 0) };
 
     unsafe { libc::close(sock) };
 
@@ -503,6 +510,9 @@ mod tests {
         let addr = sockaddr_in(Ipv4Addr::new(10, 88, 0, 1));
         assert_eq!(addr.sin_family, libc::AF_INET as u16);
         // 10.88.0.1 in network byte order
-        assert_eq!(addr.sin_addr.s_addr, u32::from(Ipv4Addr::new(10, 88, 0, 1)).to_be());
+        assert_eq!(
+            addr.sin_addr.s_addr,
+            u32::from(Ipv4Addr::new(10, 88, 0, 1)).to_be()
+        );
     }
 }

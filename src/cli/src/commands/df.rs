@@ -77,10 +77,7 @@ pub async fn execute(args: DfArgs) -> Result<(), Box<dyn std::error::Error>> {
         "",
         "",
         &output::format_bytes(total_size),
-        &format!(
-            "{} ({total_pct}%)",
-            output::format_bytes(total_reclaimable)
-        ),
+        &format!("{} ({total_pct}%)", output::format_bytes(total_reclaimable)),
     ]);
 
     println!("{table}");

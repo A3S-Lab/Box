@@ -23,11 +23,7 @@ pub async fn execute(args: ImagePruneArgs) -> Result<(), Box<dyn std::error::Err
 
     // Collect image references used by existing boxes
     let used_images: HashSet<String> = match StateFile::load_default() {
-        Ok(state) => state
-            .records()
-            .iter()
-            .map(|r| r.image.clone())
-            .collect(),
+        Ok(state) => state.records().iter().map(|r| r.image.clone()).collect(),
         Err(_) => HashSet::new(),
     };
 
@@ -56,12 +52,13 @@ pub async fn execute(args: ImagePruneArgs) -> Result<(), Box<dyn std::error::Err
 
     // Show what will be removed
     if !args.force {
-        println!(
-            "WARNING: This will remove {} image(s):",
-            to_remove.len()
-        );
+        println!("WARNING: This will remove {} image(s):", to_remove.len());
         for img in &to_remove {
-            println!("  {} ({})", img.reference, output::format_bytes(img.size_bytes));
+            println!(
+                "  {} ({})",
+                img.reference,
+                output::format_bytes(img.size_bytes)
+            );
         }
         println!();
         println!("Use --force to skip this prompt.");

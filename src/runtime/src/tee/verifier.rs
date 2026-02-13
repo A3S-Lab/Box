@@ -7,12 +7,8 @@
 
 use a3s_box_core::error::{BoxError, Result};
 
-use super::attestation::{
-    parse_platform_info, AttestationReport, PlatformInfo, SNP_REPORT_SIZE,
-};
-use super::policy::{
-    AttestationPolicy, PolicyResult, PolicyViolation,
-};
+use super::attestation::{parse_platform_info, AttestationReport, PlatformInfo, SNP_REPORT_SIZE};
+use super::policy::{AttestationPolicy, PolicyResult, PolicyViolation};
 
 /// Result of a complete attestation verification.
 #[derive(Debug, Clone)]
@@ -405,8 +401,8 @@ mod tests {
         report[0x90] = 0xAA;
         report[0x91] = 0xBB;
         // TCB at 0x38
-        report[0x38] = 3;  // boot_loader
-        report[0x3E] = 8;  // snp
+        report[0x38] = 3; // boot_loader
+        report[0x3E] = 8; // snp
         report[0x3F] = 115; // microcode
         report
     }
@@ -563,7 +559,7 @@ mod tests {
         let policy = AttestationPolicy {
             require_no_debug: false,
             min_tcb: Some(MinTcbPolicy {
-                snp: Some(8),       // requires 8, got 5
+                snp: Some(8),        // requires 8, got 5
                 microcode: Some(93), // requires 93, got 100 (ok)
                 ..Default::default()
             }),

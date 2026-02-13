@@ -45,7 +45,8 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!(
             "Logging is disabled for box {} (log-driver=none)",
             record.name
-        ).into());
+        )
+        .into());
     }
 
     // Prefer structured JSON log (container.json) when available
@@ -53,7 +54,11 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let json_log = a3s_box_runtime::log::json_log_path(&log_dir);
     let use_json = json_log.exists();
 
-    let log_path = if use_json { &json_log } else { &record.console_log };
+    let log_path = if use_json {
+        &json_log
+    } else {
+        &record.console_log
+    };
     if !log_path.exists() {
         return Err(format!("No logs found for box {}", record.name).into());
     }
@@ -70,7 +75,13 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
         let start = lines.len().saturating_sub(tail_n);
         for line in &lines[start..] {
             if use_json {
-                print_json_line(line, args.timestamps, has_time_filter, since.as_ref(), until.as_ref());
+                print_json_line(
+                    line,
+                    args.timestamps,
+                    has_time_filter,
+                    since.as_ref(),
+                    until.as_ref(),
+                );
             } else {
                 if has_time_filter && !line_in_range(line, since.as_ref(), until.as_ref()) {
                     continue;
@@ -84,7 +95,13 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
         for line in reader.lines() {
             let line = line?;
             if use_json {
-                print_json_line(&line, args.timestamps, has_time_filter, since.as_ref(), until.as_ref());
+                print_json_line(
+                    &line,
+                    args.timestamps,
+                    has_time_filter,
+                    since.as_ref(),
+                    until.as_ref(),
+                );
             } else {
                 if has_time_filter && !line_in_range(&line, since.as_ref(), until.as_ref()) {
                     continue;
@@ -111,9 +128,17 @@ pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
                 Ok(_) => {
                     let trimmed = line.trim_end();
                     if use_json {
-                        print_json_line(trimmed, args.timestamps, has_time_filter, since.as_ref(), until.as_ref());
+                        print_json_line(
+                            trimmed,
+                            args.timestamps,
+                            has_time_filter,
+                            since.as_ref(),
+                            until.as_ref(),
+                        );
                     } else {
-                        if has_time_filter && !line_in_range(trimmed, since.as_ref(), until.as_ref()) {
+                        if has_time_filter
+                            && !line_in_range(trimmed, since.as_ref(), until.as_ref())
+                        {
                             continue;
                         }
                         if args.timestamps {
@@ -154,10 +179,14 @@ fn print_json_line(
     if has_time_filter {
         if let Ok(ts) = entry.time.parse::<DateTime<Utc>>() {
             if let Some(s) = since {
-                if ts < *s { return; }
+                if ts < *s {
+                    return;
+                }
             }
             if let Some(u) = until {
-                if ts > *u { return; }
+                if ts > *u {
+                    return;
+                }
             }
         }
     }
@@ -228,9 +257,9 @@ fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
 
     if !num_buf.is_empty() {
         // Bare number without unit — treat as seconds
-        let n: i64 = num_buf.parse().map_err(|_| {
-            format!("Invalid duration: {s:?}")
-        })?;
+        let n: i64 = num_buf
+            .parse()
+            .map_err(|_| format!("Invalid duration: {s:?}"))?;
         total_secs += n;
     }
 
@@ -245,11 +274,7 @@ fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
 ///
 /// Tries to extract a timestamp from the beginning of the line.
 /// If no timestamp is found, the line is included (permissive).
-fn line_in_range(
-    line: &str,
-    since: Option<&DateTime<Utc>>,
-    until: Option<&DateTime<Utc>>,
-) -> bool {
+fn line_in_range(line: &str, since: Option<&DateTime<Utc>>, until: Option<&DateTime<Utc>>) -> bool {
     // Try to parse a timestamp from the start of the line
     let line_time = extract_line_timestamp(line);
 

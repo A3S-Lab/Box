@@ -21,10 +21,12 @@ pub async fn execute(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
     let reference = a3s_box_runtime::ImageReference::parse(&args.image)?;
 
     // Look up the image in the local store
-    let stored = store
-        .get(&args.image)
-        .await
-        .ok_or_else(|| format!("Image '{}' not found locally. Pull or build it first.", args.image))?;
+    let stored = store.get(&args.image).await.ok_or_else(|| {
+        format!(
+            "Image '{}' not found locally. Pull or build it first.",
+            args.image
+        )
+    })?;
 
     if !args.quiet {
         println!("Pushing {}...", args.image);

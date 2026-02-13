@@ -219,8 +219,7 @@ impl StateFile {
     pub fn load(path: &Path) -> Result<Self, std::io::Error> {
         if path.exists() {
             let data = std::fs::read_to_string(path)?;
-            let records: Vec<BoxRecord> =
-                serde_json::from_str(&data).unwrap_or_default();
+            let records: Vec<BoxRecord> = serde_json::from_str(&data).unwrap_or_default();
             let mut sf = Self {
                 path: path.to_path_buf(),
                 records,
@@ -249,8 +248,7 @@ impl StateFile {
 
     /// Save state to disk atomically (write to .tmp, then rename).
     pub fn save(&self) -> Result<(), std::io::Error> {
-        let data = serde_json::to_string_pretty(&self.records)
-            .map_err(std::io::Error::other)?;
+        let data = serde_json::to_string_pretty(&self.records).map_err(std::io::Error::other)?;
         let tmp_path = self.path.with_extension("json.tmp");
         std::fs::write(&tmp_path, &data)?;
         std::fs::rename(&tmp_path, &self.path)?;
@@ -303,7 +301,10 @@ impl StateFile {
         if all {
             self.records.iter().collect()
         } else {
-            self.records.iter().filter(|r| r.status == "running").collect()
+            self.records
+                .iter()
+                .filter(|r| r.status == "running")
+                .collect()
         }
     }
 
@@ -444,20 +445,45 @@ pub fn parse_restart_policy(policy: &str) -> Result<(String, u32), String> {
 
 /// Adjectives for random name generation.
 const ADJECTIVES: &[&str] = &[
-    "bold", "calm", "cool", "dark", "fast", "glad", "keen", "kind",
-    "loud", "mild", "neat", "pale", "pure", "rare", "safe", "slim",
-    "soft", "tall", "tiny", "vast", "warm", "wise", "zen", "agile",
-    "brave", "eager", "happy", "lucid", "noble", "quick", "sharp",
-    "vivid",
+    "bold", "calm", "cool", "dark", "fast", "glad", "keen", "kind", "loud", "mild", "neat", "pale",
+    "pure", "rare", "safe", "slim", "soft", "tall", "tiny", "vast", "warm", "wise", "zen", "agile",
+    "brave", "eager", "happy", "lucid", "noble", "quick", "sharp", "vivid",
 ];
 
 /// Nouns (notable computer scientists) for random name generation.
 const NOUNS: &[&str] = &[
-    "turing", "hopper", "lovelace", "dijkstra", "knuth", "ritchie",
-    "thompson", "torvalds", "wozniak", "cerf", "berners", "mccarthy",
-    "backus", "kay", "lamport", "hoare", "church", "neumann", "shannon",
-    "boole", "babbage", "hamilton", "liskov", "wing", "rivest", "shamir",
-    "diffie", "hellman", "stallman", "pike", "kernighan", "stroustrup",
+    "turing",
+    "hopper",
+    "lovelace",
+    "dijkstra",
+    "knuth",
+    "ritchie",
+    "thompson",
+    "torvalds",
+    "wozniak",
+    "cerf",
+    "berners",
+    "mccarthy",
+    "backus",
+    "kay",
+    "lamport",
+    "hoare",
+    "church",
+    "neumann",
+    "shannon",
+    "boole",
+    "babbage",
+    "hamilton",
+    "liskov",
+    "wing",
+    "rivest",
+    "shamir",
+    "diffie",
+    "hellman",
+    "stallman",
+    "pike",
+    "kernighan",
+    "stroustrup",
 ];
 
 /// Generate a random Docker-style name (adjective_noun).
@@ -486,7 +512,11 @@ mod tests {
             name: name.to_string(),
             image: "alpine:latest".to_string(),
             status: status.to_string(),
-            pid: if status == "running" { Some(99999) } else { None },
+            pid: if status == "running" {
+                Some(99999)
+            } else {
+                None
+            },
             cpus: 2,
             memory_mb: 512,
             volumes: vec![],
@@ -495,10 +525,17 @@ mod tests {
             entrypoint: None,
             box_dir: PathBuf::from("/tmp/boxes").join(id),
             socket_path: PathBuf::from("/tmp/boxes").join(id).join("grpc.sock"),
-            exec_socket_path: PathBuf::from("/tmp/boxes").join(id).join("sockets").join("exec.sock"),
+            exec_socket_path: PathBuf::from("/tmp/boxes")
+                .join(id)
+                .join("sockets")
+                .join("exec.sock"),
             console_log: PathBuf::from("/tmp/boxes").join(id).join("console.log"),
             created_at: Utc::now(),
-            started_at: if status == "running" { Some(Utc::now()) } else { None },
+            started_at: if status == "running" {
+                Some(Utc::now())
+            } else {
+                None
+            },
             auto_remove: false,
             hostname: None,
             user: None,
@@ -726,9 +763,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut sf = StateFile::load(&test_state_path(&tmp)).unwrap();
 
-        sf.add(sample_record("abc-def-123", "box1", "created")).unwrap();
-        sf.add(sample_record("abc-def-456", "box2", "created")).unwrap();
-        sf.add(sample_record("xyz-000-111", "box3", "created")).unwrap();
+        sf.add(sample_record("abc-def-123", "box1", "created"))
+            .unwrap();
+        sf.add(sample_record("abc-def-456", "box2", "created"))
+            .unwrap();
+        sf.add(sample_record("xyz-000-111", "box3", "created"))
+            .unwrap();
 
         assert_eq!(sf.find_by_id_prefix("abc").len(), 2);
         assert_eq!(sf.find_by_id_prefix("xyz").len(), 1);
@@ -742,7 +782,12 @@ mod tests {
 
         // UUID format: "550e8400-e29b-41d4-a716-446655440000"
         // short_id:    "550e8400e29b"
-        sf.add(sample_record("550e8400-e29b-41d4-a716-446655440000", "box1", "created")).unwrap();
+        sf.add(sample_record(
+            "550e8400-e29b-41d4-a716-446655440000",
+            "box1",
+            "created",
+        ))
+        .unwrap();
 
         // Search by short_id prefix
         let matches = sf.find_by_id_prefix("550e8400e");
@@ -793,7 +838,8 @@ mod tests {
 
         {
             let mut sf = StateFile::load(&path).unwrap();
-            sf.add(sample_record("persist-id", "persist_box", "created")).unwrap();
+            sf.add(sample_record("persist-id", "persist_box", "created"))
+                .unwrap();
         }
 
         {
@@ -903,8 +949,10 @@ mod tests {
 
         {
             let mut sf = StateFile::load(&path).unwrap();
-            sf.add(sample_record("created-id", "created_box", "created")).unwrap();
-            sf.add(sample_record("stopped-id", "stopped_box", "stopped")).unwrap();
+            sf.add(sample_record("created-id", "created_box", "created"))
+                .unwrap();
+            sf.add(sample_record("stopped-id", "stopped_box", "stopped"))
+                .unwrap();
         }
 
         {
@@ -936,7 +984,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut sf = StateFile::load(&test_state_path(&tmp)).unwrap();
 
-        sf.add(sample_record("mut-id", "mut_box", "created")).unwrap();
+        sf.add(sample_record("mut-id", "mut_box", "created"))
+            .unwrap();
 
         let record = sf.find_by_id_mut("mut-id").unwrap();
         record.status = "running".to_string();
@@ -959,7 +1008,8 @@ mod tests {
 
         {
             let mut sf = StateFile::load(&path).unwrap();
-            sf.add(sample_record("mut-save-id", "mut_save", "created")).unwrap();
+            sf.add(sample_record("mut-save-id", "mut_save", "created"))
+                .unwrap();
 
             let record = sf.find_by_id_mut("mut-save-id").unwrap();
             record.status = "stopped".to_string();
@@ -1127,7 +1177,11 @@ mod tests {
     #[test]
     fn test_health_check_serialization() {
         let hc = HealthCheck {
-            cmd: vec!["curl".to_string(), "-f".to_string(), "http://localhost/health".to_string()],
+            cmd: vec![
+                "curl".to_string(),
+                "-f".to_string(),
+                "http://localhost/health".to_string(),
+            ],
             interval_secs: 10,
             timeout_secs: 3,
             retries: 5,
@@ -1157,7 +1211,11 @@ mod tests {
     fn test_box_record_with_health_check() {
         let mut record = sample_record("id-1", "box1", "running");
         record.health_check = Some(HealthCheck {
-            cmd: vec!["test".to_string(), "-f".to_string(), "/tmp/healthy".to_string()],
+            cmd: vec![
+                "test".to_string(),
+                "-f".to_string(),
+                "/tmp/healthy".to_string(),
+            ],
             interval_secs: 30,
             timeout_secs: 5,
             retries: 3,
@@ -1225,16 +1283,34 @@ mod tests {
     #[test]
     fn test_parse_restart_policy_simple() {
         assert_eq!(parse_restart_policy("no").unwrap(), ("no".to_string(), 0));
-        assert_eq!(parse_restart_policy("always").unwrap(), ("always".to_string(), 0));
-        assert_eq!(parse_restart_policy("on-failure").unwrap(), ("on-failure".to_string(), 0));
-        assert_eq!(parse_restart_policy("unless-stopped").unwrap(), ("unless-stopped".to_string(), 0));
+        assert_eq!(
+            parse_restart_policy("always").unwrap(),
+            ("always".to_string(), 0)
+        );
+        assert_eq!(
+            parse_restart_policy("on-failure").unwrap(),
+            ("on-failure".to_string(), 0)
+        );
+        assert_eq!(
+            parse_restart_policy("unless-stopped").unwrap(),
+            ("unless-stopped".to_string(), 0)
+        );
     }
 
     #[test]
     fn test_parse_restart_policy_on_failure_with_max() {
-        assert_eq!(parse_restart_policy("on-failure:5").unwrap(), ("on-failure".to_string(), 5));
-        assert_eq!(parse_restart_policy("on-failure:0").unwrap(), ("on-failure".to_string(), 0));
-        assert_eq!(parse_restart_policy("on-failure:100").unwrap(), ("on-failure".to_string(), 100));
+        assert_eq!(
+            parse_restart_policy("on-failure:5").unwrap(),
+            ("on-failure".to_string(), 5)
+        );
+        assert_eq!(
+            parse_restart_policy("on-failure:0").unwrap(),
+            ("on-failure".to_string(), 0)
+        );
+        assert_eq!(
+            parse_restart_policy("on-failure:100").unwrap(),
+            ("on-failure".to_string(), 100)
+        );
     }
 
     #[test]

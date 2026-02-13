@@ -9,8 +9,8 @@ mod cp;
 mod create;
 mod df;
 pub(crate) mod diff;
-pub(crate) mod exec;
 mod events;
+pub(crate) mod exec;
 mod export;
 mod history;
 mod image_inspect;
@@ -175,13 +175,12 @@ pub(crate) fn images_dir() -> PathBuf {
 ///
 /// The cache size limit can be configured via the `A3S_IMAGE_CACHE_SIZE`
 /// environment variable (e.g., `500m`, `20g`). Defaults to 10 GB.
-pub(crate) fn open_image_store() -> Result<a3s_box_runtime::ImageStore, Box<dyn std::error::Error>> {
+pub(crate) fn open_image_store() -> Result<a3s_box_runtime::ImageStore, Box<dyn std::error::Error>>
+{
     let dir = images_dir();
     let max_size = match std::env::var(IMAGE_CACHE_SIZE_ENV) {
         Ok(val) => crate::output::parse_size_bytes(&val).map_err(|e| {
-            format!(
-                "Invalid {IMAGE_CACHE_SIZE_ENV}={val:?}: {e} (examples: 500m, 10g, 1t)"
-            )
+            format!("Invalid {IMAGE_CACHE_SIZE_ENV}={val:?}: {e} (examples: 500m, 10g, 1t)")
         })?,
         Err(_) => a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
     };
@@ -273,16 +272,14 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Version(args) => version::execute(args).await,
         Command::Info(args) => info::execute(args).await,
         Command::Monitor(args) => monitor::execute(args).await,
-        Command::Update => {
-            a3s_updater::run_update(&a3s_updater::UpdateConfig {
-                binary_name: "a3s-box",
-                crate_name: "a3s-box-cli",
-                current_version: env!("CARGO_PKG_VERSION"),
-                github_owner: "a3s-lab",
-                github_repo: "a3s",
-            })
-            .await
-            .map_err(|e| e.into())
-        }
+        Command::Update => a3s_updater::run_update(&a3s_updater::UpdateConfig {
+            binary_name: "a3s-box",
+            crate_name: "a3s-box-cli",
+            current_version: env!("CARGO_PKG_VERSION"),
+            github_owner: "a3s-lab",
+            github_repo: "a3s",
+        })
+        .await
+        .map_err(|e| e.into()),
     }
 }

@@ -31,10 +31,7 @@ pub async fn execute(args: UnpauseArgs) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
-fn unpause_one(
-    state: &mut StateFile,
-    query: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn unpause_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
     let record = resolve::resolve(state, query)?;
 
     if record.status != "paused" {
@@ -85,7 +82,10 @@ mod tests {
             entrypoint: None,
             box_dir: PathBuf::from("/tmp").join(id),
             socket_path: PathBuf::from("/tmp").join(id).join("grpc.sock"),
-            exec_socket_path: PathBuf::from("/tmp").join(id).join("sockets").join("exec.sock"),
+            exec_socket_path: PathBuf::from("/tmp")
+                .join(id)
+                .join("sockets")
+                .join("exec.sock"),
             console_log: PathBuf::from("/tmp").join(id).join("console.log"),
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -141,9 +141,12 @@ mod tests {
 
     #[test]
     fn test_unpause_rejects_running() {
-        let (_tmp, mut state) = setup_state(vec![
-            make_record("id-1", "running_box", "running", Some(99999)),
-        ]);
+        let (_tmp, mut state) = setup_state(vec![make_record(
+            "id-1",
+            "running_box",
+            "running",
+            Some(99999),
+        )]);
         let result = unpause_one(&mut state, "running_box");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not paused"));
@@ -151,9 +154,8 @@ mod tests {
 
     #[test]
     fn test_unpause_rejects_stopped() {
-        let (_tmp, mut state) = setup_state(vec![
-            make_record("id-1", "stopped_box", "stopped", None),
-        ]);
+        let (_tmp, mut state) =
+            setup_state(vec![make_record("id-1", "stopped_box", "stopped", None)]);
         let result = unpause_one(&mut state, "stopped_box");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not paused"));

@@ -1,3 +1,3 @@
 [submodule "src/deps/libkrun-sys/vendor/libkrun"]
 	path = src/deps/libkrun-sys/vendor/libkrun
-	url = https://github.com/containers/libkrun.git
+	url = https://github.com/A3S-Lab/libkrun.git

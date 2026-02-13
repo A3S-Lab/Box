@@ -9,9 +9,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use a3s_box_core::config::{
-    AgentType, BoxConfig, ResourceConfig, TeeConfig,
-};
+use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig, TeeConfig};
 use a3s_box_core::error::{BoxError, Result};
 
 use crate::cri_api::PodSandboxConfig;
@@ -26,9 +24,7 @@ const ANN_TEE: &str = "a3s.box/tee";
 const ANN_TEE_WORKLOAD_ID: &str = "a3s.box/tee-workload-id";
 
 /// Convert a CRI PodSandboxConfig to an A3S BoxConfig.
-pub fn pod_sandbox_config_to_box_config(
-    config: &PodSandboxConfig,
-) -> Result<BoxConfig> {
+pub fn pod_sandbox_config_to_box_config(config: &PodSandboxConfig) -> Result<BoxConfig> {
     let annotations = &config.annotations;
 
     let agent = parse_agent_type(annotations)?;
@@ -60,27 +56,23 @@ fn parse_agent_type(annotations: &HashMap<String, String>) -> Result<AgentType> 
     match kind {
         "a3s-code" => Ok(AgentType::A3sCode),
         "oci-image" => {
-            let path = annotations
-                .get(ANN_AGENT_IMAGE)
-                .ok_or_else(|| {
-                    BoxError::ConfigError(format!(
-                        "Annotation '{}' required when agent-kind is 'oci-image'",
-                        ANN_AGENT_IMAGE
-                    ))
-                })?;
+            let path = annotations.get(ANN_AGENT_IMAGE).ok_or_else(|| {
+                BoxError::ConfigError(format!(
+                    "Annotation '{}' required when agent-kind is 'oci-image'",
+                    ANN_AGENT_IMAGE
+                ))
+            })?;
             Ok(AgentType::OciImage {
                 path: PathBuf::from(path),
             })
         }
         "oci-registry" => {
-            let reference = annotations
-                .get(ANN_AGENT_IMAGE)
-                .ok_or_else(|| {
-                    BoxError::ConfigError(format!(
-                        "Annotation '{}' required when agent-kind is 'oci-registry'",
-                        ANN_AGENT_IMAGE
-                    ))
-                })?;
+            let reference = annotations.get(ANN_AGENT_IMAGE).ok_or_else(|| {
+                BoxError::ConfigError(format!(
+                    "Annotation '{}' required when agent-kind is 'oci-registry'",
+                    ANN_AGENT_IMAGE
+                ))
+            })?;
             Ok(AgentType::OciRegistry {
                 reference: reference.clone(),
             })
@@ -184,10 +176,7 @@ mod tests {
 
     #[test]
     fn test_oci_registry_missing_image() {
-        let annotations = HashMap::from([(
-            ANN_AGENT_KIND.to_string(),
-            "oci-registry".to_string(),
-        )]);
+        let annotations = HashMap::from([(ANN_AGENT_KIND.to_string(), "oci-registry".to_string())]);
         let config = make_config(annotations);
         assert!(pod_sandbox_config_to_box_config(&config).is_err());
     }
@@ -209,10 +198,7 @@ mod tests {
     fn test_tee_sev_snp() {
         let annotations = HashMap::from([
             (ANN_TEE.to_string(), "sev-snp".to_string()),
-            (
-                ANN_TEE_WORKLOAD_ID.to_string(),
-                "my-workload".to_string(),
-            ),
+            (ANN_TEE_WORKLOAD_ID.to_string(), "my-workload".to_string()),
         ]);
         let config = make_config(annotations);
         let box_config = pod_sandbox_config_to_box_config(&config).unwrap();
@@ -227,10 +213,7 @@ mod tests {
 
     #[test]
     fn test_unknown_agent_kind() {
-        let annotations = HashMap::from([(
-            ANN_AGENT_KIND.to_string(),
-            "unknown".to_string(),
-        )]);
+        let annotations = HashMap::from([(ANN_AGENT_KIND.to_string(), "unknown".to_string())]);
         let config = make_config(annotations);
         assert!(pod_sandbox_config_to_box_config(&config).is_err());
     }

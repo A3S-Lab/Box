@@ -36,10 +36,7 @@ impl VolumeStore {
     /// Create a store at the default location (`~/.a3s/volumes.json`).
     pub fn default_path() -> Result<Self> {
         let home = dirs_path()?;
-        Ok(Self::new(
-            home.join("volumes.json"),
-            home.join("volumes"),
-        ))
+        Ok(Self::new(home.join("volumes.json"), home.join("volumes")))
     }
 
     /// Load all volumes from disk.
@@ -56,9 +53,8 @@ impl VolumeStore {
             ))
         })?;
 
-        let file: VolumesFile = serde_json::from_str(&data).map_err(|e| {
-            BoxError::Other(format!("failed to parse volumes file: {}", e))
-        })?;
+        let file: VolumesFile = serde_json::from_str(&data)
+            .map_err(|e| BoxError::Other(format!("failed to parse volumes file: {}", e)))?;
 
         Ok(file.volumes)
     }
@@ -79,9 +75,8 @@ impl VolumeStore {
             volumes: volumes.clone(),
         };
 
-        let json = serde_json::to_string_pretty(&file).map_err(|e| {
-            BoxError::Other(format!("failed to serialize volumes: {}", e))
-        })?;
+        let json = serde_json::to_string_pretty(&file)
+            .map_err(|e| BoxError::Other(format!("failed to serialize volumes: {}", e)))?;
 
         let tmp_path = self.path.with_extension("json.tmp");
         std::fs::write(&tmp_path, &json).map_err(|e| {
@@ -144,9 +139,9 @@ impl VolumeStore {
     pub fn remove(&self, name: &str, force: bool) -> Result<VolumeConfig> {
         let mut volumes = self.load()?;
 
-        let config = volumes.remove(name).ok_or_else(|| {
-            BoxError::Other(format!("volume '{}' not found", name))
-        })?;
+        let config = volumes
+            .remove(name)
+            .ok_or_else(|| BoxError::Other(format!("volume '{}' not found", name)))?;
 
         if config.is_in_use() && !force {
             // Put it back
@@ -221,9 +216,8 @@ impl VolumeStore {
 
 /// Get the A3S home directory (~/.a3s).
 fn dirs_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| {
-        BoxError::Other("HOME environment variable not set".to_string())
-    })?;
+    let home = std::env::var("HOME")
+        .map_err(|_| BoxError::Other("HOME environment variable not set".to_string()))?;
     Ok(PathBuf::from(home).join(".a3s"))
 }
 
@@ -233,10 +227,7 @@ mod tests {
 
     fn temp_store() -> (tempfile::TempDir, VolumeStore) {
         let dir = tempfile::tempdir().unwrap();
-        let store = VolumeStore::new(
-            dir.path().join("volumes.json"),
-            dir.path().join("volumes"),
-        );
+        let store = VolumeStore::new(dir.path().join("volumes.json"), dir.path().join("volumes"));
         (dir, store)
     }
 

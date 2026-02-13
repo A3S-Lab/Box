@@ -3,7 +3,7 @@
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use a3s_box_cli::commands::{Cli, dispatch};
+use a3s_box_cli::commands::{dispatch, Cli};
 
 #[tokio::main]
 async fn main() {

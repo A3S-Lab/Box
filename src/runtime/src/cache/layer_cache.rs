@@ -246,15 +246,10 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     })?;
 
     for entry in std::fs::read_dir(src).map_err(|e| {
-        BoxError::CacheError(format!(
-            "Failed to read directory {}: {}",
-            src.display(),
-            e
-        ))
+        BoxError::CacheError(format!("Failed to read directory {}: {}", src.display(), e))
     })? {
-        let entry = entry.map_err(|e| {
-            BoxError::CacheError(format!("Failed to read directory entry: {}", e))
-        })?;
+        let entry = entry
+            .map_err(|e| BoxError::CacheError(format!("Failed to read directory entry: {}", e)))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
@@ -334,7 +329,10 @@ mod tests {
 
         // Create a source layer directory
         let source = tmp.path().join("source_layer");
-        create_test_layer(&source, &[("file.txt", "hello"), ("sub/nested.txt", "world")]);
+        create_test_layer(
+            &source,
+            &[("file.txt", "hello"), ("sub/nested.txt", "world")],
+        );
 
         // Put into cache
         let digest = "sha256:abc123def456";
@@ -506,8 +504,14 @@ mod tests {
 
     #[test]
     fn test_digest_to_dirname() {
-        assert_eq!(LayerCache::digest_to_dirname("sha256:abc123"), "sha256_abc123");
-        assert_eq!(LayerCache::digest_to_dirname("plain_digest"), "plain_digest");
+        assert_eq!(
+            LayerCache::digest_to_dirname("sha256:abc123"),
+            "sha256_abc123"
+        );
+        assert_eq!(
+            LayerCache::digest_to_dirname("plain_digest"),
+            "plain_digest"
+        );
     }
 
     #[test]
@@ -516,27 +520,39 @@ mod tests {
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
 
-        create_test_layer(&src, &[
-            ("a.txt", "aaa"),
-            ("sub/b.txt", "bbb"),
-            ("sub/deep/c.txt", "ccc"),
-        ]);
+        create_test_layer(
+            &src,
+            &[
+                ("a.txt", "aaa"),
+                ("sub/b.txt", "bbb"),
+                ("sub/deep/c.txt", "ccc"),
+            ],
+        );
 
         copy_dir_recursive(&src, &dst).unwrap();
 
         assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "aaa");
-        assert_eq!(std::fs::read_to_string(dst.join("sub/b.txt")).unwrap(), "bbb");
-        assert_eq!(std::fs::read_to_string(dst.join("sub/deep/c.txt")).unwrap(), "ccc");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub/b.txt")).unwrap(),
+            "bbb"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub/deep/c.txt")).unwrap(),
+            "ccc"
+        );
     }
 
     #[test]
     fn test_dir_size() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("sized");
-        create_test_layer(&dir, &[
-            ("a.txt", "hello"),      // 5 bytes
-            ("sub/b.txt", "world"),   // 5 bytes
-        ]);
+        create_test_layer(
+            &dir,
+            &[
+                ("a.txt", "hello"),     // 5 bytes
+                ("sub/b.txt", "world"), // 5 bytes
+            ],
+        );
 
         let size = dir_size(&dir).unwrap();
         assert_eq!(size, 10);
@@ -732,7 +748,8 @@ mod tests {
         std::fs::write(
             tmp.path().join("sha256_corrupted.meta.json"),
             "not json at all",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Should only return the valid entry, skip corrupted
         let entries = cache.list_entries().unwrap();
@@ -746,10 +763,13 @@ mod tests {
         let cache = LayerCache::new(tmp.path()).unwrap();
 
         let source = tmp.path().join("source");
-        create_test_layer(&source, &[
-            ("binary.bin", "\x00\x01\x02\x03"),
-            ("text.txt", "hello world\n"),
-        ]);
+        create_test_layer(
+            &source,
+            &[
+                ("binary.bin", "\x00\x01\x02\x03"),
+                ("text.txt", "hello world\n"),
+            ],
+        );
 
         let cached = cache.put("sha256:content_check", &source).unwrap();
 

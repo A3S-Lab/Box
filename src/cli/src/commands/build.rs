@@ -59,11 +59,7 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     if !dockerfile_path.exists() {
-        return Err(format!(
-            "Dockerfile not found at {}",
-            dockerfile_path.display()
-        )
-        .into());
+        return Err(format!("Dockerfile not found at {}", dockerfile_path.display()).into());
     }
 
     // Parse build args
@@ -107,10 +103,7 @@ mod tests {
 
     #[test]
     fn test_parse_build_args_valid() {
-        let args = vec![
-            "VERSION=1.0".to_string(),
-            "DEBUG=true".to_string(),
-        ];
+        let args = vec!["VERSION=1.0".to_string(), "DEBUG=true".to_string()];
         let result = parse_build_args(&args).unwrap();
         assert_eq!(result.get("VERSION"), Some(&"1.0".to_string()));
         assert_eq!(result.get("DEBUG"), Some(&"true".to_string()));

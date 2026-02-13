@@ -67,11 +67,7 @@ impl DirSnapshot {
 }
 
 /// Recursively walk a directory and collect file entries.
-fn walk_dir(
-    root: &Path,
-    current: &Path,
-    entries: &mut HashMap<PathBuf, FileEntry>,
-) -> Result<()> {
+fn walk_dir(root: &Path, current: &Path, entries: &mut HashMap<PathBuf, FileEntry>) -> Result<()> {
     let read_dir = std::fs::read_dir(current).map_err(|e| {
         BoxError::BuildError(format!(
             "Failed to read directory {}: {}",
@@ -81,9 +77,8 @@ fn walk_dir(
     })?;
 
     for entry in read_dir {
-        let entry = entry.map_err(|e| {
-            BoxError::BuildError(format!("Failed to read directory entry: {}", e))
-        })?;
+        let entry = entry
+            .map_err(|e| BoxError::BuildError(format!("Failed to read directory entry: {}", e)))?;
 
         let path = entry.path();
         let relative = path
@@ -161,15 +156,13 @@ pub fn create_layer(
         }
 
         if full_path.is_dir() {
-            builder
-                .append_dir(relative_path, &full_path)
-                .map_err(|e| {
-                    BoxError::BuildError(format!(
-                        "Failed to add directory {} to layer: {}",
-                        relative_path.display(),
-                        e
-                    ))
-                })?;
+            builder.append_dir(relative_path, &full_path).map_err(|e| {
+                BoxError::BuildError(format!(
+                    "Failed to add directory {} to layer: {}",
+                    relative_path.display(),
+                    e
+                ))
+            })?;
         } else {
             builder
                 .append_path_with_name(&full_path, relative_path)
@@ -183,15 +176,13 @@ pub fn create_layer(
         }
     }
 
-    builder.finish().map_err(|e| {
-        BoxError::BuildError(format!("Failed to finalize layer: {}", e))
-    })?;
+    builder
+        .finish()
+        .map_err(|e| BoxError::BuildError(format!("Failed to finalize layer: {}", e)))?;
 
     // Compute SHA256 digest of the layer file
     let digest = sha256_file(output_path)?;
-    let size = std::fs::metadata(output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(LayerInfo {
         path: output_path.to_path_buf(),
@@ -225,14 +216,12 @@ pub fn create_layer_from_dir(
 
     add_dir_to_tar(&mut builder, src_dir, src_dir, target_prefix)?;
 
-    builder.finish().map_err(|e| {
-        BoxError::BuildError(format!("Failed to finalize layer: {}", e))
-    })?;
+    builder
+        .finish()
+        .map_err(|e| BoxError::BuildError(format!("Failed to finalize layer: {}", e)))?;
 
     let digest = sha256_file(output_path)?;
-    let size = std::fs::metadata(output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
     Ok(LayerInfo {
         path: output_path.to_path_buf(),
@@ -257,33 +246,24 @@ fn add_dir_to_tar<W: std::io::Write>(
     })?;
 
     for entry in entries {
-        let entry = entry.map_err(|e| {
-            BoxError::BuildError(format!("Failed to read entry: {}", e))
-        })?;
+        let entry =
+            entry.map_err(|e| BoxError::BuildError(format!("Failed to read entry: {}", e)))?;
 
         let path = entry.path();
-        let relative = path.strip_prefix(root).map_err(|e| {
-            BoxError::BuildError(format!("Failed to strip prefix: {}", e))
-        })?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|e| BoxError::BuildError(format!("Failed to strip prefix: {}", e)))?;
         let tar_path = target_prefix.join(relative);
 
         if path.is_dir() {
             builder.append_dir(&tar_path, &path).map_err(|e| {
-                BoxError::BuildError(format!(
-                    "Failed to add directory to layer: {}",
-                    e
-                ))
+                BoxError::BuildError(format!("Failed to add directory to layer: {}", e))
             })?;
             add_dir_to_tar(builder, root, &path, target_prefix)?;
         } else {
             builder
                 .append_path_with_name(&path, &tar_path)
-                .map_err(|e| {
-                    BoxError::BuildError(format!(
-                        "Failed to add file to layer: {}",
-                        e
-                    ))
-                })?;
+                .map_err(|e| BoxError::BuildError(format!("Failed to add file to layer: {}", e)))?;
         }
     }
 
@@ -414,10 +394,7 @@ mod tests {
         fs::write(rootfs.path().join("world.txt"), "world").unwrap();
 
         let output_path = output_dir.path().join("layer.tar.gz");
-        let changed = vec![
-            PathBuf::from("hello.txt"),
-            PathBuf::from("world.txt"),
-        ];
+        let changed = vec![PathBuf::from("hello.txt"), PathBuf::from("world.txt")];
 
         let info = create_layer(rootfs.path(), &changed, &output_path).unwrap();
 
@@ -449,12 +426,7 @@ mod tests {
         fs::write(src.path().join("lib").join("util.py"), "pass").unwrap();
 
         let output_path = output_dir.path().join("layer.tar.gz");
-        let info = create_layer_from_dir(
-            src.path(),
-            Path::new("workspace"),
-            &output_path,
-        )
-        .unwrap();
+        let info = create_layer_from_dir(src.path(), Path::new("workspace"), &output_path).unwrap();
 
         assert!(info.path.exists());
         assert!(info.size > 0);

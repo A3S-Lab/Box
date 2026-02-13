@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
-use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 
 use crate::tee::attestation::{AttestationReport, AttestationRequest};
 
@@ -62,14 +62,16 @@ impl AgentClient {
         // Send a minimal HTTP/1.1 health check request.
         // The guest agent exposes a /healthz endpoint for this purpose.
         let request = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        stream.write_all(request).await.map_err(|e| {
-            BoxError::Other(format!("Health check write failed: {}", e))
-        })?;
+        stream
+            .write_all(request)
+            .await
+            .map_err(|e| BoxError::Other(format!("Health check write failed: {}", e)))?;
 
         let mut response = vec![0u8; 1024];
-        let n = stream.read(&mut response).await.map_err(|e| {
-            BoxError::Other(format!("Health check read failed: {}", e))
-        })?;
+        let n = stream
+            .read(&mut response)
+            .await
+            .map_err(|e| BoxError::Other(format!("Health check read failed: {}", e)))?;
 
         if n == 0 {
             return Ok(false);
@@ -121,9 +123,8 @@ impl ExecClient {
         &self,
         request: &a3s_box_core::exec::ExecRequest,
     ) -> Result<a3s_box_core::exec::ExecOutput> {
-        let body = serde_json::to_string(request).map_err(|e| {
-            BoxError::ExecError(format!("Failed to serialize exec request: {}", e))
-        })?;
+        let body = serde_json::to_string(request)
+            .map_err(|e| BoxError::ExecError(format!("Failed to serialize exec request: {}", e)))?;
 
         let http_request = format!(
             "POST /exec HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -139,17 +140,19 @@ impl ExecClient {
             ))
         })?;
 
-        stream.write_all(http_request.as_bytes()).await.map_err(|e| {
-            BoxError::ExecError(format!("Exec request write failed: {}", e))
-        })?;
+        stream
+            .write_all(http_request.as_bytes())
+            .await
+            .map_err(|e| BoxError::ExecError(format!("Exec request write failed: {}", e)))?;
 
         // Read full response (up to 32 MiB + headers)
         let mut response = Vec::with_capacity(4096);
         let mut buf = vec![0u8; 65536];
         loop {
-            let n = stream.read(&mut buf).await.map_err(|e| {
-                BoxError::ExecError(format!("Exec response read failed: {}", e))
-            })?;
+            let n = stream
+                .read(&mut buf)
+                .await
+                .map_err(|e| BoxError::ExecError(format!("Exec response read failed: {}", e)))?;
             if n == 0 {
                 break;
             }
@@ -170,10 +173,8 @@ impl ExecClient {
                 BoxError::ExecError("Malformed exec response: no HTTP body".to_string())
             })?;
 
-        let output: a3s_box_core::exec::ExecOutput =
-            serde_json::from_str(body_str).map_err(|e| {
-                BoxError::ExecError(format!("Failed to parse exec response: {}", e))
-            })?;
+        let output: a3s_box_core::exec::ExecOutput = serde_json::from_str(body_str)
+            .map_err(|e| BoxError::ExecError(format!("Failed to parse exec response: {}", e)))?;
 
         Ok(output)
     }
@@ -221,10 +222,7 @@ impl AttestationClient {
     /// # Returns
     /// * `Ok(AttestationReport)` - Hardware-signed report with cert chain
     /// * `Err(...)` - If the guest agent is unreachable or SNP is unavailable
-    pub async fn get_report(
-        &self,
-        request: &AttestationRequest,
-    ) -> Result<AttestationReport> {
+    pub async fn get_report(&self, request: &AttestationRequest) -> Result<AttestationReport> {
         let body = serde_json::to_string(request).map_err(|e| {
             BoxError::AttestationError(format!("Failed to serialize attestation request: {}", e))
         })?;
@@ -243,9 +241,12 @@ impl AttestationClient {
             ))
         })?;
 
-        stream.write_all(http_request.as_bytes()).await.map_err(|e| {
-            BoxError::AttestationError(format!("Attestation request write failed: {}", e))
-        })?;
+        stream
+            .write_all(http_request.as_bytes())
+            .await
+            .map_err(|e| {
+                BoxError::AttestationError(format!("Attestation request write failed: {}", e))
+            })?;
 
         // Read full response (report + certs can be several KB)
         let mut response = Vec::with_capacity(8192);
@@ -304,37 +305,40 @@ pub struct PtyClient {
 impl PtyClient {
     /// Connect to the PTY server via Unix socket.
     pub async fn connect(socket_path: &Path) -> Result<Self> {
-        let stream = tokio::net::UnixStream::connect(socket_path).await.map_err(|e| {
-            BoxError::ExecError(format!(
-                "Failed to connect to PTY server at {}: {}",
-                socket_path.display(),
-                e,
-            ))
-        })?;
+        let stream = tokio::net::UnixStream::connect(socket_path)
+            .await
+            .map_err(|e| {
+                BoxError::ExecError(format!(
+                    "Failed to connect to PTY server at {}: {}",
+                    socket_path.display(),
+                    e,
+                ))
+            })?;
 
         Ok(Self { stream })
     }
 
     /// Send a PtyRequest to start an interactive session.
     pub async fn send_request(&mut self, req: &a3s_box_core::pty::PtyRequest) -> Result<()> {
-        let payload = serde_json::to_vec(req).map_err(|e| {
-            BoxError::ExecError(format!("Failed to serialize PtyRequest: {}", e))
-        })?;
-        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_REQUEST, &payload).await
+        let payload = serde_json::to_vec(req)
+            .map_err(|e| BoxError::ExecError(format!("Failed to serialize PtyRequest: {}", e)))?;
+        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_REQUEST, &payload)
+            .await
     }
 
     /// Send terminal data to the guest.
     pub async fn send_data(&mut self, data: &[u8]) -> Result<()> {
-        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_DATA, data).await
+        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_DATA, data)
+            .await
     }
 
     /// Send a terminal resize notification.
     pub async fn send_resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         let resize = a3s_box_core::pty::PtyResize { cols, rows };
-        let payload = serde_json::to_vec(&resize).map_err(|e| {
-            BoxError::ExecError(format!("Failed to serialize PtyResize: {}", e))
-        })?;
-        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_RESIZE, &payload).await
+        let payload = serde_json::to_vec(&resize)
+            .map_err(|e| BoxError::ExecError(format!("Failed to serialize PtyResize: {}", e)))?;
+        self.write_raw_frame(a3s_box_core::pty::FRAME_PTY_RESIZE, &payload)
+            .await
     }
 
     /// Read the next frame from the guest.
@@ -371,25 +375,34 @@ impl PtyClient {
     }
 
     /// Split the underlying stream into read and write halves for concurrent I/O.
-    pub fn into_split(self) -> (tokio::net::unix::OwnedReadHalf, tokio::net::unix::OwnedWriteHalf) {
+    pub fn into_split(
+        self,
+    ) -> (
+        tokio::net::unix::OwnedReadHalf,
+        tokio::net::unix::OwnedWriteHalf,
+    ) {
         self.stream.into_split()
     }
 
     /// Write a raw frame: [type: u8] [length: u32 BE] [payload].
     async fn write_raw_frame(&mut self, frame_type: u8, payload: &[u8]) -> Result<()> {
         let len = payload.len() as u32;
-        self.stream.write_all(&[frame_type]).await.map_err(|e| {
-            BoxError::ExecError(format!("PTY frame write failed: {}", e))
-        })?;
-        self.stream.write_all(&len.to_be_bytes()).await.map_err(|e| {
-            BoxError::ExecError(format!("PTY frame write failed: {}", e))
-        })?;
-        self.stream.write_all(payload).await.map_err(|e| {
-            BoxError::ExecError(format!("PTY frame write failed: {}", e))
-        })?;
-        self.stream.flush().await.map_err(|e| {
-            BoxError::ExecError(format!("PTY frame flush failed: {}", e))
-        })?;
+        self.stream
+            .write_all(&[frame_type])
+            .await
+            .map_err(|e| BoxError::ExecError(format!("PTY frame write failed: {}", e)))?;
+        self.stream
+            .write_all(&len.to_be_bytes())
+            .await
+            .map_err(|e| BoxError::ExecError(format!("PTY frame write failed: {}", e)))?;
+        self.stream
+            .write_all(payload)
+            .await
+            .map_err(|e| BoxError::ExecError(format!("PTY frame write failed: {}", e)))?;
+        self.stream
+            .flush()
+            .await
+            .map_err(|e| BoxError::ExecError(format!("PTY frame flush failed: {}", e)))?;
         Ok(())
     }
 }
@@ -492,7 +505,10 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 1024];
             let _ = stream.read(&mut buf).await;
-            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK").await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .unwrap();
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -514,7 +530,10 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 1024];
             let _ = stream.read(&mut buf).await;
-            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n").await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                .await
+                .unwrap();
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

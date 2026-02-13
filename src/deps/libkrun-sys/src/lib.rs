@@ -152,10 +152,6 @@ extern "C" {
     /// Set the gid before starting the microVM.
     pub fn krun_setgid(ctx_id: u32, gid: libc::gid_t) -> i32;
 
-    /// Set the file path to the TEE configuration file.
-    /// Only available in libkrun-sev builds.
-    pub fn krun_set_tee_config_file(ctx_id: u32, filepath: *const c_char) -> i32;
-
     /// Configure a root filesystem backed by a block device with automatic remount.
     pub fn krun_set_root_disk_remount(
         ctx_id: u32,
@@ -163,4 +159,38 @@ extern "C" {
         fstype: *const c_char,
         options: *const c_char,
     ) -> i32;
+}
+
+// ============================================================================
+// TEE support — loaded at runtime via dlsym since the `tee` feature in libkrun
+// requires amd-sev or tdx to compile, and we don't want to mandate those.
+// ============================================================================
+
+/// Set the file path to the TEE configuration file.
+///
+/// This function is loaded at runtime via `dlsym` because it only exists in
+/// libkrun builds with the `tee` feature (which requires `amd-sev` or `tdx`).
+/// Returns `-libc::ENOSYS` if the symbol is not available.
+///
+/// # Safety
+/// `filepath` must be a valid null-terminated C string.
+pub unsafe fn krun_set_tee_config_file(ctx_id: u32, filepath: *const c_char) -> i32 {
+    type Func = unsafe extern "C" fn(u32, *const c_char) -> i32;
+
+    static FUNC: std::sync::OnceLock<Option<Func>> = std::sync::OnceLock::new();
+
+    let func = FUNC.get_or_init(|| {
+        let sym = b"krun_set_tee_config_file\0";
+        let ptr = libc::dlsym(libc::RTLD_DEFAULT, sym.as_ptr() as *const _);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute::<*mut libc::c_void, Func>(ptr))
+        }
+    });
+
+    match func {
+        Some(f) => f(ctx_id, filepath),
+        None => -libc::ENOSYS,
+    }
 }

@@ -133,10 +133,7 @@ mod tests {
     fn test_parse_agent_labels() {
         let mut labels = HashMap::new();
         labels.insert("a3s.box.agent.type".to_string(), "code".to_string());
-        labels.insert(
-            "a3s.box.agent.version".to_string(),
-            "0.1.0".to_string(),
-        );
+        labels.insert("a3s.box.agent.version".to_string(), "0.1.0".to_string());
         labels.insert(
             "a3s.box.agent.binary".to_string(),
             "/usr/bin/a3s-code".to_string(),
@@ -153,10 +150,7 @@ mod tests {
     #[test]
     fn test_parse_llm_labels() {
         let mut labels = HashMap::new();
-        labels.insert(
-            "a3s.box.llm.provider".to_string(),
-            "anthropic".to_string(),
-        );
+        labels.insert("a3s.box.llm.provider".to_string(), "anthropic".to_string());
         labels.insert(
             "a3s.box.llm.model".to_string(),
             "claude-sonnet-4-20250514".to_string(),
@@ -227,7 +221,10 @@ mod tests {
     #[test]
     fn test_ignore_non_a3s_labels() {
         let mut labels = HashMap::new();
-        labels.insert("org.opencontainers.image.title".to_string(), "test".to_string());
+        labels.insert(
+            "org.opencontainers.image.title".to_string(),
+            "test".to_string(),
+        );
         labels.insert("com.example.custom".to_string(), "value".to_string());
         labels.insert("a3s.box.agent.type".to_string(), "code".to_string());
 

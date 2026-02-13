@@ -81,6 +81,12 @@ pub struct RegistryPuller {
     auth: RegistryAuth,
 }
 
+impl Default for RegistryPuller {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RegistryPuller {
     /// Create a new registry puller with anonymous authentication.
     pub fn new() -> Self {
@@ -105,11 +111,7 @@ impl RegistryPuller {
     /// - `oci-layout`
     /// - `index.json`
     /// - `blobs/sha256/...`
-    pub async fn pull(
-        &self,
-        reference: &ImageReference,
-        target_dir: &Path,
-    ) -> Result<PathBuf> {
+    pub async fn pull(&self, reference: &ImageReference, target_dir: &Path) -> Result<PathBuf> {
         let oci_ref = self.to_oci_reference(reference)?;
 
         tracing::info!(
@@ -149,13 +151,8 @@ impl RegistryPuller {
         })?;
 
         // Pull image config and layers
-        self.pull_image_content(
-            &oci_ref,
-            &image_manifest,
-            &blobs_dir,
-            &reference.registry,
-        )
-        .await?;
+        self.pull_image_content(&oci_ref, &image_manifest, &blobs_dir, &reference.registry)
+            .await?;
 
         // Write oci-layout file
         std::fs::write(
@@ -195,21 +192,18 @@ impl RegistryPuller {
     }
 
     /// Pull the manifest digest string for an image reference.
-    pub async fn pull_manifest_digest(
-        &self,
-        reference: &ImageReference,
-    ) -> Result<String> {
+    pub async fn pull_manifest_digest(&self, reference: &ImageReference) -> Result<String> {
         let oci_ref = self.to_oci_reference(reference)?;
         let auth = self.auth.to_oci_auth();
 
-        let (_manifest, digest) = self
-            .client
-            .pull_manifest(&oci_ref, &auth)
-            .await
-            .map_err(|e| BoxError::RegistryError {
-                registry: reference.registry.clone(),
-                message: format!("Failed to pull manifest: {}", e),
-            })?;
+        let (_manifest, digest) =
+            self.client
+                .pull_manifest(&oci_ref, &auth)
+                .await
+                .map_err(|e| BoxError::RegistryError {
+                    registry: reference.registry.clone(),
+                    message: format!("Failed to pull manifest: {}", e),
+                })?;
 
         Ok(digest)
     }
@@ -279,27 +273,15 @@ impl RegistryPuller {
     /// Convert an ImageReference to an oci-distribution Reference.
     fn to_oci_reference(&self, reference: &ImageReference) -> Result<Reference> {
         let ref_str = if let Some(ref digest) = reference.digest {
-            format!(
-                "{}/{}@{}",
-                reference.registry, reference.repository, digest
-            )
+            format!("{}/{}@{}", reference.registry, reference.repository, digest)
         } else if let Some(ref tag) = reference.tag {
-            format!(
-                "{}/{}:{}",
-                reference.registry, reference.repository, tag
-            )
+            format!("{}/{}:{}", reference.registry, reference.repository, tag)
         } else {
-            format!(
-                "{}/{}:latest",
-                reference.registry, reference.repository
-            )
+            format!("{}/{}:latest", reference.registry, reference.repository)
         };
 
         ref_str.parse::<Reference>().map_err(|e| {
-            BoxError::OciImageError(format!(
-                "Invalid OCI reference '{}': {}",
-                ref_str, e
-            ))
+            BoxError::OciImageError(format!("Invalid OCI reference '{}': {}", ref_str, e))
         })
     }
 }
@@ -317,6 +299,12 @@ pub struct PushResult {
 pub struct RegistryPusher {
     client: Client,
     auth: RegistryAuth,
+}
+
+impl Default for RegistryPusher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RegistryPusher {
@@ -339,11 +327,7 @@ impl RegistryPusher {
     ///
     /// Reads the OCI layout from `image_dir` (index.json → manifest → config + layers),
     /// then pushes all blobs and the manifest to the target registry.
-    pub async fn push(
-        &self,
-        reference: &ImageReference,
-        image_dir: &Path,
-    ) -> Result<PushResult> {
+    pub async fn push(&self, reference: &ImageReference, image_dir: &Path) -> Result<PushResult> {
         let oci_ref = self.to_oci_reference(reference)?;
 
         tracing::info!(
@@ -354,23 +338,21 @@ impl RegistryPusher {
 
         // Read index.json to find the manifest digest
         let index_path = image_dir.join("index.json");
-        let index_data = std::fs::read_to_string(&index_path).map_err(|e| {
-            BoxError::OciImageError(format!("Failed to read index.json: {}", e))
-        })?;
+        let index_data = std::fs::read_to_string(&index_path)
+            .map_err(|e| BoxError::OciImageError(format!("Failed to read index.json: {}", e)))?;
         let index: serde_json::Value = serde_json::from_str(&index_data)?;
 
-        let manifest_digest = index["manifests"][0]["digest"]
-            .as_str()
-            .ok_or_else(|| BoxError::OciImageError("No manifest digest in index.json".to_string()))?;
+        let manifest_digest = index["manifests"][0]["digest"].as_str().ok_or_else(|| {
+            BoxError::OciImageError("No manifest digest in index.json".to_string())
+        })?;
 
         // Read manifest blob
         let manifest_digest_hex = manifest_digest
             .strip_prefix("sha256:")
             .unwrap_or(manifest_digest);
         let blobs_dir = image_dir.join("blobs").join("sha256");
-        let manifest_data = std::fs::read(blobs_dir.join(manifest_digest_hex)).map_err(|e| {
-            BoxError::OciImageError(format!("Failed to read manifest blob: {}", e))
-        })?;
+        let manifest_data = std::fs::read(blobs_dir.join(manifest_digest_hex))
+            .map_err(|e| BoxError::OciImageError(format!("Failed to read manifest blob: {}", e)))?;
         let manifest: OciImageManifest = serde_json::from_slice(&manifest_data)?;
 
         // Read config blob
@@ -379,14 +361,9 @@ impl RegistryPusher {
             .digest
             .strip_prefix("sha256:")
             .unwrap_or(&manifest.config.digest);
-        let config_data = std::fs::read(blobs_dir.join(config_digest_hex)).map_err(|e| {
-            BoxError::OciImageError(format!("Failed to read config blob: {}", e))
-        })?;
-        let config = Config::new(
-            config_data,
-            manifest.config.media_type.clone(),
-            None,
-        );
+        let config_data = std::fs::read(blobs_dir.join(config_digest_hex))
+            .map_err(|e| BoxError::OciImageError(format!("Failed to read config blob: {}", e)))?;
+        let config = Config::new(config_data, manifest.config.media_type.clone(), None);
 
         // Read layer blobs
         let mut layers = Vec::new();
@@ -441,22 +418,13 @@ impl RegistryPusher {
     /// Convert an ImageReference to an oci-distribution Reference.
     fn to_oci_reference(&self, reference: &ImageReference) -> Result<Reference> {
         let ref_str = if let Some(ref tag) = reference.tag {
-            format!(
-                "{}/{}:{}",
-                reference.registry, reference.repository, tag
-            )
+            format!("{}/{}:{}", reference.registry, reference.repository, tag)
         } else {
-            format!(
-                "{}/{}:latest",
-                reference.registry, reference.repository
-            )
+            format!("{}/{}:latest", reference.registry, reference.repository)
         };
 
         ref_str.parse::<Reference>().map_err(|e| {
-            BoxError::OciImageError(format!(
-                "Invalid OCI reference '{}': {}",
-                ref_str, e
-            ))
+            BoxError::OciImageError(format!("Invalid OCI reference '{}': {}", ref_str, e))
         })
     }
 }
@@ -475,9 +443,10 @@ fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
     manifests
         .iter()
         .find(|entry| {
-            entry.platform.as_ref().map_or(false, |p| {
-                p.os == "linux" && p.architecture == arch
-            })
+            entry
+                .platform
+                .as_ref()
+                .is_some_and(|p| p.os == "linux" && p.architecture == arch)
         })
         .map(|entry| entry.digest.clone())
 }

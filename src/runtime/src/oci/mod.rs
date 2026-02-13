@@ -24,24 +24,24 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+pub mod build;
+pub mod credentials;
 mod image;
 mod labels;
 mod layers;
 mod pull;
 pub mod reference;
 pub mod registry;
-pub mod credentials;
 mod rootfs;
 pub mod store;
-pub mod build;
 
+pub use build::{BuildConfig, BuildResult, Dockerfile, Instruction};
+pub use credentials::CredentialStore;
 pub use image::{OciImage, OciImageConfig};
 pub use labels::AgentLabels;
 pub use layers::extract_layer;
 pub use pull::ImagePuller;
 pub use reference::ImageReference;
-pub use registry::{RegistryAuth, RegistryPuller, RegistryPusher, PushResult};
-pub use credentials::CredentialStore;
+pub use registry::{PushResult, RegistryAuth, RegistryPuller, RegistryPusher};
 pub use rootfs::{OciRootfsBuilder, RootfsComposition};
 pub use store::{ImageStore, StoredImage};
-pub use build::{BuildConfig, BuildResult, Dockerfile, Instruction};

@@ -90,7 +90,11 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
         use std::io::Read;
         let mut buf = Vec::new();
         std::io::stdin().read_to_end(&mut buf)?;
-        if buf.is_empty() { None } else { Some(buf) }
+        if buf.is_empty() {
+            None
+        } else {
+            Some(buf)
+        }
     } else {
         None
     };
@@ -188,7 +192,7 @@ pub(crate) async fn run_pty_session(
     mut read_half: tokio::net::unix::OwnedReadHalf,
     mut write_half: tokio::net::unix::OwnedWriteHalf,
 ) -> i32 {
-    use a3s_box_core::pty::{FRAME_PTY_DATA, FRAME_PTY_EXIT, FRAME_PTY_ERROR, MAX_FRAME_PAYLOAD};
+    use a3s_box_core::pty::{FRAME_PTY_DATA, FRAME_PTY_ERROR, FRAME_PTY_EXIT, MAX_FRAME_PAYLOAD};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Task 1: Read from guest PTY → write to stdout
@@ -210,10 +214,9 @@ pub(crate) async fn run_pty_session(
             }
 
             let mut payload = vec![0u8; len];
-            if len > 0
-                && read_half.read_exact(&mut payload).await.is_err() {
-                    return -1;
-                }
+            if len > 0 && read_half.read_exact(&mut payload).await.is_err() {
+                return -1;
+            }
 
             match frame_type {
                 FRAME_PTY_DATA => {
@@ -223,7 +226,8 @@ pub(crate) async fn run_pty_session(
                     let _ = stdout.flush().await;
                 }
                 FRAME_PTY_EXIT => {
-                    if let Ok(exit) = serde_json::from_slice::<a3s_box_core::pty::PtyExit>(&payload) {
+                    if let Ok(exit) = serde_json::from_slice::<a3s_box_core::pty::PtyExit>(&payload)
+                    {
                         return exit.exit_code;
                     }
                     return 1;
@@ -243,9 +247,8 @@ pub(crate) async fn run_pty_session(
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 4096];
 
-        let mut sigwinch = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::window_change(),
-        ).ok();
+        let mut sigwinch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
 
         loop {
             tokio::select! {
@@ -290,10 +293,7 @@ pub(crate) async fn run_pty_session(
     });
 
     // Wait for the reader to finish (it returns the exit code)
-    let exit_code = match reader_task.await {
-        Ok(code) => code,
-        Err(_) => 1,
-    };
+    let exit_code = reader_task.await.unwrap_or(1);
 
     // Abort the writer task
     writer_task.abort();

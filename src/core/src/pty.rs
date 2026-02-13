@@ -94,7 +94,10 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
     if len > MAX_FRAME_PAYLOAD {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("PTY frame too large: {} bytes (max {})", len, MAX_FRAME_PAYLOAD),
+            format!(
+                "PTY frame too large: {} bytes (max {})",
+                len, MAX_FRAME_PAYLOAD
+            ),
         ));
     }
 
@@ -109,7 +112,10 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
 /// Write a PtyRequest frame.
 pub fn write_request(w: &mut impl Write, req: &PtyRequest) -> io::Result<()> {
     let payload = serde_json::to_vec(req).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("Failed to serialize PtyRequest: {}", e))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to serialize PtyRequest: {}", e),
+        )
     })?;
     write_frame(w, FRAME_PTY_REQUEST, &payload)
 }
@@ -123,7 +129,10 @@ pub fn write_data(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
 pub fn write_resize(w: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
     let resize = PtyResize { cols, rows };
     let payload = serde_json::to_vec(&resize).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("Failed to serialize PtyResize: {}", e))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to serialize PtyResize: {}", e),
+        )
     })?;
     write_frame(w, FRAME_PTY_RESIZE, &payload)
 }
@@ -132,7 +141,10 @@ pub fn write_resize(w: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> 
 pub fn write_exit(w: &mut impl Write, exit_code: i32) -> io::Result<()> {
     let exit = PtyExit { exit_code };
     let payload = serde_json::to_vec(&exit).map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("Failed to serialize PtyExit: {}", e))
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to serialize PtyExit: {}", e),
+        )
     })?;
     write_frame(w, FRAME_PTY_EXIT, &payload)
 }
@@ -147,20 +159,29 @@ pub fn parse_frame(frame_type: u8, payload: Vec<u8>) -> io::Result<PtyFrame> {
     match frame_type {
         FRAME_PTY_REQUEST => {
             let req: PtyRequest = serde_json::from_slice(&payload).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("Invalid PtyRequest: {}", e))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid PtyRequest: {}", e),
+                )
             })?;
             Ok(PtyFrame::Request(req))
         }
         FRAME_PTY_DATA => Ok(PtyFrame::Data(payload)),
         FRAME_PTY_RESIZE => {
             let resize: PtyResize = serde_json::from_slice(&payload).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("Invalid PtyResize: {}", e))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid PtyResize: {}", e),
+                )
             })?;
             Ok(PtyFrame::Resize(resize))
         }
         FRAME_PTY_EXIT => {
             let exit: PtyExit = serde_json::from_slice(&payload).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("Invalid PtyExit: {}", e))
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Invalid PtyExit: {}", e),
+                )
             })?;
             Ok(PtyFrame::Exit(exit))
         }

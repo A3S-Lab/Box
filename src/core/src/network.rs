@@ -204,7 +204,10 @@ impl NetworkConfig {
     /// Allocate an IP and register a new endpoint for a box.
     pub fn connect(&mut self, box_id: &str, box_name: &str) -> Result<NetworkEndpoint, String> {
         if self.endpoints.contains_key(box_id) {
-            return Err(format!("box '{}' is already connected to network '{}'", box_id, self.name));
+            return Err(format!(
+                "box '{}' is already connected to network '{}'",
+                box_id, self.name
+            ));
         }
 
         let ipam = Ipam::new(&self.subnet)?;
@@ -225,9 +228,12 @@ impl NetworkConfig {
 
     /// Remove a box from this network.
     pub fn disconnect(&mut self, box_id: &str) -> Result<NetworkEndpoint, String> {
-        self.endpoints
-            .remove(box_id)
-            .ok_or_else(|| format!("box '{}' is not connected to network '{}'", box_id, self.name))
+        self.endpoints.remove(box_id).ok_or_else(|| {
+            format!(
+                "box '{}' is not connected to network '{}'",
+                box_id, self.name
+            )
+        })
     }
 
     /// Get all connected endpoints.

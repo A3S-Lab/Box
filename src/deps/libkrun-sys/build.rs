@@ -35,6 +35,8 @@ const LIBKRUNFW_SO_URL: &str =
 const LIBKRUNFW_SHA256: &str = "e254bc3fb07b32e26a258d9958967b2f22eb6c3136cfedf358c332308b6d35ea";
 
 // libkrun build features (NET=1 BLK=1 enables network and block device support)
+// Note: TEE support (krun_set_tee_config_file) is loaded via dlsym at runtime
+// since the `tee` feature in libkrun requires amd-sev or tdx to compile properly.
 const LIBKRUN_BUILD_FEATURES: &[(&str, &str)] = &[("NET", "1"), ("BLK", "1")];
 
 // Library directory name differs by platform

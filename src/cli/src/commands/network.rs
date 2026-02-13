@@ -141,7 +141,13 @@ async fn execute_ls(args: LsArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut table = comfy_table::Table::new();
     table.load_preset(comfy_table::presets::NOTHING);
-    table.set_header(vec!["NETWORK NAME", "DRIVER", "SUBNET", "GATEWAY", "ENDPOINTS"]);
+    table.set_header(vec![
+        "NETWORK NAME",
+        "DRIVER",
+        "SUBNET",
+        "GATEWAY",
+        "ENDPOINTS",
+    ]);
 
     for net in &networks {
         table.add_row(vec![
@@ -288,8 +294,12 @@ mod tests {
     #[test]
     fn test_list_networks_sorted() {
         let (_dir, store) = temp_store();
-        store.create(NetworkConfig::new("znet", "10.89.0.0/24").unwrap()).unwrap();
-        store.create(NetworkConfig::new("anet", "10.90.0.0/24").unwrap()).unwrap();
+        store
+            .create(NetworkConfig::new("znet", "10.89.0.0/24").unwrap())
+            .unwrap();
+        store
+            .create(NetworkConfig::new("anet", "10.90.0.0/24").unwrap())
+            .unwrap();
 
         let mut list = store.list().unwrap();
         list.sort_by(|a, b| a.name.cmp(&b.name));
@@ -300,7 +310,9 @@ mod tests {
     #[test]
     fn test_remove_network() {
         let (_dir, store) = temp_store();
-        store.create(NetworkConfig::new("testnet", "10.89.0.0/24").unwrap()).unwrap();
+        store
+            .create(NetworkConfig::new("testnet", "10.89.0.0/24").unwrap())
+            .unwrap();
         store.remove("testnet").unwrap();
         assert!(store.get("testnet").unwrap().is_none());
     }
@@ -351,7 +363,9 @@ mod tests {
     #[test]
     fn test_connect_box_to_network() {
         let (_dir, store) = temp_store();
-        store.create(NetworkConfig::new("testnet", "10.89.0.0/24").unwrap()).unwrap();
+        store
+            .create(NetworkConfig::new("testnet", "10.89.0.0/24").unwrap())
+            .unwrap();
 
         let mut config = store.get("testnet").unwrap().unwrap();
         let ep = config.connect("box-1", "web").unwrap();
@@ -391,7 +405,9 @@ mod tests {
     #[test]
     fn test_connect_multiple_boxes() {
         let (_dir, store) = temp_store();
-        store.create(NetworkConfig::new("testnet", "10.89.0.0/24").unwrap()).unwrap();
+        store
+            .create(NetworkConfig::new("testnet", "10.89.0.0/24").unwrap())
+            .unwrap();
 
         let mut config = store.get("testnet").unwrap().unwrap();
         let ep1 = config.connect("box-1", "web").unwrap();

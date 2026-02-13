@@ -25,10 +25,7 @@ pub async fn execute(args: PullArgs) -> Result<(), Box<dyn std::error::Error>> {
     let reference = a3s_box_runtime::ImageReference::parse(&args.image)?;
     let auth = a3s_box_runtime::RegistryAuth::from_credential_store(&reference.registry);
 
-    let puller = a3s_box_runtime::ImagePuller::new(
-        store,
-        auth,
-    );
+    let puller = a3s_box_runtime::ImagePuller::new(store, auth);
 
     if !args.quiet {
         println!("Pulling {}...", args.image);
@@ -38,11 +35,7 @@ pub async fn execute(args: PullArgs) -> Result<(), Box<dyn std::error::Error>> {
     if args.quiet {
         println!("{}", image.root_dir().display());
     } else {
-        println!(
-            "Pulled: {} ({})",
-            args.image,
-            image.root_dir().display()
-        );
+        println!("Pulled: {} ({})", args.image, image.root_dir().display());
     }
 
     Ok(())

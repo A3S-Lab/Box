@@ -23,22 +23,28 @@ pub mod volume;
 
 // Re-export common types
 pub use cache::{LayerCache, RootfsCache};
+pub use grpc::{AgentClient, AttestationClient, ExecClient, PtyClient};
 pub use host_check::{check_virtualization_support, VirtualizationSupport};
-pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
-pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller, StoredImage};
-pub use oci::{RegistryPusher, PushResult, CredentialStore};
+pub use network::NetworkStore;
+pub use network::PasstManager;
 pub use oci::{BuildConfig, BuildResult, Dockerfile, Instruction};
+pub use oci::{CredentialStore, PushResult, RegistryPusher};
+pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller, StoredImage};
+pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
 pub use pool::{PoolStats, WarmPool};
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
 pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
+pub use tee::{
+    verify_attestation, AmdKdsClient, AttestationPolicy, MinTcbPolicy, PolicyResult,
+    VerificationResult,
+};
 pub use tee::{AttestationReport, AttestationRequest, CertificateChain, PlatformInfo, TcbVersion};
-pub use tee::{verify_attestation, AttestationPolicy, AmdKdsClient, MinTcbPolicy, PolicyResult, VerificationResult};
-pub use grpc::{AgentClient, AttestationClient, ExecClient, PtyClient};
-pub use network::NetworkStore;
-pub use network::PasstManager;
 pub use vm::{BoxState, VmManager};
+pub use vmm::{
+    Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, ShimHandler, TeeInstanceConfig,
+    VmController, VmHandler, VmMetrics,
+};
 pub use volume::VolumeStore;
-pub use vmm::{Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, ShimHandler, TeeInstanceConfig, VmController, VmHandler, VmMetrics};
 
 /// A3S Box Runtime version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

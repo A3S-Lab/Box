@@ -15,6 +15,7 @@ pub struct OciImage {
     root_dir: PathBuf,
 
     /// Image manifest
+    #[allow(dead_code)]
     manifest: ImageManifest,
 
     /// Image configuration
@@ -297,7 +298,7 @@ impl OciImageConfig {
         let exposed_ports = config
             .as_ref()
             .and_then(|c| c.exposed_ports().as_ref())
-            .map(|ports| ports.iter().cloned().collect())
+            .map(|ports| ports.to_vec())
             .unwrap_or_default();
 
         // Parse labels
@@ -310,7 +311,7 @@ impl OciImageConfig {
         let volumes = config
             .as_ref()
             .and_then(|c| c.volumes().as_ref())
-            .map(|vols| vols.iter().cloned().collect())
+            .map(|vols| vols.to_vec())
             .unwrap_or_default();
 
         // Parse stop signal

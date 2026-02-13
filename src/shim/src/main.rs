@@ -107,21 +107,21 @@ fn run() -> Result<()> {
 fn parse_ulimit(ulimit: &str) -> Option<String> {
     let (name, limits) = ulimit.split_once('=')?;
     let resource_num = match name.to_lowercase().as_str() {
-        "core" => 4,       // RLIMIT_CORE
-        "cpu" => 0,        // RLIMIT_CPU
-        "data" => 2,       // RLIMIT_DATA
-        "fsize" => 1,      // RLIMIT_FSIZE
-        "locks" => 10,     // RLIMIT_LOCKS
-        "memlock" => 8,    // RLIMIT_MEMLOCK
-        "msgqueue" => 12,  // RLIMIT_MSGQUEUE
-        "nice" => 13,      // RLIMIT_NICE
-        "nofile" => 7,     // RLIMIT_NOFILE
-        "nproc" => 6,      // RLIMIT_NPROC
-        "rss" => 5,        // RLIMIT_RSS
-        "rtprio" => 14,    // RLIMIT_RTPRIO
-        "rttime" => 15,    // RLIMIT_RTTIME
+        "core" => 4,        // RLIMIT_CORE
+        "cpu" => 0,         // RLIMIT_CPU
+        "data" => 2,        // RLIMIT_DATA
+        "fsize" => 1,       // RLIMIT_FSIZE
+        "locks" => 10,      // RLIMIT_LOCKS
+        "memlock" => 8,     // RLIMIT_MEMLOCK
+        "msgqueue" => 12,   // RLIMIT_MSGQUEUE
+        "nice" => 13,       // RLIMIT_NICE
+        "nofile" => 7,      // RLIMIT_NOFILE
+        "nproc" => 6,       // RLIMIT_NPROC
+        "rss" => 5,         // RLIMIT_RSS
+        "rtprio" => 14,     // RLIMIT_RTPRIO
+        "rttime" => 15,     // RLIMIT_RTTIME
         "sigpending" => 11, // RLIMIT_SIGPENDING
-        "stack" => 3,      // RLIMIT_STACK
+        "stack" => 3,       // RLIMIT_STACK
         _ => return None,
     };
     Some(format!("{}={}", resource_num, limits))
@@ -281,99 +281,6 @@ fn apply_cgroup_limits(spec: &InstanceSpec) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_ulimit_nofile() {
-        assert_eq!(parse_ulimit("nofile=1024:4096"), Some("7=1024:4096".to_string()));
-    }
-
-    #[test]
-    fn test_parse_ulimit_nproc() {
-        assert_eq!(parse_ulimit("nproc=256:512"), Some("6=256:512".to_string()));
-    }
-
-    #[test]
-    fn test_parse_ulimit_stack() {
-        assert_eq!(parse_ulimit("stack=8192:8192"), Some("3=8192:8192".to_string()));
-    }
-
-    #[test]
-    fn test_parse_ulimit_core() {
-        assert_eq!(parse_ulimit("core=0:0"), Some("4=0:0".to_string()));
-    }
-
-    #[test]
-    fn test_parse_ulimit_case_insensitive() {
-        assert_eq!(parse_ulimit("NOFILE=1024:4096"), Some("7=1024:4096".to_string()));
-        assert_eq!(parse_ulimit("Nproc=100:200"), Some("6=100:200".to_string()));
-    }
-
-    #[test]
-    fn test_parse_ulimit_unknown() {
-        assert_eq!(parse_ulimit("unknown=1:2"), None);
-    }
-
-    #[test]
-    fn test_parse_ulimit_no_equals() {
-        assert_eq!(parse_ulimit("nofile"), None);
-    }
-
-    #[test]
-    fn test_parse_ulimit_all_resources() {
-        assert!(parse_ulimit("cpu=10:20").is_some());
-        assert!(parse_ulimit("fsize=100:200").is_some());
-        assert!(parse_ulimit("data=100:200").is_some());
-        assert!(parse_ulimit("locks=100:200").is_some());
-        assert!(parse_ulimit("memlock=100:200").is_some());
-        assert!(parse_ulimit("msgqueue=100:200").is_some());
-        assert!(parse_ulimit("nice=10:20").is_some());
-        assert!(parse_ulimit("rss=100:200").is_some());
-        assert!(parse_ulimit("rtprio=10:20").is_some());
-        assert!(parse_ulimit("rttime=100:200").is_some());
-        assert!(parse_ulimit("sigpending=100:200").is_some());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_parse_cpuset_spec_single() {
-        assert_eq!(parse_cpuset_spec("0").unwrap(), vec![0]);
-        assert_eq!(parse_cpuset_spec("3").unwrap(), vec![3]);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_parse_cpuset_spec_list() {
-        assert_eq!(parse_cpuset_spec("0,1,3").unwrap(), vec![0, 1, 3]);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_parse_cpuset_spec_range() {
-        assert_eq!(parse_cpuset_spec("0-3").unwrap(), vec![0, 1, 2, 3]);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_parse_cpuset_spec_mixed() {
-        assert_eq!(parse_cpuset_spec("0,2-4,7").unwrap(), vec![0, 2, 3, 4, 7]);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_parse_cpuset_spec_invalid_range() {
-        assert!(parse_cpuset_spec("3-1").is_err());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_parse_cpuset_spec_invalid_number() {
-        assert!(parse_cpuset_spec("abc").is_err());
-    }
-}
-
 /// Configure libkrun context and start the VM.
 ///
 /// # Safety
@@ -528,16 +435,16 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
 
     // Configure PTY communication channel (Unix socket bridged to vsock port 4090)
     if !spec.pty_socket_path.as_os_str().is_empty() {
-        let pty_socket_str = spec
-            .pty_socket_path
-            .to_str()
-            .ok_or_else(|| BoxError::BoxBootError {
-                message: format!(
-                    "Invalid PTY socket path: {}",
-                    spec.pty_socket_path.display()
-                ),
-                hint: None,
-            })?;
+        let pty_socket_str =
+            spec.pty_socket_path
+                .to_str()
+                .ok_or_else(|| BoxError::BoxBootError {
+                    message: format!(
+                        "Invalid PTY socket path: {}",
+                        spec.pty_socket_path.display()
+                    ),
+                    hint: None,
+                })?;
         tracing::debug!(
             socket_path = pty_socket_str,
             guest_port = PTY_VSOCK_PORT,
@@ -562,16 +469,17 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             "Configuring passt virtio-net networking"
         );
 
-        let socket_str = net_config
-            .passt_socket_path
-            .to_str()
-            .ok_or_else(|| BoxError::BoxBootError {
-                message: format!(
-                    "Invalid passt socket path: {}",
-                    net_config.passt_socket_path.display()
-                ),
-                hint: None,
-            })?;
+        let socket_str =
+            net_config
+                .passt_socket_path
+                .to_str()
+                .ok_or_else(|| BoxError::BoxBootError {
+                    message: format!(
+                        "Invalid passt socket path: {}",
+                        net_config.passt_socket_path.display()
+                    ),
+                    hint: None,
+                })?;
 
         ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
 
@@ -579,7 +487,10 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         let ip_cidr = format!("{}/{}", net_config.ip_address, net_config.prefix_len);
         ctx.set_env(&[
             ("A3S_NET_IP".to_string(), ip_cidr),
-            ("A3S_NET_GATEWAY".to_string(), net_config.gateway.to_string()),
+            (
+                "A3S_NET_GATEWAY".to_string(),
+                net_config.gateway.to_string(),
+            ),
             (
                 "A3S_NET_DNS".to_string(),
                 net_config
@@ -622,13 +533,12 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.enable_split_irqchip()?;
 
         // Set TEE configuration file
-        let tee_config_str = tee_config
-            .config_path
-            .to_str()
-            .ok_or_else(|| BoxError::TeeConfig(format!(
+        let tee_config_str = tee_config.config_path.to_str().ok_or_else(|| {
+            BoxError::TeeConfig(format!(
                 "Invalid TEE config path: {}",
                 tee_config.config_path.display()
-            )))?;
+            ))
+        })?;
         ctx.set_tee_config(tee_config_str)?;
 
         tracing::info!("TEE configured successfully");
@@ -649,7 +559,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
 
     // Apply cgroup v2 resource limits (Linux only, best-effort)
     #[cfg(target_os = "linux")]
-    apply_cgroup_limits(&spec);
+    apply_cgroup_limits(spec);
 
     // Start VM (process takeover - never returns on success)
     tracing::info!(box_id = %spec.box_id, "Starting VM (process takeover)");
@@ -724,4 +634,106 @@ unsafe fn apply_user_config(ctx: &KrunContext, user: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ulimit_nofile() {
+        assert_eq!(
+            parse_ulimit("nofile=1024:4096"),
+            Some("7=1024:4096".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_ulimit_nproc() {
+        assert_eq!(parse_ulimit("nproc=256:512"), Some("6=256:512".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ulimit_stack() {
+        assert_eq!(
+            parse_ulimit("stack=8192:8192"),
+            Some("3=8192:8192".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_ulimit_core() {
+        assert_eq!(parse_ulimit("core=0:0"), Some("4=0:0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ulimit_case_insensitive() {
+        assert_eq!(
+            parse_ulimit("NOFILE=1024:4096"),
+            Some("7=1024:4096".to_string())
+        );
+        assert_eq!(parse_ulimit("Nproc=100:200"), Some("6=100:200".to_string()));
+    }
+
+    #[test]
+    fn test_parse_ulimit_unknown() {
+        assert_eq!(parse_ulimit("unknown=1:2"), None);
+    }
+
+    #[test]
+    fn test_parse_ulimit_no_equals() {
+        assert_eq!(parse_ulimit("nofile"), None);
+    }
+
+    #[test]
+    fn test_parse_ulimit_all_resources() {
+        assert!(parse_ulimit("cpu=10:20").is_some());
+        assert!(parse_ulimit("fsize=100:200").is_some());
+        assert!(parse_ulimit("data=100:200").is_some());
+        assert!(parse_ulimit("locks=100:200").is_some());
+        assert!(parse_ulimit("memlock=100:200").is_some());
+        assert!(parse_ulimit("msgqueue=100:200").is_some());
+        assert!(parse_ulimit("nice=10:20").is_some());
+        assert!(parse_ulimit("rss=100:200").is_some());
+        assert!(parse_ulimit("rtprio=10:20").is_some());
+        assert!(parse_ulimit("rttime=100:200").is_some());
+        assert!(parse_ulimit("sigpending=100:200").is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_single() {
+        assert_eq!(parse_cpuset_spec("0").unwrap(), vec![0]);
+        assert_eq!(parse_cpuset_spec("3").unwrap(), vec![3]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_list() {
+        assert_eq!(parse_cpuset_spec("0,1,3").unwrap(), vec![0, 1, 3]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_range() {
+        assert_eq!(parse_cpuset_spec("0-3").unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_mixed() {
+        assert_eq!(parse_cpuset_spec("0,2-4,7").unwrap(), vec![0, 2, 3, 4, 7]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_invalid_range() {
+        assert!(parse_cpuset_spec("3-1").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_cpuset_spec_invalid_number() {
+        assert!(parse_cpuset_spec("abc").is_err());
+    }
 }

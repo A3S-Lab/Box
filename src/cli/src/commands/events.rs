@@ -82,10 +82,7 @@ fn parse_filters(filters: &[String]) -> HashMap<String, String> {
     map
 }
 
-fn matches_filters(
-    event: &Event,
-    filters: &HashMap<String, String>,
-) -> bool {
+fn matches_filters(event: &Event, filters: &HashMap<String, String>) -> bool {
     for (key, value) in filters {
         let matches = match key.as_str() {
             "type" => event.event_type == *value,
@@ -198,7 +195,7 @@ pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>>
         }
 
         // Detect removed boxes
-        for (id, _) in &prev {
+        for id in prev.keys() {
             if !current.contains_key(id) {
                 let (name, image) = records
                     .get(id)
@@ -268,10 +265,7 @@ mod tests {
 
     #[test]
     fn test_parse_filters() {
-        let filters = parse_filters(&[
-            "type=container".to_string(),
-            "event=start".to_string(),
-        ]);
+        let filters = parse_filters(&["type=container".to_string(), "event=start".to_string()]);
         assert_eq!(filters.get("type").unwrap(), "container");
         assert_eq!(filters.get("event").unwrap(), "start");
     }

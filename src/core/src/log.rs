@@ -4,19 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Logging driver type.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LogDriver {
     /// Docker-compatible JSON lines format (default).
+    #[default]
     JsonFile,
     /// Disable logging entirely.
     None,
-}
-
-impl Default for LogDriver {
-    fn default() -> Self {
-        Self::JsonFile
-    }
 }
 
 impl std::fmt::Display for LogDriver {
@@ -35,7 +30,10 @@ impl std::str::FromStr for LogDriver {
         match s {
             "json-file" => Ok(Self::JsonFile),
             "none" => Ok(Self::None),
-            _ => Err(format!("unknown log driver: '{}' (supported: json-file, none)", s)),
+            _ => Err(format!(
+                "unknown log driver: '{}' (supported: json-file, none)",
+                s
+            )),
         }
     }
 }
@@ -95,9 +93,15 @@ fn parse_size(s: &str) -> std::result::Result<u64, String> {
         return Ok(n);
     }
     let (num, mult) = if s.ends_with("gb") || s.ends_with('g') {
-        (s.trim_end_matches("gb").trim_end_matches('g'), 1024u64 * 1024 * 1024)
+        (
+            s.trim_end_matches("gb").trim_end_matches('g'),
+            1024u64 * 1024 * 1024,
+        )
     } else if s.ends_with("mb") || s.ends_with('m') {
-        (s.trim_end_matches("mb").trim_end_matches('m'), 1024u64 * 1024)
+        (
+            s.trim_end_matches("mb").trim_end_matches('m'),
+            1024u64 * 1024,
+        )
     } else if s.ends_with("kb") || s.ends_with('k') {
         (s.trim_end_matches("kb").trim_end_matches('k'), 1024u64)
     } else if s.ends_with('b') {
@@ -115,7 +119,10 @@ mod tests {
 
     #[test]
     fn test_log_driver_from_str() {
-        assert_eq!("json-file".parse::<LogDriver>().unwrap(), LogDriver::JsonFile);
+        assert_eq!(
+            "json-file".parse::<LogDriver>().unwrap(),
+            LogDriver::JsonFile
+        );
         assert_eq!("none".parse::<LogDriver>().unwrap(), LogDriver::None);
         assert!("unknown".parse::<LogDriver>().is_err());
     }
@@ -131,8 +138,12 @@ mod tests {
     #[test]
     fn test_log_config_custom_options() {
         let mut config = LogConfig::default();
-        config.options.insert("max-size".to_string(), "50m".to_string());
-        config.options.insert("max-file".to_string(), "5".to_string());
+        config
+            .options
+            .insert("max-size".to_string(), "50m".to_string());
+        config
+            .options
+            .insert("max-file".to_string(), "5".to_string());
         assert_eq!(config.max_size(), 50 * 1024 * 1024);
         assert_eq!(config.max_file(), 5);
     }

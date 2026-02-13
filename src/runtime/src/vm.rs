@@ -9,12 +9,15 @@ use a3s_box_core::event::{BoxEvent, EventEmitter};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::cache::RootfsCache;
 use crate::grpc::{AgentClient, AttestationClient, ExecClient};
+use crate::network::PasstManager;
 use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
-use crate::vmm::{Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmController, VmHandler, DEFAULT_SHUTDOWN_TIMEOUT_MS};
-use crate::cache::RootfsCache;
-use crate::network::PasstManager;
+use crate::vmm::{
+    Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmController,
+    VmHandler, DEFAULT_SHUTDOWN_TIMEOUT_MS,
+};
 use crate::AGENT_VSOCK_PORT;
 
 /// Box state machine.
@@ -187,9 +190,10 @@ impl VmManager {
         }
         drop(state);
 
-        let client = self.exec_client.as_ref().ok_or_else(|| {
-            BoxError::ExecError("Exec client not connected".to_string())
-        })?;
+        let client = self
+            .exec_client
+            .as_ref()
+            .ok_or_else(|| BoxError::ExecError("Exec client not connected".to_string()))?;
 
         let request = a3s_box_core::exec::ExecRequest {
             cmd,
@@ -221,11 +225,7 @@ impl VmManager {
         let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
         let resolv_path = layout.rootfs_path.join("etc/resolv.conf");
         std::fs::write(&resolv_path, &resolv_content).map_err(|e| {
-            BoxError::Other(format!(
-                "Failed to write {}: {}",
-                resolv_path.display(),
-                e
-            ))
+            BoxError::Other(format!("Failed to write {}: {}", resolv_path.display(), e))
         })?;
         tracing::debug!(dns = %resolv_content.trim(), "Configured guest DNS");
 
@@ -282,18 +282,13 @@ impl VmManager {
 
     /// Set up bridge networking by looking up the network, spawning passt,
     /// and building the NetworkInstanceConfig for the VM spec.
-    fn setup_bridge_network(
-        &mut self,
-        network_name: &str,
-    ) -> Result<NetworkInstanceConfig> {
+    fn setup_bridge_network(&mut self, network_name: &str) -> Result<NetworkInstanceConfig> {
         use crate::network::NetworkStore;
 
         let store = NetworkStore::default_path()?;
-        let net_config = store
-            .get(network_name)?
-            .ok_or_else(|| BoxError::NetworkError(format!(
-                "network '{}' not found", network_name
-            )))?;
+        let net_config = store.get(network_name)?.ok_or_else(|| {
+            BoxError::NetworkError(format!("network '{}' not found", network_name))
+        })?;
 
         // Find this box's endpoint in the network
         let endpoint = net_config
@@ -317,12 +312,17 @@ impl VmManager {
 
         // Parse MAC address from hex string "02:42:0a:58:00:02" → [u8; 6]
         let mac_address = parse_mac(&endpoint.mac_address).map_err(|e| {
-            BoxError::NetworkError(format!("invalid MAC address '{}': {}", endpoint.mac_address, e))
+            BoxError::NetworkError(format!(
+                "invalid MAC address '{}': {}",
+                endpoint.mac_address, e
+            ))
         })?;
 
         // Determine DNS servers
         let dns_servers: Vec<std::net::Ipv4Addr> = if !self.config.dns.is_empty() {
-            self.config.dns.iter()
+            self.config
+                .dns
+                .iter()
                 .filter_map(|s| s.parse().ok())
                 .collect()
         } else {
@@ -358,11 +358,7 @@ impl VmManager {
     ///
     /// Looks up the box's own endpoint and all peer endpoints in the network,
     /// then generates a hosts file mapping IPs to box names.
-    fn write_hosts_file(
-        &self,
-        layout: &BoxLayout,
-        network_name: &str,
-    ) -> Result<()> {
+    fn write_hosts_file(&self, layout: &BoxLayout, network_name: &str) -> Result<()> {
         use crate::network::NetworkStore;
 
         let store = NetworkStore::default_path()?;
@@ -384,11 +380,7 @@ impl VmManager {
         let hosts_content = a3s_box_core::dns::generate_hosts_file(&own_ip, &own_name, &peers);
         let hosts_path = layout.rootfs_path.join("etc/hosts");
         std::fs::write(&hosts_path, &hosts_content).map_err(|e| {
-            BoxError::Other(format!(
-                "Failed to write {}: {}",
-                hosts_path.display(),
-                e
-            ))
+            BoxError::Other(format!("Failed to write {}: {}", hosts_path.display(), e))
         })?;
         tracing::debug!(hosts = %hosts_content.trim(), "Configured guest /etc/hosts for DNS discovery");
 
@@ -524,9 +516,7 @@ impl VmManager {
         match *state {
             BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
             BoxState::Created => {
-                return Err(BoxError::AttestationError(
-                    "VM not yet booted".to_string(),
-                ));
+                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
             }
             BoxState::Stopped => {
                 return Err(BoxError::AttestationError("VM is stopped".to_string()));
@@ -546,9 +536,7 @@ impl VmManager {
             .agent_client
             .as_ref()
             .map(|c| c.socket_path().to_path_buf())
-            .ok_or_else(|| {
-                BoxError::AttestationError("Agent client not connected".to_string())
-            })?;
+            .ok_or_else(|| BoxError::AttestationError("Agent client not connected".to_string()))?;
 
         let attest_client = AttestationClient::connect(&socket_path).await?;
         let report = attest_client.get_report(request).await?;
@@ -607,17 +595,16 @@ impl VmManager {
         }
 
         // Canonicalize paths to absolute (libkrun requires absolute paths for virtiofs)
-        let workspace_path =
-            workspace_path
-                .canonicalize()
-                .map_err(|e| BoxError::BoxBootError {
-                    message: format!(
-                        "Failed to resolve workspace path {}: {}",
-                        workspace_path.display(),
-                        e
-                    ),
-                    hint: None,
-                })?;
+        let workspace_path = workspace_path
+            .canonicalize()
+            .map_err(|e| BoxError::BoxBootError {
+                message: format!(
+                    "Failed to resolve workspace path {}: {}",
+                    workspace_path.display(),
+                    e
+                ),
+                hint: None,
+            })?;
         let skills_path = skills_path
             .canonicalize()
             .map_err(|e| BoxError::BoxBootError {
@@ -630,18 +617,17 @@ impl VmManager {
             })?;
 
         // Prepare rootfs based on agent type
-        let (rootfs_path, agent_oci_config, has_guest_init, image_at_root) = match &self.config.agent {
+        let (rootfs_path, agent_oci_config, has_guest_init, image_at_root) = match &self
+            .config
+            .agent
+        {
             AgentType::OciImage { path: agent_path } => {
                 // Use OCI image for agent (extracted under /agent)
                 let rootfs_path = box_dir.join("rootfs");
 
                 // Try rootfs cache first
-                let cache_key = RootfsCache::compute_key(
-                    &agent_path.display().to_string(),
-                    &[],
-                    &[],
-                    &[],
-                );
+                let cache_key =
+                    RootfsCache::compute_key(&agent_path.display().to_string(), &[], &[], &[]);
                 if let Some(cached) = self.try_rootfs_cache(&cache_key, &rootfs_path)? {
                     tracing::info!(
                         cache_key = %&cache_key[..12],
@@ -704,7 +690,11 @@ impl VmManager {
                     let agent_config = builder.agent_config()?;
 
                     // Store in cache for next time
-                    self.store_rootfs_cache(&cache_key, &rootfs_path, &agent_path.display().to_string());
+                    self.store_rootfs_cache(
+                        &cache_key,
+                        &rootfs_path,
+                        &agent_path.display().to_string(),
+                    );
 
                     (rootfs_path, Some(agent_config), has_guest_init, false)
                 }
@@ -713,7 +703,8 @@ impl VmManager {
                 // Pull image from registry and extract at rootfs root.
                 // This preserves absolute symlinks and dynamic linker paths.
                 let images_dir = self.home_dir.join("images");
-                let store = crate::oci::ImageStore::new(&images_dir, crate::DEFAULT_IMAGE_CACHE_SIZE)?;
+                let store =
+                    crate::oci::ImageStore::new(&images_dir, crate::DEFAULT_IMAGE_CACHE_SIZE)?;
                 let puller = crate::oci::ImagePuller::new(
                     std::sync::Arc::new(store),
                     crate::oci::RegistryAuth::from_env(),
@@ -1144,7 +1135,12 @@ impl VmManager {
             // Pass agent configuration via environment variables
             let (agent_exec, agent_args, agent_env) = match &layout.agent_oci_config {
                 Some(oci_config) => {
-                    let (exec, args) = Self::resolve_oci_entrypoint(oci_config, layout.image_at_root, &self.config.cmd, self.config.entrypoint_override.as_deref());
+                    let (exec, args) = Self::resolve_oci_entrypoint(
+                        oci_config,
+                        layout.image_at_root,
+                        &self.config.cmd,
+                        self.config.entrypoint_override.as_deref(),
+                    );
                     (exec, args, oci_config.env.clone())
                 }
                 None => (
@@ -1186,8 +1182,15 @@ impl VmManager {
                 let parts: Vec<&str> = vol.split(':').collect();
                 if parts.len() >= 2 {
                     let guest_path = parts[1];
-                    let mode = if parts.len() >= 3 && parts[2] == "ro" { ":ro" } else { "" };
-                    env.push((format!("A3S_VOL_{}", i), format!("vol{}:{}{}", i, guest_path, mode)));
+                    let mode = if parts.len() >= 3 && parts[2] == "ro" {
+                        ":ro"
+                    } else {
+                        ""
+                    };
+                    env.push((
+                        format!("A3S_VOL_{}", i),
+                        format!("vol{}:{}{}", i, guest_path, mode),
+                    ));
                 }
             }
 
@@ -1226,7 +1229,12 @@ impl VmManager {
             // Direct agent execution (no namespace isolation)
             match &layout.agent_oci_config {
                 Some(oci_config) => {
-                    let (executable, args) = Self::resolve_oci_entrypoint(oci_config, layout.image_at_root, &self.config.cmd, self.config.entrypoint_override.as_deref());
+                    let (executable, args) = Self::resolve_oci_entrypoint(
+                        oci_config,
+                        layout.image_at_root,
+                        &self.config.cmd,
+                        self.config.entrypoint_override.as_deref(),
+                    );
                     let env = oci_config.env.clone();
 
                     tracing::debug!(
@@ -1326,14 +1334,10 @@ impl VmManager {
     ) -> (String, Vec<String>) {
         let oci_entrypoint = match entrypoint_override {
             Some(ep) => ep,
-            None => oci_config
-                .entrypoint
-                .as_ref()
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]),
+            None => oci_config.entrypoint.as_deref().unwrap_or(&[]),
         };
         let oci_cmd = if cmd_override.is_empty() {
-            oci_config.cmd.as_ref().map(|v| v.as_slice()).unwrap_or(&[])
+            oci_config.cmd.as_deref().unwrap_or(&[])
         } else {
             cmd_override
         };
@@ -1416,14 +1420,16 @@ impl VmManager {
                 hint: None,
             })?;
         }
-        let host_path = host_path.canonicalize().map_err(|e| BoxError::BoxBootError {
-            message: format!(
-                "Failed to resolve volume path {}: {}",
-                host_path.display(),
-                e
-            ),
-            hint: None,
-        })?;
+        let host_path = host_path
+            .canonicalize()
+            .map_err(|e| BoxError::BoxBootError {
+                message: format!(
+                    "Failed to resolve volume path {}: {}",
+                    host_path.display(),
+                    e
+                ),
+                hint: None,
+            })?;
 
         // Use a unique tag for each user volume
         let tag = format!("vol{}", index);
@@ -1457,7 +1463,9 @@ impl VmManager {
         }
 
         let mut config = a3s_box_core::volume::VolumeConfig::new(name, "");
-        config.labels.insert("anonymous".to_string(), "true".to_string());
+        config
+            .labels
+            .insert("anonymous".to_string(), "true".to_string());
         config.attach(&self.box_id);
         let created = store.create(config)?;
         Ok(created.mount_point)
@@ -1531,22 +1539,20 @@ impl VmManager {
         let mut last_err = None;
         while start.elapsed().as_millis() < MAX_WAIT_MS as u128 {
             match AgentClient::connect(socket_path).await {
-                Ok(client) => {
-                    match client.health_check().await {
-                        Ok(true) => {
-                            tracing::debug!("Guest agent health check passed");
-                            self.agent_client = Some(client);
-                            return Ok(());
-                        }
-                        Ok(false) => {
-                            tracing::debug!("Guest agent reported unhealthy, retrying");
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "Health check RPC failed, retrying");
-                            last_err = Some(e);
-                        }
+                Ok(client) => match client.health_check().await {
+                    Ok(true) => {
+                        tracing::debug!("Guest agent health check passed");
+                        self.agent_client = Some(client);
+                        return Ok(());
                     }
-                }
+                    Ok(false) => {
+                        tracing::debug!("Guest agent reported unhealthy, retrying");
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Health check RPC failed, retrying");
+                        last_err = Some(e);
+                    }
+                },
                 Err(e) => {
                     tracing::debug!(error = %e, "Failed to connect to agent, retrying");
                     last_err = Some(e);
@@ -1563,8 +1569,7 @@ impl VmManager {
                 }
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(HEALTH_CHECK_INTERVAL_MS))
-                .await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(HEALTH_CHECK_INTERVAL_MS)).await;
         }
 
         Err(BoxError::TimeoutError(format!(
@@ -1665,8 +1670,8 @@ fn parse_mac(mac_str: &str) -> std::result::Result<[u8; 6], String> {
 
     let mut mac = [0u8; 6];
     for (i, part) in parts.iter().enumerate() {
-        mac[i] = u8::from_str_radix(part, 16)
-            .map_err(|e| format!("invalid octet '{}': {}", part, e))?;
+        mac[i] =
+            u8::from_str_radix(part, 16).map_err(|e| format!("invalid octet '{}': {}", part, e))?;
     }
     Ok(mac)
 }
@@ -1745,14 +1750,20 @@ mod tests {
 
         let result = VmManager::parse_volume_mount(&volume, 0);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid volume mode"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid volume mode"));
     }
 
     #[test]
     fn test_parse_volume_mount_invalid_format() {
         let result = VmManager::parse_volume_mount("invalid", 0);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid volume format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid volume format"));
     }
 
     #[test]
@@ -1792,7 +1803,11 @@ mod tests {
     fn test_resolve_oci_entrypoint_cmd_only() {
         let config = OciImageConfig {
             entrypoint: None,
-            cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), "echo hi".to_string()]),
+            cmd: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string(),
+            ]),
             env: vec![],
             working_dir: None,
             user: None,
@@ -1889,7 +1904,8 @@ mod tests {
 
         // Override replaces the image entrypoint entirely
         let override_ep = vec!["/bin/sh".to_string(), "-c".to_string()];
-        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], Some(&override_ep));
+        let (exec, args) =
+            VmManager::resolve_oci_entrypoint(&config, true, &[], Some(&override_ep));
         assert_eq!(exec, "/bin/sh");
         // args = entrypoint[1:] + cmd
         assert_eq!(args, vec!["-c", "--flag"]);
@@ -1914,7 +1930,8 @@ mod tests {
         // Both entrypoint and cmd overridden
         let override_ep = vec!["/bin/sh".to_string()];
         let cmd_override = vec!["echo".to_string(), "hello".to_string()];
-        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &cmd_override, Some(&override_ep));
+        let (exec, args) =
+            VmManager::resolve_oci_entrypoint(&config, true, &cmd_override, Some(&override_ep));
         assert_eq!(exec, "/bin/sh");
         assert_eq!(args, vec!["echo", "hello"]);
     }
@@ -2009,7 +2026,10 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap(), target);
         assert!(target.join("agent.bin").is_file());
-        assert_eq!(std::fs::read_to_string(target.join("agent.bin")).unwrap(), "binary");
+        assert_eq!(
+            std::fs::read_to_string(target.join("agent.bin")).unwrap(),
+            "binary"
+        );
     }
 
     #[test]
@@ -2130,8 +2150,14 @@ mod tests {
         let result = vm.try_rootfs_cache("roundtrip_key", &target2).unwrap();
         assert!(result.is_some());
         assert!(target2.join("init").is_file());
-        assert_eq!(std::fs::read_to_string(target2.join("init")).unwrap(), "init_binary");
-        assert_eq!(std::fs::read_to_string(target2.join("etc/config")).unwrap(), "config_data");
+        assert_eq!(
+            std::fs::read_to_string(target2.join("init")).unwrap(),
+            "init_binary"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target2.join("etc/config")).unwrap(),
+            "config_data"
+        );
     }
 
     #[test]

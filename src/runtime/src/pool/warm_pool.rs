@@ -9,8 +9,8 @@ use std::time::Instant;
 use a3s_box_core::config::{BoxConfig, PoolConfig};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::{BoxEvent, EventEmitter};
-use tokio::sync::Mutex;
 use tokio::sync::watch;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::vm::VmManager;
@@ -251,8 +251,7 @@ impl WarmPool {
         let mut stats = self.stats.lock().await;
         stats.idle_count = 0;
 
-        self.event_emitter
-            .emit(BoxEvent::empty("pool.drained"));
+        self.event_emitter.emit(BoxEvent::empty("pool.drained"));
 
         tracing::info!(destroyed = count, "Warm pool drained");
 
@@ -312,8 +311,7 @@ impl WarmPool {
             }
         }
 
-        self.event_emitter
-            .emit(BoxEvent::empty("pool.replenish"));
+        self.event_emitter.emit(BoxEvent::empty("pool.replenish"));
     }
 
     /// Spawn the background maintenance loop.
@@ -583,7 +581,9 @@ mod tests {
         // The error should be about VM boot, not config validation
         match result {
             Err(e) => assert!(!e.to_string().contains("cannot exceed max_size")),
-            Ok(mut pool) => { let _ = pool.drain().await; }
+            Ok(mut pool) => {
+                let _ = pool.drain().await;
+            }
         }
     }
 
@@ -687,30 +687,43 @@ mod tests {
     // --- Maintenance loop check interval calculation ---
 
     #[test]
+    #[allow(clippy::unnecessary_min_or_max)]
     fn test_maintenance_check_interval_with_ttl() {
         // TTL = 300s → check every 60s (300/5)
-        let interval = if 300u64 > 0 { (300u64 / 5).max(5) } else { 30 };
+        let interval = if 300_u64 > 0 {
+            (300_u64 / 5).max(5)
+        } else {
+            30
+        };
         assert_eq!(interval, 60);
     }
 
     #[test]
+    #[allow(clippy::unnecessary_min_or_max)]
     fn test_maintenance_check_interval_short_ttl() {
         // TTL = 10s → check every 5s (min 5)
-        let interval = if 10u64 > 0 { (10u64 / 5).max(5) } else { 30 };
+        let interval = if 10_u64 > 0 { (10_u64 / 5).max(5) } else { 30 };
         assert_eq!(interval, 5);
     }
 
     #[test]
+    #[allow(clippy::unnecessary_min_or_max)]
     fn test_maintenance_check_interval_very_short_ttl() {
         // TTL = 1s → check every 5s (min 5)
-        let interval = if 1u64 > 0 { (1u64 / 5).max(5) } else { 30 };
+        let interval = if 1_u64 > 0 { (1_u64 / 5).max(5) } else { 30 };
         assert_eq!(interval, 5);
     }
 
     #[test]
+    #[allow(
+        clippy::absurd_extreme_comparisons,
+        clippy::erasing_op,
+        clippy::unnecessary_min_or_max,
+        unused_comparisons
+    )]
     fn test_maintenance_check_interval_no_ttl() {
         // TTL = 0 → check every 30s
-        let interval = if 0u64 > 0 { (0u64 / 5).max(5) } else { 30 };
+        let interval = if 0_u64 > 0 { (0_u64 / 5).max(5) } else { 30 };
         assert_eq!(interval, 30);
     }
 

@@ -196,7 +196,8 @@ mod tests {
         // skill2 does NOT exist — should be skipped
 
         let mut mgr = FsManager::new();
-        mgr.setup_default_mounts(&workspace, &[skill1, skill2], &cache).unwrap();
+        mgr.setup_default_mounts(&workspace, &[skill1, skill2], &cache)
+            .unwrap();
 
         // workspace + 1 skill (skill2 skipped) + cache = 3
         assert_eq!(mgr.mounts().len(), 3);

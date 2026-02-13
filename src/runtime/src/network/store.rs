@@ -47,9 +47,8 @@ impl NetworkStore {
             ))
         })?;
 
-        let file: NetworksFile = serde_json::from_str(&data).map_err(|e| {
-            BoxError::NetworkError(format!("failed to parse networks file: {}", e))
-        })?;
+        let file: NetworksFile = serde_json::from_str(&data)
+            .map_err(|e| BoxError::NetworkError(format!("failed to parse networks file: {}", e)))?;
 
         Ok(file.networks)
     }
@@ -71,9 +70,8 @@ impl NetworkStore {
             networks: networks.clone(),
         };
 
-        let json = serde_json::to_string_pretty(&file).map_err(|e| {
-            BoxError::NetworkError(format!("failed to serialize networks: {}", e))
-        })?;
+        let json = serde_json::to_string_pretty(&file)
+            .map_err(|e| BoxError::NetworkError(format!("failed to serialize networks: {}", e)))?;
 
         // Atomic write: write to tmp, then rename
         let tmp_path = self.path.with_extension("json.tmp");
@@ -122,9 +120,9 @@ impl NetworkStore {
     pub fn remove(&self, name: &str) -> Result<NetworkConfig> {
         let mut networks = self.load()?;
 
-        let config = networks.remove(name).ok_or_else(|| {
-            BoxError::NetworkError(format!("network '{}' not found", name))
-        })?;
+        let config = networks
+            .remove(name)
+            .ok_or_else(|| BoxError::NetworkError(format!("network '{}' not found", name)))?;
 
         if !config.endpoints.is_empty() {
             return Err(BoxError::NetworkError(format!(
@@ -167,9 +165,8 @@ impl NetworkStore {
 
 /// Get the A3S home directory (~/.a3s).
 fn dirs_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| {
-        BoxError::NetworkError("HOME environment variable not set".to_string())
-    })?;
+    let home = std::env::var("HOME")
+        .map_err(|_| BoxError::NetworkError("HOME environment variable not set".to_string()))?;
     Ok(PathBuf::from(home).join(".a3s"))
 }
 

@@ -42,10 +42,11 @@ impl SevSnpGeneration {
 }
 
 /// Agent type configuration - specifies how the coding agent is loaded.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentType {
     /// Built-in A3S Code agent (default)
+    #[default]
     A3sCode,
 
     /// OCI image containing the agent
@@ -77,17 +78,12 @@ pub enum AgentType {
     },
 }
 
-impl Default for AgentType {
-    fn default() -> Self {
-        Self::A3sCode
-    }
-}
-
 /// Business code configuration - specifies how business code is loaded.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BusinessType {
     /// No business code (default)
+    #[default]
     None,
 
     /// OCI image containing business code
@@ -101,12 +97,6 @@ pub enum BusinessType {
         /// Path to the directory
         path: PathBuf,
     },
-}
-
-impl Default for BusinessType {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Cache configuration for cold start optimization.

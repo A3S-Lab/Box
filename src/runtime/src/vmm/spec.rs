@@ -333,6 +333,9 @@ mod tests {
         let deserialized: InstanceSpec = serde_json::from_str(&json).unwrap();
 
         assert_eq!(deserialized.resource_limits.pids_limit, Some(100));
-        assert_eq!(deserialized.resource_limits.cpuset_cpus, Some("0-3".to_string()));
+        assert_eq!(
+            deserialized.resource_limits.cpuset_cpus,
+            Some("0-3".to_string())
+        );
     }
 }

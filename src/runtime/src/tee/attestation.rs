@@ -205,12 +205,12 @@ mod tests {
         report[0x04] = 1;
         // policy at offset 0x08
         report[0x08] = 0x30; // SMT + migration allowed
-        // tcb at offset 0x38
+                             // tcb at offset 0x38
         report[0x38] = 3; // boot_loader
         report[0x39] = 0; // tee
         report[0x3E] = 8; // snp
         report[0x3F] = 115; // microcode
-        // measurement at offset 0x90 (48 bytes)
+                            // measurement at offset 0x90 (48 bytes)
         report[0x90] = 0xAB;
         report[0x91] = 0xCD;
 

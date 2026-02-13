@@ -147,7 +147,7 @@ fn format_status(record: &BoxRecord) -> String {
 /// - `label=key=value` — check if the label key has the exact value
 fn match_label(labels: &std::collections::HashMap<String, String>, filter_value: &str) -> bool {
     if let Some((key, value)) = filter_value.split_once('=') {
-        labels.get(key).map_or(false, |v| v == value)
+        labels.get(key).is_some_and(|v| v == value)
     } else {
         labels.contains_key(filter_value)
     }
@@ -155,10 +155,7 @@ fn match_label(labels: &std::collections::HashMap<String, String>, filter_value:
 
 /// Format labels as a comma-separated "key=value" string.
 fn format_labels(labels: &std::collections::HashMap<String, String>) -> String {
-    let mut pairs: Vec<String> = labels
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let mut pairs: Vec<String> = labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
     pairs.sort();
     pairs.join(",")
 }
@@ -187,7 +184,10 @@ mod tests {
             entrypoint: None,
             box_dir: PathBuf::from("/tmp").join(&id),
             socket_path: PathBuf::from("/tmp").join(&id).join("grpc.sock"),
-            exec_socket_path: PathBuf::from("/tmp").join(&id).join("sockets").join("exec.sock"),
+            exec_socket_path: PathBuf::from("/tmp")
+                .join(&id)
+                .join("sockets")
+                .join("exec.sock"),
             console_log: PathBuf::from("/tmp").join(&id).join("console.log"),
             created_at: chrono::Utc::now(),
             started_at: None,

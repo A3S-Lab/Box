@@ -116,12 +116,7 @@ impl RootfsCache {
     ///
     /// Copies the contents of `source_rootfs` into the cache keyed by `key`.
     /// Returns the path to the cached rootfs directory.
-    pub fn put(
-        &self,
-        key: &str,
-        source_rootfs: &Path,
-        description: &str,
-    ) -> Result<PathBuf> {
+    pub fn put(&self, key: &str, source_rootfs: &Path, description: &str) -> Result<PathBuf> {
         let rootfs_dir = self.cache_dir.join(key);
         let meta_path = self.cache_dir.join(format!("{}.meta.json", key));
 
@@ -322,10 +317,10 @@ mod tests {
         let cache = RootfsCache::new(tmp.path()).unwrap();
 
         let source = tmp.path().join("source_rootfs");
-        create_test_rootfs(&source, &[
-            ("bin/agent", "binary"),
-            ("etc/config.json", "{}"),
-        ]);
+        create_test_rootfs(
+            &source,
+            &[("bin/agent", "binary"), ("etc/config.json", "{}")],
+        );
 
         let key = "abc123def456";
         let cached_path = cache.put(key, &source, "test rootfs").unwrap();
@@ -422,7 +417,9 @@ mod tests {
         for i in 0..5 {
             let source = tmp.path().join(format!("s{}", i));
             create_test_rootfs(&source, &[("f.txt", "data")]);
-            cache.put(&format!("key{}", i), &source, &format!("entry {}", i)).unwrap();
+            cache
+                .put(&format!("key{}", i), &source, &format!("entry {}", i))
+                .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -442,7 +439,9 @@ mod tests {
         for i in 0..3 {
             let source = tmp.path().join(format!("s{}", i));
             create_test_rootfs(&source, &[("f.txt", &"x".repeat(100))]);
-            cache.put(&format!("key{}", i), &source, &format!("entry {}", i)).unwrap();
+            cache
+                .put(&format!("key{}", i), &source, &format!("entry {}", i))
+                .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -563,18 +562,10 @@ mod tests {
 
     #[test]
     fn test_compute_key_entrypoint_order_matters() {
-        let key1 = RootfsCache::compute_key(
-            "img",
-            &[],
-            &["/bin/sh".to_string(), "-c".to_string()],
-            &[],
-        );
-        let key2 = RootfsCache::compute_key(
-            "img",
-            &[],
-            &["-c".to_string(), "/bin/sh".to_string()],
-            &[],
-        );
+        let key1 =
+            RootfsCache::compute_key("img", &[], &["/bin/sh".to_string(), "-c".to_string()], &[]);
+        let key2 =
+            RootfsCache::compute_key("img", &[], &["-c".to_string(), "/bin/sh".to_string()], &[]);
         assert_ne!(key1, key2);
     }
 
@@ -583,7 +574,11 @@ mod tests {
         let key = RootfsCache::compute_key(
             "registry.example.com/org/image:v1.0-beta+build.123",
             &["sha256:abc/def".to_string()],
-            &["/bin/sh".to_string(), "-c".to_string(), "echo 'hello world'".to_string()],
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "echo 'hello world'".to_string(),
+            ],
             &[("PATH".to_string(), "/usr/bin:/usr/local/bin".to_string())],
         );
         assert_eq!(key.len(), 64);
@@ -655,7 +650,8 @@ mod tests {
         std::fs::write(
             tmp.path().join(format!("{}.meta.json", key)),
             serde_json::to_string(&meta).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = cache.get(key).unwrap();
         assert!(result.is_none());
@@ -672,7 +668,8 @@ mod tests {
         std::fs::write(
             tmp.path().join(format!("{}.meta.json", key)),
             "not valid json!!!",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Should still return Some (directory + meta file both exist)
         let result = cache.get(key).unwrap();
@@ -724,7 +721,9 @@ mod tests {
         for i in 0..5 {
             let source = tmp.path().join(format!("s{}", i));
             create_test_rootfs(&source, &[("f.txt", &"x".repeat(100))]);
-            cache.put(&format!("key{}", i), &source, &format!("entry {}", i)).unwrap();
+            cache
+                .put(&format!("key{}", i), &source, &format!("entry {}", i))
+                .unwrap();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -783,10 +782,7 @@ mod tests {
         cache.put("valid_key", &source, "valid").unwrap();
 
         // Add corrupted .meta.json
-        std::fs::write(
-            tmp.path().join("corrupted.meta.json"),
-            "not json",
-        ).unwrap();
+        std::fs::write(tmp.path().join("corrupted.meta.json"), "not json").unwrap();
 
         let entries = cache.list_entries().unwrap();
         assert_eq!(entries.len(), 1);
@@ -799,11 +795,14 @@ mod tests {
         let cache = RootfsCache::new(tmp.path()).unwrap();
 
         let source = tmp.path().join("source");
-        create_test_rootfs(&source, &[
-            ("bin/agent", "binary_content"),
-            ("etc/config.json", r#"{"key":"value"}"#),
-            ("lib/deep/nested.so", "shared_object"),
-        ]);
+        create_test_rootfs(
+            &source,
+            &[
+                ("bin/agent", "binary_content"),
+                ("etc/config.json", r#"{"key":"value"}"#),
+                ("lib/deep/nested.so", "shared_object"),
+            ],
+        );
 
         let cached = cache.put("content_key", &source, "content test").unwrap();
 

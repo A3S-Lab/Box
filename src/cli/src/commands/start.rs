@@ -30,10 +30,7 @@ pub async fn execute(args: StartArgs) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
-async fn start_one(
-    state: &mut StateFile,
-    query: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn start_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
     let record = resolve::resolve(state, query)?;
 
     match record.status.as_str() {

@@ -169,8 +169,7 @@ impl LogCollector {
                         let bytes = content.as_bytes();
                         if (bytes.len() as u64) > offset {
                             let new_content = &content[offset as usize..];
-                            let new_lines: Vec<&str> =
-                                new_content.lines().collect();
+                            let new_lines: Vec<&str> = new_content.lines().collect();
 
                             let mut parsed: Vec<LogEntry> = new_lines
                                 .into_iter()

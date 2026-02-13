@@ -17,8 +17,8 @@ pub async fn execute(args: LoadArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = super::open_image_store()?;
 
     // Extract tar to a temporary directory
-    let tmp_dir = tempfile::tempdir()
-        .map_err(|e| format!("Failed to create temp directory: {e}"))?;
+    let tmp_dir =
+        tempfile::tempdir().map_err(|e| format!("Failed to create temp directory: {e}"))?;
 
     let file = std::fs::File::open(&args.input)
         .map_err(|e| format!("Failed to open {}: {e}", args.input))?;
@@ -31,8 +31,8 @@ pub async fn execute(args: LoadArgs) -> Result<(), Box<dyn std::error::Error>> {
     let index_path = tmp_dir.path().join("index.json");
     let index_content = std::fs::read_to_string(&index_path)
         .map_err(|e| format!("Failed to read index.json from archive: {e}"))?;
-    let index: serde_json::Value = serde_json::from_str(&index_content)
-        .map_err(|e| format!("Invalid index.json: {e}"))?;
+    let index: serde_json::Value =
+        serde_json::from_str(&index_content).map_err(|e| format!("Invalid index.json: {e}"))?;
 
     let digest = index["manifests"][0]["digest"]
         .as_str()

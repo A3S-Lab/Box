@@ -127,9 +127,9 @@ fn join_continuation_lines(content: &str) -> Vec<String> {
     let mut current = String::new();
 
     for line in content.lines() {
-        if line.ends_with('\\') {
+        if let Some(stripped) = line.strip_suffix('\\') {
             // Remove trailing backslash and append
-            current.push_str(line[..line.len() - 1].trim_end());
+            current.push_str(stripped.trim_end());
             current.push(' ');
         } else {
             current.push_str(line);
@@ -249,10 +249,7 @@ fn parse_copy(rest: &str, line_num: usize) -> Result<Instruction> {
     // Check for --from=<stage> flag
     let (from, remaining) = if rest.starts_with("--from=") {
         let (flag, after) = split_first_word(rest);
-        let stage = flag
-            .strip_prefix("--from=")
-            .unwrap_or("")
-            .to_string();
+        let stage = flag.strip_prefix("--from=").unwrap_or("").to_string();
         (Some(stage), after)
     } else {
         (None, rest)
@@ -329,11 +326,7 @@ fn parse_entrypoint(rest: &str, line_num: usize) -> Result<Instruction> {
         parse_json_array(rest, line_num)?
     } else {
         // Shell form: wrap in sh -c
-        vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            rest.to_string(),
-        ]
+        vec!["/bin/sh".to_string(), "-c".to_string(), rest.to_string()]
     };
 
     Ok(Instruction::Entrypoint { exec })
@@ -351,11 +344,7 @@ fn parse_cmd(rest: &str, line_num: usize) -> Result<Instruction> {
         parse_json_array(rest, line_num)?
     } else {
         // Shell form: wrap in sh -c
-        vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            rest.to_string(),
-        ]
+        vec!["/bin/sh".to_string(), "-c".to_string(), rest.to_string()]
     };
 
     Ok(Instruction::Cmd { exec })
@@ -439,10 +428,7 @@ fn parse_add(rest: &str, line_num: usize) -> Result<Instruction> {
     // Check for --chown=<user> flag
     let (chown, remaining) = if rest.starts_with("--chown=") {
         let (flag, after) = split_first_word(rest);
-        let user = flag
-            .strip_prefix("--chown=")
-            .unwrap_or("")
-            .to_string();
+        let user = flag.strip_prefix("--chown=").unwrap_or("").to_string();
         (Some(user), after)
     } else {
         (None, rest)
@@ -706,12 +692,12 @@ fn parse_duration_secs(s: &str, line_num: usize) -> Result<u64> {
         return Ok(n);
     }
 
-    let (num_str, suffix) = if s.ends_with('s') {
-        (&s[..s.len() - 1], "s")
-    } else if s.ends_with('m') {
-        (&s[..s.len() - 1], "m")
-    } else if s.ends_with('h') {
-        (&s[..s.len() - 1], "h")
+    let (num_str, suffix) = if let Some(stripped) = s.strip_suffix('s') {
+        (stripped, "s")
+    } else if let Some(stripped) = s.strip_suffix('m') {
+        (stripped, "m")
+    } else if let Some(stripped) = s.strip_suffix('h') {
+        (stripped, "h")
     } else {
         return Err(BoxError::BuildError(format!(
             "Line {}: Invalid duration '{}' (use s/m/h suffix)",
@@ -1083,7 +1069,9 @@ mod tests {
         let content = "FROM alpine:3.19\nCMD [\"echo\", \"hello\"]";
         let df = Dockerfile::parse(content).unwrap();
         assert_eq!(df.instructions.len(), 2);
-        assert!(matches!(&df.instructions[0], Instruction::From { image, .. } if image == "alpine:3.19"));
+        assert!(
+            matches!(&df.instructions[0], Instruction::From { image, .. } if image == "alpine:3.19")
+        );
     }
 
     #[test]
@@ -1245,8 +1233,7 @@ CMD ["app.py"]
 
     #[test]
     fn test_parse_shell_powershell() {
-        let result =
-            parse_shell(r#"["powershell", "-command"]"#, 1).unwrap();
+        let result = parse_shell(r#"["powershell", "-command"]"#, 1).unwrap();
         assert_eq!(
             result,
             Instruction::Shell {
@@ -1360,12 +1347,15 @@ CMD ["app.py"]
 
     #[test]
     fn test_parse_healthcheck_json_cmd() {
-        let result =
-            parse_healthcheck(r#"CMD ["curl", "-f", "http://localhost/"]"#, 1).unwrap();
+        let result = parse_healthcheck(r#"CMD ["curl", "-f", "http://localhost/"]"#, 1).unwrap();
         if let Instruction::HealthCheck { cmd, .. } = &result {
             assert_eq!(
                 cmd.as_ref().unwrap(),
-                &vec!["curl".to_string(), "-f".to_string(), "http://localhost/".to_string()]
+                &vec![
+                    "curl".to_string(),
+                    "-f".to_string(),
+                    "http://localhost/".to_string()
+                ]
             );
         } else {
             panic!("Expected HealthCheck");
@@ -1509,7 +1499,10 @@ CMD ["app.py"]
         let content = "FROM alpine\nHEALTHCHECK CMD curl -f http://localhost/";
         let df = Dockerfile::parse(content).unwrap();
         assert_eq!(df.instructions.len(), 2);
-        assert!(matches!(&df.instructions[1], Instruction::HealthCheck { cmd: Some(_), .. }));
+        assert!(matches!(
+            &df.instructions[1],
+            Instruction::HealthCheck { cmd: Some(_), .. }
+        ));
     }
 
     #[test]
@@ -1517,7 +1510,9 @@ CMD ["app.py"]
         let content = "FROM alpine\nVOLUME /data";
         let df = Dockerfile::parse(content).unwrap();
         assert_eq!(df.instructions.len(), 2);
-        assert!(matches!(&df.instructions[1], Instruction::Volume { paths } if paths == &["/data".to_string()]));
+        assert!(
+            matches!(&df.instructions[1], Instruction::Volume { paths } if paths == &["/data".to_string()])
+        );
     }
 
     #[test]
@@ -1533,7 +1528,9 @@ CMD ["app.py"]
         let content = "FROM alpine\nSTOPSIGNAL SIGKILL";
         let df = Dockerfile::parse(content).unwrap();
         assert_eq!(df.instructions.len(), 2);
-        assert!(matches!(&df.instructions[1], Instruction::StopSignal { signal } if signal == "SIGKILL"));
+        assert!(
+            matches!(&df.instructions[1], Instruction::StopSignal { signal } if signal == "SIGKILL")
+        );
     }
 
     #[test]

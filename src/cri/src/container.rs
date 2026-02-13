@@ -94,10 +94,7 @@ impl ContainerStore {
                     }
                 }
                 if let Some(filter) = label_filter {
-                    if !filter
-                        .iter()
-                        .all(|(k, v)| c.labels.get(k).map_or(false, |cv| cv == v))
-                    {
+                    if !filter.iter().all(|(k, v)| c.labels.get(k) == Some(v)) {
                         return false;
                     }
                 }
@@ -131,12 +128,7 @@ impl ContainerStore {
     }
 
     /// Update container timestamps and exit code when exited.
-    pub async fn mark_exited(
-        &self,
-        id: &str,
-        finished_at: i64,
-        exit_code: i32,
-    ) -> bool {
+    pub async fn mark_exited(&self, id: &str, finished_at: i64, exit_code: i32) -> bool {
         let mut store = self.containers.write().await;
         if let Some(c) = store.get_mut(id) {
             c.state = ContainerState::Exited;
@@ -157,9 +149,7 @@ impl ContainerStore {
             .map(|c| c.id.clone())
             .collect();
 
-        ids.iter()
-            .filter_map(|id| store.remove(id))
-            .collect()
+        ids.iter().filter_map(|id| store.remove(id)).collect()
     }
 }
 

@@ -10,9 +10,7 @@ use std::sync::Arc;
 use a3s_box_core::error::{BoxError, Result};
 
 use super::dockerfile::{Dockerfile, Instruction};
-use super::layer::{
-    create_layer, create_layer_from_dir, sha256_bytes, sha256_file, LayerInfo,
-};
+use super::layer::{create_layer, create_layer_from_dir, sha256_bytes, sha256_file, LayerInfo};
 use crate::oci::image::OciImageConfig;
 use crate::oci::layers::extract_layer;
 use crate::oci::store::ImageStore;
@@ -141,10 +139,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
     let dockerfile = Dockerfile::from_file(&config.dockerfile_path)?;
 
     if !config.quiet {
-        println!(
-            "Building from {}",
-            config.dockerfile_path.display()
-        );
+        println!("Building from {}", config.dockerfile_path.display());
     }
 
     // Split instructions into stages by FROM
@@ -155,9 +150,8 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
     let mut completed_stages: Vec<(Option<String>, PathBuf)> = Vec::new();
 
     // Create temp directory for build workspace
-    let build_dir = tempfile::TempDir::new().map_err(|e| {
-        BoxError::BuildError(format!("Failed to create build directory: {}", e))
-    })?;
+    let build_dir = tempfile::TempDir::new()
+        .map_err(|e| BoxError::BuildError(format!("Failed to create build directory: {}", e)))?;
 
     let mut final_state = BuildState::new(config.build_args.clone());
     let mut final_base_layers: Vec<LayerInfo> = Vec::new();
@@ -192,22 +186,23 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                         if total_stages > 1 {
                             println!(
                                 "Step {}/{}: FROM {} (stage {}/{}{})",
-                                step, total_instructions, image,
-                                stage_idx + 1, total_stages,
-                                alias.as_ref().map(|a| format!(" as {}", a)).unwrap_or_default()
+                                step,
+                                total_instructions,
+                                image,
+                                stage_idx + 1,
+                                total_stages,
+                                alias
+                                    .as_ref()
+                                    .map(|a| format!(" as {}", a))
+                                    .unwrap_or_default()
                             );
                         } else {
                             println!("Step {}/{}: FROM {}", step, total_instructions, image);
                         }
                     }
-                    let (layers, diff_ids, base_config) = handle_from(
-                        image,
-                        &rootfs_dir,
-                        &layers_dir,
-                        &store,
-                        &state.build_args,
-                    )
-                    .await?;
+                    let (layers, diff_ids, base_config) =
+                        handle_from(image, &rootfs_dir, &layers_dir, &store, &state.build_args)
+                            .await?;
                     base_layers = layers;
                     base_diff_ids = diff_ids;
 
@@ -216,7 +211,10 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
                     // Execute ONBUILD triggers from base image
                     if !base_config.onbuild.is_empty() && !config.quiet {
-                        println!("  Executing {} ONBUILD trigger(s) from base image", base_config.onbuild.len());
+                        println!(
+                            "  Executing {} ONBUILD trigger(s) from base image",
+                            base_config.onbuild.len()
+                        );
                     }
                     for trigger in &base_config.onbuild {
                         execute_onbuild_trigger(
@@ -241,7 +239,11 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                         if !config.quiet {
                             println!(
                                 "Step {}/{}: COPY --from={} {} {}",
-                                step, total_instructions, from_ref, src.join(" "), dst
+                                step,
+                                total_instructions,
+                                from_ref,
+                                src.join(" "),
+                                dst
                             );
                         }
                         let from_rootfs = resolve_stage_rootfs(from_ref, &completed_stages)?;
@@ -257,12 +259,23 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                         state.diff_ids.push(compute_diff_id(&layer_info.path)?);
                         state.layers.push(layer_info);
                         state.history.push(HistoryEntry {
-                            created_by: format!("COPY --from={} {} {}", from_ref, src.join(" "), dst),
+                            created_by: format!(
+                                "COPY --from={} {} {}",
+                                from_ref,
+                                src.join(" "),
+                                dst
+                            ),
                             empty_layer: false,
                         });
                     } else {
                         if !config.quiet {
-                            println!("Step {}/{}: COPY {} {}", step, total_instructions, src.join(" "), dst);
+                            println!(
+                                "Step {}/{}: COPY {} {}",
+                                step,
+                                total_instructions,
+                                src.join(" "),
+                                dst
+                            );
                         }
                         let layer_info = handle_copy(
                             src,
@@ -284,7 +297,13 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
                 Instruction::Add { src, dst, chown } => {
                     if !config.quiet {
-                        println!("Step {}/{}: ADD {} {}", step, total_instructions, src.join(" "), dst);
+                        println!(
+                            "Step {}/{}: ADD {} {}",
+                            step,
+                            total_instructions,
+                            src.join(" "),
+                            dst
+                        );
                     }
                     let layer_info = handle_add(
                         src,
@@ -348,7 +367,10 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
                 Instruction::Env { key, value } => {
                     if !config.quiet {
-                        println!("Step {}/{}: ENV {}={}", step, total_instructions, key, value);
+                        println!(
+                            "Step {}/{}: ENV {}={}",
+                            step, total_instructions, key, value
+                        );
                     }
                     let expanded_value = expand_args(value, &state.build_args);
                     if let Some(existing) = state.env.iter_mut().find(|(k, _)| k == key) {
@@ -364,7 +386,10 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
                 Instruction::Entrypoint { exec } => {
                     if !config.quiet {
-                        println!("Step {}/{}: ENTRYPOINT {:?}", step, total_instructions, exec);
+                        println!(
+                            "Step {}/{}: ENTRYPOINT {:?}",
+                            step, total_instructions, exec
+                        );
                     }
                     state.entrypoint = Some(exec.clone());
                     state.history.push(HistoryEntry {
@@ -397,7 +422,10 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
                 Instruction::Label { key, value } => {
                     if !config.quiet {
-                        println!("Step {}/{}: LABEL {}={}", step, total_instructions, key, value);
+                        println!(
+                            "Step {}/{}: LABEL {}={}",
+                            step, total_instructions, key, value
+                        );
                     }
                     state.labels.insert(key.clone(), value.clone());
                     state.history.push(HistoryEntry {
@@ -445,7 +473,10 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
                 Instruction::StopSignal { signal } => {
                     if !config.quiet {
-                        println!("Step {}/{}: STOPSIGNAL {}", step, total_instructions, signal);
+                        println!(
+                            "Step {}/{}: STOPSIGNAL {}",
+                            step, total_instructions, signal
+                        );
                     }
                     state.stop_signal = Some(signal.clone());
                     state.history.push(HistoryEntry {
@@ -454,7 +485,13 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                     });
                 }
 
-                Instruction::HealthCheck { cmd, interval, timeout, retries, start_period } => {
+                Instruction::HealthCheck {
+                    cmd,
+                    interval,
+                    timeout,
+                    retries,
+                    start_period,
+                } => {
                     if !config.quiet {
                         if cmd.is_some() {
                             println!("Step {}/{}: HEALTHCHECK CMD ...", step, total_instructions);
@@ -494,7 +531,12 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
                 Instruction::Volume { paths } => {
                     if !config.quiet {
-                        println!("Step {}/{}: VOLUME {}", step, total_instructions, paths.join(" "));
+                        println!(
+                            "Step {}/{}: VOLUME {}",
+                            step,
+                            total_instructions,
+                            paths.join(" ")
+                        );
                     }
                     for p in paths {
                         if !state.volumes.contains(p) {
@@ -530,7 +572,9 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         .clone()
         .unwrap_or_else(|| "a3s-build:latest".to_string());
 
-    let final_layers_dir = build_dir.path().join(format!("layers_{}", total_stages - 1));
+    let final_layers_dir = build_dir
+        .path()
+        .join(format!("layers_{}", total_stages - 1));
 
     let result = assemble_image(
         &reference,
@@ -703,10 +747,7 @@ fn handle_copy(
         })?;
     } else if let Some(parent) = dst_in_rootfs.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to create parent directory: {}",
-                e
-            ))
+            BoxError::BuildError(format!("Failed to create parent directory: {}", e))
         })?;
     }
 
@@ -762,9 +803,7 @@ fn handle_copy(
         )];
         create_layer(rootfs_dir, &changed, &layer_path)
     } else {
-        Err(BoxError::BuildError(
-            "Invalid COPY destination".to_string(),
-        ))
+        Err(BoxError::BuildError("Invalid COPY destination".to_string()))
     }
 }
 
@@ -772,6 +811,7 @@ fn handle_copy(
 ///
 /// On Linux, uses chroot. On macOS, skips with a warning.
 /// Returns Some(LayerInfo) if a layer was created, None if skipped.
+#[allow(clippy::too_many_arguments)]
 fn handle_run(
     command: &str,
     _rootfs_dir: &Path,
@@ -784,9 +824,7 @@ fn handle_run(
 ) -> Result<Option<LayerInfo>> {
     if cfg!(target_os = "macos") {
         if !quiet {
-            println!(
-                "  ⚠ RUN skipped on macOS (Linux rootfs cannot be executed on macOS host)"
-            );
+            println!("  ⚠ RUN skipped on macOS (Linux rootfs cannot be executed on macOS host)");
             println!("    Command: {}", command);
         }
         return Ok(None);
@@ -823,18 +861,18 @@ fn handle_run(
 
         // Set environment
         cmd.env_clear();
-        cmd.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        cmd.env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        );
         cmd.env("HOME", "/root");
         for (key, value) in env {
             cmd.env(key, value);
         }
 
-        let output = cmd.output().map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to execute RUN command: {}",
-                e
-            ))
-        })?;
+        let output = cmd
+            .output()
+            .map_err(|e| BoxError::BuildError(format!("Failed to execute RUN command: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -862,7 +900,7 @@ fn handle_run(
 
         let layer_path = layers_dir.join(format!("layer_{}.tar.gz", layer_index));
         let layer_info = create_layer(rootfs_dir, &changed, &layer_path)?;
-        return Ok(Some(layer_info));
+        Ok(Some(layer_info))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -870,6 +908,7 @@ fn handle_run(
 }
 
 /// Handle ADD: like COPY but supports URL download and tar auto-extraction.
+#[allow(clippy::too_many_arguments)]
 fn handle_add(
     src_patterns: &[String],
     dst: &str,
@@ -894,10 +933,7 @@ fn handle_add(
         })?;
     } else if let Some(parent) = dst_in_rootfs.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to create parent directory: {}",
-                e
-            ))
+            BoxError::BuildError(format!("Failed to create parent directory: {}", e))
         })?;
     }
 
@@ -959,9 +995,7 @@ fn handle_add(
         )];
         create_layer(rootfs_dir, &changed, &layer_path)
     } else {
-        Err(BoxError::BuildError(
-            "Invalid ADD destination".to_string(),
-        ))
+        Err(BoxError::BuildError("Invalid ADD destination".to_string()))
     }
 }
 
@@ -996,10 +1030,7 @@ fn extract_tar_to_dst(archive_path: &Path, dst: &Path) -> Result<()> {
         ))
     })?;
 
-    let name = archive_path
-        .to_str()
-        .unwrap_or("")
-        .to_lowercase();
+    let name = archive_path.to_str().unwrap_or("").to_lowercase();
 
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         let decoder = GzDecoder::new(BufReader::new(file));
@@ -1031,9 +1062,8 @@ fn extract_tar_to_dst(archive_path: &Path, dst: &Path) -> Result<()> {
                 .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("archive")),
         );
-        std::fs::copy(archive_path, &target).map_err(|e| {
-            BoxError::BuildError(format!("Failed to copy archive: {}", e))
-        })?;
+        std::fs::copy(archive_path, &target)
+            .map_err(|e| BoxError::BuildError(format!("Failed to copy archive: {}", e)))?;
     }
 
     Ok(())
@@ -1162,9 +1192,8 @@ async fn assemble_image(
     // Create output directory
     let output_dir = layers_dir.join("_output");
     let blobs_dir = output_dir.join("blobs").join("sha256");
-    std::fs::create_dir_all(&blobs_dir).map_err(|e| {
-        BoxError::BuildError(format!("Failed to create output blobs dir: {}", e))
-    })?;
+    std::fs::create_dir_all(&blobs_dir)
+        .map_err(|e| BoxError::BuildError(format!("Failed to create output blobs dir: {}", e)))?;
 
     // Collect all layers: base + new
     let mut all_layer_descriptors = Vec::new();
@@ -1174,9 +1203,8 @@ async fn assemble_image(
     for layer in base_layers {
         let blob_path = blobs_dir.join(&layer.digest);
         if !blob_path.exists() {
-            std::fs::copy(&layer.path, &blob_path).map_err(|e| {
-                BoxError::BuildError(format!("Failed to copy base layer: {}", e))
-            })?;
+            std::fs::copy(&layer.path, &blob_path)
+                .map_err(|e| BoxError::BuildError(format!("Failed to copy base layer: {}", e)))?;
         }
         all_layer_descriptors.push(serde_json::json!({
             "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
@@ -1189,9 +1217,8 @@ async fn assemble_image(
     for (i, layer) in state.layers.iter().enumerate() {
         let blob_path = blobs_dir.join(&layer.digest);
         if !blob_path.exists() {
-            std::fs::copy(&layer.path, &blob_path).map_err(|e| {
-                BoxError::BuildError(format!("Failed to copy layer {}: {}", i, e))
-            })?;
+            std::fs::copy(&layer.path, &blob_path)
+                .map_err(|e| BoxError::BuildError(format!("Failed to copy layer {}: {}", i, e)))?;
         }
         all_layer_descriptors.push(serde_json::json!({
             "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
@@ -1243,10 +1270,7 @@ async fn assemble_image(
     // Populate config section
     let config_section = config_obj["config"].as_object_mut().unwrap();
     if !env_list.is_empty() {
-        config_section.insert(
-            "Env".to_string(),
-            serde_json::json!(env_list),
-        );
+        config_section.insert("Env".to_string(), serde_json::json!(env_list));
     }
     if let Some(ref ep) = state.entrypoint {
         config_section.insert("Entrypoint".to_string(), serde_json::json!(ep));
@@ -1255,10 +1279,7 @@ async fn assemble_image(
         config_section.insert("Cmd".to_string(), serde_json::json!(cmd));
     }
     if state.workdir != "/" {
-        config_section.insert(
-            "WorkingDir".to_string(),
-            serde_json::json!(state.workdir),
-        );
+        config_section.insert("WorkingDir".to_string(), serde_json::json!(state.workdir));
     }
     if let Some(ref user) = state.user {
         config_section.insert("User".to_string(), serde_json::json!(user));
@@ -1311,9 +1332,8 @@ async fn assemble_image(
     // Write config blob
     let config_bytes = serde_json::to_vec_pretty(&config_obj)?;
     let config_digest = sha256_bytes(&config_bytes);
-    std::fs::write(blobs_dir.join(&config_digest), &config_bytes).map_err(|e| {
-        BoxError::BuildError(format!("Failed to write config blob: {}", e))
-    })?;
+    std::fs::write(blobs_dir.join(&config_digest), &config_bytes)
+        .map_err(|e| BoxError::BuildError(format!("Failed to write config blob: {}", e)))?;
 
     // Build manifest
     let manifest = serde_json::json!({
@@ -1329,9 +1349,8 @@ async fn assemble_image(
 
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     let manifest_digest = sha256_bytes(&manifest_bytes);
-    std::fs::write(blobs_dir.join(&manifest_digest), &manifest_bytes).map_err(|e| {
-        BoxError::BuildError(format!("Failed to write manifest blob: {}", e))
-    })?;
+    std::fs::write(blobs_dir.join(&manifest_digest), &manifest_bytes)
+        .map_err(|e| BoxError::BuildError(format!("Failed to write manifest blob: {}", e)))?;
 
     // Write index.json
     let index = serde_json::json!({
@@ -1347,18 +1366,14 @@ async fn assemble_image(
         output_dir.join("index.json"),
         serde_json::to_string_pretty(&index)?,
     )
-    .map_err(|e| {
-        BoxError::BuildError(format!("Failed to write index.json: {}", e))
-    })?;
+    .map_err(|e| BoxError::BuildError(format!("Failed to write index.json: {}", e)))?;
 
     // Write oci-layout
     std::fs::write(
         output_dir.join("oci-layout"),
         r#"{"imageLayoutVersion":"1.0.0"}"#,
     )
-    .map_err(|e| {
-        BoxError::BuildError(format!("Failed to write oci-layout: {}", e))
-    })?;
+    .map_err(|e| BoxError::BuildError(format!("Failed to write oci-layout: {}", e)))?;
 
     // Store in image store
     let digest_str = format!("sha256:{}", manifest_digest);
@@ -1411,11 +1426,7 @@ fn resolve_path(workdir: &str, path: &str) -> String {
     if path.starts_with('/') {
         path.to_string()
     } else {
-        format!(
-            "{}/{}",
-            workdir.trim_end_matches('/'),
-            path
-        )
+        format!("{}/{}", workdir.trim_end_matches('/'), path)
     }
 }
 
@@ -1431,12 +1442,8 @@ fn expand_args(s: &str, args: &HashMap<String, String>) -> String {
 
 /// Compute the diff_id (SHA256 of uncompressed layer content).
 fn compute_diff_id(layer_path: &Path) -> Result<String> {
-    let data = std::fs::read(layer_path).map_err(|e| {
-        BoxError::BuildError(format!(
-            "Failed to read layer for diff_id: {}",
-            e
-        ))
-    })?;
+    let data = std::fs::read(layer_path)
+        .map_err(|e| BoxError::BuildError(format!("Failed to read layer for diff_id: {}", e)))?;
 
     // Decompress gzip to get raw tar
     use flate2::read::GzDecoder;
@@ -1447,10 +1454,7 @@ fn compute_diff_id(layer_path: &Path) -> Result<String> {
     std::io::BufReader::new(decoder)
         .read_to_end(&mut uncompressed)
         .map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to decompress layer for diff_id: {}",
-                e
-            ))
+            BoxError::BuildError(format!("Failed to decompress layer for diff_id: {}", e))
         })?;
 
     Ok(sha256_bytes(&uncompressed))
@@ -1467,15 +1471,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     })?;
 
     for entry in std::fs::read_dir(src).map_err(|e| {
-        BoxError::BuildError(format!(
-            "Failed to read directory {}: {}",
-            src.display(),
-            e
-        ))
+        BoxError::BuildError(format!("Failed to read directory {}: {}", src.display(), e))
     })? {
-        let entry = entry.map_err(|e| {
-            BoxError::BuildError(format!("Failed to read entry: {}", e))
-        })?;
+        let entry =
+            entry.map_err(|e| BoxError::BuildError(format!("Failed to read entry: {}", e)))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 

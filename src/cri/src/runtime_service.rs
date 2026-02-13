@@ -25,7 +25,9 @@ use crate::sandbox::{PodSandbox, SandboxState, SandboxStore};
 pub struct BoxRuntimeService {
     sandbox_store: Arc<SandboxStore>,
     container_store: Arc<ContainerStore>,
+    #[allow(dead_code)]
     image_store: Arc<ImageStore>,
+    #[allow(dead_code)]
     image_puller: Arc<ImagePuller>,
     /// Maps sandbox_id → VmManager for running VMs.
     vm_managers: Arc<RwLock<HashMap<String, VmManager>>>,
@@ -85,8 +87,7 @@ impl RuntimeService for BoxRuntimeService {
         );
 
         // Convert CRI config to BoxConfig
-        let box_config =
-            pod_sandbox_config_to_box_config(&config).map_err(box_error_to_status)?;
+        let box_config = pod_sandbox_config_to_box_config(&config).map_err(box_error_to_status)?;
 
         // Create VmManager
         let event_emitter = EventEmitter::new(256);
@@ -136,9 +137,7 @@ impl RuntimeService for BoxRuntimeService {
         let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         for c in &containers {
             if c.state != ContainerState::Exited {
-                self.container_store
-                    .mark_exited(&c.id, now_ns, 137)
-                    .await;
+                self.container_store.mark_exited(&c.id, now_ns, 137).await;
             }
         }
 
@@ -350,9 +349,7 @@ impl RuntimeService for BoxRuntimeService {
             .container_store
             .get(container_id)
             .await
-            .ok_or_else(|| {
-                Status::not_found(format!("Container not found: {}", container_id))
-            })?;
+            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
 
         tracing::info!(
             container_id = %container_id,
@@ -410,9 +407,7 @@ impl RuntimeService for BoxRuntimeService {
             .container_store
             .get(container_id)
             .await
-            .ok_or_else(|| {
-                Status::not_found(format!("Container not found: {}", container_id))
-            })?;
+            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
 
         let state = match container.state {
             ContainerState::Created => crate::cri_api::ContainerState::ContainerCreated,
@@ -501,15 +496,9 @@ impl RuntimeService for BoxRuntimeService {
             })
             .map(|c| {
                 let state = match c.state {
-                    ContainerState::Created => {
-                        crate::cri_api::ContainerState::ContainerCreated
-                    }
-                    ContainerState::Running => {
-                        crate::cri_api::ContainerState::ContainerRunning
-                    }
-                    ContainerState::Exited => {
-                        crate::cri_api::ContainerState::ContainerExited
-                    }
+                    ContainerState::Created => crate::cri_api::ContainerState::ContainerCreated,
+                    ContainerState::Running => crate::cri_api::ContainerState::ContainerRunning,
+                    ContainerState::Exited => crate::cri_api::ContainerState::ContainerExited,
                 };
                 crate::cri_api::Container {
                     id: c.id,
@@ -593,11 +582,9 @@ impl RuntimeService for BoxRuntimeService {
 
         // Get the VmManager for this sandbox
         let vm_managers = self.vm_managers.read().await;
-        let vm = vm_managers
-            .get(&container.sandbox_id)
-            .ok_or_else(|| {
-                Status::not_found(format!("Sandbox not found: {}", container.sandbox_id))
-            })?;
+        let vm = vm_managers.get(&container.sandbox_id).ok_or_else(|| {
+            Status::not_found(format!("Sandbox not found: {}", container.sandbox_id))
+        })?;
 
         // Execute the command via the exec client
         let timeout_ns = if req.timeout > 0 {
@@ -618,10 +605,7 @@ impl RuntimeService for BoxRuntimeService {
         }))
     }
 
-    async fn exec(
-        &self,
-        _request: Request<ExecRequest>,
-    ) -> Result<Response<ExecResponse>, Status> {
+    async fn exec(&self, _request: Request<ExecRequest>) -> Result<Response<ExecResponse>, Status> {
         Err(Status::unimplemented("Exec not yet implemented"))
     }
 

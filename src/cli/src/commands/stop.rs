@@ -41,9 +41,11 @@ async fn stop_one(
     let record = resolve::resolve(state, query)?;
 
     if record.status != "running" {
-        return Err(
-            format!("Box {} is not running (status: {})", record.name, record.status).into(),
-        );
+        return Err(format!(
+            "Box {} is not running (status: {})",
+            record.name, record.status
+        )
+        .into());
     }
 
     let box_id = record.id.clone();

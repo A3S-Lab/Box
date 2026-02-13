@@ -259,10 +259,7 @@ pub fn attach_volumes(
 }
 
 /// Detach named volumes from a box in the VolumeStore.
-pub fn detach_volumes(
-    volume_names: &[String],
-    box_id: &str,
-) {
+pub fn detach_volumes(volume_names: &[String], box_id: &str) {
     if volume_names.is_empty() {
         return;
     }
@@ -282,10 +279,7 @@ mod tests {
 
     fn temp_store() -> (tempfile::TempDir, VolumeStore) {
         let dir = tempfile::tempdir().unwrap();
-        let store = VolumeStore::new(
-            dir.path().join("volumes.json"),
-            dir.path().join("volumes"),
-        );
+        let store = VolumeStore::new(dir.path().join("volumes.json"), dir.path().join("volumes"));
         (dir, store)
     }
 

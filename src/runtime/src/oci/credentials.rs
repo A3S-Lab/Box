@@ -267,8 +267,17 @@ mod tests {
         store.store("quay.io", "u2", "p2").unwrap();
         store.store("ecr.aws", "u3", "p3").unwrap();
 
-        assert_eq!(store.get("ghcr.io").unwrap(), Some(("u1".to_string(), "p1".to_string())));
-        assert_eq!(store.get("quay.io").unwrap(), Some(("u2".to_string(), "p2".to_string())));
-        assert_eq!(store.get("ecr.aws").unwrap(), Some(("u3".to_string(), "p3".to_string())));
+        assert_eq!(
+            store.get("ghcr.io").unwrap(),
+            Some(("u1".to_string(), "p1".to_string()))
+        );
+        assert_eq!(
+            store.get("quay.io").unwrap(),
+            Some(("u2".to_string(), "p2".to_string()))
+        );
+        assert_eq!(
+            store.get("ecr.aws").unwrap(),
+            Some(("u3".to_string(), "p3".to_string()))
+        );
     }
 }

@@ -107,6 +107,7 @@ impl NamespaceConfig {
 
     /// Stub for non-Linux platforms (development only).
     #[cfg(not(target_os = "linux"))]
+    #[allow(dead_code)]
     fn to_clone_flags(&self) -> u32 {
         0 // Placeholder for non-Linux
     }

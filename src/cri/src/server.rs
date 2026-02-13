@@ -28,11 +28,7 @@ pub struct CriServer {
 
 impl CriServer {
     /// Create a new CRI server.
-    pub fn new(
-        socket_path: PathBuf,
-        image_store: Arc<ImageStore>,
-        auth: RegistryAuth,
-    ) -> Self {
+    pub fn new(socket_path: PathBuf, image_store: Arc<ImageStore>, auth: RegistryAuth) -> Self {
         Self {
             socket_path,
             image_store,
@@ -52,14 +48,8 @@ impl CriServer {
             std::fs::create_dir_all(parent)?;
         }
 
-        let runtime_service = BoxRuntimeService::new(
-            self.image_store.clone(),
-            self.auth.clone(),
-        );
-        let image_service = BoxImageService::new(
-            self.image_store.clone(),
-            self.auth.clone(),
-        );
+        let runtime_service = BoxRuntimeService::new(self.image_store.clone(), self.auth.clone());
+        let image_service = BoxImageService::new(self.image_store.clone(), self.auth.clone());
 
         let uds = UnixListener::bind(&self.socket_path)?;
         let uds_stream = UnixListenerStream::new(uds);

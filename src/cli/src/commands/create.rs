@@ -7,7 +7,7 @@ use a3s_box_core::config::ResourceLimits;
 use clap::Args;
 
 use crate::output::parse_memory;
-use crate::state::{BoxRecord, StateFile, generate_name};
+use crate::state::{generate_name, BoxRecord, StateFile};
 
 #[derive(Args)]
 pub struct CreateArgs {
@@ -200,8 +200,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     let (restart_policy, max_restart_count) = crate::state::parse_restart_policy(&args.restart)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    let memory_mb = parse_memory(&args.memory)
-        .map_err(|e| format!("Invalid --memory: {e}"))?;
+    let memory_mb = parse_memory(&args.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
 
     // Build resource limits before any partial moves of args
     let resource_limits = build_resource_limits(&args)?;
@@ -217,22 +216,22 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
-    let labels = parse_env_vars(&args.labels)
-        .map_err(|e| e.replace("environment variable", "label"))?;
+    let labels =
+        parse_env_vars(&args.labels).map_err(|e| e.replace("environment variable", "label"))?;
 
     // Parse health check config (--no-healthcheck disables)
     let health_check = if args.no_healthcheck {
         None
     } else {
-        args.health_cmd.as_ref().map(|cmd| {
-            crate::state::HealthCheck {
+        args.health_cmd
+            .as_ref()
+            .map(|cmd| crate::state::HealthCheck {
                 cmd: vec!["sh".to_string(), "-c".to_string(), cmd.clone()],
                 interval_secs: args.health_interval,
                 timeout_secs: args.health_timeout,
                 retries: args.health_retries,
                 start_period_secs: args.health_start_period,
-            }
-        })
+            })
     };
 
     // Parse --shm-size
@@ -264,9 +263,10 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         resolved_volumes.push(resolved);
     }
 
-    let entrypoint = args.entrypoint.as_ref().map(|ep| {
-        ep.split_whitespace().map(String::from).collect::<Vec<_>>()
-    });
+    let entrypoint = args
+        .entrypoint
+        .as_ref()
+        .map(|ep| ep.split_whitespace().map(String::from).collect::<Vec<_>>());
 
     // Determine network mode
     let network_mode = match &args.network {
@@ -379,12 +379,16 @@ fn parse_env_file(path: &str) -> Result<HashMap<String, String>, Box<dyn std::er
 /// Build ResourceLimits from CLI args.
 fn build_resource_limits(args: &CreateArgs) -> Result<ResourceLimits, Box<dyn std::error::Error>> {
     let memory_reservation = match &args.memory_reservation {
-        Some(s) => Some(parse_memory_bytes(s).map_err(|e| format!("Invalid --memory-reservation: {e}"))?),
+        Some(s) => {
+            Some(parse_memory_bytes(s).map_err(|e| format!("Invalid --memory-reservation: {e}"))?)
+        }
         None => None,
     };
     let memory_swap = match &args.memory_swap {
         Some(s) if s == "-1" => Some(-1i64),
-        Some(s) => Some(parse_memory_bytes(s).map_err(|e| format!("Invalid --memory-swap: {e}"))? as i64),
+        Some(s) => {
+            Some(parse_memory_bytes(s).map_err(|e| format!("Invalid --memory-swap: {e}"))? as i64)
+        }
         None => None,
     };
 

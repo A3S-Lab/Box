@@ -32,12 +32,7 @@ pub fn json_log_path(log_dir: &Path) -> PathBuf {
 }
 
 /// Tail console.log and write Docker-compatible JSON lines to container.json.
-fn run_json_file_processor(
-    console_log: &Path,
-    log_dir: &Path,
-    max_size: u64,
-    max_file: u32,
-) {
+fn run_json_file_processor(console_log: &Path, log_dir: &Path, max_size: u64, max_file: u32) {
     // Wait for console.log to appear
     for _ in 0..300 {
         if console_log.exists() {
@@ -165,10 +160,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.json");
         let mut writer = RotatingWriter::new(&path, 1024, 3).unwrap();
-        writer.write_line(r#"{"log":"hello\n","stream":"stdout","time":"2026-01-01T00:00:00Z"}"#).unwrap();
+        writer
+            .write_line(r#"{"log":"hello\n","stream":"stdout","time":"2026-01-01T00:00:00Z"}"#)
+            .unwrap();
 
         let mut content = String::new();
-        std::fs::File::open(&path).unwrap().read_to_string(&mut content).unwrap();
+        std::fs::File::open(&path)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
         assert!(content.contains("hello"));
     }
 
@@ -180,7 +180,9 @@ mod tests {
         let mut writer = RotatingWriter::new(&path, 50, 2).unwrap();
 
         for i in 0..5 {
-            writer.write_line(&format!(r#"{{"log":"line {}\n"}}"#, i)).unwrap();
+            writer
+                .write_line(&format!(r#"{{"log":"line {}\n"}}"#, i))
+                .unwrap();
         }
 
         // Should have rotated — check .1 exists

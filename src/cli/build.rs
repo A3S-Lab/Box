@@ -8,9 +8,7 @@ fn main() {
     if !libkrun_dir.is_empty() && libkrun_dir != "/nonexistent" {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{libkrun_dir}");
     }
-    if !libkrunfw_dir.is_empty()
-        && libkrunfw_dir != "/nonexistent"
-        && libkrunfw_dir != libkrun_dir
+    if !libkrunfw_dir.is_empty() && libkrunfw_dir != "/nonexistent" && libkrunfw_dir != libkrun_dir
     {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{libkrunfw_dir}");
     }

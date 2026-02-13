@@ -19,7 +19,9 @@ pub struct BootResult {
 ///
 /// On success, returns the new PID. The caller is responsible for updating
 /// the `BoxRecord` state (status, pid, started_at, etc.) and saving.
-pub async fn boot_from_record(record: &BoxRecord) -> Result<BootResult, Box<dyn std::error::Error>> {
+pub async fn boot_from_record(
+    record: &BoxRecord,
+) -> Result<BootResult, Box<dyn std::error::Error>> {
     let config = config_from_record(record);
     let emitter = EventEmitter::new(256);
     let mut vm = VmManager::with_box_id(config, emitter, record.id.clone());
@@ -63,7 +65,11 @@ fn config_from_record(record: &BoxRecord) -> BoxConfig {
         cmd: record.cmd.clone(),
         entrypoint_override: record.entrypoint.clone(),
         volumes: record.volumes.clone(),
-        extra_env: record.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        extra_env: record
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         port_map: record.port_map.clone(),
         network: record.network_mode.clone(),
         tmpfs: record.tmpfs.clone(),
@@ -100,7 +106,10 @@ mod tests {
             entrypoint: Some(vec!["/bin/sh".to_string()]),
             box_dir: PathBuf::from("/tmp/boxes").join(&id),
             socket_path: PathBuf::from("/tmp/boxes").join(&id).join("grpc.sock"),
-            exec_socket_path: PathBuf::from("/tmp/boxes").join(&id).join("sockets").join("exec.sock"),
+            exec_socket_path: PathBuf::from("/tmp/boxes")
+                .join(&id)
+                .join("sockets")
+                .join("exec.sock"),
             console_log: PathBuf::from("/tmp/boxes").join(&id).join("console.log"),
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -172,7 +181,10 @@ mod tests {
         let config = config_from_record(&record);
 
         assert_eq!(config.cmd, vec!["sh", "-c", "echo hi"]);
-        assert_eq!(config.entrypoint_override, Some(vec!["/bin/sh".to_string()]));
+        assert_eq!(
+            config.entrypoint_override,
+            Some(vec!["/bin/sh".to_string()])
+        );
     }
 
     #[test]
@@ -189,7 +201,9 @@ mod tests {
         let record = sample_record();
         let config = config_from_record(&record);
 
-        assert!(config.extra_env.contains(&("FOO".to_string(), "bar".to_string())));
+        assert!(config
+            .extra_env
+            .contains(&("FOO".to_string(), "bar".to_string())));
     }
 
     #[test]

@@ -242,7 +242,10 @@ mod tests {
         };
 
         let result = row.apply_format("{{.Reference}} {{.Digest}} {{.Size}} {{.Pulled}}");
-        assert_eq!(result, "nginx:1.25 sha256:abcdef123456 1.0 KB 5 minutes ago");
+        assert_eq!(
+            result,
+            "nginx:1.25 sha256:abcdef123456 1.0 KB 5 minutes ago"
+        );
     }
 
     #[test]
@@ -270,9 +273,6 @@ mod tests {
             pulled: "5 minutes ago".to_string(),
         };
 
-        assert_eq!(
-            row.apply_format("{{.Tag}}-{{.Tag}}"),
-            "1.25-1.25"
-        );
+        assert_eq!(row.apply_format("{{.Tag}}-{{.Tag}}"), "1.25-1.25");
     }
 }

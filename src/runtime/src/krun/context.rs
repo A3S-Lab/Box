@@ -313,9 +313,8 @@ impl KrunContext {
     pub unsafe fn add_net_unixstream(&self, socket_path: &str, mac: &[u8; 6]) -> Result<()> {
         tracing::debug!(socket_path, mac = ?mac, "Adding virtio-net via passt");
 
-        let path_c = CString::new(socket_path).map_err(|e| BoxError::NetworkError(
-            format!("invalid passt socket path: {}", e),
-        ))?;
+        let path_c = CString::new(socket_path)
+            .map_err(|e| BoxError::NetworkError(format!("invalid passt socket path: {}", e)))?;
 
         // Standard compat features (same as COMPAT_NET_FEATURES in libkrun.h)
         let features: u32 = (1 << 0)   // NET_FEATURE_CSUM
@@ -323,7 +322,7 @@ impl KrunContext {
             | (1 << 7)                   // NET_FEATURE_GUEST_TSO4
             | (1 << 10)                  // NET_FEATURE_GUEST_UFO
             | (1 << 11)                  // NET_FEATURE_HOST_TSO4
-            | (1 << 14);                 // NET_FEATURE_HOST_UFO
+            | (1 << 14); // NET_FEATURE_HOST_UFO
 
         check_status(
             "krun_add_net_unixstream",
@@ -396,9 +395,8 @@ impl KrunContext {
     #[cfg(target_os = "linux")]
     pub unsafe fn set_tee_config(&self, config_path: &str) -> Result<()> {
         tracing::debug!(config_path, "Setting TEE configuration file");
-        let path_c = CString::new(config_path).map_err(|e| BoxError::TeeConfig(format!(
-            "Invalid TEE config path: {}", e
-        )))?;
+        let path_c = CString::new(config_path)
+            .map_err(|e| BoxError::TeeConfig(format!("Invalid TEE config path: {}", e)))?;
         let ret = libkrun_sys::krun_set_tee_config_file(self.ctx_id, path_c.as_ptr());
         if ret < 0 {
             return Err(BoxError::TeeConfig(format!(

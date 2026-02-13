@@ -111,18 +111,13 @@ impl ImageStore {
         source_dir: &Path,
     ) -> Result<StoredImage> {
         // Compute target path from digest
-        let digest_hex = digest
-            .strip_prefix("sha256:")
-            .unwrap_or(digest);
+        let digest_hex = digest.strip_prefix("sha256:").unwrap_or(digest);
         let target_dir = self.store_dir.join("sha256").join(digest_hex);
 
         // Copy source to target if not already present
         if !target_dir.exists() {
             copy_dir_recursive(source_dir, &target_dir).map_err(|e| {
-                BoxError::OciImageError(format!(
-                    "Failed to copy image to store: {}",
-                    e
-                ))
+                BoxError::OciImageError(format!("Failed to copy image to store: {}", e))
             })?;
         }
 
@@ -234,10 +229,7 @@ impl ImageStore {
         })?;
 
         let store_index: StoreIndex = serde_json::from_str(&data).map_err(|e| {
-            BoxError::OciImageError(format!(
-                "Failed to parse image store index: {}",
-                e
-            ))
+            BoxError::OciImageError(format!("Failed to parse image store index: {}", e))
         })?;
 
         let mut index = HashMap::new();
@@ -320,18 +312,10 @@ mod tests {
 
     fn create_test_oci_layout(dir: &Path) {
         std::fs::create_dir_all(dir.join("blobs/sha256")).unwrap();
-        std::fs::write(
-            dir.join("oci-layout"),
-            r#"{"imageLayoutVersion":"1.0.0"}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
         std::fs::write(dir.join("index.json"), r#"{"manifests":[]}"#).unwrap();
         // Write some blob data to have measurable size
-        std::fs::write(
-            dir.join("blobs/sha256/testblob"),
-            "x".repeat(1024),
-        )
-        .unwrap();
+        std::fs::write(dir.join("blobs/sha256/testblob"), "x".repeat(1024)).unwrap();
     }
 
     #[tokio::test]

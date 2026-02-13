@@ -35,9 +35,7 @@ impl ImageReference {
     pub fn parse(reference: &str) -> Result<Self> {
         let reference = reference.trim();
         if reference.is_empty() {
-            return Err(BoxError::OciImageError(
-                "Empty image reference".to_string(),
-            ));
+            return Err(BoxError::OciImageError("Empty image reference".to_string()));
         }
 
         // Split off digest first (@ separator)
@@ -234,16 +232,17 @@ mod tests {
         assert_eq!(r.tag, None);
         assert_eq!(
             r.digest,
-            Some("sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".to_string())
+            Some(
+                "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+                    .to_string()
+            )
         );
     }
 
     #[test]
     fn test_parse_tag_and_digest() {
-        let r = ImageReference::parse(
-            "ghcr.io/a3s-box/code:v0.1.0@sha256:abcdef1234567890",
-        )
-        .unwrap();
+        let r =
+            ImageReference::parse("ghcr.io/a3s-box/code:v0.1.0@sha256:abcdef1234567890").unwrap();
         assert_eq!(r.registry, "ghcr.io");
         assert_eq!(r.repository, "a3s-box/code");
         assert_eq!(r.tag, Some("v0.1.0".to_string()));

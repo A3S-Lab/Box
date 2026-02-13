@@ -48,17 +48,13 @@ impl AgentConfig {
             None => vec!["--listen".to_string(), "vsock://4088".to_string()],
         };
 
-        let workdir =
-            std::env::var("A3S_AGENT_WORKDIR").unwrap_or_else(|_| "/".to_string());
+        let workdir = std::env::var("A3S_AGENT_WORKDIR").unwrap_or_else(|_| "/".to_string());
 
         // Collect A3S_AGENT_ENV_* variables
         let env: Vec<(String, String)> = std::env::vars()
             .filter_map(|(key, value)| {
-                if let Some(stripped) = key.strip_prefix("A3S_AGENT_ENV_") {
-                    Some((stripped.to_string(), value))
-                } else {
-                    None
-                }
+                key.strip_prefix("A3S_AGENT_ENV_")
+                    .map(|stripped| (stripped.to_string(), value))
             })
             .collect();
 
@@ -352,13 +348,7 @@ fn mount_user_volumes() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     MsFlags::empty()
                 };
-                mount(
-                    Some(tag),
-                    guest_path,
-                    Some("virtiofs"),
-                    flags,
-                    None::<&str>,
-                )?;
+                mount(Some(tag), guest_path, Some("virtiofs"), flags, None::<&str>)?;
 
                 index += 1;
             }
@@ -466,10 +456,15 @@ fn wait_for_children() -> Result<(), Box<dyn std::error::Error>> {
             Ok(WaitStatus::Signaled(pid, signal, _)) => {
                 // If we're shutting down, a child killed by signal is expected
                 if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-                    info!("Child process {} terminated by signal {:?} during shutdown", pid, signal);
+                    info!(
+                        "Child process {} terminated by signal {:?} during shutdown",
+                        pid, signal
+                    );
                 } else {
                     error!("Child process {} killed by signal {:?}", pid, signal);
-                    return Err(format!("Child process {} killed by signal {:?}", pid, signal).into());
+                    return Err(
+                        format!("Child process {} killed by signal {:?}", pid, signal).into(),
+                    );
                 }
             }
             Ok(WaitStatus::StillAlive) => {
@@ -513,7 +508,10 @@ fn graceful_shutdown(timeout_ms: u64) {
 
         match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::Exited(pid, status)) => {
-                info!("Child {} exited with status {} during shutdown", pid, status);
+                info!(
+                    "Child {} exited with status {} during shutdown",
+                    pid, status
+                );
             }
             Ok(WaitStatus::Signaled(pid, signal, _)) => {
                 info!("Child {} terminated by {:?} during shutdown", pid, signal);
