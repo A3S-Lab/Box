@@ -403,6 +403,149 @@ impl RaTlsAttestationClient {
     }
 }
 
+/// A secret to inject into the TEE.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SecretEntry {
+    /// Secret name (used as filename in /run/secrets/ and env var name).
+    pub name: String,
+    /// Secret value.
+    pub value: String,
+    /// Whether to set as environment variable in the guest (default: true).
+    #[serde(default = "default_true")]
+    pub set_env: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Response from the guest after secret injection.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SecretInjectionResult {
+    /// Number of secrets successfully injected.
+    pub injected: usize,
+    /// Any non-fatal errors encountered.
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+/// Client for injecting secrets into the TEE via RA-TLS.
+///
+/// Connects to the guest's RA-TLS attestation server, verifies the TEE
+/// during the TLS handshake, then sends secrets over the encrypted channel.
+/// The guest stores secrets in `/run/secrets/` (tmpfs) and optionally
+/// sets them as environment variables.
+#[derive(Debug)]
+pub struct SecretInjector {
+    socket_path: PathBuf,
+}
+
+impl SecretInjector {
+    /// Create a new secret injector for the given attestation socket.
+    pub fn new(socket_path: &Path) -> Self {
+        Self {
+            socket_path: socket_path.to_path_buf(),
+        }
+    }
+
+    /// Inject secrets into the TEE via RA-TLS.
+    ///
+    /// 1. Connects to the guest attestation server
+    /// 2. TLS handshake verifies the TEE (attestation in cert)
+    /// 3. Sends secrets over the verified encrypted channel
+    /// 4. Guest stores secrets in /run/secrets/ and sets env vars
+    ///
+    /// # Arguments
+    /// * `secrets` - List of secrets to inject
+    /// * `policy` - Attestation policy for TEE verification
+    /// * `allow_simulated` - Whether to accept simulated TEE reports
+    pub async fn inject(
+        &self,
+        secrets: &[SecretEntry],
+        policy: crate::tee::AttestationPolicy,
+        allow_simulated: bool,
+    ) -> Result<SecretInjectionResult> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        if secrets.is_empty() {
+            return Ok(SecretInjectionResult {
+                injected: 0,
+                errors: vec![],
+            });
+        }
+
+        // Build RA-TLS client config (attestation verified during handshake)
+        let client_config = crate::tee::ratls::create_client_config(policy, allow_simulated)?;
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        // Connect to attestation socket
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            BoxError::AttestationError(format!(
+                "Failed to connect to RA-TLS server at {}: {}",
+                self.socket_path.display(),
+                e,
+            ))
+        })?;
+
+        // TLS handshake — TEE attestation verified here
+        let server_name = rustls::pki_types::ServerName::try_from("localhost")
+            .map_err(|e| BoxError::AttestationError(format!("Invalid server name: {}", e)))?;
+
+        let mut tls_stream = connector.connect(server_name, stream).await.map_err(|e| {
+            BoxError::AttestationError(format!(
+                "RA-TLS handshake failed (TEE verification failed): {}",
+                e,
+            ))
+        })?;
+
+        // Build and send secret injection request
+        let body = serde_json::json!({ "secrets": secrets });
+        let body_str = serde_json::to_string(&body).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to serialize secrets: {}", e))
+        })?;
+
+        let request = format!(
+            "POST /secrets HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body_str.len(),
+            body_str,
+        );
+
+        tls_stream.write_all(request.as_bytes()).await.map_err(|e| {
+            BoxError::AttestationError(format!("Failed to send secrets: {}", e))
+        })?;
+
+        // Read response
+        let mut response = Vec::with_capacity(4096);
+        tls_stream.read_to_end(&mut response).await.map_err(|e| {
+            BoxError::AttestationError(format!("Failed to read injection response: {}", e))
+        })?;
+
+        let response_str = String::from_utf8_lossy(&response);
+
+        // Parse HTTP body
+        let body_str = response_str
+            .find("\r\n\r\n")
+            .map(|pos| &response_str[pos + 4..])
+            .ok_or_else(|| {
+                BoxError::AttestationError("Malformed injection response".to_string())
+            })?;
+
+        // Check HTTP status
+        if !response_str.starts_with("HTTP/1.1 200") {
+            return Err(BoxError::AttestationError(format!(
+                "Secret injection failed: {}",
+                body_str.chars().take(200).collect::<String>(),
+            )));
+        }
+
+        let result: SecretInjectionResult = serde_json::from_str(body_str).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to parse injection response: {}", e))
+        })?;
+
+        Ok(result)
+    }
+}
+
 /// Client for interactive PTY sessions in the guest over Unix socket.
 ///
 /// Connects to the PTY server (vsock port 4090) and provides async

@@ -208,6 +208,10 @@ fn generate_ratls_config() -> Result<(rustls::ServerConfig, Vec<u8>), Box<dyn st
     Ok((config, cert_der))
 }
 
+/// Directory where injected secrets are stored (tmpfs, never persisted to disk).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const SECRETS_DIR: &str = "/run/secrets";
+
 // ============================================================================
 // TLS connection handler
 // ============================================================================
@@ -215,7 +219,9 @@ fn generate_ratls_config() -> Result<(rustls::ServerConfig, Vec<u8>), Box<dyn st
 /// Handle a single TLS connection over vsock.
 ///
 /// Performs the TLS handshake (which delivers the RA-TLS certificate),
-/// then serves a simple status response.
+/// then routes the request:
+/// - `GET /status` — Returns TEE status
+/// - `POST /secrets` — Receives and stores secrets
 #[cfg(target_os = "linux")]
 fn handle_tls_connection(
     fd: std::os::fd::OwnedFd,
@@ -233,21 +239,21 @@ fn handle_tls_connection(
     let mut tls = rustls::StreamOwned::new(conn, tcp_stream);
 
     // Read client request (after TLS handshake completes)
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; 65536];
     match tls.read(&mut buf) {
         Ok(0) => {
             debug!("RA-TLS client disconnected after handshake");
         }
         Ok(n) => {
+            let request = String::from_utf8_lossy(&buf[..n]);
             debug!("RA-TLS request received ({} bytes)", n);
-            // Respond with simple status
-            let response = b"{\"status\":\"ok\",\"tee\":true}";
-            let http_response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                response.len(),
-            );
-            let _ = tls.write_all(http_response.as_bytes());
-            let _ = tls.write_all(response);
+
+            if request.starts_with("POST /secrets") {
+                handle_secret_injection(&request, &mut tls);
+            } else {
+                // Default: status response
+                send_json_response(&mut tls, 200, b"{\"status\":\"ok\",\"tee\":true}");
+            }
         }
         Err(e) => {
             debug!("RA-TLS read error: {}", e);
@@ -257,6 +263,144 @@ fn handle_tls_connection(
     // Prevent double-close: OwnedFd and TcpStream both own the fd
     std::mem::forget(fd);
     Ok(())
+}
+
+/// Send an HTTP JSON response over TLS.
+#[cfg(target_os = "linux")]
+fn send_json_response(tls: &mut impl Write, status: u16, body: &[u8]) {
+    let status_text = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        500 => "Internal Server Error",
+        _ => "Error",
+    };
+    let header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status, status_text, body.len(),
+    );
+    let _ = tls.write_all(header.as_bytes());
+    let _ = tls.write_all(body);
+}
+
+// ============================================================================
+// Secret injection
+// ============================================================================
+
+/// Secret injection request from the host.
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize)]
+struct SecretInjectionRequest {
+    /// Secrets to inject as key-value pairs.
+    secrets: Vec<SecretEntry>,
+}
+
+/// A single secret entry.
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize)]
+struct SecretEntry {
+    /// Secret name (used as filename and env var name).
+    name: String,
+    /// Secret value.
+    value: String,
+    /// Whether to set as environment variable (default: true).
+    #[serde(default = "default_true")]
+    set_env: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn default_true() -> bool {
+    true
+}
+
+/// Secret injection response.
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+struct SecretInjectionResponse {
+    /// Number of secrets injected.
+    injected: usize,
+    /// Any errors encountered (non-fatal).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<String>,
+}
+
+/// Handle a POST /secrets request: store secrets to /run/secrets/ and set env vars.
+#[cfg(target_os = "linux")]
+fn handle_secret_injection(request: &str, tls: &mut impl Write) {
+    // Parse HTTP body
+    let body = match request.find("\r\n\r\n") {
+        Some(pos) => &request[pos + 4..],
+        None => {
+            let err = b"{\"error\":\"Malformed HTTP request\"}";
+            send_json_response(tls, 400, err);
+            return;
+        }
+    };
+
+    let req: SecretInjectionRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            let err = format!("{{\"error\":\"Invalid JSON: {}\"}}", e);
+            send_json_response(tls, 400, err.as_bytes());
+            return;
+        }
+    };
+
+    let mut injected = 0;
+    let mut errors = Vec::new();
+
+    // Ensure secrets directory exists
+    if let Err(e) = std::fs::create_dir_all(SECRETS_DIR) {
+        let err = format!("{{\"error\":\"Failed to create secrets dir: {}\"}}", e);
+        send_json_response(tls, 500, err.as_bytes());
+        return;
+    }
+
+    for entry in &req.secrets {
+        // Validate name (alphanumeric, underscore, dash, dot only)
+        if !is_valid_secret_name(&entry.name) {
+            errors.push(format!("Invalid secret name: {}", entry.name));
+            continue;
+        }
+
+        // Write to /run/secrets/<name>
+        let path = format!("{}/{}", SECRETS_DIR, entry.name);
+        match std::fs::write(&path, entry.value.as_bytes()) {
+            Ok(()) => {
+                // Set restrictive permissions (owner read only)
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400));
+                }
+
+                // Set environment variable if requested
+                if entry.set_env {
+                    std::env::set_var(&entry.name, &entry.value);
+                }
+
+                injected += 1;
+                info!("Secret injected: {}", entry.name);
+            }
+            Err(e) => {
+                errors.push(format!("Failed to write {}: {}", entry.name, e));
+            }
+        }
+    }
+
+    let response = SecretInjectionResponse { injected, errors };
+    let body = serde_json::to_vec(&response).unwrap_or_else(|_| b"{\"injected\":0}".to_vec());
+    send_json_response(tls, 200, &body);
+}
+
+/// Validate a secret name: alphanumeric, underscore, dash, dot only.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_valid_secret_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !name.contains('/')
+        && !name.contains('\0')
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
 }
 
 // ============================================================================
@@ -665,5 +809,29 @@ mod tests {
         assert_eq!(hex_val(b'9'), 9);
         assert_eq!(hex_val(b'a'), 10);
         assert_eq!(hex_val(b'f'), 15);
+    }
+
+    #[test]
+    fn test_valid_secret_names() {
+        assert!(is_valid_secret_name("API_KEY"));
+        assert!(is_valid_secret_name("my-secret"));
+        assert!(is_valid_secret_name("config.json"));
+        assert!(is_valid_secret_name("a"));
+        assert!(is_valid_secret_name("SECRET_123"));
+    }
+
+    #[test]
+    fn test_invalid_secret_names() {
+        assert!(!is_valid_secret_name(""));
+        assert!(!is_valid_secret_name(".hidden"));
+        assert!(!is_valid_secret_name("path/traversal"));
+        assert!(!is_valid_secret_name("has space"));
+        assert!(!is_valid_secret_name("null\0byte"));
+        assert!(!is_valid_secret_name(&"x".repeat(257)));
+    }
+
+    #[test]
+    fn test_secrets_dir_constant() {
+        assert_eq!(SECRETS_DIR, "/run/secrets");
     }
 }

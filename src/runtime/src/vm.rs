@@ -625,7 +625,62 @@ impl VmManager {
         Ok(result)
     }
 
-    /// Prepare the filesystem layout for the VM.
+    /// Inject secrets into the TEE via RA-TLS.
+    ///
+    /// Connects to the guest's RA-TLS attestation server, verifies the TEE
+    /// during the TLS handshake, then sends secrets over the encrypted channel.
+    /// The guest stores secrets in `/run/secrets/` and optionally sets env vars.
+    ///
+    /// # Arguments
+    /// * `secrets` - List of secrets to inject
+    /// * `allow_simulated` - Whether to accept simulated TEE reports
+    pub async fn inject_secrets(
+        &self,
+        secrets: &[crate::grpc::SecretEntry],
+        allow_simulated: bool,
+    ) -> Result<crate::grpc::SecretInjectionResult> {
+        // Verify VM is in a running state
+        let state = self.state.read().await;
+        match *state {
+            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
+            BoxState::Created => {
+                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
+            }
+            BoxState::Stopped => {
+                return Err(BoxError::AttestationError("VM is stopped".to_string()));
+            }
+        }
+        drop(state);
+
+        // Verify TEE is configured
+        if matches!(self.config.tee, TeeConfig::None) {
+            return Err(BoxError::AttestationError(
+                "TEE is not configured for this box".to_string(),
+            ));
+        }
+
+        let socket_path = self
+            .attest_socket_path
+            .as_ref()
+            .ok_or_else(|| {
+                BoxError::AttestationError(
+                    "Attestation socket not available".to_string(),
+                )
+            })?;
+
+        let policy = crate::tee::AttestationPolicy::default();
+        let injector = crate::grpc::SecretInjector::new(socket_path);
+        let result = injector.inject(secrets, policy, allow_simulated).await?;
+
+        tracing::info!(
+            box_id = %self.box_id,
+            injected = result.injected,
+            errors = result.errors.len(),
+            "Secrets injected into TEE"
+        );
+
+        Ok(result)
+    }
     fn prepare_layout(&self) -> Result<BoxLayout> {
         // Create box-specific directories
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);

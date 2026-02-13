@@ -24,6 +24,7 @@ pub mod volume;
 // Re-export common types
 pub use cache::{LayerCache, RootfsCache};
 pub use grpc::{AgentClient, AttestationClient, ExecClient, PtyClient, RaTlsAttestationClient};
+pub use grpc::{SecretEntry, SecretInjectionResult, SecretInjector};
 pub use host_check::{check_virtualization_support, VirtualizationSupport};
 pub use network::NetworkStore;
 pub use network::PasstManager;
