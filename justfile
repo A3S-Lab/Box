@@ -225,6 +225,43 @@ test-vm *ARGS:
         cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture --test-threads=1
     fi
 
+# Run TEE integration tests (requires built binary + HVF/KVM)
+# Usage: just test-tee                          # run all TEE tests
+#        just test-tee test_tee_seal_unseal_lifecycle  # run a specific test
+test-tee *ARGS:
+    #!/usr/bin/env bash
+    set -e
+    cd src
+
+    # Locate libkrun/libkrunfw dynamic libraries from cargo build output
+    LIBKRUN_LIB=$(ls -td target/debug/build/libkrun-sys-*/out/libkrun/lib 2>/dev/null | head -1)
+    LIBKRUNFW_LIB=$(ls -td target/debug/build/libkrun-sys-*/out/libkrunfw/lib 2>/dev/null | head -1)
+
+    if [ -z "$LIBKRUN_LIB" ] || [ -z "$LIBKRUNFW_LIB" ]; then
+        echo "❌ libkrun not found. Run 'just build' first."
+        exit 1
+    fi
+
+    export DYLD_LIBRARY_PATH="${LIBKRUN_LIB}:${LIBKRUNFW_LIB}"
+    export LD_LIBRARY_PATH="${LIBKRUN_LIB}:${LIBKRUNFW_LIB}"
+
+    # Verify binary works
+    if ! target/debug/a3s-box version >/dev/null 2>&1; then
+        echo "❌ a3s-box binary not working. Run 'just build' first."
+        exit 1
+    fi
+
+    echo "🔒 Running TEE integration tests..."
+    echo "   DYLD_LIBRARY_PATH=${LIBKRUN_LIB}:${LIBKRUNFW_LIB}"
+    echo ""
+
+    ARGS="{{ARGS}}"
+    if [ -n "$ARGS" ]; then
+        cargo test -p a3s-box-cli --test tee_integration -- --ignored --nocapture --test-threads=1 "$ARGS"
+    else
+        cargo test -p a3s-box-cli --test tee_integration -- --ignored --nocapture --test-threads=1
+    fi
+
 # ============================================================================
 # Coverage (requires: cargo install cargo-llvm-cov, brew install lcov)
 # ============================================================================

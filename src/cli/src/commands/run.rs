@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig, ResourceLimits};
+use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig, ResourceLimits, TeeConfig};
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::VmManager;
 use clap::Args;
@@ -224,6 +224,19 @@ pub struct RunArgs {
     /// Tune the host OOM score adjustment (-1000 to 1000)
     #[arg(long)]
     pub oom_score_adj: Option<i32>,
+
+    /// Enable TEE (Trusted Execution Environment) with AMD SEV-SNP.
+    /// Use --tee-simulate for development without hardware support.
+    #[arg(long)]
+    pub tee: bool,
+
+    /// TEE workload identifier for attestation (default: image name)
+    #[arg(long)]
+    pub tee_workload_id: Option<String>,
+
+    /// Enable TEE simulation mode (no AMD SEV-SNP hardware required)
+    #[arg(long)]
+    pub tee_simulate: bool,
 }
 
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -309,6 +322,20 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         None => a3s_box_core::NetworkMode::Tsi,
     };
 
+    // Build TEE config
+    let tee = if args.tee || args.tee_simulate {
+        TeeConfig::SevSnp {
+            workload_id: args
+                .tee_workload_id
+                .clone()
+                .unwrap_or_else(|| args.image.clone()),
+            generation: Default::default(),
+            simulate: args.tee_simulate,
+        }
+    } else {
+        TeeConfig::None
+    };
+
     // Build BoxConfig
     let config = BoxConfig {
         agent: AgentType::OciRegistry {
@@ -328,6 +355,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         network: network_mode.clone(),
         tmpfs: args.tmpfs.clone(),
         resource_limits: resource_limits.clone(),
+        tee,
         ..Default::default()
     };
 
@@ -833,6 +861,9 @@ mod tests {
             no_healthcheck: false,
             oom_kill_disable: false,
             oom_score_adj: None,
+            tee: false,
+            tee_workload_id: None,
+            tee_simulate: false,
         };
 
         let limits = build_resource_limits(&args).unwrap();
@@ -899,6 +930,9 @@ mod tests {
             no_healthcheck: false,
             oom_kill_disable: false,
             oom_score_adj: None,
+            tee: false,
+            tee_workload_id: None,
+            tee_simulate: false,
         };
 
         let limits = build_resource_limits(&args).unwrap();
@@ -967,6 +1001,9 @@ mod tests {
             no_healthcheck: false,
             oom_kill_disable: false,
             oom_score_adj: None,
+            tee: false,
+            tee_workload_id: None,
+            tee_simulate: false,
         };
 
         let limits = build_resource_limits(&args).unwrap();

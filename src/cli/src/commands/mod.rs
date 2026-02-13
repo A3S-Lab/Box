@@ -18,6 +18,7 @@ mod image_prune;
 mod image_tag;
 mod images;
 mod info;
+mod inject_secret;
 mod inspect;
 mod kill;
 mod load;
@@ -37,12 +38,14 @@ mod rm;
 mod rmi;
 mod run;
 mod save;
+mod seal;
 mod start;
 mod stats;
 mod stop;
 mod system_prune;
 mod top;
 mod unpause;
+mod unseal;
 mod version;
 pub mod volume;
 mod wait;
@@ -101,6 +104,12 @@ pub enum Command {
     Attach(attach::AttachArgs),
     /// Request and verify a TEE attestation report from a running box
     Attest(attest::AttestArgs),
+    /// Seal (encrypt) data bound to a TEE's identity
+    Seal(seal::SealArgs),
+    /// Unseal (decrypt) data inside a TEE
+    Unseal(unseal::UnsealArgs),
+    /// Inject secrets into a running TEE box via RA-TLS
+    InjectSecret(inject_secret::InjectSecretArgs),
     /// Block until one or more boxes stop
     Wait(wait::WaitArgs),
     /// Rename a box
@@ -243,6 +252,9 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Inspect(args) => inspect::execute(args).await,
         Command::Attach(args) => attach::execute(args).await,
         Command::Attest(args) => attest::execute(args).await,
+        Command::Seal(args) => seal::execute(args).await,
+        Command::Unseal(args) => unseal::execute(args).await,
+        Command::InjectSecret(args) => inject_secret::execute(args).await,
         Command::Wait(args) => wait::execute(args).await,
         Command::Rename(args) => rename::execute(args).await,
         Command::Port(args) => port::execute(args).await,
