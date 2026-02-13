@@ -130,6 +130,75 @@ fn wait_for<F: Fn() -> bool>(condition: F, timeout: Duration, msg: &str) {
     panic!("Timeout waiting for: {}", msg);
 }
 
+/// Wait for box to reach "running" status, printing VM logs while waiting.
+fn wait_for_running(box_name: &str, timeout: Duration) {
+    let start = std::time::Instant::now();
+    let mut last_log_len = 0;
+
+    while start.elapsed() < timeout {
+        // Print new VM log lines
+        last_log_len = print_new_logs(box_name, last_log_len);
+
+        // Check if running
+        let bin = find_binary();
+        let output = Command::new(&bin)
+            .args(["ps"])
+            .output()
+            .ok();
+        if let Some(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains(box_name) && stdout.contains("running") {
+                // Print any remaining logs
+                print_new_logs(box_name, last_log_len);
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // Print final logs before panic
+    print_new_logs(box_name, last_log_len);
+    panic!("Timeout waiting for box '{}' to be running", box_name);
+}
+
+/// Print new log lines from the box's console.log since last check.
+/// Returns the new total byte length.
+fn print_new_logs(box_name: &str, last_len: usize) -> usize {
+    // Find the box dir from inspect
+    let bin = find_binary();
+    let output = Command::new(&bin)
+        .args(["inspect", box_name])
+        .output()
+        .ok();
+
+    let log_path = if let Some(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Extract console_log path from JSON
+        stdout
+            .lines()
+            .find(|l| l.contains("console_log"))
+            .and_then(|l| {
+                l.split('"')
+                    .nth(3)
+                    .map(|s| s.to_string())
+            })
+    } else {
+        None
+    };
+
+    if let Some(path) = log_path {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if content.len() > last_len {
+                let new_content = &content[last_len..];
+                for line in new_content.lines() {
+                    eprintln!("    📋 {}", line);
+                }
+                return content.len();
+            }
+        }
+    }
+    last_len
+}
+
 /// Cleanup helper: stop and remove a box by name, ignoring errors.
 fn cleanup(name: &str) {
     let _ = run_cmd(&["stop", name]);
@@ -174,16 +243,9 @@ fn test_alpine_full_lifecycle() {
     assert!(!box_id.is_empty(), "Expected box ID in run output");
     println!("    Box ID: {}", box_id);
 
-    // ---- Step 3: Verify box is running ----
-    println!("==> Step 3: Verifying box is running...");
-    wait_for(
-        || {
-            let (stdout, _, _) = run_cmd(&["ps"]);
-            stdout.contains(box_name) && stdout.contains("running")
-        },
-        Duration::from_secs(30),
-        "box to appear as running in `ps`",
-    );
+    // ---- Step 3: Verify box is running (with live VM logs) ----
+    println!("==> Step 3: Waiting for VM to boot...");
+    wait_for_running(box_name, Duration::from_secs(30));
     println!("    ✓ Box is running");
 
     // ---- Step 4: Inspect the box ----
@@ -279,14 +341,7 @@ fn test_exec_commands() {
         "--", "sleep", "3600",
     ]);
 
-    wait_for(
-        || {
-            let (stdout, _, _) = run_cmd(&["ps"]);
-            stdout.contains(box_name) && stdout.contains("running")
-        },
-        Duration::from_secs(30),
-        "box to be running",
-    );
+    wait_for_running(box_name, Duration::from_secs(30));
 
     // Wait for exec server
     std::thread::sleep(Duration::from_secs(2));
@@ -354,14 +409,7 @@ fn test_env_and_labels() {
         "--", "sleep", "3600",
     ]);
 
-    wait_for(
-        || {
-            let (stdout, _, _) = run_cmd(&["ps"]);
-            stdout.contains(box_name) && stdout.contains("running")
-        },
-        Duration::from_secs(30),
-        "box to be running",
-    );
+    wait_for_running(box_name, Duration::from_secs(30));
 
     // Inspect should show the box
     let stdout = run_ok(&["inspect", box_name]);
