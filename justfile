@@ -220,9 +220,9 @@ test-vm *ARGS:
 
     ARGS="{{ARGS}}"
     if [ -n "$ARGS" ]; then
-        cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture "$ARGS"
+        cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture --test-threads=1 "$ARGS"
     else
-        cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture
+        cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture --test-threads=1
     fi
 
 # ============================================================================
