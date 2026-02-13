@@ -58,32 +58,38 @@ fn find_binary() -> String {
 }
 
 /// Run an a3s-box command and return (stdout, stderr, success).
-/// Output is printed to the console in real-time.
+/// stderr goes directly to terminal for real-time tracing/log output.
 fn run_cmd(args: &[&str]) -> (String, String, bool) {
     let bin = find_binary();
     eprintln!("    $ a3s-box {}", args.join(" "));
 
-    // Use inherit for stderr so tracing/log output appears immediately.
-    // Only capture stdout (which has the actual command output like box ID).
-    let output = Command::new(&bin)
+    let mut child = Command::new(&bin)
         .args(args)
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())
-        .output()
+        .spawn()
         .unwrap_or_else(|e| panic!("Failed to run `a3s-box {}`: {}", args.join(" "), e));
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout_pipe = child.stdout.take().unwrap();
+    // Read stdout in a thread so it doesn't block
+    let stdout_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let mut reader = std::io::BufReader::new(stdout_pipe);
+        reader.read_to_string(&mut buf).ok();
+        buf
+    });
+
+    let status = child.wait().expect("Failed to wait for child process");
+    let stdout = stdout_thread.join().unwrap_or_default();
+
     if !stdout.trim().is_empty() {
         for line in stdout.lines() {
             eprintln!("    → {}", line);
         }
     }
 
-    (stdout, stderr_placeholder(), output.status.success())
-}
-
-/// Stderr is inherited (printed directly), so we return empty string.
-fn stderr_placeholder() -> String {
-    String::new()
+    (stdout, String::new(), status.success())
 }
 
 /// Run an a3s-box command quietly (no output), return (stdout, stderr, success).
