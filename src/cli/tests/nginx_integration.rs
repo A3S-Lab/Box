@@ -63,46 +63,41 @@ fn run_cmd(args: &[&str]) -> (String, String, bool) {
     let bin = find_binary();
     eprintln!("    $ a3s-box {}", args.join(" "));
 
-    let mut child = Command::new(&bin)
+    // Use inherit for stderr so tracing/log output appears immediately.
+    // Only capture stdout (which has the actual command output like box ID).
+    let output = Command::new(&bin)
         .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::inherit())
+        .output()
         .unwrap_or_else(|e| panic!("Failed to run `a3s-box {}`: {}", args.join(" "), e));
 
-    // Read stdout and stderr in separate threads for real-time output
-    let stdout_handle = child.stdout.take().unwrap();
-    let stderr_handle = child.stderr.take().unwrap();
-
-    let stdout_thread = std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut lines = Vec::new();
-        for line in std::io::BufReader::new(stdout_handle).lines() {
-            if let Ok(line) = line {
-                eprintln!("    │ {}", line);
-                lines.push(line);
-            }
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if !stdout.trim().is_empty() {
+        for line in stdout.lines() {
+            eprintln!("    → {}", line);
         }
-        lines.join("\n")
-    });
+    }
 
-    let stderr_thread = std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut lines = Vec::new();
-        for line in std::io::BufReader::new(stderr_handle).lines() {
-            if let Ok(line) = line {
-                eprintln!("    │ {}", line);
-                lines.push(line);
-            }
-        }
-        lines.join("\n")
-    });
+    (stdout, stderr_placeholder(), output.status.success())
+}
 
-    let status = child.wait().expect("Failed to wait for child process");
-    let stdout = stdout_thread.join().unwrap_or_default();
-    let stderr = stderr_thread.join().unwrap_or_default();
+/// Stderr is inherited (printed directly), so we return empty string.
+fn stderr_placeholder() -> String {
+    String::new()
+}
 
-    (stdout, stderr, status.success())
+/// Run an a3s-box command quietly (no output), return (stdout, stderr, success).
+/// Used for polling commands like `ps` to avoid spamming output.
+fn run_cmd_quiet(args: &[&str]) -> (String, String, bool) {
+    let bin = find_binary();
+    let output = Command::new(&bin)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("Failed to run `a3s-box {}`: {}", args.join(" "), e));
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (stdout, stderr, output.status.success())
 }
 
 /// Run an a3s-box command, assert success, return stdout.
@@ -139,23 +134,22 @@ fn wait_for_running(box_name: &str, timeout: Duration) {
         // Print new VM log lines
         last_log_len = print_new_logs(box_name, last_log_len);
 
-        // Check if running
-        let bin = find_binary();
-        let output = Command::new(&bin)
-            .args(["ps"])
-            .output()
-            .ok();
-        if let Some(output) = output {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains(box_name) && stdout.contains("running") {
-                // Print any remaining logs
-                print_new_logs(box_name, last_log_len);
-                return;
-            }
+        // Check if running (quietly)
+        let (stdout, _, _) = run_cmd_quiet(&["ps"]);
+        if stdout.contains(box_name) && stdout.contains("running") {
+            print_new_logs(box_name, last_log_len);
+            return;
         }
+
+        // Check if dead (exited)
+        let (stdout_all, _, _) = run_cmd_quiet(&["ps", "-a"]);
+        if stdout_all.contains(box_name) && stdout_all.contains("dead") {
+            print_new_logs(box_name, last_log_len);
+            panic!("Box '{}' died during boot", box_name);
+        }
+
         std::thread::sleep(Duration::from_millis(500));
     }
-    // Print final logs before panic
     print_new_logs(box_name, last_log_len);
     panic!("Timeout waiting for box '{}' to be running", box_name);
 }
@@ -163,27 +157,13 @@ fn wait_for_running(box_name: &str, timeout: Duration) {
 /// Print new log lines from the box's console.log since last check.
 /// Returns the new total byte length.
 fn print_new_logs(box_name: &str, last_len: usize) -> usize {
-    // Find the box dir from inspect
-    let bin = find_binary();
-    let output = Command::new(&bin)
-        .args(["inspect", box_name])
-        .output()
-        .ok();
+    // Find the box dir from inspect (quietly)
+    let (stdout, _, _) = run_cmd_quiet(&["inspect", box_name]);
 
-    let log_path = if let Some(output) = output {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Extract console_log path from JSON
-        stdout
-            .lines()
-            .find(|l| l.contains("console_log"))
-            .and_then(|l| {
-                l.split('"')
-                    .nth(3)
-                    .map(|s| s.to_string())
-            })
-    } else {
-        None
-    };
+    let log_path = stdout
+        .lines()
+        .find(|l| l.contains("console_log"))
+        .and_then(|l| l.split('"').nth(3).map(|s| s.to_string()));
 
     if let Some(path) = log_path {
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -201,8 +181,8 @@ fn print_new_logs(box_name: &str, last_len: usize) -> usize {
 
 /// Cleanup helper: stop and remove a box by name, ignoring errors.
 fn cleanup(name: &str) {
-    let _ = run_cmd(&["stop", name]);
-    let _ = run_cmd(&["rm", name]);
+    let _ = run_cmd_quiet(&["stop", name]);
+    let _ = run_cmd_quiet(&["rm", name]);
 }
 
 // ============================================================================
@@ -299,7 +279,7 @@ fn test_alpine_full_lifecycle() {
 
     wait_for(
         || {
-            let (stdout, _, _) = run_cmd(&["ps", "-a"]);
+            let (stdout, _, _) = run_cmd_quiet(&["ps", "-a"]);
             stdout.contains(box_name)
                 && (stdout.contains("stopped") || stdout.contains("exited"))
         },
