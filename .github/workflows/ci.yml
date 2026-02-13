@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Lint & Format ──────────────────────────────────────────────
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cd src && cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    env:
+      A3S_DEPS_STUB: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+      - run: cd src && cargo clippy --workspace --all-targets -- -D warnings
+
+  # ── Tests (stub mode, no VM) ───────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      A3S_DEPS_STUB: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+      - run: cd src && cargo test --workspace --lib
+
+  # ── Build: Linux x86_64 ───────────────────────────────────────
+  build-linux-x86_64:
+    name: Build (linux-x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev \
+            musl-tools libclang-dev patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: linux-x86_64
+
+      # Host binaries (a3s-box, a3s-box-shim, a3s-box-cri)
+      - name: Build host binaries
+        run: |
+          cd src
+          cargo build --release \
+            -p a3s-box-cli \
+            -p a3s-box-shim \
+            -p a3s-box-cri
+
+      # Guest binaries (static musl for inside the VM)
+      - name: Build guest binaries
+        run: |
+          cd src
+          cargo build --release \
+            -p a3s-box-guest-init \
+            --target x86_64-unknown-linux-musl
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist/linux-x86_64
+          cp src/target/release/a3s-box dist/linux-x86_64/
+          cp src/target/release/a3s-box-shim dist/linux-x86_64/
+          cp src/target/release/a3s-box-cri dist/linux-x86_64/
+          cp src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init dist/linux-x86_64/
+          cp src/target/x86_64-unknown-linux-musl/release/a3s-box-nsexec dist/linux-x86_64/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a3s-box-linux-x86_64
+          path: dist/linux-x86_64/
+
+  # ── Build: Linux ARM64 ────────────────────────────────────────
+  build-linux-arm64:
+    name: Build (linux-arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev \
+            musl-tools libclang-dev patchelf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: linux-arm64
+
+      # Host binaries
+      - name: Build host binaries
+        run: |
+          cd src
+          cargo build --release \
+            -p a3s-box-cli \
+            -p a3s-box-shim \
+            -p a3s-box-cri
+
+      # Guest binaries (static musl)
+      - name: Build guest binaries
+        run: |
+          cd src
+          cargo build --release \
+            -p a3s-box-guest-init \
+            --target aarch64-unknown-linux-musl
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist/linux-arm64
+          cp src/target/release/a3s-box dist/linux-arm64/
+          cp src/target/release/a3s-box-shim dist/linux-arm64/
+          cp src/target/release/a3s-box-cri dist/linux-arm64/
+          cp src/target/aarch64-unknown-linux-musl/release/a3s-box-guest-init dist/linux-arm64/
+          cp src/target/aarch64-unknown-linux-musl/release/a3s-box-nsexec dist/linux-arm64/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a3s-box-linux-arm64
+          path: dist/linux-arm64/
+
+  # ── Build: macOS ARM64 (Apple Silicon) ─────────────────────────
+  build-macos-arm64:
+    name: Build (macos-arm64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install build dependencies
+        run: |
+          brew install lld llvm filosottile/musl-cross/musl-cross
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: macos-arm64
+
+      # Host binaries (a3s-box, a3s-box-shim — no CRI on macOS)
+      - name: Build host binaries
+        run: |
+          cd src
+          cargo build --release \
+            -p a3s-box-cli \
+            -p a3s-box-shim
+
+      # Guest binaries (cross-compile Linux musl for the VM)
+      - name: Build guest binaries
+        run: |
+          cd src
+          cargo build --release \
+            -p a3s-box-guest-init \
+            --target aarch64-unknown-linux-musl
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist/macos-arm64
+          cp src/target/release/a3s-box dist/macos-arm64/
+          cp src/target/release/a3s-box-shim dist/macos-arm64/
+          cp src/target/aarch64-unknown-linux-musl/release/a3s-box-guest-init dist/macos-arm64/
+          cp src/target/aarch64-unknown-linux-musl/release/a3s-box-nsexec dist/macos-arm64/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a3s-box-macos-arm64
+          path: dist/macos-arm64/

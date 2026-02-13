@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Tests must pass before release ─────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    env:
+      A3S_DEPS_STUB: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+      - run: cd src && cargo test --workspace --lib
+
+  # ── Build matrix ───────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+            rust_target: x86_64-unknown-linux-musl
+            guest_target: x86_64-unknown-linux-musl
+            build_cri: true
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-musl
+            guest_target: aarch64-unknown-linux-musl
+            build_cri: true
+          - target: macos-arm64
+            os: macos-14
+            rust_target: ""
+            guest_target: aarch64-unknown-linux-musl
+            build_cri: false
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.guest_target }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config libssl-dev \
+            musl-tools libclang-dev patchelf
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install lld llvm filosottile/musl-cross/musl-cross
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: release-${{ matrix.target }}
+
+      - name: Build host binaries
+        run: |
+          cd src
+          cargo build --release -p a3s-box-cli -p a3s-box-shim
+          if [ "${{ matrix.build_cri }}" = "true" ]; then
+            cargo build --release -p a3s-box-cri
+          fi
+
+      - name: Build guest binaries
+        run: |
+          cd src
+          cargo build --release \
+            -p a3s-box-guest-init \
+            --target ${{ matrix.guest_target }}
+
+      - name: Package release
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          DIR="a3s-box-${TAG}-${{ matrix.target }}"
+          mkdir -p "$DIR"
+
+          cp src/target/release/a3s-box "$DIR/"
+          cp src/target/release/a3s-box-shim "$DIR/"
+
+          if [ "${{ matrix.build_cri }}" = "true" ]; then
+            cp src/target/release/a3s-box-cri "$DIR/"
+          fi
+
+          cp "src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" "$DIR/"
+          cp "src/target/${{ matrix.guest_target }}/release/a3s-box-nsexec" "$DIR/"
+
+          cp README.md "$DIR/" 2>/dev/null || true
+          cp LICENSE "$DIR/" 2>/dev/null || true
+
+          tar czf "${DIR}.tar.gz" "$DIR"
+          echo "ASSET=${DIR}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+
+  # ── Create GitHub Release ──────────────────────────────────────
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*.tar.gz
