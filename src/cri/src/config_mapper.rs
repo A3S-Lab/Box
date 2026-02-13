@@ -120,6 +120,7 @@ fn parse_tee_config(annotations: &HashMap<String, String>) -> Result<TeeConfig> 
             Ok(TeeConfig::SevSnp {
                 workload_id,
                 generation: Default::default(),
+                simulate: false,
             })
         }
         Some("none") | None => Ok(TeeConfig::None),

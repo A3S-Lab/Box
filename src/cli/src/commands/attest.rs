@@ -31,6 +31,10 @@ pub struct AttestArgs {
     #[arg(long)]
     pub raw: bool,
 
+    /// Accept simulated (non-hardware) TEE reports for development/testing.
+    #[arg(long)]
+    pub allow_simulated: bool,
+
     /// Only output the verification result (true/false), no full report.
     #[arg(long, short)]
     pub quiet: bool,
@@ -120,7 +124,7 @@ pub async fn execute(args: AttestArgs) -> Result<(), Box<dyn std::error::Error>>
     };
 
     // Verify the report
-    let result = verify_attestation(&report, &nonce_bytes, &policy)?;
+    let result = verify_attestation(&report, &nonce_bytes, &policy, args.allow_simulated)?;
 
     if args.quiet {
         if result.verified {

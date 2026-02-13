@@ -9,6 +9,7 @@ use a3s_box_core::error::{BoxError, Result};
 
 use super::attestation::{parse_platform_info, AttestationReport, PlatformInfo, SNP_REPORT_SIZE};
 use super::policy::{AttestationPolicy, PolicyResult, PolicyViolation};
+use super::simulate::is_simulated_report;
 
 /// Result of a complete attestation verification.
 #[derive(Debug, Clone)]
@@ -38,14 +39,20 @@ pub struct VerificationResult {
 /// 4. Verify the certificate chain (VCEK → ASK → ARK)
 /// 5. Check the report against the attestation policy
 ///
+/// If `allow_simulated` is true and the report has the simulated version
+/// marker (0xA3), signature and cert chain verification are skipped.
+/// Nonce and policy checks still apply.
+///
 /// # Arguments
 /// * `report` - The attestation report from the guest
 /// * `expected_nonce` - The nonce that was sent in the request
 /// * `policy` - The verification policy to check against
+/// * `allow_simulated` - Whether to accept simulated (non-hardware) reports
 pub fn verify_attestation(
     report: &AttestationReport,
     expected_nonce: &[u8],
     policy: &AttestationPolicy,
+    allow_simulated: bool,
 ) -> Result<VerificationResult> {
     let mut failures = Vec::new();
 
@@ -58,27 +65,48 @@ pub fn verify_attestation(
         ))
     })?;
 
+    // Check if this is a simulated report
+    let simulated = is_simulated_report(&report.report);
+    if simulated && !allow_simulated {
+        return Err(BoxError::AttestationError(
+            "Simulated report rejected: allow_simulated is false".to_string(),
+        ));
+    }
+    if simulated {
+        tracing::warn!("Accepting simulated TEE report (not hardware-attested)");
+    }
+
     // 2. Verify nonce (report_data field at offset 0x50, 64 bytes)
     let nonce_valid = verify_nonce(&report.report, expected_nonce);
     if !nonce_valid {
         failures.push("Nonce mismatch: report_data does not contain expected nonce".to_string());
     }
 
-    // 3. Verify ECDSA-P384 signature
-    let signature_valid = verify_report_signature(&report.report, &report.cert_chain.vcek);
-    if !signature_valid {
-        failures.push("Signature verification failed".to_string());
-    }
+    // 3. Verify ECDSA-P384 signature (skip for simulated reports)
+    let signature_valid = if simulated {
+        true
+    } else {
+        let valid = verify_report_signature(&report.report, &report.cert_chain.vcek);
+        if !valid {
+            failures.push("Signature verification failed".to_string());
+        }
+        valid
+    };
 
-    // 4. Verify certificate chain
-    let cert_chain_valid = verify_cert_chain(
-        &report.cert_chain.vcek,
-        &report.cert_chain.ask,
-        &report.cert_chain.ark,
-    );
-    if !cert_chain_valid {
-        failures.push("Certificate chain verification failed".to_string());
-    }
+    // 4. Verify certificate chain (skip for simulated reports)
+    let cert_chain_valid = if simulated {
+        true
+    } else {
+        let valid = verify_cert_chain(
+            &report.cert_chain.vcek,
+            &report.cert_chain.ask,
+            &report.cert_chain.ark,
+        );
+        if !valid {
+            failures.push("Certificate chain verification failed".to_string());
+        }
+        valid
+    };
 
     // 5. Check policy
     let policy_result = check_policy(&platform, policy);
@@ -601,7 +629,7 @@ mod tests {
             require_no_debug: false,
             ..Default::default()
         };
-        let result = verify_attestation(&report, &wrong_nonce, &policy).unwrap();
+        let result = verify_attestation(&report, &wrong_nonce, &policy, false).unwrap();
         assert!(!result.verified);
         assert!(!result.nonce_valid);
     }
@@ -613,7 +641,66 @@ mod tests {
             cert_chain: CertificateChain::default(),
             platform: PlatformInfo::default(),
         };
-        let result = verify_attestation(&report, &[1, 2, 3], &AttestationPolicy::default());
+        let result = verify_attestation(&report, &[1, 2, 3], &AttestationPolicy::default(), false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_simulated_report_accepted() {
+        let nonce = vec![1, 2, 3, 4];
+        let mut report_data = [0u8; 64];
+        report_data[..4].copy_from_slice(&nonce);
+        let report_bytes = crate::tee::simulate::build_simulated_report(&report_data);
+        let report = AttestationReport {
+            report: report_bytes,
+            cert_chain: CertificateChain::default(),
+            platform: PlatformInfo::default(),
+        };
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            ..Default::default()
+        };
+        let result = verify_attestation(&report, &nonce, &policy, true).unwrap();
+        assert!(result.verified);
+        assert!(result.signature_valid);
+        assert!(result.cert_chain_valid);
+        assert!(result.nonce_valid);
+    }
+
+    #[test]
+    fn test_verify_simulated_report_rejected_when_not_allowed() {
+        let nonce = vec![1, 2, 3, 4];
+        let mut report_data = [0u8; 64];
+        report_data[..4].copy_from_slice(&nonce);
+        let report_bytes = crate::tee::simulate::build_simulated_report(&report_data);
+        let report = AttestationReport {
+            report: report_bytes,
+            cert_chain: CertificateChain::default(),
+            platform: PlatformInfo::default(),
+        };
+        let policy = AttestationPolicy::default();
+        let result = verify_attestation(&report, &nonce, &policy, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_simulated_report_nonce_still_checked() {
+        let nonce = vec![1, 2, 3, 4];
+        let mut report_data = [0u8; 64];
+        report_data[..4].copy_from_slice(&nonce);
+        let report_bytes = crate::tee::simulate::build_simulated_report(&report_data);
+        let report = AttestationReport {
+            report: report_bytes,
+            cert_chain: CertificateChain::default(),
+            platform: PlatformInfo::default(),
+        };
+        let wrong_nonce = vec![9, 9, 9, 9];
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            ..Default::default()
+        };
+        let result = verify_attestation(&report, &wrong_nonce, &policy, true).unwrap();
+        assert!(!result.verified);
+        assert!(!result.nonce_valid);
     }
 }

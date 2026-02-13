@@ -161,14 +161,19 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
     // Build 64-byte report_data from nonce + optional user_data
     let report_data = build_report_data(&req.nonce, req.user_data.as_deref());
 
-    // Get SNP attestation report from hardware
-    let response = match get_snp_report(&report_data) {
-        Ok(resp) => resp,
-        Err(e) => {
-            warn!("SNP attestation failed: {}", e);
-            send_error_response(&mut stream, 500, &format!("Attestation failed: {}", e))?;
-            std::mem::forget(fd);
-            return Ok(());
+    // Get attestation report (simulated or hardware)
+    let response = if is_simulate_mode() {
+        info!("Generating simulated attestation report");
+        get_simulated_report(&report_data)
+    } else {
+        match get_snp_report(&report_data) {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!("SNP attestation failed: {}", e);
+                send_error_response(&mut stream, 500, &format!("Attestation failed: {}", e))?;
+                std::mem::forget(fd);
+                return Ok(());
+            }
         }
     };
 
@@ -199,6 +204,61 @@ fn send_error_response(
         body,
     );
     stream.write_all(response.as_bytes())
+}
+
+// ============================================================================
+// Simulation mode
+// ============================================================================
+
+/// Check if TEE simulation mode is enabled via environment variable.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_simulate_mode() -> bool {
+    std::env::var("A3S_TEE_SIMULATE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Simulated SNP report version marker (0xA3 = "A3S").
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const SIMULATED_REPORT_VERSION: u32 = 0xA3;
+
+/// Generate a simulated attestation response (no hardware required).
+///
+/// Produces a 1184-byte report with correct field layout but zero signature
+/// and empty certificate chain. The host verifier must use `allow_simulated`
+/// to accept these reports.
+#[cfg(target_os = "linux")]
+fn get_simulated_report(report_data: &[u8; SNP_USER_DATA_SIZE]) -> AttestResponse {
+    const SNP_REPORT_SIZE: usize = 1184;
+    let mut report = vec![0u8; SNP_REPORT_SIZE];
+
+    // version at 0x00 — simulated marker
+    report[0x00..0x04].copy_from_slice(&SIMULATED_REPORT_VERSION.to_le_bytes());
+    // guest_svn at 0x04
+    report[0x04..0x08].copy_from_slice(&1u32.to_le_bytes());
+    // policy at 0x08 — no debug, no SMT
+    report[0x08..0x10].copy_from_slice(&0u64.to_le_bytes());
+    // current_tcb at 0x38
+    report[0x38] = 3;   // boot_loader
+    report[0x39] = 0;   // tee
+    report[0x3E] = 8;   // snp
+    report[0x3F] = 115;  // microcode
+    // report_data at 0x50
+    report[0x50..0x90].copy_from_slice(report_data);
+    // measurement at 0x90 (deterministic fake)
+    for i in 0..48 {
+        report[0x90 + i] = (i as u8).wrapping_mul(0xA3);
+    }
+    // chip_id at 0x1A0 (all 0xA3)
+    for b in &mut report[0x1A0..0x1E0] {
+        *b = 0xA3;
+    }
+    // signature at 0x2A0 — left as zeros (simulation marker)
+
+    AttestResponse {
+        report,
+        cert_chain: CertChain::default(),
+    }
 }
 
 // ============================================================================

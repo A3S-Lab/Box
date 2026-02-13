@@ -17,6 +17,9 @@ pub enum TeeConfig {
         /// CPU generation: "milan" or "genoa"
         #[serde(default)]
         generation: SevSnpGeneration,
+        /// Enable simulation mode (no hardware required, for development)
+        #[serde(default)]
+        simulate: bool,
     },
 }
 
@@ -677,15 +680,18 @@ mod tests {
         let tee = TeeConfig::SevSnp {
             workload_id: "test-agent".to_string(),
             generation: SevSnpGeneration::Milan,
+            simulate: false,
         };
 
         match tee {
             TeeConfig::SevSnp {
                 workload_id,
                 generation,
+                simulate,
             } => {
                 assert_eq!(workload_id, "test-agent");
                 assert_eq!(generation, SevSnpGeneration::Milan);
+                assert!(!simulate);
             }
             _ => panic!("Expected SevSnp variant"),
         }
@@ -708,6 +714,7 @@ mod tests {
         let tee = TeeConfig::SevSnp {
             workload_id: "my-workload".to_string(),
             generation: SevSnpGeneration::Genoa,
+            simulate: false,
         };
 
         let json = serde_json::to_string(&tee).unwrap();
@@ -731,6 +738,7 @@ mod tests {
             tee: TeeConfig::SevSnp {
                 workload_id: "secure-agent".to_string(),
                 generation: SevSnpGeneration::Milan,
+                simulate: false,
             },
             ..Default::default()
         };
@@ -742,9 +750,11 @@ mod tests {
             TeeConfig::SevSnp {
                 workload_id,
                 generation,
+                simulate,
             } => {
                 assert_eq!(workload_id, "secure-agent");
                 assert_eq!(generation, SevSnpGeneration::Milan);
+                assert!(!simulate);
             }
             _ => panic!("Expected SevSnp TEE config"),
         }

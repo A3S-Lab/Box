@@ -277,7 +277,7 @@ impl VmManager {
         self.wait_for_exec_ready(&layout.exec_socket_path).await?;
 
         // 5c. Store attestation socket path for TEE environments
-        if layout.tee_instance_config.is_some() {
+        if !matches!(self.config.tee, TeeConfig::None) {
             self.attest_socket_path = Some(layout.attest_socket_path.clone());
         }
 
@@ -910,7 +910,15 @@ impl VmManager {
             TeeConfig::SevSnp {
                 workload_id,
                 generation,
+                simulate,
             } => {
+                // In simulation mode, skip hardware check and TEE config
+                // (the guest will generate simulated reports via A3S_TEE_SIMULATE env)
+                if *simulate {
+                    tracing::warn!("TEE simulation mode: skipping hardware check and TEE config");
+                    return Ok(None);
+                }
+
                 // Verify hardware support
                 crate::tee::require_sev_snp_support()?;
 
@@ -1295,6 +1303,13 @@ impl VmManager {
                 }
             }
             entrypoint.env = env;
+        }
+
+        // Inject TEE simulation env var when simulate mode is enabled
+        if matches!(self.config.tee, TeeConfig::SevSnp { simulate: true, .. }) {
+            entrypoint
+                .env
+                .push(("A3S_TEE_SIMULATE".to_string(), "1".to_string()));
         }
 
         // Determine workdir
