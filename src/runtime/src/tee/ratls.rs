@@ -211,6 +211,9 @@ pub fn create_client_config(
     policy: AttestationPolicy,
     allow_simulated: bool,
 ) -> Result<rustls::ClientConfig> {
+    // Ensure the ring crypto provider is installed (idempotent, ignores if already set)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let verifier = RaTlsVerifier::new(policy, allow_simulated);
 
     let config = rustls::ClientConfig::builder()
