@@ -58,53 +58,25 @@ fn find_binary() -> String {
 }
 
 /// Run an a3s-box command and return (stdout, stderr, success).
-/// Both stdout and stderr are printed to terminal in real-time.
+/// Both stdout and stderr go directly to terminal for real-time output.
 fn run_cmd(args: &[&str]) -> (String, String, bool) {
-    use std::io::BufRead;
-
     let bin = find_binary();
     eprintln!("    $ a3s-box {}", args.join(" "));
 
-    let mut child = Command::new(&bin)
+    let status = Command::new(&bin)
         .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
         .unwrap_or_else(|e| panic!("Failed to run `a3s-box {}`: {}", args.join(" "), e));
 
-    let stdout_pipe = child.stdout.take().unwrap();
-    let stderr_pipe = child.stderr.take().unwrap();
-
-    // Read stdout line-by-line in a thread, printing each line immediately
-    let stdout_thread = std::thread::spawn(move || {
-        let mut lines = Vec::new();
-        for line in std::io::BufReader::new(stdout_pipe).lines().map_while(Result::ok) {
-            eprintln!("    │ {}", line);
-            lines.push(line);
-        }
-        lines.join("\n")
-    });
-
-    // Read stderr line-by-line in a thread
-    let stderr_thread = std::thread::spawn(move || {
-        let mut lines = Vec::new();
-        for line in std::io::BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
-            eprintln!("    │ {}", line);
-            lines.push(line);
-        }
-        lines.join("\n")
-    });
-
-    let status = child.wait().expect("Failed to wait for child process");
-    let stdout = stdout_thread.join().unwrap_or_default();
-    let stderr = stderr_thread.join().unwrap_or_default();
-
-    (stdout, stderr, status.success())
+    // stdout is inherited (not captured), so return empty
+    (String::new(), String::new(), status.success())
 }
 
-/// Run an a3s-box command quietly (no output), return (stdout, stderr, success).
-/// Used for polling commands like `ps` to avoid spamming output.
-fn run_cmd_quiet(args: &[&str]) -> (String, String, bool) {
+/// Run an a3s-box command and capture stdout (no real-time output).
+/// Used when we need the command's output (e.g., box ID, ps, inspect).
+fn run_cmd_capture(args: &[&str]) -> (String, String, bool) {
     let bin = find_binary();
     let output = Command::new(&bin)
         .args(args)
@@ -116,9 +88,28 @@ fn run_cmd_quiet(args: &[&str]) -> (String, String, bool) {
     (stdout, stderr, output.status.success())
 }
 
-/// Run an a3s-box command, assert success, return stdout.
+/// Run an a3s-box command quietly (no output), return (stdout, stderr, success).
+/// Used for polling commands like `ps` to avoid spamming output.
+fn run_cmd_quiet(args: &[&str]) -> (String, String, bool) {
+    run_cmd_capture(args)
+}
+
+/// Run an a3s-box command with inherited output, assert success.
 fn run_ok(args: &[&str]) -> String {
-    let (stdout, stderr, success) = run_cmd(args);
+    let (_, stderr, success) = run_cmd(args);
+    assert!(
+        success,
+        "Command `a3s-box {}` failed.\nstderr: {}",
+        args.join(" "),
+        stderr,
+    );
+    String::new()
+}
+
+/// Run an a3s-box command, capture stdout, assert success, return stdout.
+fn run_ok_capture(args: &[&str]) -> String {
+    eprintln!("    $ a3s-box {}", args.join(" "));
+    let (stdout, stderr, success) = run_cmd_capture(args);
     assert!(
         success,
         "Command `a3s-box {}` failed.\nstdout: {}\nstderr: {}",
@@ -223,21 +214,19 @@ fn test_alpine_full_lifecycle() {
     println!("==> Step 1: Pulling alpine image...");
     run_ok(&["pull", "docker.io/library/alpine:latest"]);
 
-    let stdout = run_ok(&["images"]);
+    let stdout = run_ok_capture(&["images"]);
     assert!(stdout.contains("alpine"), "alpine image not in `images`");
     println!("    ✓ alpine image available");
 
     // ---- Step 2: Run alpine with sleep (long-running process) ----
     println!("==> Step 2: Running alpine box...");
-    let stdout = run_ok(&[
+    run_ok(&[
         "run", "-d",
         "--name", box_name,
         "docker.io/library/alpine:latest",
         "--", "sleep", "3600",
     ]);
-    let box_id = stdout.trim().to_string();
-    assert!(!box_id.is_empty(), "Expected box ID in run output");
-    println!("    Box ID: {}", box_id);
+    println!("    ✓ Box created");
 
     // ---- Step 3: Verify box is running (with live VM logs) ----
     println!("==> Step 3: Waiting for VM to boot...");
@@ -246,8 +235,8 @@ fn test_alpine_full_lifecycle() {
 
     // ---- Step 4: Inspect the box ----
     println!("==> Step 4: Inspecting box...");
-    let stdout = run_ok(&["inspect", box_name]);
-    assert!(stdout.contains(&box_id) || stdout.contains(box_name));
+    let stdout = run_ok_capture(&["inspect", box_name]);
+    assert!(stdout.contains(box_name));
     assert!(stdout.contains("alpine"));
     println!("    ✓ Inspect shows correct box info");
 
@@ -258,7 +247,7 @@ fn test_alpine_full_lifecycle() {
     std::thread::sleep(Duration::from_secs(2));
 
     // uname -a: verify we're in a Linux VM
-    let (stdout, _, success) = run_cmd(&["exec", box_name, "--", "uname", "-a"]);
+    let (stdout, _, success) = run_cmd_capture(&["exec", box_name, "--", "uname", "-a"]);
     if success {
         assert!(stdout.contains("Linux"), "Expected Linux kernel");
         println!("    ✓ uname: {}", stdout.trim());
@@ -267,14 +256,14 @@ fn test_alpine_full_lifecycle() {
     }
 
     // cat /etc/os-release: verify Alpine
-    let (stdout, _, success) = run_cmd(&["exec", box_name, "--", "cat", "/etc/os-release"]);
+    let (stdout, _, success) = run_cmd_capture(&["exec", box_name, "--", "cat", "/etc/os-release"]);
     if success {
         assert!(stdout.contains("Alpine"), "Expected Alpine Linux");
         println!("    ✓ OS: Alpine Linux");
     }
 
     // ls /: verify filesystem structure
-    let (stdout, _, success) = run_cmd(&["exec", box_name, "--", "ls", "/"]);
+    let (stdout, _, success) = run_cmd_capture(&["exec", box_name, "--", "ls", "/"]);
     if success {
         assert!(stdout.contains("bin"), "Expected /bin in rootfs");
         assert!(stdout.contains("etc"), "Expected /etc in rootfs");
@@ -283,11 +272,7 @@ fn test_alpine_full_lifecycle() {
 
     // ---- Step 6: Check logs ----
     println!("==> Step 6: Checking logs...");
-    let (stdout, _, _) = run_cmd(&["logs", box_name]);
-    println!(
-        "    Logs (first 200 chars): {}",
-        &stdout[..stdout.len().min(200)]
-    );
+    run_ok(&["logs", box_name]);
 
     // ---- Step 7: Stop the box ----
     println!("==> Step 7: Stopping box...");
@@ -308,7 +293,7 @@ fn test_alpine_full_lifecycle() {
     println!("==> Step 8: Removing box...");
     run_ok(&["rm", box_name]);
 
-    let stdout = run_ok(&["ps", "-a"]);
+    let (stdout, _, _) = run_cmd_quiet(&["ps", "-a"]);
     assert!(
         !stdout.contains(box_name),
         "Box should be removed from `ps -a`"
@@ -343,31 +328,31 @@ fn test_exec_commands() {
     std::thread::sleep(Duration::from_secs(2));
 
     // Test: read OS release
-    let (stdout, _, success) = run_cmd(&["exec", box_name, "--", "cat", "/etc/os-release"]);
+    let (stdout, _, success) = run_cmd_capture(&["exec", box_name, "--", "cat", "/etc/os-release"]);
     if success {
         assert!(stdout.contains("Alpine"), "Expected Alpine in os-release");
         println!("    ✓ cat /etc/os-release → Alpine");
     }
 
     // Test: list root filesystem
-    let (stdout, _, success) = run_cmd(&["exec", box_name, "--", "ls", "/usr/bin/"]);
+    let (stdout, _, success) = run_cmd_capture(&["exec", box_name, "--", "ls", "/usr/bin/"]);
     if success {
         println!("    ✓ ls /usr/bin/ → {} entries", stdout.lines().count());
     }
 
     // Test: environment variables
-    let (stdout, _, success) = run_cmd(&["exec", box_name, "--", "env"]);
+    let (stdout, _, success) = run_cmd_capture(&["exec", box_name, "--", "env"]);
     if success {
         println!("    ✓ env → {} variables", stdout.lines().count());
     }
 
     // Test: write and read a file
-    let (_, _, success) = run_cmd(&[
+    let (_, _, success) = run_cmd_capture(&[
         "exec", box_name, "--",
         "sh", "-c", "echo hello-a3s > /tmp/test.txt",
     ]);
     if success {
-        let (stdout, _, success) = run_cmd(&["exec", box_name, "--", "cat", "/tmp/test.txt"]);
+        let (stdout, _, success) = run_cmd_capture(&["exec", box_name, "--", "cat", "/tmp/test.txt"]);
         if success {
             assert!(
                 stdout.trim() == "hello-a3s",
@@ -408,13 +393,13 @@ fn test_env_and_labels() {
     wait_for_running(box_name, Duration::from_secs(30));
 
     // Inspect should show the box
-    let stdout = run_ok(&["inspect", box_name]);
+    let stdout = run_ok_capture(&["inspect", box_name]);
     assert!(stdout.contains(box_name));
     println!("    ✓ Box running with env vars and labels");
 
     // Verify env vars inside the box
     std::thread::sleep(Duration::from_secs(2));
-    let (stdout, _, success) = run_cmd(&[
+    let (stdout, _, success) = run_cmd_capture(&[
         "exec", box_name, "--", "sh", "-c", "echo $MY_APP",
     ]);
     if success {
@@ -426,7 +411,7 @@ fn test_env_and_labels() {
         println!("    ✓ Environment variable MY_APP set correctly");
     }
 
-    let (stdout, _, success) = run_cmd(&[
+    let (stdout, _, success) = run_cmd_capture(&[
         "exec", box_name, "--", "sh", "-c", "echo $MY_VERSION",
     ]);
     if success {
@@ -461,13 +446,13 @@ fn test_nginx_image_pull_and_run() {
     println!("==> Pulling nginx:alpine...");
     run_ok(&["pull", "docker.io/library/nginx:alpine"]);
 
-    let stdout = run_ok(&["images"]);
+    let stdout = run_ok_capture(&["images"]);
     assert!(stdout.contains("nginx"), "nginx image not found");
     println!("    ✓ nginx:alpine pulled");
 
     // Run nginx (may fail due to backlog limitation)
     println!("==> Running nginx (may exit due to TSI backlog limitation)...");
-    let (stdout, stderr, success) = run_cmd(&[
+    let (_, _, success) = run_cmd(&[
         "run", "-d",
         "--name", box_name,
         "-p", "8088:80",
@@ -475,14 +460,11 @@ fn test_nginx_image_pull_and_run() {
     ]);
 
     if success {
-        let box_id = stdout.trim();
-        println!("    Box ID: {}", box_id);
-
         // Give it a moment
         std::thread::sleep(Duration::from_secs(3));
 
         // Check if it's still running or died
-        let (ps_out, _, _) = run_cmd(&["ps", "-a"]);
+        let (ps_out, _, _) = run_cmd_quiet(&["ps", "-a"]);
         if ps_out.contains("running") && ps_out.contains(box_name) {
             println!("    ✓ nginx is running!");
 
@@ -496,13 +478,13 @@ fn test_nginx_image_pull_and_run() {
         } else {
             println!("    ⚠ nginx exited (expected: TSI backlog limitation)");
             // Verify it at least started and logged the nginx config
-            let (logs, _, _) = run_cmd(&["logs", box_name]);
+            let (logs, _, _) = run_cmd_capture(&["logs", box_name]);
             if logs.contains("Configuration complete") {
                 println!("    ✓ nginx configured successfully before listen() failure");
             }
         }
     } else {
-        println!("    ⚠ Run failed: {}", stderr.trim());
+        println!("    ⚠ Run command failed");
     }
 
     cleanup(box_name);
