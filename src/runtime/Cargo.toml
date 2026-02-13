@@ -43,6 +43,10 @@ rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 
+# Sealed storage
+ring = { workspace = true }
+base64 = { workspace = true }
+
 # HTTP client
 reqwest = { workspace = true }
 

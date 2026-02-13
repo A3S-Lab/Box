@@ -13,6 +13,7 @@ pub mod attestation;
 pub mod certs;
 pub mod policy;
 pub mod ratls;
+pub mod sealed;
 pub mod simulate;
 pub mod snp;
 pub mod verifier;
@@ -28,3 +29,4 @@ pub use verifier::{verify_attestation, VerificationResult};
 pub use simulate::{
     build_simulated_report, is_simulate_mode, is_simulated_report, TEE_SIMULATE_ENV,
 };
+pub use sealed::{seal, unseal, SealedData, SealingPolicy};

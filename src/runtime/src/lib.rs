@@ -39,6 +39,7 @@ pub use tee::{
     VerificationResult,
 };
 pub use tee::{AttestationReport, AttestationRequest, CertificateChain, PlatformInfo, TcbVersion};
+pub use tee::{seal, unseal, SealedData, SealingPolicy};
 pub use vm::{BoxState, VmManager};
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, ShimHandler, TeeInstanceConfig,
