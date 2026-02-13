@@ -39,17 +39,17 @@ use std::time::Duration;
 
 /// Find the a3s-box binary in the target directory.
 fn find_binary() -> String {
-    let candidates = [
-        "../../target/debug/a3s-box",
-        "../../target/release/a3s-box",
-        "../../../target/debug/a3s-box",
-        "../../../target/release/a3s-box",
-    ];
+    // CARGO_MANIFEST_DIR points to the cli crate: crates/box/src/cli
+    // target dir is at: crates/box/src/target/
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .expect("cli crate should be inside workspace");
 
-    for candidate in &candidates {
-        let path = std::path::Path::new(candidate);
-        if path.exists() {
-            return path.canonicalize().unwrap().to_string_lossy().to_string();
+    for profile in ["debug", "release"] {
+        let bin = workspace_root.join("target").join(profile).join("a3s-box");
+        if bin.exists() {
+            return bin.to_string_lossy().to_string();
         }
     }
 
