@@ -566,6 +566,65 @@ impl VmManager {
         Ok(report)
     }
 
+    /// Verify TEE attestation via RA-TLS handshake.
+    ///
+    /// Connects to the guest's RA-TLS attestation server and performs a
+    /// TLS handshake. The server's certificate contains the SNP attestation
+    /// report, which is verified during the handshake by a custom verifier.
+    ///
+    /// This is the preferred attestation method — it verifies the TEE
+    /// in a single TLS handshake without a separate report request.
+    ///
+    /// # Arguments
+    /// * `policy` - Attestation policy to verify against
+    /// * `allow_simulated` - Whether to accept simulated reports
+    pub async fn verify_attestation_ratls(
+        &self,
+        policy: &crate::tee::AttestationPolicy,
+        allow_simulated: bool,
+    ) -> Result<crate::tee::VerificationResult> {
+        // Verify VM is in a running state
+        let state = self.state.read().await;
+        match *state {
+            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
+            BoxState::Created => {
+                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
+            }
+            BoxState::Stopped => {
+                return Err(BoxError::AttestationError("VM is stopped".to_string()));
+            }
+        }
+        drop(state);
+
+        // Verify TEE is configured
+        if matches!(self.config.tee, TeeConfig::None) {
+            return Err(BoxError::AttestationError(
+                "TEE is not configured for this box".to_string(),
+            ));
+        }
+
+        let socket_path = self
+            .attest_socket_path
+            .as_ref()
+            .ok_or_else(|| {
+                BoxError::AttestationError(
+                    "Attestation socket not available (TEE not configured or VM not booted)"
+                        .to_string(),
+                )
+            })?;
+
+        let client = crate::grpc::RaTlsAttestationClient::new(socket_path);
+        let result = client.verify(policy.clone(), allow_simulated).await?;
+
+        tracing::info!(
+            box_id = %self.box_id,
+            verified = result.verified,
+            "RA-TLS attestation verification completed"
+        );
+
+        Ok(result)
+    }
+
     /// Prepare the filesystem layout for the VM.
     fn prepare_layout(&self) -> Result<BoxLayout> {
         // Create box-specific directories

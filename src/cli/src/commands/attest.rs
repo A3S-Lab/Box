@@ -6,6 +6,7 @@
 
 use a3s_box_runtime::{
     verify_attestation, AttestationClient, AttestationPolicy, AttestationRequest,
+    RaTlsAttestationClient,
 };
 use clap::Args;
 use std::path::PathBuf;
@@ -34,6 +35,11 @@ pub struct AttestArgs {
     /// Accept simulated (non-hardware) TEE reports for development/testing.
     #[arg(long)]
     pub allow_simulated: bool,
+
+    /// Use RA-TLS for attestation verification (recommended).
+    /// Verifies the TEE during the TLS handshake instead of fetching a raw report.
+    #[arg(long)]
+    pub ratls: bool,
 
     /// Only output the verification result (true/false), no full report.
     #[arg(long, short)]
@@ -93,6 +99,53 @@ pub async fn execute(args: AttestArgs) -> Result<(), Box<dyn std::error::Error>>
         )
         .into());
     }
+
+    // RA-TLS mode: verify attestation via TLS handshake
+    if args.ratls {
+        let policy = match &args.policy {
+            Some(path) => {
+                let data = std::fs::read_to_string(path)
+                    .map_err(|e| format!("Failed to read policy file {}: {}", path.display(), e))?;
+                serde_json::from_str::<AttestationPolicy>(&data)
+                    .map_err(|e| format!("Failed to parse policy file {}: {}", path.display(), e))?
+            }
+            None => AttestationPolicy::default(),
+        };
+
+        let client = RaTlsAttestationClient::new(socket_path);
+        let result = client.verify(policy, args.allow_simulated).await?;
+
+        if args.quiet {
+            if result.verified {
+                println!("true");
+            } else {
+                println!("false");
+                for f in &result.failures {
+                    eprintln!("  {}", f);
+                }
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+
+        let output = AttestOutput {
+            box_id: record.id.clone(),
+            box_name: record.name.clone(),
+            verified: Some(result.verified),
+            platform: Some(result.platform),
+            nonce: "(RA-TLS: bound to TLS public key)".to_string(),
+            report_hex: None,
+            failures: result.failures,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+
+        if !result.verified {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // Legacy mode: fetch raw report and verify manually
 
     let client = AttestationClient::connect(socket_path).await?;
     let report = client.get_report(&request).await?;

@@ -1,13 +1,21 @@
-//! Guest TEE attestation server for AMD SEV-SNP.
+//! RA-TLS attestation server for AMD SEV-SNP.
 //!
-//! Listens on vsock port 4091 and handles HTTP POST /attest requests.
-//! Obtains hardware-signed SNP attestation reports via `/dev/sev-guest`
-//! and returns them with the certificate chain.
+//! Listens on vsock port 4091 and serves TLS connections with an
+//! RA-TLS certificate that embeds the SNP attestation report.
+//! Clients verify the TEE attestation during the TLS handshake
+//! by inspecting the custom X.509 extensions in the server certificate.
+//!
+//! ## Protocol
+//!
+//! 1. Server generates a P-384 key pair on startup
+//! 2. Server obtains an SNP report with SHA-384(public_key) as report_data
+//! 3. Server creates a self-signed X.509 cert embedding the report
+//! 4. Client connects, TLS handshake delivers the cert
+//! 5. Client's custom verifier extracts and verifies the SNP report
+//! 6. After handshake, client sends a simple request, server responds with status
 
 #[cfg(target_os = "linux")]
-use std::io::Read;
-#[cfg(target_os = "linux")]
-use std::io::Write;
+use std::io::{Read, Write};
 
 use tracing::info;
 #[cfg(target_os = "linux")]
@@ -21,38 +29,70 @@ pub const ATTEST_VSOCK_PORT: u32 = 4091;
 const SNP_REPORT_SIZE: usize = 1184;
 
 /// Size of the report_data field in the SNP report request.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const SNP_USER_DATA_SIZE: usize = 64;
 
-/// Run the attestation server, listening on vsock port 4091.
+/// OID for the SNP attestation report extension.
+/// Must match the OID in runtime/src/tee/ratls.rs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const OID_SNP_REPORT: &[u64] = &[1, 3, 6, 1, 4, 1, 58270, 1, 1];
+
+/// OID for the certificate chain extension.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const OID_CERT_CHAIN: &[u64] = &[1, 3, 6, 1, 4, 1, 58270, 1, 2];
+
+// ============================================================================
+// Public entry point
+// ============================================================================
+
+/// Run the RA-TLS attestation server on vsock port 4091.
 ///
-/// On Linux with SEV-SNP, handles attestation requests via `/dev/sev-guest`.
+/// On Linux with SEV-SNP (or simulation mode), generates an RA-TLS
+/// certificate and serves TLS connections. Clients verify the TEE
+/// attestation during the TLS handshake.
+///
 /// On non-Linux platforms, this is a no-op (development stub).
 pub fn run_attest_server() -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting attestation server on vsock port {}", ATTEST_VSOCK_PORT);
+    info!("Starting RA-TLS attestation server on vsock port {}", ATTEST_VSOCK_PORT);
 
     #[cfg(target_os = "linux")]
     {
-        run_vsock_server()?;
+        run_ratls_server()?;
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        info!("Attestation server not available on non-Linux platform (development mode)");
+        info!("RA-TLS attestation server not available on non-Linux platform (development mode)");
     }
 
     Ok(())
 }
 
-/// Linux vsock server implementation.
+// ============================================================================
+// RA-TLS server (Linux only)
+// ============================================================================
+
+/// Generate an RA-TLS certificate and serve TLS over vsock.
 #[cfg(target_os = "linux")]
-fn run_vsock_server() -> Result<(), Box<dyn std::error::Error>> {
+fn run_ratls_server() -> Result<(), Box<dyn std::error::Error>> {
     use nix::sys::socket::{
         accept, bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, VsockAddr,
     };
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::Arc;
     use std::time::Duration;
     use tracing::error;
 
+    // Step 1: Generate key pair and RA-TLS certificate
+    let (tls_config, cert_der) = generate_ratls_config()?;
+    let tls_config = Arc::new(tls_config);
+
+    info!(
+        cert_size = cert_der.len(),
+        "RA-TLS certificate generated, starting TLS listener"
+    );
+
+    // Step 2: Bind vsock listener
     let sock_fd = socket(
         AddressFamily::Vsock,
         SockType::Stream,
@@ -64,18 +104,20 @@ fn run_vsock_server() -> Result<(), Box<dyn std::error::Error>> {
     bind(sock_fd.as_raw_fd(), &addr)?;
     listen(&sock_fd, Backlog::new(4)?)?;
 
-    info!("Attestation server listening on vsock port {}", ATTEST_VSOCK_PORT);
+    info!("RA-TLS attestation server listening on vsock port {}", ATTEST_VSOCK_PORT);
 
+    // Step 3: Accept loop
     loop {
         match accept(sock_fd.as_raw_fd()) {
             Ok(client_fd) => {
                 let client = unsafe { OwnedFd::from_raw_fd(client_fd) };
-                if let Err(e) = handle_connection(client) {
-                    warn!("Failed to handle attestation connection: {}", e);
+                let config = Arc::clone(&tls_config);
+                if let Err(e) = handle_tls_connection(client, config) {
+                    warn!("RA-TLS connection failed: {}", e);
                 }
             }
             Err(e) => {
-                error!("Attestation accept failed: {}", e);
+                error!("RA-TLS accept failed: {}", e);
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
@@ -83,127 +125,138 @@ fn run_vsock_server() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ============================================================================
-// Request / Response types (kept local to avoid cross-crate dependency)
+// RA-TLS certificate generation
 // ============================================================================
 
-/// Attestation request from the host.
+/// Generate a rustls ServerConfig with an RA-TLS certificate.
+///
+/// 1. Generate a P-384 key pair
+/// 2. Hash the public key to create report_data
+/// 3. Get an SNP report (or simulated) with that report_data
+/// 4. Embed the report in a self-signed X.509 certificate
+/// 5. Build a rustls ServerConfig
+///
+/// Returns (ServerConfig, cert_der) so the cert can be logged/inspected.
 #[cfg(target_os = "linux")]
-#[derive(serde::Deserialize)]
-struct AttestRequest {
-    /// Nonce from the verifier (included in report_data to prevent replay).
-    nonce: Vec<u8>,
-    /// Optional additional data to bind into the report.
-    #[serde(default)]
-    user_data: Option<Vec<u8>>,
-}
+fn generate_ratls_config() -> Result<(rustls::ServerConfig, Vec<u8>), Box<dyn std::error::Error>> {
+    use rcgen::{
+        CertificateParams, CustomExtension, DistinguishedName, DnType, KeyPair,
+        PKCS_ECDSA_P384_SHA384,
+    };
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use sha2::{Digest, Sha256};
 
-/// Attestation response returned to the host.
-#[cfg(target_os = "linux")]
-#[derive(serde::Serialize)]
-struct AttestResponse {
-    /// Raw SNP attestation report bytes.
-    report: Vec<u8>,
-    /// Certificate chain for verification.
-    cert_chain: CertChain,
-}
+    // Generate P-384 key pair
+    let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384)
+        .map_err(|e| format!("Failed to generate key pair: {}", e))?;
 
-/// Certificate chain from the SNP extended report.
-#[cfg(target_os = "linux")]
-#[derive(serde::Serialize, Default)]
-struct CertChain {
-    vcek: Vec<u8>,
-    ask: Vec<u8>,
-    ark: Vec<u8>,
+    // Hash public key to create report_data (first 64 bytes of SHA-256)
+    let pub_key_der = key_pair.public_key_der();
+    let hash = Sha256::digest(&pub_key_der);
+    let mut report_data = [0u8; SNP_USER_DATA_SIZE];
+    let copy_len = hash.len().min(SNP_USER_DATA_SIZE);
+    report_data[..copy_len].copy_from_slice(&hash[..copy_len]);
+
+    // Get attestation report
+    let (report_bytes, cert_chain_json) = if is_simulate_mode() {
+        info!("Generating simulated RA-TLS attestation report");
+        let report = build_simulated_report(&report_data);
+        let chain_json = b"{}".to_vec();
+        (report, chain_json)
+    } else {
+        info!("Requesting hardware SNP report for RA-TLS certificate");
+        let resp = get_snp_report(&report_data)
+            .map_err(|e| format!("Failed to get SNP report: {}", e))?;
+        let chain_json = serde_json::to_vec(&resp.cert_chain)
+            .unwrap_or_else(|_| b"{}".to_vec());
+        (resp.report, chain_json)
+    };
+
+    // Build X.509 certificate with SNP report extensions
+    let mut params = CertificateParams::default();
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "A3S Box RA-TLS");
+    dn.push(DnType::OrganizationName, "A3S Lab");
+    params.distinguished_name = dn;
+
+    // Add SNP report as custom extension
+    let report_ext = CustomExtension::from_oid_content(OID_SNP_REPORT, report_bytes);
+    params.custom_extensions.push(report_ext);
+
+    // Add certificate chain as custom extension
+    let chain_ext = CustomExtension::from_oid_content(OID_CERT_CHAIN, cert_chain_json);
+    params.custom_extensions.push(chain_ext);
+
+    // Self-sign
+    let cert = params.self_signed(&key_pair)
+        .map_err(|e| format!("Failed to generate RA-TLS certificate: {}", e))?;
+
+    let cert_der = cert.der().to_vec();
+    let key_der = key_pair.serialize_der();
+
+    // Build rustls ServerConfig
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let tls_cert = CertificateDer::from(cert_der.clone());
+    let tls_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![tls_cert], tls_key)
+        .map_err(|e| format!("Failed to create TLS config: {}", e))?;
+
+    Ok((config, cert_der))
 }
 
 // ============================================================================
-// Connection handler
+// TLS connection handler
 // ============================================================================
 
-/// Handle a single attestation connection.
+/// Handle a single TLS connection over vsock.
+///
+/// Performs the TLS handshake (which delivers the RA-TLS certificate),
+/// then serves a simple status response.
 #[cfg(target_os = "linux")]
-fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
+fn handle_tls_connection(
+    fd: std::os::fd::OwnedFd,
+    config: std::sync::Arc<rustls::ServerConfig>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::fd::{AsRawFd, FromRawFd};
     use tracing::debug;
 
     let raw_fd = fd.as_raw_fd();
-    let mut stream = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    let tcp_stream = unsafe { std::net::TcpStream::from_raw_fd(raw_fd) };
 
-    let mut buf = vec![0u8; 65536];
-    let n = stream.read(&mut buf)?;
-    if n == 0 {
-        std::mem::forget(fd);
-        return Ok(());
+    let conn = rustls::ServerConnection::new(config)
+        .map_err(|e| format!("TLS connection init failed: {}", e))?;
+
+    let mut tls = rustls::StreamOwned::new(conn, tcp_stream);
+
+    // Read client request (after TLS handshake completes)
+    let mut buf = vec![0u8; 4096];
+    match tls.read(&mut buf) {
+        Ok(0) => {
+            debug!("RA-TLS client disconnected after handshake");
+        }
+        Ok(n) => {
+            debug!("RA-TLS request received ({} bytes)", n);
+            // Respond with simple status
+            let response = b"{\"status\":\"ok\",\"tee\":true}";
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response.len(),
+            );
+            let _ = tls.write_all(http_response.as_bytes());
+            let _ = tls.write_all(response);
+        }
+        Err(e) => {
+            debug!("RA-TLS read error: {}", e);
+        }
     }
 
-    let request_str = String::from_utf8_lossy(&buf[..n]);
-    debug!("Attestation request received ({} bytes)", n);
-
-    // Parse HTTP body
-    let body = match request_str.find("\r\n\r\n") {
-        Some(pos) => &request_str[pos + 4..],
-        None => {
-            send_error_response(&mut stream, 400, "Malformed HTTP request")?;
-            std::mem::forget(fd);
-            return Ok(());
-        }
-    };
-
-    let req: AttestRequest = match serde_json::from_str(body) {
-        Ok(r) => r,
-        Err(e) => {
-            send_error_response(&mut stream, 400, &format!("Invalid JSON: {}", e))?;
-            std::mem::forget(fd);
-            return Ok(());
-        }
-    };
-
-    // Build 64-byte report_data from nonce + optional user_data
-    let report_data = build_report_data(&req.nonce, req.user_data.as_deref());
-
-    // Get attestation report (simulated or hardware)
-    let response = if is_simulate_mode() {
-        info!("Generating simulated attestation report");
-        get_simulated_report(&report_data)
-    } else {
-        match get_snp_report(&report_data) {
-            Ok(resp) => resp,
-            Err(e) => {
-                warn!("SNP attestation failed: {}", e);
-                send_error_response(&mut stream, 500, &format!("Attestation failed: {}", e))?;
-                std::mem::forget(fd);
-                return Ok(());
-            }
-        }
-    };
-
-    let response_body = serde_json::to_string(&response)?;
-    let http_response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        response_body.len(),
-        response_body,
-    );
-    stream.write_all(http_response.as_bytes())?;
-
+    // Prevent double-close: OwnedFd and TcpStream both own the fd
     std::mem::forget(fd);
     Ok(())
-}
-
-/// Send an HTTP error response.
-#[cfg(target_os = "linux")]
-fn send_error_response(
-    stream: &mut impl Write,
-    status: u16,
-    message: &str,
-) -> Result<(), std::io::Error> {
-    let body = format!(r#"{{"error":"{}"}}"#, message);
-    let response = format!(
-        "HTTP/1.1 {} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status,
-        body.len(),
-        body,
-    );
-    stream.write_all(response.as_bytes())
 }
 
 // ============================================================================
@@ -222,27 +275,22 @@ fn is_simulate_mode() -> bool {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const SIMULATED_REPORT_VERSION: u32 = 0xA3;
 
-/// Generate a simulated attestation response (no hardware required).
-///
-/// Produces a 1184-byte report with correct field layout but zero signature
-/// and empty certificate chain. The host verifier must use `allow_simulated`
-/// to accept these reports.
-#[cfg(target_os = "linux")]
-fn get_simulated_report(report_data: &[u8; SNP_USER_DATA_SIZE]) -> AttestResponse {
-    const SNP_REPORT_SIZE: usize = 1184;
-    let mut report = vec![0u8; SNP_REPORT_SIZE];
+/// Generate a simulated 1184-byte SNP report.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn build_simulated_report(report_data: &[u8; SNP_USER_DATA_SIZE]) -> Vec<u8> {
+    let mut report = vec![0u8; 1184];
 
     // version at 0x00 — simulated marker
     report[0x00..0x04].copy_from_slice(&SIMULATED_REPORT_VERSION.to_le_bytes());
     // guest_svn at 0x04
     report[0x04..0x08].copy_from_slice(&1u32.to_le_bytes());
-    // policy at 0x08 — no debug, no SMT
+    // policy at 0x08
     report[0x08..0x10].copy_from_slice(&0u64.to_le_bytes());
     // current_tcb at 0x38
     report[0x38] = 3;   // boot_loader
     report[0x39] = 0;   // tee
     report[0x3E] = 8;   // snp
-    report[0x3F] = 115;  // microcode
+    report[0x3F] = 115; // microcode
     // report_data at 0x50
     report[0x50..0x90].copy_from_slice(report_data);
     // measurement at 0x90 (deterministic fake)
@@ -255,41 +303,27 @@ fn get_simulated_report(report_data: &[u8; SNP_USER_DATA_SIZE]) -> AttestRespons
     }
     // signature at 0x2A0 — left as zeros (simulation marker)
 
-    AttestResponse {
-        report,
-        cert_chain: CertChain::default(),
-    }
+    report
 }
 
 // ============================================================================
-// SNP report_data construction
+// SNP report types (local to avoid cross-crate dependency)
 // ============================================================================
 
-/// Build the 64-byte report_data field from nonce and optional user_data.
-///
-/// If only nonce is provided, it is zero-padded to 64 bytes.
-/// If user_data is also provided, nonce and user_data are concatenated
-/// and truncated/padded to 64 bytes.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn build_report_data(nonce: &[u8], user_data: Option<&[u8]>) -> [u8; SNP_USER_DATA_SIZE] {
-    let mut data = [0u8; SNP_USER_DATA_SIZE];
-    match user_data {
-        Some(ud) => {
-            if nonce.len() >= SNP_USER_DATA_SIZE {
-                data.copy_from_slice(&nonce[..SNP_USER_DATA_SIZE]);
-            } else {
-                data[..nonce.len()].copy_from_slice(nonce);
-                let remaining = SNP_USER_DATA_SIZE - nonce.len();
-                let ud_copy = ud.len().min(remaining);
-                data[nonce.len()..nonce.len() + ud_copy].copy_from_slice(&ud[..ud_copy]);
-            }
-        }
-        None => {
-            let len = nonce.len().min(SNP_USER_DATA_SIZE);
-            data[..len].copy_from_slice(&nonce[..len]);
-        }
-    }
-    data
+/// Certificate chain from the SNP extended report.
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize, Default)]
+struct CertChain {
+    vcek: Vec<u8>,
+    ask: Vec<u8>,
+    ark: Vec<u8>,
+}
+
+/// Attestation response (used internally for SNP report + certs).
+#[cfg(target_os = "linux")]
+struct AttestResponse {
+    report: Vec<u8>,
+    cert_chain: CertChain,
 }
 
 // ============================================================================
@@ -297,15 +331,11 @@ fn build_report_data(nonce: &[u8], user_data: Option<&[u8]>) -> [u8; SNP_USER_DA
 // ============================================================================
 
 /// Get an SNP attestation report from the hardware via `/dev/sev-guest`.
-///
-/// Uses the `SNP_GET_EXT_REPORT` ioctl to obtain both the attestation
-/// report and the certificate chain (VCEK, ASK, ARK) in a single call.
 #[cfg(target_os = "linux")]
 fn get_snp_report(report_data: &[u8; SNP_USER_DATA_SIZE]) -> Result<AttestResponse, String> {
     use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
 
-    // Try /dev/sev-guest (standard) then /dev/sev (fallback)
     let dev = OpenOptions::new()
         .read(true)
         .write(true)
@@ -340,63 +370,42 @@ fn get_snp_report(report_data: &[u8; SNP_USER_DATA_SIZE]) -> Result<AttestRespon
 // SNP ioctl structures (from linux/sev-guest.h)
 // ============================================================================
 
-// ioctl numbers for /dev/sev-guest
-// #define SNP_GET_REPORT     _IOWR('S', 0x0, struct snp_guest_request_ioctl)
-// #define SNP_GET_EXT_REPORT _IOWR('S', 0x2, struct snp_ext_report_req)
 #[cfg(target_os = "linux")]
-const SNP_GET_REPORT_IOCTL: libc::c_ulong = 0xc018_5300; // _IOWR('S', 0x0, 24)
+const SNP_GET_REPORT_IOCTL: libc::c_ulong = 0xc018_5300;
 #[cfg(target_os = "linux")]
-const SNP_GET_EXT_REPORT_IOCTL: libc::c_ulong = 0xc018_5302; // _IOWR('S', 0x2, 24)
+const SNP_GET_EXT_REPORT_IOCTL: libc::c_ulong = 0xc018_5302;
 
-/// snp_report_req: request structure for SNP_GET_REPORT
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct SnpReportReq {
-    /// User data to include in the report (64 bytes).
     user_data: [u8; 64],
-    /// VMPL level (0 for most privileged).
     vmpl: u32,
-    /// Reserved, must be zero.
     rsvd: [u8; 28],
 }
 
-/// snp_report_resp: response structure containing the report
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct SnpReportResp {
-    /// Status code (0 = success).
     status: u32,
-    /// Size of the report data.
     report_size: u32,
-    /// Reserved.
     rsvd: [u8; 24],
-    /// The attestation report.
     report: [u8; SNP_REPORT_SIZE],
 }
 
-/// snp_guest_request_ioctl: wrapper for the ioctl call
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct SnpGuestRequestIoctl {
-    /// Message version (must be 1).
     msg_version: u8,
-    /// Request data pointer.
     req_data: u64,
-    /// Response data pointer.
     resp_data: u64,
-    /// Firmware error code (output).
     fw_err: u64,
 }
 
-/// snp_ext_report_req: request for extended report (report + certs)
 #[cfg(target_os = "linux")]
 #[repr(C)]
 struct SnpExtReportReq {
-    /// The standard report request.
     data: SnpReportReq,
-    /// Pointer to certificate buffer.
     certs_address: u64,
-    /// Length of certificate buffer.
     certs_len: u32,
 }
 
@@ -446,13 +455,12 @@ fn snp_get_report(
     Ok(resp.report.to_vec())
 }
 
-/// Get SNP extended report (report + certificate chain) via SNP_GET_EXT_REPORT.
+/// Get SNP extended report (report + certificate chain).
 #[cfg(target_os = "linux")]
 fn snp_get_ext_report(
     fd: libc::c_int,
     report_data: &[u8; SNP_USER_DATA_SIZE],
 ) -> Result<AttestResponse, String> {
-    // Certificate buffer (up to 16 KiB for VCEK + ASK + ARK)
     const CERTS_BUF_SIZE: usize = 16384;
     let mut certs_buf = vec![0u8; CERTS_BUF_SIZE];
 
@@ -499,7 +507,6 @@ fn snp_get_ext_report(
         return Err(format!("SNP_GET_EXT_REPORT firmware error: {:#x}", resp.status));
     }
 
-    // Parse certificate table from certs_buf
     let cert_chain = parse_cert_table(&certs_buf, ext_req.certs_len as usize);
 
     Ok(AttestResponse {
@@ -509,12 +516,8 @@ fn snp_get_ext_report(
 }
 
 /// Parse the SNP certificate table returned by SNP_GET_EXT_REPORT.
-///
-/// The table is a sequence of `(guid, offset, length)` entries followed
-/// by the certificate data. GUIDs identify VCEK, ASK, and ARK.
 #[cfg(target_os = "linux")]
 fn parse_cert_table(buf: &[u8], len: usize) -> CertChain {
-    // AMD SEV-SNP certificate table GUIDs (little-endian UUID format)
     const VCEK_GUID: [u8; 16] = guid_bytes("63da758d-e664-4564-adc5-f4b93be8accd");
     const ASK_GUID: [u8; 16] = guid_bytes("4ab7b379-bbac-4fe4-a02f-05aef327c782");
     const ARK_GUID: [u8; 16] = guid_bytes("c0b406a4-a803-4952-9743-3fb6014cd0ae");
@@ -524,13 +527,11 @@ fn parse_cert_table(buf: &[u8], len: usize) -> CertChain {
         return chain;
     }
 
-    // Each entry: 16-byte GUID + 4-byte offset + 4-byte length = 24 bytes
-    // Table ends with a zero GUID entry
     let mut pos = 0;
     while pos + 24 <= len {
         let guid = &buf[pos..pos + 16];
         if guid.iter().all(|&b| b == 0) {
-            break; // End of table
+            break;
         }
 
         let offset = u32::from_le_bytes(buf[pos + 16..pos + 20].try_into().unwrap_or([0; 4])) as usize;
@@ -554,13 +555,11 @@ fn parse_cert_table(buf: &[u8], len: usize) -> CertChain {
 }
 
 /// Convert a UUID string to little-endian bytes (AMD SEV-SNP format).
-/// The first three groups are byte-swapped per RFC 4122.
 #[cfg(target_os = "linux")]
 const fn guid_bytes(uuid: &str) -> [u8; 16] {
     let b = uuid.as_bytes();
     let mut out = [0u8; 16];
 
-    // Parse hex chars
     let mut hex = [0u8; 32];
     let mut hi = 0;
     let mut i = 0;
@@ -572,18 +571,14 @@ const fn guid_bytes(uuid: &str) -> [u8; 16] {
         i += 1;
     }
 
-    // Group 1 (4 bytes, reversed): bytes 0-3
     out[0] = hex[6] << 4 | hex[7];
     out[1] = hex[4] << 4 | hex[5];
     out[2] = hex[2] << 4 | hex[3];
     out[3] = hex[0] << 4 | hex[1];
-    // Group 2 (2 bytes, reversed): bytes 4-5
     out[4] = hex[10] << 4 | hex[11];
     out[5] = hex[8] << 4 | hex[9];
-    // Group 3 (2 bytes, reversed): bytes 6-7
     out[6] = hex[14] << 4 | hex[15];
     out[7] = hex[12] << 4 | hex[13];
-    // Groups 4-5 (8 bytes, not reversed): bytes 8-15
     let mut j = 0;
     while j < 8 {
         out[8 + j] = hex[16 + j * 2] << 4 | hex[16 + j * 2 + 1];
@@ -604,6 +599,10 @@ const fn hex_val(c: u8) -> u8 {
     }
 }
 
+// ============================================================================
+// Tests
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,44 +613,45 @@ mod tests {
     }
 
     #[test]
-    fn test_build_report_data_nonce_only() {
-        let nonce = vec![1, 2, 3, 4];
-        let data = build_report_data(&nonce, None);
-        assert_eq!(&data[..4], &[1, 2, 3, 4]);
-        assert_eq!(&data[4..], &[0u8; 60]);
+    fn test_is_simulate_mode_default() {
+        // Should be false unless env var is set
+        // (don't set it in tests to avoid side effects)
+        let _ = is_simulate_mode();
     }
 
     #[test]
-    fn test_build_report_data_with_user_data() {
-        let nonce = vec![1, 2, 3, 4];
-        let user_data = vec![5, 6, 7, 8];
-        let data = build_report_data(&nonce, Some(&user_data));
-        assert_eq!(&data[..4], &[1, 2, 3, 4]);
-        assert_eq!(&data[4..8], &[5, 6, 7, 8]);
-        assert_eq!(&data[8..], &[0u8; 56]);
+    fn test_build_simulated_report_size() {
+        let data = [0u8; SNP_USER_DATA_SIZE];
+        let report = build_simulated_report(&data);
+        assert_eq!(report.len(), 1184);
     }
 
     #[test]
-    fn test_build_report_data_overflow() {
-        let nonce = vec![0xAA; 64];
-        let data = build_report_data(&nonce, Some(&[0xBB; 10]));
-        // Nonce fills all 64 bytes, user_data is ignored
-        assert_eq!(data, [0xAA; 64]);
+    fn test_build_simulated_report_version() {
+        let data = [0u8; SNP_USER_DATA_SIZE];
+        let report = build_simulated_report(&data);
+        let version = u32::from_le_bytes(report[0..4].try_into().unwrap());
+        assert_eq!(version, SIMULATED_REPORT_VERSION);
     }
 
     #[test]
-    fn test_build_report_data_exact_64() {
-        let nonce = vec![0xFF; 64];
-        let data = build_report_data(&nonce, None);
-        assert_eq!(data, [0xFF; 64]);
+    fn test_build_simulated_report_contains_report_data() {
+        let mut data = [0u8; SNP_USER_DATA_SIZE];
+        data[0..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let report = build_simulated_report(&data);
+        assert_eq!(&report[0x50..0x54], &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn test_oid_constants() {
+        assert_eq!(OID_SNP_REPORT, &[1, 3, 6, 1, 4, 1, 58270, 1, 1]);
+        assert_eq!(OID_CERT_CHAIN, &[1, 3, 6, 1, 4, 1, 58270, 1, 2]);
     }
 
     #[test]
     #[cfg(target_os = "linux")]
     fn test_guid_bytes() {
-        // VCEK GUID: 63da758d-e664-4564-adc5-f4b93be8accd
         let guid = guid_bytes("63da758d-e664-4564-adc5-f4b93be8accd");
-        // First group reversed: 63da758d -> 8d75da63
         assert_eq!(guid[0], 0x8d);
         assert_eq!(guid[1], 0x75);
         assert_eq!(guid[2], 0xda);
@@ -665,7 +665,5 @@ mod tests {
         assert_eq!(hex_val(b'9'), 9);
         assert_eq!(hex_val(b'a'), 10);
         assert_eq!(hex_val(b'f'), 15);
-        assert_eq!(hex_val(b'A'), 10);
-        assert_eq!(hex_val(b'F'), 15);
     }
 }

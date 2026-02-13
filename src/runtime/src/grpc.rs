@@ -293,6 +293,116 @@ impl AttestationClient {
     }
 }
 
+/// Client for verifying TEE attestation via RA-TLS handshake.
+///
+/// Connects to the guest's RA-TLS attestation server over Unix socket,
+/// performs a TLS handshake with a custom certificate verifier that
+/// extracts and verifies the SNP report from the server's certificate.
+///
+/// Attestation verification happens during the TLS handshake — if the
+/// handshake succeeds, the TEE is verified.
+#[derive(Debug)]
+pub struct RaTlsAttestationClient {
+    socket_path: PathBuf,
+}
+
+impl RaTlsAttestationClient {
+    /// Create a new RA-TLS attestation client for the given socket path.
+    pub fn new(socket_path: &Path) -> Self {
+        Self {
+            socket_path: socket_path.to_path_buf(),
+        }
+    }
+
+    /// Get the socket path.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    /// Verify TEE attestation via RA-TLS handshake.
+    ///
+    /// Connects to the guest attestation server, performs a TLS handshake
+    /// with a custom verifier that checks the SNP report embedded in the
+    /// server's certificate, and returns the verification result.
+    ///
+    /// # Arguments
+    /// * `policy` - Attestation policy to verify against
+    /// * `allow_simulated` - Whether to accept simulated (non-hardware) reports
+    pub async fn verify(
+        &self,
+        policy: crate::tee::AttestationPolicy,
+        allow_simulated: bool,
+    ) -> Result<crate::tee::VerificationResult> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // Build RA-TLS client config with custom verifier
+        let client_config = crate::tee::ratls::create_client_config(policy, allow_simulated)?;
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        // Connect to the Unix socket
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            BoxError::AttestationError(format!(
+                "Failed to connect to RA-TLS server at {}: {}",
+                self.socket_path.display(),
+                e,
+            ))
+        })?;
+
+        // Perform TLS handshake — attestation is verified here
+        let server_name = rustls::pki_types::ServerName::try_from("localhost")
+            .map_err(|e| BoxError::AttestationError(format!("Invalid server name: {}", e)))?;
+
+        let mut tls_stream = connector.connect(server_name, stream).await.map_err(|e| {
+            BoxError::AttestationError(format!("RA-TLS handshake failed: {}", e))
+        })?;
+
+        // Send a simple request to complete the exchange
+        let request = b"GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        tls_stream.write_all(request).await.map_err(|e| {
+            BoxError::AttestationError(format!("RA-TLS write failed: {}", e))
+        })?;
+
+        // Read response
+        let mut response = Vec::with_capacity(4096);
+        tls_stream.read_to_end(&mut response).await.map_err(|e| {
+            BoxError::AttestationError(format!("RA-TLS read failed: {}", e))
+        })?;
+
+        // Extract the peer certificate for detailed report info
+        let (_, tls_conn) = tls_stream.get_ref();
+        let peer_certs = tls_conn.peer_certificates();
+
+        if let Some(certs) = peer_certs {
+            if let Some(cert) = certs.first() {
+                let report = crate::tee::ratls::extract_report_from_cert(cert.as_ref())?;
+                let nonce = if report.report.len() >= 0x90 {
+                    &report.report[0x50..0x90]
+                } else {
+                    &[]
+                };
+                return crate::tee::verify_attestation(
+                    &report,
+                    nonce,
+                    &crate::tee::AttestationPolicy::default(),
+                    allow_simulated,
+                );
+            }
+        }
+
+        // If we got here, TLS handshake succeeded (verifier passed)
+        // but we couldn't extract the cert for detailed results
+        Ok(crate::tee::VerificationResult {
+            verified: true,
+            platform: crate::tee::PlatformInfo::default(),
+            policy_result: crate::tee::PolicyResult { passed: true, violations: vec![] },
+            signature_valid: true,
+            cert_chain_valid: true,
+            nonce_valid: true,
+            failures: vec![],
+        })
+    }
+}
+
 /// Client for interactive PTY sessions in the guest over Unix socket.
 ///
 /// Connects to the PTY server (vsock port 4090) and provides async

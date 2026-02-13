@@ -28,6 +28,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
 clap = { version = "4.4", features = ["derive"] }
 
+# RA-TLS (Remote Attestation TLS)
+rcgen = { workspace = true }
+rustls = { workspace = true }
+sha2 = { workspace = true }
+
 [features]
 default = []
 
