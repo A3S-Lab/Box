@@ -58,38 +58,48 @@ fn find_binary() -> String {
 }
 
 /// Run an a3s-box command and return (stdout, stderr, success).
-/// stderr goes directly to terminal for real-time tracing/log output.
+/// Both stdout and stderr are printed to terminal in real-time.
 fn run_cmd(args: &[&str]) -> (String, String, bool) {
+    use std::io::BufRead;
+
     let bin = find_binary();
     eprintln!("    $ a3s-box {}", args.join(" "));
 
     let mut child = Command::new(&bin)
         .args(args)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("Failed to run `a3s-box {}`: {}", args.join(" "), e));
 
     let stdout_pipe = child.stdout.take().unwrap();
-    // Read stdout in a thread so it doesn't block
+    let stderr_pipe = child.stderr.take().unwrap();
+
+    // Read stdout line-by-line in a thread, printing each line immediately
     let stdout_thread = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = String::new();
-        let mut reader = std::io::BufReader::new(stdout_pipe);
-        reader.read_to_string(&mut buf).ok();
-        buf
+        let mut lines = Vec::new();
+        for line in std::io::BufReader::new(stdout_pipe).lines().map_while(Result::ok) {
+            eprintln!("    │ {}", line);
+            lines.push(line);
+        }
+        lines.join("\n")
+    });
+
+    // Read stderr line-by-line in a thread
+    let stderr_thread = std::thread::spawn(move || {
+        let mut lines = Vec::new();
+        for line in std::io::BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
+            eprintln!("    │ {}", line);
+            lines.push(line);
+        }
+        lines.join("\n")
     });
 
     let status = child.wait().expect("Failed to wait for child process");
     let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
 
-    if !stdout.trim().is_empty() {
-        for line in stdout.lines() {
-            eprintln!("    → {}", line);
-        }
-    }
-
-    (stdout, String::new(), status.success())
+    (stdout, stderr, status.success())
 }
 
 /// Run an a3s-box command quietly (no output), return (stdout, stderr, success).
