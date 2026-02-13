@@ -58,16 +58,51 @@ fn find_binary() -> String {
 }
 
 /// Run an a3s-box command and return (stdout, stderr, success).
+/// Output is printed to the console in real-time.
 fn run_cmd(args: &[&str]) -> (String, String, bool) {
     let bin = find_binary();
-    let output = Command::new(&bin)
+    eprintln!("    $ a3s-box {}", args.join(" "));
+
+    let mut child = Command::new(&bin)
         .args(args)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap_or_else(|e| panic!("Failed to run `a3s-box {}`: {}", args.join(" "), e));
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    (stdout, stderr, output.status.success())
+    // Read stdout and stderr in separate threads for real-time output
+    let stdout_handle = child.stdout.take().unwrap();
+    let stderr_handle = child.stderr.take().unwrap();
+
+    let stdout_thread = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut lines = Vec::new();
+        for line in std::io::BufReader::new(stdout_handle).lines() {
+            if let Ok(line) = line {
+                eprintln!("    │ {}", line);
+                lines.push(line);
+            }
+        }
+        lines.join("\n")
+    });
+
+    let stderr_thread = std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut lines = Vec::new();
+        for line in std::io::BufReader::new(stderr_handle).lines() {
+            if let Ok(line) = line {
+                eprintln!("    │ {}", line);
+                lines.push(line);
+            }
+        }
+        lines.join("\n")
+    });
+
+    let status = child.wait().expect("Failed to wait for child process");
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+
+    (stdout, stderr, status.success())
 }
 
 /// Run an a3s-box command, assert success, return stdout.
