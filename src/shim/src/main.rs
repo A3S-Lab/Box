@@ -474,6 +474,20 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.add_vsock_port(ATTEST_VSOCK_PORT, attest_socket_str, true)?;
     }
 
+    // Inject TEE simulation env var for guest init (PID 1) so the attestation
+    // server generates simulated reports instead of calling /dev/sev-guest.
+    // The entrypoint env contains A3S_TEE_SIMULATE=1 when simulate mode is on,
+    // but that only reaches the child process — guest init needs it via set_env.
+    if spec
+        .entrypoint
+        .env
+        .iter()
+        .any(|(k, _)| k == "A3S_TEE_SIMULATE")
+    {
+        ctx.set_env(&[("A3S_TEE_SIMULATE".to_string(), "1".to_string())])?;
+        tracing::info!("TEE simulation mode: injected A3S_TEE_SIMULATE=1 for guest init");
+    }
+
     // Configure TSI port mappings if specified
     if !spec.port_map.is_empty() {
         tracing::info!(port_map = ?spec.port_map, "Configuring TSI port mappings");
