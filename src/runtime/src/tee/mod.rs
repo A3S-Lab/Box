@@ -12,6 +12,7 @@
 pub mod attestation;
 pub mod certs;
 pub mod policy;
+pub mod ratls;
 pub mod simulate;
 pub mod snp;
 pub mod verifier;

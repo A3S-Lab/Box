@@ -65,6 +65,12 @@ x509-cert = { version = "0.2", features = ["std"] }
 der = { version = "0.7", features = ["std", "alloc"] }
 spki = "0.7"
 
+# RA-TLS (Remote Attestation TLS)
+rcgen = { version = "0.13", features = ["x509-parser"] }
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pki-types = "1"
+
 # HTTP client (for skill downloads)
 reqwest = { version = "0.11", features = ["json", "stream"] }
 

@@ -37,6 +37,12 @@ x509-cert = { workspace = true }
 der = { workspace = true }
 spki = { workspace = true }
 
+# RA-TLS (Remote Attestation TLS)
+rcgen = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+
 # HTTP client
 reqwest = { workspace = true }
 
