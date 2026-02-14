@@ -77,6 +77,8 @@ Box is **not** an AI agent itself. It provides the secure sandbox infrastructure
 - **RA-TLS**: Remote attestation over TLS — SNP report embedded in X.509 certificate extensions, verified during TLS handshake
 - **Secret Injection**: Inject secrets into TEE via RA-TLS channel, stored in `/run/secrets/` (tmpfs, mode 0400)
 - **Sealed Storage**: AES-256-GCM encryption with HKDF-SHA256 keys derived from TEE identity, three sealing policies (MeasurementAndChip, MeasurementOnly, ChipOnly)
+- **Dockerfile Build**: Full `a3s-box build` with FROM, RUN, COPY, ADD, WORKDIR, ENV, ENTRYPOINT, CMD, EXPOSE, LABEL, USER, ARG, SHELL, STOPSIGNAL, HEALTHCHECK, ONBUILD, VOLUME, and multi-stage builds
+- **Image Export/Import**: `save`/`load` for offline image transfer
 
 ## Quick Start
 
@@ -425,10 +427,6 @@ Simulation mode generates fake attestation reports with deterministic keys, allo
 - [x] Docker CLI alignment Phase 2: restart policy enforcement with monitor daemon (`always`, `on-failure`, `on-failure:N`, `unless-stopped`, exponential backoff), health check support (--health-cmd, status tracking)
 - [x] Docker CLI alignment Phase 3: interactive PTY support (`-it` flags) for exec, attach, and run via dedicated PTY server (vsock port 4090)
 - [x] `a3s-box build` — Dockerfile-based image building (FROM, RUN, COPY, WORKDIR, ENV, ENTRYPOINT, CMD, EXPOSE, LABEL, USER, ARG, ADD, SHELL, STOPSIGNAL, HEALTHCHECK, ONBUILD, VOLUME, multi-stage builds)
-- [ ] Agent configuration from OCI labels
-- [ ] Pre-built `a3s-code` guest image for AI coding agent
-- [ ] Host SDK for spawning and communicating with guest agents
-- [ ] Python SDK (`a3s-box-python`) for easy integration
 
 ### Phase 4: CRI Runtime Integration ✅
 
@@ -461,18 +459,10 @@ Simulation mode generates fake attestation reports with deterministic keys, allo
 - [x] Layer cache for OCI image layers (deduplication across images)
 - [x] VM warm pool (pre-booted idle MicroVMs for instant allocation)
 - [x] Pool maintenance with configurable TTL and auto-replenish
-- [ ] VM snapshot/restore (save "model loaded" state to SSD, restore < 500ms)
-- [ ] Layered model cache (L1: VM memory, L2: host SSD mmap, L3: MinIO object storage)
-- [ ] Snapshot TTL management and automatic refresh
+- [ ] VM snapshot/restore (save running state to SSD, restore < 500ms)
 
-**Observability**
-- [ ] Prometheus metrics export (VM boot time, memory usage, CPU utilization)
-- [ ] OpenTelemetry integration (VM lifecycle spans: create → boot → ready)
-- [ ] Cold start latency histograms (p50/p90/p95/p99)
-- [ ] Warm pool utilization metrics
+**Logging & Security**
 - [x] Structured log aggregation (json-file logging driver with rotation)
-
-**Security**
 - [x] Resource limits enforcement (CPU, memory, disk via cgroup v2)
 - [ ] Network isolation policies
 - [ ] Audit logging
@@ -487,7 +477,7 @@ Simulation mode generates fake attestation reports with deterministic keys, allo
 - [x] TEE config file generation for libkrun
 - [x] Shim TEE configuration before VM start
 
-**Phase 6.2: Remote Attestation 🚧**
+**Phase 6.2: Remote Attestation ✅**
 - [x] Attestation report types and SNP report parsing (`AttestationRequest`, `AttestationReport`, `PlatformInfo`, `TcbVersion`)
 - [x] Host-guest attestation client via Unix socket (`AttestationClient`)
 - [x] VmManager attestation integration (`request_attestation()` via `TeeExtension` trait)
@@ -506,7 +496,7 @@ Simulation mode generates fake attestation reports with deterministic keys, allo
 - [ ] KBS (Key Broker Service) integration for secret provisioning
 - [ ] Periodic re-attestation with configurable interval
 
-**Phase 6.3: Sealed Storage 🚧**
+**Phase 6.3: Sealed Storage ✅**
 - [x] HKDF-SHA256 key derivation from TEE identity (measurement + chip_id)
 - [x] AES-256-GCM sealed storage with three policies (MeasurementAndChip, MeasurementOnly, ChipOnly)
 - [x] Guest-side seal/unseal service via RA-TLS (`POST /seal`, `POST /unseal`)
@@ -523,209 +513,42 @@ Simulation mode generates fake attestation reports with deterministic keys, allo
 - [ ] Real hardware integration testing on AMD SEV-SNP platform (Azure DCasv5 or bare-metal EPYC Milan/Genoa)
 - [ ] Simulation-to-production migration guide with sealed data re-encryption tooling
 
-### Phase 7: SafeClaw Security Integration 🚧
+### Phase 7: Host SDK & Transport 📋
 
-A3S Box provides the secure infrastructure layer for [SafeClaw](../safeclaw/README.md)'s privacy-focused AI assistant.
+Box exposes a host-side SDK and unified transport layer for upstream consumers (SafeClaw, a3s-code, etc.).
 
-> See [SafeClaw Known Architecture Issues](../safeclaw/README.md#known-architecture-issues) and [SafeClaw Architecture Redesign](../safeclaw/README.md#phase-3-architecture-redesign-) for the full design review and plan.
+**Shared Transport Layer (`a3s-transport`)**
+- [ ] `Transport` trait with `connect`/`send`/`recv`/`close`
+- [ ] Unified frame protocol: `[type:u8][length:u32][payload]` — shared across exec, PTY, and TEE channels
+- [ ] `VsockTransport`: Real vsock implementation with framing, backpressure, reconnection
+- [ ] `MockTransport`: For testing without VM
+- [ ] Migrate exec server to shared framing protocol
+- [ ] Migrate PTY server to shared framing protocol
 
-#### Shared Transport Layer (`a3s-transport`)
+**`TeeRuntime` High-Level API**
+- [ ] `TeeRuntime` struct: orchestrates VM boot + attestation + secure channel
+- [ ] `spawn_verified()`: single call to get a verified TEE channel
+- [ ] `VerifiedTeeChannel`: wraps `Transport` + attestation proof
+- [ ] Lifecycle management: shutdown, re-attestation, channel recovery
 
-A unified transport abstraction to replace ad-hoc vsock protocols. See [SafeClaw Phase 3.2](../safeclaw/README.md#phase-32-unified-transport-layer-p0--foundation).
-
-- [ ] **`a3s-transport` crate**: `Transport` trait with `connect`/`send`/`recv`/`close`
-- [ ] **Unified frame protocol**: `[type:u8][length:u32][payload]` — shared across exec, PTY, and TEE channels
-- [ ] **`VsockTransport`**: Real vsock implementation with framing, backpressure, reconnection
-- [ ] **`MockTransport`**: For testing without VM (replaces SafeClaw's `simulate_tee_response`)
-- [ ] **Port allocation** (no conflicts):
-  - 4088: gRPC agent control (unchanged)
-  - 4089: exec server (unchanged)
-  - 4090: PTY server (unchanged)
-  - 4091: TEE secure channel (new, dedicated for SafeClaw)
-- [ ] **Migrate exec server**: Adopt shared framing protocol from `a3s-transport`
-- [ ] **Migrate PTY server**: Adopt shared framing protocol from `a3s-transport`
-
-#### `TeeRuntime` High-Level API
-
-A high-level API that combines VM boot + attestation + secure channel establishment into a single call:
-
-```rust
-pub struct TeeRuntime {
-    vm_manager: VmManager,
-    attestation: AttestationService,
-}
-
-impl TeeRuntime {
-    /// Boot TEE instance, verify attestation, establish secure channel — one call.
-    pub async fn spawn_verified(
-        &self,
-        config: &TeeInstanceConfig,
-    ) -> Result<VerifiedTeeChannel> {
-        let instance = self.vm_manager.boot(config.into()).await?;
-        let report = self.attestation.request_and_verify(&instance).await?;
-        let transport = VsockTransport::connect(instance.vsock_cid(), TEE_PORT).await?;
-        let channel = SecureChannel::establish(transport, &report).await?;
-        Ok(VerifiedTeeChannel { instance, channel })
-    }
-}
-```
-
-- [ ] **`TeeRuntime` struct**: Orchestrates VM + attestation + channel
-- [ ] **`spawn_verified()`**: Single entry point for SafeClaw to get a verified TEE channel
-- [ ] **`VerifiedTeeChannel`**: Wraps `Transport` + attestation proof, ready for SafeClaw use
-- [ ] **Lifecycle management**: Shutdown, re-attestation, channel recovery
-
-#### SafeClaw + A3S Box Security Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    SafeClaw Security Architecture                        │
-│                                                                          │
-│  User Request (contains sensitive data)                                  │
-│      │                                                                   │
-│      ▼                                                                   │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │                    SafeClaw Gateway                              │    │
-│  │  - Privacy classification                                        │    │
-│  │  - Sensitivity routing                                           │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│      │                                                                   │
-│      │ vsock (encrypted)                                                │
-│      ▼                                                                   │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │              A3S Box - Coordinator TEE                           │    │
-│  │  ┌───────────────────────────────────────────────────────────┐  │    │
-│  │  │  Local LLM (Qwen3/DeepSeek)                                │  │    │
-│  │  │  - Full access to sensitive data                          │  │    │
-│  │  │  - Task decomposition & sanitization                      │  │    │
-│  │  │  - Data NEVER leaves this TEE                             │  │    │
-│  │  └───────────────────────────────────────────────────────────┘  │    │
-│  │  ┌───────────────────────────────────────────────────────────┐  │    │
-│  │  │  Network Firewall                                          │  │    │
-│  │  │  - Whitelist: vsock only (no external network)            │  │    │
-│  │  └───────────────────────────────────────────────────────────┘  │    │
-│  │                    Hardware Isolated (SEV-SNP/SGX)               │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│      │                         │                         │              │
-│      │ sanitized               │ partial                 │ sanitized   │
-│      ▼                         ▼                         ▼              │
-│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐          │
-│  │ A3S Box      │      │ A3S Box      │      │ A3S Box      │          │
-│  │ Worker TEE   │      │ Worker TEE   │      │ Worker REE   │          │
-│  │              │      │              │      │              │          │
-│  │ Secure tasks │      │ Secure tasks │      │ General tasks│          │
-│  │ (partial     │      │ (partial     │      │ (no sensitive│          │
-│  │  sensitive)  │      │  sensitive)  │      │  data)       │          │
-│  └──────┬───────┘      └──────┬───────┘      └──────┬───────┘          │
-│         │                     │                     │                   │
-│         └─────────────────────┴─────────────────────┘                   │
-│                               │                                         │
-│                               ▼                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │              A3S Box - Validator TEE                             │    │
-│  │  ┌───────────────────────────────────────────────────────────┐  │    │
-│  │  │  Local LLM (Independent verification)                      │  │    │
-│  │  │  - Check output for data leakage                          │  │    │
-│  │  │  - Can BLOCK suspicious responses                         │  │    │
-│  │  └───────────────────────────────────────────────────────────┘  │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│      │                                                                   │
-│      ▼                                                                   │
-│  Safe Response (sensitive data redacted)                                │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-#### Data Security Model
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Data Security Boundaries                              │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  TRUST ZONE 1: Coordinator TEE (Highest Security)                │    │
-│  │  ┌───────────────────────────────────────────────────────────┐  │    │
-│  │  │  ✓ Full sensitive data access                              │  │    │
-│  │  │  ✓ Local LLM only (no cloud API)                          │  │    │
-│  │  │  ✓ Sealed storage for credentials                         │  │    │
-│  │  │  ✓ No outbound network                                    │  │    │
-│  │  │                                                            │  │    │
-│  │  │  Data: passwords, API keys, SSN, credit cards, medical    │  │    │
-│  │  └───────────────────────────────────────────────────────────┘  │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  TRUST ZONE 2: Worker TEE (Medium Security)                      │    │
-│  │  ┌───────────────────────────────────────────────────────────┐  │    │
-│  │  │  ✓ Partial sensitive data (need-to-know)                   │  │    │
-│  │  │  ✓ Cloud LLM API allowed (whitelisted)                    │  │    │
-│  │  │  ✓ Output sanitization enforced                           │  │    │
-│  │  │  ✓ Tool call interception                                 │  │    │
-│  │  │                                                            │  │    │
-│  │  │  Data: anonymized records, partial identifiers            │  │    │
-│  │  └───────────────────────────────────────────────────────────┘  │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐    │
-│  │  TRUST ZONE 3: Worker REE (Standard Security)                    │    │
-│  │  ┌───────────────────────────────────────────────────────────┐  │    │
-│  │  │  ✗ No sensitive data access                                │  │    │
-│  │  │  ✓ Cloud LLM API allowed                                  │  │    │
-│  │  │  ✓ General purpose tasks only                             │  │    │
-│  │  │                                                            │  │    │
-│  │  │  Data: public info, formatting, translation               │  │    │
-│  │  └───────────────────────────────────────────────────────────┘  │    │
-│  └─────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-#### TEE Security Properties
-
-| Property | Implementation | Threat Mitigated |
-|----------|----------------|------------------|
-| **Memory Encryption** | AMD SEV-SNP / Intel SGX | Memory scraping, cold boot attacks |
-| **Remote Attestation** | Quote verification | Fake TEE, tampered code |
-| **Sealed Storage** | MRENCLAVE binding | Data extraction, rollback |
-| **Network Isolation** | Whitelist firewall | Data exfiltration |
-| **Process Isolation** | Namespace + MicroVM | Container escape |
-
-**Local LLM Support (for SafeClaw Coordinator)**
-- [ ] TEE-optimized LLM inference runtime
-- [ ] Support for Qwen3, DeepSeek-R1, ChatGLM models
-- [ ] Quantization support (Q4, Q8) for memory efficiency
-- [ ] Model integrity verification (hash check before loading)
-- [ ] GPU passthrough for TEE (where supported)
-
-**Distributed TEE Architecture**
-- [ ] Multi-TEE instance orchestration
-- [ ] Inter-TEE secure communication channels
-- [ ] Cross-TEE attestation verification
-- [ ] Worker pool management (TEE/REE environments)
-- [ ] Task routing based on sensitivity level
-
-**Network Security**
-- [ ] Whitelist-only outbound firewall
-- [ ] DNS query restrictions
-- [ ] Traffic audit logging
-- [ ] Rate limiting per destination
-
-**Secure Channel Enhancement**
-- [ ] HKDF key derivation (replace SHA256)
-- [ ] Message sequence numbers (replay protection)
-- [ ] Automatic key rotation
-- [ ] Forward secrecy verification
+> Items moved to other projects:
+> - SafeClaw: distributed TEE orchestration, trust zones, LLM inference runtime, task routing, network firewall policies, data security model → see [SafeClaw README](../safeclaw/README.md)
+> - a3s-code: agent configuration from OCI labels, pre-built guest image, host SDK for agent communication, Python SDK → see [a3s-code README](https://github.com/a3s-lab/code)
 
 ### Phase 8: Elastic Scaling 📋
 
-- [ ] Metrics collector (queue depth, latency, cold start frequency)
-- [ ] Autoscaler with reactive scaling
-- [ ] Warm pool management (auto-replenish on allocation)
+- [ ] Prometheus metrics export (VM boot time, memory usage, CPU utilization, warm pool stats)
+- [ ] OpenTelemetry integration (VM lifecycle spans: create → boot → ready)
+- [ ] Autoscaler with reactive scaling based on warm pool pressure
 - [ ] Scale to zero support (with snapshot persistence)
 - [ ] Kubernetes Operator (BoxAutoscaler CRD)
-- [ ] Integration with Knative cold_start_strategy config
 
-### Phase 9: Docker Feature Parity 🚧
+> Items moved to other projects:
+> - SafeClaw: queue depth metrics, task-level latency tracking, Knative cold_start_strategy → see [SafeClaw README](../safeclaw/README.md)
 
-Remaining gaps between A3S Box and Docker, prioritized by impact.
+### Phase 9: Docker Feature Parity ✅
+
+Near-complete Docker CLI compatibility. Remaining items are low-priority edge cases.
 
 **9.1 Networking (P0) ✅**
 - [x] Bridge network driver (container-to-container communication via passt virtio-net)
