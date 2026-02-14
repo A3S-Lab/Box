@@ -7,7 +7,6 @@ members = [
     "deps/libkrun-sys",
     "cri",
     "cli",
-    "updater",
 ]
 resolver = "2"
 
@@ -116,4 +115,4 @@ base64 = "0.22"
 ring = "0.17"
 
 # Self-update
-a3s-updater = { path = "updater" }
+a3s-updater = { version = "0.2", path = "../../updater" }
