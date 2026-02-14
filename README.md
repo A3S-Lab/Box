@@ -358,10 +358,34 @@ let config = BoxConfig {
 ```
 
 **Hardware Requirements for TEE:**
-- AMD EPYC CPU (Milan 3rd gen or Genoa 4th gen) with SEV-SNP support
+- AMD EPYC CPU with SEV-SNP support:
+  - EPYC 7003 series (Milan, 3rd gen) — e.g. EPYC 7763, 7713, 7543, 7443, 7313
+  - EPYC 9004 series (Genoa, 4th gen) — e.g. EPYC 9654, 9554, 9454, 9354, 9124
 - Linux kernel 5.19+ with SEV-SNP patches
-- `/dev/sev` device accessible
+- `/dev/sev` and `/dev/sev-guest` devices accessible
 - libkrun built with `SEV=1` flag
+- Cloud options: Azure DCasv5/ECasv5 VMs, AWS M6a (SEV only, no SNP), Google Cloud N2D (SEV only)
+
+> **Note:** AMD Ryzen (including Ryzen 9 HX series), Intel CPUs, and Apple Silicon do NOT support SEV-SNP. VMware/VirtualBox nested virtualization also cannot expose SEV-SNP to guests.
+
+**TEE Simulation Mode:**
+
+For local development without SEV-SNP hardware, enable simulation mode:
+
+```bash
+export A3S_TEE_SIMULATE=1
+a3s-box run --tee sev-snp my-image
+```
+
+Simulation mode generates fake attestation reports with deterministic keys, allowing the full TEE workflow (attestation, RA-TLS, secret injection, seal/unseal) to run on any machine.
+
+**Simulation Limitations (not suitable for production):**
+- Attestation report signatures are not cryptographically valid (ECDSA verification is bypassed)
+- RA-TLS TLS public key is not bound to `report_data` — a real attacker could substitute certificates
+- Certificate chain validation checks issuer/subject strings only, not ECDSA signatures (VCEK→ASK→ARK)
+- Sealed data is NOT portable to real hardware — key derivation uses different inputs (simulated vs real measurement/chip_id), so data sealed in simulation cannot be unsealed on real SEV-SNP and vice versa
+- No replay attack protection (report age is not checked)
+- No hardware memory encryption — guest memory is readable by the host
 
 ## Roadmap
 
