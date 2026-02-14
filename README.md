@@ -283,10 +283,10 @@ Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible
 
 | Crate | Binary | Purpose |
 |-------|--------|---------|
-| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (354 tests) |
+| `cli` | `a3s-box` | Docker-like CLI for managing MicroVM sandboxes (367 unit tests, 7 integration tests) |
 | `core` | — | Foundational types: `BoxConfig`, `BoxError`, `BoxEvent`, `ExecRequest`, `PtyRequest`, `TeeConfig` (160 tests) |
-| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (442 tests) |
-| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server, PTY server (25 tests) |
+| `runtime` | — | VM lifecycle, OCI image parsing, rootfs composition, health checking, attestation verification (486 tests) |
+| `guest/init` | `a3s-box-guest-init` | Guest init (PID 1), `nsexec` for namespace isolation, exec server, PTY server, attestation server (Linux-only tests) |
 | `shim` | `a3s-box-shim` | VM subprocess shim (libkrun bridge) |
 | `cri` | `a3s-box-cri` | CRI runtime for Kubernetes integration (28 tests) |
 
@@ -849,17 +849,115 @@ just release            # Release build
 cargo build -p a3s-box-cli  # Build CLI only
 
 # Test
-just test               # All tests
+just test               # All unit tests
 just test-core          # Core crate
 just test-runtime       # Runtime crate
-cargo test -p a3s-box-cli   # CLI tests (354 tests)
-cargo test -p a3s-box-core  # Core tests (160 tests)
+cargo test -p a3s-box-cli --lib   # CLI unit tests (367 tests)
+cargo test -p a3s-box-core        # Core tests (160 tests)
+cargo test -p a3s-box-runtime     # Runtime tests (486 tests)
 
 # Lint
 just fmt                # Format code
 just lint               # Clippy
 just ci                 # Full CI checks
 ```
+
+### Test Results
+
+**Unit Tests: 1,013 passed** (as of 2025-02-14)
+
+| Crate | Tests | Notes |
+|-------|------:|-------|
+| `a3s-box-cli` | 367 | State management, name resolution, output formatting, restart policies |
+| `a3s-box-core` | 160 | Config validation, error types, event serialization |
+| `a3s-box-runtime` | 486 | OCI parsing, rootfs composition, health checking, attestation, RA-TLS, sealed storage |
+| `a3s-box-cri` | 28 | CRI sandbox/container lifecycle, config mapping |
+| `a3s-box-guest-init` | — | Tests compile only on `aarch64-unknown-linux-musl` target |
+| **Total** | **1,041** | 2 doc-tests ignored (require Linux runtime) |
+
+All unit tests run without VM, network, or hardware dependencies (`A3S_DEPS_STUB=1` for CI).
+
+**Integration Tests: 7 tests** (all `#[ignore]`, require real VM)
+
+| Test Suite | Tests | What It Covers |
+|------------|------:|----------------|
+| `nginx_integration` | 4 | VM lifecycle, image pull, exec, env vars, labels, nginx |
+| `tee_integration` | 3 | TEE attestation, seal/unseal, secret injection, sealing policies |
+
+### Integration Test Details
+
+#### nginx_integration (VM Lifecycle)
+
+Tests the full MicroVM lifecycle using Alpine Linux and nginx images:
+
+| Test | Flow |
+|------|------|
+| `test_alpine_full_lifecycle` | pull → run → ps → inspect → exec (uname, cat, ls) → logs → stop → rm |
+| `test_exec_commands` | run → exec (cat, ls, env, write+read file) → cleanup |
+| `test_env_and_labels` | run with `-e`/`-l` → verify env vars inside guest → cleanup |
+| `test_nginx_image_pull_and_run` | pull nginx:alpine → run with port mapping → check HTTP → cleanup |
+
+#### tee_integration (TEE Workflow)
+
+Tests the full Trusted Execution Environment workflow using simulated AMD SEV-SNP:
+
+| Test | Flow |
+|------|------|
+| `test_tee_seal_unseal_lifecycle` | run `--tee-simulate` → attest (RA-TLS) → seal data → unseal data → verify wrong context fails → cleanup |
+| `test_tee_secret_injection` | run `--tee-simulate` → inject-secret (2 secrets via RA-TLS) → exec cat `/run/secrets/*` → verify values → cleanup |
+| `test_tee_seal_policies` | run `--tee-simulate` → seal/unseal roundtrip for each policy (measurement-and-chip, measurement-only, chip-only) → cleanup |
+
+**TEE integration test architecture:**
+
+```
+Host                                          Guest VM (MicroVM)
+┌──────────────────────┐                     ┌──────────────────────────┐
+│  cargo test          │                     │  /sbin/init (PID 1)      │
+│  └─ a3s-box attest ──┼── RA-TLS (4091) ──►│  └─ attest_server        │
+│  └─ a3s-box seal   ──┼── RA-TLS (4091) ──►│     (SNP report in X.509)│
+│  └─ a3s-box unseal ──┼── RA-TLS (4091) ──►│                          │
+│  └─ a3s-box inject ──┼── RA-TLS (4091) ──►│  └─ /run/secrets/*       │
+│  └─ a3s-box exec   ──┼── vsock  (4089) ──►│  └─ exec_server          │
+└──────────────────────┘                     └──────────────────────────┘
+```
+
+### Running Integration Tests
+
+**Prerequisites:**
+- `a3s-box` binary built (`cargo build -p a3s-box-cli`)
+- macOS with Apple HVF or Linux with KVM
+- Internet access (to pull OCI images from Docker Hub on first run)
+- `DYLD_LIBRARY_PATH` set (macOS only)
+
+**Steps:**
+
+```bash
+cd crates/box/src
+
+# 1. Build the binary
+cargo build -p a3s-box-cli
+
+# 2. Set library paths (macOS only)
+export DYLD_LIBRARY_PATH="$(ls -td target/debug/build/libkrun-sys-*/out/libkrun/lib | head -1):$(ls -td target/debug/build/libkrun-sys-*/out/libkrunfw/lib | head -1)"
+
+# 3a. Run VM lifecycle integration tests
+cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture
+
+# 3b. Run TEE integration tests (single-threaded — shares one VM)
+cargo test -p a3s-box-cli --test tee_integration -- --ignored --nocapture --test-threads=1
+
+# 3c. Run a single test
+cargo test -p a3s-box-cli --test tee_integration -- --ignored --nocapture test_tee_seal_unseal_lifecycle
+```
+
+**Limitations:**
+- Requires hardware virtualization (Apple HVF on macOS, KVM on Linux) — cannot run in CI containers without nested virtualization
+- TEE tests use simulation mode (`--tee-simulate`) — not real AMD SEV-SNP hardware
+- First run downloads OCI images (~5MB Alpine, ~25MB nginx) — needs internet
+- Each test boots a real MicroVM (~200ms cold start + ~3s attestation server ready)
+- TEE tests must run single-threaded (`--test-threads=1`) because they share the same box name
+- `guest-init` tests require cross-compilation to `aarch64-unknown-linux-musl` and cannot run on the host
+- Sealed data from simulation mode is NOT portable to real SEV-SNP hardware (different key derivation)
 
 ### Project Structure
 
