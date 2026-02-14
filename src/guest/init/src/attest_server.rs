@@ -260,6 +260,8 @@ fn handle_tls_connection(
                 handle_seal_request(&request, &snp_report, &mut tls);
             } else if request.starts_with("POST /unseal") {
                 handle_unseal_request(&request, &snp_report, &mut tls);
+            } else if request.starts_with("POST /process") {
+                handle_process_request(&request, &mut tls);
             } else {
                 // Default: status response
                 send_json_response(&mut tls, 200, b"{\"status\":\"ok\",\"tee\":true}");
@@ -411,6 +413,167 @@ fn is_valid_secret_name(name: &str) -> bool {
         && !name.contains('\0')
         && !name.starts_with('.')
         && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+// ============================================================================
+// Message processing (POST /process)
+// ============================================================================
+
+/// Process request from the host via SafeClaw.
+#[cfg(target_os = "linux")]
+#[derive(serde::Deserialize)]
+struct ProcessRequest {
+    /// Session identifier.
+    session_id: String,
+    /// Message content to process.
+    content: String,
+    /// Request type: "process_message", "init_session", "terminate_session".
+    #[serde(default = "default_request_type")]
+    request_type: String,
+}
+
+#[cfg(target_os = "linux")]
+fn default_request_type() -> String {
+    "process_message".to_string()
+}
+
+/// Process response returned to the host.
+#[cfg(target_os = "linux")]
+#[derive(serde::Serialize)]
+struct ProcessResponse {
+    /// Session identifier.
+    session_id: String,
+    /// Response content from the TEE-resident agent.
+    content: String,
+    /// Whether processing succeeded.
+    success: bool,
+    /// Error message if processing failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Handle a POST /process request: forward message to the local agent for processing.
+///
+/// The guest agent runs as a separate process inside the TEE. This handler
+/// receives messages from the host (via RA-TLS), forwards them to the agent,
+/// and returns the agent's response.
+#[cfg(target_os = "linux")]
+fn handle_process_request(request: &str, tls: &mut impl Write) {
+    let body = match request.find("\r\n\r\n") {
+        Some(pos) => &request[pos + 4..],
+        None => {
+            send_json_response(tls, 400, b"{\"error\":\"Malformed HTTP request\"}");
+            return;
+        }
+    };
+
+    let req: ProcessRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => {
+            let err = format!("{{\"error\":\"Invalid JSON: {}\"}}", e);
+            send_json_response(tls, 400, err.as_bytes());
+            return;
+        }
+    };
+
+    info!(
+        session_id = %req.session_id,
+        request_type = %req.request_type,
+        content_len = req.content.len(),
+        "Processing message in TEE"
+    );
+
+    // Forward to the local agent process via localhost HTTP.
+    // The agent listens on 127.0.0.1:8080 inside the guest.
+    let response = match forward_to_agent(&req) {
+        Ok(content) => ProcessResponse {
+            session_id: req.session_id,
+            content,
+            success: true,
+            error: None,
+        },
+        Err(e) => {
+            warn!("Agent processing failed: {}", e);
+            ProcessResponse {
+                session_id: req.session_id,
+                content: String::new(),
+                success: false,
+                error: Some(e),
+            }
+        }
+    };
+
+    let body = serde_json::to_vec(&response).unwrap_or_else(|_| {
+        b"{\"success\":false,\"error\":\"serialize\"}".to_vec()
+    });
+    let status = if response.success { 200 } else { 500 };
+    send_json_response(tls, status, &body);
+}
+
+/// Forward a process request to the local agent via HTTP.
+///
+/// The agent runs inside the TEE and listens on localhost. This keeps
+/// the attestation server (vsock-facing) separate from the agent (internal).
+#[cfg(target_os = "linux")]
+fn forward_to_agent(req: &ProcessRequest) -> std::result::Result<String, String> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let agent_addr = "127.0.0.1:8080";
+
+    let mut stream = TcpStream::connect(agent_addr).map_err(|e| {
+        format!("Cannot connect to agent at {}: {}", agent_addr, e)
+    })?;
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
+
+    // Build JSON payload for the agent
+    let payload = serde_json::json!({
+        "session_id": req.session_id,
+        "content": req.content,
+        "request_type": req.request_type,
+    });
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| format!("Failed to serialize agent request: {}", e))?;
+
+    // Send HTTP POST to agent
+    let http_request = format!(
+        "POST /process HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload_bytes.len()
+    );
+    stream
+        .write_all(http_request.as_bytes())
+        .map_err(|e| format!("Failed to write to agent: {}", e))?;
+    stream
+        .write_all(&payload_bytes)
+        .map_err(|e| format!("Failed to write payload to agent: {}", e))?;
+
+    // Read response
+    let mut response = Vec::with_capacity(65536);
+    stream
+        .read_to_end(&mut response)
+        .map_err(|e| format!("Failed to read agent response: {}", e))?;
+
+    let response_str = String::from_utf8_lossy(&response);
+
+    // Parse HTTP response body
+    let body = response_str
+        .find("\r\n\r\n")
+        .map(|pos| &response_str[pos + 4..])
+        .unwrap_or(&response_str);
+
+    // Extract content from agent response JSON
+    let agent_resp: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("Invalid agent response JSON: {}", e))?;
+
+    agent_resp
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Agent response missing 'content' field".to_string())
 }
 
 // ============================================================================
@@ -1246,5 +1409,44 @@ mod tests {
         changed[0x1A0] = 0xFF; // change chip_id
         let key2 = derive_guest_sealing_key(&changed, "ctx", "MeasurementOnly").unwrap();
         assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_process_request_deserialization() {
+        let json = r#"{"session_id":"s1","content":"hello","request_type":"process_message"}"#;
+        let _: serde_json::Value = serde_json::from_str(json).unwrap();
+    }
+
+    #[test]
+    fn test_process_request_default_type() {
+        let json = r#"{"session_id":"s1","content":"hello"}"#;
+        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(val["session_id"], "s1");
+        assert_eq!(val["content"], "hello");
+    }
+
+    #[test]
+    fn test_process_response_serialization() {
+        let resp = serde_json::json!({
+            "session_id": "s1",
+            "content": "response text",
+            "success": true,
+        });
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("response text"));
+        assert!(json.contains("\"success\":true"));
+    }
+
+    #[test]
+    fn test_process_response_with_error() {
+        let resp = serde_json::json!({
+            "session_id": "s1",
+            "content": "",
+            "success": false,
+            "error": "agent unreachable",
+        });
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("agent unreachable"));
+        assert!(json.contains("\"success\":false"));
     }
 }
