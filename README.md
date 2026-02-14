@@ -466,7 +466,7 @@ let config = BoxConfig {
 **Phase 6.2: Remote Attestation 🚧**
 - [x] Attestation report types and SNP report parsing (`AttestationRequest`, `AttestationReport`, `PlatformInfo`, `TcbVersion`)
 - [x] Host-guest attestation client via Unix socket (`AttestationClient`)
-- [x] VmManager attestation integration (`request_attestation()`)
+- [x] VmManager attestation integration (`request_attestation()` via `TeeExtension` trait)
 - [x] ECDSA-P384 signature verification using VCEK public key
 - [x] Certificate chain validation (VCEK → ASK → ARK)
 - [x] AMD KDS client for fetching/caching certificates from `kds.amd.com`
@@ -477,6 +477,8 @@ let config = BoxConfig {
 - [x] RA-TLS module: SNP report embedded in X.509 certificate extensions (P-384 ECDSA)
 - [x] RA-TLS end-to-end: guest TLS server + host `RaTlsAttestationClient` with `--ratls` CLI flag
 - [x] Secret injection via RA-TLS channel (`SecretInjector`, `/run/secrets/`, env var support)
+- [x] `VmmProvider` trait for pluggable VMM backends (libkrun shim default, extensible to QEMU/Firecracker)
+- [x] `TeeExtension` trait extracting TEE operations from VmManager into pluggable `SnpTeeExtension`
 - [ ] KBS (Key Broker Service) integration for secret provisioning
 - [ ] Periodic re-attestation with configurable interval
 
@@ -487,6 +489,15 @@ let config = BoxConfig {
 - [x] Host-side `SealClient` + `VmManager.seal_data()`/`unseal_data()` methods
 - [ ] Version-based rollback protection
 - [ ] Encrypted persistent storage
+
+**Phase 6.4: TEE Hardening 📋**
+- [ ] RA-TLS: bind TLS public key hash to `report_data` field (currently report_data is nonce-only, TLS key not cryptographically bound to attestation)
+- [ ] Certificate chain cryptographic signature verification (currently validates issuer/subject strings but does not verify ECDSA signatures: VCEK→ASK→ARK)
+- [ ] Attestation report age checking for replay attack prevention (reject stale reports beyond configurable TTL)
+- [ ] Hardware detection improvements: CPUID leaf 0x8000001F bit checks, firmware version validation, Genoa product name detection
+- [ ] Document sealed data non-portability between simulation and real hardware (different key derivation inputs produce different keys)
+- [ ] Real hardware integration testing on AMD SEV-SNP platform (Azure DCasv5 or bare-metal EPYC Milan/Genoa)
+- [ ] Simulation-to-production migration guide with sealed data re-encryption tooling
 
 ### Phase 7: SafeClaw Security Integration 🚧
 
