@@ -362,11 +362,23 @@ impl RaTlsAttestationClient {
             BoxError::AttestationError(format!("RA-TLS write failed: {}", e))
         })?;
 
-        // Read response
+        // Read response.
+        // The guest attestation server may close the connection without sending
+        // a TLS close_notify alert. This is harmless — the attestation was already
+        // verified during the handshake. Treat unexpected EOF as normal completion.
         let mut response = Vec::with_capacity(4096);
-        tls_stream.read_to_end(&mut response).await.map_err(|e| {
-            BoxError::AttestationError(format!("RA-TLS read failed: {}", e))
-        })?;
+        match tls_stream.read_to_end(&mut response).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                tracing::debug!("RA-TLS peer closed without close_notify (harmless)");
+            }
+            Err(e) => {
+                return Err(BoxError::AttestationError(format!(
+                    "RA-TLS read failed: {}",
+                    e
+                )));
+            }
+        }
 
         // Extract the peer certificate for detailed report info
         let (_, tls_conn) = tls_stream.get_ref();
@@ -516,9 +528,18 @@ impl SecretInjector {
 
         // Read response
         let mut response = Vec::with_capacity(4096);
-        tls_stream.read_to_end(&mut response).await.map_err(|e| {
-            BoxError::AttestationError(format!("Failed to read injection response: {}", e))
-        })?;
+        match tls_stream.read_to_end(&mut response).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                tracing::debug!("RA-TLS peer closed without close_notify (harmless)");
+            }
+            Err(e) => {
+                return Err(BoxError::AttestationError(format!(
+                    "Failed to read injection response: {}",
+                    e
+                )));
+            }
+        }
 
         let response_str = String::from_utf8_lossy(&response);
 
@@ -646,9 +667,18 @@ impl SealClient {
         })?;
 
         let mut response = Vec::with_capacity(4096);
-        tls_stream.read_to_end(&mut response).await.map_err(|e| {
-            BoxError::AttestationError(format!("Failed to read seal response: {}", e))
-        })?;
+        match tls_stream.read_to_end(&mut response).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                tracing::debug!("RA-TLS peer closed without close_notify (harmless)");
+            }
+            Err(e) => {
+                return Err(BoxError::AttestationError(format!(
+                    "Failed to read seal response: {}",
+                    e
+                )));
+            }
+        }
 
         let response_str = String::from_utf8_lossy(&response);
         let body_str = response_str
@@ -735,9 +765,18 @@ impl SealClient {
         })?;
 
         let mut response = Vec::with_capacity(4096);
-        tls_stream.read_to_end(&mut response).await.map_err(|e| {
-            BoxError::AttestationError(format!("Failed to read unseal response: {}", e))
-        })?;
+        match tls_stream.read_to_end(&mut response).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                tracing::debug!("RA-TLS peer closed without close_notify (harmless)");
+            }
+            Err(e) => {
+                return Err(BoxError::AttestationError(format!(
+                    "Failed to read unseal response: {}",
+                    e
+                )));
+            }
+        }
 
         let response_str = String::from_utf8_lossy(&response);
         let body_str = response_str
