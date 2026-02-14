@@ -1,11 +1,13 @@
-//! VmController - Spawns VM subprocesses.
+//! VmController - Default VMM backend using shim subprocesses.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use a3s_box_core::error::{BoxError, Result};
+use async_trait::async_trait;
 
 use super::handler::ShimHandler;
+use super::provider::VmmProvider;
 use super::spec::InstanceSpec;
 use super::VmHandler;
 
@@ -182,11 +184,11 @@ impl VmController {
         })
     }
 
-    /// Start a VM with the given configuration.
-    ///
-    /// Spawns the shim subprocess with the serialized InstanceSpec.
-    /// Returns a handler for runtime operations on the VM.
-    pub async fn start(&self, spec: &InstanceSpec) -> Result<Box<dyn VmHandler>> {
+}
+
+#[async_trait]
+impl VmmProvider for VmController {
+    async fn start(&self, spec: &InstanceSpec) -> Result<Box<dyn VmHandler>> {
         tracing::debug!(
             box_id = %spec.box_id,
             vcpus = spec.vcpus,

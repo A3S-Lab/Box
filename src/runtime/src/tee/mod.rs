@@ -11,6 +11,7 @@
 
 pub mod attestation;
 pub mod certs;
+pub mod extension;
 pub mod policy;
 pub mod ratls;
 pub mod sealed;
@@ -23,6 +24,7 @@ pub use attestation::{
     TcbVersion,
 };
 pub use certs::AmdKdsClient;
+pub use extension::{SnpTeeExtension, TeeExtension};
 pub use policy::{AttestationPolicy, MinTcbPolicy, PolicyResult, PolicyViolation};
 pub use snp::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
 pub use verifier::{verify_attestation, VerificationResult};

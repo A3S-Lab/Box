@@ -42,9 +42,10 @@ pub use tee::{
 pub use tee::{AttestationReport, AttestationRequest, CertificateChain, PlatformInfo, TcbVersion};
 pub use tee::{seal, unseal, SealedData, SealingPolicy};
 pub use vm::{BoxState, VmManager};
+pub use tee::{SnpTeeExtension, TeeExtension};
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, ShimHandler, TeeInstanceConfig,
-    VmController, VmHandler, VmMetrics,
+    VmController, VmHandler, VmMetrics, VmmProvider,
 };
 pub use volume::VolumeStore;
 

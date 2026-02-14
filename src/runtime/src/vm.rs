@@ -10,13 +10,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::cache::RootfsCache;
-use crate::grpc::{AgentClient, AttestationClient, ExecClient};
+use crate::grpc::{AgentClient, ExecClient};
 use crate::network::PasstManager;
 use crate::oci::{OciImageConfig, OciRootfsBuilder};
 use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
+use crate::tee::TeeExtension;
 use crate::vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmController,
-    VmHandler, DEFAULT_SHUTDOWN_TIMEOUT_MS,
+    VmHandler, VmmProvider, DEFAULT_SHUTDOWN_TIMEOUT_MS,
 };
 use crate::AGENT_VSOCK_PORT;
 
@@ -82,8 +83,8 @@ pub struct VmManager {
     /// Event emitter
     event_emitter: EventEmitter,
 
-    /// VM controller (spawns shim subprocess)
-    controller: Option<VmController>,
+    /// VMM provider (spawns VMs via pluggable backend)
+    provider: Option<Box<dyn VmmProvider>>,
 
     /// VM handler (runtime operations on running VM)
     handler: Arc<RwLock<Option<Box<dyn VmHandler>>>>,
@@ -103,8 +104,8 @@ pub struct VmManager {
     /// Anonymous volume names created during boot (from OCI VOLUME directives)
     anonymous_volumes: Vec<String>,
 
-    /// Path to the attestation Unix socket (set during boot if TEE is enabled)
-    attest_socket_path: Option<PathBuf>,
+    /// TEE extension (attestation, sealing, secret injection)
+    tee: Option<Box<dyn TeeExtension>>,
 }
 
 impl VmManager {
@@ -118,14 +119,14 @@ impl VmManager {
             box_id,
             state: Arc::new(RwLock::new(BoxState::Created)),
             event_emitter,
-            controller: None,
+            provider: None,
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
             exec_client: None,
             passt_manager: None,
             home_dir,
             anonymous_volumes: Vec::new(),
-            attest_socket_path: None,
+            tee: None,
         }
     }
 
@@ -138,14 +139,33 @@ impl VmManager {
             box_id,
             state: Arc::new(RwLock::new(BoxState::Created)),
             event_emitter,
-            controller: None,
+            provider: None,
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
             exec_client: None,
             passt_manager: None,
             home_dir,
             anonymous_volumes: Vec::new(),
-            attest_socket_path: None,
+            tee: None,
+        }
+    }
+
+    /// Create a new VM manager with a custom VMM provider.
+    pub fn with_provider(
+        config: BoxConfig,
+        event_emitter: EventEmitter,
+        provider: Box<dyn VmmProvider>,
+    ) -> Self {
+        let box_id = uuid::Uuid::new_v4().to_string();
+        let home_dir = dirs_home().unwrap_or_else(|| PathBuf::from(".a3s"));
+        Self {
+            config, box_id,
+            state: Arc::new(RwLock::new(BoxState::Created)),
+            event_emitter,
+            provider: Some(provider),
+            handler: Arc::new(RwLock::new(None)),
+            agent_client: None, exec_client: None, passt_manager: None,
+            home_dir, anonymous_volumes: Vec::new(), tee: None,
         }
     }
 
@@ -253,13 +273,15 @@ impl VmManager {
             spec.network = Some(net_config);
         }
 
-        // 3. Initialize controller
-        let shim_path = VmController::find_shim()?;
-        let controller = VmController::new(shim_path)?;
-        self.controller = Some(controller);
+        // 3. Initialize VMM provider (use injected provider or default to VmController)
+        if self.provider.is_none() {
+            let shim_path = VmController::find_shim()?;
+            let controller = VmController::new(shim_path)?;
+            self.provider = Some(Box::new(controller));
+        }
 
-        // 4. Start VM via controller
-        let handler = self.controller.as_ref().unwrap().start(&spec).await?;
+        // 4. Start VM via provider
+        let handler = self.provider.as_ref().unwrap().start(&spec).await?;
 
         // Store handler
         *self.handler.write().await = Some(handler);
@@ -276,9 +298,12 @@ impl VmManager {
         // 5b. Wait for exec server to become ready
         self.wait_for_exec_ready(&layout.exec_socket_path).await?;
 
-        // 5c. Store attestation socket path for TEE environments
+        // 5c. Initialize TEE extension for TEE environments
         if !matches!(self.config.tee, TeeConfig::None) {
-            self.attest_socket_path = Some(layout.attest_socket_path.clone());
+            self.tee = Some(Box::new(crate::tee::SnpTeeExtension::new(
+                self.box_id.clone(),
+                layout.attest_socket_path.clone(),
+            )));
         }
 
         // 6. Update state to Ready
@@ -507,306 +532,18 @@ impl VmManager {
             .map(|handler| handler.pid())
     }
 
-    /// Request a TEE attestation report from the guest VM.
-    ///
-    /// Connects to the guest agent and requests a hardware-signed SNP
-    /// attestation report. The report proves the VM is running in a genuine
-    /// TEE environment and has not been tampered with.
-    ///
-    /// # Arguments
-    /// * `request` - Attestation request containing the verifier's nonce
-    ///
-    /// # Returns
-    /// * `Ok(AttestationReport)` - Hardware-signed report with cert chain
-    /// * `Err(...)` - If VM is not ready, TEE is not configured, or attestation fails
-    pub async fn request_attestation(
-        &self,
-        request: &crate::tee::AttestationRequest,
-    ) -> Result<crate::tee::AttestationReport> {
-        // Verify VM is in a running state
-        let state = self.state.read().await;
-        match *state {
-            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
-            BoxState::Created => {
-                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
-            }
-            BoxState::Stopped => {
-                return Err(BoxError::AttestationError("VM is stopped".to_string()));
-            }
-        }
-        drop(state);
-
-        // Verify TEE is configured
-        if matches!(self.config.tee, TeeConfig::None) {
-            return Err(BoxError::AttestationError(
-                "TEE is not configured for this box".to_string(),
-            ));
-        }
-
-        // Connect to the guest attestation server via dedicated socket
-        let socket_path = self
-            .attest_socket_path
-            .as_ref()
-            .ok_or_else(|| {
-                BoxError::AttestationError(
-                    "Attestation socket not available (TEE not configured or VM not booted)"
-                        .to_string(),
-                )
-            })?;
-
-        let attest_client = AttestationClient::connect(socket_path).await?;
-        let report = attest_client.get_report(request).await?;
-
-        tracing::info!(
-            box_id = %self.box_id,
-            report_size = report.report.len(),
-            "Attestation report received from guest"
-        );
-
-        Ok(report)
+    /// Get the TEE extension, if TEE is configured and VM is booted.
+    pub fn tee(&self) -> Option<&dyn TeeExtension> {
+        self.tee.as_deref()
     }
 
-    /// Verify TEE attestation via RA-TLS handshake.
-    ///
-    /// Connects to the guest's RA-TLS attestation server and performs a
-    /// TLS handshake. The server's certificate contains the SNP attestation
-    /// report, which is verified during the handshake by a custom verifier.
-    ///
-    /// This is the preferred attestation method — it verifies the TEE
-    /// in a single TLS handshake without a separate report request.
-    ///
-    /// # Arguments
-    /// * `policy` - Attestation policy to verify against
-    /// * `allow_simulated` - Whether to accept simulated reports
-    pub async fn verify_attestation_ratls(
-        &self,
-        policy: &crate::tee::AttestationPolicy,
-        allow_simulated: bool,
-    ) -> Result<crate::tee::VerificationResult> {
-        // Verify VM is in a running state
-        let state = self.state.read().await;
-        match *state {
-            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
-            BoxState::Created => {
-                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
-            }
-            BoxState::Stopped => {
-                return Err(BoxError::AttestationError("VM is stopped".to_string()));
-            }
-        }
-        drop(state);
-
-        // Verify TEE is configured
-        if matches!(self.config.tee, TeeConfig::None) {
-            return Err(BoxError::AttestationError(
-                "TEE is not configured for this box".to_string(),
-            ));
-        }
-
-        let socket_path = self
-            .attest_socket_path
-            .as_ref()
-            .ok_or_else(|| {
-                BoxError::AttestationError(
-                    "Attestation socket not available (TEE not configured or VM not booted)"
-                        .to_string(),
-                )
-            })?;
-
-        let client = crate::grpc::RaTlsAttestationClient::new(socket_path);
-        let result = client.verify(policy.clone(), allow_simulated).await?;
-
-        tracing::info!(
-            box_id = %self.box_id,
-            verified = result.verified,
-            "RA-TLS attestation verification completed"
-        );
-
-        Ok(result)
+    /// Get the TEE extension or return an error.
+    pub fn require_tee(&self) -> Result<&dyn TeeExtension> {
+        self.tee.as_deref().ok_or_else(|| {
+            BoxError::AttestationError("TEE is not configured for this box".to_string())
+        })
     }
 
-    /// Inject secrets into the TEE via RA-TLS.
-    ///
-    /// Connects to the guest's RA-TLS attestation server, verifies the TEE
-    /// during the TLS handshake, then sends secrets over the encrypted channel.
-    /// The guest stores secrets in `/run/secrets/` and optionally sets env vars.
-    ///
-    /// # Arguments
-    /// * `secrets` - List of secrets to inject
-    /// * `allow_simulated` - Whether to accept simulated TEE reports
-    pub async fn inject_secrets(
-        &self,
-        secrets: &[crate::grpc::SecretEntry],
-        allow_simulated: bool,
-    ) -> Result<crate::grpc::SecretInjectionResult> {
-        // Verify VM is in a running state
-        let state = self.state.read().await;
-        match *state {
-            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
-            BoxState::Created => {
-                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
-            }
-            BoxState::Stopped => {
-                return Err(BoxError::AttestationError("VM is stopped".to_string()));
-            }
-        }
-        drop(state);
-
-        // Verify TEE is configured
-        if matches!(self.config.tee, TeeConfig::None) {
-            return Err(BoxError::AttestationError(
-                "TEE is not configured for this box".to_string(),
-            ));
-        }
-
-        let socket_path = self
-            .attest_socket_path
-            .as_ref()
-            .ok_or_else(|| {
-                BoxError::AttestationError(
-                    "Attestation socket not available".to_string(),
-                )
-            })?;
-
-        let policy = crate::tee::AttestationPolicy::default();
-        let injector = crate::grpc::SecretInjector::new(socket_path);
-        let result = injector.inject(secrets, policy, allow_simulated).await?;
-
-        tracing::info!(
-            box_id = %self.box_id,
-            injected = result.injected,
-            errors = result.errors.len(),
-            "Secrets injected into TEE"
-        );
-
-        Ok(result)
-    }
-
-    /// Seal data inside the TEE via RA-TLS.
-    ///
-    /// Connects to the guest's RA-TLS attestation server, verifies the TEE
-    /// during the TLS handshake, then sends data to be encrypted with a key
-    /// derived from the TEE's identity (measurement + chip_id).
-    ///
-    /// # Arguments
-    /// * `data` - Raw data to seal
-    /// * `context` - Application-specific context for key derivation
-    /// * `policy` - Sealing policy ("MeasurementAndChip", "MeasurementOnly", "ChipOnly")
-    /// * `allow_simulated` - Whether to accept simulated TEE reports
-    pub async fn seal_data(
-        &self,
-        data: &[u8],
-        context: &str,
-        policy: &str,
-        allow_simulated: bool,
-    ) -> Result<crate::grpc::SealResult> {
-        // Verify VM is in a running state
-        let state = self.state.read().await;
-        match *state {
-            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
-            BoxState::Created => {
-                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
-            }
-            BoxState::Stopped => {
-                return Err(BoxError::AttestationError("VM is stopped".to_string()));
-            }
-        }
-        drop(state);
-
-        // Verify TEE is configured
-        if matches!(self.config.tee, TeeConfig::None) {
-            return Err(BoxError::AttestationError(
-                "TEE is not configured for this box".to_string(),
-            ));
-        }
-
-        let socket_path = self
-            .attest_socket_path
-            .as_ref()
-            .ok_or_else(|| {
-                BoxError::AttestationError(
-                    "Attestation socket not available".to_string(),
-                )
-            })?;
-
-        let attestation_policy = crate::tee::AttestationPolicy::default();
-        let client = crate::grpc::SealClient::new(socket_path);
-        let result = client
-            .seal(data, context, policy, attestation_policy, allow_simulated)
-            .await?;
-
-        tracing::info!(
-            box_id = %self.box_id,
-            context = context,
-            policy = policy,
-            "Data sealed inside TEE"
-        );
-
-        Ok(result)
-    }
-
-    /// Unseal data inside the TEE via RA-TLS.
-    ///
-    /// Connects to the guest's RA-TLS attestation server, verifies the TEE
-    /// during the TLS handshake, then sends the sealed blob to be decrypted
-    /// with the TEE-bound key.
-    ///
-    /// # Arguments
-    /// * `blob` - Base64-encoded sealed blob (from a previous seal operation)
-    /// * `context` - Context used during sealing
-    /// * `policy` - Sealing policy used during sealing
-    /// * `allow_simulated` - Whether to accept simulated TEE reports
-    pub async fn unseal_data(
-        &self,
-        blob: &str,
-        context: &str,
-        policy: &str,
-        allow_simulated: bool,
-    ) -> Result<Vec<u8>> {
-        // Verify VM is in a running state
-        let state = self.state.read().await;
-        match *state {
-            BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
-            BoxState::Created => {
-                return Err(BoxError::AttestationError("VM not yet booted".to_string()));
-            }
-            BoxState::Stopped => {
-                return Err(BoxError::AttestationError("VM is stopped".to_string()));
-            }
-        }
-        drop(state);
-
-        // Verify TEE is configured
-        if matches!(self.config.tee, TeeConfig::None) {
-            return Err(BoxError::AttestationError(
-                "TEE is not configured for this box".to_string(),
-            ));
-        }
-
-        let socket_path = self
-            .attest_socket_path
-            .as_ref()
-            .ok_or_else(|| {
-                BoxError::AttestationError(
-                    "Attestation socket not available".to_string(),
-                )
-            })?;
-
-        let attestation_policy = crate::tee::AttestationPolicy::default();
-        let client = crate::grpc::SealClient::new(socket_path);
-        let result = client
-            .unseal(blob, context, policy, attestation_policy, allow_simulated)
-            .await?;
-
-        tracing::info!(
-            box_id = %self.box_id,
-            context = context,
-            policy = policy,
-            "Data unsealed inside TEE"
-        );
-
-        Ok(result)
-    }
     fn prepare_layout(&self) -> Result<BoxLayout> {
         // Create box-specific directories
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
@@ -1267,10 +1004,29 @@ impl VmManager {
                 if path.exists() {
                     candidates.push(path);
                 }
+
+                // Also search cross-compilation directories relative to the
+                // exe's target root. When the exe is at target/debug/a3s-box,
+                // cross-compiled guest binaries live at
+                // target/aarch64-unknown-linux-musl/{debug,release}/.
+                if let Some(target_root) = exe_dir.parent() {
+                    let cross_dirs = [
+                        "aarch64-unknown-linux-musl/debug",
+                        "aarch64-unknown-linux-musl/release",
+                        "x86_64-unknown-linux-musl/debug",
+                        "x86_64-unknown-linux-musl/release",
+                    ];
+                    for dir in &cross_dirs {
+                        let path = target_root.join(dir).join(name);
+                        if path.exists() {
+                            candidates.push(path);
+                        }
+                    }
+                }
             }
         }
 
-        // Try cross-compilation target directories (for development)
+        // Try cross-compilation target directories relative to CWD (for development)
         let target_dirs = [
             "target/aarch64-unknown-linux-musl/debug",
             "target/aarch64-unknown-linux-musl/release",
@@ -2230,14 +1986,14 @@ mod tests {
             box_id: "test-box".to_string(),
             state: Arc::new(RwLock::new(BoxState::Created)),
             event_emitter: emitter,
-            controller: None,
+            provider: None,
             handler: Arc::new(RwLock::new(None)),
             agent_client: None,
             exec_client: None,
             passt_manager: None,
             home_dir: home_dir.to_path_buf(),
             anonymous_volumes: Vec::new(),
-            attest_socket_path: None,
+            tee: None,
         }
     }
 
