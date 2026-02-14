@@ -474,18 +474,18 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.add_vsock_port(ATTEST_VSOCK_PORT, attest_socket_str, true)?;
     }
 
-    // Inject TEE simulation env var for guest init (PID 1) so the attestation
-    // server generates simulated reports instead of calling /dev/sev-guest.
-    // The entrypoint env contains A3S_TEE_SIMULATE=1 when simulate mode is on,
-    // but that only reaches the child process — guest init needs it via set_env.
+    // Note: A3S_TEE_SIMULATE is already included in spec.entrypoint.env
+    // (added by vm.rs when simulate mode is on) and passed to the guest init
+    // via krun_set_exec's envp parameter. Do NOT call set_env here — libkrun's
+    // krun_set_env overwrites (not appends) the environment, which would erase
+    // all A3S_AGENT_* vars set by set_exec.
     if spec
         .entrypoint
         .env
         .iter()
         .any(|(k, _)| k == "A3S_TEE_SIMULATE")
     {
-        ctx.set_env(&[("A3S_TEE_SIMULATE".to_string(), "1".to_string())])?;
-        tracing::info!("TEE simulation mode: injected A3S_TEE_SIMULATE=1 for guest init");
+        tracing::info!("TEE simulation mode: A3S_TEE_SIMULATE=1 included in entrypoint env");
     }
 
     // Configure TSI port mappings if specified
@@ -518,6 +518,10 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
 
         ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
 
+        // TODO: This set_env call overwrites the environment set by set_exec,
+        // erasing A3S_AGENT_* vars. These network env vars should be added to
+        // spec.entrypoint.env in vm.rs instead. For now, this only affects
+        // boxes using --network with guest init (namespace isolation).
         // Inject network env vars for guest init to configure eth0
         let ip_cidr = format!("{}/{}", net_config.ip_address, net_config.prefix_len);
         ctx.set_env(&[

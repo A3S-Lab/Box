@@ -896,7 +896,7 @@ fn snp_get_report(
     };
 
     let ret = unsafe {
-        libc::ioctl(fd, SNP_GET_REPORT_IOCTL, &mut ioctl_req as *mut _)
+        libc::ioctl(fd, SNP_GET_REPORT_IOCTL as libc::Ioctl, &mut ioctl_req as *mut _)
     };
 
     if ret != 0 {
@@ -951,7 +951,7 @@ fn snp_get_ext_report(
     };
 
     let ret = unsafe {
-        libc::ioctl(fd, SNP_GET_EXT_REPORT_IOCTL, &mut ioctl_req as *mut _)
+        libc::ioctl(fd, SNP_GET_EXT_REPORT_IOCTL as libc::Ioctl, &mut ioctl_req as *mut _)
     };
 
     if ret != 0 {

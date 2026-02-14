@@ -15,6 +15,7 @@ libkrun-sys = { path = "../deps/libkrun-sys" }
 
 # Async runtime
 tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
