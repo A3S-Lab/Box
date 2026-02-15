@@ -14,7 +14,7 @@ use super::simulate::is_simulated_report;
 /// Result of a complete attestation verification.
 #[derive(Debug, Clone)]
 pub struct VerificationResult {
-    /// Whether the report passed all checks (signature + policy).
+    /// Whether the report passed all checks (signature + policy + age).
     pub verified: bool,
     /// Platform info extracted from the report.
     pub platform: PlatformInfo,
@@ -26,6 +26,8 @@ pub struct VerificationResult {
     pub cert_chain_valid: bool,
     /// Nonce in report matches the expected nonce.
     pub nonce_valid: bool,
+    /// Report age is within the allowed threshold (or age check was skipped).
+    pub report_age_valid: bool,
     /// Summary of any failures.
     pub failures: Vec<String>,
 }
@@ -38,6 +40,7 @@ pub struct VerificationResult {
 /// 3. Verify the ECDSA-P384 signature using the VCEK public key
 /// 4. Verify the certificate chain (VCEK → ASK → ARK)
 /// 5. Check the report against the attestation policy
+/// 6. Check report age (if `nonce_issued_at` and `max_report_age_secs` are set)
 ///
 /// If `allow_simulated` is true and the report has the simulated version
 /// marker (0xA3), signature and cert chain verification are skipped.
@@ -53,6 +56,30 @@ pub fn verify_attestation(
     expected_nonce: &[u8],
     policy: &AttestationPolicy,
     allow_simulated: bool,
+) -> Result<VerificationResult> {
+    verify_attestation_with_time(report, expected_nonce, policy, allow_simulated, None)
+}
+
+/// Verify an SNP attestation report with optional replay protection.
+///
+/// Same as [`verify_attestation`], but accepts `nonce_issued_at` — the Unix
+/// timestamp (seconds) when the nonce was generated. When combined with
+/// `policy.max_report_age_secs`, this rejects stale reports that could be
+/// replayed by an attacker.
+///
+/// # Arguments
+/// * `report` - The attestation report from the guest
+/// * `expected_nonce` - The nonce that was sent in the request
+/// * `policy` - The verification policy to check against
+/// * `allow_simulated` - Whether to accept simulated (non-hardware) reports
+/// * `nonce_issued_at` - Unix timestamp (seconds) when the nonce was created.
+///   If `None`, report age checking is skipped even if `max_report_age_secs` is set.
+pub fn verify_attestation_with_time(
+    report: &AttestationReport,
+    expected_nonce: &[u8],
+    policy: &AttestationPolicy,
+    allow_simulated: bool,
+    nonce_issued_at: Option<u64>,
 ) -> Result<VerificationResult> {
     let mut failures = Vec::new();
 
@@ -116,7 +143,14 @@ pub fn verify_attestation(
         }
     }
 
-    let verified = nonce_valid && signature_valid && cert_chain_valid && policy_result.passed;
+    // 6. Check report age (replay protection)
+    let report_age_valid = check_report_age(policy, nonce_issued_at, &mut failures);
+
+    let verified = nonce_valid
+        && signature_valid
+        && cert_chain_valid
+        && policy_result.passed
+        && report_age_valid;
 
     Ok(VerificationResult {
         verified,
@@ -125,6 +159,7 @@ pub fn verify_attestation(
         signature_valid,
         cert_chain_valid,
         nonce_valid,
+        report_age_valid,
         failures,
     })
 }
@@ -494,6 +529,64 @@ fn check_policy(platform: &PlatformInfo, policy: &AttestationPolicy) -> PolicyRe
     }
 
     PolicyResult::from_violations(violations)
+}
+
+/// Check report age for replay protection.
+///
+/// SNP reports don't contain a hardware timestamp, so we rely on the
+/// application layer: the verifier records when the nonce was issued
+/// (`nonce_issued_at`) and checks that the current time minus that
+/// timestamp doesn't exceed `policy.max_report_age_secs`.
+///
+/// Returns `true` if the age check passes or is skipped.
+fn check_report_age(
+    policy: &AttestationPolicy,
+    nonce_issued_at: Option<u64>,
+    failures: &mut Vec<String>,
+) -> bool {
+    let max_age = match policy.max_report_age_secs {
+        Some(max) => max,
+        None => return true, // No age limit configured
+    };
+
+    let issued_at = match nonce_issued_at {
+        Some(t) => t,
+        None => {
+            // Policy requires age check but no timestamp was provided.
+            // This is a configuration issue, not a security failure —
+            // the caller should pass nonce_issued_at when using max_report_age_secs.
+            tracing::warn!(
+                "max_report_age_secs={} set but nonce_issued_at not provided, skipping age check",
+                max_age
+            );
+            return true;
+        }
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if now < issued_at {
+        // Clock skew — nonce_issued_at is in the future
+        failures.push(format!(
+            "Report age check failed: nonce_issued_at ({}) is in the future (now={})",
+            issued_at, now
+        ));
+        return false;
+    }
+
+    let age = now - issued_at;
+    if age > max_age {
+        failures.push(format!(
+            "Report too old: age {}s exceeds maximum {}s (replay protection)",
+            age, max_age
+        ));
+        return false;
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -920,5 +1013,140 @@ mod tests {
         let result = verify_attestation(&report, &wrong_nonce, &policy, true).unwrap();
         assert!(!result.verified);
         assert!(!result.nonce_valid);
+    }
+
+    // ========================================================================
+    // Report age checking tests
+    // ========================================================================
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn test_check_report_age_no_policy() {
+        // No max_report_age_secs → always passes
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            ..Default::default()
+        };
+        let mut failures = Vec::new();
+        assert!(check_report_age(&policy, Some(now_secs() - 9999), &mut failures));
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn test_check_report_age_no_timestamp() {
+        // max_report_age_secs set but no timestamp → skip (warn, pass)
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            max_report_age_secs: Some(60),
+            ..Default::default()
+        };
+        let mut failures = Vec::new();
+        assert!(check_report_age(&policy, None, &mut failures));
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn test_check_report_age_fresh_report() {
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            max_report_age_secs: Some(60),
+            ..Default::default()
+        };
+        let mut failures = Vec::new();
+        // Issued 5 seconds ago
+        assert!(check_report_age(&policy, Some(now_secs() - 5), &mut failures));
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn test_check_report_age_stale_report() {
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            max_report_age_secs: Some(60),
+            ..Default::default()
+        };
+        let mut failures = Vec::new();
+        // Issued 120 seconds ago, max is 60
+        assert!(!check_report_age(&policy, Some(now_secs() - 120), &mut failures));
+        assert!(failures.len() == 1);
+        assert!(failures[0].contains("too old"));
+    }
+
+    #[test]
+    fn test_check_report_age_future_timestamp() {
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            max_report_age_secs: Some(60),
+            ..Default::default()
+        };
+        let mut failures = Vec::new();
+        // Issued in the future (clock skew)
+        assert!(!check_report_age(&policy, Some(now_secs() + 3600), &mut failures));
+        assert!(failures[0].contains("future"));
+    }
+
+    #[test]
+    fn test_check_report_age_exact_boundary() {
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            max_report_age_secs: Some(60),
+            ..Default::default()
+        };
+        let mut failures = Vec::new();
+        // Issued exactly at the boundary — age == max, should pass (not strictly greater)
+        assert!(check_report_age(&policy, Some(now_secs() - 60), &mut failures));
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn test_verify_attestation_with_time_fresh() {
+        let nonce = vec![1, 2, 3, 4];
+        let mut report_data = [0u8; 64];
+        report_data[..4].copy_from_slice(&nonce);
+        let report_bytes = crate::tee::simulate::build_simulated_report(&report_data);
+        let report = AttestationReport {
+            report: report_bytes,
+            cert_chain: CertificateChain::default(),
+            platform: PlatformInfo::default(),
+        };
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            max_report_age_secs: Some(60),
+            ..Default::default()
+        };
+        let result = verify_attestation_with_time(
+            &report, &nonce, &policy, true, Some(now_secs() - 5),
+        ).unwrap();
+        assert!(result.verified);
+        assert!(result.report_age_valid);
+    }
+
+    #[test]
+    fn test_verify_attestation_with_time_stale() {
+        let nonce = vec![1, 2, 3, 4];
+        let mut report_data = [0u8; 64];
+        report_data[..4].copy_from_slice(&nonce);
+        let report_bytes = crate::tee::simulate::build_simulated_report(&report_data);
+        let report = AttestationReport {
+            report: report_bytes,
+            cert_chain: CertificateChain::default(),
+            platform: PlatformInfo::default(),
+        };
+        let policy = AttestationPolicy {
+            require_no_debug: false,
+            max_report_age_secs: Some(30),
+            ..Default::default()
+        };
+        let result = verify_attestation_with_time(
+            &report, &nonce, &policy, true, Some(now_secs() - 120),
+        ).unwrap();
+        assert!(!result.verified);
+        assert!(!result.report_age_valid);
     }
 }

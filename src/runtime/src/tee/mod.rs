@@ -27,7 +27,7 @@ pub use certs::AmdKdsClient;
 pub use extension::{SnpTeeExtension, TeeExtension};
 pub use policy::{AttestationPolicy, MinTcbPolicy, PolicyResult, PolicyViolation};
 pub use snp::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
-pub use verifier::{verify_attestation, VerificationResult};
+pub use verifier::{verify_attestation, verify_attestation_with_time, VerificationResult};
 pub use simulate::{
     build_simulated_report, is_simulate_mode, is_simulated_report, TEE_SIMULATE_ENV,
 };

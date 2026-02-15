@@ -36,8 +36,8 @@ pub use pool::{PoolStats, WarmPool};
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
 pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
 pub use tee::{
-    verify_attestation, AmdKdsClient, AttestationPolicy, MinTcbPolicy, PolicyResult,
-    VerificationResult,
+    verify_attestation, verify_attestation_with_time, AmdKdsClient, AttestationPolicy,
+    MinTcbPolicy, PolicyResult, VerificationResult,
 };
 pub use tee::{AttestationReport, AttestationRequest, CertificateChain, PlatformInfo, TcbVersion};
 pub use tee::{seal, unseal, SealedData, SealingPolicy};

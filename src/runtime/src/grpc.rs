@@ -410,6 +410,7 @@ impl RaTlsAttestationClient {
             signature_valid: true,
             cert_chain_valid: true,
             nonce_valid: true,
+            report_age_valid: true,
             failures: vec![],
         })
     }
