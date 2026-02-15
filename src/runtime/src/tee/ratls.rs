@@ -23,6 +23,7 @@
 //! ```
 
 use a3s_box_core::error::{BoxError, Result};
+use sha2::{Digest, Sha256};
 
 use super::attestation::{AttestationReport, CertificateChain};
 use super::policy::AttestationPolicy;
@@ -40,6 +41,9 @@ const OID_CERT_CHAIN: &str = "1.3.6.1.4.1.58270.1.2";
 // ============================================================================
 // Certificate generation
 // ============================================================================
+
+/// Size of the SHA-256 public key hash stored in report_data.
+const PUBKEY_HASH_SIZE: usize = 32;
 
 /// Generate a self-signed RA-TLS certificate containing an SNP attestation report.
 ///
@@ -101,6 +105,49 @@ pub fn generate_ratls_certificate(
     );
 
     Ok((cert_der, key_der))
+}
+
+/// Compute the SHA-256 hash of a DER-encoded public key from an X.509 certificate.
+///
+/// This is the same hash that the guest attestation server places into
+/// `report_data[0..32]` when generating the RA-TLS certificate, binding
+/// the TLS public key to the hardware attestation report.
+fn compute_cert_pubkey_hash(cert_der: &[u8]) -> Result<[u8; PUBKEY_HASH_SIZE]> {
+    use der::{Decode, Encode};
+    use x509_cert::Certificate;
+
+    let cert = Certificate::from_der(cert_der).map_err(|e| {
+        BoxError::AttestationError(format!("Failed to parse certificate for key binding: {}", e))
+    })?;
+
+    let spki = &cert.tbs_certificate.subject_public_key_info;
+    let pub_key_der = spki.to_der().map_err(|e| {
+        BoxError::AttestationError(format!("Failed to encode SPKI to DER: {}", e))
+    })?;
+
+    let hash = Sha256::digest(&pub_key_der);
+    let mut out = [0u8; PUBKEY_HASH_SIZE];
+    out.copy_from_slice(&hash);
+    Ok(out)
+}
+
+/// Verify that the TLS certificate's public key is bound to the SNP report.
+///
+/// The guest attestation server computes `SHA-256(public_key_der)` and places
+/// it in `report_data[0..32]`. This function recomputes the hash from the
+/// certificate and checks it matches, preventing MITM attacks where an
+/// attacker replays a valid report in a different certificate.
+fn verify_pubkey_binding(cert_der: &[u8], report: &[u8]) -> Result<bool> {
+    if report.len() < 0x50 + 64 {
+        return Err(BoxError::AttestationError(
+            "Report too short to extract report_data for key binding".to_string(),
+        ));
+    }
+
+    let expected_hash = &report[0x50..0x50 + PUBKEY_HASH_SIZE];
+    let actual_hash = compute_cert_pubkey_hash(cert_der)?;
+
+    Ok(expected_hash == actual_hash)
 }
 
 // ============================================================================
@@ -257,20 +304,37 @@ impl rustls::client::danger::ServerCertVerifier for RaTlsVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let cert_der = end_entity.as_ref();
+
         // Extract and verify the SNP report from the certificate
-        let report = extract_report_from_cert(end_entity.as_ref()).map_err(|e| {
+        let report = extract_report_from_cert(cert_der).map_err(|e| {
             rustls::Error::General(format!("RA-TLS report extraction failed: {}", e))
         })?;
 
-        // For RA-TLS, we don't enforce a specific nonce in the cert —
-        // the nonce binding happens at the application layer.
-        // We verify the report structure, signature, and policy.
-        let empty_nonce: Vec<u8> = Vec::new();
+        // Verify public key binding: the report_data[0..32] must contain
+        // SHA-256(certificate_public_key). This prevents MITM attacks where
+        // an attacker replays a valid SNP report in a different certificate.
+        let key_bound = verify_pubkey_binding(cert_der, &report.report).map_err(|e| {
+            rustls::Error::General(format!("RA-TLS key binding check failed: {}", e))
+        })?;
+
+        if !key_bound {
+            return Err(rustls::Error::General(
+                "RA-TLS key binding failed: certificate public key hash does not match report_data. \
+                 Possible MITM attack — the SNP report was not generated for this TLS certificate."
+                    .to_string(),
+            ));
+        }
+
+        // Verify the report structure, signature, cert chain, and policy.
+        // For RA-TLS, the nonce in report_data is the public key hash (already
+        // verified above), so we pass it as the expected nonce.
         let nonce_to_check = if report.report.len() >= 0x90 {
-            // Use the report_data as the "expected nonce" (self-check passes)
             &report.report[0x50..0x90]
         } else {
-            &empty_nonce
+            return Err(rustls::Error::General(
+                "RA-TLS report too short to extract report_data".to_string(),
+            ));
         };
 
         let result =
@@ -282,7 +346,8 @@ impl rustls::client::danger::ServerCertVerifier for RaTlsVerifier {
         if result.verified {
             tracing::debug!(
                 simulated = is_simulated_report(&report.report),
-                "RA-TLS attestation verified"
+                key_bound = true,
+                "RA-TLS attestation verified with public key binding"
             );
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
@@ -406,15 +471,96 @@ mod tests {
     use crate::tee::attestation::{CertificateChain, PlatformInfo};
     use crate::tee::simulate::build_simulated_report;
 
-    fn make_test_attestation_report() -> AttestationReport {
+    /// Generate a test RA-TLS certificate with the public key hash correctly
+    /// bound in report_data, matching the real guest attestation server behavior.
+    fn make_bound_ratls_cert() -> (Vec<u8>, Vec<u8>, AttestationReport) {
+        use rcgen::{
+            CertificateParams, CustomExtension, DistinguishedName, DnType, KeyPair,
+            PKCS_ECDSA_P384_SHA384,
+        };
+
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+
+        // Hash the public key (same as guest attest_server.rs)
+        let pub_key_der = key_pair.public_key_der();
+        let hash = Sha256::digest(&pub_key_der);
+        let mut report_data = [0u8; 64];
+        let copy_len = hash.len().min(64);
+        report_data[..copy_len].copy_from_slice(&hash[..copy_len]);
+
+        let report_bytes = build_simulated_report(&report_data);
+
+        // Build certificate with report embedded
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "A3S Box RA-TLS");
+        dn.push(DnType::OrganizationName, "A3S Lab");
+        params.distinguished_name = dn;
+
+        let report_ext =
+            CustomExtension::from_oid_content(&oid_to_asn1(OID_SNP_REPORT), report_bytes.clone());
+        params.custom_extensions.push(report_ext);
+
+        let chain = CertificateChain::default();
+        let chain_json = serde_json::to_vec(&chain).unwrap();
+        let chain_ext =
+            CustomExtension::from_oid_content(&oid_to_asn1(OID_CERT_CHAIN), chain_json);
+        params.custom_extensions.push(chain_ext);
+
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_der = cert.der().to_vec();
+        let key_der = key_pair.serialize_der();
+
+        let report = AttestationReport {
+            report: report_bytes,
+            cert_chain: chain,
+            platform: PlatformInfo::default(),
+        };
+
+        (cert_der, key_der, report)
+    }
+
+    /// Generate a certificate with an UNBOUND report (report_data does not
+    /// contain the public key hash). Simulates a MITM attack.
+    fn make_unbound_ratls_cert() -> (Vec<u8>, AttestationReport) {
+        use rcgen::{
+            CertificateParams, CustomExtension, DistinguishedName, DnType, KeyPair,
+            PKCS_ECDSA_P384_SHA384,
+        };
+
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+
+        // Use arbitrary report_data that does NOT match the public key hash
         let mut report_data = [0u8; 64];
         report_data[0..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-        let report = build_simulated_report(&report_data);
-        AttestationReport {
-            report,
-            cert_chain: CertificateChain::default(),
+
+        let report_bytes = build_simulated_report(&report_data);
+
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "A3S Box RA-TLS");
+        params.distinguished_name = dn;
+
+        let report_ext =
+            CustomExtension::from_oid_content(&oid_to_asn1(OID_SNP_REPORT), report_bytes.clone());
+        params.custom_extensions.push(report_ext);
+
+        let chain = CertificateChain::default();
+        let chain_json = serde_json::to_vec(&chain).unwrap();
+        let chain_ext =
+            CustomExtension::from_oid_content(&oid_to_asn1(OID_CERT_CHAIN), chain_json);
+        params.custom_extensions.push(chain_ext);
+
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_der = cert.der().to_vec();
+
+        let report = AttestationReport {
+            report: report_bytes,
+            cert_chain: chain,
             platform: PlatformInfo::default(),
-        }
+        };
+
+        (cert_der, report)
     }
 
     #[test]
@@ -462,24 +608,18 @@ mod tests {
 
     #[test]
     fn test_generate_ratls_certificate() {
-        let report = make_test_attestation_report();
-        let (cert_der, key_der) = generate_ratls_certificate(&report).unwrap();
+        let (cert_der, key_der, _) = make_bound_ratls_cert();
         assert!(!cert_der.is_empty());
         assert!(!key_der.is_empty());
     }
 
     #[test]
     fn test_extract_report_from_cert() {
-        let report = make_test_attestation_report();
-        let (cert_der, _) = generate_ratls_certificate(&report).unwrap();
-
+        let (cert_der, _, report) = make_bound_ratls_cert();
         let extracted = extract_report_from_cert(&cert_der).unwrap();
         assert_eq!(extracted.report.len(), 1184);
-        // Verify the report_data is preserved
-        assert_eq!(extracted.report[0x50], 0xDE);
-        assert_eq!(extracted.report[0x51], 0xAD);
-        assert_eq!(extracted.report[0x52], 0xBE);
-        assert_eq!(extracted.report[0x53], 0xEF);
+        // Verify the report_data is preserved (contains pubkey hash)
+        assert_eq!(&extracted.report[0x50..0x90], &report.report[0x50..0x90]);
     }
 
     #[test]
@@ -494,10 +634,8 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_ratls_certificate_simulated() {
-        let report = make_test_attestation_report();
-        let (cert_der, _) = generate_ratls_certificate(&report).unwrap();
-
+    fn test_verify_ratls_certificate_simulated_with_binding() {
+        let (cert_der, _, report) = make_bound_ratls_cert();
         let nonce = &report.report[0x50..0x90];
         let policy = AttestationPolicy {
             require_no_debug: false,
@@ -509,9 +647,7 @@ mod tests {
 
     #[test]
     fn test_verify_ratls_certificate_simulated_rejected() {
-        let report = make_test_attestation_report();
-        let (cert_der, _) = generate_ratls_certificate(&report).unwrap();
-
+        let (cert_der, _, report) = make_bound_ratls_cert();
         let nonce = &report.report[0x50..0x90];
         let policy = AttestationPolicy::default();
         // allow_simulated = false should reject
@@ -522,8 +658,7 @@ mod tests {
     #[test]
     fn test_create_server_config() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let report = make_test_attestation_report();
-        let (cert_der, key_der) = generate_ratls_certificate(&report).unwrap();
+        let (cert_der, key_der, _) = make_bound_ratls_cert();
         let config = create_server_config(&cert_der, &key_der);
         assert!(config.is_ok());
     }
@@ -541,5 +676,62 @@ mod tests {
         let verifier = RaTlsVerifier::new(AttestationPolicy::default(), false);
         let debug = format!("{:?}", verifier);
         assert!(debug.contains("RaTlsVerifier"));
+    }
+
+    // ========================================================================
+    // Public key binding tests
+    // ========================================================================
+
+    #[test]
+    fn test_pubkey_binding_valid() {
+        let (cert_der, _, report) = make_bound_ratls_cert();
+        let bound = verify_pubkey_binding(&cert_der, &report.report).unwrap();
+        assert!(bound, "Public key hash should match report_data");
+    }
+
+    #[test]
+    fn test_pubkey_binding_invalid_mitm() {
+        let (cert_der, _) = make_unbound_ratls_cert();
+        // The report_data contains [0xDE, 0xAD, 0xBE, 0xEF, 0, 0, ...]
+        // which does NOT match the certificate's public key hash
+        let report_data = {
+            let mut rd = [0u8; 64];
+            rd[0..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+            build_simulated_report(&rd)
+        };
+        let bound = verify_pubkey_binding(&cert_der, &report_data).unwrap();
+        assert!(!bound, "Unbound report should fail key binding check");
+    }
+
+    #[test]
+    fn test_pubkey_binding_report_too_short() {
+        let (cert_der, _, _) = make_bound_ratls_cert();
+        let short_report = vec![0u8; 10];
+        let result = verify_pubkey_binding(&cert_der, &short_report);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compute_cert_pubkey_hash_deterministic() {
+        let (cert_der, _, _) = make_bound_ratls_cert();
+        let hash1 = compute_cert_pubkey_hash(&cert_der).unwrap();
+        let hash2 = compute_cert_pubkey_hash(&cert_der).unwrap();
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_cert_pubkey_hash_different_certs() {
+        let (cert1, _, _) = make_bound_ratls_cert();
+        let (cert2, _, _) = make_bound_ratls_cert();
+        let hash1 = compute_cert_pubkey_hash(&cert1).unwrap();
+        let hash2 = compute_cert_pubkey_hash(&cert2).unwrap();
+        // Different key pairs → different hashes
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_cert_pubkey_hash_invalid_cert() {
+        let result = compute_cert_pubkey_hash(&[0xFF, 0xFF, 0xFF]);
+        assert!(result.is_err());
     }
 }
