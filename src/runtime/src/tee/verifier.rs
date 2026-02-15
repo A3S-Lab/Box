@@ -245,13 +245,10 @@ fn verify_p384_signature(
 ///
 /// Checks that:
 /// 1. Each certificate is a valid X.509 certificate
-/// 2. VCEK is signed by ASK
-/// 3. ASK is signed by ARK
-/// 4. ARK is self-signed (root of trust)
-///
-/// Note: Full signature verification of the cert chain requires the same
-/// ECDSA-P384 verification. For now, we validate structure and issuer/subject
-/// matching. Full cryptographic chain verification is a future enhancement.
+/// 2. VCEK is signed by ASK (ECDSA-P384 signature verification)
+/// 3. ASK is signed by ARK (ECDSA-P384 signature verification)
+/// 4. ARK is self-signed (ECDSA-P384 signature verification)
+/// 5. Issuer/subject names match across the chain
 fn verify_cert_chain(vcek_der: &[u8], ask_der: &[u8], ark_der: &[u8]) -> bool {
     use der::Decode;
     use x509_cert::Certificate;
@@ -309,7 +306,97 @@ fn verify_cert_chain(vcek_der: &[u8], ask_der: &[u8], ark_der: &[u8]) -> bool {
         return false;
     }
 
+    // Verify ECDSA-P384 signatures across the chain.
+    // Each certificate's tbsCertificate is signed by the issuer's private key.
+
+    // ARK is self-signed: verify ARK signature with ARK's own public key
+    if !verify_cert_signature(&ark, &ark) {
+        tracing::warn!("ARK self-signature verification failed");
+        return false;
+    }
+
+    // ASK is signed by ARK
+    if !verify_cert_signature(&ask, &ark) {
+        tracing::warn!("ASK signature verification failed (not signed by ARK)");
+        return false;
+    }
+
+    // VCEK is signed by ASK
+    if !verify_cert_signature(&vcek, &ask) {
+        tracing::warn!("VCEK signature verification failed (not signed by ASK)");
+        return false;
+    }
+
     true
+}
+
+/// Verify that `cert` was signed by `issuer` using ECDSA-P384.
+///
+/// Extracts the tbsCertificate DER bytes from `cert`, the signature from
+/// `cert.signature`, and the public key from `issuer`, then performs
+/// ECDSA-P384-SHA384 verification.
+fn verify_cert_signature(
+    cert: &x509_cert::Certificate,
+    issuer: &x509_cert::Certificate,
+) -> bool {
+    use der::Encode;
+    use p384::ecdsa::{signature::Verifier, DerSignature, VerifyingKey};
+
+    // Encode the tbsCertificate to DER (this is the signed data)
+    let tbs_der = match cert.tbs_certificate.to_der() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Failed to encode tbsCertificate to DER: {}", e);
+            return false;
+        }
+    };
+
+    // Extract the signature bytes from the certificate
+    let sig_bytes = match cert.signature.as_bytes() {
+        Some(b) => b,
+        None => {
+            tracing::warn!("Failed to extract signature bytes from certificate");
+            return false;
+        }
+    };
+
+    // Parse as DER-encoded ECDSA signature
+    let signature = match DerSignature::from_bytes(sig_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to parse certificate ECDSA signature: {}", e);
+            return false;
+        }
+    };
+
+    // Extract the issuer's public key
+    let issuer_pub_key_bytes = match issuer
+        .tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .as_bytes()
+    {
+        Some(b) => b,
+        None => {
+            tracing::warn!("Failed to extract issuer public key bytes");
+            return false;
+        }
+    };
+
+    let verifying_key = match VerifyingKey::from_sec1_bytes(issuer_pub_key_bytes) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!("Failed to create P-384 verifying key from issuer: {}", e);
+            return false;
+        }
+    };
+
+    // Verify the signature over the tbsCertificate DER bytes.
+    // X.509 uses SHA-384 hash internally for P-384 signatures.
+    match verifying_key.verify(&tbs_der, &signature) {
+        Ok(()) => true,
+        Err(_) => false,
+    }
 }
 
 /// Check the attestation report against the verification policy.
@@ -487,6 +574,137 @@ mod tests {
         assert!(!verify_cert_chain(&[1], &[], &[]));
         assert!(!verify_cert_chain(&[], &[1], &[]));
         assert!(!verify_cert_chain(&[], &[], &[1]));
+    }
+
+    // ========================================================================
+    // Certificate chain ECDSA signature verification tests
+    // ========================================================================
+
+    /// Generate a 3-level P-384 certificate chain: ARK (root) → ASK → VCEK.
+    /// Returns (vcek_der, ask_der, ark_der).
+    fn make_test_cert_chain() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use rcgen::{
+            CertificateParams, DistinguishedName, DnType, IsCa, BasicConstraints,
+            KeyPair, KeyUsagePurpose, PKCS_ECDSA_P384_SHA384,
+        };
+
+        // ARK (root CA, self-signed)
+        let ark_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut ark_params = CertificateParams::default();
+        let mut ark_dn = DistinguishedName::new();
+        ark_dn.push(DnType::CommonName, "AMD SEV ARK");
+        ark_dn.push(DnType::OrganizationName, "AMD");
+        ark_params.distinguished_name = ark_dn.clone();
+        ark_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ark_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let ark_cert = ark_params.self_signed(&ark_key).unwrap();
+
+        // ASK (intermediate CA, signed by ARK)
+        let ask_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut ask_params = CertificateParams::default();
+        let mut ask_dn = DistinguishedName::new();
+        ask_dn.push(DnType::CommonName, "AMD SEV ASK");
+        ask_dn.push(DnType::OrganizationName, "AMD");
+        ask_params.distinguished_name = ask_dn;
+        ask_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ask_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let ask_cert = ask_params.signed_by(&ask_key, &ark_cert, &ark_key).unwrap();
+
+        // VCEK (leaf, signed by ASK)
+        let vcek_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut vcek_params = CertificateParams::default();
+        let mut vcek_dn = DistinguishedName::new();
+        vcek_dn.push(DnType::CommonName, "AMD SEV VCEK");
+        vcek_dn.push(DnType::OrganizationName, "AMD");
+        vcek_params.distinguished_name = vcek_dn;
+        vcek_params.is_ca = IsCa::NoCa;
+        vcek_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        let vcek_cert = vcek_params.signed_by(&vcek_key, &ask_cert, &ask_key).unwrap();
+
+        (
+            vcek_cert.der().to_vec(),
+            ask_cert.der().to_vec(),
+            ark_cert.der().to_vec(),
+        )
+    }
+
+    #[test]
+    fn test_verify_cert_chain_valid_signatures() {
+        let (vcek, ask, ark) = make_test_cert_chain();
+        assert!(verify_cert_chain(&vcek, &ask, &ark));
+    }
+
+    #[test]
+    fn test_verify_cert_chain_wrong_ark_rejects() {
+        let (vcek, ask, _ark) = make_test_cert_chain();
+        // Generate a different ARK (different key pair)
+        let (_, _, wrong_ark) = make_test_cert_chain();
+        // ASK was signed by the original ARK, not this one
+        assert!(!verify_cert_chain(&vcek, &ask, &wrong_ark));
+    }
+
+    #[test]
+    fn test_verify_cert_chain_wrong_ask_rejects() {
+        let (vcek, _ask, ark) = make_test_cert_chain();
+        // Generate a different chain and use its ASK
+        let (_, wrong_ask, _) = make_test_cert_chain();
+        // VCEK was signed by the original ASK, not this one
+        assert!(!verify_cert_chain(&vcek, &wrong_ask, &ark));
+    }
+
+    #[test]
+    fn test_verify_cert_chain_swapped_ask_ark_rejects() {
+        let (vcek, ask, ark) = make_test_cert_chain();
+        // Swap ASK and ARK — should fail because ARK won't be self-signed
+        // and signatures won't match
+        assert!(!verify_cert_chain(&vcek, &ark, &ask));
+    }
+
+    #[test]
+    fn test_verify_cert_signature_self_signed() {
+        use der::Decode;
+        use rcgen::{
+            CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P384_SHA384,
+        };
+
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "Test Self-Signed");
+        params.distinguished_name = dn;
+        let cert = params.self_signed(&key).unwrap();
+
+        let parsed = x509_cert::Certificate::from_der(cert.der()).unwrap();
+        assert!(verify_cert_signature(&parsed, &parsed));
+    }
+
+    #[test]
+    fn test_verify_cert_signature_wrong_issuer_rejects() {
+        use der::Decode;
+        use rcgen::{
+            CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P384_SHA384,
+        };
+
+        // Two independent self-signed certs
+        let key1 = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut params1 = CertificateParams::default();
+        let mut dn1 = DistinguishedName::new();
+        dn1.push(DnType::CommonName, "Cert A");
+        params1.distinguished_name = dn1;
+        let cert1 = params1.self_signed(&key1).unwrap();
+
+        let key2 = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut params2 = CertificateParams::default();
+        let mut dn2 = DistinguishedName::new();
+        dn2.push(DnType::CommonName, "Cert B");
+        params2.distinguished_name = dn2;
+        let cert2 = params2.self_signed(&key2).unwrap();
+
+        let parsed1 = x509_cert::Certificate::from_der(cert1.der()).unwrap();
+        let parsed2 = x509_cert::Certificate::from_der(cert2.der()).unwrap();
+
+        // cert1 was NOT signed by cert2's key
+        assert!(!verify_cert_signature(&parsed1, &parsed2));
     }
 
     #[test]

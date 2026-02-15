@@ -268,7 +268,7 @@ a3s-box inject-secret dev --secret "KEY=val" --set-env --allow-simulated
 ```
 
 Simulation generates fake attestation reports with deterministic keys. Not suitable for production:
-- ECDSA verification bypassed, certificate chain checks issuer strings only
+- ECDSA report signature verification bypassed (no hardware signature in simulation)
 - No replay protection, no hardware memory encryption
 - Sealed data NOT portable to real hardware (different key derivation inputs)
 
@@ -397,7 +397,7 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 
 **TEE Hardening**
 - [x] Bind TLS public key hash to `report_data` (RA-TLS key binding)
-- [ ] Certificate chain ECDSA signature verification (VCEK→ASK→ARK)
+- [x] Certificate chain ECDSA signature verification (VCEK→ASK→ARK)
 - [ ] Attestation report age checking (replay protection)
 - [ ] KBS (Key Broker Service) integration
 - [ ] Periodic re-attestation
