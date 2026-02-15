@@ -11,6 +11,7 @@ pub mod image_service;
 pub mod runtime_service;
 pub mod sandbox;
 pub mod server;
+pub mod streaming;
 
 /// Generated CRI v1 protobuf types.
 pub mod cri_api {

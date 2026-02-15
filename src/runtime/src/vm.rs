@@ -106,6 +106,12 @@ pub struct VmManager {
 
     /// TEE extension (attestation, sealing, secret injection)
     tee: Option<Box<dyn TeeExtension>>,
+
+    /// Path to the exec Unix socket (set after boot)
+    exec_socket_path: Option<PathBuf>,
+
+    /// Path to the PTY Unix socket (set after boot)
+    pty_socket_path: Option<PathBuf>,
 }
 
 impl VmManager {
@@ -127,6 +133,8 @@ impl VmManager {
             home_dir,
             anonymous_volumes: Vec::new(),
             tee: None,
+            exec_socket_path: None,
+            pty_socket_path: None,
         }
     }
 
@@ -147,6 +155,8 @@ impl VmManager {
             home_dir,
             anonymous_volumes: Vec::new(),
             tee: None,
+            exec_socket_path: None,
+            pty_socket_path: None,
         }
     }
 
@@ -166,6 +176,7 @@ impl VmManager {
             handler: Arc::new(RwLock::new(None)),
             agent_client: None, exec_client: None, passt_manager: None,
             home_dir, anonymous_volumes: Vec::new(), tee: None,
+            exec_socket_path: None, pty_socket_path: None,
         }
     }
 
@@ -187,6 +198,16 @@ impl VmManager {
     /// Get the exec client, if connected.
     pub fn exec_client(&self) -> Option<&ExecClient> {
         self.exec_client.as_ref()
+    }
+
+    /// Get the exec socket path, if the VM has been booted.
+    pub fn exec_socket_path(&self) -> Option<&Path> {
+        self.exec_socket_path.as_deref()
+    }
+
+    /// Get the PTY socket path, if the VM has been booted.
+    pub fn pty_socket_path(&self) -> Option<&Path> {
+        self.pty_socket_path.as_deref()
     }
 
     /// Get the names of anonymous volumes created during boot.
@@ -297,6 +318,10 @@ impl VmManager {
 
         // 5b. Wait for exec server to become ready
         self.wait_for_exec_ready(&layout.exec_socket_path).await?;
+
+        // 5b2. Store socket paths for CRI streaming access
+        self.exec_socket_path = Some(layout.exec_socket_path.clone());
+        self.pty_socket_path = Some(layout.pty_socket_path.clone());
 
         // 5c. Initialize TEE extension for TEE environments
         if !matches!(self.config.tee, TeeConfig::None) {
@@ -1994,6 +2019,8 @@ mod tests {
             home_dir: home_dir.to_path_buf(),
             anonymous_volumes: Vec::new(),
             tee: None,
+            exec_socket_path: None,
+            pty_socket_path: None,
         }
     }
 

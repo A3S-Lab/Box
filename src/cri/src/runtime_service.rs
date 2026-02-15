@@ -20,6 +20,7 @@ use crate::cri_api::runtime_service_server::RuntimeService;
 use crate::cri_api::*;
 use crate::error::box_error_to_status;
 use crate::sandbox::{PodSandbox, SandboxState, SandboxStore};
+use crate::streaming::{SessionKind, StreamingHandle, StreamingSession};
 
 /// A3S Box implementation of the CRI RuntimeService.
 pub struct BoxRuntimeService {
@@ -31,11 +32,13 @@ pub struct BoxRuntimeService {
     image_puller: Arc<ImagePuller>,
     /// Maps sandbox_id → VmManager for running VMs.
     vm_managers: Arc<RwLock<HashMap<String, VmManager>>>,
+    /// Handle for registering CRI streaming sessions.
+    streaming: StreamingHandle,
 }
 
 impl BoxRuntimeService {
     /// Create a new BoxRuntimeService.
-    pub fn new(image_store: Arc<ImageStore>, auth: RegistryAuth) -> Self {
+    pub fn new(image_store: Arc<ImageStore>, auth: RegistryAuth, streaming: StreamingHandle) -> Self {
         let image_puller = Arc::new(ImagePuller::new(image_store.clone(), auth));
         Self {
             sandbox_store: Arc::new(SandboxStore::new()),
@@ -43,6 +46,7 @@ impl BoxRuntimeService {
             image_store,
             image_puller,
             vm_managers: Arc::new(RwLock::new(HashMap::new())),
+            streaming,
         }
     }
 }
@@ -605,39 +609,230 @@ impl RuntimeService for BoxRuntimeService {
         }))
     }
 
-    async fn exec(&self, _request: Request<ExecRequest>) -> Result<Response<ExecResponse>, Status> {
-        Err(Status::unimplemented("Exec not yet implemented"))
+    async fn exec(&self, request: Request<ExecRequest>) -> Result<Response<ExecResponse>, Status> {
+        let req = request.into_inner();
+        let container_id = &req.container_id;
+
+        tracing::info!(
+            container_id = %container_id,
+            cmd = ?req.cmd,
+            tty = req.tty,
+            "CRI Exec"
+        );
+
+        // Look up the container to find its sandbox
+        let container = self
+            .container_store
+            .get(container_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+
+        // Get the VmManager for this sandbox
+        let vm_managers = self.vm_managers.read().await;
+        let vm = vm_managers.get(&container.sandbox_id).ok_or_else(|| {
+            Status::not_found(format!("Sandbox not found: {}", container.sandbox_id))
+        })?;
+
+        let exec_socket = vm
+            .exec_socket_path()
+            .ok_or_else(|| Status::unavailable("VM exec socket not ready"))?
+            .to_string_lossy()
+            .to_string();
+        let pty_socket = vm
+            .pty_socket_path()
+            .ok_or_else(|| Status::unavailable("VM PTY socket not ready"))?
+            .to_string_lossy()
+            .to_string();
+
+        let session = StreamingSession {
+            kind: SessionKind::Exec,
+            sandbox_id: container.sandbox_id.clone(),
+            cmd: req.cmd,
+            tty: req.tty,
+            stdin: req.stdin,
+            ports: vec![],
+            exec_socket_path: exec_socket,
+            pty_socket_path: pty_socket,
+        };
+
+        let url = self.streaming.register(session).await;
+        Ok(Response::new(ExecResponse { url }))
     }
 
     async fn attach(
         &self,
-        _request: Request<AttachRequest>,
+        request: Request<AttachRequest>,
     ) -> Result<Response<AttachResponse>, Status> {
-        Err(Status::unimplemented("Attach not yet implemented"))
+        let req = request.into_inner();
+        let container_id = &req.container_id;
+
+        tracing::info!(
+            container_id = %container_id,
+            tty = req.tty,
+            "CRI Attach"
+        );
+
+        let container = self
+            .container_store
+            .get(container_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+
+        let vm_managers = self.vm_managers.read().await;
+        let vm = vm_managers.get(&container.sandbox_id).ok_or_else(|| {
+            Status::not_found(format!("Sandbox not found: {}", container.sandbox_id))
+        })?;
+
+        let exec_socket = vm
+            .exec_socket_path()
+            .ok_or_else(|| Status::unavailable("VM exec socket not ready"))?
+            .to_string_lossy()
+            .to_string();
+        let pty_socket = vm
+            .pty_socket_path()
+            .ok_or_else(|| Status::unavailable("VM PTY socket not ready"))?
+            .to_string_lossy()
+            .to_string();
+
+        let session = StreamingSession {
+            kind: SessionKind::Attach,
+            sandbox_id: container.sandbox_id.clone(),
+            cmd: vec![],
+            tty: req.tty,
+            stdin: req.stdin,
+            ports: vec![],
+            exec_socket_path: exec_socket,
+            pty_socket_path: pty_socket,
+        };
+
+        let url = self.streaming.register(session).await;
+        Ok(Response::new(AttachResponse { url }))
     }
 
     async fn port_forward(
         &self,
-        _request: Request<PortForwardRequest>,
+        request: Request<PortForwardRequest>,
     ) -> Result<Response<PortForwardResponse>, Status> {
-        Err(Status::unimplemented("PortForward not yet implemented"))
+        let req = request.into_inner();
+        let sandbox_id = &req.pod_sandbox_id;
+
+        tracing::info!(
+            sandbox_id = %sandbox_id,
+            ports = ?req.port,
+            "CRI PortForward"
+        );
+
+        // Verify sandbox exists
+        self.sandbox_store
+            .get(sandbox_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Sandbox not found: {}", sandbox_id)))?;
+
+        let vm_managers = self.vm_managers.read().await;
+        let vm = vm_managers.get(sandbox_id).ok_or_else(|| {
+            Status::not_found(format!("VM not found for sandbox: {}", sandbox_id))
+        })?;
+
+        let exec_socket = vm
+            .exec_socket_path()
+            .ok_or_else(|| Status::unavailable("VM exec socket not ready"))?
+            .to_string_lossy()
+            .to_string();
+        let pty_socket = vm
+            .pty_socket_path()
+            .ok_or_else(|| Status::unavailable("VM PTY socket not ready"))?
+            .to_string_lossy()
+            .to_string();
+
+        let session = StreamingSession {
+            kind: SessionKind::PortForward,
+            sandbox_id: sandbox_id.to_string(),
+            cmd: vec![],
+            tty: false,
+            stdin: false,
+            ports: req.port,
+            exec_socket_path: exec_socket,
+            pty_socket_path: pty_socket,
+        };
+
+        let url = self.streaming.register(session).await;
+        Ok(Response::new(PortForwardResponse { url }))
     }
 
     async fn update_container_resources(
         &self,
-        _request: Request<UpdateContainerResourcesRequest>,
+        request: Request<UpdateContainerResourcesRequest>,
     ) -> Result<Response<UpdateContainerResourcesResponse>, Status> {
-        Err(Status::unimplemented(
-            "UpdateContainerResources not yet implemented",
-        ))
+        let req = request.into_inner();
+        let container_id = &req.container_id;
+
+        // Verify container exists
+        let container = self
+            .container_store
+            .get(container_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+
+        if let Some(ref linux) = req.linux {
+            tracing::info!(
+                container_id = %container_id,
+                sandbox_id = %container.sandbox_id,
+                cpu_quota = linux.cpu_quota,
+                cpu_period = linux.cpu_period,
+                memory_limit = linux.memory_limit_in_bytes,
+                "CRI UpdateContainerResources (acknowledged, microVM resources are fixed at boot)"
+            );
+        } else {
+            tracing::info!(
+                container_id = %container_id,
+                "CRI UpdateContainerResources (no linux resources specified)"
+            );
+        }
+
+        // MicroVM resources (CPU, memory) are fixed at boot time and cannot be
+        // dynamically resized. We acknowledge the request to maintain CRI compatibility
+        // but log that the actual resources remain unchanged.
+        Ok(Response::new(UpdateContainerResourcesResponse {}))
     }
 
     async fn reopen_container_log(
         &self,
-        _request: Request<ReopenContainerLogRequest>,
+        request: Request<ReopenContainerLogRequest>,
     ) -> Result<Response<ReopenContainerLogResponse>, Status> {
-        Err(Status::unimplemented(
-            "ReopenContainerLog not yet implemented",
-        ))
+        let req = request.into_inner();
+        let container_id = &req.container_id;
+
+        let container = self
+            .container_store
+            .get(container_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
+
+        tracing::info!(
+            container_id = %container_id,
+            log_path = %container.log_path,
+            "CRI ReopenContainerLog"
+        );
+
+        // If the container has a log path, signal log rotation by truncating
+        // the existing log file. The guest agent will continue writing to it.
+        if !container.log_path.is_empty() {
+            let log_path = std::path::Path::new(&container.log_path);
+            if log_path.exists() {
+                if let Err(e) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(log_path)
+                {
+                    tracing::warn!(
+                        container_id = %container_id,
+                        error = %e,
+                        "Failed to truncate container log"
+                    );
+                }
+            }
+        }
+
+        Ok(Response::new(ReopenContainerLogResponse {}))
     }
 }

@@ -1,7 +1,9 @@
 //! gRPC server setup for CRI services.
 //!
 //! Listens on a Unix domain socket for CRI RuntimeService and ImageService RPCs.
+//! Also starts an HTTP streaming server for exec/attach/port-forward.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use crate::cri_api::image_service_server::ImageServiceServer;
 use crate::cri_api::runtime_service_server::RuntimeServiceServer;
 use crate::image_service::BoxImageService;
 use crate::runtime_service::BoxRuntimeService;
+use crate::streaming::StreamingServer;
 
 /// CRI gRPC server configuration.
 pub struct CriServer {
@@ -24,6 +27,8 @@ pub struct CriServer {
     image_store: Arc<ImageStore>,
     /// Registry authentication.
     auth: RegistryAuth,
+    /// Streaming server bind address.
+    streaming_addr: SocketAddr,
 }
 
 impl CriServer {
@@ -33,7 +38,14 @@ impl CriServer {
             socket_path,
             image_store,
             auth,
+            streaming_addr: "127.0.0.1:18800".parse().unwrap(),
         }
+    }
+
+    /// Set the streaming server bind address.
+    pub fn with_streaming_addr(mut self, addr: SocketAddr) -> Self {
+        self.streaming_addr = addr;
+        self
     }
 
     /// Start serving CRI RPCs on the Unix socket.
@@ -48,7 +60,21 @@ impl CriServer {
             std::fs::create_dir_all(parent)?;
         }
 
-        let runtime_service = BoxRuntimeService::new(self.image_store.clone(), self.auth.clone());
+        // Start streaming server
+        let streaming_server = StreamingServer::new(self.streaming_addr);
+        let streaming_handle = streaming_server.handle();
+
+        tokio::spawn(async move {
+            if let Err(e) = streaming_server.serve().await {
+                tracing::error!(error = %e, "CRI streaming server failed");
+            }
+        });
+
+        let runtime_service = BoxRuntimeService::new(
+            self.image_store.clone(),
+            self.auth.clone(),
+            streaming_handle,
+        );
         let image_service = BoxImageService::new(self.image_store.clone(), self.auth.clone());
 
         let uds = UnixListener::bind(&self.socket_path)?;
@@ -56,6 +82,7 @@ impl CriServer {
 
         tracing::info!(
             socket = %self.socket_path.display(),
+            streaming_addr = %self.streaming_addr,
             "CRI server listening"
         );
 
