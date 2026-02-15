@@ -1,11 +1,11 @@
 # A3S Box
 
 <p align="center">
-  <strong>MicroVM Sandbox Runtime with TEE Support</strong>
+  <strong>VM Runtime — Standalone CLI &amp; K8s RuntimeClass</strong>
 </p>
 
 <p align="center">
-  <em>Hardware-isolated execution environments for secure workloads — Docker-like CLI, sub-second boot, AMD SEV-SNP confidential computing</em>
+  <em>General-purpose MicroVM runtime for hardware-isolated workloads — Docker-like CLI for standalone use, K8s RuntimeClass for cluster deployment. AMD SEV-SNP TEE when hardware supports, VM isolation always. Application-agnostic: doesn't know what runs inside.</em>
 </p>
 
 <p align="center">
@@ -22,9 +22,9 @@
 
 ## Overview
 
-**A3S Box** is a MicroVM-based sandbox runtime that provides hardware-isolated execution environments. Each sandbox runs in its own MicroVM with a dedicated Linux kernel (~200ms cold start), OCI image support, and optional AMD SEV-SNP hardware memory encryption.
+**A3S Box** is a general-purpose MicroVM runtime with two deployment modes: a Docker-like CLI (`a3s-box run`) for standalone use, and a K8s RuntimeClass (`a3s-box-shim`) for cluster deployment. Each workload runs in its own MicroVM with a dedicated Linux kernel (~200ms cold start), OCI image support, and optional AMD SEV-SNP hardware memory encryption.
 
-Box is a general-purpose VM runtime — it can sandbox any process, not just AI agents. In the A3S ecosystem, it serves as the infrastructure layer that SafeClaw and a3s-code run inside.
+A3S Box is **application-agnostic** — it doesn't know or care what runs inside. Any OCI-packaged process can be sandboxed: web servers, databases, AI agents, or security proxies. When TEE hardware is available (AMD SEV-SNP), workloads get hardware-enforced memory encryption automatically; otherwise they still get VM-level isolation.
 
 ## Features
 
@@ -339,32 +339,38 @@ cargo test -p a3s-box-cli --test tee_integration -- --ignored --nocapture --test
 
 ## A3S Ecosystem
 
-A3S is a modular ecosystem. Each component works independently or together:
+A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM isolation for any workload — it does not know what runs inside.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    A3S Ecosystem                            │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              a3s-box (this project)                  │   │
-│  │           MicroVM Sandbox Runtime                    │   │
-│  │        (Hardware Isolation Layer)                    │   │
-│  │                                                      │   │
-│  │  ┌────────────────────────────────────────────────┐ │   │
-│  │  │  a3s-code — AI Coding Agent (runs inside Box)  │ │   │
-│  │  │  a3s-lane — Priority Command Queue             │ │   │
-│  │  │  a3s-context — Hierarchical Memory/Knowledge   │ │   │
-│  │  └────────────────────────────────────────────────┘ │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│                     A3S Ecosystem                          │
+│                                                            │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │   a3s-gateway (K8s Ingress Controller, optional)     │  │
+│  │   Routes traffic to Pods — application-agnostic      │  │
+│  └────────────────────┬─────────────────────────────────┘  │
+│                       │                                    │
+│  ┌────────────────────▼─────────────────────────────────┐  │
+│  │              a3s-box (this project)                   │  │
+│  │      VM Runtime — Standalone CLI & K8s RuntimeClass   │  │
+│  │          TEE when hardware supports, VM always        │  │
+│  │                                                       │  │
+│  │  ┌─────────────────────────────────────────────────┐  │  │
+│  │  │   Guest workload (any OCI image)                │  │  │
+│  │  │   e.g. SafeClaw + A3S Code, or any other app    │  │  │
+│  │  └─────────────────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────┘
 ```
 
-| Project | Layer | Purpose |
-|---------|-------|---------|
-| **box** (this) | Infrastructure | MicroVM sandbox runtime with hardware isolation |
-| [code](https://github.com/a3s-lab/code) | Application | AI coding agent with tool execution |
-| [lane](https://github.com/a3s-lab/lane) | Utility | Priority-based async task scheduling |
-| [context](https://github.com/a3s-lab/context) | Utility | Hierarchical context with semantic search |
+> A3S Box is application-agnostic. It provides the same VM isolation whether the guest is SafeClaw, a web server, or a database.
+
+| Project | Layer | Relationship to Box |
+|---------|-------|---------------------|
+| **box** (this) | Infrastructure | VM runtime — standalone CLI or K8s RuntimeClass |
+| [gateway](https://github.com/a3s-lab/gateway) | Ingress | Routes external traffic to Pods running in a3s-box VMs |
+| [code](https://github.com/a3s-lab/code) | Agent Service | Can run inside a3s-box VM as a guest process |
+| [safeclaw](https://github.com/a3s-lab/safeclaw) | Security Proxy | Can run inside a3s-box VM alongside a3s-code |
 
 ## Roadmap
 
@@ -404,7 +410,7 @@ A3S is a modular ecosystem. Each component works independently or together:
 **Host SDK & Transport**
 - [ ] `a3s-transport` crate: unified `Transport` trait with framing protocol
 - [ ] `VsockTransport` / `MockTransport` implementations
-- [ ] `TeeRuntime` high-level API: `spawn_verified()` → verified TEE channel
+- [ ] Guest-side TEE self-detection API via `a3s-box-core`: check `/dev/sev-guest`, report TEE capability to application layer
 - [ ] Migrate exec/PTY servers to shared framing protocol
 
 **Observability & Scaling**
@@ -422,7 +428,7 @@ A3S is a modular ecosystem. Each component works independently or together:
 - [ ] Seccomp profiles, no-new-privileges
 
 > Items that belong to other projects (not Box):
-> - **SafeClaw**: distributed TEE orchestration, trust zones, LLM inference, task routing, network firewall policies
+> - **SafeClaw**: security proxy logic (injection detection, taint tracking, output sanitization, audit pipeline)
 > - **a3s-code**: agent configuration from OCI labels, pre-built guest image, Python SDK
 
 ## Development
