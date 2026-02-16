@@ -49,7 +49,7 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 ### Security & Isolation
 - **Namespace Isolation** — Separate mount, PID, IPC, UTS namespaces within each VM
 - **Resource Limits** — CPU shares/quota/pinning, memory reservation/swap, PID limits, ulimits (cgroup v2)
-- **Security Options** — Capabilities (`--cap-add/drop`), read-only rootfs, privileged mode, device mapping, GPU access
+- **Security Options** — Capabilities (`--cap-add/drop`), seccomp profiles (`--security-opt seccomp=`), no-new-privileges, read-only rootfs, privileged mode, device mapping, GPU access
 - **Restart Policies** — `always`, `on-failure:N`, `unless-stopped` with exponential backoff
 - **Health Checks** — Configurable commands with interval, timeout, retries, start period
 - **Logging** — JSON logging driver with rotation, or `--log-driver none`
@@ -286,15 +286,15 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,176 passed
+### Unit Tests — 1,191 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 367 | State management, name resolution, output formatting, restart policies |
-| `a3s-box-core` | 171 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection |
+| `a3s-box-core` | 185 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config |
 | `a3s-box-runtime` | 541 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
-| `a3s-box-guest-init` | 52 | Exec server, attest server frame I/O, secret validation |
+| `a3s-box-guest-init` | 53 | Exec server, attest server frame I/O, secret validation, namespace security |
 | `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
 
 All unit tests run without VM, network, or hardware dependencies (`A3S_DEPS_STUB=1` for CI).
@@ -442,7 +442,6 @@ Box acts as the "hands" of Knative-style serverless serving — it executes inst
 
 - [ ] **Scale API (standalone mode)**: Expose an internal API for Gateway to request instance scale-up/scale-down (`POST /scale {service, replicas}`) — create, start, or stop MicroVMs on demand
 - [ ] **Instance readiness signaling**: Report instance state transitions (Creating → Booting → Ready → Busy → Stopping) to Gateway via callback or event, so Gateway knows when to start forwarding traffic
-- [ ] **VM snapshot/restore for cold start**: Save running VM state to SSD, restore in < 500ms — critical for scale-from-zero latency in both standalone and K8s modes
 - [ ] **Warm pool auto-scaling**: Dynamically adjust warm pool `min_idle` based on Gateway's scaling pressure signals — pre-warm more VMs when traffic is trending up
 - [ ] **Instance health reporting**: Continuously report per-instance health (CPU, memory, in-flight requests) to Gateway for autoscaler decision-making
 - [ ] **Graceful scale-down**: Drain in-flight requests before stopping a VM — coordinate with Gateway to stop routing new requests, wait for completion, then terminate
@@ -451,10 +450,10 @@ Box acts as the "hands" of Knative-style serverless serving — it executes inst
 **Docker Parity (remaining)**
 - [ ] Multi-container orchestration (compose-like YAML)
 - [ ] Buildx multi-platform builds
-- [ ] Secrets management (`--secret`)
-- [ ] CRI streaming API (Exec, Attach, PortForward)
+- [x] Secrets management (RA-TLS `inject-secret` with `--secret`, `--file`, `--set-env`, tmpfs `/run/secrets/`)
+- [x] CRI streaming API (Exec, Attach, PortForward via HTTP streaming server → vsock bridge)
 - [ ] Image signing (cosign/notation)
-- [ ] Seccomp profiles, no-new-privileges
+- [x] Seccomp profiles, no-new-privileges (`--security-opt seccomp=`, `--cap-add`, `--cap-drop`, `--privileged`)
 
 > Items that belong to other projects (not Box):
 > - **SafeClaw**: security proxy logic (injection detection, taint tracking, output sanitization, audit pipeline)

@@ -1325,6 +1325,15 @@ impl VmManager {
                 env.push((format!("A3S_TMPFS_{}", i), tmpfs_spec.clone()));
             }
 
+            // Pass security configuration to guest init
+            let security_config = a3s_box_core::SecurityConfig::from_options(
+                &self.config.security_opt,
+                &self.config.cap_add,
+                &self.config.cap_drop,
+                self.config.privileged,
+            );
+            env.extend(security_config.to_env_vars());
+
             tracing::debug!(
                 env = ?env,
                 "Using guest init with agent configuration"

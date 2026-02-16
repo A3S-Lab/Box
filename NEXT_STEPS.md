@@ -13,7 +13,8 @@
 - [x] Instrument VM boot, exec, destroy with Prometheus metrics
 - [x] OpenTelemetry spans (VM lifecycle: `vm_boot` → `prepare_layout` → `vm_start` → `wait_for_ready`, exec, destroy)
 - [x] Autoscaler with warm pool pressure-based scaling (`ScalingPolicy`, `PoolScaler`, miss rate window)
+- [x] Seccomp profiles, no-new-privileges, capability dropping (default BPF filter, `SecurityConfig`, env var bridge)
 
 ## Next
 
-- [ ] Scale API (standalone mode): `POST /scale {service, replicas}`
+- [ ] Image signing (cosign/notation)

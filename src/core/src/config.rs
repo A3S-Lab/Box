@@ -374,6 +374,22 @@ pub struct BoxConfig {
     /// Resource limits (PID limits, CPU pinning, ulimits, cgroup controls).
     #[serde(default)]
     pub resource_limits: ResourceLimits,
+
+    /// Linux capabilities to add (e.g., "NET_ADMIN", "SYS_PTRACE")
+    #[serde(default)]
+    pub cap_add: Vec<String>,
+
+    /// Linux capabilities to drop (e.g., "ALL", "NET_RAW")
+    #[serde(default)]
+    pub cap_drop: Vec<String>,
+
+    /// Security options (e.g., "seccomp=unconfined", "no-new-privileges")
+    #[serde(default)]
+    pub security_opt: Vec<String>,
+
+    /// Run in privileged mode (disables all security restrictions)
+    #[serde(default)]
+    pub privileged: bool,
 }
 
 impl Default for BoxConfig {
@@ -398,6 +414,10 @@ impl Default for BoxConfig {
             network: NetworkMode::default(),
             tmpfs: vec![],
             resource_limits: ResourceLimits::default(),
+            cap_add: vec![],
+            cap_drop: vec![],
+            security_opt: vec![],
+            privileged: false,
         }
     }
 }
