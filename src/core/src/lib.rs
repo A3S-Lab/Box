@@ -11,6 +11,7 @@ pub mod exec;
 pub mod log;
 pub mod network;
 pub mod pty;
+pub mod tee;
 pub mod volume;
 
 // Re-export commonly used types
@@ -20,6 +21,7 @@ pub use event::{BoxEvent, EventEmitter};
 pub use exec::{ExecOutput, ExecRequest};
 pub use network::{NetworkConfig, NetworkEndpoint, NetworkMode};
 pub use pty::PTY_VSOCK_PORT;
+pub use tee::ATTEST_VSOCK_PORT;
 pub use volume::VolumeConfig;
 
 /// A3S Box version

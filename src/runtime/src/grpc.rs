@@ -325,7 +325,7 @@ impl RaTlsAttestationClient {
         policy: crate::tee::AttestationPolicy,
         allow_simulated: bool,
     ) -> Result<crate::tee::VerificationResult> {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use a3s_box_core::tee::{AttestRequest, AttestRoute};
 
         // Build RA-TLS client config with custom verifier
         let client_config = crate::tee::ratls::create_client_config(policy, allow_simulated)?;
@@ -348,29 +348,18 @@ impl RaTlsAttestationClient {
             BoxError::AttestationError(format!("RA-TLS handshake failed: {}", e))
         })?;
 
-        // Send a simple request to complete the exchange
-        let request = b"GET /status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-        tls_stream.write_all(request).await.map_err(|e| {
-            BoxError::AttestationError(format!("RA-TLS write failed: {}", e))
+        // Send a Frame-based status request
+        let req = AttestRequest {
+            route: AttestRoute::Status,
+            payload: serde_json::Value::Null,
+        };
+        let payload = serde_json::to_vec(&req).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to serialize status request: {}", e))
         })?;
+        write_tls_frame(&mut tls_stream, 0x01, &payload).await?;
 
-        // Read response.
-        // The guest attestation server may close the connection without sending
-        // a TLS close_notify alert. This is harmless — the attestation was already
-        // verified during the handshake. Treat unexpected EOF as normal completion.
-        let mut response = Vec::with_capacity(4096);
-        match tls_stream.read_to_end(&mut response).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                tracing::debug!("RA-TLS peer closed without close_notify (harmless)");
-            }
-            Err(e) => {
-                return Err(BoxError::AttestationError(format!(
-                    "RA-TLS read failed: {}",
-                    e
-                )));
-            }
-        }
+        // Read response frame
+        let _response = read_tls_frame(&mut tls_stream).await?;
 
         // Extract the peer certificate for detailed report info
         let (_, tls_conn) = tls_stream.get_ref();
@@ -457,7 +446,7 @@ impl SecretInjector {
     ///
     /// 1. Connects to the guest attestation server
     /// 2. TLS handshake verifies the TEE (attestation in cert)
-    /// 3. Sends secrets over the verified encrypted channel
+    /// 3. Sends secrets over the verified encrypted channel (Frame protocol)
     /// 4. Guest stores secrets in /run/secrets/ and sets env vars
     ///
     /// # Arguments
@@ -470,7 +459,7 @@ impl SecretInjector {
         policy: crate::tee::AttestationPolicy,
         allow_simulated: bool,
     ) -> Result<SecretInjectionResult> {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use a3s_box_core::tee::{AttestRequest, AttestRoute};
 
         if secrets.is_empty() {
             return Ok(SecretInjectionResult {
@@ -503,58 +492,34 @@ impl SecretInjector {
             ))
         })?;
 
-        // Build and send secret injection request
-        let body = serde_json::json!({ "secrets": secrets });
-        let body_str = serde_json::to_string(&body).map_err(|e| {
-            BoxError::AttestationError(format!("Failed to serialize secrets: {}", e))
+        // Build and send Frame-based secret injection request
+        let req = AttestRequest {
+            route: AttestRoute::Secrets,
+            payload: serde_json::json!({ "secrets": secrets }),
+        };
+        let payload = serde_json::to_vec(&req).map_err(|e| {
+            BoxError::AttestationError(format!("Failed to serialize secrets request: {}", e))
         })?;
+        write_tls_frame(&mut tls_stream, 0x01, &payload).await?;
 
-        let request = format!(
-            "POST /secrets HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body_str.len(),
-            body_str,
-        );
+        // Read response frame
+        let (frame_type, response_data) = read_tls_frame(&mut tls_stream).await?;
 
-        tls_stream.write_all(request.as_bytes()).await.map_err(|e| {
-            BoxError::AttestationError(format!("Failed to send secrets: {}", e))
-        })?;
-
-        // Read response
-        let mut response = Vec::with_capacity(4096);
-        match tls_stream.read_to_end(&mut response).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                tracing::debug!("RA-TLS peer closed without close_notify (harmless)");
-            }
-            Err(e) => {
-                return Err(BoxError::AttestationError(format!(
-                    "Failed to read injection response: {}",
-                    e
-                )));
-            }
-        }
-
-        let response_str = String::from_utf8_lossy(&response);
-
-        // Parse HTTP body
-        let body_str = response_str
-            .find("\r\n\r\n")
-            .map(|pos| &response_str[pos + 4..])
-            .ok_or_else(|| {
-                BoxError::AttestationError("Malformed injection response".to_string())
-            })?;
-
-        // Check HTTP status
-        if !response_str.starts_with("HTTP/1.1 200") {
+        if frame_type == 0x04 {
+            let msg = String::from_utf8_lossy(&response_data);
             return Err(BoxError::AttestationError(format!(
                 "Secret injection failed: {}",
-                body_str.chars().take(200).collect::<String>(),
+                msg,
             )));
         }
 
-        let result: SecretInjectionResult = serde_json::from_str(body_str).map_err(|e| {
-            BoxError::AttestationError(format!("Failed to parse injection response: {}", e))
-        })?;
+        let result: SecretInjectionResult =
+            serde_json::from_slice(&response_data).map_err(|e| {
+                BoxError::AttestationError(format!(
+                    "Failed to parse injection response: {}",
+                    e
+                ))
+            })?;
 
         Ok(result)
     }
@@ -601,7 +566,7 @@ impl SealClient {
     ///
     /// 1. Connects to the guest attestation server
     /// 2. TLS handshake verifies the TEE
-    /// 3. Sends plaintext (base64) over the encrypted channel
+    /// 3. Sends plaintext (base64) over the encrypted channel (Frame protocol)
     /// 4. Guest encrypts with AES-256-GCM bound to TEE identity
     ///
     /// # Arguments
@@ -618,8 +583,8 @@ impl SealClient {
         attestation_policy: crate::tee::AttestationPolicy,
         allow_simulated: bool,
     ) -> Result<SealResult> {
+        use a3s_box_core::tee::{AttestRequest, AttestRoute};
         use base64::Engine;
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let client_config =
             crate::tee::ratls::create_client_config(attestation_policy, allow_simulated)?;
@@ -640,55 +605,30 @@ impl SealClient {
             BoxError::AttestationError(format!("RA-TLS handshake failed: {}", e))
         })?;
 
-        let body = serde_json::json!({
-            "data": base64::engine::general_purpose::STANDARD.encode(data),
-            "context": context,
-            "policy": policy,
-        });
-        let body_str = serde_json::to_string(&body).map_err(|e| {
+        let req = AttestRequest {
+            route: AttestRoute::Seal,
+            payload: serde_json::json!({
+                "data": base64::engine::general_purpose::STANDARD.encode(data),
+                "context": context,
+                "policy": policy,
+            }),
+        };
+        let payload = serde_json::to_vec(&req).map_err(|e| {
             BoxError::AttestationError(format!("Failed to serialize seal request: {}", e))
         })?;
+        write_tls_frame(&mut tls_stream, 0x01, &payload).await?;
 
-        let request = format!(
-            "POST /seal HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body_str.len(),
-            body_str,
-        );
+        let (frame_type, response_data) = read_tls_frame(&mut tls_stream).await?;
 
-        tls_stream.write_all(request.as_bytes()).await.map_err(|e| {
-            BoxError::AttestationError(format!("Failed to send seal request: {}", e))
-        })?;
-
-        let mut response = Vec::with_capacity(4096);
-        match tls_stream.read_to_end(&mut response).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                tracing::debug!("RA-TLS peer closed without close_notify (harmless)");
-            }
-            Err(e) => {
-                return Err(BoxError::AttestationError(format!(
-                    "Failed to read seal response: {}",
-                    e
-                )));
-            }
-        }
-
-        let response_str = String::from_utf8_lossy(&response);
-        let body_str = response_str
-            .find("\r\n\r\n")
-            .map(|pos| &response_str[pos + 4..])
-            .ok_or_else(|| {
-                BoxError::AttestationError("Malformed seal response".to_string())
-            })?;
-
-        if !response_str.starts_with("HTTP/1.1 200") {
+        if frame_type == 0x04 {
+            let msg = String::from_utf8_lossy(&response_data);
             return Err(BoxError::AttestationError(format!(
                 "Seal request failed: {}",
-                body_str.chars().take(200).collect::<String>(),
+                msg,
             )));
         }
 
-        let result: SealResult = serde_json::from_str(body_str).map_err(|e| {
+        let result: SealResult = serde_json::from_slice(&response_data).map_err(|e| {
             BoxError::AttestationError(format!("Failed to parse seal response: {}", e))
         })?;
 
@@ -699,7 +639,7 @@ impl SealClient {
     ///
     /// 1. Connects to the guest attestation server
     /// 2. TLS handshake verifies the TEE
-    /// 3. Sends sealed blob over the encrypted channel
+    /// 3. Sends sealed blob over the encrypted channel (Frame protocol)
     /// 4. Guest decrypts with the TEE-bound key
     ///
     /// # Arguments
@@ -716,8 +656,8 @@ impl SealClient {
         attestation_policy: crate::tee::AttestationPolicy,
         allow_simulated: bool,
     ) -> Result<Vec<u8>> {
+        use a3s_box_core::tee::{AttestRequest, AttestRoute};
         use base64::Engine;
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let client_config =
             crate::tee::ratls::create_client_config(attestation_policy, allow_simulated)?;
@@ -738,55 +678,30 @@ impl SealClient {
             BoxError::AttestationError(format!("RA-TLS handshake failed: {}", e))
         })?;
 
-        let body = serde_json::json!({
-            "blob": blob,
-            "context": context,
-            "policy": policy,
-        });
-        let body_str = serde_json::to_string(&body).map_err(|e| {
+        let req = AttestRequest {
+            route: AttestRoute::Unseal,
+            payload: serde_json::json!({
+                "blob": blob,
+                "context": context,
+                "policy": policy,
+            }),
+        };
+        let payload = serde_json::to_vec(&req).map_err(|e| {
             BoxError::AttestationError(format!("Failed to serialize unseal request: {}", e))
         })?;
+        write_tls_frame(&mut tls_stream, 0x01, &payload).await?;
 
-        let request = format!(
-            "POST /unseal HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body_str.len(),
-            body_str,
-        );
+        let (frame_type, response_data) = read_tls_frame(&mut tls_stream).await?;
 
-        tls_stream.write_all(request.as_bytes()).await.map_err(|e| {
-            BoxError::AttestationError(format!("Failed to send unseal request: {}", e))
-        })?;
-
-        let mut response = Vec::with_capacity(4096);
-        match tls_stream.read_to_end(&mut response).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                tracing::debug!("RA-TLS peer closed without close_notify (harmless)");
-            }
-            Err(e) => {
-                return Err(BoxError::AttestationError(format!(
-                    "Failed to read unseal response: {}",
-                    e
-                )));
-            }
-        }
-
-        let response_str = String::from_utf8_lossy(&response);
-        let body_str = response_str
-            .find("\r\n\r\n")
-            .map(|pos| &response_str[pos + 4..])
-            .ok_or_else(|| {
-                BoxError::AttestationError("Malformed unseal response".to_string())
-            })?;
-
-        if !response_str.starts_with("HTTP/1.1 200") {
+        if frame_type == 0x04 {
+            let msg = String::from_utf8_lossy(&response_data);
             return Err(BoxError::AttestationError(format!(
                 "Unseal request failed: {}",
-                body_str.chars().take(200).collect::<String>(),
+                msg,
             )));
         }
 
-        let result: UnsealResult = serde_json::from_str(body_str).map_err(|e| {
+        let result: UnsealResult = serde_json::from_slice(&response_data).map_err(|e| {
             BoxError::AttestationError(format!("Failed to parse unseal response: {}", e))
         })?;
 
@@ -798,6 +713,62 @@ impl SealClient {
 
         Ok(plaintext)
     }
+}
+
+// ============================================================================
+// TLS Frame helpers (used by RA-TLS clients)
+// ============================================================================
+
+/// Write a frame over an async TLS stream.
+/// Wire format: [type:u8][length:u32 BE][payload]
+async fn write_tls_frame<S>(stream: &mut S, frame_type: u8, payload: &[u8]) -> Result<()>
+where
+    S: tokio::io::AsyncWriteExt + Unpin,
+{
+    let len = payload.len() as u32;
+    let mut header = [0u8; 5];
+    header[0] = frame_type;
+    header[1..5].copy_from_slice(&len.to_be_bytes());
+    stream.write_all(&header).await.map_err(|e| {
+        BoxError::AttestationError(format!("TLS frame header write failed: {}", e))
+    })?;
+    if !payload.is_empty() {
+        stream.write_all(payload).await.map_err(|e| {
+            BoxError::AttestationError(format!("TLS frame payload write failed: {}", e))
+        })?;
+    }
+    Ok(())
+}
+
+/// Read a frame from an async TLS stream.
+/// Returns (frame_type, payload). Treats unexpected EOF after handshake as empty response.
+async fn read_tls_frame<S>(stream: &mut S) -> Result<(u8, Vec<u8>)>
+where
+    S: tokio::io::AsyncReadExt + Unpin,
+{
+    let mut header = [0u8; 5];
+    match stream.read_exact(&mut header).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            tracing::debug!("RA-TLS peer closed without sending response frame");
+            return Ok((0x01, Vec::new()));
+        }
+        Err(e) => {
+            return Err(BoxError::AttestationError(format!(
+                "TLS frame header read failed: {}",
+                e
+            )));
+        }
+    }
+    let frame_type = header[0];
+    let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+    let mut payload = vec![0u8; len];
+    if len > 0 {
+        stream.read_exact(&mut payload).await.map_err(|e| {
+            BoxError::AttestationError(format!("TLS frame payload read failed: {}", e))
+        })?;
+    }
+    Ok((frame_type, payload))
 }
 
 /// Client for interactive PTY sessions in the guest over Unix socket.

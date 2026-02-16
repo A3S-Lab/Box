@@ -14,15 +14,16 @@
 //! 5. Client's custom verifier extracts and verifies the SNP report
 //! 6. After handshake, client sends a simple request, server responds with status
 
+use std::io::Write;
 #[cfg(target_os = "linux")]
-use std::io::{Read, Write};
+use std::io::Read;
 
 use tracing::info;
 #[cfg(target_os = "linux")]
 use tracing::warn;
 
 /// Vsock port for the attestation server.
-pub const ATTEST_VSOCK_PORT: u32 = 4091;
+pub const ATTEST_VSOCK_PORT: u32 = a3s_transport::ports::TEE_CHANNEL;
 
 /// SNP attestation report size (AMD SEV-SNP ABI spec v1.52).
 #[cfg(target_os = "linux")]
@@ -222,17 +223,19 @@ const SECRETS_DIR: &str = "/run/secrets";
 /// Handle a single TLS connection over vsock.
 ///
 /// Performs the TLS handshake (which delivers the RA-TLS certificate),
-/// then routes the request:
-/// - `GET /status` — Returns TEE status
-/// - `POST /secrets` — Receives and stores secrets
-/// - `POST /seal` — Seal data bound to TEE identity
-/// - `POST /unseal` — Unseal previously sealed data
+/// then reads a Frame-based request and routes it:
+/// - `status` — Returns TEE status
+/// - `secrets` — Receives and stores secrets
+/// - `seal` — Seal data bound to TEE identity
+/// - `unseal` — Unseal previously sealed data
+/// - `process` — Forward to local agent
 #[cfg(target_os = "linux")]
 fn handle_tls_connection(
     fd: std::os::fd::OwnedFd,
     config: std::sync::Arc<rustls::ServerConfig>,
     snp_report: std::sync::Arc<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use a3s_box_core::tee::{AttestRequest, AttestRoute};
     use std::os::fd::{AsRawFd, FromRawFd};
     use tracing::debug;
 
@@ -244,31 +247,54 @@ fn handle_tls_connection(
 
     let mut tls = rustls::StreamOwned::new(conn, tcp_stream);
 
-    // Read client request (after TLS handshake completes)
-    let mut buf = vec![0u8; 65536];
-    match tls.read(&mut buf) {
-        Ok(0) => {
-            debug!("RA-TLS client disconnected after handshake");
-        }
-        Ok(n) => {
-            let request = String::from_utf8_lossy(&buf[..n]);
-            debug!("RA-TLS request received ({} bytes)", n);
-
-            if request.starts_with("POST /secrets") {
-                handle_secret_injection(&request, &mut tls);
-            } else if request.starts_with("POST /seal") {
-                handle_seal_request(&request, &snp_report, &mut tls);
-            } else if request.starts_with("POST /unseal") {
-                handle_unseal_request(&request, &snp_report, &mut tls);
-            } else if request.starts_with("POST /process") {
-                handle_process_request(&request, &mut tls);
+    // Read a Frame from the TLS stream
+    match read_frame(&mut tls) {
+        Ok(Some(frame)) => {
+            if frame.0 != 0x01 {
+                // Not a Data frame — send error
+                debug!("RA-TLS received non-data frame type: 0x{:02x}", frame.0);
+                send_error_response(&mut tls, "Expected Data frame");
             } else {
-                // Default: status response
-                send_json_response(&mut tls, 200, b"{\"status\":\"ok\",\"tee\":true}");
+                // Parse the JSON request envelope
+                match serde_json::from_slice::<AttestRequest>(&frame.1) {
+                    Ok(req) => {
+                        debug!("RA-TLS request: route={:?}", req.route);
+                        match req.route {
+                            AttestRoute::Secrets => {
+                                handle_secret_injection(&req.payload, &mut tls);
+                            }
+                            AttestRoute::Seal => {
+                                handle_seal_request(&req.payload, &snp_report, &mut tls);
+                            }
+                            AttestRoute::Unseal => {
+                                handle_unseal_request(&req.payload, &snp_report, &mut tls);
+                            }
+                            AttestRoute::Process => {
+                                handle_process_request(&req.payload, &mut tls);
+                            }
+                            AttestRoute::Status => {
+                                send_data_response(
+                                    &mut tls,
+                                    b"{\"status\":\"ok\",\"tee\":true}",
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("RA-TLS invalid request JSON: {}", e);
+                        send_error_response(
+                            &mut tls,
+                            &format!("Invalid request JSON: {}", e),
+                        );
+                    }
+                }
             }
         }
+        Ok(None) => {
+            debug!("RA-TLS client disconnected after handshake");
+        }
         Err(e) => {
-            debug!("RA-TLS read error: {}", e);
+            debug!("RA-TLS frame read error: {}", e);
         }
     }
 
@@ -277,21 +303,49 @@ fn handle_tls_connection(
     Ok(())
 }
 
-/// Send an HTTP JSON response over TLS.
-#[cfg(target_os = "linux")]
-fn send_json_response(tls: &mut impl Write, status: u16, body: &[u8]) {
-    let status_text = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        500 => "Internal Server Error",
-        _ => "Error",
-    };
-    let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        status, status_text, body.len(),
-    );
-    let _ = tls.write_all(header.as_bytes());
-    let _ = tls.write_all(body);
+/// Read a single frame from a synchronous stream.
+/// Returns (frame_type, payload) or None on EOF.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn read_frame(r: &mut impl std::io::Read) -> std::io::Result<Option<(u8, Vec<u8>)>> {
+    let mut header = [0u8; 5];
+    match r.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let frame_type = header[0];
+    let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+    let mut payload = vec![0u8; len];
+    if len > 0 {
+        r.read_exact(&mut payload)?;
+    }
+    Ok(Some((frame_type, payload)))
+}
+
+/// Write a frame to a synchronous stream.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn write_frame(w: &mut impl Write, frame_type: u8, payload: &[u8]) -> std::io::Result<()> {
+    let len = payload.len() as u32;
+    let mut header = [0u8; 5];
+    header[0] = frame_type;
+    header[1..5].copy_from_slice(&len.to_be_bytes());
+    w.write_all(&header)?;
+    if !payload.is_empty() {
+        w.write_all(payload)?;
+    }
+    Ok(())
+}
+
+/// Send a Data frame response (success).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn send_data_response(tls: &mut impl Write, body: &[u8]) {
+    let _ = write_frame(tls, 0x01, body); // FrameType::Data
+}
+
+/// Send an Error frame response.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn send_error_response(tls: &mut impl Write, message: &str) {
+    let _ = write_frame(tls, 0x04, message.as_bytes()); // FrameType::Error
 }
 
 // ============================================================================
@@ -335,24 +389,13 @@ struct SecretInjectionResponse {
     errors: Vec<String>,
 }
 
-/// Handle a POST /secrets request: store secrets to /run/secrets/ and set env vars.
+/// Handle a secrets request: store secrets to /run/secrets/ and set env vars.
 #[cfg(target_os = "linux")]
-fn handle_secret_injection(request: &str, tls: &mut impl Write) {
-    // Parse HTTP body
-    let body = match request.find("\r\n\r\n") {
-        Some(pos) => &request[pos + 4..],
-        None => {
-            let err = b"{\"error\":\"Malformed HTTP request\"}";
-            send_json_response(tls, 400, err);
-            return;
-        }
-    };
-
-    let req: SecretInjectionRequest = match serde_json::from_str(body) {
+fn handle_secret_injection(payload: &serde_json::Value, tls: &mut impl Write) {
+    let req: SecretInjectionRequest = match serde_json::from_value(payload.clone()) {
         Ok(r) => r,
         Err(e) => {
-            let err = format!("{{\"error\":\"Invalid JSON: {}\"}}", e);
-            send_json_response(tls, 400, err.as_bytes());
+            send_error_response(tls, &format!("Invalid secrets payload: {}", e));
             return;
         }
     };
@@ -362,8 +405,7 @@ fn handle_secret_injection(request: &str, tls: &mut impl Write) {
 
     // Ensure secrets directory exists
     if let Err(e) = std::fs::create_dir_all(SECRETS_DIR) {
-        let err = format!("{{\"error\":\"Failed to create secrets dir: {}\"}}", e);
-        send_json_response(tls, 500, err.as_bytes());
+        send_error_response(tls, &format!("Failed to create secrets dir: {}", e));
         return;
     }
 
@@ -401,7 +443,7 @@ fn handle_secret_injection(request: &str, tls: &mut impl Write) {
 
     let response = SecretInjectionResponse { injected, errors };
     let body = serde_json::to_vec(&response).unwrap_or_else(|_| b"{\"injected\":0}".to_vec());
-    send_json_response(tls, 200, &body);
+    send_data_response(tls, &body);
 }
 
 /// Validate a secret name: alphanumeric, underscore, dash, dot only.
@@ -452,26 +494,17 @@ struct ProcessResponse {
     error: Option<String>,
 }
 
-/// Handle a POST /process request: forward message to the local agent for processing.
+/// Handle a process request: forward message to the local agent for processing.
 ///
 /// The guest agent runs as a separate process inside the TEE. This handler
 /// receives messages from the host (via RA-TLS), forwards them to the agent,
 /// and returns the agent's response.
 #[cfg(target_os = "linux")]
-fn handle_process_request(request: &str, tls: &mut impl Write) {
-    let body = match request.find("\r\n\r\n") {
-        Some(pos) => &request[pos + 4..],
-        None => {
-            send_json_response(tls, 400, b"{\"error\":\"Malformed HTTP request\"}");
-            return;
-        }
-    };
-
-    let req: ProcessRequest = match serde_json::from_str(body) {
+fn handle_process_request(payload: &serde_json::Value, tls: &mut impl Write) {
+    let req: ProcessRequest = match serde_json::from_value(payload.clone()) {
         Ok(r) => r,
         Err(e) => {
-            let err = format!("{{\"error\":\"Invalid JSON: {}\"}}", e);
-            send_json_response(tls, 400, err.as_bytes());
+            send_error_response(tls, &format!("Invalid process payload: {}", e));
             return;
         }
     };
@@ -506,8 +539,11 @@ fn handle_process_request(request: &str, tls: &mut impl Write) {
     let body = serde_json::to_vec(&response).unwrap_or_else(|_| {
         b"{\"success\":false,\"error\":\"serialize\"}".to_vec()
     });
-    let status = if response.success { 200 } else { 500 };
-    send_json_response(tls, status, &body);
+    if response.success {
+        send_data_response(tls, &body);
+    } else {
+        send_error_response(tls, &String::from_utf8_lossy(&body));
+    }
 }
 
 /// Forward a process request to the local agent via HTTP.
@@ -635,26 +671,16 @@ struct UnsealResponse {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const HKDF_SALT: &[u8] = b"a3s-sealed-storage-v1";
 
-/// Handle a POST /seal request: encrypt data bound to TEE identity.
+/// Handle a seal request: encrypt data bound to TEE identity.
 #[cfg(target_os = "linux")]
-fn handle_seal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
+fn handle_seal_request(payload: &serde_json::Value, snp_report: &[u8], tls: &mut impl Write) {
     use base64::Engine;
     use ring::aead::{self, Aad, BoundKey, Nonce, NonceSequence, NONCE_LEN};
-    use ring::hkdf;
 
-    let body = match request.find("\r\n\r\n") {
-        Some(pos) => &request[pos + 4..],
-        None => {
-            send_json_response(tls, 400, b"{\"error\":\"Malformed HTTP request\"}");
-            return;
-        }
-    };
-
-    let req: SealRequest = match serde_json::from_str(body) {
+    let req: SealRequest = match serde_json::from_value(payload.clone()) {
         Ok(r) => r,
         Err(e) => {
-            let err = format!("{{\"error\":\"Invalid JSON: {}\"}}", e);
-            send_json_response(tls, 400, err.as_bytes());
+            send_error_response(tls, &format!("Invalid seal payload: {}", e));
             return;
         }
     };
@@ -663,8 +689,7 @@ fn handle_seal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
     let plaintext = match base64::engine::general_purpose::STANDARD.decode(&req.data) {
         Ok(d) => d,
         Err(e) => {
-            let err = format!("{{\"error\":\"Invalid base64 data: {}\"}}", e);
-            send_json_response(tls, 400, err.as_bytes());
+            send_error_response(tls, &format!("Invalid base64 data: {}", e));
             return;
         }
     };
@@ -673,8 +698,7 @@ fn handle_seal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
     let key = match derive_guest_sealing_key(snp_report, &req.context, &req.policy) {
         Ok(k) => k,
         Err(e) => {
-            let err = format!("{{\"error\":\"{}\"}}", e);
-            send_json_response(tls, 500, err.as_bytes());
+            send_error_response(tls, &e);
             return;
         }
     };
@@ -683,7 +707,7 @@ fn handle_seal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
     let rng = ring::rand::SystemRandom::new();
     let mut nonce_bytes = [0u8; NONCE_LEN];
     if ring::rand::SecureRandom::fill(&rng, &mut nonce_bytes).is_err() {
-        send_json_response(tls, 500, b"{\"error\":\"Failed to generate nonce\"}");
+        send_error_response(tls, "Failed to generate nonce");
         return;
     }
 
@@ -692,7 +716,7 @@ fn handle_seal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
     let unbound_key = match aead::UnboundKey::new(&aead::AES_256_GCM, &key) {
         Ok(k) => k,
         Err(_) => {
-            send_json_response(tls, 500, b"{\"error\":\"Failed to create encryption key\"}");
+            send_error_response(tls, "Failed to create encryption key");
             return;
         }
     };
@@ -709,7 +733,7 @@ fn handle_seal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
         .seal_in_place_append_tag(Aad::from(req.context.as_bytes()), &mut in_out)
         .is_err()
     {
-        send_json_response(tls, 500, b"{\"error\":\"Encryption failed\"}");
+        send_error_response(tls, "Encryption failed");
         return;
     }
 
@@ -725,29 +749,20 @@ fn handle_seal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
     };
 
     let body = serde_json::to_vec(&response).unwrap_or_else(|_| b"{\"error\":\"serialize\"}".to_vec());
-    send_json_response(tls, 200, &body);
+    send_data_response(tls, &body);
     info!("Sealed {} bytes of data", blob.len());
 }
 
-/// Handle a POST /unseal request: decrypt data using TEE identity.
+/// Handle an unseal request: decrypt data using TEE identity.
 #[cfg(target_os = "linux")]
-fn handle_unseal_request(request: &str, snp_report: &[u8], tls: &mut impl Write) {
+fn handle_unseal_request(payload: &serde_json::Value, snp_report: &[u8], tls: &mut impl Write) {
     use base64::Engine;
     use ring::aead::{self, Aad, BoundKey, Nonce, NonceSequence, NONCE_LEN};
 
-    let body = match request.find("\r\n\r\n") {
-        Some(pos) => &request[pos + 4..],
-        None => {
-            send_json_response(tls, 400, b"{\"error\":\"Malformed HTTP request\"}");
-            return;
-        }
-    };
-
-    let req: UnsealRequest = match serde_json::from_str(body) {
+    let req: UnsealRequest = match serde_json::from_value(payload.clone()) {
         Ok(r) => r,
         Err(e) => {
-            let err = format!("{{\"error\":\"Invalid JSON: {}\"}}", e);
-            send_json_response(tls, 400, err.as_bytes());
+            send_error_response(tls, &format!("Invalid unseal payload: {}", e));
             return;
         }
     };
@@ -756,14 +771,13 @@ fn handle_unseal_request(request: &str, snp_report: &[u8], tls: &mut impl Write)
     let blob = match base64::engine::general_purpose::STANDARD.decode(&req.blob) {
         Ok(d) => d,
         Err(e) => {
-            let err = format!("{{\"error\":\"Invalid base64 blob: {}\"}}", e);
-            send_json_response(tls, 400, err.as_bytes());
+            send_error_response(tls, &format!("Invalid base64 blob: {}", e));
             return;
         }
     };
 
     if blob.len() < NONCE_LEN + aead::AES_256_GCM.tag_len() {
-        send_json_response(tls, 400, b"{\"error\":\"Sealed blob too short\"}");
+        send_error_response(tls, "Sealed blob too short");
         return;
     }
 
@@ -771,8 +785,7 @@ fn handle_unseal_request(request: &str, snp_report: &[u8], tls: &mut impl Write)
     let key = match derive_guest_sealing_key(snp_report, &req.context, &req.policy) {
         Ok(k) => k,
         Err(e) => {
-            let err = format!("{{\"error\":\"{}\"}}", e);
-            send_json_response(tls, 500, err.as_bytes());
+            send_error_response(tls, &e);
             return;
         }
     };
@@ -781,7 +794,7 @@ fn handle_unseal_request(request: &str, snp_report: &[u8], tls: &mut impl Write)
     let nonce_bytes: [u8; NONCE_LEN] = match blob[..NONCE_LEN].try_into() {
         Ok(n) => n,
         Err(_) => {
-            send_json_response(tls, 400, b"{\"error\":\"Invalid nonce\"}");
+            send_error_response(tls, "Invalid nonce");
             return;
         }
     };
@@ -791,7 +804,7 @@ fn handle_unseal_request(request: &str, snp_report: &[u8], tls: &mut impl Write)
     let unbound_key = match aead::UnboundKey::new(&aead::AES_256_GCM, &key) {
         Ok(k) => k,
         Err(_) => {
-            send_json_response(tls, 500, b"{\"error\":\"Failed to create decryption key\"}");
+            send_error_response(tls, "Failed to create decryption key");
             return;
         }
     };
@@ -807,11 +820,7 @@ fn handle_unseal_request(request: &str, snp_report: &[u8], tls: &mut impl Write)
     let plaintext = match opening_key.open_in_place(Aad::from(req.context.as_bytes()), &mut in_out) {
         Ok(pt) => pt,
         Err(_) => {
-            send_json_response(
-                tls,
-                403,
-                b"{\"error\":\"Unseal failed: TEE identity mismatch or data corrupted\"}",
-            );
+            send_error_response(tls, "Unseal failed: TEE identity mismatch or data corrupted");
             return;
         }
     };
@@ -821,7 +830,7 @@ fn handle_unseal_request(request: &str, snp_report: &[u8], tls: &mut impl Write)
     };
 
     let body = serde_json::to_vec(&response).unwrap_or_else(|_| b"{\"error\":\"serialize\"}".to_vec());
-    send_json_response(tls, 200, &body);
+    send_data_response(tls, &body);
     info!("Unsealed data successfully");
 }
 
@@ -1231,7 +1240,7 @@ mod tests {
 
     #[test]
     fn test_attest_vsock_port_constant() {
-        assert_eq!(ATTEST_VSOCK_PORT, 4091);
+        assert_eq!(ATTEST_VSOCK_PORT, a3s_transport::ports::TEE_CHANNEL);
     }
 
     #[test]
@@ -1448,5 +1457,52 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("agent unreachable"));
         assert!(json.contains("\"success\":false"));
+    }
+
+    #[test]
+    fn test_frame_roundtrip() {
+        let payload = b"hello frame";
+        let mut buf = Vec::new();
+        write_frame(&mut buf, 0x01, payload).unwrap();
+        let mut cursor = std::io::Cursor::new(buf);
+        let (ft, data) = read_frame(&mut cursor).unwrap().unwrap();
+        assert_eq!(ft, 0x01);
+        assert_eq!(data, payload);
+    }
+
+    #[test]
+    fn test_frame_read_eof() {
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        assert!(read_frame(&mut cursor).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_frame_empty_payload() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, 0x04, b"").unwrap();
+        let mut cursor = std::io::Cursor::new(buf);
+        let (ft, data) = read_frame(&mut cursor).unwrap().unwrap();
+        assert_eq!(ft, 0x04);
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn test_send_data_response() {
+        let mut buf = Vec::new();
+        send_data_response(&mut buf, b"{\"ok\":true}");
+        let mut cursor = std::io::Cursor::new(buf);
+        let (ft, data) = read_frame(&mut cursor).unwrap().unwrap();
+        assert_eq!(ft, 0x01); // Data
+        assert_eq!(data, b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn test_send_error_response() {
+        let mut buf = Vec::new();
+        send_error_response(&mut buf, "something failed");
+        let mut cursor = std::io::Cursor::new(buf);
+        let (ft, data) = read_frame(&mut cursor).unwrap().unwrap();
+        assert_eq!(ft, 0x04); // Error
+        assert_eq!(data, b"something failed");
     }
 }
