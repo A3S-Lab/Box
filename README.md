@@ -61,6 +61,13 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **Sealed Storage** — AES-256-GCM with HKDF-SHA256, three policies: MeasurementAndChip, MeasurementOnly, ChipOnly
 - **Simulation Mode** — Full TEE workflow on any machine via `A3S_TEE_SIMULATE=1`
 
+### Embedded Sandbox SDK
+- **No Daemon** — Create, exec, and stop MicroVM sandboxes directly from Rust code, no CLI or daemon required
+- **Simple API** — `BoxSdk::new()` → `sdk.create(options)` → `sandbox.exec("cmd", &["args"])` → `sandbox.stop()`
+- **OCI Images** — Specify any OCI image (`alpine:latest`, `python:3.12-slim`, etc.)
+- **Configurable** — vCPUs, memory, environment variables, host mounts, working directory, TEE mode
+- **PTY Support** — Open interactive terminal sessions via `sandbox.pty()`
+
 ### Kubernetes Integration
 - **CRI Runtime** — RuntimeService + ImageService for kubelet
 - **Deployment** — DaemonSet, RuntimeClass, Kustomize base, RBAC
@@ -274,15 +281,16 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,090 passed
+### Unit Tests — 1,135 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 367 | State management, name resolution, output formatting, restart policies |
 | `a3s-box-core` | 165 | Config validation, error types, event serialization, TEE protocol types |
 | `a3s-box-runtime` | 506 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage |
-| `a3s-box-cri` | 28 | CRI sandbox/container lifecycle, config mapping |
+| `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 52 | Exec server, attest server frame I/O, secret validation |
+| `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
 
 All unit tests run without VM, network, or hardware dependencies (`A3S_DEPS_STUB=1` for CI).
 
@@ -388,6 +396,7 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 | Secret Injection | RA-TLS channel, `/run/secrets/`, env var support |
 | Performance | Rootfs caching, layer cache, warm pool with TTL and auto-replenish |
 | Host SDK & Transport | `a3s-transport` Frame protocol, exec/PTY/attest servers migrated, `FrameReader`/`FrameWriter` async I/O, shared port constants and TEE request types |
+| Embedded Sandbox SDK | `a3s-box-sdk` crate: `BoxSdk` → `Sandbox` lifecycle, exec/PTY from Rust code, no daemon required, OCI image support, configurable resources/env/mounts |
 
 ### In Progress 🚧
 

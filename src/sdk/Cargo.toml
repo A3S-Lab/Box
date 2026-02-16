@@ -1,0 +1,24 @@
+[package]
+name = "a3s-box-sdk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Embedded MicroVM sandbox SDK — create, exec, stop sandboxes from your code"
+
+[dependencies]
+a3s-box-core = { path = "../core" }
+a3s-box-runtime = { path = "../runtime" }
+a3s-transport = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+dirs = "5"
+
+[dev-dependencies]
+tempfile = { workspace = true }
