@@ -3,13 +3,14 @@
 //! Defines a binary framing protocol for bidirectional PTY communication
 //! between the host CLI and the guest PTY server over vsock port 4090.
 //!
-//! Frame format: [type: u8] [length: u32 BE] [payload: length bytes]
+//! Wire format: `[type: u8] [length: u32 BE] [payload: length bytes]`
+//! (same as `a3s-transport::Frame`)
 
 use serde::{Deserialize, Serialize};
-use std::io::{self, Read, Write};
+use std::io;
 
 /// Vsock port for the PTY server.
-pub const PTY_VSOCK_PORT: u32 = 4090;
+pub const PTY_VSOCK_PORT: u32 = a3s_transport::ports::PTY_SERVER;
 
 /// Maximum frame payload size: 64 KiB.
 pub const MAX_FRAME_PAYLOAD: usize = 64 * 1024;
@@ -24,6 +25,10 @@ pub const FRAME_PTY_RESIZE: u8 = 0x03;
 pub const FRAME_PTY_EXIT: u8 = 0x04;
 /// Frame type: error message (guest → host).
 pub const FRAME_PTY_ERROR: u8 = 0x05;
+
+// Re-export low-level frame I/O from a3s-transport (identical wire format).
+// The exec_server already uses its own copy; PTY server and core share these.
+pub use a3s_transport::frame::Frame as TransportFrame;
 
 /// Request to open an interactive PTY session in the guest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +74,7 @@ pub enum PtyFrame {
 }
 
 /// Write a frame to a stream: [type: u8] [length: u32 BE] [payload].
-pub fn write_frame(w: &mut impl Write, frame_type: u8, payload: &[u8]) -> io::Result<()> {
+pub fn write_frame(w: &mut impl io::Write, frame_type: u8, payload: &[u8]) -> io::Result<()> {
     let len = payload.len() as u32;
     w.write_all(&[frame_type])?;
     w.write_all(&len.to_be_bytes())?;
@@ -80,7 +85,7 @@ pub fn write_frame(w: &mut impl Write, frame_type: u8, payload: &[u8]) -> io::Re
 /// Read a raw frame from a stream. Returns (frame_type, payload).
 ///
 /// Returns `Ok(None)` on EOF.
-pub fn read_frame(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
+pub fn read_frame(r: &mut impl io::Read) -> io::Result<Option<(u8, Vec<u8>)>> {
     let mut header = [0u8; 5];
     match r.read_exact(&mut header) {
         Ok(()) => {}
@@ -110,7 +115,7 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
 }
 
 /// Write a PtyRequest frame.
-pub fn write_request(w: &mut impl Write, req: &PtyRequest) -> io::Result<()> {
+pub fn write_request(w: &mut impl io::Write, req: &PtyRequest) -> io::Result<()> {
     let payload = serde_json::to_vec(req).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -121,12 +126,12 @@ pub fn write_request(w: &mut impl Write, req: &PtyRequest) -> io::Result<()> {
 }
 
 /// Write a PtyData frame.
-pub fn write_data(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
+pub fn write_data(w: &mut impl io::Write, data: &[u8]) -> io::Result<()> {
     write_frame(w, FRAME_PTY_DATA, data)
 }
 
 /// Write a PtyResize frame.
-pub fn write_resize(w: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> {
+pub fn write_resize(w: &mut impl io::Write, cols: u16, rows: u16) -> io::Result<()> {
     let resize = PtyResize { cols, rows };
     let payload = serde_json::to_vec(&resize).map_err(|e| {
         io::Error::new(
@@ -138,7 +143,7 @@ pub fn write_resize(w: &mut impl Write, cols: u16, rows: u16) -> io::Result<()> 
 }
 
 /// Write a PtyExit frame.
-pub fn write_exit(w: &mut impl Write, exit_code: i32) -> io::Result<()> {
+pub fn write_exit(w: &mut impl io::Write, exit_code: i32) -> io::Result<()> {
     let exit = PtyExit { exit_code };
     let payload = serde_json::to_vec(&exit).map_err(|e| {
         io::Error::new(
@@ -150,7 +155,7 @@ pub fn write_exit(w: &mut impl Write, exit_code: i32) -> io::Result<()> {
 }
 
 /// Write a PtyError frame.
-pub fn write_error(w: &mut impl Write, message: &str) -> io::Result<()> {
+pub fn write_error(w: &mut impl io::Write, message: &str) -> io::Result<()> {
     write_frame(w, FRAME_PTY_ERROR, message.as_bytes())
 }
 

@@ -189,55 +189,45 @@ async fn execute_pty(
 ///
 /// Returns the process exit code.
 pub(crate) async fn run_pty_session(
-    mut read_half: tokio::net::unix::OwnedReadHalf,
-    mut write_half: tokio::net::unix::OwnedWriteHalf,
+    mut reader: a3s_transport::FrameReader<tokio::io::ReadHalf<tokio::net::UnixStream>>,
+    mut writer: a3s_transport::FrameWriter<tokio::io::WriteHalf<tokio::net::UnixStream>>,
 ) -> i32 {
-    use a3s_box_core::pty::{FRAME_PTY_DATA, FRAME_PTY_ERROR, FRAME_PTY_EXIT, MAX_FRAME_PAYLOAD};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use a3s_box_core::pty::{FRAME_PTY_DATA, FRAME_PTY_ERROR, FRAME_PTY_EXIT};
+    use tokio::io::AsyncReadExt;
 
     // Task 1: Read from guest PTY → write to stdout
     let reader_task = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         loop {
-            // Read frame header
-            let mut header = [0u8; 5];
-            match read_half.read_exact(&mut header).await {
-                Ok(_) => {}
-                Err(_) => return -1i32,
-            }
-
-            let frame_type = header[0];
-            let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
-
-            if len > MAX_FRAME_PAYLOAD {
-                return -1;
-            }
-
-            let mut payload = vec![0u8; len];
-            if len > 0 && read_half.read_exact(&mut payload).await.is_err() {
-                return -1;
-            }
-
-            match frame_type {
-                FRAME_PTY_DATA => {
-                    if stdout.write_all(&payload).await.is_err() {
-                        return -1;
+            match reader.read_frame().await {
+                Ok(Some(frame)) => {
+                    let frame_type = frame.frame_type as u8;
+                    match frame_type {
+                        FRAME_PTY_DATA => {
+                            use tokio::io::AsyncWriteExt;
+                            if stdout.write_all(&frame.payload).await.is_err() {
+                                return -1i32;
+                            }
+                            let _ = stdout.flush().await;
+                        }
+                        FRAME_PTY_EXIT => {
+                            if let Ok(exit) =
+                                serde_json::from_slice::<a3s_box_core::pty::PtyExit>(&frame.payload)
+                            {
+                                return exit.exit_code;
+                            }
+                            return 1;
+                        }
+                        FRAME_PTY_ERROR => {
+                            let msg = String::from_utf8_lossy(&frame.payload);
+                            eprintln!("\r\nPTY error: {}", msg);
+                            return 1;
+                        }
+                        _ => {} // Ignore unknown frames
                     }
-                    let _ = stdout.flush().await;
                 }
-                FRAME_PTY_EXIT => {
-                    if let Ok(exit) = serde_json::from_slice::<a3s_box_core::pty::PtyExit>(&payload)
-                    {
-                        return exit.exit_code;
-                    }
-                    return 1;
-                }
-                FRAME_PTY_ERROR => {
-                    let msg = String::from_utf8_lossy(&payload);
-                    eprintln!("\r\nPTY error: {}", msg);
-                    return 1;
-                }
-                _ => {} // Ignore unknown frames
+                Ok(None) => return -1, // EOF
+                Err(_) => return -1,
             }
         }
     });
@@ -256,17 +246,9 @@ pub(crate) async fn run_pty_session(
                     match result {
                         Ok(0) => break,
                         Ok(n) => {
-                            let len = n as u32;
-                            if write_half.write_all(&[FRAME_PTY_DATA]).await.is_err() {
+                            if writer.write_data(&buf[..n]).await.is_err() {
                                 break;
                             }
-                            if write_half.write_all(&len.to_be_bytes()).await.is_err() {
-                                break;
-                            }
-                            if write_half.write_all(&buf[..n]).await.is_err() {
-                                break;
-                            }
-                            let _ = write_half.flush().await;
                         }
                         Err(_) => break,
                     }
@@ -280,11 +262,10 @@ pub(crate) async fn run_pty_session(
                     if let Ok((cols, rows)) = crossterm::terminal::size() {
                         let resize = a3s_box_core::pty::PtyResize { cols, rows };
                         if let Ok(payload) = serde_json::to_vec(&resize) {
-                            let len = payload.len() as u32;
-                            let _ = write_half.write_all(&[a3s_box_core::pty::FRAME_PTY_RESIZE]).await;
-                            let _ = write_half.write_all(&len.to_be_bytes()).await;
-                            let _ = write_half.write_all(&payload).await;
-                            let _ = write_half.flush().await;
+                            let ft = a3s_transport::FrameType::try_from(a3s_box_core::pty::FRAME_PTY_RESIZE)
+                                .unwrap_or(a3s_transport::FrameType::Control);
+                            let frame = a3s_transport::Frame { frame_type: ft, payload };
+                            let _ = writer.write_frame(&frame).await;
                         }
                     }
                 },

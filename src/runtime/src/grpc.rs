@@ -804,9 +804,11 @@ impl SealClient {
 ///
 /// Connects to the PTY server (vsock port 4090) and provides async
 /// frame-based communication for bidirectional terminal I/O.
+/// Uses `a3s_transport::FrameReader`/`FrameWriter` for wire I/O.
 #[derive(Debug)]
 pub struct PtyClient {
-    stream: tokio::net::UnixStream,
+    reader: a3s_transport::FrameReader<tokio::io::ReadHalf<tokio::net::UnixStream>>,
+    writer: a3s_transport::FrameWriter<tokio::io::WriteHalf<tokio::net::UnixStream>>,
 }
 
 impl PtyClient {
@@ -822,7 +824,11 @@ impl PtyClient {
                 ))
             })?;
 
-        Ok(Self { stream })
+        let (r, w) = tokio::io::split(stream);
+        Ok(Self {
+            reader: a3s_transport::FrameReader::new(r),
+            writer: a3s_transport::FrameWriter::new(w),
+        })
     }
 
     /// Send a PtyRequest to start an interactive session.
@@ -852,65 +858,35 @@ impl PtyClient {
     ///
     /// Returns `Ok(None)` on EOF (guest disconnected).
     pub async fn read_frame(&mut self) -> Result<Option<(u8, Vec<u8>)>> {
-        let mut header = [0u8; 5];
-        match self.stream.read_exact(&mut header).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => {
-                return Err(BoxError::ExecError(format!("PTY frame read failed: {}", e)));
-            }
+        match self.reader.read_frame().await {
+            Ok(Some(frame)) => Ok(Some((frame.frame_type as u8, frame.payload))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(BoxError::ExecError(format!("PTY frame read failed: {}", e))),
         }
-
-        let frame_type = header[0];
-        let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
-
-        if len > a3s_box_core::pty::MAX_FRAME_PAYLOAD {
-            return Err(BoxError::ExecError(format!(
-                "PTY frame too large: {} bytes",
-                len
-            )));
-        }
-
-        let mut payload = vec![0u8; len];
-        if len > 0 {
-            self.stream.read_exact(&mut payload).await.map_err(|e| {
-                BoxError::ExecError(format!("PTY frame payload read failed: {}", e))
-            })?;
-        }
-
-        Ok(Some((frame_type, payload)))
     }
 
-    /// Split the underlying stream into read and write halves for concurrent I/O.
+    /// Split the client into read and write halves for concurrent I/O.
     pub fn into_split(
         self,
     ) -> (
-        tokio::net::unix::OwnedReadHalf,
-        tokio::net::unix::OwnedWriteHalf,
+        a3s_transport::FrameReader<tokio::io::ReadHalf<tokio::net::UnixStream>>,
+        a3s_transport::FrameWriter<tokio::io::WriteHalf<tokio::net::UnixStream>>,
     ) {
-        self.stream.into_split()
+        (self.reader, self.writer)
     }
 
-    /// Write a raw frame: [type: u8] [length: u32 BE] [payload].
+    /// Write a raw PTY frame using the transport writer.
     async fn write_raw_frame(&mut self, frame_type: u8, payload: &[u8]) -> Result<()> {
-        let len = payload.len() as u32;
-        self.stream
-            .write_all(&[frame_type])
-            .await
-            .map_err(|e| BoxError::ExecError(format!("PTY frame write failed: {}", e)))?;
-        self.stream
-            .write_all(&len.to_be_bytes())
-            .await
-            .map_err(|e| BoxError::ExecError(format!("PTY frame write failed: {}", e)))?;
-        self.stream
-            .write_all(payload)
-            .await
-            .map_err(|e| BoxError::ExecError(format!("PTY frame write failed: {}", e)))?;
-        self.stream
-            .flush()
-            .await
-            .map_err(|e| BoxError::ExecError(format!("PTY frame flush failed: {}", e)))?;
-        Ok(())
+        // PTY uses custom frame type bytes (0x01-0x05) that map to transport FrameType
+        let ft = a3s_transport::FrameType::try_from(frame_type)
+            .unwrap_or(a3s_transport::FrameType::Data);
+        let frame = a3s_transport::Frame {
+            frame_type: ft,
+            payload: payload.to_vec(),
+        };
+        self.writer.write_frame(&frame).await.map_err(|e| {
+            BoxError::ExecError(format!("PTY frame write failed: {}", e))
+        })
     }
 }
 
