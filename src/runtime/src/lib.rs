@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod network;
 pub mod oci;
 pub mod pool;
+pub mod prom;
 pub mod rootfs;
 pub mod tee;
 pub mod vm;
@@ -33,6 +34,7 @@ pub use oci::{CredentialStore, PushResult, RegistryPusher};
 pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller, StoredImage};
 pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
 pub use pool::{PoolStats, WarmPool};
+pub use prom::RuntimeMetrics;
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
 pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
 pub use tee::{

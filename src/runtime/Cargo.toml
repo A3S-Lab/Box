@@ -76,4 +76,7 @@ flate2 = "1.0"
 # Build support
 tempfile = { workspace = true }
 
+# Metrics
+prometheus = { workspace = true }
+
 [dev-dependencies]
