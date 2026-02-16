@@ -21,6 +21,11 @@
 - [x] Audit logging (`AuditEvent`, `AuditLog` with rotation, `AuditQuery` with filters, `a3s-box audit` CLI)
 - [x] Network isolation policies (`NetworkPolicy`, `IsolationMode`: None/Strict/Custom, `PolicyRule` with from/to/ports/action, policy-aware peer discovery)
 - [x] VM snapshot/restore (configuration-based `SnapshotStore`, `SnapshotMetadata`, rootfs copy, `snapshot create/restore/ls/rm/inspect` CLI, pruning)
+- [x] KBS (Key Broker Service) integration (`KbsClient`, `KbsConfig`, RATS challenge-response, resource path parsing)
+- [x] Periodic re-attestation (`ReattestConfig`, `ReattestState`, configurable interval/threshold/action, grace period)
+- [x] Version-based rollback protection for sealed storage (`VersionStore`, `VersionedSealedData`, monotonic version counter)
 
 ## Next
 
+- [ ] Real hardware testing on AMD SEV-SNP (Azure DCasv5 / bare-metal EPYC)
+- [ ] Kubernetes Operator (BoxAutoscaler CRD)

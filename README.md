@@ -66,7 +66,9 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **Remote Attestation** — SNP report generation, ECDSA-P384 verification, certificate chain validation (VCEK→ASK→ARK)
 - **RA-TLS** — SNP report embedded in X.509 certificate extensions, verified during TLS handshake
 - **Secret Injection** — Inject secrets via RA-TLS into `/run/secrets/` (tmpfs, mode 0400)
-- **Sealed Storage** — AES-256-GCM with HKDF-SHA256, three policies: MeasurementAndChip, MeasurementOnly, ChipOnly
+- **Sealed Storage** — AES-256-GCM with HKDF-SHA256, three policies: MeasurementAndChip, MeasurementOnly, ChipOnly, version-based rollback protection
+- **KBS Integration** — Key Broker Service client (RATS challenge-response), resource path routing, session tokens
+- **Re-attestation** — Periodic TEE verification with configurable interval, failure threshold, grace period, and action (Warn/Event/Stop)
 - **Simulation Mode** — Full TEE workflow on any machine via `A3S_TEE_SIMULATE=1`
 
 ### Embedded Sandbox SDK
@@ -293,13 +295,13 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,329 passed
+### Unit Tests — 1,378 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 376 | State management, name resolution, output formatting, restart policies, compose CLI, audit CLI, snapshot CLI |
 | `a3s-box-core` | 252 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config, compose types, platform types, audit types, network isolation policies, snapshot types |
-| `a3s-box-runtime` | 603 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler, image signing, compose orchestrator, audit log, snapshot store |
+| `a3s-box-runtime` | 652 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler, image signing, compose orchestrator, audit log, snapshot store, KBS client, re-attestation, rollback protection |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 53 | Exec server, attest server frame I/O, secret validation, namespace security |
 | `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
@@ -417,9 +419,9 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 - [x] Bind TLS public key hash to `report_data` (RA-TLS key binding)
 - [x] Certificate chain ECDSA signature verification (VCEK→ASK→ARK)
 - [x] Attestation report age checking (replay protection)
-- [ ] KBS (Key Broker Service) integration
-- [ ] Periodic re-attestation
-- [ ] Version-based rollback protection for sealed storage
+- [x] KBS (Key Broker Service) integration (`KbsClient`, `KbsConfig`, RATS challenge-response protocol, resource path parsing)
+- [x] Periodic re-attestation (`ReattestConfig`, `ReattestState`, configurable interval/threshold/action, grace period)
+- [x] Version-based rollback protection for sealed storage (`VersionStore`, `VersionedSealedData`, monotonic version counter, atomic persistence)
 - [ ] Real hardware testing on AMD SEV-SNP (Azure DCasv5 / bare-metal EPYC)
 
 ### Planned 📋

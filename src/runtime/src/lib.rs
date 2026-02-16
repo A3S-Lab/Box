@@ -50,6 +50,9 @@ pub use tee::{
 };
 pub use tee::{AttestationReport, AttestationRequest, CertificateChain, PlatformInfo, TcbVersion};
 pub use tee::{seal, unseal, SealedData, SealingPolicy};
+pub use tee::{KbsClient, KbsConfig, KbsRequest, KbsResponse, KbsSecret};
+pub use tee::{FailureAction, ReattestConfig, ReattestState, ReattestSummary};
+pub use tee::{VersionStore, VersionedSealedData, seal_versioned, unseal_versioned};
 pub use vm::{BoxState, VmManager};
 pub use tee::{SnpTeeExtension, TeeExtension};
 pub use vmm::{
