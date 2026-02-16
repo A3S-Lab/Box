@@ -8,6 +8,7 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::{BoxEvent, EventEmitter};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 use crate::cache::RootfsCache;
 use crate::grpc::{AgentClient, ExecClient};
@@ -236,6 +237,7 @@ impl VmManager {
     /// Execute a command in the guest VM.
     ///
     /// Requires the VM to be in Ready, Busy, or Compacting state.
+    #[tracing::instrument(skip(self, cmd), fields(box_id = %self.box_id))]
     pub async fn exec_command(
         &self,
         cmd: Vec<String>,
@@ -284,6 +286,7 @@ impl VmManager {
 
     /// Boot the VM.
     pub async fn boot(&mut self) -> Result<()> {
+        let boot_span = tracing::info_span!("vm_boot", box_id = %self.box_id);
         // Check and transition state: Created → booting
         {
             let state = self.state.read().await;
@@ -294,10 +297,13 @@ impl VmManager {
 
         let boot_start = std::time::Instant::now();
 
-        tracing::info!(box_id = %self.box_id, "Booting VM");
+        tracing::info!(parent: &boot_span, box_id = %self.box_id, "Booting VM");
 
         // 1. Prepare filesystem layout
-        let layout = self.prepare_layout()?;
+        let layout = {
+            let _span = tracing::info_span!(parent: &boot_span, "prepare_layout").entered();
+            self.prepare_layout()?
+        };
 
         // 1.5. Override /etc/resolv.conf with configured DNS
         let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
@@ -305,7 +311,7 @@ impl VmManager {
         std::fs::write(&resolv_path, &resolv_content).map_err(|e| {
             BoxError::Other(format!("Failed to write {}: {}", resolv_path.display(), e))
         })?;
-        tracing::debug!(dns = %resolv_content.trim(), "Configured guest DNS");
+        tracing::debug!(parent: &boot_span, dns = %resolv_content.trim(), "Configured guest DNS");
 
         // 2. Build InstanceSpec
         let mut spec = self.build_instance_spec(&layout)?;
@@ -332,22 +338,35 @@ impl VmManager {
         }
 
         // 4. Start VM via provider
-        let handler = self.provider.as_ref().unwrap().start(&spec).await?;
+        let handler = {
+            let vm_start_span = tracing::info_span!(parent: &boot_span, "vm_start");
+            async {
+                self.provider.as_ref().unwrap().start(&spec).await
+            }
+            .instrument(vm_start_span)
+            .await?
+        };
 
         // Store handler
         *self.handler.write().await = Some(handler);
 
         // 5. Wait for guest ready
-        if layout.image_at_root {
-            // Generic OCI image (no a3s agent) - just wait for the VM process to stabilize
-            self.wait_for_vm_running().await?;
-        } else {
-            // A3S agent image - wait for agent socket to appear (connection test only)
-            self.wait_for_agent_socket(&layout.socket_path).await?;
-        }
+        {
+            let wait_span = tracing::info_span!(parent: &boot_span, "wait_for_ready");
+            async {
+                if layout.image_at_root {
+                    self.wait_for_vm_running().await?;
+                } else {
+                    self.wait_for_agent_socket(&layout.socket_path).await?;
+                }
 
-        // 5b. Wait for exec server to become ready (Heartbeat health check)
-        self.wait_for_exec_ready(&layout.exec_socket_path).await?;
+                // 5b. Wait for exec server to become ready (Heartbeat health check)
+                self.wait_for_exec_ready(&layout.exec_socket_path).await?;
+                Ok::<(), BoxError>(())
+            }
+            .instrument(wait_span)
+            .await?;
+        }
 
         // 5b2. Store socket paths for CRI streaming access
         self.exec_socket_path = Some(layout.exec_socket_path.clone());
@@ -375,7 +394,7 @@ impl VmManager {
         // Emit ready event
         self.event_emitter.emit(BoxEvent::empty("box.ready"));
 
-        tracing::info!(box_id = %self.box_id, "VM ready");
+        tracing::info!(parent: &boot_span, box_id = %self.box_id, "VM ready");
 
         Ok(())
     }
@@ -496,6 +515,7 @@ impl VmManager {
     ///
     /// Sends SIGTERM to the shim process and waits up to `timeout_ms` for it
     /// to exit gracefully before sending SIGKILL.
+    #[tracing::instrument(skip(self), fields(box_id = %self.box_id))]
     pub async fn destroy_with_timeout(&mut self, timeout_ms: u64) -> Result<()> {
         let mut state = self.state.write().await;
 

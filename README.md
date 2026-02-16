@@ -72,6 +72,10 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **CRI Runtime** — RuntimeService + ImageService for kubelet
 - **Deployment** — DaemonSet, RuntimeClass, Kustomize base, RBAC
 
+### Observability
+- **Prometheus Metrics** — 18 metrics: VM boot duration, count, CPU/memory, exec total/duration/errors, image pull, rootfs cache, warm pool
+- **Tracing Spans** — OpenTelemetry-compatible `tracing` spans for VM lifecycle (`vm_boot`, `prepare_layout`, `vm_start`, `wait_for_ready`), exec, and destroy
+
 ## Quick Start
 
 ### Prerequisites
@@ -287,7 +291,7 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 |-------|------:|----------|
 | `a3s-box-cli` | 367 | State management, name resolution, output formatting, restart policies |
 | `a3s-box-core` | 171 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection |
-| `a3s-box-runtime` | 517 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics |
+| `a3s-box-runtime` | 517 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 52 | Exec server, attest server frame I/O, secret validation |
 | `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
@@ -425,7 +429,7 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 
 **Observability & Scaling**
 - [x] Prometheus metrics (VM boot time, memory, CPU, exec, image pull, warm pool)
-- [ ] OpenTelemetry spans (VM lifecycle: create → boot → ready)
+- [x] OpenTelemetry spans (VM lifecycle: `vm_boot` → `prepare_layout` → `vm_start` → `wait_for_ready`, exec, destroy)
 - [ ] Autoscaler with warm pool pressure-based scaling
 - [ ] Kubernetes Operator (BoxAutoscaler CRD)
 

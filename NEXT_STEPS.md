@@ -11,7 +11,8 @@
 - [x] AgentClient health check migration (HTTP → Frame Heartbeat on exec server)
 - [x] Prometheus metrics (`RuntimeMetrics`: VM lifecycle, exec, image, warm pool)
 - [x] Instrument VM boot, exec, destroy with Prometheus metrics
+- [x] OpenTelemetry spans (VM lifecycle: `vm_boot` → `prepare_layout` → `vm_start` → `wait_for_ready`, exec, destroy)
 
 ## Next
 
-- [ ] OpenTelemetry spans (VM lifecycle: create → boot → ready)
+- [ ] Autoscaler with warm pool pressure-based scaling
