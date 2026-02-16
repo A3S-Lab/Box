@@ -12,7 +12,8 @@
 - [x] Prometheus metrics (`RuntimeMetrics`: VM lifecycle, exec, image, warm pool)
 - [x] Instrument VM boot, exec, destroy with Prometheus metrics
 - [x] OpenTelemetry spans (VM lifecycle: `vm_boot` → `prepare_layout` → `vm_start` → `wait_for_ready`, exec, destroy)
+- [x] Autoscaler with warm pool pressure-based scaling (`ScalingPolicy`, `PoolScaler`, miss rate window)
 
 ## Next
 
-- [ ] Autoscaler with warm pool pressure-based scaling
+- [ ] Scale API (standalone mode): `POST /scale {service, replicas}`

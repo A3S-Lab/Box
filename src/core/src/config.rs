@@ -162,6 +162,70 @@ pub struct PoolConfig {
     /// Time-to-live for idle VMs in seconds (0 = unlimited)
     #[serde(default = "default_idle_ttl")]
     pub idle_ttl_secs: u64,
+
+    /// Autoscaling policy for dynamic min_idle adjustment
+    #[serde(default)]
+    pub scaling: ScalingPolicy,
+}
+
+/// Autoscaling policy for dynamic warm pool sizing.
+///
+/// When enabled, the pool monitors acquire hit/miss rates over a sliding
+/// window and adjusts `min_idle` up or down to match demand pressure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScalingPolicy {
+    /// Enable autoscaling (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Miss rate threshold to trigger scale-up (default: 0.3 = 30%)
+    #[serde(default = "default_scale_up_threshold")]
+    pub scale_up_threshold: f64,
+
+    /// Miss rate threshold to trigger scale-down (default: 0.05 = 5%)
+    #[serde(default = "default_scale_down_threshold")]
+    pub scale_down_threshold: f64,
+
+    /// Upper bound for dynamic min_idle (default: 0 = use max_size)
+    #[serde(default)]
+    pub max_min_idle: usize,
+
+    /// Seconds between scaling decisions (default: 60)
+    #[serde(default = "default_cooldown_secs")]
+    pub cooldown_secs: u64,
+
+    /// Observation window for miss rate calculation in seconds (default: 120)
+    #[serde(default = "default_window_secs")]
+    pub window_secs: u64,
+}
+
+fn default_scale_up_threshold() -> f64 {
+    0.3
+}
+
+fn default_scale_down_threshold() -> f64 {
+    0.05
+}
+
+fn default_cooldown_secs() -> u64 {
+    60
+}
+
+fn default_window_secs() -> u64 {
+    120
+}
+
+impl Default for ScalingPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scale_up_threshold: 0.3,
+            scale_down_threshold: 0.05,
+            max_min_idle: 0,
+            cooldown_secs: 60,
+            window_secs: 120,
+        }
+    }
 }
 
 fn default_min_idle() -> usize {
@@ -183,6 +247,7 @@ impl Default for PoolConfig {
             min_idle: 1,
             max_size: 5,
             idle_ttl_secs: 300,
+            scaling: ScalingPolicy::default(),
         }
     }
 }
@@ -824,6 +889,7 @@ mod tests {
             min_idle: 3,
             max_size: 10,
             idle_ttl_secs: 600,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -883,6 +949,7 @@ mod tests {
                 min_idle: 2,
                 max_size: 8,
                 idle_ttl_secs: 120,
+                ..Default::default()
             },
             ..Default::default()
         };

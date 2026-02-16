@@ -33,6 +33,7 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **OCI Images** — Pull, push, build, tag, inspect, prune from any OCI registry with local LRU cache
 - **Dockerfile Build** — Full `a3s-box build` with multi-stage builds and all Dockerfile instructions
 - **Warm Pool** — Pre-booted idle MicroVMs for instant allocation (`min_idle` / `max_size` / `idle_ttl`)
+- **Pool Autoscaler** — Pressure-based dynamic `min_idle` adjustment (miss rate sliding window, cooldown, configurable thresholds)
 - **Rootfs Caching** — Content-addressable cache with SHA256 keys and TTL/size pruning
 - **Cross-Platform** — macOS (Apple Silicon) and Linux (x86_64/ARM64), no root required
 
@@ -285,13 +286,13 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,152 passed
+### Unit Tests — 1,176 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 367 | State management, name resolution, output formatting, restart policies |
 | `a3s-box-core` | 171 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection |
-| `a3s-box-runtime` | 517 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans |
+| `a3s-box-runtime` | 541 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 52 | Exec server, attest server frame I/O, secret validation |
 | `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
@@ -430,7 +431,7 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 **Observability & Scaling**
 - [x] Prometheus metrics (VM boot time, memory, CPU, exec, image pull, warm pool)
 - [x] OpenTelemetry spans (VM lifecycle: `vm_boot` → `prepare_layout` → `vm_start` → `wait_for_ready`, exec, destroy)
-- [ ] Autoscaler with warm pool pressure-based scaling
+- [x] Autoscaler with warm pool pressure-based scaling (`ScalingPolicy`, `PoolScaler`, miss rate window)
 - [ ] Kubernetes Operator (BoxAutoscaler CRD)
 
 **Knative Serving — Instance Executor**

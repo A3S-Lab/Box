@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::pool::scaler::PoolScaler;
 use crate::vm::VmManager;
 
 /// A pre-warmed VM waiting in the pool.
@@ -70,6 +71,8 @@ pub struct WarmPool {
     shutdown_tx: watch::Sender<bool>,
     /// Shutdown signal receiver (cloned for background task).
     shutdown_rx: watch::Receiver<bool>,
+    /// Autoscaler for dynamic min_idle adjustment (None if scaling disabled).
+    scaler: Option<Arc<Mutex<PoolScaler>>>,
 }
 
 impl WarmPool {
@@ -104,6 +107,16 @@ impl WarmPool {
         }));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+        let scaler = if config.scaling.enabled {
+            Some(Arc::new(Mutex::new(PoolScaler::new(
+                config.scaling.clone(),
+                config.min_idle,
+                config.max_size,
+            ))))
+        } else {
+            None
+        };
+
         let mut pool = Self {
             config,
             box_config,
@@ -113,6 +126,7 @@ impl WarmPool {
             replenish_handle: None,
             shutdown_tx,
             shutdown_rx,
+            scaler,
         };
 
         // Initial fill
@@ -145,6 +159,11 @@ impl WarmPool {
                 stats.total_acquired += 1;
                 stats.idle_count = idle.len();
 
+                // Record hit for autoscaler
+                if let Some(ref scaler) = self.scaler {
+                    scaler.lock().await.record_acquire(true);
+                }
+
                 self.event_emitter.emit(BoxEvent::with_string(
                     "pool.vm.acquired",
                     format!("Acquired VM {} from pool", warm_vm.vm.box_id()),
@@ -160,8 +179,14 @@ impl WarmPool {
             }
         }
 
-        // No idle VM available — boot one on demand
+        // No idle VM available — boot one on demand (miss)
         tracing::info!("No idle VM in pool, booting on demand");
+
+        // Record miss for autoscaler
+        if let Some(ref scaler) = self.scaler {
+            scaler.lock().await.record_acquire(false);
+        }
+
         let vm = self.boot_new_vm().await?;
 
         let mut stats = self.stats.lock().await;
@@ -317,8 +342,9 @@ impl WarmPool {
     /// Spawn the background maintenance loop.
     ///
     /// Periodically checks for:
-    /// 1. Pool below min_idle → replenish
-    /// 2. Idle VMs past TTL → evict
+    /// 1. Autoscaler evaluation → adjust min_idle dynamically
+    /// 2. Pool below min_idle → replenish
+    /// 3. Idle VMs past TTL → evict
     fn spawn_maintenance_loop(&self) -> JoinHandle<()> {
         let idle = Arc::clone(&self.idle);
         let stats = Arc::clone(&self.stats);
@@ -326,6 +352,7 @@ impl WarmPool {
         let box_config = self.box_config.clone();
         let event_emitter = self.event_emitter.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let scaler = self.scaler.clone();
 
         tokio::spawn(async move {
             let check_interval = std::time::Duration::from_secs(
@@ -336,6 +363,9 @@ impl WarmPool {
                     30
                 },
             );
+
+            // Dynamic min_idle starts from config, adjusted by scaler
+            let mut effective_min_idle = config.min_idle;
 
             loop {
                 tokio::select! {
@@ -356,11 +386,34 @@ impl WarmPool {
                             ).await;
                         }
 
-                        // Replenish if below min_idle
+                        // Evaluate autoscaler
+                        if let Some(ref scaler) = scaler {
+                            let mut s = scaler.lock().await;
+                            let decision = s.evaluate();
+                            let new_min = s.current_min_idle();
+                            if new_min != effective_min_idle {
+                                tracing::info!(
+                                    old_min_idle = effective_min_idle,
+                                    new_min_idle = new_min,
+                                    ?decision,
+                                    "Autoscaler adjusted min_idle"
+                                );
+                                event_emitter.emit(BoxEvent::with_string(
+                                    "pool.autoscale",
+                                    format!(
+                                        "min_idle adjusted {} → {} ({:?})",
+                                        effective_min_idle, new_min, decision
+                                    ),
+                                ));
+                                effective_min_idle = new_min;
+                            }
+                        }
+
+                        // Replenish if below effective min_idle
                         let current = idle.lock().await.len();
-                        if current < config.min_idle {
-                            let needed = config.min_idle - current;
-                            tracing::debug!(current, needed, "Replenishing warm pool");
+                        if current < effective_min_idle {
+                            let needed = effective_min_idle - current;
+                            tracing::debug!(current, needed, min_idle = effective_min_idle, "Replenishing warm pool");
 
                             for _ in 0..needed {
                                 let mut vm = VmManager::new(
@@ -456,6 +509,7 @@ mod tests {
             min_idle,
             max_size,
             idle_ttl_secs: 300,
+            ..Default::default()
         }
     }
 
@@ -540,6 +594,7 @@ mod tests {
             min_idle: 3,
             max_size: 10,
             idle_ttl_secs: 600,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&config).unwrap();
