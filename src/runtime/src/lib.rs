@@ -16,6 +16,7 @@ pub mod log;
 pub mod metrics;
 pub mod network;
 pub mod oci;
+pub mod operator;
 pub mod pool;
 pub mod prom;
 pub mod rootfs;
@@ -35,6 +36,7 @@ pub use grpc::{SealClient, SealResult, SecretEntry, SecretInjectionResult, Secre
 pub use host_check::{check_virtualization_support, VirtualizationSupport};
 pub use network::NetworkStore;
 pub use network::PasstManager;
+pub use operator::{AutoscalerController, ObservedMetrics, ReconcileResult};
 pub use oci::{BuildConfig, BuildResult, Dockerfile, Instruction};
 pub use oci::{CredentialStore, PushResult, RegistryPusher};
 pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller, StoredImage};

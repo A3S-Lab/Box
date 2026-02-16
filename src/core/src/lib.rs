@@ -12,6 +12,7 @@ pub mod event;
 pub mod exec;
 pub mod log;
 pub mod network;
+pub mod operator;
 pub mod platform;
 pub mod pty;
 pub mod scale;
@@ -28,6 +29,7 @@ pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
 pub use exec::{ExecOutput, ExecRequest};
 pub use network::{IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode, NetworkPolicy};
+pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};
 pub use platform::Platform;
 pub use scale::{
     InstanceDeregistration, InstanceEvent, InstanceHealth, InstanceInfo, InstanceRegistration,

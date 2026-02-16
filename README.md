@@ -37,6 +37,7 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **Compose** — Multi-container orchestration via YAML (`compose up/down/ps/config`), dependency-ordered boot, shared networks
 - **Snapshot/Restore** — Configuration-based VM snapshots (`snapshot create/restore/ls/rm/inspect`), rootfs preservation, sub-500ms restore via cache
 - **Scale API** — Gateway ↔ Box instance scaling (`ScaleRequest`/`ScaleResponse`), per-service tracking, capacity management, readiness signaling with `InstanceEvent` lifecycle transitions, `ServiceHealth` aggregation, graceful drain, `InstanceRegistry` for multi-node discovery
+- **K8s Operator** — `BoxAutoscaler` CRD with ratio-based autoscaling, multi-metric evaluation (CPU/memory/inflight/RPS), stabilization windows, tolerance bands
 - **Pool Autoscaler** — Pressure-based dynamic `min_idle` adjustment (miss rate sliding window, cooldown, configurable thresholds)
 - **Rootfs Caching** — Content-addressable cache with SHA256 keys and TTL/size pruning
 - **Cross-Platform** — macOS (Apple Silicon) and Linux (x86_64/ARM64), no root required
@@ -296,13 +297,13 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,442 passed
+### Unit Tests — 1,473 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 376 | State management, name resolution, output formatting, restart policies, compose CLI, audit CLI, snapshot CLI |
-| `a3s-box-core` | 267 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config, compose types, platform types, audit types, network isolation policies, snapshot types, scale API types |
-| `a3s-box-runtime` | 701 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler, gateway pressure, image signing, compose orchestrator, audit log, snapshot store, KBS client, re-attestation, rollback protection, scale manager, service health, graceful drain, instance registry |
+| `a3s-box-core` | 280 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config, compose types, platform types, audit types, network isolation policies, snapshot types, scale API types, operator CRD types |
+| `a3s-box-runtime` | 719 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler, gateway pressure, image signing, compose orchestrator, audit log, snapshot store, KBS client, re-attestation, rollback protection, scale manager, service health, graceful drain, instance registry, autoscaler controller |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 53 | Exec server, attest server frame I/O, secret validation, namespace security |
 | `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
@@ -438,7 +439,7 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 - [x] Prometheus metrics (VM boot time, memory, CPU, exec, image pull, warm pool)
 - [x] OpenTelemetry spans (VM lifecycle: `vm_boot` → `prepare_layout` → `vm_start` → `wait_for_ready`, exec, destroy)
 - [x] Autoscaler with warm pool pressure-based scaling (`ScalingPolicy`, `PoolScaler`, miss rate window)
-- [ ] Kubernetes Operator (BoxAutoscaler CRD)
+- [x] Kubernetes Operator (`BoxAutoscaler` CRD: spec/status types, `AutoscalerController` with ratio-based reconciliation, multi-metric evaluation, stabilization windows, tolerance bands)
 
 **Knative Serving — Instance Executor**
 
