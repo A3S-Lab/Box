@@ -281,13 +281,13 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,135 passed
+### Unit Tests — 1,142 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 367 | State management, name resolution, output formatting, restart policies |
-| `a3s-box-core` | 165 | Config validation, error types, event serialization, TEE protocol types |
-| `a3s-box-runtime` | 506 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage |
+| `a3s-box-core` | 171 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection |
+| `a3s-box-runtime` | 507 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 52 | Exec server, attest server frame I/O, secret validation |
 | `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
@@ -419,8 +419,9 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 **Host SDK & Transport**
 - [x] `a3s-transport` crate: unified `Transport` trait with framing protocol
 - [x] `VsockTransport` / `MockTransport` implementations
-- [ ] Guest-side TEE self-detection API via `a3s-box-core`: check `/dev/sev-guest`, report TEE capability to application layer
+- [x] Guest-side TEE self-detection API via `a3s-box-core`: `detect_tee()`, `TeeCapability`, `TeeType`
 - [x] Migrate exec/PTY/attest servers to shared framing protocol
+- [x] Migrate health check from HTTP to Frame Heartbeat protocol
 
 **Observability & Scaling**
 - [ ] Prometheus metrics (VM boot time, memory, CPU, warm pool)

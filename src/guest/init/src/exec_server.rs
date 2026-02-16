@@ -98,6 +98,12 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
     };
 
     if frame_type != FrameType::Data as u8 {
+        // Heartbeat: respond with Heartbeat frame (health check)
+        if frame_type == FrameType::Heartbeat as u8 {
+            write_frame(&mut stream, FrameType::Heartbeat as u8, &payload)?;
+            std::mem::forget(fd);
+            return Ok(());
+        }
         send_error_frame(&mut stream, "Expected Data frame")?;
         std::mem::forget(fd);
         return Ok(());

@@ -100,13 +100,10 @@ fn register_sigterm_handler() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Check if this VM is running in a TEE environment.
 ///
-/// Returns true if TEE simulation mode is enabled (`A3S_TEE_SIMULATE` env var)
-/// or real AMD SEV-SNP hardware is present (`/dev/sev-guest` or `/dev/sev`).
+/// Delegates to `a3s_box_core::tee::is_tee_available()` which checks
+/// `A3S_TEE_SIMULATE` env var and `/dev/sev-guest` or `/dev/sev` devices.
 fn is_tee_environment() -> bool {
-    if std::env::var("A3S_TEE_SIMULATE").is_ok() {
-        return true;
-    }
-    std::path::Path::new("/dev/sev-guest").exists() || std::path::Path::new("/dev/sev").exists()
+    a3s_box_core::tee::is_tee_available()
 }
 
 fn main() {

@@ -22,6 +22,7 @@ pub use exec::{ExecOutput, ExecRequest};
 pub use network::{NetworkConfig, NetworkEndpoint, NetworkMode};
 pub use pty::PTY_VSOCK_PORT;
 pub use tee::ATTEST_VSOCK_PORT;
+pub use tee::{TeeCapability, TeeType, detect_tee, is_tee_available};
 pub use volume::VolumeConfig;
 
 /// A3S Box version

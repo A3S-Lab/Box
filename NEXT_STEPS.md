@@ -7,8 +7,10 @@
 - [x] Migrate PTY protocol (host-side FrameReader/FrameWriter)
 - [x] Migrate Attest protocol (Frame inside TLS tunnel)
 - [x] Embedded sandbox SDK (`a3s-box-sdk` crate: BoxSdk, Sandbox, SandboxOptions)
+- [x] Guest-side TEE self-detection API (`detect_tee()`, `TeeCapability`, `TeeType` in core)
+- [x] AgentClient health check migration (HTTP → Frame Heartbeat on exec server)
 
 ## Next
 
-- [ ] Guest-side TEE self-detection API
-- [ ] AgentClient health check migration (HTTP → Frame)
+- [ ] Prometheus metrics (VM boot time, memory, CPU, warm pool)
+- [ ] OpenTelemetry spans (VM lifecycle: create → boot → ready)

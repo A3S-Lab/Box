@@ -312,11 +312,11 @@ impl VmManager {
             // Generic OCI image (no a3s agent) - just wait for the VM process to stabilize
             self.wait_for_vm_running().await?;
         } else {
-            // A3S agent image - wait for gRPC health check
-            self.wait_for_guest_ready(&layout.socket_path).await?;
+            // A3S agent image - wait for agent socket to appear (connection test only)
+            self.wait_for_agent_socket(&layout.socket_path).await?;
         }
 
-        // 5b. Wait for exec server to become ready
+        // 5b. Wait for exec server to become ready (Heartbeat health check)
         self.wait_for_exec_ready(&layout.exec_socket_path).await?;
 
         // 5b2. Store socket paths for CRI streaming access
@@ -1551,28 +1551,31 @@ impl VmManager {
     ///
     /// Phase 1: Wait for the Unix socket file to appear on disk.
     /// Phase 2: Connect via gRPC and perform a health check with retries.
-    async fn wait_for_guest_ready(&mut self, socket_path: &std::path::Path) -> Result<()> {
+    /// Wait for the agent socket to appear and be connectable.
+    ///
+    /// This only verifies the agent process has started and is listening.
+    /// The actual health check is done via Heartbeat on the exec server.
+    async fn wait_for_agent_socket(&mut self, socket_path: &std::path::Path) -> Result<()> {
         const MAX_WAIT_MS: u64 = 30000;
         const POLL_INTERVAL_MS: u64 = 100;
-        const HEALTH_CHECK_INTERVAL_MS: u64 = 250;
 
         tracing::debug!(
             socket_path = %socket_path.display(),
-            "Waiting for guest agent to become ready"
+            "Waiting for agent socket to appear"
         );
 
         let start = std::time::Instant::now();
 
-        // Phase 1: Wait for socket file to appear
+        // Wait for socket file to appear
         loop {
             if start.elapsed().as_millis() >= MAX_WAIT_MS as u128 {
                 return Err(BoxError::TimeoutError(
-                    "Timed out waiting for gRPC socket to appear".to_string(),
+                    "Timed out waiting for agent socket to appear".to_string(),
                 ));
             }
 
             if socket_path.exists() {
-                tracing::debug!("gRPC socket file detected");
+                tracing::debug!("Agent socket file detected");
                 break;
             }
 
@@ -1589,45 +1592,26 @@ impl VmManager {
             tokio::time::sleep(tokio::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
 
-        // Phase 2: Connect and perform gRPC health check with retries
+        // Try to connect (stores client for later use)
         let mut last_err = None;
         while start.elapsed().as_millis() < MAX_WAIT_MS as u128 {
             match AgentClient::connect(socket_path).await {
-                Ok(client) => match client.health_check().await {
-                    Ok(true) => {
-                        tracing::debug!("Guest agent health check passed");
-                        self.agent_client = Some(client);
-                        return Ok(());
-                    }
-                    Ok(false) => {
-                        tracing::debug!("Guest agent reported unhealthy, retrying");
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "Health check RPC failed, retrying");
-                        last_err = Some(e);
-                    }
-                },
+                Ok(client) => {
+                    tracing::debug!("Agent socket connectable");
+                    self.agent_client = Some(client);
+                    return Ok(());
+                }
                 Err(e) => {
-                    tracing::debug!(error = %e, "Failed to connect to agent, retrying");
+                    tracing::debug!(error = %e, "Agent connect failed, retrying");
                     last_err = Some(e);
                 }
             }
 
-            // Check if VM is still running
-            if let Some(ref handler) = *self.handler.read().await {
-                if !handler.is_running() {
-                    return Err(BoxError::BoxBootError {
-                        message: "VM process exited during health check".to_string(),
-                        hint: Some("Check console output for errors".to_string()),
-                    });
-                }
-            }
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(HEALTH_CHECK_INTERVAL_MS)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
 
         Err(BoxError::TimeoutError(format!(
-            "Timed out waiting for guest agent health check (last error: {})",
+            "Timed out connecting to agent socket (last error: {})",
             last_err
                 .map(|e| e.to_string())
                 .unwrap_or_else(|| "none".to_string()),
@@ -1636,9 +1620,10 @@ impl VmManager {
 
     /// Wait for the exec server socket to become ready.
     ///
-    /// Polls for the socket file to appear, then verifies it is connectable.
-    /// This is best-effort: if the exec socket never appears (e.g., older guest
-    /// init without exec server), the VM still boots successfully.
+    /// Polls for the socket file to appear, then verifies the exec server
+    /// is healthy via a Frame Heartbeat round-trip. This is best-effort:
+    /// if the exec socket never appears (e.g., older guest init without
+    /// exec server), the VM still boots successfully.
     async fn wait_for_exec_ready(&mut self, exec_socket_path: &std::path::Path) -> Result<()> {
         const MAX_WAIT_MS: u64 = 10000;
         const POLL_INTERVAL_MS: u64 = 200;
@@ -1673,14 +1658,22 @@ impl VmManager {
             tokio::time::sleep(tokio::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
 
-        // Phase 2: Try to connect
+        // Phase 2: Connect and verify with Heartbeat health check
         while start.elapsed().as_millis() < MAX_WAIT_MS as u128 {
             match ExecClient::connect(exec_socket_path).await {
-                Ok(client) => {
-                    tracing::debug!("Exec client connected");
-                    self.exec_client = Some(client);
-                    return Ok(());
-                }
+                Ok(client) => match client.heartbeat().await {
+                    Ok(true) => {
+                        tracing::debug!("Exec server heartbeat passed");
+                        self.exec_client = Some(client);
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        tracing::debug!("Exec server heartbeat failed, retrying");
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Exec heartbeat error, retrying");
+                    }
+                },
                 Err(e) => {
                     tracing::debug!(error = %e, "Exec connect failed, retrying");
                 }
@@ -1689,7 +1682,7 @@ impl VmManager {
             tokio::time::sleep(tokio::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
         }
 
-        tracing::warn!("Exec socket appeared but connection failed, exec will not be available");
+        tracing::warn!("Exec socket appeared but heartbeat failed, exec will not be available");
         Ok(())
     }
 }
