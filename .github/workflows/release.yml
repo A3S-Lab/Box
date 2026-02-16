@@ -233,6 +233,7 @@ jobs:
         run: |
           echo "void krun_stub(void) {}" > /tmp/krun_stub.c
           cc -shared -o /tmp/libkrun.dylib /tmp/krun_stub.c
+          sudo mkdir -p /usr/local/lib
           sudo cp /tmp/libkrun.dylib /usr/local/lib/
       - name: Install maturin
         run: pip install maturin
@@ -288,6 +289,7 @@ jobs:
           brew install protobuf
           echo "void krun_stub(void) {}" > /tmp/krun_stub.c
           cc -shared -o /tmp/libkrun.dylib /tmp/krun_stub.c
+          sudo mkdir -p /usr/local/lib
           sudo cp /tmp/libkrun.dylib /usr/local/lib/
       - name: Build native module
         run: |
@@ -298,9 +300,10 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd sdk/node
-          npm publish --access public
+          npm publish --access public --ignore-scripts
 
   # ── Update Homebrew Formula ────────────────────────────────────
   publish-homebrew:
