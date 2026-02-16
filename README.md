@@ -274,22 +274,22 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,041 passed
+### Unit Tests — 1,090 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 367 | State management, name resolution, output formatting, restart policies |
-| `a3s-box-core` | 160 | Config validation, error types, event serialization |
-| `a3s-box-runtime` | 486 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage |
+| `a3s-box-core` | 165 | Config validation, error types, event serialization, TEE protocol types |
+| `a3s-box-runtime` | 506 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage |
 | `a3s-box-cri` | 28 | CRI sandbox/container lifecycle, config mapping |
-| `a3s-box-guest-init` | — | Compiles only on `aarch64-unknown-linux-musl` |
+| `a3s-box-guest-init` | 52 | Exec server, attest server frame I/O, secret validation |
 
 All unit tests run without VM, network, or hardware dependencies (`A3S_DEPS_STUB=1` for CI).
 
 ```bash
 just test                         # All unit tests
 cargo test -p a3s-box-cli --lib   # CLI only (367 tests)
-cargo test -p a3s-box-runtime     # Runtime only (486 tests)
+cargo test -p a3s-box-runtime     # Runtime only (506 tests)
 ```
 
 ### Integration Tests — 7 tests
@@ -387,6 +387,7 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 | Sealed Storage | HKDF-SHA256 key derivation, AES-256-GCM, three sealing policies, seal/unseal CLI |
 | Secret Injection | RA-TLS channel, `/run/secrets/`, env var support |
 | Performance | Rootfs caching, layer cache, warm pool with TTL and auto-replenish |
+| Host SDK & Transport | `a3s-transport` Frame protocol, exec/PTY/attest servers migrated, `FrameReader`/`FrameWriter` async I/O, shared port constants and TEE request types |
 
 ### In Progress 🚧
 
@@ -407,10 +408,10 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 ### Planned 📋
 
 **Host SDK & Transport**
-- [ ] `a3s-transport` crate: unified `Transport` trait with framing protocol
-- [ ] `VsockTransport` / `MockTransport` implementations
+- [x] `a3s-transport` crate: unified `Transport` trait with framing protocol
+- [x] `VsockTransport` / `MockTransport` implementations
 - [ ] Guest-side TEE self-detection API via `a3s-box-core`: check `/dev/sev-guest`, report TEE capability to application layer
-- [ ] Migrate exec/PTY servers to shared framing protocol
+- [x] Migrate exec/PTY/attest servers to shared framing protocol
 
 **Observability & Scaling**
 - [ ] Prometheus metrics (VM boot time, memory, CPU, warm pool)
