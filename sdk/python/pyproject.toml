@@ -1,31 +1,21 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "a3s-box"
 version = "0.3.0"
-description = "Python SDK for A3S Box — embedded MicroVM sandboxes"
-readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.10"
-authors = [{name = "A3S Lab"}]
-keywords = ["sandbox", "microvm", "container", "tee", "confidential-computing"]
+description = "Python bindings for A3S Box MicroVM sandbox runtime"
+license = "MIT"
+requires-python = ">=3.9"
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Software Development :: Libraries",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
 ]
-dependencies = []
 
-[project.urls]
-Homepage = "https://github.com/A3S-Lab/Box"
-Repository = "https://github.com/A3S-Lab/Box"
-
-[tool.setuptools.packages.find]
-include = ["a3s_box*"]
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "a3s_box._a3s_box"

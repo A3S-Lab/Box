@@ -83,3 +83,5 @@ logs/
 
 # Git Worktrees
 .worktrees/
+sdk/*/target/
+sdk/*/Cargo.lock

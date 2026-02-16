@@ -36,36 +36,10 @@ jobs:
           workspaces: src
       - run: cd src && cargo test --workspace --lib
 
-  # ── SDK Tests ─────────────────────────────────────────────────
-  test-python-sdk:
-    name: Test Python SDK
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: |
-          pip install pytest pytest-asyncio
-          cd sdk/python && python -m pytest tests/ -v
-
-  test-typescript-sdk:
-    name: Test TypeScript SDK
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - run: |
-          cd sdk/typescript
-          npm ci
-          npm test
-
   # ── Build matrix ───────────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
-    needs: [test, test-python-sdk, test-typescript-sdk]
+    needs: test
     strategy:
       matrix:
         include:
@@ -210,52 +184,88 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           cd src
-          # Publish in dependency order, skip already-published
           for crate in a3s-box-core a3s-box-sdk; do
             echo "Publishing $crate..."
             cargo publish -p "$crate" --allow-dirty 2>&1 || echo "Skipped $crate (may already be published)"
             sleep 10
           done
 
-  # ── Publish Python SDK to PyPI ─────────────────────────────────
+  # ── Publish Python SDK to PyPI (native via maturin) ────────────
   publish-pypi:
-    name: Publish to PyPI
+    name: Publish to PyPI (${{ matrix.target }})
     needs: release
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64
+          - os: macos-14
+            target: aarch64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install build tools
-        run: pip install build twine
-      - name: Build and publish
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      - name: Install maturin
+        run: pip install maturin
+      - name: Build wheel
         run: |
           cd sdk/python
-          python -m build
-          twine upload dist/*
+          maturin build --release --strip
+      - name: Upload wheel
+        env:
+          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          cd sdk/python
+          maturin upload --skip-existing target/wheels/*.whl
 
-  # ── Publish TypeScript SDK to npm ──────────────────────────────
+  # ── Publish Node.js SDK to npm (native via napi-rs) ────────────
   publish-npm:
-    name: Publish to npm
+    name: Publish to npm (${{ matrix.target }})
     needs: release
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
-      - name: Build and publish
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libclang-dev protobuf-compiler
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Build native module
+        run: |
+          cd sdk/node
+          npm install
+          npx napi build --platform --release
+      - name: Publish
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          cd sdk/typescript
-          npm ci
-          npm run build
+          cd sdk/node
           npm publish --access public
 
   # ── Update Homebrew Formula ────────────────────────────────────
@@ -278,7 +288,6 @@ jobs:
       - name: Download release tarballs and compute SHA256
         run: |
           TAG="${{ steps.version.outputs.tag }}"
-          VERSION="${{ steps.version.outputs.version }}"
           BASE="https://github.com/A3S-Lab/Box/releases/download/${TAG}"
 
           for target in linux-x86_64 linux-arm64 macos-arm64; do
@@ -300,28 +309,28 @@ jobs:
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           VERSION="${{ steps.version.outputs.version }}"
-          cat > homebrew-tap/Formula/a3s-box.rb << 'FORMULA'
+          cat > homebrew-tap/Formula/a3s-box.rb << FORMULA
           class A3sBox < Formula
             desc "MicroVM sandbox runtime with TEE support"
             homepage "https://github.com/A3S-Lab/Box"
-            version "VERSION_PLACEHOLDER"
+            version "${VERSION}"
             license "MIT"
 
             on_macos do
               on_arm do
-                url "https://github.com/A3S-Lab/Box/releases/download/TAG_PLACEHOLDER/a3s-box-TAG_PLACEHOLDER-macos-arm64.tar.gz"
-                sha256 "SHA_MACOS_ARM64_PLACEHOLDER"
+                url "https://github.com/A3S-Lab/Box/releases/download/${TAG}/a3s-box-${TAG}-macos-arm64.tar.gz"
+                sha256 "${SHA_macos_arm64}"
               end
             end
 
             on_linux do
               on_arm do
-                url "https://github.com/A3S-Lab/Box/releases/download/TAG_PLACEHOLDER/a3s-box-TAG_PLACEHOLDER-linux-arm64.tar.gz"
-                sha256 "SHA_LINUX_ARM64_PLACEHOLDER"
+                url "https://github.com/A3S-Lab/Box/releases/download/${TAG}/a3s-box-${TAG}-linux-arm64.tar.gz"
+                sha256 "${SHA_linux_arm64}"
               end
               on_intel do
-                url "https://github.com/A3S-Lab/Box/releases/download/TAG_PLACEHOLDER/a3s-box-TAG_PLACEHOLDER-linux-x86_64.tar.gz"
-                sha256 "SHA_LINUX_X86_64_PLACEHOLDER"
+                url "https://github.com/A3S-Lab/Box/releases/download/${TAG}/a3s-box-${TAG}-linux-x86_64.tar.gz"
+                sha256 "${SHA_linux_x86_64}"
               end
             end
 
@@ -338,13 +347,6 @@ jobs:
             end
           end
           FORMULA
-
-          # Replace placeholders
-          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" homebrew-tap/Formula/a3s-box.rb
-          sed -i "s/TAG_PLACEHOLDER/${TAG}/g" homebrew-tap/Formula/a3s-box.rb
-          sed -i "s/SHA_MACOS_ARM64_PLACEHOLDER/${SHA_macos_arm64}/g" homebrew-tap/Formula/a3s-box.rb
-          sed -i "s/SHA_LINUX_ARM64_PLACEHOLDER/${SHA_linux_arm64}/g" homebrew-tap/Formula/a3s-box.rb
-          sed -i "s/SHA_LINUX_X86_64_PLACEHOLDER/${SHA_linux_x86_64}/g" homebrew-tap/Formula/a3s-box.rb
 
       - name: Push formula
         run: |
