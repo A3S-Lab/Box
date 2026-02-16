@@ -30,6 +30,10 @@ pub struct BuildArgs {
     /// Suppress build output
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Target platform(s) for multi-platform builds (e.g., "linux/amd64,linux/arm64")
+    #[arg(long)]
+    pub platform: Option<String>,
 }
 
 pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -68,12 +72,20 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
     // Open image store
     let store = Arc::new(super::open_image_store()?);
 
+    // Parse target platforms
+    let platforms = match &args.platform {
+        Some(p) => a3s_box_core::platform::Platform::parse_list(p)
+            .map_err(|e| format!("Invalid --platform: {e}"))?,
+        None => vec![],
+    };
+
     let config = a3s_box_runtime::BuildConfig {
         context_dir,
         dockerfile_path,
         tag: args.tag.clone(),
         build_args,
         quiet: args.quiet,
+        platforms,
     };
 
     let result = a3s_box_runtime::oci::build::engine::build(config, store).await?;

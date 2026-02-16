@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::platform::Platform;
 
 use super::dockerfile::{Dockerfile, Instruction};
 use super::layer::{create_layer, create_layer_from_dir, sha256_bytes, sha256_file, LayerInfo};
@@ -29,6 +30,9 @@ pub struct BuildConfig {
     pub build_args: HashMap<String, String>,
     /// Suppress build output
     pub quiet: bool,
+    /// Target platforms for multi-platform builds.
+    /// Empty means build for the host platform only.
+    pub platforms: Vec<Platform>,
 }
 
 /// Result of a successful build.
@@ -576,6 +580,13 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         .path()
         .join(format!("layers_{}", total_stages - 1));
 
+    // Determine target platform (use first platform or host default)
+    let target_platform = config
+        .platforms
+        .first()
+        .cloned()
+        .unwrap_or_else(Platform::host);
+
     let result = assemble_image(
         &reference,
         &final_state,
@@ -583,15 +594,17 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         &final_base_diff_ids,
         &final_layers_dir,
         &store,
+        &target_platform,
     )
     .await?;
 
     if !config.quiet {
         println!(
-            "Successfully built {} ({} layers, {})",
+            "Successfully built {} ({} layers, {}, {})",
             reference,
             result.layer_count,
-            format_size(result.size)
+            format_size(result.size),
+            target_platform,
         );
     }
 
@@ -1188,6 +1201,7 @@ async fn assemble_image(
     base_diff_ids: &[String],
     layers_dir: &Path,
     store: &Arc<ImageStore>,
+    target_platform: &Platform,
 ) -> Result<BuildResult> {
     // Create output directory
     let output_dir = layers_dir.join("_output");
@@ -1232,11 +1246,7 @@ async fn assemble_image(
 
     // Build OCI config
     let now = chrono::Utc::now().to_rfc3339();
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        other => other,
-    };
+    let arch = target_platform.oci_arch();
 
     let env_list: Vec<String> = state
         .env
@@ -1353,13 +1363,22 @@ async fn assemble_image(
         .map_err(|e| BoxError::BuildError(format!("Failed to write manifest blob: {}", e)))?;
 
     // Write index.json
+    let mut platform_obj = serde_json::json!({
+        "os": target_platform.os,
+        "architecture": target_platform.architecture
+    });
+    if let Some(ref variant) = target_platform.variant {
+        platform_obj["variant"] = serde_json::json!(variant);
+    }
+
     let index = serde_json::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.index.v1+json",
         "manifests": [{
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "digest": format!("sha256:{}", manifest_digest),
-            "size": manifest_bytes.len()
+            "size": manifest_bytes.len(),
+            "platform": platform_obj
         }]
     });
     std::fs::write(

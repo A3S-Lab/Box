@@ -32,6 +32,7 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **~200ms Cold Start** — Sub-second MicroVM boot via libkrun (Apple HVF / Linux KVM)
 - **OCI Images** — Pull, push, build, tag, inspect, prune from any OCI registry with local LRU cache
 - **Dockerfile Build** — Full `a3s-box build` with multi-stage builds and all Dockerfile instructions
+- **Multi-Platform Build** — Buildx-style `--platform linux/amd64,linux/arm64` with OCI Image Index output
 - **Warm Pool** — Pre-booted idle MicroVMs for instant allocation (`min_idle` / `max_size` / `idle_ttl`)
 - **Compose** — Multi-container orchestration via YAML (`compose up/down/ps/config`), dependency-ordered boot, shared networks
 - **Pool Autoscaler** — Pressure-based dynamic `min_idle` adjustment (miss rate sliding window, cooldown, configurable thresholds)
@@ -288,12 +289,12 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,246 passed
+### Unit Tests — 1,260 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 369 | State management, name resolution, output formatting, restart policies, compose CLI |
-| `a3s-box-core` | 205 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config, compose types |
+| `a3s-box-core` | 219 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config, compose types, platform types |
 | `a3s-box-runtime` | 574 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler, image signing, compose orchestrator |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 53 | Exec server, attest server frame I/O, secret validation, namespace security |
@@ -451,7 +452,7 @@ Box acts as the "hands" of Knative-style serverless serving — it executes inst
 
 **Docker Parity (remaining)**
 - [x] Multi-container orchestration (`ComposeConfig` YAML, `ComposeProject` with topological boot order, `a3s-box compose up/down/ps/config`)
-- [ ] Buildx multi-platform builds
+- [x] Buildx multi-platform builds (`Platform` type, `--platform` flag, parameterized OCI config, Image Index with platform annotations)
 - [x] Secrets management (RA-TLS `inject-secret` with `--secret`, `--file`, `--set-env`, tmpfs `/run/secrets/`)
 - [x] CRI streaming API (Exec, Attach, PortForward via HTTP streaming server → vsock bridge)
 - [x] Image signing (cosign-compatible `SignaturePolicy`, registry signature fetch, payload verification, `RegistryPuller` integration)
