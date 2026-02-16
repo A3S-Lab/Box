@@ -518,28 +518,11 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
 
         ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
 
-        // TODO: This set_env call overwrites the environment set by set_exec,
-        // erasing A3S_AGENT_* vars. These network env vars should be added to
-        // spec.entrypoint.env in vm.rs instead. For now, this only affects
-        // boxes using --network with guest init (namespace isolation).
-        // Inject network env vars for guest init to configure eth0
-        let ip_cidr = format!("{}/{}", net_config.ip_address, net_config.prefix_len);
-        ctx.set_env(&[
-            ("A3S_NET_IP".to_string(), ip_cidr),
-            (
-                "A3S_NET_GATEWAY".to_string(),
-                net_config.gateway.to_string(),
-            ),
-            (
-                "A3S_NET_DNS".to_string(),
-                net_config
-                    .dns_servers
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            ),
-        ])?;
+        // Network env vars (A3S_NET_IP, A3S_NET_GATEWAY, A3S_NET_DNS) are now
+        // injected into spec.entrypoint.env by vm.rs, so they are passed via
+        // krun_set_exec's envp alongside all A3S_AGENT_* vars. Do NOT call
+        // ctx.set_env here — libkrun's krun_set_env overwrites (not appends)
+        // the environment, which would erase all vars set by set_exec.
     }
 
     // Configure user/group from OCI USER directive

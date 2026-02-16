@@ -327,6 +327,24 @@ impl VmManager {
             // Write /etc/hosts for DNS service discovery
             self.write_hosts_file(&layout, &network_name)?;
 
+            // Inject network env vars into entrypoint so they are passed via
+            // krun_set_exec's envp (not krun_set_env which overwrites all vars).
+            let ip_cidr = format!("{}/{}", net_config.ip_address, net_config.prefix_len);
+            spec.entrypoint.env.push(("A3S_NET_IP".to_string(), ip_cidr));
+            spec.entrypoint.env.push((
+                "A3S_NET_GATEWAY".to_string(),
+                net_config.gateway.to_string(),
+            ));
+            spec.entrypoint.env.push((
+                "A3S_NET_DNS".to_string(),
+                net_config
+                    .dns_servers
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+
             spec.network = Some(net_config);
         }
 
