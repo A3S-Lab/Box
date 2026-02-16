@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 a3s-box-core = { path = "../core" }
+a3s-transport = { workspace = true }
 libkrun-sys = { path = "../deps/libkrun-sys" }
 
 # Async runtime

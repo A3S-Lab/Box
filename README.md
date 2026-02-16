@@ -418,6 +418,20 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 - [ ] Autoscaler with warm pool pressure-based scaling
 - [ ] Kubernetes Operator (BoxAutoscaler CRD)
 
+**Knative Serving — Instance Executor**
+
+Box acts as the "hands" of Knative-style serverless serving — it executes instance lifecycle operations on demand. Supports two deployment modes:
+- **Standalone**: Gateway calls Box Scale API directly, Box manages MicroVMs on the host
+- **K8s**: kubelet calls Box via CRI (already implemented), K8s manages replicas, Box provides the MicroVM runtime
+
+- [ ] **Scale API (standalone mode)**: Expose an internal API for Gateway to request instance scale-up/scale-down (`POST /scale {service, replicas}`) — create, start, or stop MicroVMs on demand
+- [ ] **Instance readiness signaling**: Report instance state transitions (Creating → Booting → Ready → Busy → Stopping) to Gateway via callback or event, so Gateway knows when to start forwarding traffic
+- [ ] **VM snapshot/restore for cold start**: Save running VM state to SSD, restore in < 500ms — critical for scale-from-zero latency in both standalone and K8s modes
+- [ ] **Warm pool auto-scaling**: Dynamically adjust warm pool `min_idle` based on Gateway's scaling pressure signals — pre-warm more VMs when traffic is trending up
+- [ ] **Instance health reporting**: Continuously report per-instance health (CPU, memory, in-flight requests) to Gateway for autoscaler decision-making
+- [ ] **Graceful scale-down**: Drain in-flight requests before stopping a VM — coordinate with Gateway to stop routing new requests, wait for completion, then terminate
+- [ ] **Instance self-registration (standalone mode)**: On boot, each Box instance registers its endpoint with Gateway's service discovery — enables multi-node standalone deployments without K8s
+
 **Docker Parity (remaining)**
 - [ ] Multi-container orchestration (compose-like YAML)
 - [ ] Buildx multi-platform builds

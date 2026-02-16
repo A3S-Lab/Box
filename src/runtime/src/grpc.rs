@@ -85,8 +85,8 @@ impl AgentClient {
 
 /// Client for executing commands in the guest over Unix socket.
 ///
-/// Sends HTTP POST /exec requests with JSON-encoded ExecRequest bodies
-/// and parses JSON ExecOutput responses.
+/// Uses the Frame wire protocol: sends a Data frame with JSON ExecRequest,
+/// receives a Data frame with JSON ExecOutput.
 #[derive(Debug)]
 pub struct ExecClient {
     socket_path: PathBuf,
@@ -117,20 +117,13 @@ impl ExecClient {
 
     /// Execute a command in the guest.
     ///
-    /// Sends an HTTP POST /exec request over the Unix socket and returns
-    /// the captured stdout, stderr, and exit code.
+    /// Sends a Data frame with JSON ExecRequest, reads a Data frame with JSON ExecOutput.
     pub async fn exec_command(
         &self,
         request: &a3s_box_core::exec::ExecRequest,
     ) -> Result<a3s_box_core::exec::ExecOutput> {
-        let body = serde_json::to_string(request)
+        let payload = serde_json::to_vec(request)
             .map_err(|e| BoxError::ExecError(format!("Failed to serialize exec request: {}", e)))?;
-
-        let http_request = format!(
-            "POST /exec HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body,
-        );
 
         let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             BoxError::ExecError(format!(
@@ -140,43 +133,42 @@ impl ExecClient {
             ))
         })?;
 
+        // Send request as Data frame
+        let request_frame = a3s_transport::Frame::data(payload);
+        let encoded = request_frame.encode().map_err(|e| {
+            BoxError::ExecError(format!("Failed to encode exec request frame: {}", e))
+        })?;
         stream
-            .write_all(http_request.as_bytes())
+            .write_all(&encoded)
             .await
             .map_err(|e| BoxError::ExecError(format!("Exec request write failed: {}", e)))?;
 
-        // Read full response (up to 32 MiB + headers)
-        let mut response = Vec::with_capacity(4096);
-        let mut buf = vec![0u8; 65536];
-        loop {
-            let n = stream
-                .read(&mut buf)
-                .await
-                .map_err(|e| BoxError::ExecError(format!("Exec response read failed: {}", e)))?;
-            if n == 0 {
-                break;
+        // Read response frame
+        let (r, _w) = tokio::io::split(stream);
+        let mut reader = a3s_transport::FrameReader::new(r);
+        let frame = reader
+            .read_frame()
+            .await
+            .map_err(|e| BoxError::ExecError(format!("Exec response read failed: {}", e)))?
+            .ok_or_else(|| BoxError::ExecError("Exec server closed without response".to_string()))?;
+
+        match frame.frame_type {
+            a3s_transport::FrameType::Data => {
+                let output: a3s_box_core::exec::ExecOutput =
+                    serde_json::from_slice(&frame.payload).map_err(|e| {
+                        BoxError::ExecError(format!("Failed to parse exec response: {}", e))
+                    })?;
+                Ok(output)
             }
-            response.extend_from_slice(&buf[..n]);
-            // Safety limit: 33 MiB (16 MiB stdout + 16 MiB stderr + headers)
-            if response.len() > 33 * 1024 * 1024 {
-                break;
+            a3s_transport::FrameType::Error => {
+                let msg = String::from_utf8_lossy(&frame.payload);
+                Err(BoxError::ExecError(format!("Exec server error: {}", msg)))
             }
+            _ => Err(BoxError::ExecError(format!(
+                "Unexpected frame type: {:?}",
+                frame.frame_type
+            ))),
         }
-
-        let response_str = String::from_utf8_lossy(&response);
-
-        // Find the JSON body after the HTTP headers
-        let body_str = response_str
-            .find("\r\n\r\n")
-            .map(|pos| &response_str[pos + 4..])
-            .ok_or_else(|| {
-                BoxError::ExecError("Malformed exec response: no HTTP body".to_string())
-            })?;
-
-        let output: a3s_box_core::exec::ExecOutput = serde_json::from_str(body_str)
-            .map_err(|e| BoxError::ExecError(format!("Failed to parse exec response: {}", e)))?;
-
-        Ok(output)
     }
 }
 
@@ -1151,23 +1143,23 @@ mod tests {
             // Accept connect verification
             let (stream, _) = listener.accept().await.unwrap();
             drop(stream);
-            // Accept exec request
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let _ = stream.read(&mut buf).await;
-            // Build a proper ExecOutput JSON (stdout/stderr are Vec<u8> → JSON arrays)
+            // Accept exec request — read Frame, respond with Frame
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, w) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(r);
+            let mut writer = a3s_transport::FrameWriter::new(w);
+
+            // Read request frame
+            let _frame = reader.read_frame().await.unwrap().unwrap();
+
+            // Send response as Data frame
             let output = a3s_box_core::exec::ExecOutput {
                 stdout: b"hello\n".to_vec(),
                 stderr: vec![],
                 exit_code: 0,
             };
-            let response_body = serde_json::to_string(&output).unwrap();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
+            let payload = serde_json::to_vec(&output).unwrap();
+            writer.write_data(&payload).await.unwrap();
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1199,8 +1191,9 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut buf = vec![0u8; 4096];
             let _ = stream.read(&mut buf).await;
-            // No \r\n\r\n separator → malformed
+            // Send garbage — not a valid frame
             stream.write_all(b"garbage").await.unwrap();
+            drop(stream);
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
