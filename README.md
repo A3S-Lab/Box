@@ -39,7 +39,7 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **Rootfs Caching** — Content-addressable cache with SHA256 keys and TTL/size pruning
 - **Cross-Platform** — macOS (Apple Silicon) and Linux (x86_64/ARM64), no root required
 
-### Docker-Compatible CLI (48 commands)
+### Docker-Compatible CLI (49 commands)
 - **Lifecycle**: `run`, `create`, `start`, `stop`, `pause`, `unpause`, `restart`, `rm`, `kill`, `rename`
 - **Exec & PTY**: `exec` (with `-it`, `-u`, `-e`, `-w`), `attach -it`, `run -it`, `top`
 - **Images**: `pull`, `push`, `build`, `images`, `rmi`, `tag`, `image-inspect`, `image-prune`, `save`, `load`, `export`, `commit`, `diff`
@@ -53,6 +53,7 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **Resource Limits** — CPU shares/quota/pinning, memory reservation/swap, PID limits, ulimits (cgroup v2)
 - **Security Options** — Capabilities (`--cap-add/drop`), seccomp profiles (`--security-opt seccomp=`), no-new-privileges, read-only rootfs, privileged mode, device mapping, GPU access
 - **Image Signing** — Cosign-compatible signature verification (`SignaturePolicy`: skip, key-based, keyless), registry signature fetch, digest validation before pull
+- **Audit Logging** — Persistent JSON-lines audit trail with rotation, structured events (who/what/when/outcome), queryable via `a3s-box audit` with action/box/outcome filters
 - **Restart Policies** — `always`, `on-failure:N`, `unless-stopped` with exponential backoff
 - **Health Checks** — Configurable commands with interval, timeout, retries, start period
 - **Logging** — JSON logging driver with rotation, or `--log-driver none`
@@ -289,13 +290,13 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,260 passed
+### Unit Tests — 1,284 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
-| `a3s-box-cli` | 369 | State management, name resolution, output formatting, restart policies, compose CLI |
-| `a3s-box-core` | 219 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config, compose types, platform types |
-| `a3s-box-runtime` | 574 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler, image signing, compose orchestrator |
+| `a3s-box-cli` | 372 | State management, name resolution, output formatting, restart policies, compose CLI, audit CLI |
+| `a3s-box-core` | 229 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config, compose types, platform types, audit types |
+| `a3s-box-runtime` | 585 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler, image signing, compose orchestrator, audit log |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 53 | Exec server, attest server frame I/O, secret validation, namespace security |
 | `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
@@ -411,7 +412,7 @@ A3S Box is the **infrastructure layer** of the A3S ecosystem. It provides VM iso
 **Production Hardening**
 - [ ] VM snapshot/restore (save running state to SSD, restore < 500ms)
 - [ ] Network isolation policies
-- [ ] Audit logging
+- [x] Audit logging (`AuditEvent` types, `AuditLog` with rotation, `AuditQuery` filters, `a3s-box audit` CLI)
 
 **TEE Hardening**
 - [x] Bind TLS public key hash to `report_data` (RA-TLS key binding)

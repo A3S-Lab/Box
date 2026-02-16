@@ -3,6 +3,7 @@
 //! This module provides the foundational types, traits, and abstractions
 //! used across the A3S Box MicroVM runtime.
 
+pub mod audit;
 pub mod compose;
 pub mod config;
 pub mod dns;
@@ -18,6 +19,7 @@ pub mod tee;
 pub mod volume;
 
 // Re-export commonly used types
+pub use audit::{AuditAction, AuditConfig, AuditEvent, AuditOutcome};
 pub use compose::ComposeConfig;
 pub use config::{BoxConfig, ResourceConfig, ResourceLimits};
 pub use error::{BoxError, Result};

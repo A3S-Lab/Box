@@ -2,6 +2,7 @@
 
 mod attach;
 mod attest;
+mod audit;
 mod build;
 mod commit;
 mod compose;
@@ -105,6 +106,8 @@ pub enum Command {
     Attach(attach::AttachArgs),
     /// Request and verify a TEE attestation report from a running box
     Attest(attest::AttestArgs),
+    /// View the audit log
+    Audit(audit::AuditArgs),
     /// Seal (encrypt) data bound to a TEE's identity
     Seal(seal::SealArgs),
     /// Unseal (decrypt) data inside a TEE
@@ -255,6 +258,7 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Inspect(args) => inspect::execute(args).await,
         Command::Attach(args) => attach::execute(args).await,
         Command::Attest(args) => attest::execute(args).await,
+        Command::Audit(args) => audit::execute(args).await,
         Command::Seal(args) => seal::execute(args).await,
         Command::Unseal(args) => unseal::execute(args).await,
         Command::InjectSecret(args) => inject_secret::execute(args).await,

@@ -5,6 +5,7 @@
 
 #![allow(clippy::result_large_err)]
 
+pub mod audit;
 pub mod cache;
 pub mod compose;
 pub mod fs;
@@ -24,6 +25,7 @@ pub mod vmm;
 pub mod volume;
 
 // Re-export common types
+pub use audit::{AuditLog, AuditQuery, read_audit_log};
 pub use compose::{ComposeProject, ProjectState};
 pub use cache::{LayerCache, RootfsCache};
 pub use grpc::{AgentClient, AttestationClient, ExecClient, PtyClient, RaTlsAttestationClient};

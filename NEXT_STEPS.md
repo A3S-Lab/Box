@@ -18,3 +18,9 @@
 - [x] Image signing (cosign-compatible `SignaturePolicy`, `VerifyResult`, registry signature fetch, payload verification)
 - [x] Multi-container orchestration (compose YAML: `ComposeConfig`, `ComposeProject`, topological boot order, `a3s-box compose up/down/ps/config`)
 - [x] Buildx multi-platform builds (`Platform` type, `--platform` flag, parameterized OCI config architecture, Image Index with platform annotations)
+- [x] Audit logging (`AuditEvent`, `AuditLog` with rotation, `AuditQuery` with filters, `a3s-box audit` CLI)
+
+## Next
+
+- [ ] VM snapshot/restore (save running state to SSD, restore < 500ms)
+- [ ] Network isolation policies
