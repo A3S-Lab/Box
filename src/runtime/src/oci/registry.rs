@@ -13,6 +13,7 @@ use oci_distribution::{Client, Reference};
 
 use super::credentials::CredentialStore;
 use super::reference::ImageReference;
+use super::signing::{verify_image_signature, SignaturePolicy, VerifyResult};
 
 /// Authentication credentials for a container registry.
 #[derive(Debug, Clone)]
@@ -79,6 +80,8 @@ impl RegistryAuth {
 pub struct RegistryPuller {
     client: Client,
     auth: RegistryAuth,
+    /// Signature verification policy (default: Skip).
+    signature_policy: SignaturePolicy,
 }
 
 impl Default for RegistryPuller {
@@ -102,7 +105,17 @@ impl RegistryPuller {
         };
         let client = Client::new(config);
 
-        Self { client, auth }
+        Self {
+            client,
+            auth,
+            signature_policy: SignaturePolicy::default(),
+        }
+    }
+
+    /// Set the signature verification policy.
+    pub fn with_signature_policy(mut self, policy: SignaturePolicy) -> Self {
+        self.signature_policy = policy;
+        self
     }
 
     /// Pull an image and write it as an OCI image layout to `target_dir`.
@@ -137,6 +150,35 @@ impl RegistryPuller {
                 registry: reference.registry.clone(),
                 message: format!("Failed to pull manifest: {}", e),
             })?;
+
+        // Verify image signature before downloading layers
+        let verify_result = verify_image_signature(
+            &self.signature_policy,
+            &reference.registry,
+            &reference.repository,
+            &manifest_digest,
+        )
+        .await;
+
+        if !verify_result.is_ok() {
+            return Err(BoxError::RegistryError {
+                registry: reference.registry.clone(),
+                message: match verify_result {
+                    VerifyResult::NoSignature => format!(
+                        "Image {}:{} has no signature and policy requires verification",
+                        reference.repository,
+                        reference.tag.as_deref().unwrap_or("latest")
+                    ),
+                    VerifyResult::Failed(msg) => format!(
+                        "Image signature verification failed for {}:{}: {}",
+                        reference.repository,
+                        reference.tag.as_deref().unwrap_or("latest"),
+                        msg
+                    ),
+                    _ => "Signature verification failed".to_string(),
+                },
+            });
+        }
 
         // Write manifest blob
         let manifest_json = serde_json::to_vec(&image_manifest)?;

@@ -50,6 +50,7 @@ A3S Box is **application-agnostic** — it doesn't know or care what runs inside
 - **Namespace Isolation** — Separate mount, PID, IPC, UTS namespaces within each VM
 - **Resource Limits** — CPU shares/quota/pinning, memory reservation/swap, PID limits, ulimits (cgroup v2)
 - **Security Options** — Capabilities (`--cap-add/drop`), seccomp profiles (`--security-opt seccomp=`), no-new-privileges, read-only rootfs, privileged mode, device mapping, GPU access
+- **Image Signing** — Cosign-compatible signature verification (`SignaturePolicy`: skip, key-based, keyless), registry signature fetch, digest validation before pull
 - **Restart Policies** — `always`, `on-failure:N`, `unless-stopped` with exponential backoff
 - **Health Checks** — Configurable commands with interval, timeout, retries, start period
 - **Logging** — JSON logging driver with rotation, or `--log-driver none`
@@ -286,13 +287,13 @@ Simulation generates fake attestation reports with deterministic keys. Not suita
 
 ## Testing
 
-### Unit Tests — 1,191 passed
+### Unit Tests — 1,205 passed
 
 | Crate | Tests | Coverage |
 |-------|------:|----------|
 | `a3s-box-cli` | 367 | State management, name resolution, output formatting, restart policies |
 | `a3s-box-core` | 185 | Config validation, error types, event serialization, TEE protocol types, TEE self-detection, security config |
-| `a3s-box-runtime` | 541 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler |
+| `a3s-box-runtime` | 555 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, heartbeat, Prometheus metrics, tracing spans, pool autoscaler, image signing |
 | `a3s-box-cri` | 34 | CRI sandbox/container lifecycle, config mapping |
 | `a3s-box-guest-init` | 53 | Exec server, attest server frame I/O, secret validation, namespace security |
 | `a3s-box-sdk` | 11 | SDK init, config building, exec result conversion, serde roundtrip |
@@ -452,7 +453,7 @@ Box acts as the "hands" of Knative-style serverless serving — it executes inst
 - [ ] Buildx multi-platform builds
 - [x] Secrets management (RA-TLS `inject-secret` with `--secret`, `--file`, `--set-env`, tmpfs `/run/secrets/`)
 - [x] CRI streaming API (Exec, Attach, PortForward via HTTP streaming server → vsock bridge)
-- [ ] Image signing (cosign/notation)
+- [x] Image signing (cosign-compatible `SignaturePolicy`, registry signature fetch, payload verification, `RegistryPuller` integration)
 - [x] Seccomp profiles, no-new-privileges (`--security-opt seccomp=`, `--cap-add`, `--cap-drop`, `--privileged`)
 
 > Items that belong to other projects (not Box):

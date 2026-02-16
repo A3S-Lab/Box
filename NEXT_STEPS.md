@@ -15,6 +15,9 @@
 - [x] Autoscaler with warm pool pressure-based scaling (`ScalingPolicy`, `PoolScaler`, miss rate window)
 - [x] Seccomp profiles, no-new-privileges, capability dropping (default BPF filter, `SecurityConfig`, env var bridge)
 
+- [x] Image signing (cosign-compatible `SignaturePolicy`, `VerifyResult`, registry signature fetch, payload verification)
+
 ## Next
 
-- [ ] Image signing (cosign/notation)
+- [ ] Multi-container orchestration (compose-like YAML)
+- [ ] Buildx multi-platform builds

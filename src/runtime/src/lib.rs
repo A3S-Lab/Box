@@ -33,6 +33,7 @@ pub use oci::{BuildConfig, BuildResult, Dockerfile, Instruction};
 pub use oci::{CredentialStore, PushResult, RegistryPusher};
 pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller, StoredImage};
 pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder, RootfsComposition};
+pub use oci::{SignaturePolicy, VerifyResult};
 pub use pool::{PoolStats, WarmPool};
 pub use prom::RuntimeMetrics;
 pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
