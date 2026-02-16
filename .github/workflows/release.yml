@@ -195,6 +195,7 @@ jobs:
     name: Publish to PyPI (${{ matrix.target }})
     needs: release
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -204,13 +205,35 @@ jobs:
           - os: macos-14
             target: aarch64
     runs-on: ${{ matrix.os }}
+    env:
+      A3S_DEPS_STUB: "1"
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Create stub libkrun for linking (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
+          sudo cp /tmp/libkrun.so /usr/lib/
+          sudo ldconfig
+      - name: Create stub libkrun for linking (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          cc -shared -o /tmp/libkrun.dylib /tmp/krun_stub.c
+          sudo cp /tmp/libkrun.dylib /usr/local/lib/
       - name: Install maturin
         run: pip install maturin
       - name: Build wheel
@@ -229,6 +252,7 @@ jobs:
     name: Publish to npm (${{ matrix.target }})
     needs: release
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -238,6 +262,8 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    env:
+      A3S_DEPS_STUB: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -252,9 +278,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libssl-dev libclang-dev protobuf-compiler
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
+          sudo cp /tmp/libkrun.so /usr/lib/
+          sudo ldconfig
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: |
+          brew install protobuf
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          cc -shared -o /tmp/libkrun.dylib /tmp/krun_stub.c
+          sudo cp /tmp/libkrun.dylib /usr/local/lib/
       - name: Build native module
         run: |
           cd sdk/node
