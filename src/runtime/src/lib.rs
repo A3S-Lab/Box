@@ -46,7 +46,7 @@ pub use pool::{PoolStats, WarmPool};
 pub use prom::RuntimeMetrics;
 pub use scale::{InstanceRegistry, ScaleManager, ServiceHealth};
 pub use snapshot::SnapshotStore;
-pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_WORKDIR};
+pub use rootfs::{GuestLayout, RootfsBuilder, GUEST_WORKDIR};
 pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
 pub use tee::{
     verify_attestation, verify_attestation_with_time, AmdKdsClient, AttestationPolicy,

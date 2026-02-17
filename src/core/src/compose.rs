@@ -143,7 +143,7 @@ pub struct HealthcheckConfig {
     pub start_period: Option<String>,
 }
 
-/// Volume declaration (placeholder for future driver options).
+/// Volume declaration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VolumeDeclaration {
     /// Volume driver (default: "local").
@@ -281,7 +281,7 @@ impl ServiceNetworks {
     }
 }
 
-/// Per-service network configuration (placeholder for future options like aliases).
+/// Per-service network configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServiceNetworkConfig {
     /// Network aliases for this service.

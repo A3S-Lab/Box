@@ -202,54 +202,6 @@ impl RootfsBuilder {
 
 /// Find the guest agent binary.
 ///
-/// The guest agent (`a3s-code`) is a separate project.
-/// Set `A3S_AGENT_PATH` to point to the pre-built binary.
-///
-/// Searches in the following order:
-/// 1. A3S_AGENT_PATH environment variable
-/// 2. Same directory as the current executable
-/// 3. Common installation paths
-pub fn find_agent_binary() -> Result<PathBuf> {
-    // Check environment variable
-    if let Ok(path) = std::env::var("A3S_AGENT_PATH") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    // Check same directory as current executable
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let agent_path = exe_dir.join("a3s-code");
-            if agent_path.exists() {
-                return Ok(agent_path);
-            }
-        }
-    }
-
-    // Check common paths
-    let common_paths = [
-        "/usr/local/bin/a3s-code",
-        "/usr/bin/a3s-code",
-        "./target/release/a3s-code",
-        "./target/debug/a3s-code",
-    ];
-
-    for path in common_paths {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    Err(BoxError::Other(
-        "Guest agent binary (a3s-code) not found. \
-         Set A3S_AGENT_PATH to the path of the pre-built a3s-code binary."
-            .to_string(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,33 +381,4 @@ mod tests {
         assert_eq!(first_mtime, second_mtime);
     }
 
-    #[test]
-    fn test_find_agent_binary_from_env() {
-        let temp_dir = TempDir::new().unwrap();
-        let fake_agent = temp_dir.path().join("a3s-box-code");
-        fs::write(&fake_agent, b"fake").unwrap();
-
-        // Set environment variable
-        std::env::set_var("A3S_AGENT_PATH", fake_agent.to_str().unwrap());
-
-        let result = find_agent_binary();
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), fake_agent);
-
-        // Clean up
-        std::env::remove_var("A3S_AGENT_PATH");
-    }
-
-    #[test]
-    fn test_find_agent_binary_not_found() {
-        // Ensure env var is not set
-        std::env::remove_var("A3S_AGENT_PATH");
-
-        let result = find_agent_binary();
-        // This will fail unless agent is installed in common paths
-        // Just verify it returns an error message mentioning A3S_AGENT_PATH
-        if let Err(e) = result {
-            assert!(e.to_string().contains("A3S_AGENT_PATH"));
-        }
-    }
 }

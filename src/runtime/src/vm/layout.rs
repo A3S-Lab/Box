@@ -372,7 +372,7 @@ impl VmManager {
                     "ram_mib": self.config.resources.memory_mb,
                     "tee": "snp",
                     "tee_data": format!(r#"{{"gen":"{}"}}"#, generation.as_str()),
-                    "attestation_url": ""  // Phase 2: Remote attestation
+                    "attestation_url": ""
                 });
 
                 let config_path = box_dir.join("tee-config.json");

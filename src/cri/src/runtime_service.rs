@@ -562,7 +562,7 @@ impl RuntimeService for BoxRuntimeService {
         Ok(Response::new(UpdateRuntimeConfigResponse {}))
     }
 
-    // ── Exec / Attach / PortForward (P2 - stubs) ────────────────────
+    // ── Exec / Attach / PortForward ────────────────────────────────
 
     async fn exec_sync(
         &self,
