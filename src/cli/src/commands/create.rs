@@ -290,7 +290,6 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         cmd: vec![],
         entrypoint,
         box_dir: box_dir.clone(),
-        socket_path: box_dir.join("sockets").join("grpc.sock"),
         exec_socket_path: box_dir.join("sockets").join("exec.sock"),
         console_log: box_dir.join("logs").join("console.log"),
         created_at: chrono::Utc::now(),

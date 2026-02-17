@@ -15,9 +15,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::Instrument;
 
-use crate::grpc::{AgentClient, ExecClient};
+use crate::grpc::ExecClient;
 use crate::network::PasstManager;
-use crate::rootfs::GUEST_AGENT_PATH;
 use crate::tee::TeeExtension;
 use crate::vmm::{VmController, VmHandler, VmmProvider, DEFAULT_SHUTDOWN_TIMEOUT_MS};
 
@@ -44,8 +43,6 @@ pub enum BoxState {
 pub(crate) struct BoxLayout {
     /// Path to the root filesystem
     pub(crate) rootfs_path: PathBuf,
-    /// Path to the gRPC Unix socket
-    pub(crate) socket_path: PathBuf,
     /// Path to the exec Unix socket
     pub(crate) exec_socket_path: PathBuf,
     /// Path to the PTY Unix socket
@@ -89,9 +86,6 @@ pub struct VmManager {
     /// VM handler (runtime operations on running VM)
     pub(crate) handler: Arc<RwLock<Option<Box<dyn VmHandler>>>>,
 
-    /// gRPC client for communicating with the guest agent
-    pub(crate) agent_client: Option<AgentClient>,
-
     /// Exec client for executing commands in the guest
     pub(crate) exec_client: Option<ExecClient>,
 
@@ -130,7 +124,6 @@ impl VmManager {
             event_emitter,
             provider: None,
             handler: Arc::new(RwLock::new(None)),
-            agent_client: None,
             exec_client: None,
             passt_manager: None,
             home_dir,
@@ -153,7 +146,6 @@ impl VmManager {
             event_emitter,
             provider: None,
             handler: Arc::new(RwLock::new(None)),
-            agent_client: None,
             exec_client: None,
             passt_manager: None,
             home_dir,
@@ -179,7 +171,7 @@ impl VmManager {
             event_emitter,
             provider: Some(provider),
             handler: Arc::new(RwLock::new(None)),
-            agent_client: None, exec_client: None, passt_manager: None,
+            exec_client: None, passt_manager: None,
             home_dir, anonymous_volumes: Vec::new(), tee: None,
             exec_socket_path: None, pty_socket_path: None, prom: None,
         }
@@ -193,11 +185,6 @@ impl VmManager {
     /// Get current state.
     pub async fn state(&self) -> BoxState {
         *self.state.read().await
-    }
-
-    /// Get the agent client, if connected.
-    pub fn agent_client(&self) -> Option<&AgentClient> {
-        self.agent_client.as_ref()
     }
 
     /// Get the exec client, if connected.
@@ -372,11 +359,7 @@ impl VmManager {
         {
             let wait_span = tracing::info_span!(parent: &boot_span, "wait_for_ready");
             async {
-                if layout.image_at_root {
-                    self.wait_for_vm_running().await?;
-                } else {
-                    self.wait_for_agent_socket(&layout.socket_path).await?;
-                }
+                self.wait_for_vm_running().await?;
 
                 // 5b. Wait for exec server to become ready (Heartbeat health check)
                 self.wait_for_exec_ready(&layout.exec_socket_path).await?;
@@ -588,7 +571,7 @@ impl From<&BoxConfig> for VmConfig {
             vcpus: config.resources.vcpus,
             memory_mb: config.resources.memory_mb,
             kernel_path: "/path/to/kernel".to_string(),
-            init_cmd: vec![GUEST_AGENT_PATH.to_string()],
+            init_cmd: vec!["/sbin/init".to_string()],
         }
     }
 }

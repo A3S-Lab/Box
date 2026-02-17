@@ -77,10 +77,6 @@ pub struct InstanceSpec {
     /// Path to the root filesystem
     pub rootfs_path: PathBuf,
 
-    /// Path to the Unix socket for gRPC communication
-    /// This socket is bridged to vsock inside the VM
-    pub grpc_socket_path: PathBuf,
-
     /// Path to the Unix socket for exec communication
     /// This socket is bridged to vsock port 4089 inside the VM
     pub exec_socket_path: PathBuf,
@@ -137,7 +133,6 @@ impl Default for InstanceSpec {
             vcpus: 2,
             memory_mib: 512,
             rootfs_path: PathBuf::new(),
-            grpc_socket_path: PathBuf::new(),
             exec_socket_path: PathBuf::new(),
             pty_socket_path: PathBuf::new(),
             attest_socket_path: PathBuf::new(),
@@ -184,7 +179,6 @@ mod tests {
             vcpus: 4,
             memory_mib: 2048,
             rootfs_path: PathBuf::from("/tmp/rootfs"),
-            grpc_socket_path: PathBuf::from("/tmp/grpc.sock"),
             exec_socket_path: PathBuf::from("/tmp/exec.sock"),
             pty_socket_path: PathBuf::from("/tmp/pty.sock"),
             attest_socket_path: PathBuf::from("/tmp/attest.sock"),
@@ -309,7 +303,6 @@ mod tests {
             "vcpus": 1,
             "memory_mib": 256,
             "rootfs_path": "/rootfs",
-            "grpc_socket_path": "/grpc.sock",
             "exec_socket_path": "/exec.sock",
             "fs_mounts": [],
             "entrypoint": {"executable": "/bin/sh", "args": [], "env": []},

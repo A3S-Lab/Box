@@ -31,7 +31,7 @@ pub mod volume;
 pub use audit::{AuditLog, AuditQuery, read_audit_log};
 pub use compose::{ComposeProject, ProjectState};
 pub use cache::{LayerCache, RootfsCache};
-pub use grpc::{AgentClient, AttestationClient, ExecClient, PtyClient, RaTlsAttestationClient, StreamingExec};
+pub use grpc::{AttestationClient, ExecClient, PtyClient, RaTlsAttestationClient, StreamingExec};
 pub use grpc::{SealClient, SealResult, SecretEntry, SecretInjectionResult, SecretInjector, UnsealResult};
 pub use host_check::{check_virtualization_support, VirtualizationSupport};
 pub use network::NetworkStore;
@@ -46,7 +46,7 @@ pub use pool::{PoolStats, WarmPool};
 pub use prom::RuntimeMetrics;
 pub use scale::{InstanceRegistry, ScaleManager, ServiceHealth};
 pub use snapshot::SnapshotStore;
-pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_AGENT_PATH, GUEST_WORKDIR};
+pub use rootfs::{find_agent_binary, GuestLayout, RootfsBuilder, GUEST_WORKDIR};
 pub use tee::{check_sev_snp_support, require_sev_snp_support, SevSnpSupport};
 pub use tee::{
     verify_attestation, verify_attestation_with_time, AmdKdsClient, AttestationPolicy,
@@ -67,9 +67,6 @@ pub use volume::VolumeStore;
 
 /// A3S Box Runtime version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Default vsock port for communication with Guest Agent.
-pub const AGENT_VSOCK_PORT: u32 = 4088;
 
 /// Default vsock port for exec server in the guest.
 pub const EXEC_VSOCK_PORT: u32 = 4089;

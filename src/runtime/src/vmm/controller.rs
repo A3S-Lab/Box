@@ -204,17 +204,8 @@ impl VmmProvider for VmController {
 
         tracing::trace!(config = %config_json, "VM configuration");
 
-        // Clean up stale socket file if it exists
-        if spec.grpc_socket_path.exists() {
-            tracing::warn!(
-                path = %spec.grpc_socket_path.display(),
-                "Removing stale Unix socket"
-            );
-            let _ = std::fs::remove_file(&spec.grpc_socket_path);
-        }
-
         // Ensure socket directory exists
-        if let Some(socket_dir) = spec.grpc_socket_path.parent() {
+        if let Some(socket_dir) = spec.exec_socket_path.parent() {
             std::fs::create_dir_all(socket_dir).map_err(|e| BoxError::BoxBootError {
                 message: format!(
                     "Failed to create socket directory {}: {}",

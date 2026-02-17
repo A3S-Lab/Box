@@ -45,7 +45,7 @@ impl AgentConfig {
             Some(argc) => (0..argc)
                 .filter_map(|i| std::env::var(format!("A3S_AGENT_ARG_{}", i)).ok())
                 .collect(),
-            None => vec!["--listen".to_string(), "vsock://4088".to_string()],
+            None => vec![],
         };
 
         let workdir = std::env::var("A3S_AGENT_WORKDIR").unwrap_or_else(|_| "/".to_string());

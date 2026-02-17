@@ -2,10 +2,6 @@
 //!
 //! Defines the directory structure inside the guest VM.
 
-/// Path to the guest agent binary inside the VM.
-/// The agent binary is provided externally (e.g., from OCI image or mounted volume).
-pub const GUEST_AGENT_PATH: &str = "/a3s/agent/a3s-code";
-
 /// Working directory inside the guest VM.
 pub const GUEST_WORKDIR: &str = "/workspace";
 
@@ -124,14 +120,6 @@ mod tests {
         assert!(dirs.contains(&"/var"));
         assert!(dirs.contains(&"/var/tmp"));
         assert!(dirs.contains(&"/var/log"));
-    }
-
-    #[test]
-    fn test_guest_agent_path_constant() {
-        assert_eq!(GUEST_AGENT_PATH, "/a3s/agent/a3s-code");
-        // Agent path should be under agent_dir
-        let layout = GuestLayout::default();
-        assert!(GUEST_AGENT_PATH.starts_with(layout.agent_dir));
     }
 
     #[test]

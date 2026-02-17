@@ -6,9 +6,8 @@ use a3s_box_core::config::TeeConfig;
 use a3s_box_core::error::{BoxError, Result};
 
 use crate::oci::OciImageConfig;
-use crate::rootfs::{GUEST_AGENT_PATH, GUEST_WORKDIR};
+use crate::rootfs::GUEST_WORKDIR;
 use crate::vmm::{Entrypoint, FsMount, InstanceSpec};
-use crate::AGENT_VSOCK_PORT;
 
 use super::{md5_simple, BoxLayout, VmManager};
 
@@ -104,11 +103,8 @@ impl VmManager {
                     (exec, args, oci_config.env.clone())
                 }
                 None => (
-                    GUEST_AGENT_PATH.to_string(),
-                    vec![
-                        "--listen".to_string(),
-                        format!("vsock://{}", AGENT_VSOCK_PORT),
-                    ],
+                    "/sbin/init".to_string(),
+                    vec![],
                     vec![],
                 ),
             };
@@ -221,14 +217,10 @@ impl VmManager {
                     }
                 }
                 None => {
-                    // Use default A3S agent entrypoint
-                    // The guest agent listens on vsock for gRPC commands
+                    // No OCI config: use default init entrypoint
                     Entrypoint {
-                        executable: GUEST_AGENT_PATH.to_string(),
-                        args: vec![
-                            "--listen".to_string(),
-                            format!("vsock://{}", AGENT_VSOCK_PORT),
-                        ],
+                        executable: "/sbin/init".to_string(),
+                        args: vec![],
                         env: vec![],
                     }
                 }
@@ -276,7 +268,6 @@ impl VmManager {
             vcpus: self.config.resources.vcpus as u8,
             memory_mib: self.config.resources.memory_mb,
             rootfs_path: layout.rootfs_path.clone(),
-            grpc_socket_path: layout.socket_path.clone(),
             exec_socket_path: layout.exec_socket_path.clone(),
             pty_socket_path: layout.pty_socket_path.clone(),
             attest_socket_path: layout.attest_socket_path.clone(),
@@ -339,8 +330,8 @@ impl VmManager {
             let args: Vec<String> = oci_cmd.iter().skip(1).cloned().collect();
             (exec, args)
         } else {
-            // Neither set: fall back to default agent path
-            (GUEST_AGENT_PATH.to_string(), vec![])
+            // Neither set: fall back to default init
+            ("/sbin/init".to_string(), vec![])
         }
     }
 
@@ -587,7 +578,7 @@ mod tests {
         };
 
         let (exec, _args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
-        assert_eq!(exec, GUEST_AGENT_PATH);
+        assert_eq!(exec, "/sbin/init");
     }
 
     #[test]

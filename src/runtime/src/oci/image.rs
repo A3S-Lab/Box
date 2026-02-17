@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(image.entrypoint(), Some(&["/bin/agent".to_string()][..]));
         assert_eq!(
             image.cmd(),
-            Some(&["--listen".to_string(), "vsock://4088".to_string()][..])
+            Some(&["--port".to_string(), "8080".to_string()][..])
         );
         assert_eq!(image.working_dir(), Some("/workspace"));
 
@@ -478,7 +478,7 @@ mod tests {
             "os": "linux",
             "config": {
                 "Entrypoint": ["/bin/agent"],
-                "Cmd": ["--listen", "vsock://4088"],
+                "Cmd": ["--port", "8080"],
                 "Env": ["PATH=/usr/local/bin:/usr/bin:/bin"],
                 "WorkingDir": "/workspace",
                 "Labels": {

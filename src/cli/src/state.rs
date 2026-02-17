@@ -39,8 +39,6 @@ pub struct BoxRecord {
     pub entrypoint: Option<Vec<String>>,
     /// Box working directory (~/.a3s/boxes/<id>/)
     pub box_dir: PathBuf,
-    /// Path to gRPC socket
-    pub socket_path: PathBuf,
     /// Path to exec socket
     #[serde(default)]
     pub exec_socket_path: PathBuf,
@@ -524,7 +522,6 @@ mod tests {
             cmd: vec![],
             entrypoint: None,
             box_dir: PathBuf::from("/tmp/boxes").join(id),
-            socket_path: PathBuf::from("/tmp/boxes").join(id).join("grpc.sock"),
             exec_socket_path: PathBuf::from("/tmp/boxes")
                 .join(id)
                 .join("sockets")

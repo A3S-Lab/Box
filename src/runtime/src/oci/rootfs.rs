@@ -702,7 +702,7 @@ mod tests {
             "os": "linux",
             "config": {
                 "Entrypoint": ["/bin/agent"],
-                "Cmd": ["--listen", "vsock://4088"],
+                "Cmd": ["--port", "8080"],
                 "Env": ["PATH=/usr/bin"],
                 "WorkingDir": "/workspace"
             },

@@ -15,7 +15,6 @@
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_runtime::krun::KrunContext;
 use a3s_box_runtime::vmm::InstanceSpec;
-use a3s_box_runtime::AGENT_VSOCK_PORT;
 use a3s_box_runtime::ATTEST_VSOCK_PORT;
 use a3s_box_runtime::EXEC_VSOCK_PORT;
 use a3s_box_runtime::PTY_VSOCK_PORT;
@@ -396,25 +395,6 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         &spec.entrypoint.args,
         &spec.entrypoint.env,
     )?;
-
-    // Configure gRPC communication channel (Unix socket bridged to vsock)
-    // listen=true: libkrun creates socket, host connects, guest accepts via vsock
-    let grpc_socket_str = spec
-        .grpc_socket_path
-        .to_str()
-        .ok_or_else(|| BoxError::BoxBootError {
-            message: format!(
-                "Invalid gRPC socket path: {}",
-                spec.grpc_socket_path.display()
-            ),
-            hint: None,
-        })?;
-    tracing::debug!(
-        socket_path = grpc_socket_str,
-        guest_port = AGENT_VSOCK_PORT,
-        "Configuring vsock bridge for gRPC"
-    );
-    ctx.add_vsock_port(AGENT_VSOCK_PORT, grpc_socket_str, true)?;
 
     // Configure exec communication channel (Unix socket bridged to vsock port 4089)
     let exec_socket_str = spec

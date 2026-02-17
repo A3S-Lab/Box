@@ -177,7 +177,6 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
         cmd: meta.cmd.clone(),
         entrypoint: meta.entrypoint.clone(),
         box_dir: box_dir.clone(),
-        socket_path: socket_dir.join("grpc.sock"),
         exec_socket_path: socket_dir.join("exec.sock"),
         console_log: logs_dir.join("console.log"),
         created_at: chrono::Utc::now(),

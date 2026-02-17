@@ -623,7 +623,7 @@ mod tests {
     fn test_agent_type_local_binary() {
         let agent = AgentType::LocalBinary {
             path: PathBuf::from("/usr/bin/agent"),
-            args: vec!["--listen".to_string(), "vsock://4088".to_string()],
+            args: vec!["--port".to_string(), "8080".to_string()],
         };
 
         match agent {

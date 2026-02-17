@@ -90,8 +90,6 @@ pub async fn execute(args: AttestArgs) -> Result<(), Box<dyn std::error::Error>>
     };
 
     // Derive the attestation socket path from box_dir.
-    // The attestation server (RA-TLS on vsock port 4091) uses a separate socket
-    // from the agent gRPC socket (vsock port 4088).
     let attest_socket_path = record.box_dir.join("sockets").join("attest.sock");
     let socket_path = &attest_socket_path;
     if !socket_path.exists() {

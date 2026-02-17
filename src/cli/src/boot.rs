@@ -105,7 +105,6 @@ mod tests {
             cmd: vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()],
             entrypoint: Some(vec!["/bin/sh".to_string()]),
             box_dir: PathBuf::from("/tmp/boxes").join(&id),
-            socket_path: PathBuf::from("/tmp/boxes").join(&id).join("grpc.sock"),
             exec_socket_path: PathBuf::from("/tmp/boxes")
                 .join(&id)
                 .join("sockets")

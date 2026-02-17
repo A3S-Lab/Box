@@ -258,7 +258,6 @@ impl VmManager {
 
         Ok(BoxLayout {
             rootfs_path,
-            socket_path: socket_dir.join("grpc.sock"),
             exec_socket_path: socket_dir.join("exec.sock"),
             pty_socket_path: socket_dir.join("pty.sock"),
             attest_socket_path: socket_dir.join("attest.sock"),
@@ -563,7 +562,6 @@ mod tests {
             event_emitter: emitter,
             provider: None,
             handler: Arc::new(RwLock::new(None)),
-            agent_client: None,
             exec_client: None,
             passt_manager: None,
             home_dir: home_dir.to_path_buf(),
