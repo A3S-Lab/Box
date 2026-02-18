@@ -20,8 +20,8 @@ jobs:
       A3S_DEPS_STUB: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -62,8 +62,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Init submodules
+        run: |
+          git -c http.extraheader= submodule update --init --recursive
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -164,8 +166,8 @@ jobs:
       A3S_DEPS_STUB: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -208,8 +210,8 @@ jobs:
       A3S_DEPS_STUB: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
@@ -268,8 +270,8 @@ jobs:
       A3S_DEPS_STUB: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
