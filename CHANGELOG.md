@@ -4,17 +4,27 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-02-18
+
 ### Added
 - Helm chart for Kubernetes deployment (`deploy/helm/a3s-box/`)
 - Network isolation enforcement via `--isolation` flag on `network create`
 - Image signature verification CLI flags (`--verify-key`, `--verify-issuer`, `--verify-identity`)
 - Prometheus metrics auto-activated on every box boot
 - Embedded shim support in SDK (`--features embed-shim`)
+- Compose orchestration execution (`compose up/down/ps`)
 
 ### Changed
 - CI workflow optimized: platform builds use `cargo check` instead of full release build
 - Clippy and SDK checks now include stub libkrun for reliable linking
 - README rewritten based on verified capabilities
+- Shared CLI helpers extracted into `commands/common.rs` (DRY)
+- Large files split into focused submodules
+- Vendored a3s-transport replaced with a3s-common dependency
+
+### Fixed
+- Codesign race condition on macOS: concurrent tests no longer fail with file lock protection
+- `build/` and `dist/` gitignore patterns scoped to root only
 
 ### Removed
 - Root Dockerfile (legacy prototype, not part of Box)
@@ -24,6 +34,8 @@ All notable changes to A3S Box will be documented in this file.
 - `deploy/examples/ai-agent-pod.yaml` (a3s-code specific, not Box)
 - Kustomize manifests (replaced by Helm chart)
 - Dead documentation links in README
+- Dead code: `find_agent_binary`, agent/gRPC port 4088 code
+- `updater` crate (moved to separate repo)
 
 ## [0.3.0] — 2025-02-17
 
