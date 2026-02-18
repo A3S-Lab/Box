@@ -2,39 +2,36 @@ apiVersion: apps/v1
 kind: DaemonSet
 metadata:
   name: a3s-box-cri
-  namespace: a3s-box-system
+  namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: a3s-box
+    {{- include "a3s-box.labels" . | nindent 4 }}
     app.kubernetes.io/component: cri-runtime
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: a3s-box
-      app.kubernetes.io/component: cri-runtime
+      {{- include "a3s-box.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: a3s-box
-        app.kubernetes.io/component: cri-runtime
+        {{- include "a3s-box.selectorLabels" . | nindent 8 }}
     spec:
-      serviceAccountName: a3s-box-cri
+      serviceAccountName: {{ include "a3s-box.serviceAccountName" . }}
       hostPID: false
       hostNetwork: false
-      # Only run on nodes labeled with a3s-box runtime support
       nodeSelector:
-        a3s-box.io/runtime: "true"
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- with .Values.tolerations }}
       tolerations:
-        # Allow scheduling on control-plane nodes if labeled
-        - key: node-role.kubernetes.io/control-plane
-          operator: Exists
-          effect: NoSchedule
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: a3s-box-cri
-          image: ghcr.io/a3s-lab/a3s-box-cri:latest
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - "--socket=/var/run/a3s-box/a3s-box.sock"
+            - "--socket={{ .Values.config.socketPath }}"
             - "--image-dir=/var/lib/a3s-box/images"
-            - "--image-cache-size=10737418240"
+            - "--image-cache-size={{ .Values.config.imageCacheSize }}"
           env:
             - name: RUST_LOG
               valueFrom:
@@ -42,25 +39,16 @@ spec:
                   name: a3s-box-config
                   key: log-level
           securityContext:
-            privileged: true  # Required for /dev/kvm access
+            privileged: {{ .Values.securityContext.privileged }}
           resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
+            {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            # CRI socket directory — kubelet connects here
             - name: run-a3s-box
               mountPath: /var/run/a3s-box
-            # Image cache — persisted across restarts
             - name: image-store
               mountPath: /var/lib/a3s-box/images
-            # KVM device — required for MicroVM creation
             - name: dev-kvm
               mountPath: /dev/kvm
-            # Box working directory — VM rootfs, sockets, logs
             - name: a3s-home
               mountPath: /root/.a3s
           livenessProbe:
@@ -68,17 +56,17 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - "test -S /var/run/a3s-box/a3s-box.sock"
-            initialDelaySeconds: 5
-            periodSeconds: 10
+                - "test -S {{ .Values.config.socketPath }}"
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
           readinessProbe:
             exec:
               command:
                 - /bin/sh
                 - -c
-                - "test -S /var/run/a3s-box/a3s-box.sock"
-            initialDelaySeconds: 3
-            periodSeconds: 5
+                - "test -S {{ .Values.config.socketPath }}"
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
       volumes:
         - name: run-a3s-box
           hostPath:

@@ -1,0 +1,57 @@
+# A3S Box Helm Chart — values.yaml
+
+image:
+  repository: ghcr.io/a3s-lab/a3s-box-cri
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Node selector for DaemonSet and RuntimeClass scheduling
+nodeSelector:
+  a3s-box.io/runtime: "true"
+
+# Tolerations for DaemonSet pods
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+# CRI runtime configuration
+config:
+  socketPath: /var/run/a3s-box/a3s-box.sock
+  imageCacheSize: "10737418240"  # 10 GB
+  logLevel: info
+
+# DaemonSet resource limits
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# RuntimeClass overhead per pod
+overhead:
+  memory: 30Mi
+  cpu: 50m
+
+# RuntimeClass handler name (must match containerd/CRI-O config)
+runtimeHandler: a3s-box
+
+# RBAC
+serviceAccount:
+  create: true
+  name: a3s-box-cri
+
+# Security context for the CRI container
+securityContext:
+  privileged: true  # Required for /dev/kvm access
+
+# Probes
+livenessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  initialDelaySeconds: 3
+  periodSeconds: 5

@@ -1,0 +1,18 @@
+apiVersion: v2
+name: a3s-box
+description: MicroVM runtime for hardware-isolated workloads — CRI shim for Kubernetes
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - microvm
+  - container-runtime
+  - cri
+  - tee
+  - confidential-computing
+home: https://github.com/A3S-Lab/Box
+sources:
+  - https://github.com/A3S-Lab/Box
+maintainers:
+  - name: A3S Lab
+    url: https://github.com/A3S-Lab

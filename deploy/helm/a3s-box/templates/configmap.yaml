@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a3s-box-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "a3s-box.labels" . | nindent 4 }}
+data:
+  socket-path: {{ .Values.config.socketPath | quote }}
+  image-cache-size: {{ .Values.config.imageCacheSize | quote }}
+  log-level: {{ .Values.config.logLevel | quote }}
