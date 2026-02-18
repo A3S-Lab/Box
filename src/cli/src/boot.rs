@@ -3,7 +3,7 @@
 //! Used by `start`, `restart`, and `monitor` commands to avoid duplicating
 //! the "reconstruct BoxConfig from BoxRecord → VmManager::boot()" pattern.
 
-use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig};
+use a3s_box_core::config::{BoxConfig, ResourceConfig};
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::{prom::RuntimeMetrics, VmManager};
 
@@ -47,6 +47,15 @@ pub async fn boot_from_record(
         record.log_config.clone(),
     );
 
+    // Spawn health checker if configured (self-terminates when box stops)
+    if let Some(ref hc) = record.health_check {
+        crate::health::spawn_health_checker(
+            record.id.clone(),
+            record.exec_socket_path.clone(),
+            hc.clone(),
+        );
+    }
+
     let pid = vm.pid().await;
     Ok(BootResult { pid })
 }
@@ -56,10 +65,14 @@ pub async fn boot_from_record(
 /// Reconstructs the full configuration needed to boot a VM from the
 /// persisted record fields.
 fn config_from_record(record: &BoxRecord) -> BoxConfig {
+    // Translate shm_size to a tmpfs entry, reusing the BOX_TMPFS_* guest init mechanism.
+    let mut tmpfs = record.tmpfs.clone();
+    if let Some(size_bytes) = record.shm_size {
+        tmpfs.push(format!("/dev/shm:size={}", size_bytes));
+    }
+
     BoxConfig {
-        agent: AgentType::OciRegistry {
-            reference: record.image.clone(),
-        },
+        image: record.image.clone(),
         resources: ResourceConfig {
             vcpus: record.cpus,
             memory_mb: record.memory_mb,
@@ -75,8 +88,9 @@ fn config_from_record(record: &BoxRecord) -> BoxConfig {
             .collect(),
         port_map: record.port_map.clone(),
         network: record.network_mode.clone(),
-        tmpfs: record.tmpfs.clone(),
+        tmpfs,
         resource_limits: record.resource_limits.clone(),
+        read_only: record.read_only,
         ..Default::default()
     }
 }
@@ -159,13 +173,7 @@ mod tests {
     fn test_config_from_record_image() {
         let record = sample_record();
         let config = config_from_record(&record);
-
-        match &config.agent {
-            AgentType::OciRegistry { reference } => {
-                assert_eq!(reference, "alpine:latest");
-            }
-            _ => panic!("Expected OciRegistry agent type"),
-        }
+        assert_eq!(config.image, "alpine:latest");
     }
 
     #[test]
@@ -196,6 +204,36 @@ mod tests {
 
         assert_eq!(config.volumes, vec!["/host:/guest"]);
         assert_eq!(config.tmpfs, vec!["/tmp"]);
+    }
+
+    #[test]
+    fn test_config_from_record_shm_size_appends_tmpfs() {
+        let mut record = sample_record();
+        record.shm_size = Some(64 * 1024 * 1024); // 64 MiB
+        let config = config_from_record(&record);
+
+        assert!(config.tmpfs.contains(&"/tmp".to_string()));
+        assert!(config
+            .tmpfs
+            .iter()
+            .any(|t| t == "/dev/shm:size=67108864"));
+    }
+
+    #[test]
+    fn test_config_from_record_shm_size_none() {
+        let record = sample_record();
+        let config = config_from_record(&record);
+
+        // No /dev/shm entry when shm_size is None
+        assert!(!config.tmpfs.iter().any(|t| t.contains("/dev/shm")));
+    }
+
+    #[test]
+    fn test_config_from_record_read_only() {
+        let mut record = sample_record();
+        record.read_only = true;
+        let config = config_from_record(&record);
+        assert!(config.read_only);
     }
 
     #[test]

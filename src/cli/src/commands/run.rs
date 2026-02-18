@@ -3,8 +3,9 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use a3s_box_core::config::{AgentType, BoxConfig, ResourceConfig, TeeConfig};
+use a3s_box_core::config::{BoxConfig, ResourceConfig, TeeConfig};
 use a3s_box_core::event::EventEmitter;
+use a3s_box_core::vmm::{parse_signal_name, DEFAULT_SHUTDOWN_TIMEOUT_MS};
 use a3s_box_runtime::VmManager;
 use clap::Args;
 
@@ -131,13 +132,18 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         resolved_volumes.push(resolved);
     }
 
-    // Parse --shm-size
+    // Parse --shm-size and translate to a tmpfs entry for /dev/shm.
+    // This reuses the existing BOX_TMPFS_* guest init mechanism.
     let shm_size = match &args.common.shm_size {
         Some(s) => {
             Some(common::parse_memory_bytes(s).map_err(|e| format!("Invalid --shm-size: {e}"))?)
         }
         None => None,
     };
+    let mut tmpfs = args.common.tmpfs.clone();
+    if let Some(size_bytes) = shm_size {
+        tmpfs.push(format!("/dev/shm:size={}", size_bytes));
+    }
 
     // Determine network mode
     let network_mode = match &args.common.network {
@@ -161,11 +167,17 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         TeeConfig::None
     };
 
+    // Warn about unimplemented flags that are stored but not enforced
+    if !args.common.device.is_empty() {
+        eprintln!("Warning: --device is not supported by the libkrun backend (devices are stored but not passed through)");
+    }
+    if args.common.gpus.is_some() {
+        eprintln!("Warning: --gpus is not yet implemented (stored but not enforced)");
+    }
+
     // Build BoxConfig
     let config = BoxConfig {
-        agent: AgentType::OciRegistry {
-            reference: args.common.image.clone(),
-        },
+        image: args.common.image.clone(),
         resources: ResourceConfig {
             vcpus: args.common.cpus,
             memory_mb,
@@ -178,9 +190,10 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         port_map: args.common.publish.clone(),
         dns: args.common.dns.clone(),
         network: network_mode.clone(),
-        tmpfs: args.common.tmpfs.clone(),
+        tmpfs,
         resource_limits: resource_limits.clone(),
         tee,
+        read_only: args.common.read_only,
         ..Default::default()
     };
 
@@ -251,7 +264,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         labels,
         stopped_by_user: false,
         restart_count: 0,
-        health_check,
+        health_check: health_check.clone(),
         health_status,
         health_retries: 0,
         health_last_check: None,
@@ -293,8 +306,31 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         log_config,
     );
 
+    // Spawn health checker if configured
+    let health_checker = health_check.as_ref().map(|hc| {
+        crate::health::spawn_health_checker(
+            box_id.clone(),
+            box_dir.join("sockets").join("exec.sock"),
+            hc.clone(),
+        )
+    });
+
     // Attach named volumes to this box
     super::volume::attach_volumes(&volume_names, &box_id)?;
+
+    // Resolve stop signal and timeout for the destroy path.
+    // CLI --stop-signal > BoxRecord.stop_signal (which may come from OCI image) > SIGTERM.
+    let stop_signal = args
+        .common
+        .stop_signal
+        .as_deref()
+        .map(parse_signal_name)
+        .unwrap_or(libc::SIGTERM);
+    let stop_timeout_ms = args
+        .common
+        .stop_timeout
+        .map(|secs| secs * 1000)
+        .unwrap_or(DEFAULT_SHUTDOWN_TIMEOUT_MS);
 
     if args.detach && args.tty {
         return Err("Cannot use -t (tty) with -d (detach)".into());
@@ -359,8 +395,11 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         let exit_code = super::exec::run_pty_session(read_half, write_half).await;
         terminal::disable_raw_mode()?;
 
-        // Clean up: destroy VM
-        vm.destroy().await?;
+        // Clean up: destroy VM using configured stop signal and timeout
+        if let Some(ref handle) = health_checker {
+            handle.abort();
+        }
+        vm.destroy_with_options(stop_signal, stop_timeout_ms).await?;
         super::volume::detach_volumes(&volume_names, &box_id);
         if let Some(ref net_name) = args.common.network {
             let net_store = a3s_box_runtime::NetworkStore::default_path()?;
@@ -388,7 +427,7 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Foreground mode: tail console log and wait for Ctrl-C
+    // Foreground mode: tail console log and wait for Ctrl-C or natural container exit
     println!(
         "Box {} ({}) started. Press Ctrl-C to stop.",
         name,
@@ -396,21 +435,36 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let console_log = box_dir.join("logs").join("console.log");
-    let shutdown = tokio::signal::ctrl_c();
 
     // Tail console log in background
     let log_handle = tokio::spawn(async move {
         super::tail_file(&console_log).await;
     });
 
-    // Wait for Ctrl-C
-    let _ = shutdown.await;
-    println!("\nStopping box {}...", name);
+    // Poll health_check every 500ms to detect natural container exit.
+    let user_interrupted = tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nStopping box {}...", name);
+            true
+        }
+        _ = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if !vm.health_check().await.unwrap_or(false) {
+                    break;
+                }
+            }
+        } => false,
+    };
 
     log_handle.abort();
+    if let Some(ref handle) = health_checker {
+        handle.abort();
+    }
 
-    // Destroy VM
-    vm.destroy().await?;
+    // Destroy VM using configured stop signal and timeout (no-op if already stopped naturally)
+    vm.destroy_with_options(stop_signal, stop_timeout_ms).await?;
+    let exit_code = vm.exit_code();
 
     // Detach named volumes
     super::volume::detach_volumes(&volume_names, &box_id);
@@ -434,10 +488,25 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     if args.rm {
         state.remove(&box_id)?;
         let _ = std::fs::remove_dir_all(&box_dir);
-        println!("Box {} removed.", name);
+        if !user_interrupted {
+            println!("Box {} exited and was removed.", name);
+        } else {
+            println!("Box {} removed.", name);
+        }
     } else {
         state.save()?;
-        println!("Box {} stopped.", name);
+        if !user_interrupted {
+            println!("Box {} exited.", name);
+        } else {
+            println!("Box {} stopped.", name);
+        }
+    }
+
+    // Propagate the container's exit code (mirrors docker run behaviour)
+    if let Some(code) = exit_code {
+        if code != 0 {
+            std::process::exit(code);
+        }
     }
 
     Ok(())

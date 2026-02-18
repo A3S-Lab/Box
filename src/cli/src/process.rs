@@ -5,10 +5,10 @@ pub fn is_process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
-/// Send SIGTERM, wait up to `timeout` seconds, then SIGKILL if still alive.
-pub async fn graceful_stop(pid: u32, timeout: u64) {
+/// Send `signal`, wait up to `timeout` seconds, then SIGKILL if still alive.
+pub async fn graceful_stop(pid: u32, signal: i32, timeout: u64) {
     unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
+        libc::kill(pid as i32, signal);
     }
 
     let start = std::time::Instant::now();

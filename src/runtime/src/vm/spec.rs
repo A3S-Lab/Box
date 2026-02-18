@@ -15,18 +15,11 @@ impl VmManager {
     /// Build InstanceSpec from config and layout.
     pub(crate) fn build_instance_spec(&mut self, layout: &BoxLayout) -> Result<InstanceSpec> {
         // Build filesystem mounts
-        let mut fs_mounts = vec![
-            FsMount {
-                tag: "workspace".to_string(),
-                host_path: layout.workspace_path.clone(),
-                read_only: false,
-            },
-            FsMount {
-                tag: "skills".to_string(),
-                host_path: layout.skills_path.clone(),
-                read_only: true,
-            },
-        ];
+        let mut fs_mounts = vec![FsMount {
+            tag: "workspace".to_string(),
+            host_path: layout.workspace_path.clone(),
+            read_only: false,
+        }];
 
         // Add user-specified volume mounts (-v host:guest or -v host:guest:ro)
         for (i, vol) in self.config.volumes.iter().enumerate() {
@@ -43,7 +36,7 @@ impl VmManager {
             .collect();
         let mut anon_vol_offset = self.config.volumes.len();
 
-        if let Some(ref oci_config) = layout.agent_oci_config {
+        if let Some(ref oci_config) = layout.oci_config {
             for vol_path in &oci_config.volumes {
                 // Skip if the user already mounted something at this path
                 if user_guest_paths.contains(vol_path) {
@@ -88,15 +81,17 @@ impl VmManager {
             }
         }
 
-        // Build entrypoint based on agent type and OCI config
-        let mut entrypoint = if layout.has_guest_init {
-            // Use guest init as entrypoint for namespace isolation
-            // Pass agent configuration via environment variables
-            let (agent_exec, agent_args, agent_env) = match &layout.agent_oci_config {
+        // Determine whether guest init is installed (it becomes PID 1 and passes
+        // BOX_EXEC_* env vars to the container entrypoint).
+        let has_guest_init = layout.rootfs_path.join("sbin/init").exists();
+
+        // Build entrypoint
+        let mut entrypoint = if has_guest_init {
+            // Guest init is PID 1. Pass container entrypoint/env via BOX_EXEC_* env vars.
+            let (exec, args, container_env) = match &layout.oci_config {
                 Some(oci_config) => {
                     let (exec, args) = Self::resolve_oci_entrypoint(
                         oci_config,
-                        layout.image_at_root,
                         &self.config.cmd,
                         self.config.entrypoint_override.as_deref(),
                     );
@@ -105,31 +100,30 @@ impl VmManager {
                 None => ("/sbin/init".to_string(), vec![], vec![]),
             };
 
-            // Build environment for guest init
-            // Pass args as individual env vars to avoid spaces in values
-            // being truncated by libkrun's env serialization
+            // Pass exec + args as individual env vars (avoids spaces being truncated
+            // by libkrun's env serialization).
             let mut env: Vec<(String, String)> = vec![
-                ("A3S_AGENT_EXEC".to_string(), agent_exec),
-                ("A3S_AGENT_ARGC".to_string(), agent_args.len().to_string()),
+                ("BOX_EXEC_EXEC".to_string(), exec),
+                ("BOX_EXEC_ARGC".to_string(), args.len().to_string()),
             ];
-            for (i, arg) in agent_args.iter().enumerate() {
-                env.push((format!("A3S_AGENT_ARG_{}", i), arg.clone()));
+            for (i, arg) in args.iter().enumerate() {
+                env.push((format!("BOX_EXEC_ARG_{}", i), arg.clone()));
             }
 
             // Pass the OCI working directory to guest init
-            if let Some(ref oci_config) = layout.agent_oci_config {
+            if let Some(ref oci_config) = layout.oci_config {
                 if let Some(ref wd) = oci_config.working_dir {
-                    env.push(("A3S_AGENT_WORKDIR".to_string(), wd.clone()));
+                    env.push(("BOX_EXEC_WORKDIR".to_string(), wd.clone()));
                 }
             }
 
-            // Add agent environment variables with A3S_AGENT_ENV_ prefix
-            for (key, value) in agent_env {
-                env.push((format!("A3S_AGENT_ENV_{}", key), value));
+            // Pass container environment variables with BOX_EXEC_ENV_ prefix
+            for (key, value) in container_env {
+                env.push((format!("BOX_EXEC_ENV_{}", key), value));
             }
 
-            // Pass user volume mounts to guest init for mounting inside the VM
-            // Format: A3S_VOL_<index>=<tag>:<guest_path>[:ro]
+            // Pass user volume mounts to guest init for mounting inside the VM.
+            // Format: BOX_VOL_<index>=<tag>:<guest_path>[:ro]
             for (i, vol) in self.config.volumes.iter().enumerate() {
                 let parts: Vec<&str> = vol.split(':').collect();
                 if parts.len() >= 2 {
@@ -140,31 +134,31 @@ impl VmManager {
                         ""
                     };
                     env.push((
-                        format!("A3S_VOL_{}", i),
+                        format!("BOX_VOL_{}", i),
                         format!("vol{}:{}{}", i, guest_path, mode),
                     ));
                 }
             }
 
             // Pass anonymous volume mounts (from OCI VOLUME directives) to guest init
-            if let Some(ref oci_config) = layout.agent_oci_config {
+            if let Some(ref oci_config) = layout.oci_config {
                 let mut anon_idx = self.config.volumes.len();
                 for vol_path in &oci_config.volumes {
                     if user_guest_paths.contains(vol_path) {
                         continue;
                     }
                     env.push((
-                        format!("A3S_VOL_{}", anon_idx),
+                        format!("BOX_VOL_{}", anon_idx),
                         format!("vol{}:{}", anon_idx, vol_path),
                     ));
                     anon_idx += 1;
                 }
             }
 
-            // Pass tmpfs mounts to guest init for mounting inside the VM
-            // Format: A3S_TMPFS_<index>=<path>[:<options>]
+            // Pass tmpfs mounts to guest init.
+            // Format: BOX_TMPFS_<index>=<path>[:<options>]
             for (i, tmpfs_spec) in self.config.tmpfs.iter().enumerate() {
-                env.push((format!("A3S_TMPFS_{}", i), tmpfs_spec.clone()));
+                env.push((format!("BOX_TMPFS_{}", i), tmpfs_spec.clone()));
             }
 
             // Pass security configuration to guest init
@@ -176,10 +170,12 @@ impl VmManager {
             );
             env.extend(security_config.to_env_vars());
 
-            tracing::debug!(
-                env = ?env,
-                "Using guest init with agent configuration"
-            );
+            // Signal guest init to remount rootfs read-only after all setup
+            if self.config.read_only {
+                env.push(("BOX_READONLY".to_string(), "1".to_string()));
+            }
+
+            tracing::debug!(env = ?env, "Using guest init as PID 1");
 
             Entrypoint {
                 executable: "/sbin/init".to_string(),
@@ -187,12 +183,11 @@ impl VmManager {
                 env,
             }
         } else {
-            // Direct agent execution (no namespace isolation)
-            match &layout.agent_oci_config {
+            // No guest init — exec the container entrypoint directly as PID 1
+            match &layout.oci_config {
                 Some(oci_config) => {
                     let (executable, args) = Self::resolve_oci_entrypoint(
                         oci_config,
-                        layout.image_at_root,
                         &self.config.cmd,
                         self.config.entrypoint_override.as_deref(),
                     );
@@ -203,7 +198,7 @@ impl VmManager {
                         args = ?args,
                         env_count = env.len(),
                         workdir = ?oci_config.working_dir,
-                        "Using OCI image entrypoint"
+                        "Using OCI image entrypoint directly"
                     );
 
                     Entrypoint {
@@ -212,14 +207,11 @@ impl VmManager {
                         env,
                     }
                 }
-                None => {
-                    // No OCI config: use default init entrypoint
-                    Entrypoint {
-                        executable: "/sbin/init".to_string(),
-                        args: vec![],
-                        env: vec![],
-                    }
-                }
+                None => Entrypoint {
+                    executable: "/sbin/init".to_string(),
+                    args: vec![],
+                    env: vec![],
+                },
             }
         };
 
@@ -245,7 +237,7 @@ impl VmManager {
         }
 
         // Determine workdir
-        let workdir = match &layout.agent_oci_config {
+        let workdir = match &layout.oci_config {
             Some(oci_config) => oci_config
                 .working_dir
                 .clone()
@@ -254,10 +246,7 @@ impl VmManager {
         };
 
         // Extract user from OCI config (USER directive)
-        let user = layout
-            .agent_oci_config
-            .as_ref()
-            .and_then(|c| c.user.clone());
+        let user = layout.oci_config.as_ref().and_then(|c| c.user.clone());
 
         Ok(InstanceSpec {
             box_id: self.box_id.clone(),
@@ -285,14 +274,12 @@ impl VmManager {
     /// - If `entrypoint_override` is set, it replaces the OCI ENTRYPOINT
     /// - If ENTRYPOINT is set: executable = ENTRYPOINT[0], args = ENTRYPOINT[1:] + CMD
     /// - If only CMD is set: executable = CMD[0], args = CMD[1:]
-    /// - If neither: fall back to default agent path
+    /// - If neither: fall back to `/sbin/init`
     /// - If `cmd_override` is non-empty, it replaces the OCI CMD
     ///
-    /// When `image_at_root` is false, paths are prefixed with `/agent` since the
-    /// image is extracted under that directory. When true, paths are used as-is.
+    /// Paths are used as-is since the OCI image is always extracted at rootfs root.
     fn resolve_oci_entrypoint(
         oci_config: &OciImageConfig,
-        image_at_root: bool,
         cmd_override: &[String],
         entrypoint_override: Option<&[String]>,
     ) -> (String, Vec<String>) {
@@ -306,37 +293,20 @@ impl VmManager {
             cmd_override
         };
 
-        let maybe_prefix = |path: &str| -> String {
-            if image_at_root {
-                path.to_string()
-            } else {
-                Self::prefix_agent_path(path)
-            }
-        };
-
         if !oci_entrypoint.is_empty() {
             // ENTRYPOINT is set: use it as executable, CMD as additional args
-            let exec = maybe_prefix(&oci_entrypoint[0]);
+            let exec = oci_entrypoint[0].clone();
             let mut args: Vec<String> = oci_entrypoint.iter().skip(1).cloned().collect();
             args.extend(oci_cmd.iter().cloned());
             (exec, args)
         } else if !oci_cmd.is_empty() {
             // Only CMD is set: use CMD[0] as executable, CMD[1:] as args
-            let exec = maybe_prefix(&oci_cmd[0]);
+            let exec = oci_cmd[0].clone();
             let args: Vec<String> = oci_cmd.iter().skip(1).cloned().collect();
             (exec, args)
         } else {
             // Neither set: fall back to default init
             ("/sbin/init".to_string(), vec![])
-        }
-    }
-
-    /// Prefix a path with /agent to make it relative to the agent rootfs.
-    fn prefix_agent_path(path: &str) -> String {
-        if path.starts_with('/') {
-            format!("/agent{}", path)
-        } else {
-            format!("/agent/{}", path)
         }
     }
 
@@ -527,7 +497,7 @@ mod tests {
             onbuild: vec![],
         };
 
-        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, &[], None);
         assert_eq!(exec, "/bin/app");
         assert_eq!(args, vec!["--flag"]);
     }
@@ -552,7 +522,7 @@ mod tests {
             onbuild: vec![],
         };
 
-        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, &[], None);
         assert_eq!(exec, "/bin/sh");
         assert_eq!(args, vec!["-c", "echo hi"]);
     }
@@ -573,7 +543,7 @@ mod tests {
             onbuild: vec![],
         };
 
-        let (exec, _args) = VmManager::resolve_oci_entrypoint(&config, true, &[], None);
+        let (exec, _args) = VmManager::resolve_oci_entrypoint(&config, &[], None);
         assert_eq!(exec, "/sbin/init");
     }
 
@@ -594,29 +564,9 @@ mod tests {
         };
 
         let override_cmd = vec!["sleep".to_string(), "3600".to_string()];
-        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, true, &override_cmd, None);
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, &override_cmd, None);
         assert_eq!(exec, "sleep");
         assert_eq!(args, vec!["3600"]);
-    }
-
-    #[test]
-    fn test_resolve_oci_entrypoint_image_not_at_root() {
-        let config = OciImageConfig {
-            entrypoint: None,
-            cmd: Some(vec!["/bin/sh".to_string()]),
-            env: vec![],
-            working_dir: None,
-            user: None,
-            exposed_ports: vec![],
-            labels: std::collections::HashMap::new(),
-            volumes: vec![],
-            stop_signal: None,
-            health_check: None,
-            onbuild: vec![],
-        };
-
-        let (exec, _) = VmManager::resolve_oci_entrypoint(&config, false, &[], None);
-        assert_eq!(exec, "/agent/bin/sh");
     }
 
     #[test]
@@ -637,8 +587,7 @@ mod tests {
 
         // Override replaces the image entrypoint entirely
         let override_ep = vec!["/bin/sh".to_string(), "-c".to_string()];
-        let (exec, args) =
-            VmManager::resolve_oci_entrypoint(&config, true, &[], Some(&override_ep));
+        let (exec, args) = VmManager::resolve_oci_entrypoint(&config, &[], Some(&override_ep));
         assert_eq!(exec, "/bin/sh");
         // args = entrypoint[1:] + cmd
         assert_eq!(args, vec!["-c", "--flag"]);
@@ -664,18 +613,9 @@ mod tests {
         let override_ep = vec!["/bin/sh".to_string()];
         let cmd_override = vec!["echo".to_string(), "hello".to_string()];
         let (exec, args) =
-            VmManager::resolve_oci_entrypoint(&config, true, &cmd_override, Some(&override_ep));
+            VmManager::resolve_oci_entrypoint(&config, &cmd_override, Some(&override_ep));
         assert_eq!(exec, "/bin/sh");
         assert_eq!(args, vec!["echo", "hello"]);
     }
 
-    #[test]
-    fn test_prefix_agent_path_absolute() {
-        assert_eq!(VmManager::prefix_agent_path("/bin/sh"), "/agent/bin/sh");
-    }
-
-    #[test]
-    fn test_prefix_agent_path_relative() {
-        assert_eq!(VmManager::prefix_agent_path("bin/sh"), "/agent/bin/sh");
-    }
 }

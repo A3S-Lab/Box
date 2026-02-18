@@ -2,6 +2,8 @@
 
 use clap::Args;
 
+use a3s_box_core::vmm::parse_signal_name;
+
 use crate::cleanup;
 use crate::process;
 use crate::resolve;
@@ -13,9 +15,9 @@ pub struct StopArgs {
     #[arg(required = true)]
     pub boxes: Vec<String>,
 
-    /// Seconds to wait before force-killing
-    #[arg(short = 't', long, default_value = "10")]
-    pub timeout: u64,
+    /// Seconds to wait before force-killing (overrides per-box stop-timeout)
+    #[arg(short = 't', long)]
+    pub timeout: Option<u64>,
 }
 
 pub async fn execute(args: StopArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -38,7 +40,7 @@ pub async fn execute(args: StopArgs) -> Result<(), Box<dyn std::error::Error>> {
 async fn stop_one(
     state: &mut StateFile,
     query: &str,
-    timeout: u64,
+    timeout: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let record = resolve::resolve(state, query)?;
 
@@ -58,9 +60,21 @@ async fn stop_one(
     let network_name = record.network_name.clone();
     let volume_names = record.volume_names.clone();
 
-    // Send SIGTERM, then SIGKILL after timeout
+    // Resolve stop signal: CLI --stop-signal > BoxRecord.stop_signal > SIGTERM
+    let stop_signal = record
+        .stop_signal
+        .as_deref()
+        .map(parse_signal_name)
+        .unwrap_or(libc::SIGTERM);
+
+    // Resolve timeout: CLI -t > BoxRecord.stop_timeout > 10s
+    let effective_timeout = timeout
+        .or(record.stop_timeout)
+        .unwrap_or(10);
+
+    // Send stop signal, then SIGKILL after timeout
     if let Some(pid) = pid {
-        process::graceful_stop(pid, timeout).await;
+        process::graceful_stop(pid, stop_signal, effective_timeout).await;
     }
 
     // Clean up volumes and network

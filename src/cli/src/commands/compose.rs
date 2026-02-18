@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use a3s_box_core::compose::ComposeConfig;
-use a3s_box_core::config::AgentType;
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::{ComposeProject, NetworkStore, VmManager};
 use clap::{Args, Subcommand};
@@ -181,10 +180,7 @@ async fn execute_up(
 
     for svc_name in &project.service_order {
         let box_config = project.build_box_config(svc_name, Some(&default_net))?;
-        let image = match &box_config.agent {
-            AgentType::OciRegistry { reference } => reference.clone(),
-            _ => "unknown".to_string(),
-        };
+        let image = box_config.image.clone();
 
         // Create VmManager and boot
         let emitter = EventEmitter::new(256);
@@ -369,7 +365,7 @@ async fn execute_down(
         // Kill the process if running
         if status == "running" {
             if let Some(pid) = pid {
-                crate::process::graceful_stop(*pid, 10).await;
+                crate::process::graceful_stop(*pid, libc::SIGTERM, 10).await;
             }
         }
 

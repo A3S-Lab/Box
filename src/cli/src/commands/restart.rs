@@ -52,7 +52,13 @@ async fn restart_one(
     // Phase 1: Stop the box if it's running
     if was_running {
         if let Some(pid) = pid {
-            process::graceful_stop(pid, timeout).await;
+            let stop_signal = record
+                .stop_signal
+                .as_deref()
+                .map(a3s_box_core::vmm::parse_signal_name)
+                .unwrap_or(libc::SIGTERM);
+            let effective_timeout = record.stop_timeout.unwrap_or(timeout);
+            process::graceful_stop(pid, stop_signal, effective_timeout).await;
         }
 
         // Update state to stopped

@@ -3,6 +3,7 @@
 pub mod boot;
 pub mod cleanup;
 pub mod commands;
+pub mod health;
 pub mod output;
 pub mod process;
 pub mod resolve;
