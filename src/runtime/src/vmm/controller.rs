@@ -51,26 +51,46 @@ impl VmController {
     /// On macOS, Hypervisor.framework requires this entitlement. If the binary
     /// was built with `cargo build` directly (without `just build`), it won't
     /// have the entitlement. This method checks and signs it if needed.
+    ///
+    /// Uses a file lock to prevent race conditions when multiple processes
+    /// (e.g., concurrent tests) try to sign the same binary simultaneously.
     #[cfg(target_os = "macos")]
     fn ensure_entitlement(shim_path: &std::path::Path) -> Result<()> {
-        // Check if the binary already has the entitlement
-        let output = Command::new("codesign")
-            .args(["-d", "--entitlements", "-", "--xml"])
-            .arg(shim_path)
-            .output()
-            .map_err(|e| BoxError::BoxBootError {
-                message: format!("Failed to check entitlements: {}", e),
-                hint: None,
-            })?;
+        use std::fs::File;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("com.apple.security.hypervisor") {
+        // Fast path: check without lock first
+        if Self::has_hypervisor_entitlement(shim_path)? {
+            return Ok(());
+        }
+
+        // Acquire exclusive file lock to prevent concurrent codesign
+        let lock_path = std::env::temp_dir().join("a3s-box-shim-codesign.lock");
+        let lock_file = File::create(&lock_path).map_err(|e| BoxError::BoxBootError {
+            message: format!("Failed to create codesign lock file: {}", e),
+            hint: None,
+        })?;
+
+        // flock(LOCK_EX) — blocks until exclusive lock is acquired
+        let fd = std::os::unix::io::AsRawFd::as_raw_fd(&lock_file);
+        let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+        if ret != 0 {
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "Failed to acquire codesign lock: {}",
+                    std::io::Error::last_os_error()
+                ),
+                hint: None,
+            });
+        }
+
+        // Re-check after acquiring lock — another process may have signed it
+        if Self::has_hypervisor_entitlement(shim_path)? {
+            // Lock is released when lock_file is dropped
             return Ok(());
         }
 
         tracing::info!("Signing shim with Hypervisor.framework entitlement");
 
-        // Find the entitlements plist next to the shim or in the source tree
         let entitlements_path = Self::find_entitlements_plist(shim_path)?;
 
         let status = Command::new("codesign")
@@ -95,7 +115,24 @@ impl VmController {
             });
         }
 
+        // Lock is released when lock_file is dropped
         Ok(())
+    }
+
+    /// Check if the shim binary already has the Hypervisor entitlement.
+    #[cfg(target_os = "macos")]
+    fn has_hypervisor_entitlement(shim_path: &std::path::Path) -> Result<bool> {
+        let output = Command::new("codesign")
+            .args(["-d", "--entitlements", "-", "--xml"])
+            .arg(shim_path)
+            .output()
+            .map_err(|e| BoxError::BoxBootError {
+                message: format!("Failed to check entitlements: {}", e),
+                hint: None,
+            })?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.contains("com.apple.security.hypervisor"))
     }
 
     /// Find the entitlements.plist file.
@@ -146,8 +183,9 @@ impl VmController {
     ///
     /// Searches in order:
     /// 1. Same directory as current executable
-    /// 2. target/debug or target/release (for development)
-    /// 3. PATH
+    /// 2. `~/.a3s/bin/` (SDK-extracted shim)
+    /// 3. target/debug or target/release (for development)
+    /// 4. PATH
     pub fn find_shim() -> Result<PathBuf> {
         // Try same directory as current executable
         if let Ok(exe_path) = std::env::current_exe() {
@@ -156,6 +194,14 @@ impl VmController {
                 if shim_path.exists() {
                     return Ok(shim_path);
                 }
+            }
+        }
+
+        // Try ~/.a3s/bin/ (SDK-extracted shim)
+        if let Some(home) = dirs::home_dir() {
+            let shim_path = home.join(".a3s").join("bin").join("a3s-box-shim");
+            if shim_path.exists() {
+                return Ok(shim_path);
             }
         }
 
