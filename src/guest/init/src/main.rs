@@ -167,6 +167,8 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
         ipc: false,
         uts: false,
         net: false,
+        user: false,
+        cgroup: false,
     };
 
     // Step 7: Launch container entrypoint

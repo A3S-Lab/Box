@@ -238,11 +238,11 @@ Capabilities:
 
 ### Multi-Language SDKs
 
-| SDK | Install | Tests |
-|-----|---------|------:|
-| Python | `pip install a3s-box` | 25 |
-| TypeScript | `npm install @a3s-lab/box` | 21 |
-| Rust | `a3s-box-sdk` crate | 24 |
+| SDK | Package | Version | Tests |
+|-----|---------|---------|------:|
+| Python | `pip install a3s-box` | 0.4.0 | 25 |
+| TypeScript | `npm install @a3s-lab/box` | 0.4.0 | 21 |
+| Rust | `a3s-box-sdk` crate | 0.4.0 | 24 |
 
 All SDKs provide: async API, streaming exec, file transfer, sandbox lifecycle management.
 
@@ -272,7 +272,7 @@ All SDKs provide: async API, streaming exec, file transfer, sandbox lifecycle ma
 │                              │                                   │
 │  ┌───────────────────────────▼───────────────────────────────┐  │
 │  │                 Process (Namespace 1)                      │  │
-│  │  - Isolated mount, PID, IPC, UTS namespaces               │  │
+│  │  - Isolated mount, PID, IPC, UTS, user, cgroup namespaces │  │
 │  └───────────────────────────┬───────────────────────────────┘  │
 │                              │ /usr/bin/nsexec                   │
 │  ┌───────────────────────────▼───────────────────────────────┐  │
@@ -285,15 +285,15 @@ All SDKs provide: async API, streaming exec, file transfer, sandbox lifecycle ma
 
 ### Crates
 
-| Crate | Binary | Purpose | Tests |
-|-------|--------|---------|------:|
-| `cli` | `a3s-box` | Docker-like CLI (52 commands) | 361 |
-| `core` | — | Config, error types, events | 331 |
-| `runtime` | — | VM lifecycle, OCI, attestation | 678 |
-| `guest/init` | `a3s-box-guest-init` | Guest PID 1, exec/PTY/attestation servers | 25 |
-| `shim` | `a3s-box-shim` | libkrun bridge | 14 |
-| `cri` | `a3s-box-cri` | Kubernetes CRI runtime | 33 |
-| `sdk` | — | Embedded sandbox SDK | 24 |
+| Crate | Binary | Purpose | Version | Tests |
+|-------|--------|---------|---------|------:|
+| `cli` | `a3s-box` | Docker-like CLI (52 commands) | 0.4.0 | 361 |
+| `core` | — | Config, error types, events | 0.4.0 | 331 |
+| `runtime` | — | VM lifecycle, OCI, attestation | 0.4.0 | 678 |
+| `guest/init` | `a3s-box-guest-init` | Guest PID 1, exec/PTY/attestation servers | 0.4.0 | 25 |
+| `shim` | `a3s-box-shim` | libkrun bridge | 0.4.0 | 14 |
+| `cri` | `a3s-box-cri` | Kubernetes CRI runtime | 0.4.0 | 33 |
+| `sdk` | — | Embedded sandbox SDK | 0.4.0 | 24 |
 
 218 source files, ~1,466 unit tests, 7 integration tests.
 
@@ -321,6 +321,7 @@ The following modules are implemented and tested but exist as library code for e
 ```rust
 use a3s_box_core::config::{BoxConfig, TeeConfig, SevSnpGeneration};
 
+// AMD SEV-SNP
 let config = BoxConfig {
     tee: TeeConfig::SevSnp {
         workload_id: "my-secure-workload".to_string(),
@@ -330,8 +331,14 @@ let config = BoxConfig {
     ..Default::default()
 };
 
-// Intel TDX (config support, runtime pending):
-// tee: TeeConfig::Tdx { workload_id: "my-workload".to_string(), simulate: false }
+// Intel TDX (config support, runtime pending)
+let config = BoxConfig {
+    tee: TeeConfig::Tdx {
+        workload_id: "my-workload".to_string(),
+        simulate: false,
+    },
+    ..Default::default()
+};
 ```
 
 ### Hardware Requirements
@@ -451,7 +458,7 @@ helm install a3s-box deploy/helm/a3s-box/ -n a3s-box-system --create-namespace
 
 # Custom values
 helm install a3s-box deploy/helm/a3s-box/ -n a3s-box-system --create-namespace \
-  --set image.tag=v0.2.0 \
+  --set image.tag=v0.4.0 \
   --set config.logLevel=debug \
   --set config.imageCacheSize=21474836480 \
   --set resources.limits.memory=1Gi
@@ -523,8 +530,8 @@ box/
 │   ├── sdk/            # Embedded sandbox SDK
 │   └── guest/init/     # Guest PID 1, exec/PTY/attestation servers
 ├── sdk/
-│   ├── python/         # Python SDK
-│   └── typescript/     # TypeScript SDK
+│   ├── python/         # Python SDK (PyO3)
+│   └── node/           # TypeScript SDK (napi-rs)
 ├── deploy/
 │   ├── helm/           # Helm chart
 │   ├── examples/       # Example Pod specs
