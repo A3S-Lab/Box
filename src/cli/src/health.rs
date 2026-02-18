@@ -10,7 +10,7 @@
 //! - After `retries` consecutive failures → status becomes "unhealthy"
 //! - Socket disappearing → box has stopped; checker exits
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use a3s_box_core::exec::ExecRequest;
