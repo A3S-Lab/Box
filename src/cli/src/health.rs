@@ -75,7 +75,7 @@ async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCh
 }
 
 /// Run the health check command once. Returns `true` if the command exits 0.
-async fn run_probe(exec_socket_path: &PathBuf, cmd: &[String], timeout_ns: u64) -> bool {
+async fn run_probe(exec_socket_path: &Path, cmd: &[String], timeout_ns: u64) -> bool {
     let client = match ExecClient::connect(exec_socket_path).await {
         Ok(c) => c,
         Err(_) => return false,
