@@ -124,7 +124,6 @@ jobs:
           fi
 
           cp "src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" "$DIR/"
-          cp "src/target/${{ matrix.guest_target }}/release/a3s-box-nsexec" "$DIR/"
 
           cp README.md "$DIR/" 2>/dev/null || true
           cp LICENSE "$DIR/" 2>/dev/null || true
@@ -379,7 +378,6 @@ jobs:
               bin.install "a3s-box"
               bin.install "a3s-box-shim"
               bin.install "a3s-box-guest-init"
-              bin.install "a3s-box-nsexec"
               bin.install "a3s-box-cri" if File.exist?("a3s-box-cri")
             end
 

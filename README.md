@@ -97,7 +97,7 @@ brew tap a3s-lab/tap https://github.com/A3S-Lab/homebrew-tap
 brew install a3s-box
 ```
 
-This installs `a3s-box`, `a3s-box-shim`, `a3s-box-guest-init`, and `a3s-box-nsexec`.
+This installs `a3s-box`, `a3s-box-shim`, and `a3s-box-guest-init`.
 
 ```bash
 # Update to latest version
