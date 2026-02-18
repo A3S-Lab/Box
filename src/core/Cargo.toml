@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Core types, config, and error handling for A3S Box MicroVM runtime"
 
 [dependencies]
 a3s-transport = { workspace = true }
