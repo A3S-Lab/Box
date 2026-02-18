@@ -87,11 +87,29 @@ A3S Box is application-agnostic. It doesn't know what runs inside — web server
 ### Prerequisites
 
 - **macOS ARM64** (Apple Silicon) or **Linux x86_64/ARM64**
-- Rust 1.75+
 
 > macOS Intel is NOT supported.
 
-### Build
+### Install via Homebrew (Recommended)
+
+```bash
+brew tap a3s-lab/tap https://github.com/A3S-Lab/homebrew-tap
+brew install a3s-box
+```
+
+This installs `a3s-box`, `a3s-box-shim`, `a3s-box-guest-init`, and `a3s-box-nsexec`.
+
+```bash
+# Update to latest version
+brew update && brew upgrade a3s-box
+
+# Uninstall
+brew uninstall a3s-box
+```
+
+### Build from Source
+
+Requires Rust 1.75+.
 
 ```bash
 git clone https://github.com/a3s-lab/box.git && cd box
