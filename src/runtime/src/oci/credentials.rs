@@ -32,11 +32,10 @@ pub struct CredentialStore {
 impl CredentialStore {
     /// Create a credential store at the default path (`~/.a3s/auth/credentials.json`).
     pub fn default_path() -> Result<Self> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            BoxError::Other("Cannot determine home directory for credential store".to_string())
-        })?;
         Ok(Self {
-            path: home.join(".a3s").join("auth").join("credentials.json"),
+            path: a3s_box_core::dirs_home()
+                .join("auth")
+                .join("credentials.json"),
         })
     }
 
@@ -94,14 +93,14 @@ impl CredentialStore {
             return Ok(CredentialFile::default());
         }
         let data = std::fs::read_to_string(&self.path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "Failed to read credential store {}: {}",
                 self.path.display(),
                 e
             ))
         })?;
         serde_json::from_str(&data).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "Failed to parse credential store {}: {}",
                 self.path.display(),
                 e
@@ -113,7 +112,7 @@ impl CredentialStore {
     fn save(&self, file: &CredentialFile) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::ConfigError(format!(
                     "Failed to create credential store directory {}: {}",
                     parent.display(),
                     e
@@ -124,14 +123,14 @@ impl CredentialStore {
         let tmp_path = self.path.with_extension("tmp");
         let data = serde_json::to_string_pretty(file)?;
         std::fs::write(&tmp_path, &data).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "Failed to write credential store {}: {}",
                 tmp_path.display(),
                 e
             ))
         })?;
         std::fs::rename(&tmp_path, &self.path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "Failed to rename credential store {} -> {}: {}",
                 tmp_path.display(),
                 self.path.display(),

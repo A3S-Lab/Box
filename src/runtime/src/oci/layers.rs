@@ -25,7 +25,7 @@ use tar::Archive;
 pub fn extract_layer(layer_path: &Path, target_dir: &Path) -> Result<()> {
     // Validate layer exists
     if !layer_path.exists() {
-        return Err(BoxError::Other(format!(
+        return Err(BoxError::OciImageError(format!(
             "Layer file not found: {}",
             layer_path.display()
         )));
@@ -33,7 +33,7 @@ pub fn extract_layer(layer_path: &Path, target_dir: &Path) -> Result<()> {
 
     // Create target directory
     std::fs::create_dir_all(target_dir).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::OciImageError(format!(
             "Failed to create target directory {}: {}",
             target_dir.display(),
             e
@@ -42,7 +42,7 @@ pub fn extract_layer(layer_path: &Path, target_dir: &Path) -> Result<()> {
 
     // Open layer file
     let file = File::open(layer_path).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::OciImageError(format!(
             "Failed to open layer file {}: {}",
             layer_path.display(),
             e
@@ -55,7 +55,7 @@ pub fn extract_layer(layer_path: &Path, target_dir: &Path) -> Result<()> {
     // Extract tar archive
     let mut archive = Archive::new(decoder);
     archive.unpack(target_dir).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::OciImageError(format!(
             "Failed to extract layer to {}: {}",
             target_dir.display(),
             e

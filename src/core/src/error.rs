@@ -66,6 +66,14 @@ pub enum BoxError {
     #[error("Network error: {0}")]
     NetworkError(String),
 
+    /// VM state machine error (invalid state transition or precondition)
+    #[error("VM state error: {0}")]
+    StateError(String),
+
+    /// Audit log error
+    #[error("Audit error: {0}")]
+    AuditError(String),
+
     /// Generic error
     #[error("{0}")]
     Other(String),

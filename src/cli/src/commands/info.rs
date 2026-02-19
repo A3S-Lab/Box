@@ -23,9 +23,7 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     // Home directory
-    let home = dirs::home_dir()
-        .map(|h| h.join(".a3s"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".a3s"));
+    let home = a3s_box_core::dirs_home();
     println!("Home directory: {}", home.display());
 
     // Box count

@@ -248,33 +248,16 @@ impl AmdKdsClient {
     }
 }
 
-/// Simple base64 decoder (no external dependency needed).
+/// Decode a base64 string (standard alphabet, tolerates whitespace and missing padding).
 fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, String> {
-    let input = input.trim();
-    let mut output = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-
-    for &byte in input.as_bytes() {
-        let val = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' | b'\n' | b'\r' | b' ' => continue,
-            _ => return Err(format!("Invalid base64 character: {}", byte as char)),
-        };
-        buf = (buf << 6) | val as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            output.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-
-    Ok(output)
+    use base64::{engine::general_purpose, Engine};
+    // Strip whitespace before decoding (PEM base64 contains newlines)
+    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    // Use STANDARD_NO_PAD to tolerate both padded and unpadded input
+    general_purpose::STANDARD_NO_PAD
+        .decode(&cleaned)
+        .or_else(|_| general_purpose::STANDARD.decode(&cleaned))
+        .map_err(|e| format!("base64 decode error: {}", e))
 }
 
 #[cfg(test)]

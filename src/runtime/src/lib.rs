@@ -46,17 +46,12 @@ pub mod scale;
 // Audit
 pub use audit::{read_audit_log, AuditLog, AuditQuery};
 
-// Cache
-pub use cache::{LayerCache, RootfsCache};
-
 // gRPC clients
 pub use grpc::{AttestationClient, ExecClient, PtyClient, RaTlsAttestationClient, StreamingExec};
-pub use grpc::{
-    SealClient, SealResult, SecretEntry, SecretInjectionResult, SecretInjector, UnsealResult,
-};
+pub use grpc::{SealClient, SecretEntry, SecretInjector};
 
 // Host checks
-pub use host_check::{check_virtualization_support, VirtualizationSupport};
+pub use host_check::check_virtualization_support;
 
 // Network
 pub use network::NetworkStore;
@@ -64,9 +59,8 @@ pub use network::NetworkStore;
 // OCI images
 pub use a3s_box_core::StoredImage;
 pub use oci::{CredentialStore, PushResult, RegistryPusher};
-pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth, RegistryPuller};
-pub use oci::{OciImage, OciImageConfig, OciRootfsBuilder};
-pub use oci::{SignaturePolicy, VerifyResult};
+pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth};
+pub use oci::{OciImage, SignaturePolicy};
 
 // Metrics
 pub use prom::RuntimeMetrics;
@@ -74,14 +68,13 @@ pub use prom::RuntimeMetrics;
 // Snapshot
 pub use snapshot::SnapshotStore;
 
-// TEE (only types actually used externally)
-pub use tee::{seal, unseal, SealedData, SealingPolicy};
+// TEE
+pub use tee::{seal, unseal};
 pub use tee::{
     verify_attestation, verify_attestation_with_time, AmdKdsClient, AttestationPolicy,
     MinTcbPolicy, PolicyResult, VerificationResult,
 };
-pub use tee::{AttestationReport, AttestationRequest, CertificateChain, PlatformInfo, TcbVersion};
-pub use tee::{SnpTeeExtension, TeeExtension};
+pub use tee::{AttestationReport, AttestationRequest, PlatformInfo};
 
 // VM
 pub use vm::{BoxState, VmManager};
@@ -96,19 +89,19 @@ pub use volume::VolumeStore;
 // ── Feature-gated re-exports ──
 
 #[cfg(feature = "build")]
-pub use oci::{BuildConfig, BuildResult, Dockerfile, Instruction};
+pub use oci::{BuildConfig, Dockerfile, Instruction};
 
 #[cfg(feature = "compose")]
-pub use compose::{ComposeProject, ProjectState};
+pub use compose::ComposeProject;
 
 #[cfg(feature = "operator")]
-pub use operator::{AutoscalerController, ObservedMetrics, ReconcileResult};
+pub use operator::AutoscalerController;
 
 #[cfg(feature = "pool")]
-pub use pool::{PoolStats, WarmPool};
+pub use pool::WarmPool;
 
 #[cfg(feature = "scale")]
-pub use scale::{InstanceRegistry, ScaleManager, ServiceHealth};
+pub use scale::ScaleManager;
 
 // ── Constants ──
 

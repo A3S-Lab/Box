@@ -11,6 +11,8 @@ use crate::vmm::{Entrypoint, FsMount, InstanceSpec};
 
 use super::{fnv1a_hash, BoxLayout, VmManager};
 
+const SBIN_INIT: &str = "/sbin/init";
+
 impl VmManager {
     /// Build InstanceSpec from config and layout.
     pub(crate) fn build_instance_spec(&mut self, layout: &BoxLayout) -> Result<InstanceSpec> {
@@ -97,7 +99,7 @@ impl VmManager {
                     );
                     (exec, args, oci_config.env.clone())
                 }
-                None => ("/sbin/init".to_string(), vec![], vec![]),
+                None => (SBIN_INIT.to_string(), vec![], vec![]),
             };
 
             // Pass exec + args as individual env vars (avoids spaces being truncated
@@ -178,7 +180,7 @@ impl VmManager {
             tracing::debug!(env = ?env, "Using guest init as PID 1");
 
             Entrypoint {
-                executable: "/sbin/init".to_string(),
+                executable: SBIN_INIT.to_string(),
                 args: vec![],
                 env,
             }
@@ -208,7 +210,7 @@ impl VmManager {
                     }
                 }
                 None => Entrypoint {
-                    executable: "/sbin/init".to_string(),
+                    executable: SBIN_INIT.to_string(),
                     args: vec![],
                     env: vec![],
                 },
@@ -308,7 +310,7 @@ impl VmManager {
             (exec, args)
         } else {
             // Neither set: fall back to default init
-            ("/sbin/init".to_string(), vec![])
+            (SBIN_INIT.to_string(), vec![])
         }
     }
 
@@ -328,7 +330,7 @@ impl VmManager {
                     "ro" => true,
                     "rw" => false,
                     other => {
-                        return Err(BoxError::Other(format!(
+                        return Err(BoxError::ConfigError(format!(
                             "Invalid volume mode '{}' (expected 'ro' or 'rw'): {}",
                             other, volume
                         )));
@@ -337,7 +339,7 @@ impl VmManager {
                 (parts[0], parts[1], ro)
             }
             _ => {
-                return Err(BoxError::Other(format!(
+                return Err(BoxError::ConfigError(format!(
                     "Invalid volume format (expected host:guest[:ro|rw]): {}",
                     volume
                 )));

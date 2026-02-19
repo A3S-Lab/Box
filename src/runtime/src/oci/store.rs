@@ -61,8 +61,10 @@ impl ImageStore {
             image.last_used = Utc::now();
             let updated = image.clone();
             drop(index);
-            // Best-effort save of updated last_used
-            let _ = self.save_index_inner().await;
+            // Best-effort save of updated last_used; log on failure so staleness is visible.
+            if let Err(e) = self.save_index_inner().await {
+                tracing::warn!(error = %e, "Failed to persist image store index (last_used may be stale)");
+            }
             Some(updated)
         } else {
             None
@@ -77,7 +79,9 @@ impl ImageStore {
             image.last_used = Utc::now();
             let updated = image.clone();
             drop(index);
-            let _ = self.save_index_inner().await;
+            if let Err(e) = self.save_index_inner().await {
+                tracing::warn!(error = %e, "Failed to persist image store index (last_used may be stale)");
+            }
             Some(updated)
         } else {
             None

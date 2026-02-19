@@ -288,28 +288,39 @@ impl LayerInfo {
     }
 }
 
-/// Compute SHA256 digest of a file.
-pub fn sha256_file(path: &Path) -> Result<String> {
-    let data = std::fs::read(path).map_err(|e| {
+/// Compute SHA256 digest of a file by streaming its contents.
+pub(super) fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::Digest as _;
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path).map_err(|e| {
         BoxError::BuildError(format!(
-            "Failed to read file for hashing {}: {}",
+            "Failed to open file for hashing {}: {}",
             path.display(),
             e
         ))
     })?;
-
     let mut hasher = Sha256::new();
-    hasher.update(&data);
-    let hash = hasher.finalize();
-    Ok(hex::encode(hash))
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to read file for hashing {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Compute SHA256 digest of raw bytes.
-pub fn sha256_bytes(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let hash = hasher.finalize();
-    hex::encode(hash)
+pub(super) fn sha256_bytes(data: &[u8]) -> String {
+    hex::encode(Sha256::digest(data))
 }
 
 #[cfg(test)]

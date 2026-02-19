@@ -491,7 +491,10 @@ fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std:
                     info!("Container process {} exited with status {}", pid, status);
                     process::exit(status);
                 } else {
-                    info!("Child process {} exited with status {} (reaped)", pid, status);
+                    info!(
+                        "Child process {} exited with status {} (reaped)",
+                        pid, status
+                    );
                 }
             }
             Ok(WaitStatus::Signaled(pid, signal, _)) => {
@@ -504,7 +507,10 @@ fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std:
                         pid, signal
                     );
                 } else {
-                    info!("Child process {} killed by signal {:?} (reaped)", pid, signal);
+                    info!(
+                        "Child process {} killed by signal {:?} (reaped)",
+                        pid, signal
+                    );
                 }
             }
             Ok(WaitStatus::StillAlive) => {

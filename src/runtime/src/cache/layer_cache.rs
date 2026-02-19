@@ -63,7 +63,9 @@ impl LayerCache {
         if let Ok(content) = std::fs::read_to_string(&meta_path) {
             if let Ok(mut meta) = serde_json::from_str::<LayerMeta>(&content) {
                 meta.last_accessed = chrono::Utc::now().timestamp();
-                let _ = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?);
+                if let Err(e) = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?) {
+                    tracing::warn!(path = %meta_path.display(), error = %e, "Failed to update layer cache metadata");
+                }
             }
         }
 

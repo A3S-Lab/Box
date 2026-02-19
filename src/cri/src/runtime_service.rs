@@ -838,3 +838,693 @@ impl RuntimeService for BoxRuntimeService {
         Ok(Response::new(ReopenContainerLogResponse {}))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    use crate::streaming::StreamingServer;
+
+    /// Create a BoxRuntimeService for testing.
+    /// Uses a dummy ImageStore and StreamingHandle.
+    fn make_test_service() -> BoxRuntimeService {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let streaming_server = StreamingServer::new(addr);
+        let handle = streaming_server.handle();
+
+        BoxRuntimeService {
+            sandbox_store: Arc::new(SandboxStore::new()),
+            container_store: Arc::new(ContainerStore::new()),
+            vm_managers: Arc::new(RwLock::new(HashMap::new())),
+            streaming: handle,
+        }
+    }
+
+    fn test_sandbox(id: &str) -> PodSandbox {
+        PodSandbox {
+            id: id.to_string(),
+            name: format!("pod-{}", id),
+            namespace: "default".to_string(),
+            uid: format!("uid-{}", id),
+            state: SandboxState::Ready,
+            created_at: 1_000_000_000,
+            labels: HashMap::from([("app".to_string(), "test".to_string())]),
+            annotations: HashMap::new(),
+            log_directory: "/var/log/pods".to_string(),
+            runtime_handler: "a3s".to_string(),
+        }
+    }
+
+    fn test_container(id: &str, sandbox_id: &str) -> Container {
+        Container {
+            id: id.to_string(),
+            sandbox_id: sandbox_id.to_string(),
+            name: format!("container-{}", id),
+            image_ref: "nginx:latest".to_string(),
+            state: ContainerState::Created,
+            created_at: 1_000_000_000,
+            started_at: 0,
+            finished_at: 0,
+            exit_code: 0,
+            labels: HashMap::from([("app".to_string(), "test".to_string())]),
+            annotations: HashMap::new(),
+            log_path: String::new(),
+        }
+    }
+
+    // ── Version ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_version() {
+        let svc = make_test_service();
+        let resp = svc
+            .version(Request::new(VersionRequest {
+                version: "0.1.0".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.runtime_name, "a3s-box");
+        assert_eq!(resp.runtime_api_version, "v1");
+        assert!(!resp.runtime_version.is_empty());
+    }
+
+    // ── Status ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_status() {
+        let svc = make_test_service();
+        let resp = svc
+            .status(Request::new(StatusRequest { verbose: false }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let status = resp.status.unwrap();
+        assert_eq!(status.conditions.len(), 2);
+        assert!(status
+            .conditions
+            .iter()
+            .any(|c| c.r#type == "RuntimeReady" && c.status));
+        assert!(status
+            .conditions
+            .iter()
+            .any(|c| c.r#type == "NetworkReady" && c.status));
+    }
+
+    // ── UpdateRuntimeConfig ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_update_runtime_config() {
+        let svc = make_test_service();
+        let result = svc
+            .update_runtime_config(Request::new(UpdateRuntimeConfigRequest {
+                runtime_config: None,
+            }))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    // ── Pod Sandbox Status / List ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_pod_sandbox_status_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .pod_sandbox_status(Request::new(PodSandboxStatusRequest {
+                pod_sandbox_id: "nonexistent".to_string(),
+                verbose: false,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_pod_sandbox_status_found() {
+        let svc = make_test_service();
+        svc.sandbox_store.add(test_sandbox("sb-1")).await;
+
+        let resp = svc
+            .pod_sandbox_status(Request::new(PodSandboxStatusRequest {
+                pod_sandbox_id: "sb-1".to_string(),
+                verbose: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let status = resp.status.unwrap();
+        assert_eq!(status.id, "sb-1");
+        assert_eq!(status.state(), PodSandboxState::SandboxReady);
+        let meta = status.metadata.unwrap();
+        assert_eq!(meta.name, "pod-sb-1");
+        assert_eq!(meta.namespace, "default");
+    }
+
+    #[tokio::test]
+    async fn test_list_pod_sandbox_empty() {
+        let svc = make_test_service();
+        let resp = svc
+            .list_pod_sandbox(Request::new(ListPodSandboxRequest { filter: None }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_pod_sandbox_with_entries() {
+        let svc = make_test_service();
+        svc.sandbox_store.add(test_sandbox("sb-1")).await;
+        svc.sandbox_store.add(test_sandbox("sb-2")).await;
+
+        let resp = svc
+            .list_pod_sandbox(Request::new(ListPodSandboxRequest { filter: None }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_pod_sandbox_filter_by_id() {
+        let svc = make_test_service();
+        svc.sandbox_store.add(test_sandbox("sb-1")).await;
+        svc.sandbox_store.add(test_sandbox("sb-2")).await;
+
+        let resp = svc
+            .list_pod_sandbox(Request::new(ListPodSandboxRequest {
+                filter: Some(PodSandboxFilter {
+                    id: "sb-1".to_string(),
+                    state: 0,
+                    label_selector: HashMap::new(),
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].id, "sb-1");
+    }
+
+    // ── Container CRUD ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_create_container_sandbox_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .create_container(Request::new(CreateContainerRequest {
+                pod_sandbox_id: "nonexistent".to_string(),
+                config: Some(ContainerConfig {
+                    metadata: Some(ContainerMetadata {
+                        name: "test".to_string(),
+                        attempt: 0,
+                    }),
+                    image: Some(ImageSpec {
+                        image: "nginx:latest".to_string(),
+                        annotations: HashMap::new(),
+                    }),
+                    ..Default::default()
+                }),
+                sandbox_config: None,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_create_container_missing_config() {
+        let svc = make_test_service();
+        svc.sandbox_store.add(test_sandbox("sb-1")).await;
+
+        let result = svc
+            .create_container(Request::new(CreateContainerRequest {
+                pod_sandbox_id: "sb-1".to_string(),
+                config: None,
+                sandbox_config: None,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_create_container_missing_metadata() {
+        let svc = make_test_service();
+        svc.sandbox_store.add(test_sandbox("sb-1")).await;
+
+        let result = svc
+            .create_container(Request::new(CreateContainerRequest {
+                pod_sandbox_id: "sb-1".to_string(),
+                config: Some(ContainerConfig {
+                    metadata: None,
+                    ..Default::default()
+                }),
+                sandbox_config: None,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_create_container_success() {
+        let svc = make_test_service();
+        svc.sandbox_store.add(test_sandbox("sb-1")).await;
+
+        let resp = svc
+            .create_container(Request::new(CreateContainerRequest {
+                pod_sandbox_id: "sb-1".to_string(),
+                config: Some(ContainerConfig {
+                    metadata: Some(ContainerMetadata {
+                        name: "my-container".to_string(),
+                        attempt: 0,
+                    }),
+                    image: Some(ImageSpec {
+                        image: "nginx:latest".to_string(),
+                        annotations: HashMap::new(),
+                    }),
+                    ..Default::default()
+                }),
+                sandbox_config: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.container_id.is_empty());
+
+        // Verify container is in the store
+        let c = svc.container_store.get(&resp.container_id).await.unwrap();
+        assert_eq!(c.name, "my-container");
+        assert_eq!(c.sandbox_id, "sb-1");
+        assert_eq!(c.state, ContainerState::Created);
+    }
+
+    #[tokio::test]
+    async fn test_start_container_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .start_container(Request::new(StartContainerRequest {
+                container_id: "nonexistent".to_string(),
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_start_container_success() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+
+        svc.start_container(Request::new(StartContainerRequest {
+            container_id: "c-1".to_string(),
+        }))
+        .await
+        .unwrap();
+
+        let c = svc.container_store.get("c-1").await.unwrap();
+        assert_eq!(c.state, ContainerState::Running);
+        assert!(c.started_at > 0);
+    }
+
+    #[tokio::test]
+    async fn test_stop_container() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+        svc.container_store.mark_started("c-1", 2_000_000_000).await;
+
+        svc.stop_container(Request::new(StopContainerRequest {
+            container_id: "c-1".to_string(),
+            timeout: 0,
+        }))
+        .await
+        .unwrap();
+
+        let c = svc.container_store.get("c-1").await.unwrap();
+        assert_eq!(c.state, ContainerState::Exited);
+        assert!(c.finished_at > 0);
+        assert_eq!(c.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn test_remove_container() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+
+        svc.remove_container(Request::new(RemoveContainerRequest {
+            container_id: "c-1".to_string(),
+        }))
+        .await
+        .unwrap();
+
+        assert!(svc.container_store.get("c-1").await.is_none());
+    }
+
+    // ── Container Status ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_container_status_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .container_status(Request::new(ContainerStatusRequest {
+                container_id: "nonexistent".to_string(),
+                verbose: false,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_container_status_created() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+
+        let resp = svc
+            .container_status(Request::new(ContainerStatusRequest {
+                container_id: "c-1".to_string(),
+                verbose: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let status = resp.status.unwrap();
+        assert_eq!(status.id, "c-1");
+        assert_eq!(
+            status.state(),
+            crate::cri_api::ContainerState::ContainerCreated
+        );
+        assert_eq!(status.image_ref, "nginx:latest");
+    }
+
+    #[tokio::test]
+    async fn test_container_status_running() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+        svc.container_store.mark_started("c-1", 2_000_000_000).await;
+
+        let resp = svc
+            .container_status(Request::new(ContainerStatusRequest {
+                container_id: "c-1".to_string(),
+                verbose: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let status = resp.status.unwrap();
+        assert_eq!(
+            status.state(),
+            crate::cri_api::ContainerState::ContainerRunning
+        );
+        assert_eq!(status.started_at, 2_000_000_000);
+    }
+
+    // ── List Containers ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_containers_empty() {
+        let svc = make_test_service();
+        let resp = svc
+            .list_containers(Request::new(ListContainersRequest { filter: None }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.containers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_containers_filter_by_sandbox() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+        svc.container_store.add(test_container("c-2", "sb-1")).await;
+        svc.container_store.add(test_container("c-3", "sb-2")).await;
+
+        let resp = svc
+            .list_containers(Request::new(ListContainersRequest {
+                filter: Some(ContainerFilter {
+                    id: String::new(),
+                    state: None,
+                    pod_sandbox_id: "sb-1".to_string(),
+                    label_selector: HashMap::new(),
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.containers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_containers_filter_by_id() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+        svc.container_store.add(test_container("c-2", "sb-1")).await;
+
+        let resp = svc
+            .list_containers(Request::new(ListContainersRequest {
+                filter: Some(ContainerFilter {
+                    id: "c-1".to_string(),
+                    state: None,
+                    pod_sandbox_id: String::new(),
+                    label_selector: HashMap::new(),
+                }),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.containers.len(), 1);
+        assert_eq!(resp.containers[0].id, "c-1");
+    }
+
+    // ── UpdateContainerResources ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_update_container_resources_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .update_container_resources(Request::new(UpdateContainerResourcesRequest {
+                container_id: "nonexistent".to_string(),
+                linux: None,
+                annotations: HashMap::new(),
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_update_container_resources_no_linux() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+
+        let result = svc
+            .update_container_resources(Request::new(UpdateContainerResourcesRequest {
+                container_id: "c-1".to_string(),
+                linux: None,
+                annotations: HashMap::new(),
+            }))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_update_container_resources_linux_rejected() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+
+        let result = svc
+            .update_container_resources(Request::new(UpdateContainerResourcesRequest {
+                container_id: "c-1".to_string(),
+                linux: Some(LinuxContainerResources {
+                    cpu_quota: 100_000,
+                    memory_limit_in_bytes: 1024 * 1024 * 512,
+                    ..Default::default()
+                }),
+                annotations: HashMap::new(),
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unimplemented);
+    }
+
+    // ── ReopenContainerLog ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_reopen_container_log_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .reopen_container_log(Request::new(ReopenContainerLogRequest {
+                container_id: "nonexistent".to_string(),
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_reopen_container_log_empty_path() {
+        let svc = make_test_service();
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+
+        // Should succeed even with empty log path (no-op)
+        let result = svc
+            .reopen_container_log(Request::new(ReopenContainerLogRequest {
+                container_id: "c-1".to_string(),
+            }))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_reopen_container_log_truncates_file() {
+        let svc = make_test_service();
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("container.log");
+        std::fs::write(&log_path, "some log content here").unwrap();
+
+        let mut c = test_container("c-1", "sb-1");
+        c.log_path = log_path.to_string_lossy().to_string();
+        svc.container_store.add(c).await;
+
+        svc.reopen_container_log(Request::new(ReopenContainerLogRequest {
+            container_id: "c-1".to_string(),
+        }))
+        .await
+        .unwrap();
+
+        // File should be truncated
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.is_empty());
+    }
+
+    // ── Stop/Remove Pod Sandbox (store-only, no VM) ──────────────────
+
+    #[tokio::test]
+    async fn test_stop_pod_sandbox_no_vm() {
+        let svc = make_test_service();
+        svc.sandbox_store.add(test_sandbox("sb-1")).await;
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+        svc.container_store.mark_started("c-1", 2_000_000_000).await;
+
+        svc.stop_pod_sandbox(Request::new(StopPodSandboxRequest {
+            pod_sandbox_id: "sb-1".to_string(),
+        }))
+        .await
+        .unwrap();
+
+        // Sandbox should be NotReady
+        let sb = svc.sandbox_store.get("sb-1").await.unwrap();
+        assert_eq!(sb.state, SandboxState::NotReady);
+
+        // Container should be Exited
+        let c = svc.container_store.get("c-1").await.unwrap();
+        assert_eq!(c.state, ContainerState::Exited);
+    }
+
+    #[tokio::test]
+    async fn test_remove_pod_sandbox_no_vm() {
+        let svc = make_test_service();
+        svc.sandbox_store.add(test_sandbox("sb-1")).await;
+        svc.container_store.add(test_container("c-1", "sb-1")).await;
+
+        svc.remove_pod_sandbox(Request::new(RemovePodSandboxRequest {
+            pod_sandbox_id: "sb-1".to_string(),
+        }))
+        .await
+        .unwrap();
+
+        // Sandbox and containers should be gone
+        assert!(svc.sandbox_store.get("sb-1").await.is_none());
+        assert!(svc.container_store.get("c-1").await.is_none());
+    }
+
+    // ── Exec/Attach/PortForward error paths ──────────────────────────
+
+    #[tokio::test]
+    async fn test_exec_sync_container_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .exec_sync(Request::new(ExecSyncRequest {
+                container_id: "nonexistent".to_string(),
+                cmd: vec!["ls".to_string()],
+                timeout: 0,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_exec_sync_sandbox_not_found() {
+        let svc = make_test_service();
+        // Container exists but no VM for its sandbox
+        svc.container_store
+            .add(test_container("c-1", "sb-missing"))
+            .await;
+
+        let result = svc
+            .exec_sync(Request::new(ExecSyncRequest {
+                container_id: "c-1".to_string(),
+                cmd: vec!["ls".to_string()],
+                timeout: 0,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_exec_container_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .exec(Request::new(ExecRequest {
+                container_id: "nonexistent".to_string(),
+                cmd: vec!["sh".to_string()],
+                tty: false,
+                stdin: false,
+                stdout: true,
+                stderr: true,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_attach_container_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .attach(Request::new(AttachRequest {
+                container_id: "nonexistent".to_string(),
+                stdin: false,
+                tty: false,
+                stdout: true,
+                stderr: true,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_port_forward_sandbox_not_found() {
+        let svc = make_test_service();
+        let result = svc
+            .port_forward(Request::new(PortForwardRequest {
+                pod_sandbox_id: "nonexistent".to_string(),
+                port: vec![8080],
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+}

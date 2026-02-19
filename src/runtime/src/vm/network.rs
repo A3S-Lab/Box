@@ -115,7 +115,7 @@ impl VmManager {
         let hosts_content = a3s_box_core::dns::generate_hosts_file(&own_ip, &own_name, &peers);
         let hosts_path = layout.rootfs_path.join("etc/hosts");
         std::fs::write(&hosts_path, &hosts_content).map_err(|e| {
-            BoxError::Other(format!("Failed to write {}: {}", hosts_path.display(), e))
+            BoxError::NetworkError(format!("Failed to write {}: {}", hosts_path.display(), e))
         })?;
         tracing::debug!(hosts = %hosts_content.trim(), "Configured guest /etc/hosts for DNS discovery");
 

@@ -77,7 +77,7 @@ impl RegistryAuth {
 }
 
 /// Pulls OCI images from container registries.
-pub struct RegistryPuller {
+pub(crate) struct RegistryPuller {
     client: Client,
     auth: RegistryAuth,
     /// Signature verification policy (default: Skip).

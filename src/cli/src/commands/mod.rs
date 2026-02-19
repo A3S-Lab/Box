@@ -182,10 +182,7 @@ pub enum Command {
 
 /// Return the path to the image store directory (~/.a3s/images).
 pub(crate) fn images_dir() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".a3s"))
-        .unwrap_or_else(|| PathBuf::from(".a3s"))
-        .join("images")
+    a3s_box_core::dirs_home().join("images")
 }
 
 /// Open the shared image store.

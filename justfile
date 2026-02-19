@@ -144,9 +144,14 @@ test:
     print_header "🧪 A3S Box Test Suite"
     echo ""
 
-    # Test each crate (queue extracted to lane, code is standalone)
-    run_tests "a3s-box-core"    "core"
-    run_tests "a3s-box-runtime" "runtime"
+    # Test each crate
+    run_tests "a3s-box-core"       "core"
+    run_tests "a3s-box-runtime"    "runtime"
+    run_tests "a3s-box-cli"        "cli"
+    run_tests "a3s-box-cri"        "cri"
+    run_tests "a3s-box-sdk"        "sdk"
+    run_tests "a3s-box-guest-init" "guest-init"
+    run_tests "a3s-box-shim"       "shim"
 
     # Summary
     echo ""
@@ -164,11 +169,11 @@ test:
 
 # Run tests without progress (raw cargo output)
 test-raw:
-    cd src && cargo test -p a3s-box-core -p a3s-box-runtime --lib
+    cd src && cargo test -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim --lib
 
 # Run tests with verbose output
 test-v:
-    cd src && cargo test -p a3s-box-core -p a3s-box-runtime --lib -- --nocapture
+    cd src && cargo test -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim --lib -- --nocapture
 
 # ============================================================================
 # Test Subsets
@@ -468,6 +473,11 @@ test-cov:
 
     run_cov_realtime "a3s-box-core" "core"
     run_cov_realtime "a3s-box-runtime" "runtime"
+    run_cov_realtime "a3s-box-cli" "cli"
+    run_cov_realtime "a3s-box-cri" "cri"
+    run_cov_realtime "a3s-box-sdk" "sdk"
+    run_cov_realtime "a3s-box-guest-init" "guest-init"
+    run_cov_realtime "a3s-box-shim" "shim"
 
     # Print grand total summary
     echo -e "${BOLD}${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -542,7 +552,7 @@ cov:
     echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
     echo "┃                    🧪 Running Tests with Coverage                     ┃"
     echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime \
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim \
         --lcov --output-path "$COV_FILE" 2>&1 | grep -E "^test result"
     echo ""
     echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
@@ -557,15 +567,15 @@ cov-module MOD:
 
 # Coverage with HTML report (opens in browser)
 cov-html:
-    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime --html --open
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim --html --open
 
 # Coverage with detailed file-by-file table
 cov-table:
-    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim
 
 # Coverage for CI (generates lcov.info)
 cov-ci:
-    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime --lcov --output-path lcov.info
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim --lcov --output-path lcov.info
 
 # ============================================================================
 # Code Quality
@@ -742,7 +752,7 @@ publish:
 
     # Test
     print_step "Running tests..."
-    if (cd src && cargo test -p a3s-box-core -p a3s-box-runtime --lib); then
+    if (cd src && cargo test -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim --lib); then
         print_success "Tests OK"
     else
         print_error "Tests failed."

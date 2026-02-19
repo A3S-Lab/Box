@@ -31,7 +31,7 @@ pub fn check_virtualization_support() -> Result<VirtualizationSupport> {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        Err(BoxError::Other(
+        Err(BoxError::ConfigError(
             "Unsupported platform: A3S Box requires macOS (Apple Silicon) or Linux with KVM"
                 .to_string(),
         ))
@@ -47,10 +47,10 @@ fn check_macos_hypervisor() -> Result<VirtualizationSupport> {
         let output = std::process::Command::new("sysctl")
             .arg("kern.hv_support")
             .output()
-            .map_err(|e| BoxError::Other(format!("Failed to run sysctl: {}", e)))?;
+            .map_err(|e| BoxError::ExecError(format!("Failed to run sysctl: {}", e)))?;
 
         if !output.status.success() {
-            return Err(BoxError::Other(
+            return Err(BoxError::ConfigError(
                 "Failed to query Hypervisor.framework support via sysctl".to_string(),
             ));
         }
@@ -65,7 +65,7 @@ fn check_macos_hypervisor() -> Result<VirtualizationSupport> {
                 details: "Apple Silicon hardware virtualization is available".to_string(),
             })
         } else {
-            Err(BoxError::Other(
+            Err(BoxError::ConfigError(
                 "Hypervisor.framework is not available on this system. \
                  Ensure you are running on Apple Silicon and have the necessary entitlements."
                     .to_string(),
@@ -75,7 +75,7 @@ fn check_macos_hypervisor() -> Result<VirtualizationSupport> {
 
     #[cfg(not(target_arch = "aarch64"))]
     {
-        Err(BoxError::Other(
+        Err(BoxError::ConfigError(
             "A3S Box on macOS requires Apple Silicon (ARM64). Intel Macs are not supported."
                 .to_string(),
         ))
@@ -90,7 +90,7 @@ fn check_linux_kvm() -> Result<VirtualizationSupport> {
     let kvm_path = Path::new("/dev/kvm");
 
     if !kvm_path.exists() {
-        return Err(BoxError::Other(
+        return Err(BoxError::ConfigError(
             "KVM is not available: /dev/kvm not found. \
              Ensure KVM kernel modules are loaded (modprobe kvm kvm_intel or kvm_amd)."
                 .to_string(),
@@ -109,13 +109,16 @@ fn check_linux_kvm() -> Result<VirtualizationSupport> {
         }),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::PermissionDenied {
-                Err(BoxError::Other(format!(
+                Err(BoxError::ConfigError(format!(
                     "KVM access denied: {}. Add your user to the 'kvm' group: \
                      sudo usermod -aG kvm $USER",
                     e
                 )))
             } else {
-                Err(BoxError::Other(format!("Failed to access /dev/kvm: {}", e)))
+                Err(BoxError::ConfigError(format!(
+                    "Failed to access /dev/kvm: {}",
+                    e
+                )))
             }
         }
     }

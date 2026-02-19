@@ -1,9 +1,11 @@
 [package]
 name = "a3s-box-guest-init"
-version = "0.5.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Guest init process for a3s-box VM with namespace isolation"
-license = "MIT"
 
 [lib]
 name = "a3s_box_guest_init"

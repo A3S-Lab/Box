@@ -103,7 +103,6 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
     let resource_limits = common::build_resource_limits(&args.common)?;
 
-    // Parse logging config
     let log_driver: a3s_box_core::log::LogDriver = args
         .log_driver
         .parse()
@@ -118,31 +117,21 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
     let name = args.common.name.clone().unwrap_or_else(generate_name);
     let mut env = common::parse_env_vars(&args.common.env)?;
     for env_file in &args.common.env_file {
-        let file_env = common::parse_env_file(env_file)?;
-        for (k, v) in file_env {
+        for (k, v) in common::parse_env_file(env_file)? {
             env.entry(k).or_insert(v);
         }
     }
-
     let labels = common::parse_env_vars(&args.common.labels)
         .map_err(|e| e.replace("environment variable", "label"))?;
-
     let health_check = parse_health_check(&args.common);
-    let health_status = if health_check.is_some() {
-        "starting".to_string()
-    } else {
-        "none".to_string()
-    };
-
     let entrypoint_override = args
         .common
         .entrypoint
         .as_ref()
         .map(|ep| ep.split_whitespace().map(String::from).collect::<Vec<_>>());
-
     let (resolved_volumes, volume_names) = resolve_volumes(&args.common.volumes)?;
 
-    // Parse --shm-size → tmpfs entry
+    // Parse --shm-size once; reuse for both tmpfs entry and the box record.
     let shm_size = match &args.common.shm_size {
         Some(s) => {
             Some(common::parse_memory_bytes(s).map_err(|e| format!("Invalid --shm-size: {e}"))?)
@@ -160,21 +149,8 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         },
         None => a3s_box_core::NetworkMode::Tsi,
     };
+    let tee = build_tee_config(args);
 
-    let tee = if args.tee || args.tee_simulate {
-        TeeConfig::SevSnp {
-            workload_id: args
-                .tee_workload_id
-                .clone()
-                .unwrap_or_else(|| args.common.image.clone()),
-            generation: Default::default(),
-            simulate: args.tee_simulate,
-        }
-    } else {
-        TeeConfig::None
-    };
-
-    // Warn about unimplemented flags
     if !args.common.device.is_empty() {
         eprintln!("Warning: --device is not supported by the libkrun backend (devices are stored but not passed through)");
     }
@@ -182,69 +158,38 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         eprintln!("Warning: --gpus is not yet implemented (stored but not enforced)");
     }
 
-    let config = BoxConfig {
-        image: args.common.image.clone(),
-        resources: ResourceConfig {
-            vcpus: args.common.cpus,
-            memory_mb,
-            ..Default::default()
-        },
-        cmd: args.cmd.clone(),
-        entrypoint_override: entrypoint_override.clone(),
-        volumes: resolved_volumes.clone(),
-        extra_env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        port_map: args.common.publish.clone(),
-        dns: args.common.dns.clone(),
-        network: network_mode.clone(),
+    let config = build_box_config(
+        args,
+        memory_mb,
+        resource_limits.clone(),
+        entrypoint_override.clone(),
+        resolved_volumes.clone(),
+        env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        network_mode.clone(),
         tmpfs,
-        resource_limits: resource_limits.clone(),
         tee,
-        read_only: args.common.read_only,
-        ..Default::default()
-    };
+    );
 
-    // Boot VM
     let emitter = EventEmitter::new(256);
     let mut vm = VmManager::new(config, emitter);
     let box_id = vm.box_id().to_string();
-
     println!(
         "Creating box {} ({})...",
         name,
         &BoxRecord::make_short_id(&box_id)
     );
 
-    // Register network endpoint before boot
-    if let Some(ref net_name) = args.common.network {
-        let net_store = a3s_box_runtime::NetworkStore::default_path()?;
-        let mut net_config = net_store
-            .get(net_name)?
-            .ok_or_else(|| format!("network '{}' not found", net_name))?;
-        let endpoint = net_config
-            .connect(&box_id, &name)
-            .map_err(|e| format!("Failed to connect to network: {e}"))?;
-        net_store.update(&net_config)?;
-        println!(
-            "Connected to network {} (IP: {})",
-            net_name, endpoint.ip_address
-        );
-    }
-
+    connect_network(args.common.network.as_deref(), &box_id, &name)?;
     vm.boot().await?;
 
     let pid = vm.pid().await;
-    let home = dirs::home_dir()
-        .map(|h| h.join(".a3s"))
-        .unwrap_or_else(|| PathBuf::from(".a3s"));
-    let box_dir = home.join("boxes").join(&box_id);
+    let box_dir = a3s_box_core::dirs_home().join("boxes").join(&box_id);
 
-    // Parse --shm-size for record storage (not the tmpfs-merged version)
-    let shm_size_for_record = match &args.common.shm_size {
-        Some(s) => Some(common::parse_memory_bytes(s)?),
-        None => None,
+    let health_status = if health_check.is_some() {
+        "starting"
+    } else {
+        "none"
     };
-
-    // Save box record
     let record = BoxRecord {
         id: box_id.clone(),
         short_id: BoxRecord::make_short_id(&box_id),
@@ -273,7 +218,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         stopped_by_user: false,
         restart_count: 0,
         health_check: health_check.clone(),
-        health_status,
+        health_status: health_status.to_string(),
         health_retries: 0,
         health_last_check: None,
         network_mode: network_mode.clone(),
@@ -293,7 +238,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         privileged: args.common.privileged,
         devices: args.common.device.clone(),
         gpus: args.common.gpus.clone(),
-        shm_size: shm_size_for_record,
+        shm_size,
         stop_signal: args.common.stop_signal.clone(),
         stop_timeout: args.common.stop_timeout,
         oom_kill_disable: args.common.oom_kill_disable,
@@ -301,11 +246,8 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         max_restart_count: 0,
         exit_code: None,
     };
+    StateFile::load_default()?.add(record)?;
 
-    let mut state = StateFile::load_default()?;
-    state.add(record)?;
-
-    // Spawn log processor
     let log_dir = box_dir.join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
     let _log_handle = a3s_box_runtime::log::spawn_log_processor(
@@ -314,7 +256,6 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         log_config,
     );
 
-    // Spawn health checker
     let health_checker = health_check.as_ref().map(|hc| {
         crate::health::spawn_health_checker(
             box_id.clone(),
@@ -323,7 +264,6 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         )
     });
 
-    // Attach named volumes
     super::volume::attach_volumes(&volume_names, &box_id)?;
 
     let stop_signal = args
@@ -348,6 +288,81 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         stop_signal,
         stop_timeout_ms,
     })
+}
+
+/// Build TeeConfig from run args.
+fn build_tee_config(args: &RunArgs) -> TeeConfig {
+    if args.tee || args.tee_simulate {
+        TeeConfig::SevSnp {
+            workload_id: args
+                .tee_workload_id
+                .clone()
+                .unwrap_or_else(|| args.common.image.clone()),
+            generation: Default::default(),
+            simulate: args.tee_simulate,
+        }
+    } else {
+        TeeConfig::None
+    }
+}
+
+/// Build BoxConfig from parsed run arguments.
+#[allow(clippy::too_many_arguments)]
+fn build_box_config(
+    args: &RunArgs,
+    memory_mb: u32,
+    resource_limits: a3s_box_core::config::ResourceLimits,
+    entrypoint_override: Option<Vec<String>>,
+    resolved_volumes: Vec<String>,
+    extra_env: Vec<(String, String)>,
+    network: a3s_box_core::NetworkMode,
+    tmpfs: Vec<String>,
+    tee: TeeConfig,
+) -> BoxConfig {
+    BoxConfig {
+        image: args.common.image.clone(),
+        resources: ResourceConfig {
+            vcpus: args.common.cpus,
+            memory_mb,
+            ..Default::default()
+        },
+        cmd: args.cmd.clone(),
+        entrypoint_override,
+        volumes: resolved_volumes,
+        extra_env,
+        port_map: args.common.publish.clone(),
+        dns: args.common.dns.clone(),
+        network,
+        tmpfs,
+        resource_limits,
+        tee,
+        read_only: args.common.read_only,
+        ..Default::default()
+    }
+}
+
+/// Register a network endpoint for the box before booting.
+fn connect_network(
+    net_name: Option<&str>,
+    box_id: &str,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(net_name) = net_name else {
+        return Ok(());
+    };
+    let net_store = a3s_box_runtime::NetworkStore::default_path()?;
+    let mut net_config = net_store
+        .get(net_name)?
+        .ok_or_else(|| format!("network '{}' not found", net_name))?;
+    let endpoint = net_config
+        .connect(box_id, name)
+        .map_err(|e| format!("Failed to connect to network: {e}"))?;
+    net_store.update(&net_config)?;
+    println!(
+        "Connected to network {} (IP: {})",
+        net_name, endpoint.ip_address
+    );
+    Ok(())
 }
 
 // ============================================================================

@@ -97,7 +97,7 @@ impl OciImage {
         let manifest_digest = index
             .manifests()
             .first()
-            .ok_or_else(|| BoxError::Other("No manifests in index.json".to_string()))?
+            .ok_or_else(|| BoxError::OciImageError("No manifests in index.json".to_string()))?
             .digest()
             .to_string();
 
@@ -169,7 +169,7 @@ impl OciImage {
         // Check oci-layout file exists
         let oci_layout_path = root_dir.join("oci-layout");
         if !oci_layout_path.exists() {
-            return Err(BoxError::Other(format!(
+            return Err(BoxError::OciImageError(format!(
                 "Not a valid OCI layout: missing oci-layout file in {}",
                 root_dir.display()
             )));
@@ -178,7 +178,7 @@ impl OciImage {
         // Check index.json exists
         let index_path = root_dir.join("index.json");
         if !index_path.exists() {
-            return Err(BoxError::Other(format!(
+            return Err(BoxError::OciImageError(format!(
                 "Not a valid OCI layout: missing index.json in {}",
                 root_dir.display()
             )));
@@ -187,7 +187,7 @@ impl OciImage {
         // Check blobs directory exists
         let blobs_dir = root_dir.join("blobs");
         if !blobs_dir.exists() {
-            return Err(BoxError::Other(format!(
+            return Err(BoxError::OciImageError(format!(
                 "Not a valid OCI layout: missing blobs directory in {}",
                 root_dir.display()
             )));
@@ -200,7 +200,7 @@ impl OciImage {
     fn load_index(root_dir: &Path) -> Result<ImageIndex> {
         let index_path = root_dir.join("index.json");
         let content = std::fs::read_to_string(&index_path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::OciImageError(format!(
                 "Failed to read index.json at {}: {}",
                 index_path.display(),
                 e
@@ -208,14 +208,14 @@ impl OciImage {
         })?;
 
         serde_json::from_str(&content)
-            .map_err(|e| BoxError::Other(format!("Failed to parse index.json: {}", e)))
+            .map_err(|e| BoxError::OciImageError(format!("Failed to parse index.json: {}", e)))
     }
 
     /// Load the image manifest from blobs.
     fn load_manifest(root_dir: &Path, digest: &str) -> Result<ImageManifest> {
         let blob_path = Self::blob_path(root_dir, digest);
         let content = std::fs::read_to_string(&blob_path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::OciImageError(format!(
                 "Failed to read manifest at {}: {}",
                 blob_path.display(),
                 e
@@ -223,14 +223,14 @@ impl OciImage {
         })?;
 
         serde_json::from_str(&content)
-            .map_err(|e| BoxError::Other(format!("Failed to parse manifest: {}", e)))
+            .map_err(|e| BoxError::OciImageError(format!("Failed to parse manifest: {}", e)))
     }
 
     /// Load the image configuration from blobs.
     fn load_config(root_dir: &Path, digest: &str) -> Result<OciImageConfig> {
         let blob_path = Self::blob_path(root_dir, digest);
         let content = std::fs::read_to_string(&blob_path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::OciImageError(format!(
                 "Failed to read config at {}: {}",
                 blob_path.display(),
                 e
@@ -238,7 +238,7 @@ impl OciImage {
         })?;
 
         let oci_config: ImageConfiguration = serde_json::from_str(&content)
-            .map_err(|e| BoxError::Other(format!("Failed to parse config: {}", e)))?;
+            .map_err(|e| BoxError::OciImageError(format!("Failed to parse config: {}", e)))?;
 
         // Convert to our config type
         Ok(OciImageConfig::from_oci_config(&oci_config))

@@ -37,9 +37,7 @@ impl StateFile {
 
     /// Load from the default path (~/.a3s/boxes.json).
     pub fn load_default() -> Result<Self, std::io::Error> {
-        let home = dirs::home_dir()
-            .map(|h| h.join(".a3s"))
-            .unwrap_or_else(|| PathBuf::from(".a3s"));
+        let home = a3s_box_core::dirs_home();
         Self::load(&home.join("boxes.json"))
     }
 

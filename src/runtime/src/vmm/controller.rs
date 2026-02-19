@@ -198,8 +198,8 @@ impl VmController {
         }
 
         // Try ~/.a3s/bin/ (SDK-extracted shim)
-        if let Some(home) = dirs::home_dir() {
-            let shim_path = home.join(".a3s").join("bin").join("a3s-box-shim");
+        {
+            let shim_path = a3s_box_core::dirs_home().join("bin").join("a3s-box-shim");
             if shim_path.exists() {
                 return Ok(shim_path);
             }

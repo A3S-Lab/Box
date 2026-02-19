@@ -113,7 +113,7 @@ impl VmManager {
     /// Create a new VM manager.
     pub fn new(config: BoxConfig, event_emitter: EventEmitter) -> Self {
         let box_id = uuid::Uuid::new_v4().to_string();
-        let home_dir = dirs_home().unwrap_or_else(|| PathBuf::from(".a3s"));
+        let home_dir = a3s_box_core::dirs_home();
 
         Self {
             config,
@@ -136,7 +136,7 @@ impl VmManager {
 
     /// Create a new VM manager with a specific box ID.
     pub fn with_box_id(config: BoxConfig, event_emitter: EventEmitter, box_id: String) -> Self {
-        let home_dir = dirs_home().unwrap_or_else(|| PathBuf::from(".a3s"));
+        let home_dir = a3s_box_core::dirs_home();
 
         Self {
             config,
@@ -164,7 +164,7 @@ impl VmManager {
         provider: Box<dyn VmmProvider>,
     ) -> Self {
         let box_id = uuid::Uuid::new_v4().to_string();
-        let home_dir = dirs_home().unwrap_or_else(|| PathBuf::from(".a3s"));
+        let home_dir = a3s_box_core::dirs_home();
         Self {
             config,
             box_id,
@@ -303,7 +303,7 @@ impl VmManager {
         {
             let state = self.state.read().await;
             if *state != BoxState::Created {
-                return Err(BoxError::Other("VM already booted".to_string()));
+                return Err(BoxError::StateError("VM already booted".to_string()));
             }
         }
 
@@ -320,9 +320,9 @@ impl VmManager {
         // 1.5. Override /etc/resolv.conf with configured DNS
         let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
         let resolv_path = layout.rootfs_path.join("etc/resolv.conf");
-        std::fs::write(&resolv_path, &resolv_content).map_err(|e| {
-            BoxError::Other(format!("Failed to write {}: {}", resolv_path.display(), e))
-        })?;
+        tokio::fs::write(&resolv_path, &resolv_content)
+            .await
+            .map_err(|e| BoxError::IoError(e))?;
         tracing::debug!(parent: &boot_span, dns = %resolv_content.trim(), "Configured guest DNS");
 
         // 2. Build InstanceSpec
@@ -488,7 +488,7 @@ impl VmManager {
         let mut state = self.state.write().await;
 
         if *state != BoxState::Ready {
-            return Err(BoxError::Other("VM not ready".to_string()));
+            return Err(BoxError::StateError("VM not ready".to_string()));
         }
 
         *state = BoxState::Busy;
@@ -500,7 +500,7 @@ impl VmManager {
         let mut state = self.state.write().await;
 
         if *state != BoxState::Busy && *state != BoxState::Compacting {
-            return Err(BoxError::Other("Invalid state transition".to_string()));
+            return Err(BoxError::StateError("Invalid state transition".to_string()));
         }
 
         *state = BoxState::Ready;
@@ -512,7 +512,7 @@ impl VmManager {
         let mut state = self.state.write().await;
 
         if *state != BoxState::Busy {
-            return Err(BoxError::Other("VM not busy".to_string()));
+            return Err(BoxError::StateError("VM not busy".to_string()));
         }
 
         *state = BoxState::Compacting;
@@ -527,10 +527,10 @@ impl VmManager {
         match *state {
             BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
             BoxState::Created => {
-                return Err(BoxError::Other("VM not yet booted".to_string()));
+                return Err(BoxError::StateError("VM not yet booted".to_string()));
             }
             BoxState::Stopped => {
-                return Err(BoxError::Other("VM is stopped".to_string()));
+                return Err(BoxError::StateError("VM is stopped".to_string()));
             }
         }
         drop(state);
@@ -540,7 +540,7 @@ impl VmManager {
             let ret = unsafe { libc::kill(pid as i32, libc::SIGSTOP) };
             if ret != 0 {
                 let err = std::io::Error::last_os_error();
-                return Err(BoxError::Other(format!(
+                return Err(BoxError::ExecError(format!(
                     "Failed to send SIGSTOP to pid {}: {}",
                     pid, err
                 )));
@@ -548,7 +548,9 @@ impl VmManager {
             tracing::info!(box_id = %self.box_id, pid, "VM paused");
             Ok(())
         } else {
-            Err(BoxError::Other("VM has no running process".to_string()))
+            Err(BoxError::StateError(
+                "VM has no running process".to_string(),
+            ))
         }
     }
 
@@ -561,7 +563,7 @@ impl VmManager {
             let ret = unsafe { libc::kill(pid as i32, libc::SIGCONT) };
             if ret != 0 {
                 let err = std::io::Error::last_os_error();
-                return Err(BoxError::Other(format!(
+                return Err(BoxError::ExecError(format!(
                     "Failed to send SIGCONT to pid {}: {}",
                     pid, err
                 )));
@@ -569,7 +571,9 @@ impl VmManager {
             tracing::info!(box_id = %self.box_id, pid, "VM resumed");
             Ok(())
         } else {
-            Err(BoxError::Other("VM has no running process".to_string()))
+            Err(BoxError::StateError(
+                "VM has no running process".to_string(),
+            ))
         }
     }
 
@@ -619,17 +623,6 @@ impl VmManager {
             BoxError::AttestationError("TEE is not configured for this box".to_string())
         })
     }
-}
-
-/// Get the A3S home directory (~/.a3s).
-fn dirs_home() -> Option<PathBuf> {
-    // Check A3S_HOME environment variable first
-    if let Ok(home) = std::env::var("A3S_HOME") {
-        return Some(PathBuf::from(home));
-    }
-
-    // Fall back to ~/.a3s
-    dirs::home_dir().map(|h| h.join(".a3s"))
 }
 
 /// Simple FNV-1a hash for generating short deterministic hashes from strings.

@@ -46,7 +46,7 @@ impl ComposeProject {
         // Validate: every service must have an image
         for (svc_name, svc) in &config.services {
             if svc.image.is_none() {
-                return Err(BoxError::Other(format!(
+                return Err(BoxError::ConfigError(format!(
                     "Service '{}' has no image specified",
                     svc_name
                 )));
@@ -56,7 +56,7 @@ impl ComposeProject {
         // Compute topological order
         let service_order = config
             .service_order()
-            .map_err(|e| BoxError::Other(format!("Invalid compose config: {}", e)))?;
+            .map_err(|e| BoxError::ConfigError(format!("Invalid compose config: {}", e)))?;
 
         Ok(Self {
             name,
@@ -87,16 +87,15 @@ impl ComposeProject {
         default_network: Option<&str>,
     ) -> Result<BoxConfig> {
         let svc = self.config.services.get(service_name).ok_or_else(|| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "Service '{}' not found in compose config",
                 service_name
             ))
         })?;
 
-        let image = svc
-            .image
-            .as_deref()
-            .ok_or_else(|| BoxError::Other(format!("Service '{}' has no image", service_name)))?;
+        let image = svc.image.as_deref().ok_or_else(|| {
+            BoxError::ConfigError(format!("Service '{}' has no image", service_name))
+        })?;
 
         // Parse memory limit
         let memory_mb = match &svc.mem_limit {
@@ -226,18 +225,18 @@ fn parse_compose_memory(s: &str) -> Result<u32> {
         return n
             .parse::<u64>()
             .map(|v| v.div_ceil(1024) as u32)
-            .map_err(|_| BoxError::Other(format!("Invalid memory value: {}", s)));
+            .map_err(|_| BoxError::ConfigError(format!("Invalid memory value: {}", s)));
     } else {
         // Assume bytes
         return s
             .parse::<u64>()
             .map(|v| v.div_ceil(1024 * 1024) as u32)
-            .map_err(|_| BoxError::Other(format!("Invalid memory value: {}", s)));
+            .map_err(|_| BoxError::ConfigError(format!("Invalid memory value: {}", s)));
     };
 
     let num: f64 = num_str
         .parse()
-        .map_err(|_| BoxError::Other(format!("Invalid memory value: {}", s)))?;
+        .map_err(|_| BoxError::ConfigError(format!("Invalid memory value: {}", s)))?;
 
     Ok((num * multiplier as f64) as u32)
 }

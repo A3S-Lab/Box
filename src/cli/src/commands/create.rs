@@ -1,7 +1,5 @@
 //! `a3s-box create` command — Create without starting.
 
-use std::path::PathBuf;
-
 use clap::Args;
 
 use super::common::{self, CommonBoxArgs};
@@ -67,9 +65,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     let box_id = uuid::Uuid::new_v4().to_string();
     let short_id = BoxRecord::make_short_id(&box_id);
 
-    let home = dirs::home_dir()
-        .map(|h| h.join(".a3s"))
-        .unwrap_or_else(|| PathBuf::from(".a3s"));
+    let home = a3s_box_core::dirs_home();
     let box_dir = home.join("boxes").join(&box_id);
 
     // Create box directory structure

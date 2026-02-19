@@ -26,7 +26,7 @@ pub trait CredentialProvider: Send + Sync {
     /// Not all backends support writes (e.g., environment-variable-based
     /// providers are read-only). Default implementation returns an error.
     fn store(&self, _registry: &str, _username: &str, _password: &str) -> Result<()> {
-        Err(crate::error::BoxError::Other(
+        Err(crate::error::BoxError::ConfigError(
             "This credential provider does not support storing credentials".to_string(),
         ))
     }
@@ -35,7 +35,7 @@ pub trait CredentialProvider: Send + Sync {
     ///
     /// Default implementation returns an error.
     fn remove(&self, _registry: &str) -> Result<bool> {
-        Err(crate::error::BoxError::Other(
+        Err(crate::error::BoxError::ConfigError(
             "This credential provider does not support removing credentials".to_string(),
         ))
     }

@@ -168,9 +168,7 @@ async fn execute_up(
 
     // Step 2: Boot services in dependency order
     let default_net = project.default_network_name();
-    let home = dirs::home_dir()
-        .map(|h| h.join(".a3s"))
-        .unwrap_or_else(|| PathBuf::from(".a3s"));
+    let home = a3s_box_core::dirs_home();
 
     println!(
         "Starting project '{}' ({} services)...",

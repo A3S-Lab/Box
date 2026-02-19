@@ -37,7 +37,7 @@ pub fn ensure_shim(home_dir: &Path) -> Result<Option<PathBuf>> {
 
     let bin_dir = home_dir.join("bin");
     std::fs::create_dir_all(&bin_dir).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::ConfigError(format!(
             "Failed to create bin directory {}: {}",
             bin_dir.display(),
             e
@@ -70,7 +70,7 @@ pub fn ensure_shim(home_dir: &Path) -> Result<Option<PathBuf>> {
     );
 
     std::fs::write(&shim_path, SHIM_BINARY).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::ConfigError(format!(
             "Failed to write shim binary to {}: {}",
             shim_path.display(),
             e
@@ -82,7 +82,7 @@ pub fn ensure_shim(home_dir: &Path) -> Result<Option<PathBuf>> {
 
     // Write version sidecar
     std::fs::write(&version_path, SHIM_VERSION).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::ConfigError(format!(
             "Failed to write shim version file {}: {}",
             version_path.display(),
             e
@@ -102,7 +102,7 @@ fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)
         .map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "Failed to read permissions for {}: {}",
                 path.display(),
                 e
@@ -111,7 +111,7 @@ fn set_executable(path: &Path) -> Result<()> {
         .permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(path, perms).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::ConfigError(format!(
             "Failed to set executable permission on {}: {}",
             path.display(),
             e
@@ -138,8 +138,9 @@ fn sign_with_entitlement(shim_path: &Path, home_dir: &Path) -> Result<()> {
     <true/>
 </dict>
 </plist>"#;
-        std::fs::write(&entitlements_path, plist)
-            .map_err(|e| BoxError::Other(format!("Failed to write entitlements plist: {}", e)))?;
+        std::fs::write(&entitlements_path, plist).map_err(|e| {
+            BoxError::ConfigError(format!("Failed to write entitlements plist: {}", e))
+        })?;
     }
 
     // Check if already signed
@@ -165,7 +166,7 @@ fn sign_with_entitlement(shim_path: &Path, home_dir: &Path) -> Result<()> {
         .arg("--force")
         .arg(shim_path)
         .status()
-        .map_err(|e| BoxError::Other(format!("Failed to run codesign: {}", e)))?;
+        .map_err(|e| BoxError::ExecError(format!("Failed to run codesign: {}", e)))?;
 
     if !status.success() {
         tracing::warn!(

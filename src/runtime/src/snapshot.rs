@@ -23,7 +23,7 @@ impl SnapshotStore {
     /// Create a new snapshot store at the given directory.
     pub fn new(base_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(base_dir).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::CacheError(format!(
                 "Failed to create snapshot directory {}: {}",
                 base_dir.display(),
                 e
@@ -36,9 +36,7 @@ impl SnapshotStore {
 
     /// Open the default snapshot store at `~/.a3s/snapshots`.
     pub fn default_path() -> Result<Self> {
-        let home = dirs::home_dir()
-            .map(|h| h.join(".a3s"))
-            .unwrap_or_else(|| PathBuf::from(".a3s"));
+        let home = a3s_box_core::dirs_home();
         Self::new(&home.join("snapshots"))
     }
 
@@ -53,14 +51,14 @@ impl SnapshotStore {
     ) -> Result<SnapshotMetadata> {
         let snap_dir = self.base_dir.join(&metadata.id);
         if snap_dir.exists() {
-            return Err(BoxError::Other(format!(
+            return Err(BoxError::CacheError(format!(
                 "Snapshot '{}' already exists",
                 metadata.id
             )));
         }
 
         std::fs::create_dir_all(&snap_dir).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::CacheError(format!(
                 "Failed to create snapshot directory {}: {}",
                 snap_dir.display(),
                 e
@@ -73,7 +71,7 @@ impl SnapshotStore {
             copy_dir_recursive(rootfs_source, &rootfs_dest)?;
         } else {
             std::fs::create_dir_all(&rootfs_dest).map_err(|e| {
-                BoxError::Other(format!("Failed to create snapshot rootfs directory: {}", e))
+                BoxError::CacheError(format!("Failed to create snapshot rootfs directory: {}", e))
             })?;
         }
 
@@ -83,10 +81,10 @@ impl SnapshotStore {
         // Write metadata
         let meta_path = snap_dir.join("metadata.json");
         let json = serde_json::to_string_pretty(&metadata).map_err(|e| {
-            BoxError::Other(format!("Failed to serialize snapshot metadata: {}", e))
+            BoxError::SerializationError(format!("Failed to serialize snapshot metadata: {}", e))
         })?;
         std::fs::write(&meta_path, &json).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::CacheError(format!(
                 "Failed to write snapshot metadata {}: {}",
                 meta_path.display(),
                 e
@@ -104,14 +102,15 @@ impl SnapshotStore {
         }
 
         let data = std::fs::read_to_string(&meta_path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::CacheError(format!(
                 "Failed to read snapshot metadata {}: {}",
                 meta_path.display(),
                 e
             ))
         })?;
-        let metadata: SnapshotMetadata = serde_json::from_str(&data)
-            .map_err(|e| BoxError::Other(format!("Failed to parse snapshot metadata: {}", e)))?;
+        let metadata: SnapshotMetadata = serde_json::from_str(&data).map_err(|e| {
+            BoxError::SerializationError(format!("Failed to parse snapshot metadata: {}", e))
+        })?;
         Ok(Some(metadata))
     }
 
@@ -128,7 +127,7 @@ impl SnapshotStore {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(snapshots),
             Err(e) => {
-                return Err(BoxError::Other(format!(
+                return Err(BoxError::CacheError(format!(
                     "Failed to read snapshot directory: {}",
                     e
                 )));
@@ -136,8 +135,9 @@ impl SnapshotStore {
         };
 
         for entry in entries {
-            let entry = entry
-                .map_err(|e| BoxError::Other(format!("Failed to read snapshot entry: {}", e)))?;
+            let entry = entry.map_err(|e| {
+                BoxError::CacheError(format!("Failed to read snapshot entry: {}", e))
+            })?;
             let meta_path = entry.path().join("metadata.json");
             if meta_path.exists() {
                 if let Ok(data) = std::fs::read_to_string(&meta_path) {
@@ -160,8 +160,9 @@ impl SnapshotStore {
             return Ok(false);
         }
 
-        std::fs::remove_dir_all(&snap_dir)
-            .map_err(|e| BoxError::Other(format!("Failed to delete snapshot {}: {}", id, e)))?;
+        std::fs::remove_dir_all(&snap_dir).map_err(|e| {
+            BoxError::CacheError(format!("Failed to delete snapshot {}: {}", id, e))
+        })?;
         Ok(true)
     }
 
@@ -207,7 +208,7 @@ impl SnapshotStore {
 /// Recursively copy a directory.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::CacheError(format!(
             "Failed to create directory {}: {}",
             dst.display(),
             e
@@ -215,10 +216,10 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     })?;
 
     for entry in std::fs::read_dir(src).map_err(|e| {
-        BoxError::Other(format!("Failed to read directory {}: {}", src.display(), e))
+        BoxError::CacheError(format!("Failed to read directory {}: {}", src.display(), e))
     })? {
-        let entry =
-            entry.map_err(|e| BoxError::Other(format!("Failed to read directory entry: {}", e)))?;
+        let entry = entry
+            .map_err(|e| BoxError::CacheError(format!("Failed to read directory entry: {}", e)))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
@@ -226,7 +227,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::CacheError(format!(
                     "Failed to copy {} → {}: {}",
                     src_path.display(),
                     dst_path.display(),

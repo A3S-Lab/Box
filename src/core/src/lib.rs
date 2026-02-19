@@ -57,3 +57,18 @@ pub use volume::VolumeConfig;
 
 /// A3S Box version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Get the A3S home directory.
+///
+/// Resolution order:
+/// 1. `A3S_HOME` environment variable (if set)
+/// 2. `~/.a3s` (via `dirs::home_dir()`)
+/// 3. Fallback to `.a3s` in the current directory
+pub fn dirs_home() -> std::path::PathBuf {
+    if let Ok(home) = std::env::var("A3S_HOME") {
+        return std::path::PathBuf::from(home);
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".a3s"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".a3s"))
+}

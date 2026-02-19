@@ -47,7 +47,7 @@ impl VersionStore {
     pub fn load(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::ConfigError(format!(
                     "Failed to create version store directory {}: {}",
                     parent.display(),
                     e
@@ -57,7 +57,7 @@ impl VersionStore {
 
         let versions = if path.exists() {
             let data = std::fs::read_to_string(path).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::ConfigError(format!(
                     "Failed to read version store {}: {}",
                     path.display(),
                     e
@@ -76,9 +76,7 @@ impl VersionStore {
 
     /// Load from the default path (~/.a3s/sealed-versions.json).
     pub fn load_default() -> Result<Self> {
-        let home = dirs::home_dir()
-            .map(|h| h.join(".a3s"))
-            .unwrap_or_else(|| PathBuf::from(".a3s"));
+        let home = a3s_box_core::dirs_home();
         Self::load(&home.join("sealed-versions.json"))
     }
 
@@ -139,18 +137,12 @@ impl VersionStore {
 
     /// Save the version store atomically.
     fn save(&self) -> Result<()> {
-        let data = serde_json::to_string_pretty(&self.versions)
-            .map_err(|e| BoxError::Other(format!("Failed to serialize version store: {}", e)))?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &data).map_err(|e| {
-            BoxError::Other(format!(
-                "Failed to write version store {}: {}",
-                tmp.display(),
-                e
-            ))
+        let data = serde_json::to_string_pretty(&self.versions).map_err(|e| {
+            BoxError::SerializationError(format!("Failed to serialize version store: {}", e))
         })?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| BoxError::Other(format!("Failed to rename version store: {}", e)))?;
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, &data).map_err(|e| BoxError::IoError(e))?;
+        std::fs::rename(&tmp, &self.path).map_err(BoxError::IoError)?;
         Ok(())
     }
 }

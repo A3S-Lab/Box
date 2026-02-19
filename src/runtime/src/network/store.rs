@@ -29,7 +29,7 @@ impl NetworkStore {
 
     /// Create a store at the default location (`~/.a3s/networks.json`).
     pub fn default_path() -> Result<Self> {
-        let home = dirs_path()?;
+        let home = a3s_box_core::dirs_home();
         Ok(Self::new(home.join("networks.json")))
     }
 
@@ -161,13 +161,6 @@ impl NetworkStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
-
-/// Get the A3S home directory (~/.a3s).
-fn dirs_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .map_err(|_| BoxError::NetworkError("HOME environment variable not set".to_string()))?;
-    Ok(PathBuf::from(home).join(".a3s"))
 }
 
 impl a3s_box_core::traits::NetworkStoreBackend for NetworkStore {

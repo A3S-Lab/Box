@@ -152,3 +152,209 @@ impl ImageService for BoxImageService {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use a3s_box_runtime::oci::ImageStore;
+
+    /// Create a test ImageStore backed by a temp directory.
+    fn make_test_store() -> (Arc<ImageStore>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("images");
+        let store = ImageStore::new(&store_dir, 100 * 1024 * 1024).unwrap();
+        (Arc::new(store), tmp)
+    }
+
+    /// Create a BoxImageService for testing.
+    fn make_test_service() -> (BoxImageService, tempfile::TempDir) {
+        let (store, tmp) = make_test_store();
+        let svc = BoxImageService::new(store, RegistryAuth::anonymous());
+        (svc, tmp)
+    }
+
+    /// Put a fake image into the store for testing.
+    async fn put_test_image(store: &ImageStore, reference: &str, digest: &str) {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a minimal OCI layout
+        std::fs::write(
+            tmp.path().join("oci-layout"),
+            r#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        let blobs_dir = tmp.path().join("blobs").join("sha256");
+        std::fs::create_dir_all(&blobs_dir).unwrap();
+        std::fs::write(blobs_dir.join("dummy"), b"test layer data").unwrap();
+
+        store.put(reference, digest, tmp.path()).await.unwrap();
+    }
+
+    // ── ListImages ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_list_images_empty() {
+        let (svc, _tmp) = make_test_service();
+        let resp = svc
+            .list_images(Request::new(ListImagesRequest { filter: None }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_images_with_entries() {
+        let (svc, _tmp) = make_test_service();
+        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
+        put_test_image(&svc.image_store, "alpine:3.18", "sha256:bbb222").await;
+
+        let resp = svc
+            .list_images(Request::new(ListImagesRequest { filter: None }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.images.len(), 2);
+
+        // Verify image fields
+        let refs: Vec<&str> = resp
+            .images
+            .iter()
+            .flat_map(|i| &i.repo_tags)
+            .map(|s| s.as_str())
+            .collect();
+        assert!(refs.contains(&"nginx:latest"));
+        assert!(refs.contains(&"alpine:3.18"));
+    }
+
+    // ── ImageStatus ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_image_status_missing_spec() {
+        let (svc, _tmp) = make_test_service();
+        let result = svc
+            .image_status(Request::new(ImageStatusRequest {
+                image: None,
+                verbose: false,
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_image_status_not_found() {
+        let (svc, _tmp) = make_test_service();
+        let resp = svc
+            .image_status(Request::new(ImageStatusRequest {
+                image: Some(ImageSpec {
+                    image: "nonexistent:latest".to_string(),
+                    annotations: Default::default(),
+                }),
+                verbose: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.image.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_image_status_found() {
+        let (svc, _tmp) = make_test_service();
+        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
+
+        let resp = svc
+            .image_status(Request::new(ImageStatusRequest {
+                image: Some(ImageSpec {
+                    image: "nginx:latest".to_string(),
+                    annotations: Default::default(),
+                }),
+                verbose: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let image = resp.image.unwrap();
+        assert_eq!(image.id, "sha256:aaa111");
+        assert!(image.repo_tags.contains(&"nginx:latest".to_string()));
+    }
+
+    // ── RemoveImage ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_remove_image_missing_spec() {
+        let (svc, _tmp) = make_test_service();
+        let result = svc
+            .remove_image(Request::new(RemoveImageRequest { image: None }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_remove_image_not_found() {
+        let (svc, _tmp) = make_test_service();
+        let result = svc
+            .remove_image(Request::new(RemoveImageRequest {
+                image: Some(ImageSpec {
+                    image: "nonexistent:latest".to_string(),
+                    annotations: Default::default(),
+                }),
+            }))
+            .await;
+        // ImageStore.remove returns an error for missing images
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_remove_image_success() {
+        let (svc, _tmp) = make_test_service();
+        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
+
+        svc.remove_image(Request::new(RemoveImageRequest {
+            image: Some(ImageSpec {
+                image: "nginx:latest".to_string(),
+                annotations: Default::default(),
+            }),
+        }))
+        .await
+        .unwrap();
+
+        // Verify it's gone
+        assert!(svc.image_store.get("nginx:latest").await.is_none());
+    }
+
+    // ── ImageFsInfo ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_image_fs_info_empty() {
+        let (svc, _tmp) = make_test_service();
+        let resp = svc
+            .image_fs_info(Request::new(ImageFsInfoRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.image_filesystems.len(), 1);
+        let fs = &resp.image_filesystems[0];
+        assert_eq!(fs.used_bytes.as_ref().unwrap().value, 0);
+    }
+
+    #[tokio::test]
+    async fn test_image_fs_info_with_images() {
+        let (svc, _tmp) = make_test_service();
+        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
+
+        let resp = svc
+            .image_fs_info(Request::new(ImageFsInfoRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.image_filesystems.len(), 1);
+        let fs = &resp.image_filesystems[0];
+        assert!(fs.used_bytes.as_ref().unwrap().value > 0);
+        assert!(fs.fs_id.is_some());
+    }
+}

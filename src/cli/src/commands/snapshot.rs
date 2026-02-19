@@ -142,9 +142,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     let box_name = args.name.unwrap_or_else(generate_name);
     let short_id = BoxRecord::make_short_id(&box_id);
 
-    let home = dirs::home_dir()
-        .map(|h| h.join(".a3s"))
-        .unwrap_or_else(|| std::path::PathBuf::from(".a3s"));
+    let home = a3s_box_core::dirs_home();
     let box_dir = home.join("boxes").join(&box_id);
     let socket_dir = box_dir.join("sockets");
     let logs_dir = box_dir.join("logs");

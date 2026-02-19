@@ -43,7 +43,7 @@ pub use image::{OciHealthCheck, OciImage, OciImageConfig};
 pub use layers::extract_layer;
 pub use pull::ImagePuller;
 pub use reference::ImageReference;
-pub use registry::{PushResult, RegistryAuth, RegistryPuller, RegistryPusher};
+pub use registry::{PushResult, RegistryAuth, RegistryPusher};
 pub use rootfs::OciRootfsBuilder;
 pub use signing::{SignaturePolicy, VerifyResult};
 pub use store::ImageStore;

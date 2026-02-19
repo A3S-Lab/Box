@@ -136,7 +136,9 @@ impl ImagePuller {
         let stored = self.store.put(&full_ref, &digest, &tmp_dir).await?;
 
         // Clean up temp directory
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+        if let Err(e) = std::fs::remove_dir_all(&tmp_dir) {
+            tracing::warn!(path = %tmp_dir.display(), error = %e, "Failed to remove temp dir after pull");
+        }
 
         // Evict old images if over capacity
         let evicted = self.store.evict().await?;

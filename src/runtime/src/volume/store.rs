@@ -35,7 +35,7 @@ impl VolumeStore {
 
     /// Create a store at the default location (`~/.a3s/volumes.json`).
     pub fn default_path() -> Result<Self> {
-        let home = dirs_path()?;
+        let home = a3s_box_core::dirs_home();
         Ok(Self::new(home.join("volumes.json"), home.join("volumes")))
     }
 
@@ -46,15 +46,16 @@ impl VolumeStore {
         }
 
         let data = std::fs::read_to_string(&self.path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "failed to read volumes file {}: {}",
                 self.path.display(),
                 e
             ))
         })?;
 
-        let file: VolumesFile = serde_json::from_str(&data)
-            .map_err(|e| BoxError::Other(format!("failed to parse volumes file: {}", e)))?;
+        let file: VolumesFile = serde_json::from_str(&data).map_err(|e| {
+            BoxError::SerializationError(format!("failed to parse volumes file: {}", e))
+        })?;
 
         Ok(file.volumes)
     }
@@ -63,7 +64,7 @@ impl VolumeStore {
     pub fn save(&self, volumes: &HashMap<String, VolumeConfig>) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::ConfigError(format!(
                     "failed to create directory {}: {}",
                     parent.display(),
                     e
@@ -75,12 +76,13 @@ impl VolumeStore {
             volumes: volumes.clone(),
         };
 
-        let json = serde_json::to_string_pretty(&file)
-            .map_err(|e| BoxError::Other(format!("failed to serialize volumes: {}", e)))?;
+        let json = serde_json::to_string_pretty(&file).map_err(|e| {
+            BoxError::SerializationError(format!("failed to serialize volumes: {}", e))
+        })?;
 
         let tmp_path = self.path.with_extension("json.tmp");
         std::fs::write(&tmp_path, &json).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "failed to write tmp file {}: {}",
                 tmp_path.display(),
                 e
@@ -88,7 +90,7 @@ impl VolumeStore {
         })?;
 
         std::fs::rename(&tmp_path, &self.path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "failed to rename {} → {}: {}",
                 tmp_path.display(),
                 self.path.display(),
@@ -112,7 +114,7 @@ impl VolumeStore {
         let mut volumes = self.load()?;
 
         if volumes.contains_key(&config.name) {
-            return Err(BoxError::Other(format!(
+            return Err(BoxError::ConfigError(format!(
                 "volume '{}' already exists",
                 config.name
             )));
@@ -121,14 +123,14 @@ impl VolumeStore {
         // Create volume data directory
         let vol_dir = self.volumes_dir.join(&config.name);
         std::fs::create_dir_all(&vol_dir).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::ConfigError(format!(
                 "failed to create volume directory {}: {}",
                 vol_dir.display(),
                 e
             ))
         })?;
 
-        config.mount_point = vol_dir.to_string_lossy().to_string();
+        config.mount_point = vol_dir.to_string_lossy().into_owned();
 
         volumes.insert(config.name.clone(), config.clone());
         self.save(&volumes)?;
@@ -141,12 +143,12 @@ impl VolumeStore {
 
         let config = volumes
             .remove(name)
-            .ok_or_else(|| BoxError::Other(format!("volume '{}' not found", name)))?;
+            .ok_or_else(|| BoxError::ConfigError(format!("volume '{}' not found", name)))?;
 
         if config.is_in_use() && !force {
             // Put it back
             volumes.insert(name.to_string(), config.clone());
-            return Err(BoxError::Other(format!(
+            return Err(BoxError::ConfigError(format!(
                 "volume '{}' is in use by {} box(es); use --force to remove",
                 name,
                 config.in_use_by.len()
@@ -175,7 +177,7 @@ impl VolumeStore {
         let mut volumes = self.load()?;
 
         if !volumes.contains_key(&config.name) {
-            return Err(BoxError::Other(format!(
+            return Err(BoxError::ConfigError(format!(
                 "volume '{}' not found",
                 config.name
             )));
@@ -212,13 +214,6 @@ impl VolumeStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
-
-/// Get the A3S home directory (~/.a3s).
-fn dirs_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME")
-        .map_err(|_| BoxError::Other("HOME environment variable not set".to_string()))?;
-    Ok(PathBuf::from(home).join(".a3s"))
 }
 
 impl a3s_box_core::traits::VolumeStoreBackend for VolumeStore {

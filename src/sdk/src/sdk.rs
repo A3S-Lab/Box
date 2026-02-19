@@ -40,9 +40,7 @@ impl BoxSdk {
     /// Sets up the home directory at `~/.a3s` and ensures
     /// cache directories exist.
     pub async fn new() -> Result<Self> {
-        let home_dir = dirs::home_dir()
-            .map(|h| h.join(".a3s"))
-            .unwrap_or_else(|| PathBuf::from(".a3s"));
+        let home_dir = a3s_box_core::dirs_home();
 
         Self::init(home_dir).await
     }
@@ -57,7 +55,7 @@ impl BoxSdk {
         for dir in &dirs {
             let path = home_dir.join(dir);
             std::fs::create_dir_all(&path).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::ConfigError(format!(
                     "Failed to create SDK directory {}: {}",
                     path.display(),
                     e
@@ -176,7 +174,7 @@ impl BoxSdk {
             let ws_host_path = self.home_dir.join("workspaces").join(&ws.name);
             // Ensure workspace directory exists
             std::fs::create_dir_all(&ws_host_path).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::ConfigError(format!(
                     "Failed to create workspace directory {}: {}",
                     ws_host_path.display(),
                     e

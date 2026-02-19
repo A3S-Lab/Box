@@ -43,6 +43,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 
 # TEE attestation verification
+p256 = { workspace = true }
 p384 = { workspace = true }
 ecdsa = { workspace = true }
 x509-cert = { workspace = true }
@@ -90,3 +91,5 @@ tempfile = { workspace = true }
 prometheus = { workspace = true }
 
 [dev-dependencies]
+rand = { workspace = true }
+tempfile = { workspace = true }

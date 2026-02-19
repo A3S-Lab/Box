@@ -44,7 +44,7 @@ impl RootfsBuilder {
 
         // Create base directory
         fs::create_dir_all(&self.rootfs_path).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::BuildError(format!(
                 "Failed to create rootfs directory {}: {}",
                 self.rootfs_path.display(),
                 e
@@ -66,7 +66,7 @@ impl RootfsBuilder {
         for dir in self.layout.required_dirs() {
             let full_path = self.rootfs_path.join(dir.trim_start_matches('/'));
             fs::create_dir_all(&full_path).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::BuildError(format!(
                     "Failed to create directory {}: {}",
                     full_path.display(),
                     e
@@ -110,12 +110,12 @@ impl RootfsBuilder {
         // Ensure parent directory exists
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
-                BoxError::Other(format!("Failed to create parent directory: {}", e))
+                BoxError::BuildError(format!("Failed to create parent directory: {}", e))
             })?;
         }
 
         fs::write(&full_path, content).map_err(|e| {
-            BoxError::Other(format!("Failed to write {}: {}", full_path.display(), e))
+            BoxError::BuildError(format!("Failed to write {}: {}", full_path.display(), e))
         })?;
 
         tracing::debug!(path = %full_path.display(), "Created file");

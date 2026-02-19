@@ -64,7 +64,9 @@ impl OciRootfsBuilder {
         );
 
         if self.image_path.as_os_str().is_empty() {
-            return Err(BoxError::Other("OCI image path not set".to_string()));
+            return Err(BoxError::OciImageError(
+                "OCI image path not set".to_string(),
+            ));
         }
 
         self.create_base_structure()?;
@@ -98,7 +100,7 @@ impl OciRootfsBuilder {
         for dir in dirs {
             let full_path = self.rootfs_path.join(dir);
             std::fs::create_dir_all(&full_path).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::BuildError(format!(
                     "Failed to create directory {}: {}",
                     full_path.display(),
                     e
@@ -133,24 +135,25 @@ impl OciRootfsBuilder {
         let src = self
             .guest_init_path
             .as_ref()
-            .ok_or_else(|| BoxError::Other("Guest init path not set".to_string()))?;
+            .ok_or_else(|| BoxError::BuildError("Guest init path not set".to_string()))?;
 
         if !src.exists() {
-            return Err(BoxError::Other(format!(
+            return Err(BoxError::BuildError(format!(
                 "Guest init binary not found: {}",
                 src.display()
             )));
         }
 
         let sbin_dir = self.rootfs_path.join("sbin");
-        std::fs::create_dir_all(&sbin_dir)
-            .map_err(|e| BoxError::Other(format!("Failed to create /sbin directory: {}", e)))?;
+        std::fs::create_dir_all(&sbin_dir).map_err(|e| {
+            BoxError::BuildError(format!("Failed to create /sbin directory: {}", e))
+        })?;
 
         let dest = sbin_dir.join("init");
         // Remove any existing init (e.g., busybox symlink in Alpine)
         if dest.exists() || dest.symlink_metadata().is_ok() {
             std::fs::remove_file(&dest).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::BuildError(format!(
                     "Failed to remove existing {}: {}",
                     dest.display(),
                     e
@@ -158,7 +161,7 @@ impl OciRootfsBuilder {
             })?;
         }
         std::fs::copy(src, &dest).map_err(|e| {
-            BoxError::Other(format!(
+            BoxError::BuildError(format!(
                 "Failed to copy guest init to {}: {}",
                 dest.display(),
                 e
@@ -169,11 +172,11 @@ impl OciRootfsBuilder {
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&dest)
-                .map_err(|e| BoxError::Other(format!("Failed to get permissions: {}", e)))?
+                .map_err(|e| BoxError::BuildError(format!("Failed to get permissions: {}", e)))?
                 .permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&dest, perms)
-                .map_err(|e| BoxError::Other(format!("Failed to set permissions: {}", e)))?;
+                .map_err(|e| BoxError::BuildError(format!("Failed to set permissions: {}", e)))?;
         }
 
         tracing::info!(
@@ -256,12 +259,12 @@ impl OciRootfsBuilder {
 
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                BoxError::Other(format!("Failed to create parent directory: {}", e))
+                BoxError::BuildError(format!("Failed to create parent directory: {}", e))
             })?;
         }
 
         std::fs::write(&full_path, content).map_err(|e| {
-            BoxError::Other(format!("Failed to write {}: {}", full_path.display(), e))
+            BoxError::BuildError(format!("Failed to write {}: {}", full_path.display(), e))
         })?;
 
         tracing::debug!(path = %full_path.display(), "Created file");

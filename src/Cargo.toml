@@ -59,6 +59,7 @@ sha2 = "0.10"
 hex = "0.4"
 
 # Cryptography (for TEE attestation verification)
+p256 = { version = "0.13", features = ["ecdsa"] }
 p384 = { version = "0.13", features = ["ecdsa"] }
 ecdsa = { version = "0.16", features = ["verifying"] }
 x509-cert = { version = "0.2", features = ["std"] }

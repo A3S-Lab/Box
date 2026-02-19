@@ -38,7 +38,7 @@ impl AuditLog {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
-                BoxError::Other(format!(
+                BoxError::AuditError(format!(
                     "Failed to create audit log directory {}: {}",
                     parent.display(),
                     e
@@ -61,9 +61,8 @@ impl AuditLog {
 
     /// Open the audit log at the default path (~/.a3s/audit/audit.jsonl).
     pub fn default_path() -> Result<Self> {
-        let path = dirs::home_dir()
-            .map(|h| h.join(".a3s").join("audit").join("audit.jsonl"))
-            .unwrap_or_else(|| PathBuf::from(".a3s/audit/audit.jsonl"));
+        let path = a3s_box_core::dirs_home().join("audit").join("audit.jsonl");
+
         Self::new(path, AuditConfig::default())
     }
 
@@ -72,7 +71,7 @@ impl AuditLog {
         let mut inner = self
             .inner
             .lock()
-            .map_err(|_| BoxError::Other("Audit log lock poisoned".to_string()))?;
+            .map_err(|_| BoxError::AuditError("Audit log lock poisoned".to_string()))?;
 
         if !inner.config.enabled {
             return Ok(());
@@ -90,7 +89,7 @@ impl AuditLog {
                 .append(true)
                 .open(&inner.path)
                 .map_err(|e| {
-                    BoxError::Other(format!(
+                    BoxError::AuditError(format!(
                         "Failed to open audit log {}: {}",
                         inner.path.display(),
                         e
@@ -100,16 +99,17 @@ impl AuditLog {
         }
 
         // Serialize and write
-        let mut line = serde_json::to_string(event)
-            .map_err(|e| BoxError::Other(format!("Failed to serialize audit event: {}", e)))?;
+        let mut line = serde_json::to_string(event).map_err(|e| {
+            BoxError::SerializationError(format!("Failed to serialize audit event: {}", e))
+        })?;
         line.push('\n');
 
         let bytes = line.as_bytes();
         if let Some(ref mut file) = inner.file {
             file.write_all(bytes)
-                .map_err(|e| BoxError::Other(format!("Failed to write audit event: {}", e)))?;
+                .map_err(|e| BoxError::AuditError(format!("Failed to write audit event: {}", e)))?;
             file.flush()
-                .map_err(|e| BoxError::Other(format!("Failed to flush audit log: {}", e)))?;
+                .map_err(|e| BoxError::AuditError(format!("Failed to flush audit log: {}", e)))?;
         }
 
         inner.current_size += bytes.len() as u64;
@@ -127,7 +127,9 @@ impl AuditLog {
         // Remove oldest if at limit
         let oldest = rotated_path(base, max);
         if oldest.exists() {
-            let _ = fs::remove_file(&oldest);
+            if let Err(e) = fs::remove_file(&oldest) {
+                tracing::warn!(path = %oldest.display(), error = %e, "Failed to remove oldest audit log during rotation");
+            }
         }
 
         // Shift existing rotated files: .9 → .10, .8 → .9, etc.
@@ -135,13 +137,17 @@ impl AuditLog {
             let from = rotated_path(base, i);
             let to = rotated_path(base, i + 1);
             if from.exists() {
-                let _ = fs::rename(&from, &to);
+                if let Err(e) = fs::rename(&from, &to) {
+                    tracing::warn!(from = %from.display(), to = %to.display(), error = %e, "Failed to shift audit log during rotation");
+                }
             }
         }
 
         // Rename current to .1
         if base.exists() {
-            let _ = fs::rename(base, rotated_path(base, 1));
+            if let Err(e) = fs::rename(base, rotated_path(base, 1)) {
+                tracing::warn!(path = %base.display(), error = %e, "Failed to rotate current audit log");
+            }
         }
 
         inner.current_size = 0;
@@ -191,7 +197,7 @@ pub fn read_audit_log(path: &Path, query: &AuditQuery) -> Result<Vec<AuditEvent>
     }
 
     let file = File::open(path).map_err(|e| {
-        BoxError::Other(format!(
+        BoxError::AuditError(format!(
             "Failed to open audit log {}: {}",
             path.display(),
             e
@@ -202,8 +208,8 @@ pub fn read_audit_log(path: &Path, query: &AuditQuery) -> Result<Vec<AuditEvent>
     let mut events = Vec::new();
 
     for line in reader.lines() {
-        let line =
-            line.map_err(|e| BoxError::Other(format!("Failed to read audit log line: {}", e)))?;
+        let line = line
+            .map_err(|e| BoxError::AuditError(format!("Failed to read audit log line: {}", e)))?;
 
         if line.trim().is_empty() {
             continue;
