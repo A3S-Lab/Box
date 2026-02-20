@@ -228,11 +228,30 @@ pub(super) fn handle_add(
 
     for src in src_patterns {
         if src.starts_with("http://") || src.starts_with("https://") {
-            // URL download — not supported in offline build, create placeholder
-            tracing::warn!(
-                url = src.as_str(),
-                "ADD URL download not supported in offline build, skipping"
-            );
+            // URL download — fetch and write to destination
+            let bytes = download_url(src).map_err(|e| {
+                BoxError::BuildError(format!("ADD URL download failed for {}: {}", src, e))
+            })?;
+            // Derive filename from URL path
+            let filename = src
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("downloaded");
+            let dest_file = if dst_in_rootfs.is_dir() || src.ends_with('/') {
+                dst_in_rootfs.join(filename)
+            } else {
+                dst_in_rootfs.clone()
+            };
+            if let Some(parent) = dest_file.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    BoxError::BuildError(format!("Failed to create parent for ADD URL: {}", e))
+                })?;
+            }
+            std::fs::write(&dest_file, &bytes).map_err(|e| {
+                BoxError::BuildError(format!("Failed to write downloaded file: {}", e))
+            })?;
+            tracing::info!(url = src.as_str(), dest = %dest_file.display(), "ADD URL downloaded");
             continue;
         }
 
@@ -422,4 +441,35 @@ pub(super) fn apply_base_config(
         }
     }
     // Note: onbuild triggers are NOT inherited — they are executed, not stored
+}
+
+/// Download a URL and return the response bytes.
+///
+/// Uses `tokio::task::block_in_place` to run async reqwest from a sync context
+/// while inside a tokio runtime (the build engine runs inside `async fn build()`).
+fn download_url(url: &str) -> std::result::Result<Vec<u8>, String> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+            let response = client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+            if !response.status().is_success() {
+                return Err(format!("HTTP {} for {}", response.status(), url));
+            }
+
+            response
+                .bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| format!("Failed to read response body: {}", e))
+        })
+    })
 }
