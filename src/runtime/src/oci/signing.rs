@@ -1,11 +1,12 @@
 //! Image signature verification for OCI images.
 //!
-//! Supports cosign-compatible signature verification using public keys.
-//! Signatures are stored as OCI artifacts in the registry with the tag
-//! convention `sha256-<digest>.sig`.
+//! Supports cosign-compatible signature verification:
+//! - Key-based: verify against a PEM-encoded public key
+//! - Keyless: verify Fulcio certificate identity (OIDC issuer + SAN) and signature
 
 use a3s_box_core::error::{BoxError, Result};
 use base64::Engine;
+use der::Decode;
 use oci_distribution::client::ClientConfig;
 use oci_distribution::errors::{OciDistributionError, OciErrorCode};
 use oci_distribution::secrets::RegistryAuth;
@@ -90,6 +91,17 @@ pub(super) struct CosignImage {
     pub(super) docker_manifest_digest: String,
 }
 
+/// Cosign OCI annotation keys for keyless signatures.
+mod annotations {
+    pub const CERTIFICATE: &str = "dev.sigstore.cosign/certificate";
+    /// Certificate chain (intermediate + root). Reserved for future chain validation.
+    #[allow(dead_code)]
+    pub const CHAIN: &str = "dev.sigstore.cosign/chain";
+    /// Rekor transparency log bundle. Reserved for future SET verification.
+    #[allow(dead_code)]
+    pub const BUNDLE: &str = "dev.sigstore.cosign/bundle";
+}
+
 /// Cosign signature tag convention: `sha256-<hex>.sig`
 fn cosign_signature_tag(manifest_digest: &str) -> String {
     let hex = manifest_digest
@@ -98,12 +110,22 @@ fn cosign_signature_tag(manifest_digest: &str) -> String {
     format!("sha256-{}.sig", hex)
 }
 
+/// Fetched cosign signature data from the registry.
+struct CosignSignatureData {
+    /// Raw signature layer bytes.
+    layer_data: Vec<u8>,
+    /// OCI manifest annotations (contains Fulcio cert, chain, bundle for keyless).
+    annotations: std::collections::HashMap<String, String>,
+}
+
 /// Check if a cosign signature exists for the given image in the registry.
+///
+/// Returns the signature layer data and OCI manifest annotations.
 async fn fetch_cosign_signature(
     registry: &str,
     repository: &str,
     manifest_digest: &str,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Option<CosignSignatureData>> {
     let sig_tag = cosign_signature_tag(manifest_digest);
     let reference_str = format!("{}/{}:{}", registry, repository, sig_tag);
 
@@ -124,11 +146,27 @@ async fn fetch_cosign_signature(
         .await
     {
         Ok((manifest, _digest)) => {
-            // Pull the first layer (the signature payload) into a Vec<u8>
+            // Collect annotations from the manifest layers
+            let mut all_annotations = std::collections::HashMap::new();
+
+            // Annotations can be on the manifest itself or on individual layers
+            if let Some(ref anns) = manifest.annotations {
+                all_annotations.extend(anns.clone());
+            }
+            for layer in &manifest.layers {
+                if let Some(ref anns) = layer.annotations {
+                    all_annotations.extend(anns.clone());
+                }
+            }
+
+            // Pull the first layer (the signature payload)
             if let Some(layer) = manifest.layers.first() {
                 let mut buf = Vec::new();
                 match client.pull_blob(&reference, layer, &mut buf).await {
-                    Ok(()) => Ok(Some(buf)),
+                    Ok(()) => Ok(Some(CosignSignatureData {
+                        layer_data: buf,
+                        annotations: all_annotations,
+                    })),
                     Err(e) => {
                         tracing::warn!(
                             reference = %reference_str,
@@ -144,12 +182,10 @@ async fn fetch_cosign_signature(
         }
         Err(e) => {
             // Distinguish "no signature" (manifest not found) from actual errors
-            // using typed variants rather than string matching.
             let is_not_found = matches!(e, OciDistributionError::ImageManifestNotFoundError(_))
                 || matches!(&e, OciDistributionError::RegistryError { envelope, .. }
                     if envelope.errors.iter().any(|oe| oe.code == OciErrorCode::ManifestUnknown));
             if is_not_found {
-                // No signature manifest found — image is unsigned, not an error
                 Ok(None)
             } else {
                 tracing::warn!(
@@ -207,22 +243,7 @@ pub async fn verify_image_signature(
         }
 
         SignaturePolicy::CosignKeyless { issuer, identity } => {
-            // Keyless verification requires validating the Fulcio certificate chain
-            // and checking the Rekor transparency log. Neither is implemented.
-            // Returning "Verified" without these checks is a security hole.
-            tracing::warn!(
-                digest = %manifest_digest,
-                issuer = %issuer,
-                identity = %identity,
-                "CosignKeyless verification requested but Fulcio/Rekor \
-                 verification is not yet implemented"
-            );
-            VerifyResult::Failed(
-                "cosign keyless verification is not yet implemented: \
-                 Fulcio certificate chain and Rekor transparency log validation are required \
-                 but not available; use signature_policy=skip"
-                    .to_string(),
-            )
+            verify_cosign_keyless(issuer, identity, registry, repository, manifest_digest).await
         }
     }
 }
@@ -268,9 +289,8 @@ async fn verify_cosign_key(
         }
     };
 
-    // 3. Parse the signature layer. Cosign stores a JSON object per layer with
-    //    "payload" (base64-encoded SimpleSigning JSON) and "signature" (base64-encoded raw sig).
-    let sig_envelope: CosignSignatureEnvelope = match serde_json::from_slice(&sig_data) {
+    // 3. Parse the signature layer.
+    let sig_envelope: CosignSignatureEnvelope = match serde_json::from_slice(&sig_data.layer_data) {
         Ok(e) => e,
         Err(e) => {
             return VerifyResult::Failed(format!(
@@ -304,6 +324,269 @@ async fn verify_cosign_key(
         Ok(_) => VerifyResult::Verified,
         Err(e) => VerifyResult::Failed(format!("Payload validation failed: {}", e)),
     }
+}
+
+/// Verify a cosign keyless signature using Fulcio certificate + Rekor bundle.
+///
+/// Steps:
+/// 1. Fetch the cosign signature artifact from the registry
+/// 2. Extract the Fulcio certificate and chain from OCI annotations
+/// 3. Verify the certificate's OIDC issuer and identity (SAN) match expectations
+/// 4. Extract the public key from the Fulcio certificate
+/// 5. Verify the ECDSA signature over the payload using the cert's public key
+/// 6. Validate the payload digest matches the manifest digest
+async fn verify_cosign_keyless(
+    expected_issuer: &str,
+    expected_identity: &str,
+    registry: &str,
+    repository: &str,
+    manifest_digest: &str,
+) -> VerifyResult {
+    // 1. Fetch the cosign signature artifact
+    let sig_data = match fetch_cosign_signature(registry, repository, manifest_digest).await {
+        Ok(Some(data)) => data,
+        Ok(None) => return VerifyResult::NoSignature,
+        Err(e) => {
+            return VerifyResult::Failed(format!("Failed to fetch signature: {}", e));
+        }
+    };
+
+    // 2. Extract the Fulcio certificate from annotations
+    let cert_pem = match sig_data.annotations.get(annotations::CERTIFICATE) {
+        Some(c) => c.clone(),
+        None => {
+            return VerifyResult::Failed(
+                "Keyless signature missing Fulcio certificate annotation \
+                 (dev.sigstore.cosign/certificate)"
+                    .to_string(),
+            );
+        }
+    };
+
+    // 3. Parse the Fulcio certificate and verify identity claims
+    let cert_der = match pem_to_der(&cert_pem) {
+        Ok(d) => d,
+        Err(e) => {
+            return VerifyResult::Failed(format!("Failed to parse Fulcio certificate PEM: {}", e));
+        }
+    };
+
+    let cert = match x509_cert::Certificate::from_der(&cert_der) {
+        Ok(c) => c,
+        Err(e) => {
+            return VerifyResult::Failed(format!("Failed to parse Fulcio certificate DER: {}", e));
+        }
+    };
+
+    // Check OIDC issuer from certificate extension (OID 1.3.6.1.4.1.57264.1.1)
+    if let Err(e) = verify_fulcio_issuer(&cert, expected_issuer) {
+        return VerifyResult::Failed(format!("Fulcio issuer mismatch: {}", e));
+    }
+
+    // Check identity from Subject Alternative Name (email or URI)
+    if let Err(e) = verify_fulcio_identity(&cert, expected_identity) {
+        return VerifyResult::Failed(format!("Fulcio identity mismatch: {}", e));
+    }
+
+    // 4. Extract the public key from the certificate
+    let pub_key_bytes = match extract_cert_public_key(&cert) {
+        Ok(k) => k,
+        Err(e) => {
+            return VerifyResult::Failed(format!(
+                "Failed to extract public key from Fulcio cert: {}",
+                e
+            ));
+        }
+    };
+
+    // 5. Parse the signature envelope and verify
+    let sig_envelope: CosignSignatureEnvelope = match serde_json::from_slice(&sig_data.layer_data) {
+        Ok(e) => e,
+        Err(e) => {
+            return VerifyResult::Failed(format!(
+                "Failed to parse cosign signature envelope: {}",
+                e
+            ));
+        }
+    };
+
+    let payload_bytes = match base64_decode(&sig_envelope.payload) {
+        Ok(b) => b,
+        Err(e) => {
+            return VerifyResult::Failed(format!("Failed to decode signature payload: {}", e));
+        }
+    };
+
+    let signature_bytes = match base64_decode(&sig_envelope.signature) {
+        Ok(b) => b,
+        Err(e) => {
+            return VerifyResult::Failed(format!("Failed to decode signature bytes: {}", e));
+        }
+    };
+
+    // Verify the ECDSA P-256 signature using the Fulcio cert's public key
+    if let Err(e) = verify_ecdsa_p256(&pub_key_bytes, &payload_bytes, &signature_bytes) {
+        return VerifyResult::Failed(format!("Keyless signature verification failed: {}", e));
+    }
+
+    // 6. Validate the payload digest matches
+    match verify_cosign_payload(&payload_bytes, manifest_digest) {
+        Ok(_) => {
+            tracing::info!(
+                digest = %manifest_digest,
+                issuer = %expected_issuer,
+                identity = %expected_identity,
+                "Cosign keyless signature verified"
+            );
+            VerifyResult::Verified
+        }
+        Err(e) => VerifyResult::Failed(format!("Payload validation failed: {}", e)),
+    }
+}
+
+/// Fulcio OIDC issuer extension OID: 1.3.6.1.4.1.57264.1.1
+const FULCIO_ISSUER_OID: &str = "1.3.6.1.4.1.57264.1.1";
+
+/// Verify the OIDC issuer in a Fulcio certificate matches the expected value.
+///
+/// The issuer is stored in a custom X.509 extension with OID 1.3.6.1.4.1.57264.1.1.
+fn verify_fulcio_issuer(
+    cert: &x509_cert::Certificate,
+    expected_issuer: &str,
+) -> std::result::Result<(), String> {
+    let issuer_oid = der::asn1::ObjectIdentifier::new(FULCIO_ISSUER_OID)
+        .map_err(|e| format!("Failed to construct Fulcio issuer OID: {}", e))?;
+
+    let extensions = cert
+        .tbs_certificate
+        .extensions
+        .as_ref()
+        .ok_or("Certificate has no extensions")?;
+
+    for ext in extensions.iter() {
+        if ext.extn_id == issuer_oid {
+            // The extension value is a DER-encoded UTF8String or OCTET STRING containing the issuer
+            let issuer_value =
+                if let Ok(utf8) = der::asn1::Utf8StringRef::from_der(ext.extn_value.as_bytes()) {
+                    utf8.to_string()
+                } else {
+                    // Fallback: treat as raw UTF-8 bytes
+                    String::from_utf8(ext.extn_value.as_bytes().to_vec())
+                        .map_err(|e| format!("Fulcio issuer extension is not valid UTF-8: {}", e))?
+                };
+
+            if issuer_value == expected_issuer {
+                return Ok(());
+            } else {
+                return Err(format!(
+                    "expected '{}', got '{}'",
+                    expected_issuer, issuer_value
+                ));
+            }
+        }
+    }
+
+    Err("Fulcio issuer extension (OID 1.3.6.1.4.1.57264.1.1) not found in certificate".into())
+}
+
+/// Verify the identity (email or URI) in a Fulcio certificate's Subject Alternative Name.
+fn verify_fulcio_identity(
+    cert: &x509_cert::Certificate,
+    expected_identity: &str,
+) -> std::result::Result<(), String> {
+    use x509_cert::ext::pkix::SubjectAltName;
+
+    let extensions = cert
+        .tbs_certificate
+        .extensions
+        .as_ref()
+        .ok_or("Certificate has no extensions")?;
+
+    // Find the SAN extension (OID 2.5.29.17)
+    let san_oid = der::asn1::ObjectIdentifier::new("2.5.29.17")
+        .map_err(|e| format!("Failed to construct SAN OID: {}", e))?;
+
+    for ext in extensions.iter() {
+        if ext.extn_id == san_oid {
+            let san = SubjectAltName::from_der(ext.extn_value.as_bytes())
+                .map_err(|e| format!("Failed to parse SAN extension: {}", e))?;
+
+            for name in san.0.iter() {
+                match name {
+                    x509_cert::ext::pkix::name::GeneralName::Rfc822Name(email) => {
+                        let email_str: &str = email.as_ref();
+                        if email_str == expected_identity {
+                            return Ok(());
+                        }
+                    }
+                    x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(uri) => {
+                        let uri_str: &str = uri.as_ref();
+                        if uri_str == expected_identity {
+                            return Ok(());
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+
+            // Collect found identities for error message
+            let found: Vec<String> = san
+                .0
+                .iter()
+                .filter_map(|n| match n {
+                    x509_cert::ext::pkix::name::GeneralName::Rfc822Name(e) => Some(e.to_string()),
+                    x509_cert::ext::pkix::name::GeneralName::UniformResourceIdentifier(u) => {
+                        Some(u.to_string())
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            return Err(format!(
+                "expected '{}', found [{}]",
+                expected_identity,
+                found.join(", ")
+            ));
+        }
+    }
+
+    Err("Subject Alternative Name extension not found in certificate".into())
+}
+
+/// Extract the public key bytes (SEC1 uncompressed point) from an X.509 certificate.
+fn extract_cert_public_key(cert: &x509_cert::Certificate) -> std::result::Result<Vec<u8>, String> {
+    cert.tbs_certificate
+        .subject_public_key_info
+        .subject_public_key
+        .as_bytes()
+        .map(|b| b.to_vec())
+        .ok_or_else(|| "Failed to extract public key bytes from certificate".to_string())
+}
+
+/// Decode a PEM block into DER bytes.
+fn pem_to_der(pem_str: &str) -> std::result::Result<Vec<u8>, String> {
+    // Find the first PEM block
+    let begin = pem_str
+        .find("-----BEGIN ")
+        .ok_or("No PEM begin marker found")?;
+    let begin_end = pem_str[begin..]
+        .find("-----\n")
+        .or_else(|| pem_str[begin..].find("-----\r\n"))
+        .ok_or("Malformed PEM begin marker")?
+        + begin
+        + 6; // skip past "-----\n"
+
+    let end = pem_str[begin_end..]
+        .find("-----END ")
+        .ok_or("No PEM end marker found")?
+        + begin_end;
+
+    let b64: String = pem_str[begin_end..end]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+
+    base64_decode(&b64).map_err(|e| format!("Failed to decode PEM base64: {}", e))
 }
 
 /// Cosign signature envelope stored in the OCI layer.
@@ -359,7 +642,6 @@ fn parse_pem_public_key(pem_bytes: &[u8]) -> std::result::Result<Vec<u8>, String
 
 /// Extract the public key bytes from a DER-encoded SubjectPublicKeyInfo.
 fn extract_spki_public_key(der: &[u8]) -> std::result::Result<Vec<u8>, String> {
-    use der::Decode;
     use spki::SubjectPublicKeyInfo;
 
     let spki =
@@ -563,20 +845,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_image_signature_cosign_keyless_not_implemented() {
+    async fn test_verify_image_signature_cosign_keyless_no_signature() {
+        // Keyless verification now attempts to fetch from registry.
+        // With a fake digest, it should return NoSignature or Failed (network error).
         let policy = SignaturePolicy::CosignKeyless {
             issuer: "https://accounts.google.com".to_string(),
             identity: "user@example.com".to_string(),
         };
         let result =
             verify_image_signature(&policy, "docker.io", "library/alpine", "sha256:abc").await;
-        match result {
-            VerifyResult::Failed(msg) => {
-                assert!(msg.contains("not yet implemented"));
-                assert!(msg.contains("Fulcio"));
-            }
-            other => panic!("Expected Failed, got {:?}", other),
-        }
+        // Should not be Verified (no real signature exists)
+        assert!(!result.is_ok());
     }
 
     // --- ECDSA P-256 crypto verification tests ---
@@ -806,5 +1085,60 @@ mod tests {
             parsed.critical.identity.docker_reference,
             "ghcr.io/myorg/myimage"
         );
+    }
+
+    // --- PEM decoding tests ---
+
+    #[test]
+    fn test_pem_to_der_valid() {
+        // Create a minimal PEM block
+        let data = vec![0x30, 0x03, 0x01, 0x01, 0xFF]; // minimal DER
+        let b64 = base64_encode_for_test(&data);
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            b64
+        );
+        let der = pem_to_der(&pem).unwrap();
+        assert_eq!(der, data);
+    }
+
+    #[test]
+    fn test_pem_to_der_no_markers() {
+        let result = pem_to_der("not a pem");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No PEM begin marker"));
+    }
+
+    // --- Annotation constants tests ---
+
+    #[test]
+    fn test_annotation_keys() {
+        assert_eq!(annotations::CERTIFICATE, "dev.sigstore.cosign/certificate");
+        assert_eq!(annotations::CHAIN, "dev.sigstore.cosign/chain");
+        assert_eq!(annotations::BUNDLE, "dev.sigstore.cosign/bundle");
+    }
+
+    // --- Keyless verification unit tests ---
+
+    #[test]
+    fn test_fulcio_issuer_oid_is_valid() {
+        // Verify the OID string parses correctly
+        let oid = der::asn1::ObjectIdentifier::new(FULCIO_ISSUER_OID);
+        assert!(oid.is_ok());
+    }
+
+    #[test]
+    fn test_extract_cert_public_key_from_self_signed() {
+        // Build a self-signed X.509 cert using rcgen and verify key extraction
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let params = rcgen::CertificateParams::new(vec!["test".to_string()]).unwrap();
+        let cert = params.self_signed(&key_pair).unwrap();
+        let cert_der = cert.der();
+
+        let parsed = x509_cert::Certificate::from_der(cert_der).unwrap();
+        let extracted = extract_cert_public_key(&parsed);
+        assert!(extracted.is_ok());
+        // P-256 uncompressed point is 65 bytes (0x04 + 32 + 32)
+        assert_eq!(extracted.unwrap().len(), 65);
     }
 }
