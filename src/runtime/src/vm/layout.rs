@@ -67,49 +67,51 @@ impl VmManager {
         let oci_image = puller.pull(reference).await?;
 
         let image_path = oci_image.root_dir().to_path_buf();
-        let rootfs_path = box_dir.join("rootfs");
 
-        // Try rootfs cache first
+        // Try rootfs cache first — on hit, use the rootfs provider (overlay or copy)
         let cache_key = RootfsCache::compute_key(reference, &[], &[], &[]);
-        let oci_config = if let Some(_cached) = self.try_rootfs_cache(&cache_key, &rootfs_path)? {
-            tracing::info!(
-                cache_key = %&cache_key[..12],
-                reference = %reference,
-                "Rootfs cache hit, skipping OCI extraction"
-            );
-            let builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
-            Some(builder.image_config()?)
-        } else {
-            tracing::info!(
-                image = %image_path.display(),
-                rootfs = %rootfs_path.display(),
-                "Building rootfs from pulled OCI image"
-            );
-
-            let mut builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
-
-            // Install guest init if available (runs as PID 1, mounts virtiofs shares,
-            // then execs the container entrypoint)
-            if let Ok(guest_init_path) = Self::find_guest_init() {
+        let (rootfs_path, oci_config) =
+            if let Some(cached_path) = self.try_rootfs_cache_path(&cache_key)? {
                 tracing::info!(
-                    guest_init = %guest_init_path.display(),
-                    "Installing guest init"
+                    cache_key = %&cache_key[..12],
+                    reference = %reference,
+                    provider = self.rootfs_provider.name(),
+                    "Rootfs cache hit"
                 );
-                builder = builder.with_guest_init(guest_init_path);
+                let rootfs_path = self.rootfs_provider.prepare(&box_dir, &cached_path)?;
+                let builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
+                (rootfs_path, Some(builder.image_config()?))
             } else {
-                tracing::warn!(
-                    "Guest init binary not found; container entrypoint will run as PID 1"
+                tracing::info!(
+                    image = %image_path.display(),
+                    "Building rootfs from pulled OCI image (cache miss)"
                 );
-            }
 
-            builder.build()?;
-            let config = builder.image_config()?;
+                let rootfs_path = box_dir.join("rootfs");
+                let mut builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
 
-            // Store in cache for next time
-            self.store_rootfs_cache(&cache_key, &rootfs_path, reference);
+                // Install guest init if available (runs as PID 1, mounts virtiofs shares,
+                // then execs the container entrypoint)
+                if let Ok(guest_init_path) = Self::find_guest_init() {
+                    tracing::info!(
+                        guest_init = %guest_init_path.display(),
+                        "Installing guest init"
+                    );
+                    builder = builder.with_guest_init(guest_init_path);
+                } else {
+                    tracing::warn!(
+                        "Guest init binary not found; container entrypoint will run as PID 1"
+                    );
+                }
 
-            Some(config)
-        };
+                builder.build()?;
+                let config = builder.image_config()?;
+
+                // Store in cache for next time
+                self.store_rootfs_cache(&cache_key, &rootfs_path, reference);
+
+                (rootfs_path, Some(config))
+            };
 
         // Generate TEE configuration if enabled
         let tee_instance_config = self.generate_tee_config(&box_dir)?;
@@ -130,6 +132,7 @@ impl VmManager {
     ///
     /// Returns `Some(target_path)` if cache hit, `None` if cache miss.
     /// If caching is disabled in config, always returns `None`.
+    #[cfg(test)]
     pub(crate) fn try_rootfs_cache(
         &self,
         cache_key: &str,
@@ -156,6 +159,27 @@ impl VmManager {
             }
             None => Ok(None),
         }
+    }
+
+    /// Try to get the cached rootfs path without copying.
+    ///
+    /// Returns `Some(cached_path)` if cache hit, `None` if cache miss.
+    /// The caller is responsible for preparing the rootfs via `RootfsProvider`.
+    pub(crate) fn try_rootfs_cache_path(&self, cache_key: &str) -> Result<Option<PathBuf>> {
+        if !self.config.cache.enabled {
+            return Ok(None);
+        }
+
+        let cache_dir = self.resolve_cache_dir().join("rootfs");
+        let cache = match RootfsCache::new(&cache_dir) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to open rootfs cache, skipping");
+                return Ok(None);
+            }
+        };
+
+        cache.get(cache_key)
     }
 
     /// Store a built rootfs in the cache for future reuse.
@@ -420,6 +444,7 @@ mod tests {
             home_dir: home_dir.to_path_buf(),
             anonymous_volumes: Vec::new(),
             tee: None,
+            rootfs_provider: crate::rootfs::default_provider(),
             exec_socket_path: None,
             pty_socket_path: None,
             prom: None,

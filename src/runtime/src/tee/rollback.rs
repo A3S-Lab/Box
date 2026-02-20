@@ -141,7 +141,7 @@ impl VersionStore {
             BoxError::SerializationError(format!("Failed to serialize version store: {}", e))
         })?;
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &data).map_err(|e| BoxError::IoError(e))?;
+        std::fs::write(&tmp, &data).map_err(BoxError::IoError)?;
         std::fs::rename(&tmp, &self.path).map_err(BoxError::IoError)?;
         Ok(())
     }

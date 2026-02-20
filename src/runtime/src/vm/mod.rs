@@ -96,6 +96,9 @@ pub struct VmManager {
     /// TEE extension (attestation, sealing, secret injection)
     pub(crate) tee: Option<Box<dyn TeeExtension>>,
 
+    /// Rootfs provider (overlay or copy)
+    pub(crate) rootfs_provider: Box<dyn crate::rootfs::RootfsProvider>,
+
     /// Path to the exec Unix socket (set after boot)
     pub(crate) exec_socket_path: Option<PathBuf>,
 
@@ -127,6 +130,7 @@ impl VmManager {
             home_dir,
             anonymous_volumes: Vec::new(),
             tee: None,
+            rootfs_provider: crate::rootfs::default_provider(),
             exec_socket_path: None,
             pty_socket_path: None,
             prom: None,
@@ -150,6 +154,7 @@ impl VmManager {
             home_dir,
             anonymous_volumes: Vec::new(),
             tee: None,
+            rootfs_provider: crate::rootfs::default_provider(),
             exec_socket_path: None,
             pty_socket_path: None,
             prom: None,
@@ -177,6 +182,7 @@ impl VmManager {
             home_dir,
             anonymous_volumes: Vec::new(),
             tee: None,
+            rootfs_provider: crate::rootfs::default_provider(),
             exec_socket_path: None,
             pty_socket_path: None,
             prom: None,
@@ -215,6 +221,19 @@ impl VmManager {
     /// default `VmController::find_shim()` fallback.
     pub fn set_provider(&mut self, provider: Box<dyn VmmProvider>) {
         self.provider = Some(provider);
+    }
+
+    /// Override the rootfs provider (overlay or copy).
+    ///
+    /// By default, `default_provider()` auto-detects the best available provider.
+    /// Call this before `boot()` to force a specific provider.
+    pub fn set_rootfs_provider(&mut self, provider: Box<dyn crate::rootfs::RootfsProvider>) {
+        self.rootfs_provider = provider;
+    }
+
+    /// Get the name of the active rootfs provider.
+    pub fn rootfs_provider_name(&self) -> &str {
+        self.rootfs_provider.name()
     }
 
     /// Attach Prometheus metrics to this VM manager.
@@ -322,7 +341,7 @@ impl VmManager {
         let resolv_path = layout.rootfs_path.join("etc/resolv.conf");
         tokio::fs::write(&resolv_path, &resolv_content)
             .await
-            .map_err(|e| BoxError::IoError(e))?;
+            .map_err(BoxError::IoError)?;
         tracing::debug!(parent: &boot_span, dns = %resolv_content.trim(), "Configured guest DNS");
 
         // 2. Build InstanceSpec
@@ -470,6 +489,16 @@ impl VmManager {
         self.passt_manager = None;
 
         *state = BoxState::Stopped;
+
+        // Cleanup rootfs provider (unmount overlay if applicable)
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        if let Err(e) = self.rootfs_provider.cleanup(&box_dir) {
+            tracing::warn!(
+                box_id = %self.box_id,
+                error = %e,
+                "Failed to cleanup rootfs provider"
+            );
+        }
 
         // Record Prometheus metrics
         if let Some(ref prom) = self.prom {
