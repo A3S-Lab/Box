@@ -436,6 +436,42 @@ cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture
 cargo test -p a3s-box-cli --test tee_integration -- --ignored --nocapture --test-threads=1
 ```
 
+## Roadmap
+
+### ✅ v0.5.x — Complete
+
+- [x] MicroVM runtime via libkrun (HVF/KVM), sub-200ms cold start
+- [x] Docker-compatible CLI — 52 commands
+- [x] OCI image pull/push/build/cache with LRU eviction
+- [x] Dockerfile build — all 17 instructions, multi-stage, multi-platform
+- [x] `ADD <url>` HTTP/HTTPS download in Dockerfile
+- [x] `ONBUILD` trigger inheritance from base images
+- [x] Manifest digest exposed on every pulled image (`OciImage::manifest_digest()`)
+- [x] Cosign image signing — key-based and keyless (OIDC + Rekor)
+- [x] AMD SEV-SNP attestation, RA-TLS, secret injection, sealed storage
+- [x] Re-attestation with configurable interval and failure threshold
+- [x] Rollback protection via monotonic counter in sealed data
+- [x] KBS (Key Broker Service) client with RATS challenge-response
+- [x] Warm pool — pre-booted VM pool with idle TTL and LRU eviction
+- [x] Compose orchestration — health-aware boot ordering, shared networks
+- [x] Snapshots — create/restore/ls/rm/inspect
+- [x] Syslog log driver (UDP/TCP, RFC 3164) + gzip-compressed JSON rotation
+- [x] Audit log — persistent JSON-lines trail, queryable via `a3s-box audit`
+- [x] 19 Prometheus metrics + OpenTelemetry tracing spans
+- [x] Kubernetes CRI v1 — RuntimeService, ImageService, streaming exec/attach/port-forward
+- [x] Helm chart — DaemonSet, RuntimeClass, RBAC
+- [x] Embedded SDK — Rust, Python, TypeScript
+
+### 🚧 v0.6.x — Planned
+
+- [ ] Persistent CRI state store — survive CRI server restarts without orphaning VMs
+- [ ] Intel TDX runtime support (hardware-gated, config variant already exists)
+- [ ] `--gpus` / `--device` passthrough via VFIO (libkrun upstream dependency)
+- [ ] `.tar.bz2` / `.tar.xz` auto-extraction in `ADD` (bzip2/xz deps)
+- [ ] OCI image signing on `push` (currently verify-only on pull)
+- [ ] Live resource update — hot-resize CPU/memory without VM restart
+- [ ] Multi-node compose — cross-host service discovery
+
 ## A3S Ecosystem
 
 A3S Box is the infrastructure layer. It provides VM isolation for any workload.
