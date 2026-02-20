@@ -208,6 +208,90 @@ impl ComposeProject {
         order.reverse();
         order
     }
+
+    /// Check if a service requires its dependencies to be healthy before starting.
+    ///
+    /// Returns the list of dependency service names that must reach "healthy" status.
+    pub fn health_wait_deps(&self, service_name: &str) -> Vec<String> {
+        let Some(svc) = self.config.services.get(service_name) else {
+            return vec![];
+        };
+
+        match &svc.depends_on {
+            a3s_box_core::compose::DependsOn::Map(map) => map
+                .iter()
+                .filter(|(_, cond)| cond.condition == "service_healthy")
+                .map(|(name, _)| name.clone())
+                .collect(),
+            _ => vec![],
+        }
+    }
+
+    /// Get the health check config for a service, if defined.
+    pub fn healthcheck(&self, service_name: &str) -> Option<HealthCheckSpec> {
+        let svc = self.config.services.get(service_name)?;
+        let hc = svc.healthcheck.as_ref()?;
+
+        let cmd = hc.test.to_vec();
+        if cmd.is_empty() {
+            return None;
+        }
+
+        Some(HealthCheckSpec {
+            cmd,
+            interval_secs: hc
+                .interval
+                .as_deref()
+                .and_then(parse_duration_secs)
+                .unwrap_or(30),
+            timeout_secs: hc
+                .timeout
+                .as_deref()
+                .and_then(parse_duration_secs)
+                .unwrap_or(5),
+            retries: hc.retries.unwrap_or(3),
+            start_period_secs: hc
+                .start_period
+                .as_deref()
+                .and_then(parse_duration_secs)
+                .unwrap_or(0),
+        })
+    }
+}
+
+/// Parsed health check specification (runtime-friendly).
+#[derive(Debug, Clone)]
+pub struct HealthCheckSpec {
+    /// Command to run.
+    pub cmd: Vec<String>,
+    /// Interval between checks in seconds.
+    pub interval_secs: u64,
+    /// Per-check timeout in seconds.
+    pub timeout_secs: u64,
+    /// Consecutive failures before unhealthy.
+    pub retries: u32,
+    /// Grace period before checks start counting.
+    pub start_period_secs: u64,
+}
+
+/// Parse a compose duration string (e.g., "30s", "1m", "500ms") into seconds.
+fn parse_duration_secs(s: &str) -> Option<u64> {
+    let s = s.trim().to_lowercase();
+    if s.ends_with("ms") {
+        let n: u64 = s.trim_end_matches("ms").parse().ok()?;
+        Some(n / 1000) // round down, minimum 0
+    } else if s.ends_with('s') {
+        s.trim_end_matches('s').parse().ok()
+    } else if s.ends_with('m') {
+        let n: u64 = s.trim_end_matches('m').parse().ok()?;
+        Some(n * 60)
+    } else if s.ends_with('h') {
+        let n: u64 = s.trim_end_matches('h').parse().ok()?;
+        Some(n * 3600)
+    } else {
+        // Assume seconds
+        s.parse().ok()
+    }
 }
 
 /// Parse a compose memory string (e.g., "512m", "1g", "1024") into MB.
@@ -523,5 +607,108 @@ services:
         assert!(box_config.privileged);
         assert_eq!(box_config.cap_add, vec!["NET_ADMIN"]);
         assert_eq!(box_config.cap_drop, vec!["ALL"]);
+    }
+
+    #[test]
+    fn test_parse_duration_secs() {
+        assert_eq!(parse_duration_secs("30s"), Some(30));
+        assert_eq!(parse_duration_secs("1m"), Some(60));
+        assert_eq!(parse_duration_secs("2h"), Some(7200));
+        assert_eq!(parse_duration_secs("500ms"), Some(0));
+        assert_eq!(parse_duration_secs("5000ms"), Some(5));
+        assert_eq!(parse_duration_secs("10"), Some(10));
+        assert_eq!(parse_duration_secs("abc"), None);
+    }
+
+    #[test]
+    fn test_health_wait_deps_simple() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    depends_on:
+      - db
+  db:
+    image: postgres
+"#;
+        let config = ComposeConfig::from_yaml_str(yaml).unwrap();
+        let project = ComposeProject::new("myapp", config).unwrap();
+        // Simple depends_on → no health wait (condition defaults to service_started)
+        assert!(project.health_wait_deps("web").is_empty());
+    }
+
+    #[test]
+    fn test_health_wait_deps_service_healthy() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+  db:
+    image: postgres
+    healthcheck:
+      test: ["CMD", "pg_isready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  redis:
+    image: redis
+"#;
+        let config = ComposeConfig::from_yaml_str(yaml).unwrap();
+        let project = ComposeProject::new("myapp", config).unwrap();
+        let deps = project.health_wait_deps("web");
+        assert_eq!(deps, vec!["db".to_string()]);
+    }
+
+    #[test]
+    fn test_healthcheck_spec() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+"#;
+        let config = ComposeConfig::from_yaml_str(yaml).unwrap();
+        let project = ComposeProject::new("myapp", config).unwrap();
+        let hc = project.healthcheck("web").unwrap();
+        assert_eq!(hc.cmd, vec!["CMD", "curl", "-f", "http://localhost/"]);
+        assert_eq!(hc.interval_secs, 10);
+        assert_eq!(hc.timeout_secs, 3);
+        assert_eq!(hc.retries, 5);
+        assert_eq!(hc.start_period_secs, 30);
+    }
+
+    #[test]
+    fn test_healthcheck_spec_defaults() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    healthcheck:
+      test: ["CMD", "true"]
+"#;
+        let config = ComposeConfig::from_yaml_str(yaml).unwrap();
+        let project = ComposeProject::new("myapp", config).unwrap();
+        let hc = project.healthcheck("web").unwrap();
+        assert_eq!(hc.interval_secs, 30);
+        assert_eq!(hc.timeout_secs, 5);
+        assert_eq!(hc.retries, 3);
+        assert_eq!(hc.start_period_secs, 0);
+    }
+
+    #[test]
+    fn test_healthcheck_none() {
+        let config = sample_config();
+        let project = ComposeProject::new("myapp", config).unwrap();
+        assert!(project.healthcheck("db").is_none());
     }
 }

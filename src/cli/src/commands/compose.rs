@@ -10,7 +10,7 @@ use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::{ComposeProject, NetworkStore, VmManager};
 use clap::{Args, Subcommand};
 
-use crate::state::{BoxRecord, StateFile};
+use crate::state::{BoxRecord, HealthCheck, StateFile};
 
 /// Label key for compose project name.
 const LABEL_PROJECT: &str = "com.a3s.compose.project";
@@ -49,6 +49,8 @@ pub enum ComposeCommand {
     Ps,
     /// Validate and display the compose configuration
     Config,
+    /// View logs from all services
+    Logs(ComposeLogsArgs),
 }
 
 #[derive(Args)]
@@ -56,6 +58,10 @@ pub struct ComposeUpArgs {
     /// Run in detached mode (background)
     #[arg(short = 'd', long)]
     pub detach: bool,
+
+    /// Timeout in seconds to wait for healthy dependencies (default: 120)
+    #[arg(long, default_value = "120")]
+    pub timeout: u64,
 }
 
 #[derive(Args)]
@@ -63,6 +69,20 @@ pub struct ComposeDownArgs {
     /// Remove named volumes declared in the compose file
     #[arg(short = 'v', long)]
     pub volumes: bool,
+}
+
+#[derive(Args)]
+pub struct ComposeLogsArgs {
+    /// Follow log output
+    #[arg(short = 'f', long)]
+    pub follow: bool,
+
+    /// Number of lines to show from the end of the logs
+    #[arg(long, default_value = "100")]
+    pub tail: usize,
+
+    /// Show logs for a specific service only
+    pub service: Option<String>,
 }
 
 pub async fn execute(args: ComposeArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -83,6 +103,7 @@ pub async fn execute(args: ComposeArgs) -> Result<(), Box<dyn std::error::Error>
         ComposeCommand::Down(down_args) => execute_down(&project_name, down_args).await,
         ComposeCommand::Ps => execute_ps(&project_name).await,
         ComposeCommand::Config => execute_config(&project_name, config),
+        ComposeCommand::Logs(logs_args) => execute_logs(&project_name, logs_args).await,
     }
 }
 
@@ -124,10 +145,13 @@ fn load_compose_file(
 // ============================================================================
 
 /// `compose up` — Create networks and start services in dependency order.
+///
+/// When a service declares `depends_on: { svc: { condition: service_healthy } }`,
+/// we wait for the dependency to reach "healthy" status before booting the dependent.
 async fn execute_up(
     project_name: &str,
     config: ComposeConfig,
-    _up_args: ComposeUpArgs,
+    up_args: ComposeUpArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let project = ComposeProject::new(project_name, config)?;
     let mut state = StateFile::load_default()?;
@@ -157,7 +181,6 @@ async fn execute_up(
     let net_store = NetworkStore::default_path()?;
     for (i, net_name) in networks.iter().enumerate() {
         if net_store.get(net_name)?.is_none() {
-            // Auto-assign subnets: 10.89.{i}.0/24
             let subnet = format!("10.89.{}.0/24", 100 + i);
             let config = a3s_box_core::network::NetworkConfig::new(net_name, &subnet)
                 .map_err(|e| format!("Failed to create network '{}': {}", net_name, e))?;
@@ -177,6 +200,17 @@ async fn execute_up(
     );
 
     for svc_name in &project.service_order {
+        // Wait for healthy dependencies before booting this service
+        let health_deps = project.health_wait_deps(svc_name);
+        if !health_deps.is_empty() {
+            print!(
+                "  [~] Waiting for {} to be healthy...",
+                health_deps.join(", ")
+            );
+            wait_for_healthy(&health_deps, up_args.timeout).await?;
+            println!(" ✓");
+        }
+
         let box_config = project.build_box_config(svc_name, Some(&default_net))?;
         let image = box_config.image.clone();
 
@@ -221,6 +255,21 @@ async fn execute_up(
         let volumes: Vec<String> = svc.map(|s| s.volumes.clone()).unwrap_or_default();
         let port_map: Vec<String> = svc.map(|s| s.ports.clone()).unwrap_or_default();
 
+        // Convert compose healthcheck → CLI HealthCheck
+        let health_check = project.healthcheck(svc_name).map(|hc| HealthCheck {
+            cmd: hc.cmd,
+            interval_secs: hc.interval_secs,
+            timeout_secs: hc.timeout_secs,
+            retries: hc.retries,
+            start_period_secs: hc.start_period_secs,
+        });
+
+        let health_status = if health_check.is_some() {
+            "starting".to_string()
+        } else {
+            "none".to_string()
+        };
+
         let record = BoxRecord {
             id: box_id.clone(),
             short_id: BoxRecord::make_short_id(&box_id),
@@ -259,8 +308,8 @@ async fn execute_up(
             restart_count: 0,
             max_restart_count: 0,
             exit_code: None,
-            health_check: None,
-            health_status: "none".to_string(),
+            health_check: health_check.clone(),
+            health_status,
             health_retries: 0,
             health_last_check: None,
             network_mode: a3s_box_core::NetworkMode::Bridge {
@@ -291,6 +340,15 @@ async fn execute_up(
 
         state.add(record)?;
 
+        // Spawn health checker if configured
+        if let Some(ref hc) = health_check {
+            crate::health::spawn_health_checker(
+                box_id.clone(),
+                box_dir.join("sockets").join("exec.sock"),
+                hc.clone(),
+            );
+        }
+
         // Spawn log processor
         let log_dir = box_dir.join("logs");
         let _ = a3s_box_runtime::log::spawn_log_processor(
@@ -304,6 +362,41 @@ async fn execute_up(
 
     println!("All {} services started.", project.service_order.len());
     Ok(())
+}
+
+/// Wait for all named services to reach "healthy" status in the state file.
+///
+/// Polls the state file every 2 seconds until all services are healthy or timeout.
+async fn wait_for_healthy(
+    service_names: &[String],
+    timeout_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    loop {
+        if std::time::Instant::now() > deadline {
+            return Err(format!(
+                "Timed out waiting for services to become healthy: {}",
+                service_names.join(", ")
+            )
+            .into());
+        }
+
+        let state = StateFile::load_default()?;
+        let all_healthy = service_names.iter().all(|svc_name| {
+            // Find the box for this service by label
+            state
+                .find_by_label(LABEL_SERVICE, svc_name)
+                .iter()
+                .any(|r| r.health_status == "healthy")
+        });
+
+        if all_healthy {
+            return Ok(());
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 // ============================================================================
@@ -445,10 +538,10 @@ async fn execute_ps(project_name: &str) -> Result<(), Box<dyn std::error::Error>
     }
 
     println!(
-        "{:<20} {:<30} {:<12} {:<10}",
-        "SERVICE", "IMAGE", "STATUS", "PID"
+        "{:<20} {:<30} {:<12} {:<12} {:<10}",
+        "SERVICE", "IMAGE", "STATUS", "HEALTH", "PID"
     );
-    println!("{}", "-".repeat(72));
+    println!("{}", "-".repeat(84));
 
     for record in &boxes {
         let svc_name = record
@@ -461,8 +554,8 @@ async fn execute_ps(project_name: &str) -> Result<(), Box<dyn std::error::Error>
             .map(|p| p.to_string())
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<20} {:<30} {:<12} {:<10}",
-            svc_name, record.image, record.status, pid_str
+            "{:<20} {:<30} {:<12} {:<12} {:<10}",
+            svc_name, record.image, record.status, record.health_status, pid_str
         );
     }
 
@@ -513,6 +606,129 @@ fn execute_config(
     }
 
     println!("\nConfiguration is valid.");
+    Ok(())
+}
+
+// ============================================================================
+// compose logs
+// ============================================================================
+
+/// `compose logs` — View logs from all (or one) service in the project.
+async fn execute_logs(
+    project_name: &str,
+    logs_args: ComposeLogsArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = StateFile::load_default()?;
+    let boxes = state.find_by_label(LABEL_PROJECT, project_name);
+
+    if boxes.is_empty() {
+        println!("No services found for project '{}'.", project_name);
+        return Ok(());
+    }
+
+    // Filter to specific service if requested
+    let targets: Vec<_> = if let Some(ref svc) = logs_args.service {
+        boxes
+            .iter()
+            .filter(|r| {
+                r.labels
+                    .get(LABEL_SERVICE)
+                    .map(|s| s == svc)
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        boxes.iter().collect()
+    };
+
+    if targets.is_empty() {
+        if let Some(ref svc) = logs_args.service {
+            return Err(
+                format!("Service '{}' not found in project '{}'.", svc, project_name).into(),
+            );
+        }
+    }
+
+    for record in &targets {
+        let svc_name = record
+            .labels
+            .get(LABEL_SERVICE)
+            .map(|s| s.as_str())
+            .unwrap_or("?");
+
+        let log_path = record.console_log.clone();
+        if !log_path.exists() {
+            println!("[{}] (no logs)", svc_name);
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&log_path)
+            .map_err(|e| format!("Failed to read logs for {}: {}", svc_name, e))?;
+
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(logs_args.tail);
+        let prefix = if targets.len() > 1 {
+            format!("{} | ", svc_name)
+        } else {
+            String::new()
+        };
+
+        for line in &lines[start..] {
+            println!("{}{}", prefix, line);
+        }
+    }
+
+    if logs_args.follow {
+        println!("(follow mode: use Ctrl-C to stop)");
+        // In follow mode, tail all log files concurrently
+        // For simplicity, we poll every second
+        let mut last_sizes: HashMap<String, u64> = HashMap::new();
+        for record in &targets {
+            let size = std::fs::metadata(&record.console_log)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            last_sizes.insert(record.id.clone(), size);
+        }
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            for record in &targets {
+                let log_path = &record.console_log;
+                let current_size = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
+                let last_size = last_sizes.get(&record.id).copied().unwrap_or(0);
+
+                if current_size > last_size {
+                    let svc_name = record
+                        .labels
+                        .get(LABEL_SERVICE)
+                        .map(|s| s.as_str())
+                        .unwrap_or("?");
+                    let prefix = if targets.len() > 1 {
+                        format!("{} | ", svc_name)
+                    } else {
+                        String::new()
+                    };
+
+                    if let Ok(file) = std::fs::File::open(log_path) {
+                        use std::io::{Read, Seek, SeekFrom};
+                        let mut file = file;
+                        if file.seek(SeekFrom::Start(last_size)).is_ok() {
+                            let mut buf = String::new();
+                            if file.read_to_string(&mut buf).is_ok() {
+                                for line in buf.lines() {
+                                    println!("{}{}", prefix, line);
+                                }
+                            }
+                        }
+                    }
+
+                    last_sizes.insert(record.id.clone(), current_size);
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

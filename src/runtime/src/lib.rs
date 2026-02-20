@@ -92,7 +92,7 @@ pub use volume::VolumeStore;
 pub use oci::{BuildConfig, Dockerfile, Instruction};
 
 #[cfg(feature = "compose")]
-pub use compose::ComposeProject;
+pub use compose::{ComposeProject, HealthCheckSpec};
 
 #[cfg(feature = "operator")]
 pub use operator::AutoscalerController;
