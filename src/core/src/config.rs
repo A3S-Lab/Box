@@ -349,6 +349,17 @@ pub struct BoxConfig {
     /// such as SafeClaw that intercept and classify agent traffic.
     #[serde(default)]
     pub sidecar: Option<SidecarConfig>,
+
+    /// Preserve the box filesystem across stop/start cycles.
+    ///
+    /// When true, the overlay upper layer (or copy rootfs) is kept on disk
+    /// after the box stops and reused on the next start. Changes made inside
+    /// the box persist between restarts, similar to a traditional VM.
+    ///
+    /// When false (default), the writable layer is wiped on every stop,
+    /// giving a clean slate on each start.
+    #[serde(default)]
+    pub persistent: bool,
 }
 
 impl Default for BoxConfig {
@@ -379,6 +390,7 @@ impl Default for BoxConfig {
             privileged: false,
             read_only: false,
             sidecar: None,
+            persistent: false,
         }
     }
 }

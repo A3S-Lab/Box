@@ -43,6 +43,7 @@ mod rmi;
 mod run;
 mod save;
 mod seal;
+mod shell;
 mod snapshot;
 mod start;
 mod stats;
@@ -181,6 +182,8 @@ pub enum Command {
     Monitor(monitor::MonitorArgs),
     /// Manage the warm VM pool (pre-boot VMs for instant start)
     Pool(pool::PoolArgs),
+    /// Open an interactive shell in a running box
+    Shell(shell::ShellArgs),
 }
 
 /// Return the path to the image store directory (~/.a3s/images).
@@ -296,5 +299,6 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Info(args) => info::execute(args).await,
         Command::Monitor(args) => monitor::execute(args).await,
         Command::Pool(args) => pool::execute(args).await,
+        Command::Shell(args) => shell::execute(args).await,
     }
 }

@@ -352,6 +352,7 @@ fn build_box_config(
             vsock_port: args.sidecar_vsock_port,
             env: vec![],
         }),
+        persistent: args.common.persistent,
         ..Default::default()
     }
 }
@@ -666,6 +667,7 @@ mod tests {
                 no_healthcheck: false,
                 oom_kill_disable: false,
                 oom_score_adj: None,
+                persistent: false,
             },
             detach: false,
             interactive: false,

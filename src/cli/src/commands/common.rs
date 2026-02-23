@@ -190,6 +190,10 @@ pub struct CommonBoxArgs {
     /// Tune the host OOM score adjustment (-1000 to 1000)
     #[arg(long)]
     pub oom_score_adj: Option<i32>,
+
+    /// Preserve filesystem changes across stop/start cycles
+    #[arg(long)]
+    pub persistent: bool,
 }
 
 /// Parse KEY=VALUE pairs into a HashMap.
@@ -505,6 +509,7 @@ mod tests {
             no_healthcheck: false,
             oom_kill_disable: false,
             oom_score_adj: None,
+            persistent: false,
         }
     }
 

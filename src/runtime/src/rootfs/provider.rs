@@ -14,8 +14,12 @@ pub trait RootfsProvider: Send + Sync {
     /// Returns the path to use as `InstanceSpec.rootfs_path`.
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf>;
 
-    /// Cleanup after box stops (unmount overlay, remove upper/work dirs).
-    fn cleanup(&self, box_dir: &Path) -> Result<()>;
+    /// Cleanup after box stops.
+    ///
+    /// When `persistent` is true, the writable layer (overlay upper dir or copy
+    /// rootfs) is preserved on disk so changes survive the next start.
+    /// When false, the writable layer is wiped for a clean slate.
+    fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()>;
 
     /// Human-readable name for logging.
     fn name(&self) -> &'static str;
@@ -30,11 +34,20 @@ pub struct CopyProvider;
 impl RootfsProvider for CopyProvider {
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf> {
         let rootfs = box_dir.join("rootfs");
+        // Reuse existing rootfs when persistent and already populated
+        if rootfs.exists() {
+            tracing::info!(path = %rootfs.display(), "Reusing persistent rootfs");
+            return Ok(rootfs);
+        }
         crate::cache::layer_cache::copy_dir_recursive(cache_dir, &rootfs)?;
         Ok(rootfs)
     }
 
-    fn cleanup(&self, box_dir: &Path) -> Result<()> {
+    fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()> {
+        if persistent {
+            tracing::info!("Persistent box: keeping rootfs on disk");
+            return Ok(());
+        }
         let rootfs = box_dir.join("rootfs");
         if rootfs.exists() {
             std::fs::remove_dir_all(&rootfs).map_err(|e| {
@@ -91,7 +104,7 @@ impl RootfsProvider for OverlayProvider {
         Ok(merged)
     }
 
-    fn cleanup(&self, box_dir: &Path) -> Result<()> {
+    fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()> {
         let merged = box_dir.join("merged");
         if merged.exists() {
             if let Err(e) = super::overlay::overlay_unmount(&merged) {
@@ -101,6 +114,20 @@ impl RootfsProvider for OverlayProvider {
                     "Failed to unmount overlay (may already be unmounted)"
                 );
             }
+        }
+
+        if persistent {
+            // Keep upper (writes) and remove only merged/work (not needed at rest)
+            tracing::info!("Persistent box: keeping overlay upper layer on disk");
+            for dir_name in &["merged", "work"] {
+                let dir = box_dir.join(dir_name);
+                if dir.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&dir) {
+                        tracing::warn!(path = %dir.display(), error = %e, "Failed to remove overlay dir");
+                    }
+                }
+            }
+            return Ok(());
         }
 
         for dir_name in &["upper", "work", "merged"] {
@@ -181,7 +208,7 @@ mod tests {
         let rootfs = provider.prepare(&box_dir, &cache_dir).unwrap();
         assert!(rootfs.exists());
 
-        provider.cleanup(&box_dir).unwrap();
+        provider.cleanup(&box_dir, false).unwrap();
         assert!(!rootfs.exists());
     }
 
@@ -190,7 +217,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let provider = CopyProvider;
         // Should not error on missing dir
-        provider.cleanup(tmp.path()).unwrap();
+        provider.cleanup(tmp.path(), false).unwrap();
     }
 
     #[test]
@@ -239,7 +266,7 @@ mod tests {
         std::fs::write(merged.join("etc/newfile"), "overlay write").unwrap();
         assert!(box_dir.join("upper/etc/newfile").exists());
 
-        provider.cleanup(&box_dir).unwrap();
+        provider.cleanup(&box_dir, false).unwrap();
         assert!(!box_dir.join("merged").exists());
         assert!(!box_dir.join("upper").exists());
         assert!(!box_dir.join("work").exists());
