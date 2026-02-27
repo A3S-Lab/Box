@@ -17,7 +17,7 @@ pub fn relaunch_as_admin() -> std::io::Result<()> {
 
         let result = unsafe {
             ShellExecuteW(
-                std::ptr::null_mut(),
+                0isize,
                 verb.as_ptr(),
                 file.as_ptr(),
                 params.as_ptr(),
