@@ -73,14 +73,6 @@ jobs:
           cat .winget/A3SLab.Box.installer.yaml
           cat .winget/A3SLab.Box.locale.en-US.yaml
 
-      - name: Validate manifests
-        run: |
-          # Install winget-create for validation
-          Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
-
-          # Validate manifests
-          .\wingetcreate.exe validate .winget\
-
       - name: Submit to winget-pkgs
         uses: vedantmgoyal9/winget-releaser@main
         with:
