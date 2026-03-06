@@ -1,5 +1,7 @@
 //! TeeExtension - Trait for TEE operations on a running VM.
 
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::Result;

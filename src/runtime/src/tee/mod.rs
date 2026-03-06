@@ -27,6 +27,7 @@ pub use attestation::{
     TcbVersion,
 };
 pub use certs::AmdKdsClient;
+#[cfg(unix)]
 pub use extension::{SnpTeeExtension, TeeExtension};
 pub use kbs::{KbsClient, KbsConfig, KbsRequest, KbsResponse, KbsSecret};
 pub use policy::{AttestationPolicy, MinTcbPolicy, PolicyResult, PolicyViolation};
