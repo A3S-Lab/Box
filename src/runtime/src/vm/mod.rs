@@ -625,6 +625,22 @@ impl VmManager {
         }
     }
 
+    /// Pause the VM (Windows stub - not yet implemented).
+    #[cfg(windows)]
+    pub async fn pause(&self) -> Result<()> {
+        Err(BoxError::StateError(
+            "VM pause is not yet supported on Windows".to_string(),
+        ))
+    }
+
+    /// Resume the VM (Windows stub - not yet implemented).
+    #[cfg(windows)]
+    pub async fn resume(&self) -> Result<()> {
+        Err(BoxError::StateError(
+            "VM resume is not yet supported on Windows".to_string(),
+        ))
+    }
+
     /// Check if VM is healthy.
     pub async fn health_check(&self) -> Result<bool> {
         let state = self.state.read().await;

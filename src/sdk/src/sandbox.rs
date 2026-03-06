@@ -224,7 +224,7 @@ impl Sandbox {
             data: None,
         };
 
-        let client = ExecClient::connect(&self.exec_socket).await?;
+        let client: ExecClient = ExecClient::connect(&self.exec_socket).await?;
         let response = client.file_transfer(&request).await?;
 
         if !response.success {
@@ -252,7 +252,7 @@ impl Sandbox {
     ///
     /// Returns a `PtyClient` for bidirectional terminal I/O.
     pub async fn pty(&self, shell: &str, cols: u16, rows: u16) -> Result<PtyClient> {
-        let mut client = PtyClient::connect(&self.pty_socket).await?;
+        let mut client: PtyClient = PtyClient::connect(&self.pty_socket).await?;
 
         let request = a3s_box_core::pty::PtyRequest {
             cmd: vec![shell.to_string()],
