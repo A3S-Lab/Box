@@ -1,0 +1,184 @@
+name: Publish libkrun-sys
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 0.1.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Build and test Windows krun.dll ────────────────────────────
+  build-windows-dll:
+    name: Build Windows krun.dll
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: libkrun-windows
+
+      - name: Build krun.dll
+        working-directory: src/deps/libkrun-sys/vendor/libkrun
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Run Windows API tests
+        working-directory: src/deps/libkrun-sys
+        run: |
+          # Copy krun.dll to test location
+          Copy-Item vendor\libkrun\target\x86_64-pc-windows-msvc\release\krun.dll prebuilt\x86_64-pc-windows-msvc\
+          # Run all API tests
+          cargo test --target x86_64-pc-windows-msvc --lib -- --test-threads=1
+
+      - name: Package krun.dll
+        run: |
+          $VERSION = "${{ inputs.version }}"
+          $DIR = "a3s-libkrun-sys-$VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Path $DIR\lib -Force
+
+          # Copy DLL
+          Copy-Item src\deps\libkrun-sys\vendor\libkrun\target\x86_64-pc-windows-msvc\release\krun.dll $DIR\lib\
+
+          # Copy headers if any
+          if (Test-Path src\deps\libkrun-sys\vendor\libkrun\include) {
+            Copy-Item -Recurse src\deps\libkrun-sys\vendor\libkrun\include $DIR\
+          }
+
+          # Create README
+          @"
+# a3s-libkrun-sys Windows Build
+
+Version: $VERSION
+Platform: Windows x86_64 (WHPX)
+Built: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+
+## Contents
+
+- lib/krun.dll - libkrun Windows WHPX backend
+
+## Usage
+
+Add to your Cargo.toml:
+
+``````toml
+[dependencies]
+a3s-libkrun-sys = "$VERSION"
+``````
+
+The krun.dll must be in your PATH or in the same directory as your executable.
+
+## Features
+
+- Windows Hypervisor Platform (WHPX) backend
+- virtiofs passthrough filesystem
+- virtio-net TCP backend
+- virtio-blk block device
+- virtio-console
+- TSI (Transparent Socket Impersonation) for vsock
+
+## Requirements
+
+- Windows 10/11 with Hyper-V Platform enabled
+- Run: ``Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform``
+"@ | Out-File -FilePath $DIR\README.md -Encoding UTF8
+
+          # Create zip
+          Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"
+          echo "ASSET=$DIR.zip" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-dll
+          path: ${{ env.ASSET }}
+
+  # ── Publish to crates.io ───────────────────────────────────────
+  publish-crate:
+    name: Publish a3s-libkrun-sys to crates.io
+    needs: build-windows-dll
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Update version in Cargo.toml
+        working-directory: src/deps/libkrun-sys
+        run: |
+          VERSION="${{ inputs.version }}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          cat Cargo.toml | grep "^version"
+
+      - name: Publish to crates.io
+        working-directory: src/deps/libkrun-sys
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --allow-dirty || echo "Already published or error occurred"
+
+  # ── Create GitHub Release ──────────────────────────────────────
+  create-release:
+    name: Create GitHub Release
+    needs: [build-windows-dll, publish-crate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-dll
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: libkrun-sys-v${{ inputs.version }}
+          name: "a3s-libkrun-sys v${{ inputs.version }} - Windows WHPX Support"
+          body: |
+            ## a3s-libkrun-sys v${{ inputs.version }}
+
+            Windows WHPX backend support for libkrun.
+
+            ### Features
+            - ✅ Windows Hypervisor Platform (WHPX) backend
+            - ✅ virtiofs passthrough filesystem
+            - ✅ virtio-net TCP backend
+            - ✅ virtio-blk block device
+            - ✅ virtio-console
+            - ✅ TSI (Transparent Socket Impersonation)
+
+            ### Installation
+
+            ```toml
+            [dependencies]
+            a3s-libkrun-sys = "${{ inputs.version }}"
+            ```
+
+            ### Requirements
+            - Windows 10/11 with Hyper-V Platform enabled
+            - Run: `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform`
+
+            ### Downloads
+            - Windows x86_64: See assets below
+
+          files: |
+            artifacts/*.zip
+          draft: false
+          prerelease: false
+

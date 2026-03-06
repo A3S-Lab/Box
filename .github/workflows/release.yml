@@ -171,7 +171,7 @@ jobs:
 
   # ── Windows launcher build ─────────────────────────────────────
   build-windows:
-    name: Build Windows Launcher
+    name: Build Windows (WHPX Backend)
     needs: test
     runs-on: windows-latest
     steps:
@@ -185,14 +185,47 @@ jobs:
         with:
           workspaces: src
           key: release-windows
-      - name: Build Windows launcher
-        working-directory: src/win-launcher
-        run: cargo build --release --bin a3s-box-win --target x86_64-pc-windows-msvc
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+
+      - name: Build Windows runtime and launcher
+        run: |
+          cd src
+          # Build runtime with Windows WHPX backend
+          cargo build --release -p a3s-box-runtime --target x86_64-pc-windows-msvc
+          # Build Windows launcher
+          cd win-launcher
+          cargo build --release --bin a3s-box-win --target x86_64-pc-windows-msvc
+
+      - name: Package Windows release
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          DIR="a3s-box-${TAG}-windows-x86_64"
+          mkdir -p "$DIR/lib"
+
+          # Copy launcher
+          cp src/target/x86_64-pc-windows-msvc/release/a3s-box-win.exe "$DIR/"
+
+          # Copy krun.dll from prebuilt
+          if [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll" ]; then
+            cp src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll "$DIR/lib/"
+          fi
+
+          # Copy README and LICENSE
+          cp README.md "$DIR/" 2>/dev/null || true
+          cp LICENSE "$DIR/" 2>/dev/null || true
+
+          # List package contents
+          echo "Package contents:"
+          ls -lhR "$DIR/"
+
+          # Create zip archive (Windows-friendly)
+          powershell Compress-Archive -Path "$DIR" -DestinationPath "${DIR}.zip"
+          echo "ASSET=${DIR}.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: windows-launcher
-          path: src/win-launcher/target/x86_64-pc-windows-msvc/release/a3s-box-win.exe
+          name: windows-x86_64
+          path: ${{ env.ASSET }}
 
   release:
     name: GitHub Release
@@ -213,7 +246,7 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/**/*.tar.gz
-            artifacts/windows-launcher/a3s-box-win.exe
+            artifacts/**/*.zip
 
   # ── Publish to crates.io ───────────────────────────────────────
   publish-crates:

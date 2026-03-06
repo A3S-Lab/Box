@@ -1,11 +1,14 @@
 [package]
 name = "a3s-libkrun-sys"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["A3S Lab Team"]
-description = "FFI bindings to libkrun with vendored build support"
+description = "FFI bindings to libkrun with Windows WHPX backend support"
 license = "MIT"
 repository = "https://github.com/A3S-Lab/Box"
+keywords = ["libkrun", "microvm", "whpx", "virtualization", "windows"]
+categories = ["api-bindings", "os::windows-apis", "virtualization"]
+readme = "README.md"
 
 links = "a3s_krun"
 
@@ -16,5 +19,9 @@ num_cpus = "1.16"
 [dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation"] }
+
 [features]
 default = []
+
