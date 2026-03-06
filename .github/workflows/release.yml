@@ -296,6 +296,8 @@ jobs:
             target: aarch64
           - os: macos-14
             target: aarch64
+          - os: windows-latest
+            target: x86_64
     runs-on: ${{ matrix.os }}
     env:
       A3S_DEPS_STUB: "1"
@@ -313,6 +315,9 @@ jobs:
       - name: Install protoc (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        run: choco install protoc
       - name: Create stub libkrun for linking (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -327,6 +332,15 @@ jobs:
           cc -shared -o /tmp/libkrun.dylib /tmp/krun_stub.c
           sudo mkdir -p /usr/local/lib
           sudo cp /tmp/libkrun.dylib /usr/local/lib/
+      - name: Create stub libkrun for linking (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          cl /LD /Fe:krun.dll /tmp/krun_stub.c
+          mkdir -p "$USERPROFILE/.cargo/lib" || true
+          cp krun.dll "$USERPROFILE/.cargo/lib/" || true
+          cp krun.lib "$USERPROFILE/.cargo/lib/" || true
       - name: Install maturin
         run: pip install maturin
       - name: Build wheel
@@ -356,6 +370,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     env:
       A3S_DEPS_STUB: "1"
@@ -385,6 +401,16 @@ jobs:
           cc -shared -o /tmp/libkrun.dylib /tmp/krun_stub.c
           sudo mkdir -p /usr/local/lib
           sudo cp /tmp/libkrun.dylib /usr/local/lib/
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          choco install protoc
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          cl /LD /Fe:krun.dll /tmp/krun_stub.c
+          mkdir -p "$USERPROFILE/.cargo/lib" || true
+          cp krun.dll "$USERPROFILE/.cargo/lib/" || true
+          cp krun.lib "$USERPROFILE/.cargo/lib/" || true
       - name: Build native module
         env:
           LIBRARY_PATH: /usr/local/lib
