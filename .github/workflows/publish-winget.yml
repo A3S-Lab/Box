@@ -1,0 +1,113 @@
+name: Publish to winget
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g., 0.8.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish-winget:
+    name: Publish to winget
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download release asset
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          ASSET="a3s-box-${TAG}-windows-x86_64.zip"
+          URL="https://github.com/A3S-Lab/Box/releases/download/${TAG}/${ASSET}"
+
+          echo "Downloading: $URL"
+          curl -L -o "$ASSET" "$URL"
+
+          # Compute SHA256
+          SHA256=$(certutil -hashfile "$ASSET" SHA256 | findstr /v "hash" | findstr /v "CertUtil")
+          SHA256=$(echo $SHA256 | tr -d '[:space:]')
+          echo "SHA256: $SHA256"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+        id: download
+
+      - name: Update manifest files
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          SHA256="${{ steps.download.outputs.sha256 }}"
+
+          # Update version in all manifest files
+          sed -i "s/PackageVersion: .*/PackageVersion: $VERSION/" .winget/A3SLab.Box.yaml
+          sed -i "s/PackageVersion: .*/PackageVersion: $VERSION/" .winget/A3SLab.Box.installer.yaml
+          sed -i "s/PackageVersion: .*/PackageVersion: $VERSION/" .winget/A3SLab.Box.locale.en-US.yaml
+
+          # Update installer URL and SHA256
+          sed -i "s|InstallerUrl: .*|InstallerUrl: https://github.com/A3S-Lab/Box/releases/download/${TAG}/a3s-box-${TAG}-windows-x86_64.zip|" .winget/A3SLab.Box.installer.yaml
+          sed -i "s/InstallerSha256: .*/InstallerSha256: $SHA256/" .winget/A3SLab.Box.installer.yaml
+
+          # Update nested installer path
+          sed -i "s|RelativeFilePath: a3s-box-v[0-9.]*-windows-x86_64|RelativeFilePath: a3s-box-${TAG}-windows-x86_64|g" .winget/A3SLab.Box.installer.yaml
+
+          echo "Updated manifest files:"
+          cat .winget/A3SLab.Box.yaml
+          cat .winget/A3SLab.Box.installer.yaml
+          cat .winget/A3SLab.Box.locale.en-US.yaml
+
+      - name: Validate manifests
+        run: |
+          # Install winget-create for validation
+          Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile wingetcreate.exe
+
+          # Validate manifests
+          .\wingetcreate.exe validate .winget\
+
+      - name: Submit to winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: A3SLab.Box
+          version: ${{ steps.version.outputs.version }}
+          installers-regex: 'a3s-box-v.*-windows-x86_64\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}
+          fork-user: ${{ secrets.WINGET_FORK_USER }}
+          max-versions-to-keep: 5
+
+      # Alternative: Manual PR creation if vedantmgoyal9/winget-releaser doesn't work
+      - name: Create winget-pkgs PR (fallback)
+        if: failure()
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          echo "Automatic submission failed. Please manually submit to winget-pkgs:"
+          echo ""
+          echo "1. Fork https://github.com/microsoft/winget-pkgs"
+          echo "2. Create directory: manifests/a/A3SLab/Box/$VERSION/"
+          echo "3. Copy these files to that directory:"
+          echo "   - .winget/A3SLab.Box.yaml"
+          echo "   - .winget/A3SLab.Box.installer.yaml"
+          echo "   - .winget/A3SLab.Box.locale.en-US.yaml"
+          echo "4. Create PR to microsoft/winget-pkgs"
+          echo ""
+          echo "Or use wingetcreate:"
+          echo "wingetcreate update A3SLab.Box -v $VERSION -u https://github.com/A3S-Lab/Box/releases/download/v$VERSION/a3s-box-v$VERSION-windows-x86_64.zip -t ${{ secrets.GITHUB_TOKEN }}"

@@ -496,3 +496,30 @@ jobs:
           git add Formula/a3s-box.rb
           git commit -m "chore: update a3s-box to ${{ steps.version.outputs.tag }}"
           git push
+
+  # ── Trigger winget publishing ───────────────────────────────────
+  trigger-winget:
+    name: Trigger winget Publishing
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger winget workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const version = tag.replace('v', '');
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'publish-winget.yml',
+              ref: 'main',
+              inputs: {
+                version: version
+              }
+            });
+
+            console.log(`Triggered winget publishing for version ${version}`);
+
