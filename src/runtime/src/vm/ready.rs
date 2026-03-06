@@ -2,6 +2,7 @@
 
 use a3s_box_core::error::{BoxError, Result};
 
+#[cfg(unix)]
 use crate::grpc::ExecClient;
 
 use super::VmManager;
@@ -35,6 +36,7 @@ impl VmManager {
     /// is healthy via a Frame Heartbeat round-trip. This is best-effort:
     /// if the exec socket never appears (e.g., older guest init without
     /// exec server), the VM still boots successfully.
+    #[cfg(unix)]
     pub(crate) async fn wait_for_exec_ready(
         &mut self,
         exec_socket_path: &std::path::Path,

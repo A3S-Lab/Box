@@ -17,8 +17,10 @@ use tracing::Instrument;
 
 use libc;
 
+#[cfg(unix)]
 use crate::grpc::ExecClient;
 use crate::network::PasstManager;
+#[cfg(unix)]
 use crate::tee::TeeExtension;
 use crate::vmm::{VmController, VmHandler, VmmProvider, DEFAULT_SHUTDOWN_TIMEOUT_MS};
 
@@ -82,6 +84,7 @@ pub struct VmManager {
     pub(crate) handler: Arc<RwLock<Option<Box<dyn VmHandler>>>>,
 
     /// Exec client for executing commands in the guest
+    #[cfg(unix)]
     pub(crate) exec_client: Option<ExecClient>,
 
     /// Passt manager for bridge networking (None if TSI mode)
@@ -94,6 +97,7 @@ pub struct VmManager {
     pub(crate) anonymous_volumes: Vec<String>,
 
     /// TEE extension (attestation, sealing, secret injection)
+    #[cfg(unix)]
     pub(crate) tee: Option<Box<dyn TeeExtension>>,
 
     /// Rootfs provider (overlay or copy)
@@ -125,10 +129,12 @@ impl VmManager {
             event_emitter,
             provider: None,
             handler: Arc::new(RwLock::new(None)),
+            #[cfg(unix)]
             exec_client: None,
             passt_manager: None,
             home_dir,
             anonymous_volumes: Vec::new(),
+            #[cfg(unix)]
             tee: None,
             rootfs_provider: crate::rootfs::default_provider(),
             exec_socket_path: None,
@@ -149,10 +155,12 @@ impl VmManager {
             event_emitter,
             provider: None,
             handler: Arc::new(RwLock::new(None)),
+            #[cfg(unix)]
             exec_client: None,
             passt_manager: None,
             home_dir,
             anonymous_volumes: Vec::new(),
+            #[cfg(unix)]
             tee: None,
             rootfs_provider: crate::rootfs::default_provider(),
             exec_socket_path: None,
@@ -177,10 +185,12 @@ impl VmManager {
             event_emitter,
             provider: Some(provider),
             handler: Arc::new(RwLock::new(None)),
+            #[cfg(unix)]
             exec_client: None,
             passt_manager: None,
             home_dir,
             anonymous_volumes: Vec::new(),
+            #[cfg(unix)]
             tee: None,
             rootfs_provider: crate::rootfs::default_provider(),
             exec_socket_path: None,
@@ -201,6 +211,7 @@ impl VmManager {
     }
 
     /// Get the exec client, if connected.
+    #[cfg(unix)]
     pub fn exec_client(&self) -> Option<&ExecClient> {
         self.exec_client.as_ref()
     }
@@ -266,6 +277,7 @@ impl VmManager {
     /// Execute a command in the guest VM.
     ///
     /// Requires the VM to be in Ready, Busy, or Compacting state.
+    #[cfg(unix)]
     #[tracing::instrument(skip(self, cmd), fields(box_id = %self.box_id))]
     pub async fn exec_command(
         &self,
@@ -413,6 +425,7 @@ impl VmManager {
                 self.wait_for_vm_running().await?;
 
                 // 5b. Wait for exec server to become ready (Heartbeat health check)
+                #[cfg(unix)]
                 self.wait_for_exec_ready(&layout.exec_socket_path).await?;
                 Ok::<(), BoxError>(())
             }
@@ -425,6 +438,7 @@ impl VmManager {
         self.pty_socket_path = Some(layout.pty_socket_path.clone());
 
         // 5c. Initialize TEE extension for TEE environments
+        #[cfg(unix)]
         if !matches!(self.config.tee, TeeConfig::None) {
             self.tee = Some(Box::new(crate::tee::SnpTeeExtension::new(
                 self.box_id.clone(),
@@ -554,6 +568,7 @@ impl VmManager {
     /// Pause the VM by sending SIGSTOP to the shim process.
     ///
     /// The VM must be in Ready, Busy, or Compacting state.
+    #[cfg(unix)]
     pub async fn pause(&self) -> Result<()> {
         let state = self.state.read().await;
         match *state {
@@ -589,6 +604,7 @@ impl VmManager {
     /// Resume the VM by sending SIGCONT to the shim process.
     ///
     /// Can be called on a paused VM to resume execution.
+    #[cfg(unix)]
     pub async fn resume(&self) -> Result<()> {
         if let Some(pid) = self.pid().await {
             // Safety: sending SIGCONT to resume the process
@@ -658,11 +674,13 @@ impl VmManager {
     }
 
     /// Get the TEE extension, if TEE is configured and VM is booted.
+    #[cfg(unix)]
     pub fn tee(&self) -> Option<&dyn TeeExtension> {
         self.tee.as_deref()
     }
 
     /// Get the TEE extension or return an error.
+    #[cfg(unix)]
     pub fn require_tee(&self) -> Result<&dyn TeeExtension> {
         self.tee.as_deref().ok_or_else(|| {
             BoxError::AttestationError("TEE is not configured for this box".to_string())
@@ -676,6 +694,7 @@ impl VmManager {
     ///
     /// Tier 2 changes (cgroup-based limits) are applied by executing shell
     /// commands inside the guest that write to cgroup v2 control files.
+    #[cfg(unix)]
     pub async fn update_resources(
         &self,
         update: &crate::resize::ResourceUpdate,

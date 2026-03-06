@@ -65,6 +65,7 @@ impl VmHandler for ShimHandler {
         self.pid
     }
 
+    #[cfg(unix)]
     fn stop(&mut self, signal: i32, timeout_ms: u64) -> Result<()> {
         // Graceful shutdown: send configured signal first, wait, then SIGKILL if needed.
         // This gives libkrun time to flush its virtio-blk buffers to disk.
@@ -153,6 +154,55 @@ impl VmHandler for ShimHandler {
         }
     }
 
+    #[cfg(windows)]
+    fn stop(&mut self, _signal: i32, timeout_ms: u64) -> Result<()> {
+        // Windows version: use Child::kill() or terminate process by PID
+        if let Some(mut process) = self.process.take() {
+            tracing::debug!(pid = self.pid, box_id = %self.box_id, "Terminating VM process");
+
+            // Try graceful wait first
+            let start = std::time::Instant::now();
+            loop {
+                match process.try_wait() {
+                    Ok(Some(status)) => {
+                        tracing::debug!(pid = self.pid, ?status, "VM process exited");
+                        self.exit_code = status.code();
+                        return Ok(());
+                    }
+                    Ok(None) => {
+                        if start.elapsed().as_millis() > timeout_ms as u128 {
+                            tracing::warn!(pid = self.pid, "VM process did not exit, forcing kill");
+                            let _ = process.kill();
+                            if let Ok(status) = process.wait() {
+                                self.exit_code = status.code();
+                            }
+                            return Ok(());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => {
+                        tracing::warn!(pid = self.pid, error = %e, "Error checking process, forcing kill");
+                        let _ = process.kill();
+                        let _ = process.wait();
+                        return Ok(());
+                    }
+                }
+            }
+        } else {
+            // Attached mode: just check if process exists
+            tracing::debug!(pid = self.pid, "Checking attached VM process");
+            let start = std::time::Instant::now();
+            while start.elapsed().as_millis() <= timeout_ms as u128 {
+                if !self.is_running() {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            tracing::warn!(pid = self.pid, "Attached VM process still running after timeout");
+            Ok(())
+        }
+    }
+
     fn metrics(&self) -> VmMetrics {
         let pid = Pid::from_u32(self.pid);
 
@@ -180,9 +230,18 @@ impl VmHandler for ShimHandler {
         VmMetrics::default()
     }
 
+    #[cfg(unix)]
     fn is_running(&self) -> bool {
         // Check if process exists by sending signal 0
         unsafe { libc::kill(self.pid as i32, 0) == 0 }
+    }
+
+    #[cfg(windows)]
+    fn is_running(&self) -> bool {
+        // Use sysinfo to check if process exists
+        let mut sys = System::new();
+        sys.refresh_process(Pid::from_u32(self.pid));
+        sys.process(Pid::from_u32(self.pid)).is_some()
     }
 
     fn exit_code(&self) -> Option<i32> {

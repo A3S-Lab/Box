@@ -12,7 +12,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 authors = ["A3S Lab Team"]
 license = "MIT"
@@ -117,7 +117,7 @@ base64 = "0.22"
 ring = "0.17"
 
 # Shared types (transport protocol, privacy, tools)
-a3s-transport = { version = "0.1", package = "a3s-common" }
+a3s-transport = { path = "../../common", package = "a3s-common" }
 
 # Metrics
 prometheus = "0.13"
