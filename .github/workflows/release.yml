@@ -191,8 +191,9 @@ jobs:
           cd src
           # Build runtime with Windows WHPX backend
           cargo build --release -p a3s-box-runtime --target x86_64-pc-windows-msvc
-          # Build Windows launcher
-          cargo build --release -p a3s-box-win --target x86_64-pc-windows-msvc
+          # Build Windows launcher (not in workspace)
+          cd win-launcher
+          cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Package Windows release
         shell: bash
@@ -202,7 +203,7 @@ jobs:
           mkdir -p "$DIR/lib"
 
           # Copy launcher
-          cp src/target/x86_64-pc-windows-msvc/release/a3s-box-win.exe "$DIR/"
+          cp src/win-launcher/target/x86_64-pc-windows-msvc/release/a3s-box-win.exe "$DIR/"
 
           # Copy krun.dll from prebuilt
           if [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll" ]; then
