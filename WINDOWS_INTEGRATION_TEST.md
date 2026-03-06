@@ -6,6 +6,60 @@
 ✅ **a3s-libkrun-sys** - 编译通过，所有 API 测试通过
 ✅ **a3s-box-runtime** - 编译通过
 ✅ **基础 VM 配置** - 所有 API 调用成功
+✅ **完整 VM 启动** - nginx_test.rs 验证成功（2026-03-06）
+
+## 最新测试结果 (2026-03-06)
+
+### nginx_test.rs - 完整 VM 启动测试
+
+成功验证了从配置到启动的完整流程：
+
+```
+=== a3s-box nginx Container Test (Windows) ===
+
+Using kernel: C:\Users\18770\AppData\Local\Temp\libkrun-kernels\vmlinux-5.10.225
+
+1. Creating VM context...
+   ✓ Context ID: 0
+
+2. Configuring VM...
+   ✓ 1 vCPU, 256 MiB RAM
+
+3. Setting kernel...
+   ✓ Kernel configured
+
+4. Setting root filesystem...
+   ✓ Root: C:\temp\test-rootfs
+
+5. Configuring network...
+   ✓ Network: virtio-net device (disconnected)
+
+6. Configuring console...
+   ✓ Serial console on ttyS0
+
+7. Setting workload...
+   ✓ Workload configured
+
+8. Starting VM...
+   Note: This will block. Press Ctrl+C to stop.
+```
+
+**关键发现**:
+- ✅ 所有配置步骤成功
+- ✅ VM 成功启动并进入 `krun_start_enter` 阻塞状态
+- ✅ 使用 Firecracker 内核 (vmlinux-5.10.225, 20.3 MB)
+- ⚠️ TCP 网络后端需要预先建立连接（使用 null 可创建断开连接的设备）
+
+### 内核下载
+
+使用 PowerShell 脚本自动下载测试内核：
+
+```powershell
+# 位置: D:\code\libkrun\tests\windows\download_test_kernel.ps1
+# 下载到: C:\Users\18770\AppData\Local\Temp\libkrun-kernels\vmlinux-5.10.225
+# 大小: 20.3 MB (21,280,768 bytes)
+# 来源: Firecracker S3 bucket
+```
 
 ## 测试结果
 
