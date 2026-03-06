@@ -22,7 +22,7 @@
 
 ## Overview
 
-A3S Box boots OCI images inside MicroVMs powered by libkrun (Apple HVF on macOS, KVM on Linux). Each workload gets its own Linux kernel, namespace isolation, and optional AMD SEV-SNP hardware memory encryption — all with ~200ms cold start.
+A3S Box boots OCI images inside MicroVMs powered by libkrun (Apple HVF on macOS, KVM on Linux, WHPX on Windows). Each workload gets its own Linux kernel, namespace isolation, and optional AMD SEV-SNP hardware memory encryption — all with ~200ms cold start.
 
 Two deployment modes:
 - **Standalone CLI** (`a3s-box run`) — Docker-compatible commands for local development and production
@@ -33,14 +33,14 @@ A3S Box is application-agnostic. It doesn't know what runs inside — web server
 ## Features
 
 ### VM Runtime
-- **~200ms Cold Start** — MicroVM boot via libkrun (Apple HVF / Linux KVM)
+- **~200ms Cold Start** — MicroVM boot via libkrun (Apple HVF / Linux KVM / Windows WHPX)
 - **OCI Images** — Pull, push, build, tag, inspect, prune from any OCI registry with local LRU cache; manifest digest exposed on every pulled image
 - **Dockerfile Build** — `a3s-box build` with multi-stage builds, all Dockerfile instructions, `ADD <url>` HTTP download, `ONBUILD` trigger inheritance
 - **Multi-Platform Build** — `--platform linux/amd64,linux/arm64` with OCI Image Index output
 - **Compose** — Multi-container orchestration via YAML (`compose up/down/ps/config`), dependency-ordered boot, shared networks
 - **Snapshot/Restore** — Configuration-based VM snapshots (`snapshot create/restore/ls/rm/inspect`), rootfs preservation
 - **Rootfs Caching** — Content-addressable cache with SHA256 keys and TTL/size pruning
-- **Cross-Platform** — macOS (Apple Silicon) and Linux (x86_64/ARM64), no root required
+- **Cross-Platform** — macOS (Apple Silicon), Linux (x86_64/ARM64), and Windows (x86_64), no root required
 
 ### Docker-Compatible CLI (52 commands)
 - **Lifecycle**: `run`, `create`, `start`, `stop`, `pause`, `unpause`, `restart`, `rm`, `kill`, `rename`, `wait`
@@ -86,11 +86,11 @@ A3S Box is application-agnostic. It doesn't know what runs inside — web server
 
 ### Prerequisites
 
-- **macOS ARM64** (Apple Silicon) or **Linux x86_64/ARM64**
+- **macOS ARM64** (Apple Silicon), **Linux x86_64/ARM64**, or **Windows x86_64**
 
 > macOS Intel is NOT supported.
 
-### Install via Homebrew (Recommended)
+### Install on macOS/Linux via Homebrew (Recommended)
 
 ```bash
 brew tap a3s-lab/tap https://github.com/A3S-Lab/homebrew-tap
@@ -107,6 +107,34 @@ brew update && brew upgrade a3s-box
 brew uninstall a3s-box
 ```
 
+### Install on Windows via winget
+
+```powershell
+# Install
+winget install A3SLab.Box
+
+# Verify installation
+a3s-box version
+```
+
+#### Windows Prerequisites
+
+Enable Windows Hypervisor Platform:
+
+```powershell
+# Run as Administrator
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+
+# Reboot required
+Restart-Computer
+```
+
+Verify it's enabled:
+
+```powershell
+Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+```
+
 ### Build from Source
 
 Requires Rust 1.75+.
@@ -117,7 +145,10 @@ git submodule update --init --recursive
 cd src && cargo build --release
 ```
 
-macOS requires `brew install lld llvm`. Linux requires `apt install build-essential pkg-config libssl-dev`.
+**Platform-specific dependencies:**
+- macOS: `brew install lld llvm`
+- Linux: `apt install build-essential pkg-config libssl-dev`
+- Windows: Visual Studio Build Tools 2019+ with MSVC
 
 | Mode | Command | Use Case |
 |------|---------|----------|
@@ -468,12 +499,43 @@ cargo test -p a3s-box-cli --test tee_integration -- --ignored --nocapture --test
 - [x] Warm pool CLI/CRI integration — `a3s-box pool start/stop/status`, CRI acquires from pool on RunPodSandbox
 - [x] SafeClaw + Box sidecar integration — `--sidecar IMAGE` flag, `SidecarConfig` in BoxConfig, guest-init launches sidecar before main container
 - [ ] Intel TDX runtime support (hardware-gated, config variant already exists)
-- [ ] Intel TDX runtime support (hardware-gated, config variant already exists)
 - [ ] `--gpus` / `--device` passthrough via VFIO (libkrun upstream dependency)
 - [ ] `.tar.bz2` / `.tar.xz` auto-extraction in `ADD` (bzip2/xz deps)
 - [ ] OCI image signing on `push` (currently verify-only on pull)
 - [ ] Live resource update — hot-resize CPU/memory without VM restart
 - [ ] Multi-node compose — cross-host service discovery
+
+### 🎯 v0.8.0 — Windows WHPX Backend (Released 2026-03-06)
+
+- [x] **Windows Hypervisor Platform (WHPX) backend** — Full Windows x86_64 support
+- [x] **virtiofs on Windows** — Passthrough filesystem with full read/write/symlink/fsync
+- [x] **virtio-net TCP backend** — Network device with checksum offload and TSO
+- [x] **virtio-blk Windows** — File-backed block device
+- [x] **TSI on Windows** — Transparent Socket Impersonation for TCP/UDP/Named Pipes
+- [x] **Windows CI/CD** — GitHub Actions build and release pipeline
+- [x] **winget publishing** — Windows Package Manager support
+- [x] **a3s-libkrun-sys 0.1.2** — FFI bindings with Windows support on crates.io
+
+**Platform Support Matrix:**
+
+| Platform | Backend | Status | Package Manager |
+|----------|---------|--------|-----------------|
+| Linux x86_64 | KVM | ✅ Production | apt, yum, brew |
+| Linux ARM64 | KVM | ✅ Production | apt, yum, brew |
+| macOS ARM64 | HVF | ✅ Production | brew |
+| **Windows x86_64** | **WHPX** | ✅ **Production** | **winget** |
+
+**Known Limitations (Windows):**
+- Single vCPU (multi-vCPU planned)
+- No virtio-gpu support
+- Requires Linux kernel (ELF format)
+
+### 🔮 v0.9.x — Planned
+
+- [ ] Windows multi-vCPU support
+- [ ] libkrunfw-windows — Bundled kernel for Windows
+- [ ] Windows ARM64 support (pending WHPX ARM64 API)
+- [ ] virtio-snd WASAPI backend for Windows
 
 ## A3S Ecosystem
 
