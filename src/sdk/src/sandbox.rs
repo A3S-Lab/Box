@@ -107,7 +107,7 @@ impl Sandbox {
             streaming: false,
         };
 
-        let client = ExecClient::connect(&self.exec_socket).await?;
+        let client: ExecClient = ExecClient::connect(&self.exec_socket).await?;
         let output = client.exec_command(&request).await?;
         let mut result = ExecResult::from(output);
         result.metrics.duration_ms = started.elapsed().as_millis() as u64;
@@ -133,7 +133,7 @@ impl Sandbox {
             streaming: false,
         };
 
-        let client = ExecClient::connect(&self.exec_socket).await?;
+        let client: ExecClient = ExecClient::connect(&self.exec_socket).await?;
         let output = client.exec_command(&request).await?;
         let mut result = ExecResult::from(output);
         result.metrics.duration_ms = started.elapsed().as_millis() as u64;
@@ -181,7 +181,7 @@ impl Sandbox {
             streaming: true,
         };
 
-        let client = ExecClient::connect(&self.exec_socket).await?;
+        let client: ExecClient = ExecClient::connect(&self.exec_socket).await?;
         client.exec_stream(&request).await
     }
 
