@@ -265,7 +265,11 @@ pub(crate) async fn run_pty_session(
                 data = rx.recv() => {
                     match data {
                         Some(bytes) => {
-                            if writer.write_data(&bytes).await.is_err() {
+                            // Send PTY_DATA frame (0x02), not generic Data frame (0x01)
+                            let ft = a3s_transport::FrameType::try_from(a3s_box_core::pty::FRAME_PTY_DATA)
+                                .unwrap_or(a3s_transport::FrameType::Data);
+                            let frame = a3s_transport::Frame { frame_type: ft, payload: bytes };
+                            if writer.write_frame(&frame).await.is_err() {
                                 break;
                             }
                         }
