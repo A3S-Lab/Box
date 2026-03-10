@@ -61,8 +61,14 @@ pub async fn execute(args: PullArgs) -> Result<(), Box<dyn std::error::Error>> {
         println!("Pulling {}...", args.image);
         puller = puller.with_progress_fn(std::sync::Arc::new(|current, total, digest, size| {
             let short = &digest[digest.len().saturating_sub(12)..];
-            let mb = size as f64 / 1_048_576.0;
-            println!("  [{current}/{total}] {short}: {mb:.1} MB");
+            let size_str = if size >= 1_048_576 {
+                format!("{:.1} MB", size as f64 / 1_048_576.0)
+            } else if size >= 1024 {
+                format!("{:.1} KB", size as f64 / 1024.0)
+            } else {
+                format!("{} B", size)
+            };
+            println!("  [{current}/{total}] {short}: {size_str}");
         }));
     }
     let image = puller.pull(&args.image).await?;

@@ -194,7 +194,6 @@ pub(crate) async fn run_pty_session(
     mut writer: a3s_transport::FrameWriter<tokio::io::WriteHalf<tokio::net::UnixStream>>,
 ) -> i32 {
     use a3s_box_core::pty::{FRAME_PTY_DATA, FRAME_PTY_ERROR, FRAME_PTY_EXIT};
-    use tokio::io::AsyncReadExt;
 
     // Task 1: Read from guest PTY → write to stdout
     let reader_task = tokio::spawn(async move {
@@ -233,25 +232,44 @@ pub(crate) async fn run_pty_session(
         }
     });
 
-    // Task 2: Read from stdin + handle SIGWINCH → send frames to guest
+    // Task 2: Read from stdin + handle SIGWINCH → send frames to guest.
+    //
+    // tokio::io::stdin() uses kqueue on macOS which does not generate
+    // readiness events for TTY fds in raw mode, causing reads to block
+    // indefinitely. Use a dedicated blocking thread via spawn_blocking +
+    // an mpsc channel to relay stdin bytes into the async writer task.
     let writer_task = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
-        let mut buf = [0u8; 4096];
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut stdin = std::io::stdin();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
 
         let mut sigwinch =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).ok();
 
         loop {
             tokio::select! {
-                result = stdin.read(&mut buf) => {
-                    match result {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if writer.write_data(&buf[..n]).await.is_err() {
+                data = rx.recv() => {
+                    match data {
+                        Some(bytes) => {
+                            if writer.write_data(&bytes).await.is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
+                        None => break,
                     }
                 },
                 _ = async {

@@ -64,6 +64,9 @@ impl VmManager {
         if let Some(ref m) = self.prom {
             puller = puller.set_metrics(m.clone());
         }
+        if let Some(ref f) = self.pull_progress_fn {
+            puller = puller.with_progress_fn(f.clone());
+        }
 
         tracing::info!(reference = %reference, "Pulling OCI image from registry");
 

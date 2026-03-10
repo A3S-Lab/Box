@@ -114,6 +114,9 @@ pub struct VmManager {
 
     /// Exit code captured from the shim process after it exits.
     pub(crate) shim_exit_code: Option<i32>,
+
+    /// Optional progress callback for image pulls: `(current, total, digest, size_bytes)`.
+    pub(crate) pull_progress_fn: Option<Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>>,
 }
 
 impl VmManager {
@@ -141,6 +144,7 @@ impl VmManager {
             pty_socket_path: None,
             prom: None,
             shim_exit_code: None,
+            pull_progress_fn: None,
         }
     }
 
@@ -167,6 +171,7 @@ impl VmManager {
             pty_socket_path: None,
             prom: None,
             shim_exit_code: None,
+            pull_progress_fn: None,
         }
     }
 
@@ -197,6 +202,7 @@ impl VmManager {
             pty_socket_path: None,
             prom: None,
             shim_exit_code: None,
+            pull_progress_fn: None,
         }
     }
 
@@ -245,6 +251,12 @@ impl VmManager {
     /// Get the name of the active rootfs provider.
     pub fn rootfs_provider_name(&self) -> &str {
         self.rootfs_provider.name()
+    }
+
+    /// Set a progress callback for image pulls: `(current, total, digest, size_bytes)`.
+    /// Called once per layer when `run` pulls an image that is not yet cached.
+    pub fn set_pull_progress_fn(&mut self, f: Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>) {
+        self.pull_progress_fn = Some(f);
     }
 
     /// Attach Prometheus metrics to this VM manager.
