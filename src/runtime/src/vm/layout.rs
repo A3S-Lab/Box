@@ -461,6 +461,7 @@ mod tests {
             pty_socket_path: None,
             prom: None,
             shim_exit_code: None,
+            pull_progress_fn: None,
         }
     }
 
