@@ -4,6 +4,7 @@
 //! (Docker Hub, GHCR, etc.).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use a3s_box_core::error::{BoxError, Result};
 use oci_distribution::client::{ClientConfig, ClientProtocol, Config, ImageLayer, PushResponse};
@@ -82,6 +83,8 @@ pub(crate) struct RegistryPuller {
     auth: RegistryAuth,
     /// Signature verification policy (default: Skip).
     signature_policy: SignaturePolicy,
+    /// Optional layer progress callback: (current, total, digest, size_bytes).
+    progress_fn: Option<Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>>,
 }
 
 impl Default for RegistryPuller {
@@ -109,12 +112,22 @@ impl RegistryPuller {
             client,
             auth,
             signature_policy: SignaturePolicy::default(),
+            progress_fn: None,
         }
     }
 
     /// Set the signature verification policy.
     pub fn with_signature_policy(mut self, policy: SignaturePolicy) -> Self {
         self.signature_policy = policy;
+        self
+    }
+
+    /// Set a progress callback invoked for each layer: `(current, total, digest, size_bytes)`.
+    pub fn with_progress_fn(
+        mut self,
+        f: Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>,
+    ) -> Self {
+        self.progress_fn = Some(f);
         self
     }
 
@@ -281,12 +294,17 @@ impl RegistryPuller {
         })?;
 
         // Pull layer blobs
-        for layer in &manifest.layers {
+        let total = manifest.layers.len();
+        for (idx, layer) in manifest.layers.iter().enumerate() {
             tracing::debug!(
                 digest = %layer.digest,
                 size = layer.size,
                 "Pulling layer"
             );
+
+            if let Some(ref f) = self.progress_fn {
+                f(idx + 1, total, &layer.digest, layer.size);
+            }
 
             let mut layer_data: Vec<u8> = Vec::new();
             self.client

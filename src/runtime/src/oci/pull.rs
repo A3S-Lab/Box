@@ -42,6 +42,15 @@ impl ImagePuller {
         self
     }
 
+    /// Set a layer progress callback: `(current, total, digest, size_bytes)`.
+    pub fn with_progress_fn(
+        mut self,
+        f: Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>,
+    ) -> Self {
+        self.puller = self.puller.with_progress_fn(f);
+        self
+    }
+
     /// Pull an image, using the local cache if available.
     ///
     /// Returns the loaded OCI image from the store.
