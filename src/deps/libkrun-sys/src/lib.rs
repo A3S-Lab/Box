@@ -292,6 +292,12 @@ extern "C" {
 ///
 /// Loaded at runtime via `dlsym` — only exists in libkrun builds with the
 /// `tee` feature (amd-sev / tdx).  Returns `-ENOSYS` if the symbol is absent.
+///
+/// # Safety
+///
+/// `filepath` must be a valid null-terminated C string that remains valid for
+/// the duration of the call. `ctx_id` must be a valid context ID returned by
+/// `krun_create_ctx`.
 #[cfg(target_os = "linux")]
 pub unsafe fn krun_set_tee_config_file(ctx_id: u32, filepath: *const c_char) -> i32 {
     type Func = unsafe extern "C" fn(u32, *const c_char) -> i32;
