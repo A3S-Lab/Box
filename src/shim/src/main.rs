@@ -402,62 +402,62 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // Configure exec communication channel (Unix socket bridged to vsock port 4089)
     #[cfg(not(target_os = "windows"))]
     {
-    let exec_socket_str = spec
-        .exec_socket_path
-        .to_str()
-        .ok_or_else(|| BoxError::BoxBootError {
-            message: format!(
-                "Invalid exec socket path: {}",
-                spec.exec_socket_path.display()
-            ),
-            hint: None,
-        })?;
-    tracing::debug!(
-        socket_path = exec_socket_str,
-        guest_port = EXEC_VSOCK_PORT,
-        "Configuring vsock bridge for exec"
-    );
-    ctx.add_vsock_port(EXEC_VSOCK_PORT, exec_socket_str, true)?;
-
-    // Configure PTY communication channel (Unix socket bridged to vsock port 4090)
-    if !spec.pty_socket_path.as_os_str().is_empty() {
-        let pty_socket_str =
-            spec.pty_socket_path
+        let exec_socket_str =
+            spec.exec_socket_path
                 .to_str()
                 .ok_or_else(|| BoxError::BoxBootError {
                     message: format!(
-                        "Invalid PTY socket path: {}",
-                        spec.pty_socket_path.display()
+                        "Invalid exec socket path: {}",
+                        spec.exec_socket_path.display()
                     ),
                     hint: None,
                 })?;
         tracing::debug!(
-            socket_path = pty_socket_str,
-            guest_port = PTY_VSOCK_PORT,
-            "Configuring vsock bridge for PTY"
+            socket_path = exec_socket_str,
+            guest_port = EXEC_VSOCK_PORT,
+            "Configuring vsock bridge for exec"
         );
-        ctx.add_vsock_port(PTY_VSOCK_PORT, pty_socket_str, true)?;
-    }
+        ctx.add_vsock_port(EXEC_VSOCK_PORT, exec_socket_str, true)?;
 
-    // Configure attestation communication channel (Unix socket bridged to vsock port 4091)
-    if !spec.attest_socket_path.as_os_str().is_empty() {
-        let attest_socket_str =
-            spec.attest_socket_path
-                .to_str()
-                .ok_or_else(|| BoxError::BoxBootError {
-                    message: format!(
-                        "Invalid attestation socket path: {}",
-                        spec.attest_socket_path.display()
-                    ),
-                    hint: None,
-                })?;
-        tracing::debug!(
-            socket_path = attest_socket_str,
-            guest_port = ATTEST_VSOCK_PORT,
-            "Configuring vsock bridge for attestation"
-        );
-        ctx.add_vsock_port(ATTEST_VSOCK_PORT, attest_socket_str, true)?;
-    }
+        // Configure PTY communication channel (Unix socket bridged to vsock port 4090)
+        if !spec.pty_socket_path.as_os_str().is_empty() {
+            let pty_socket_str =
+                spec.pty_socket_path
+                    .to_str()
+                    .ok_or_else(|| BoxError::BoxBootError {
+                        message: format!(
+                            "Invalid PTY socket path: {}",
+                            spec.pty_socket_path.display()
+                        ),
+                        hint: None,
+                    })?;
+            tracing::debug!(
+                socket_path = pty_socket_str,
+                guest_port = PTY_VSOCK_PORT,
+                "Configuring vsock bridge for PTY"
+            );
+            ctx.add_vsock_port(PTY_VSOCK_PORT, pty_socket_str, true)?;
+        }
+
+        // Configure attestation communication channel (Unix socket bridged to vsock port 4091)
+        if !spec.attest_socket_path.as_os_str().is_empty() {
+            let attest_socket_str =
+                spec.attest_socket_path
+                    .to_str()
+                    .ok_or_else(|| BoxError::BoxBootError {
+                        message: format!(
+                            "Invalid attestation socket path: {}",
+                            spec.attest_socket_path.display()
+                        ),
+                        hint: None,
+                    })?;
+            tracing::debug!(
+                socket_path = attest_socket_str,
+                guest_port = ATTEST_VSOCK_PORT,
+                "Configuring vsock bridge for attestation"
+            );
+            ctx.add_vsock_port(ATTEST_VSOCK_PORT, attest_socket_str, true)?;
+        }
     } // end #[cfg(not(target_os = "windows"))]
 
     // Note: A3S_TEE_SIMULATE is already included in spec.entrypoint.env

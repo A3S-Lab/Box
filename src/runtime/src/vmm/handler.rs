@@ -198,7 +198,10 @@ impl VmHandler for ShimHandler {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            tracing::warn!(pid = self.pid, "Attached VM process still running after timeout");
+            tracing::warn!(
+                pid = self.pid,
+                "Attached VM process still running after timeout"
+            );
             Ok(())
         }
     }

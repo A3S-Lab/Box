@@ -10,16 +10,16 @@ use std::{ffi::CString, ptr};
 
 use super::check_status;
 use a3s_box_core::error::{BoxError, Result};
+#[cfg(target_os = "windows")]
+use libkrun_sys::{krun_add_net_tcp, krun_add_vsock_port_windows, krun_set_kernel};
+#[cfg(not(target_os = "windows"))]
+use libkrun_sys::{krun_add_net_unixstream, krun_add_vsock_port2};
 use libkrun_sys::{
     krun_add_virtiofs, krun_create_ctx, krun_free_ctx, krun_init_log, krun_set_console_output,
     krun_set_env, krun_set_exec, krun_set_port_map, krun_set_rlimits, krun_set_root,
     krun_set_vm_config, krun_set_workdir, krun_setgid, krun_setuid, krun_split_irqchip,
     krun_start_enter,
 };
-#[cfg(not(target_os = "windows"))]
-use libkrun_sys::{krun_add_net_unixstream, krun_add_vsock_port2};
-#[cfg(target_os = "windows")]
-use libkrun_sys::{krun_add_net_tcp, krun_add_vsock_port_windows, krun_set_kernel};
 
 /// Thin wrapper that owns a libkrun context.
 pub struct KrunContext {
@@ -467,9 +467,7 @@ impl KrunContext {
                 self.ctx_id,
                 kernel_c.as_ptr(),
                 kernel_format,
-                initramfs_c
-                    .as_ref()
-                    .map_or(ptr::null(), |c| c.as_ptr()),
+                initramfs_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
                 cmdline_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
             ),
         )
