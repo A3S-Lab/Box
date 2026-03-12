@@ -31,7 +31,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-a3s-libkrun-sys = "0.1.2"
+a3s-libkrun-sys = "0.1.5"
 ```
 
 ### Windows Requirements
