@@ -61,14 +61,18 @@ fn main() {
         return;
     }
 
-    // Try to find system-installed libkrun first
-    if let Ok(lib_dir) = find_system_libkrun() {
-        println!(
-            "cargo:warning=Using system-installed libkrun from {}",
-            lib_dir.display()
-        );
-        configure_linking(&lib_dir, &lib_dir);
-        return;
+    // Try to find system-installed libkrun first (unless A3S_BUILD_LIBKRUN is set)
+    if env::var("A3S_BUILD_LIBKRUN").is_err() {
+        if let Ok(lib_dir) = find_system_libkrun() {
+            println!(
+                "cargo:warning=Using system-installed libkrun from {}",
+                lib_dir.display()
+            );
+            configure_linking(&lib_dir, &lib_dir);
+            return;
+        }
+    } else {
+        println!("cargo:warning=A3S_BUILD_LIBKRUN set: forcing build from source");
     }
 
     // Fall back to building from source (with prebuilt libkrunfw)
