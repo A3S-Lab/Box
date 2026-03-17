@@ -235,23 +235,37 @@ fn download_file(url: &str, dest: &Path) -> io::Result<()> {
 
 /// Verifies SHA256 checksum of a file.
 fn verify_sha256(file: &Path, expected: &str) -> io::Result<()> {
-    let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "linux") {
-        ("sha256sum", vec![file.to_str().unwrap()])
+    let actual = if cfg!(target_os = "windows") {
+        // PowerShell is available on all modern Windows
+        let script = format!(
+            "(Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash.ToLower()",
+            file.display()
+        );
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &script])
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other("PowerShell Get-FileHash failed"));
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string()
     } else {
-        ("shasum", vec!["-a", "256", file.to_str().unwrap()])
+        let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "linux") {
+            ("sha256sum", vec![file.to_str().unwrap()])
+        } else {
+            ("shasum", vec!["-a", "256", file.to_str().unwrap()])
+        };
+        let output = Command::new(cmd).args(&args).output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!("{} failed", cmd)));
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
     };
-
-    let output = Command::new(cmd).args(&args).output()?;
-
-    if !output.status.success() {
-        return Err(io::Error::other(format!("{} failed", cmd)));
-    }
-
-    let actual = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
 
     if actual != expected {
         return Err(io::Error::new(
@@ -440,6 +454,12 @@ fn download_libkrunfw_prebuilt(out_dir: &Path) -> PathBuf {
     src_dir
 }
 
+// Windows: prebuilt krun.dll + krun.lib + libkrunfw.dll bundle
+const KRUN_WINDOWS_URL: &str =
+    "https://github.com/A3S-Lab/libkrun/releases/download/v1.17.5-windows/krun-windows-x64.zip";
+const KRUN_WINDOWS_SHA256: &str =
+    "8d5bd3d2452bb6e36973b8b57d34e16fdee0af677d32f883aa689f22708dbc2a";
+
 /// macOS: Build libkrun from source, use prebuilt libkrunfw
 #[cfg(target_os = "macos")]
 fn build() {
@@ -569,6 +589,81 @@ fn download_libkrunfw_so(install_dir: &Path) {
     );
 }
 
+/// Windows: Download and extract the prebuilt krun-windows-x64.zip.
+/// Returns the directory containing krun.lib, krun.dll, and libkrunfw.dll.
+#[cfg(target_os = "windows")]
+fn download_krun_windows_prebuilt(out_dir: &Path) -> PathBuf {
+    let zip_path = out_dir.join("krun-windows-x64.zip");
+    let extract_dir = out_dir.join("krun-windows-x64");
+    let lib_dir = extract_dir.join("krun-windows-x64");
+
+    if lib_dir.join("krun.lib").exists() {
+        println!("cargo:warning=Using cached krun Windows prebuilt");
+        return lib_dir;
+    }
+
+    download_file(KRUN_WINDOWS_URL, &zip_path)
+        .unwrap_or_else(|e| panic!("Failed to download krun Windows prebuilt: {}", e));
+
+    verify_sha256(&zip_path, KRUN_WINDOWS_SHA256)
+        .unwrap_or_else(|e| panic!("Failed to verify krun Windows prebuilt checksum: {}", e));
+
+    fs::create_dir_all(&extract_dir)
+        .unwrap_or_else(|e| panic!("Failed to create extract dir: {}", e));
+
+    // Use PowerShell to unzip (available on all modern Windows)
+    let status = Command::new("powershell.exe")
+        .args([
+            "-NoProfile", "-Command",
+            &format!(
+                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                zip_path.display(),
+                extract_dir.display(),
+            ),
+        ])
+        .status()
+        .unwrap_or_else(|e| panic!("Failed to run PowerShell unzip: {}", e));
+
+    assert!(status.success(), "PowerShell Expand-Archive failed");
+    println!(
+        "cargo:warning=Extracted krun Windows prebuilt to {}",
+        lib_dir.display()
+    );
+    lib_dir
+}
+
+/// Windows: Download and link the prebuilt krun.dll + krun.lib bundle.
+///
+/// Search order:
+///   1. LIBKRUN_DIR env var (local build override)
+///   2. deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/ (vendored)
+///   3. Auto-download krun-windows-x64.zip from GitHub Releases into OUT_DIR
+#[cfg(target_os = "windows")]
+fn build() {
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
+    let triple = format!("{}-pc-windows-msvc", target_arch);
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    let lib_dir = if let Ok(dir) = env::var("LIBKRUN_DIR") {
+        PathBuf::from(dir)
+    } else {
+        let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+        let prebuilt = manifest_dir.join("prebuilt").join(&triple);
+        if prebuilt.join("krun.lib").exists() {
+            prebuilt
+        } else {
+            download_krun_windows_prebuilt(&out_dir)
+        }
+    };
+
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!("cargo:rustc-link-lib=dylib=krun");
+    println!("cargo:rustc-link-lib=WinHvPlatform");
+    println!("cargo:LIBKRUN_A3S_DEP={}", lib_dir.display());
+    println!("cargo:LIBKRUNFW_A3S_DEP={}", lib_dir.display());
+    println!("cargo:rerun-if-env-changed=LIBKRUN_DIR");
+}
+
 /// Linux: Build libkrun from source, download prebuilt libkrunfw
 #[cfg(target_os = "linux")]
 fn build() {
@@ -612,51 +707,6 @@ fn build() {
 
     // 4. Configure linking
     configure_linking(&libkrun_lib_dir, &libkrunfw_lib_dir);
-}
-
-/// Windows: locate pre-built krun.dll via LIBKRUN_DIR or a vendored prebuilt directory.
-///
-/// Build krun.dll from the libkrun source in this repo:
-///   cargo build --release -p libkrun --target x86_64-pc-windows-msvc
-///   set LIBKRUN_DIR=<path-to-libkrun>\target\x86_64-pc-windows-msvc\release
-///
-/// Or copy krun.dll + krun.lib (renamed from krun.dll.lib) into:
-///   deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/
-#[cfg(target_os = "windows")]
-fn build() {
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
-    let triple = format!("{}-pc-windows-msvc", target_arch);
-
-    let lib_dir = if let Ok(dir) = env::var("LIBKRUN_DIR") {
-        PathBuf::from(dir)
-    } else {
-        let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-        manifest_dir.join("prebuilt").join(&triple)
-    };
-
-    let krun_lib = lib_dir.join("krun.lib");
-    if !krun_lib.exists() {
-        println!(
-            "cargo:warning=krun.lib not found at {}. \
-             Build libkrun (`cargo build --release -p libkrun --target {triple}`) \
-             and set LIBKRUN_DIR to the output directory, \
-             or copy krun.lib into deps/libkrun-sys/prebuilt/{triple}/. \
-             Set A3S_DEPS_STUB=1 to skip (CI lint mode).",
-            krun_lib.display(),
-            triple = triple,
-        );
-    }
-
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=dylib=krun");
-    // krun.dll itself imports WinHvPlatform; re-declare so the linker finds it.
-    println!("cargo:rustc-link-lib=WinHvPlatform");
-
-    println!("cargo:LIBKRUN_A3S_DEP={}", lib_dir.display());
-    println!("cargo:LIBKRUNFW_A3S_DEP={}", lib_dir.display());
-
-    println!("cargo:rerun-if-env-changed=LIBKRUN_DIR");
-    println!("cargo:rerun-if-changed=prebuilt/{}/krun.lib", triple);
 }
 
 /// Unsupported platform
