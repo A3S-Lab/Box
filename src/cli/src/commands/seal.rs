@@ -4,11 +4,13 @@
 //! then encrypts data using a key derived from the TEE's measurement and chip_id.
 //! The sealed blob can only be decrypted by the same TEE.
 
-use a3s_box_runtime::{tee::AttestationPolicy, SealClient};
 use clap::Args;
 
 use crate::resolve;
 use crate::state::StateFile;
+
+#[cfg(not(windows))]
+use a3s_box_runtime::{tee::AttestationPolicy, SealClient};
 
 #[derive(Args)]
 pub struct SealArgs {
@@ -37,6 +39,7 @@ pub struct SealArgs {
 }
 
 /// JSON output for the seal command.
+#[cfg(not(windows))]
 #[derive(serde::Serialize)]
 struct SealOutput {
     box_name: String,
@@ -45,6 +48,12 @@ struct SealOutput {
     policy: String,
 }
 
+#[cfg(windows)]
+pub async fn execute(_args: SealArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("'seal' requires Unix domain sockets and is not supported on Windows".into())
+}
+
+#[cfg(not(windows))]
 pub async fn execute(args: SealArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;

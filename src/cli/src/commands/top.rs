@@ -2,9 +2,12 @@
 //!
 //! Convenience wrapper that runs `ps` inside the box via the exec channel.
 
-use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
-use a3s_box_runtime::ExecClient;
 use clap::Args;
+
+#[cfg(not(windows))]
+use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
+#[cfg(not(windows))]
+use a3s_box_runtime::ExecClient;
 
 use crate::resolve;
 use crate::state::StateFile;
@@ -22,6 +25,12 @@ pub struct TopArgs {
     pub ps_args: Vec<String>,
 }
 
+#[cfg(windows)]
+pub async fn execute(_args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("'top' requires Unix domain sockets and is not supported on Windows".into())
+}
+
+#[cfg(not(windows))]
 pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;

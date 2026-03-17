@@ -65,7 +65,7 @@ async fn stop_one(
         .stop_signal
         .as_deref()
         .map(parse_signal_name)
-        .unwrap_or(libc::SIGTERM);
+        .unwrap_or(15); // SIGTERM = 15
 
     // Resolve timeout: CLI -t > BoxRecord.stop_timeout > 10s
     let effective_timeout = timeout.or(record.stop_timeout).unwrap_or(10);

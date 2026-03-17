@@ -3,10 +3,7 @@
 //! Convenience wrapper around `exec -t <box> /bin/sh`.
 //! Equivalent to: `a3s-box exec -t <box> -- /bin/sh`
 
-use a3s_box_core::pty::PtyRequest;
-use a3s_box_runtime::PtyClient;
 use clap::Args;
-use crossterm::terminal;
 
 use crate::resolve;
 use crate::state::StateFile;
@@ -29,7 +26,17 @@ pub struct ShellArgs {
     pub workdir: Option<String>,
 }
 
+#[cfg(windows)]
+pub async fn execute(_args: ShellArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("'shell' requires Unix domain sockets and is not supported on Windows".into())
+}
+
+#[cfg(not(windows))]
 pub async fn execute(args: ShellArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use a3s_box_core::pty::PtyRequest;
+    use a3s_box_runtime::PtyClient;
+    use crossterm::terminal;
+
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;
 

@@ -10,8 +10,10 @@
 
 use clap::Args;
 
-use a3s_box_core::exec::ExecRequest;
 use a3s_box_runtime::resize::{validate_update, ResourceUpdate};
+#[cfg(not(windows))]
+use a3s_box_core::exec::ExecRequest;
+#[cfg(not(windows))]
 use a3s_box_runtime::ExecClient;
 
 use super::common;
@@ -164,6 +166,8 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
 
         // Tier 2 changes → apply via exec channel
         if update.has_tier2_changes() {
+            #[cfg(not(windows))]
+            {
             let exec_socket_path = if !record.exec_socket_path.as_os_str().is_empty() {
                 record.exec_socket_path.clone()
             } else {
@@ -206,6 +210,7 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
                     }
                 }
             }
+            } // #[cfg(not(windows))]
         }
     }
 

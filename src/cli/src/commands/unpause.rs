@@ -42,10 +42,11 @@ fn unpause_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std::er
     let name = record.name.clone();
 
     if let Some(pid) = record.pid {
+        #[cfg(unix)]
         // Safety: sending SIGCONT to resume the process
-        unsafe {
-            libc::kill(pid as i32, libc::SIGCONT);
-        }
+        unsafe { libc::kill(pid as i32, libc::SIGCONT); }
+        #[cfg(windows)]
+        { let _ = pid; return Err("unpause is not supported on Windows".into()); }
     }
 
     // Update status back to running

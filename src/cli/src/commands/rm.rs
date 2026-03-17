@@ -52,9 +52,7 @@ fn rm_one(
 
         // Force-kill the running box
         if let Some(pid) = record.pid {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
+            crate::process::terminate_process(pid);
         }
     }
 

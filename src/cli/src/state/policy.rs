@@ -2,9 +2,9 @@
 
 use super::BoxRecord;
 
-/// Check if a process is alive by sending signal 0.
+/// Check if a process is alive.
 pub(super) fn is_process_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
+    crate::process::is_process_alive(pid)
 }
 
 /// Determine if a box should be automatically restarted based on its restart policy.

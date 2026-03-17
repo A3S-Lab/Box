@@ -32,7 +32,10 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
 
     // Interactive PTY mode
     if args.tty {
+        #[cfg(not(windows))]
         return execute_pty_attach(record).await;
+        #[cfg(windows)]
+        return Err("'attach -it' requires Unix domain sockets and is not supported on Windows".into());
     }
 
     // Original behavior: tail console log
@@ -61,6 +64,7 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Attach to a running box with an interactive PTY session.
+#[cfg(not(windows))]
 async fn execute_pty_attach(
     record: &crate::state::BoxRecord,
 ) -> Result<(), Box<dyn std::error::Error>> {

@@ -8,9 +8,12 @@
 //!   a3s-box cp <box>:/path/in/box /host/path   (box → host)
 //!   a3s-box cp /host/path <box>:/path/in/box   (host → box)
 
-use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
-use a3s_box_runtime::ExecClient;
 use clap::Args;
+
+#[cfg(not(windows))]
+use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
+#[cfg(not(windows))]
+use a3s_box_runtime::ExecClient;
 
 use crate::resolve;
 use crate::state::StateFile;
@@ -49,6 +52,11 @@ fn parse_endpoint(s: &str) -> Endpoint {
 }
 
 pub async fn execute(args: CpArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    { let _ = args; return Err("'cp' requires Unix domain sockets and is not supported on Windows".into()); }
+
+    #[cfg(not(windows))]
+    {
     let src = parse_endpoint(&args.src);
     let dst = parse_endpoint(&args.dst);
 
@@ -67,9 +75,11 @@ pub async fn execute(args: CpArgs) -> Result<(), Box<dyn std::error::Error>> {
             Err("Copying between two boxes is not supported. Copy to host first.".into())
         }
     }
+    } // #[cfg(not(windows))]
 }
 
 /// Copy a file or directory from a box to the host.
+#[cfg(not(windows))]
 async fn copy_from_box(
     box_name: &str,
     box_path: &str,
@@ -85,6 +95,7 @@ async fn copy_from_box(
 }
 
 /// Copy a file or directory from the host to a box.
+#[cfg(not(windows))]
 async fn copy_to_box(
     host_path: &str,
     box_name: &str,
@@ -103,6 +114,7 @@ async fn copy_to_box(
 }
 
 /// Check if a path is a directory inside the box.
+#[cfg(not(windows))]
 async fn is_directory_in_box(
     client: &ExecClient,
     box_path: &str,
@@ -126,6 +138,7 @@ async fn is_directory_in_box(
 // ---------------------------------------------------------------------------
 
 /// Copy a single file from a box to the host.
+#[cfg(not(windows))]
 async fn copy_file_from_box(
     client: &ExecClient,
     box_name: &str,
@@ -171,6 +184,7 @@ async fn copy_file_from_box(
 }
 
 /// Copy a single file from the host to a box.
+#[cfg(not(windows))]
 async fn copy_file_to_box(
     client: &ExecClient,
     host_path: &str,
@@ -220,6 +234,7 @@ async fn copy_file_to_box(
 // ---------------------------------------------------------------------------
 
 /// Copy a directory from a box to the host using tar.
+#[cfg(not(windows))]
 async fn copy_dir_from_box(
     client: &ExecClient,
     box_name: &str,
@@ -270,6 +285,7 @@ async fn copy_dir_from_box(
 }
 
 /// Copy a directory from the host to a box using tar.
+#[cfg(not(windows))]
 async fn copy_dir_to_box(
     client: &ExecClient,
     host_path: &str,
@@ -366,6 +382,7 @@ fn extract_tar_to_dir(tar_data: &[u8], dir_path: &str) -> Result<(), Box<dyn std
 }
 
 /// Connect to a box's exec server.
+#[cfg(not(windows))]
 async fn connect_exec(box_name: &str) -> Result<ExecClient, Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, box_name)?;

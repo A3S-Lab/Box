@@ -7,8 +7,6 @@
 //! When `-t` (tty) is specified, allocates a PTY in the guest for interactive
 //! terminal sessions (e.g., `a3s-box exec -it mybox /bin/sh`).
 
-use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
-use a3s_box_runtime::ExecClient;
 use clap::Args;
 
 use crate::resolve;
@@ -48,7 +46,16 @@ pub struct ExecArgs {
     pub cmd: Vec<String>,
 }
 
+#[cfg(windows)]
+pub async fn execute(_args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("'exec' requires Unix domain sockets and is not supported on Windows".into())
+}
+
+#[cfg(not(windows))]
 pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use a3s_box_core::exec::{ExecRequest, DEFAULT_EXEC_TIMEOUT_NS};
+    use a3s_box_runtime::ExecClient;
+
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;
 
@@ -129,6 +136,7 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Execute a command with an interactive PTY session.
+#[cfg(not(windows))]
 async fn execute_pty(
     args: ExecArgs,
     record: &crate::state::BoxRecord,
@@ -189,6 +197,7 @@ async fn execute_pty(
 /// - SIGWINCH → PtyResize frames
 ///
 /// Returns the process exit code.
+#[cfg(not(windows))]
 pub(crate) async fn run_pty_session(
     mut reader: a3s_transport::FrameReader<tokio::io::ReadHalf<tokio::net::UnixStream>>,
     mut writer: a3s_transport::FrameWriter<tokio::io::WriteHalf<tokio::net::UnixStream>>,

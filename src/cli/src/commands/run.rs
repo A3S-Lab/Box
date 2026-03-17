@@ -311,7 +311,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         .stop_signal
         .as_deref()
         .map(parse_signal_name)
-        .unwrap_or(libc::SIGTERM);
+        .unwrap_or(15); // SIGTERM = 15
     let stop_timeout_ms = args
         .common
         .stop_timeout
@@ -415,6 +415,7 @@ fn connect_network(
 // Phase 2a: Interactive PTY mode
 // ============================================================================
 
+#[cfg(not(windows))]
 async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     use a3s_box_core::pty::PtyRequest;
     use a3s_box_runtime::PtyClient;
@@ -476,6 +477,11 @@ async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std:
         std::process::exit(exit_code);
     }
     Ok(())
+}
+
+#[cfg(windows)]
+async fn run_tty(_ctx: RunContext, _args: &RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("Interactive PTY mode (-it) is not supported on Windows".into())
 }
 
 // ============================================================================

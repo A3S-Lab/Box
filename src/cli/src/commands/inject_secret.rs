@@ -4,11 +4,13 @@
 //! then injects secrets over the encrypted channel. Secrets are stored in
 //! `/run/secrets/<name>` inside the guest (tmpfs, mode 0600).
 
-use a3s_box_runtime::{tee::AttestationPolicy, SecretEntry, SecretInjector};
 use clap::Args;
 
 use crate::resolve;
 use crate::state::StateFile;
+
+#[cfg(not(windows))]
+use a3s_box_runtime::{tee::AttestationPolicy, SecretEntry, SecretInjector};
 
 #[derive(Args)]
 pub struct InjectSecretArgs {
@@ -33,6 +35,7 @@ pub struct InjectSecretArgs {
 }
 
 /// JSON output for the inject-secret command.
+#[cfg(not(windows))]
 #[derive(serde::Serialize)]
 struct InjectOutput {
     box_name: String,
@@ -40,6 +43,12 @@ struct InjectOutput {
     secrets: Vec<String>,
 }
 
+#[cfg(windows)]
+pub async fn execute(_args: InjectSecretArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("'inject-secret' requires Unix domain sockets and is not supported on Windows".into())
+}
+
+#[cfg(not(windows))]
 pub async fn execute(args: InjectSecretArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;
@@ -103,6 +112,7 @@ pub async fn execute(args: InjectSecretArgs) -> Result<(), Box<dyn std::error::E
 }
 
 /// Parse a "NAME=VALUE" string into a SecretEntry.
+#[cfg(not(windows))]
 fn parse_secret(s: &str, set_env: bool) -> Result<SecretEntry, String> {
     let (name, value) = s
         .split_once('=')
@@ -120,6 +130,7 @@ fn parse_secret(s: &str, set_env: bool) -> Result<SecretEntry, String> {
 }
 
 #[cfg(test)]
+#[cfg(not(windows))]
 mod tests {
     use super::*;
 

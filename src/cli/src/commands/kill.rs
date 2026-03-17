@@ -6,6 +6,25 @@ use crate::cleanup;
 use crate::resolve;
 use crate::state::StateFile;
 
+// Signal constants — use libc on Unix, define numerically on Windows.
+#[cfg(unix)]
+use libc::{SIGCONT, SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGSTOP, SIGTERM, SIGUSR1, SIGUSR2};
+
+#[cfg(windows)]
+mod win_signals {
+    pub const SIGKILL: i32 = 9;
+    pub const SIGTERM: i32 = 15;
+    pub const SIGINT: i32 = 2;
+    pub const SIGHUP: i32 = 1;
+    pub const SIGQUIT: i32 = 3;
+    pub const SIGUSR1: i32 = 10;
+    pub const SIGUSR2: i32 = 12;
+    pub const SIGSTOP: i32 = 19;
+    pub const SIGCONT: i32 = 18;
+}
+#[cfg(windows)]
+use win_signals::*;
+
 #[derive(Args)]
 pub struct KillArgs {
     /// Box name(s) or ID(s)
@@ -17,7 +36,7 @@ pub struct KillArgs {
     pub signal: String,
 }
 
-/// Parse a signal name or number into a libc signal constant.
+/// Parse a signal name or number into a signal constant.
 ///
 /// Supports common signal names with or without the "SIG" prefix:
 /// KILL/SIGKILL, TERM/SIGTERM, INT/SIGINT, HUP/SIGHUP, QUIT/SIGQUIT,
@@ -32,15 +51,15 @@ fn parse_signal(name: &str) -> Result<i32, String> {
         .unwrap_or_else(|| name.to_uppercase());
 
     match normalized.as_str() {
-        "KILL" => Ok(libc::SIGKILL),
-        "TERM" => Ok(libc::SIGTERM),
-        "INT" => Ok(libc::SIGINT),
-        "HUP" => Ok(libc::SIGHUP),
-        "QUIT" => Ok(libc::SIGQUIT),
-        "USR1" => Ok(libc::SIGUSR1),
-        "USR2" => Ok(libc::SIGUSR2),
-        "STOP" => Ok(libc::SIGSTOP),
-        "CONT" => Ok(libc::SIGCONT),
+        "KILL" => Ok(SIGKILL),
+        "TERM" => Ok(SIGTERM),
+        "INT" => Ok(SIGINT),
+        "HUP" => Ok(SIGHUP),
+        "QUIT" => Ok(SIGQUIT),
+        "USR1" => Ok(SIGUSR1),
+        "USR2" => Ok(SIGUSR2),
+        "STOP" => Ok(SIGSTOP),
+        "CONT" => Ok(SIGCONT),
         other => {
             // Try parsing as a numeric signal
             other
@@ -85,13 +104,16 @@ fn kill_one(
     let volume_names = record.volume_names.clone();
 
     if let Some(pid) = record.pid {
+        #[cfg(unix)]
         unsafe {
             libc::kill(pid as i32, signal);
         }
+        #[cfg(windows)]
+        crate::process::terminate_process(pid);
     }
 
     // Only update state to stopped for terminating signals
-    if signal == libc::SIGKILL || signal == libc::SIGTERM {
+    if signal == SIGKILL || signal == SIGTERM {
         cleanup::cleanup_box_resources(&box_id, &volume_names, network_name.as_deref());
 
         let record = resolve::resolve_mut(state, &box_id)?;
@@ -111,49 +133,49 @@ mod tests {
 
     #[test]
     fn test_parse_signal_kill() {
-        assert_eq!(parse_signal("KILL").unwrap(), libc::SIGKILL);
-        assert_eq!(parse_signal("SIGKILL").unwrap(), libc::SIGKILL);
-        assert_eq!(parse_signal("kill").unwrap(), libc::SIGKILL);
-        assert_eq!(parse_signal("sigkill").unwrap(), libc::SIGKILL);
+        assert_eq!(parse_signal("KILL").unwrap(), SIGKILL);
+        assert_eq!(parse_signal("SIGKILL").unwrap(), SIGKILL);
+        assert_eq!(parse_signal("kill").unwrap(), SIGKILL);
+        assert_eq!(parse_signal("sigkill").unwrap(), SIGKILL);
     }
 
     #[test]
     fn test_parse_signal_term() {
-        assert_eq!(parse_signal("TERM").unwrap(), libc::SIGTERM);
-        assert_eq!(parse_signal("SIGTERM").unwrap(), libc::SIGTERM);
-        assert_eq!(parse_signal("term").unwrap(), libc::SIGTERM);
+        assert_eq!(parse_signal("TERM").unwrap(), SIGTERM);
+        assert_eq!(parse_signal("SIGTERM").unwrap(), SIGTERM);
+        assert_eq!(parse_signal("term").unwrap(), SIGTERM);
     }
 
     #[test]
     fn test_parse_signal_int() {
-        assert_eq!(parse_signal("INT").unwrap(), libc::SIGINT);
-        assert_eq!(parse_signal("SIGINT").unwrap(), libc::SIGINT);
+        assert_eq!(parse_signal("INT").unwrap(), SIGINT);
+        assert_eq!(parse_signal("SIGINT").unwrap(), SIGINT);
     }
 
     #[test]
     fn test_parse_signal_hup() {
-        assert_eq!(parse_signal("HUP").unwrap(), libc::SIGHUP);
-        assert_eq!(parse_signal("SIGHUP").unwrap(), libc::SIGHUP);
+        assert_eq!(parse_signal("HUP").unwrap(), SIGHUP);
+        assert_eq!(parse_signal("SIGHUP").unwrap(), SIGHUP);
     }
 
     #[test]
     fn test_parse_signal_quit() {
-        assert_eq!(parse_signal("QUIT").unwrap(), libc::SIGQUIT);
-        assert_eq!(parse_signal("SIGQUIT").unwrap(), libc::SIGQUIT);
+        assert_eq!(parse_signal("QUIT").unwrap(), SIGQUIT);
+        assert_eq!(parse_signal("SIGQUIT").unwrap(), SIGQUIT);
     }
 
     #[test]
     fn test_parse_signal_usr() {
-        assert_eq!(parse_signal("USR1").unwrap(), libc::SIGUSR1);
-        assert_eq!(parse_signal("SIGUSR1").unwrap(), libc::SIGUSR1);
-        assert_eq!(parse_signal("USR2").unwrap(), libc::SIGUSR2);
-        assert_eq!(parse_signal("SIGUSR2").unwrap(), libc::SIGUSR2);
+        assert_eq!(parse_signal("USR1").unwrap(), SIGUSR1);
+        assert_eq!(parse_signal("SIGUSR1").unwrap(), SIGUSR1);
+        assert_eq!(parse_signal("USR2").unwrap(), SIGUSR2);
+        assert_eq!(parse_signal("SIGUSR2").unwrap(), SIGUSR2);
     }
 
     #[test]
     fn test_parse_signal_stop_cont() {
-        assert_eq!(parse_signal("STOP").unwrap(), libc::SIGSTOP);
-        assert_eq!(parse_signal("CONT").unwrap(), libc::SIGCONT);
+        assert_eq!(parse_signal("STOP").unwrap(), SIGSTOP);
+        assert_eq!(parse_signal("CONT").unwrap(), SIGCONT);
     }
 
     #[test]

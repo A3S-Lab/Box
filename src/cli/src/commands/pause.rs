@@ -42,10 +42,11 @@ fn pause_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std::erro
     let name = record.name.clone();
 
     if let Some(pid) = record.pid {
+        #[cfg(unix)]
         // Safety: sending SIGSTOP to pause the process
-        unsafe {
-            libc::kill(pid as i32, libc::SIGSTOP);
-        }
+        unsafe { libc::kill(pid as i32, libc::SIGSTOP); }
+        #[cfg(windows)]
+        { let _ = pid; return Err("pause is not supported on Windows".into()); }
     }
 
     // Update status to paused

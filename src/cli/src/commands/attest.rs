@@ -4,15 +4,17 @@
 //! SNP attestation report, optionally verifies it against a policy, and
 //! outputs the result as JSON.
 
-use a3s_box_runtime::{
-    verify_attestation, AttestationClient, AttestationPolicy, AttestationRequest,
-    RaTlsAttestationClient,
-};
 use clap::Args;
 use std::path::PathBuf;
 
 use crate::resolve;
 use crate::state::StateFile;
+
+#[cfg(not(windows))]
+use a3s_box_runtime::{
+    verify_attestation, AttestationClient, AttestationPolicy, AttestationRequest,
+    RaTlsAttestationClient,
+};
 
 #[derive(Args)]
 pub struct AttestArgs {
@@ -47,6 +49,7 @@ pub struct AttestArgs {
 }
 
 /// JSON output for the attest command.
+#[cfg(not(windows))]
 #[derive(serde::Serialize)]
 struct AttestOutput {
     /// Box ID
@@ -69,6 +72,12 @@ struct AttestOutput {
     failures: Vec<String>,
 }
 
+#[cfg(windows)]
+pub async fn execute(_args: AttestArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("'attest' requires Unix domain sockets and is not supported on Windows".into())
+}
+
+#[cfg(not(windows))]
 pub async fn execute(args: AttestArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;

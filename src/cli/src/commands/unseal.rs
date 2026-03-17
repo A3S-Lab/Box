@@ -4,11 +4,13 @@
 //! then decrypts a sealed blob using the TEE-bound key. Only succeeds if the
 //! TEE identity matches the one that sealed the data.
 
-use a3s_box_runtime::{tee::AttestationPolicy, SealClient};
 use clap::Args;
 
 use crate::resolve;
 use crate::state::StateFile;
+
+#[cfg(not(windows))]
+use a3s_box_runtime::{tee::AttestationPolicy, SealClient};
 
 #[derive(Args)]
 pub struct UnsealArgs {
@@ -37,6 +39,7 @@ pub struct UnsealArgs {
 }
 
 /// JSON output for the unseal command.
+#[cfg(not(windows))]
 #[derive(serde::Serialize)]
 struct UnsealOutput {
     box_name: String,
@@ -45,6 +48,12 @@ struct UnsealOutput {
     policy: String,
 }
 
+#[cfg(windows)]
+pub async fn execute(_args: UnsealArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("'unseal' requires Unix domain sockets and is not supported on Windows".into())
+}
+
+#[cfg(not(windows))]
 pub async fn execute(args: UnsealArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.r#box)?;

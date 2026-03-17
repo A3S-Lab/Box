@@ -10,11 +10,7 @@
 //! - After `retries` consecutive failures → status becomes "unhealthy"
 //! - Socket disappearing → box has stopped; checker exits
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use a3s_box_core::exec::ExecRequest;
-use a3s_box_runtime::ExecClient;
+use std::path::PathBuf;
 
 use crate::state::{HealthCheck, StateFile};
 
@@ -28,12 +24,25 @@ pub fn spawn_health_checker(
     exec_socket_path: PathBuf,
     health_check: HealthCheck,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        run_health_loop(box_id, exec_socket_path, health_check).await;
-    })
+    #[cfg(not(windows))]
+    {
+        tokio::spawn(async move {
+            run_health_loop(box_id, exec_socket_path, health_check).await;
+        })
+    }
+    #[cfg(windows)]
+    {
+        // Health checks require exec socket (Unix domain sockets); no-op on Windows.
+        let _ = (box_id, exec_socket_path, health_check);
+        tokio::spawn(async {})
+    }
 }
 
+#[cfg(not(windows))]
 async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCheck) {
+    use std::path::Path;
+    use std::time::Duration;
+
     // Honour start_period before the first probe
     if hc.start_period_secs > 0 {
         tokio::time::sleep(Duration::from_secs(hc.start_period_secs)).await;
@@ -74,8 +83,11 @@ async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCh
     }
 }
 
-/// Run the health check command once. Returns `true` if the command exits 0.
-async fn run_probe(exec_socket_path: &Path, cmd: &[String], timeout_ns: u64) -> bool {
+#[cfg(not(windows))]
+async fn run_probe(exec_socket_path: &std::path::Path, cmd: &[String], timeout_ns: u64) -> bool {
+    use a3s_box_core::exec::ExecRequest;
+    use a3s_box_runtime::ExecClient;
+
     let client = match ExecClient::connect(exec_socket_path).await {
         Ok(c) => c,
         Err(_) => return false,
@@ -111,8 +123,8 @@ mod tests {
             retries: 3,
             start_period_secs: 0,
         };
-        let interval = Duration::from_secs(hc.interval_secs.max(1));
-        assert_eq!(interval, Duration::from_secs(1));
+        let interval = std::time::Duration::from_secs(hc.interval_secs.max(1));
+        assert_eq!(interval, std::time::Duration::from_secs(1));
     }
 
     #[test]
