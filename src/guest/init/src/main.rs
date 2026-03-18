@@ -476,7 +476,7 @@ fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
                 std::env::set_current_dir("/mnt/newroot")?;
 
                 // Pivot root
-                use nix::unistd::{chroot, chdir};
+                use nix::unistd::{chdir, chroot};
                 chroot("/mnt/newroot")?;
                 chdir("/")?;
 

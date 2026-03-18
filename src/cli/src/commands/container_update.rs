@@ -10,9 +10,9 @@
 
 use clap::Args;
 
-use a3s_box_runtime::resize::{validate_update, ResourceUpdate};
 #[cfg(not(windows))]
 use a3s_box_core::exec::ExecRequest;
+use a3s_box_runtime::resize::{validate_update, ResourceUpdate};
 #[cfg(not(windows))]
 use a3s_box_runtime::ExecClient;
 
@@ -168,48 +168,48 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
         if update.has_tier2_changes() {
             #[cfg(not(windows))]
             {
-            let exec_socket_path = if !record.exec_socket_path.as_os_str().is_empty() {
-                record.exec_socket_path.clone()
-            } else {
-                record.box_dir.join("sockets").join("exec.sock")
-            };
+                let exec_socket_path = if !record.exec_socket_path.as_os_str().is_empty() {
+                    record.exec_socket_path.clone()
+                } else {
+                    record.box_dir.join("sockets").join("exec.sock")
+                };
 
-            if !exec_socket_path.exists() {
-                eprintln!(
-                    "Warning: exec socket not found at {}, changes saved but not applied live",
-                    exec_socket_path.display()
-                );
-            } else {
-                let client = ExecClient::connect(&exec_socket_path).await?;
-                let commands = update.build_cgroup_commands();
+                if !exec_socket_path.exists() {
+                    eprintln!(
+                        "Warning: exec socket not found at {}, changes saved but not applied live",
+                        exec_socket_path.display()
+                    );
+                } else {
+                    let client = ExecClient::connect(&exec_socket_path).await?;
+                    let commands = update.build_cgroup_commands();
 
-                for cmd_str in &commands {
-                    let request = ExecRequest {
-                        cmd: vec!["sh".to_string(), "-c".to_string(), cmd_str.clone()],
-                        timeout_ns: 5_000_000_000,
-                        env: vec![],
-                        working_dir: None,
-                        stdin: None,
-                        user: None,
-                        streaming: false,
-                    };
+                    for cmd_str in &commands {
+                        let request = ExecRequest {
+                            cmd: vec!["sh".to_string(), "-c".to_string(), cmd_str.clone()],
+                            timeout_ns: 5_000_000_000,
+                            env: vec![],
+                            working_dir: None,
+                            stdin: None,
+                            user: None,
+                            streaming: false,
+                        };
 
-                    match client.exec_command(&request).await {
-                        Ok(output) if output.exit_code == 0 => {}
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            eprintln!(
-                                "Warning: cgroup update failed (exit {}): {}",
-                                output.exit_code,
-                                stderr.trim()
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("Warning: failed to apply live update: {e}");
+                        match client.exec_command(&request).await {
+                            Ok(output) if output.exit_code == 0 => {}
+                            Ok(output) => {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                eprintln!(
+                                    "Warning: cgroup update failed (exit {}): {}",
+                                    output.exit_code,
+                                    stderr.trim()
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: failed to apply live update: {e}");
+                            }
                         }
                     }
                 }
-            }
             } // #[cfg(not(windows))]
         }
     }

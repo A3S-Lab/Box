@@ -196,7 +196,16 @@ pub(super) fn handle_run(
     // Other platforms: not supported
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (command, rootfs_dir, layers_dir, workdir, env, shell, layer_index, quiet);
+        let _ = (
+            command,
+            rootfs_dir,
+            layers_dir,
+            workdir,
+            env,
+            shell,
+            layer_index,
+            quiet,
+        );
         Ok(None)
     }
 }
