@@ -89,6 +89,9 @@ xz2 = "0.1"
 # Build support
 tempfile = { workspace = true }
 
+# Metrics
+prometheus = { workspace = true }
+
 # macOS userspace network proxy (replaces gvproxy)
 [target.'cfg(target_os = "macos")'.dependencies]
 smoltcp = { version = "0.11", default-features = false, features = [
@@ -100,9 +103,6 @@ smoltcp = { version = "0.11", default-features = false, features = [
     "std",
     "alloc",
 ] }
-
-# Metrics
-prometheus = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
