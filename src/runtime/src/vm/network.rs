@@ -63,13 +63,13 @@ impl VmManager {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
 
         #[cfg(target_os = "linux")]
-        let socket_path = {
+        let (socket_path, _net_socket_fd, _net_proxy_fd) = {
             let mut passt = crate::network::PasstManager::new(&box_dir);
             passt.spawn(ip, gateway, prefix_len, &dns_servers)?;
             let path = passt.socket_path().to_path_buf();
             self.net_manager = Some(Box::new(passt));
             tracing::info!(network = network_name, ip = %ip, gateway = %gateway, "Bridge networking configured via passt");
-            path
+            (path, None::<i32>, None::<i32>)
         };
 
         #[cfg(target_os = "macos")]
