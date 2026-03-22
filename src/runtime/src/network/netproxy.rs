@@ -517,9 +517,9 @@ impl NetProxyManager {
         let (proxy_socket, krun_fd) = socketpair_unixgram()?;
         let port_forwards = parse_port_forwards(port_map, ip)
             .map_err(|e| BoxError::NetworkError(format!("invalid port_map: {}", e)))?;
-        proxy_socket
-            .set_nonblocking(true)
-            .map_err(|e| BoxError::NetworkError(format!("failed to configure netproxy socket: {}", e)))?;
+        proxy_socket.set_nonblocking(true).map_err(|e| {
+            BoxError::NetworkError(format!("failed to configure netproxy socket: {}", e))
+        })?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let dns_servers = dns_servers.to_vec();
         let worker_shutdown = shutdown.clone();
@@ -538,7 +538,9 @@ impl NetProxyManager {
                 engine.run();
                 tracing::info!("NetProxy thread exiting");
             })
-            .map_err(|e| BoxError::NetworkError(format!("failed to spawn netproxy thread: {}", e)))?;
+            .map_err(|e| {
+                BoxError::NetworkError(format!("failed to spawn netproxy thread: {}", e))
+            })?;
         self.net_socket_fd = Some(krun_fd);
         self.net_proxy_fd = None;
         self.shutdown = Some(shutdown);
