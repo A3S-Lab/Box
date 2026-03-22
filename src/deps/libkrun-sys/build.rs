@@ -490,8 +490,24 @@ fn extract_major_soname(filename: &str) -> Option<String> {
 // ============================================================================
 
 #[cfg(target_os = "macos")]
+fn append_env_path(var: &str, path: &Path) {
+    let mut paths = env::var_os(var)
+        .map(|value| env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if paths.iter().any(|existing| existing == path) {
+        return;
+    }
+    paths.push(path.to_path_buf());
+    if let Ok(joined) = env::join_paths(paths) {
+        env::set_var(var, joined);
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn setup_libclang_path() {
-    if env::var("LIBCLANG_PATH").is_ok() {
+    if let Some(existing) = env::var_os("LIBCLANG_PATH").map(PathBuf::from) {
+        append_env_path("DYLD_FALLBACK_LIBRARY_PATH", &existing);
+        append_env_path("DYLD_LIBRARY_PATH", &existing);
         return;
     }
     if Command::new("llvm-config")
@@ -508,9 +524,12 @@ fn setup_libclang_path() {
         if output.status.success() {
             let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let lib_path = format!("{}/lib", prefix);
-            if Path::new(&lib_path).join("libclang.dylib").exists() {
+            let lib_path = PathBuf::from(lib_path);
+            if lib_path.join("libclang.dylib").exists() {
                 env::set_var("LIBCLANG_PATH", &lib_path);
-                println!("cargo:warning=Set LIBCLANG_PATH to {}", lib_path);
+                append_env_path("DYLD_FALLBACK_LIBRARY_PATH", &lib_path);
+                append_env_path("DYLD_LIBRARY_PATH", &lib_path);
+                println!("cargo:warning=Set LIBCLANG_PATH to {}", lib_path.display());
             }
         }
     }
