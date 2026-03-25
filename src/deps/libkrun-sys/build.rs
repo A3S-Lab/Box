@@ -247,9 +247,7 @@ fn verify_sha256(file: &Path, expected: &str) -> io::Result<()> {
         if !output.status.success() {
             return Err(io::Error::other("PowerShell Get-FileHash failed"));
         }
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string()
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
         let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "linux") {
             ("sha256sum", vec![file.to_str().unwrap()])
@@ -614,7 +612,8 @@ fn download_krun_windows_prebuilt(out_dir: &Path) -> PathBuf {
     // Use PowerShell to unzip (available on all modern Windows)
     let status = Command::new("powershell.exe")
         .args([
-            "-NoProfile", "-Command",
+            "-NoProfile",
+            "-Command",
             &format!(
                 "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
                 zip_path.display(),

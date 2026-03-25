@@ -17,12 +17,16 @@ use a3s_box_runtime::krun::KrunContext;
 use a3s_box_runtime::vmm::InstanceSpec;
 #[cfg(not(target_os = "windows"))]
 use a3s_box_runtime::ATTEST_VSOCK_PORT;
-#[cfg(not(target_os = "windows"))]
 use a3s_box_runtime::EXEC_VSOCK_PORT;
+#[cfg(target_os = "windows")]
+use a3s_box_runtime::PORT_FWD_VSOCK_PORT;
 #[cfg(not(target_os = "windows"))]
 use a3s_box_runtime::PTY_VSOCK_PORT;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+
+#[cfg(target_os = "windows")]
+mod windows_port_forward;
 
 /// A3S Box Shim - MicroVM subprocess
 #[derive(Parser, Debug)]
@@ -399,7 +403,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         &spec.entrypoint.env,
     )?;
 
-    // Configure exec communication channel (Unix socket bridged to vsock port 4089)
+    // Configure exec communication channel
     #[cfg(not(target_os = "windows"))]
     {
         let exec_socket_str =
@@ -415,7 +419,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         tracing::debug!(
             socket_path = exec_socket_str,
             guest_port = EXEC_VSOCK_PORT,
-            "Configuring vsock bridge for exec"
+            "Configuring vsock bridge for exec (Unix socket)"
         );
         ctx.add_vsock_port(EXEC_VSOCK_PORT, exec_socket_str, true)?;
 
@@ -468,7 +472,37 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             );
             ctx.set_port_map(&spec.port_map)?;
         }
-    } // end #[cfg(not(target_os = "windows"))]
+    }
+
+    // Configure exec communication channel on Windows (Named Pipe bridged to vsock)
+    #[cfg(target_os = "windows")]
+    {
+        // On Windows, libkrun uses Named Pipes instead of Unix sockets
+        // The pipe name format is: \\.\pipe\<name>
+        let pipe_name = format!(
+            "\\\\.\\pipe\\a3s-box-exec-{}",
+            spec.box_id.to_string().replace('-', "")
+        );
+        tracing::debug!(
+            pipe_name = %pipe_name,
+            guest_port = EXEC_VSOCK_PORT,
+            "Configuring vsock bridge for exec (Named Pipe)"
+        );
+        ctx.add_vsock_port_windows(EXEC_VSOCK_PORT, &pipe_name)?;
+
+        // Note: PTY and attestation channels are not yet implemented on Windows.
+        if !spec.port_map.is_empty() {
+            let port_fwd_pipe =
+                windows_port_forward::spawn_port_forward_manager(&spec.box_id, &spec.port_map)?;
+            tracing::info!(
+                port_map = ?spec.port_map,
+                pipe_name = %port_fwd_pipe,
+                guest_port = PORT_FWD_VSOCK_PORT,
+                "Configuring Windows published-port control channel"
+            );
+            ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, &port_fwd_pipe)?;
+        }
+    }
 
     // Note: A3S_TEE_SIMULATE is already included in spec.entrypoint.env
     // (added by vm.rs when simulate mode is on) and passed to the guest init

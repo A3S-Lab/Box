@@ -187,10 +187,16 @@ impl VmController {
     /// 3. target/debug or target/release (for development)
     /// 4. PATH
     pub fn find_shim() -> Result<PathBuf> {
+        // On Windows the binary has a .exe suffix; on other platforms it's empty.
+        #[cfg(target_os = "windows")]
+        let shim_name = "a3s-box-shim.exe";
+        #[cfg(not(target_os = "windows"))]
+        let shim_name = "a3s-box-shim";
+
         // Try same directory as current executable
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                let shim_path = exe_dir.join("a3s-box-shim");
+                let shim_path = exe_dir.join(shim_name);
                 if shim_path.exists() {
                     return Ok(shim_path);
                 }
@@ -199,7 +205,7 @@ impl VmController {
 
         // Try ~/.a3s/bin/ (SDK-extracted shim)
         {
-            let shim_path = a3s_box_core::dirs_home().join("bin").join("a3s-box-shim");
+            let shim_path = a3s_box_core::dirs_home().join("bin").join(shim_name);
             if shim_path.exists() {
                 return Ok(shim_path);
             }
@@ -208,16 +214,26 @@ impl VmController {
         // Try target directories (for development)
         let target_dirs = ["target/debug", "target/release"];
         for dir in target_dirs {
-            let shim_path = PathBuf::from(dir).join("a3s-box-shim");
+            let shim_path = PathBuf::from(dir).join(shim_name);
             if shim_path.exists() {
                 return Ok(shim_path);
             }
         }
 
-        // Try PATH
-        if let Ok(output) = Command::new("which").arg("a3s-box-shim").output() {
+        // Try PATH — use `where` on Windows, `which` elsewhere
+        #[cfg(target_os = "windows")]
+        let which_cmd = "where";
+        #[cfg(not(target_os = "windows"))]
+        let which_cmd = "which";
+
+        if let Ok(output) = Command::new(which_cmd).arg(shim_name).output() {
             if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let path = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 if !path.is_empty() {
                     return Ok(PathBuf::from(path));
                 }
@@ -228,6 +244,52 @@ impl VmController {
             message: "Could not find a3s-box-shim binary".to_string(),
             hint: Some("Build the shim with: cargo build -p a3s-box-shim".to_string()),
         })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_shim_path_env(shim_path: &std::path::Path) -> Option<std::ffi::OsString> {
+        use std::collections::HashSet;
+
+        let mut dirs = Vec::<PathBuf>::new();
+        if let Ok(dir) = std::env::var("LIBKRUN_DIR") {
+            dirs.push(PathBuf::from(dir));
+        }
+        if let Some(dir) = option_env!("LIBKRUN_DIR") {
+            dirs.push(PathBuf::from(dir));
+        }
+        if let Some(dir) = shim_path.parent() {
+            dirs.push(dir.to_path_buf());
+        }
+
+        let mut seen = HashSet::new();
+        let mut path_entries = Vec::new();
+        for dir in dirs {
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
+            if dir.join("krun.dll").exists() && dir.join("libkrunfw.dll").exists() {
+                path_entries.push(dir);
+            }
+        }
+
+        if path_entries.is_empty() {
+            return None;
+        }
+
+        let mut merged = std::ffi::OsString::new();
+        for entry in path_entries {
+            if !merged.is_empty() {
+                merged.push(";");
+            }
+            merged.push(entry);
+        }
+        if let Some(existing) = std::env::var_os("PATH") {
+            if !merged.is_empty() {
+                merged.push(";");
+            }
+            merged.push(existing);
+        }
+        Some(merged)
     }
 }
 
@@ -268,17 +330,23 @@ impl VmmProvider for VmController {
             "Spawning shim subprocess"
         );
 
-        let child = Command::new(&self.shim_path)
+        let mut command = Command::new(&self.shim_path);
+        command
             .arg("--config")
             .arg(&config_json)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit()) // Inherit for debugging
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| BoxError::BoxBootError {
-                message: format!("Failed to spawn shim: {}", e),
-                hint: Some(format!("Shim path: {}", self.shim_path.display())),
-            })?;
+            .stderr(Stdio::inherit());
+
+        #[cfg(target_os = "windows")]
+        if let Some(path) = Self::windows_shim_path_env(&self.shim_path) {
+            command.env("PATH", path);
+        }
+
+        let child = command.spawn().map_err(|e| BoxError::BoxBootError {
+            message: format!("Failed to spawn shim: {}", e),
+            hint: Some(format!("Shim path: {}", self.shim_path.display())),
+        })?;
 
         let pid = child.id();
         tracing::info!(

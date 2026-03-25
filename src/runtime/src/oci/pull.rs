@@ -135,8 +135,11 @@ impl ImagePuller {
             return OciImage::from_path(&stored.path);
         }
 
-        // Pull to a temporary directory first
-        let tmp_dir = self.store.store_dir().join("tmp").join(&digest);
+        // Pull to a temporary directory first.
+        // Strip the "sha256:" prefix so the directory name is pure hex,
+        // which is valid on all platforms (Windows forbids ':' in filenames).
+        let digest_hex = digest.strip_prefix("sha256:").unwrap_or(&digest);
+        let tmp_dir = self.store.store_dir().join("tmp").join(digest_hex);
         if tmp_dir.exists() {
             std::fs::remove_dir_all(&tmp_dir).map_err(|e| {
                 BoxError::OciImageError(format!(

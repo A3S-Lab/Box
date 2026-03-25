@@ -82,6 +82,14 @@ impl OciRootfsBuilder {
         Ok(())
     }
 
+    /// Install or refresh only the guest-init binary in an existing rootfs.
+    pub fn install_guest_init_only(&self) -> Result<()> {
+        if self.guest_init_path.is_some() {
+            self.install_guest_init()?;
+        }
+        Ok(())
+    }
+
     /// Create the base directory structure.
     fn create_base_structure(&self) -> Result<()> {
         let dirs = [
@@ -144,12 +152,70 @@ impl OciRootfsBuilder {
             )));
         }
 
-        let sbin_dir = self.rootfs_path.join("sbin");
-        std::fs::create_dir_all(&sbin_dir).map_err(|e| {
-            BoxError::BuildError(format!("Failed to create /sbin directory: {}", e))
+        #[cfg(target_os = "windows")]
+        let install_dir = {
+            let sbin_link = self.rootfs_path.join("sbin");
+            match std::fs::symlink_metadata(&sbin_link) {
+                Ok(meta) if meta.is_dir() => sbin_link.clone(),
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    let target = std::fs::read_link(&sbin_link).map_err(|err| {
+                        BoxError::BuildError(format!(
+                            "Failed to resolve /sbin symlink {}: {}",
+                            sbin_link.display(),
+                            err
+                        ))
+                    })?;
+                    if target.is_absolute() {
+                        target
+                    } else {
+                        self.rootfs_path.join(target)
+                    }
+                }
+                Ok(_) => {
+                    return Err(BoxError::BuildError(format!(
+                        "Cannot install guest init because {} exists and is not a directory or symlink",
+                        sbin_link.display()
+                    )));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    let usr_sbin = self.rootfs_path.join("usr").join("sbin");
+                    if usr_sbin.is_dir() {
+                        usr_sbin
+                    } else {
+                        std::fs::create_dir_all(&sbin_link).map_err(|e| {
+                            BoxError::BuildError(format!("Failed to create /sbin directory: {}", e))
+                        })?;
+                        sbin_link.clone()
+                    }
+                }
+                Err(err) => {
+                    return Err(BoxError::BuildError(format!(
+                        "Failed to inspect /sbin path {}: {}",
+                        sbin_link.display(),
+                        err
+                    )));
+                }
+            }
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let install_dir = {
+            let sbin_dir = self.rootfs_path.join("sbin");
+            std::fs::create_dir_all(&sbin_dir).map_err(|e| {
+                BoxError::BuildError(format!("Failed to create /sbin directory: {}", e))
+            })?;
+            sbin_dir
+        };
+
+        std::fs::create_dir_all(&install_dir).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to create guest init install directory {}: {}",
+                install_dir.display(),
+                e
+            ))
         })?;
 
-        let dest = sbin_dir.join("init");
+        let dest = install_dir.join("init");
         // Remove any existing init (e.g., busybox symlink in Alpine)
         if dest.exists() || dest.symlink_metadata().is_ok() {
             std::fs::remove_file(&dest).map_err(|e| {
@@ -362,6 +428,28 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("image path not set"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_install_guest_init_prefers_usr_sbin_when_sbin_missing() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs_path = temp_dir.path().join("rootfs");
+        let guest_init = temp_dir.path().join("guest-init");
+
+        fs::create_dir_all(rootfs_path.join("usr").join("sbin")).unwrap();
+        fs::write(&guest_init, b"guest-init").unwrap();
+
+        let builder = OciRootfsBuilder {
+            rootfs_path: rootfs_path.clone(),
+            image_path: PathBuf::new(),
+            guest_init_path: Some(guest_init),
+        };
+
+        builder.install_guest_init().unwrap();
+
+        assert!(rootfs_path.join("usr").join("sbin").join("init").exists());
+        assert!(!rootfs_path.join("sbin").exists());
     }
 
     // Helper: create a minimal test OCI image

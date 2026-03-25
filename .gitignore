@@ -52,6 +52,7 @@ lcov.info
 coverage.lcov
 *.profraw
 *.profdata
+target/
 target/llvm-cov-target/
 target/coverage/
 tarpaulin-report.html

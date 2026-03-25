@@ -35,7 +35,9 @@ pub async fn execute(args: AttachArgs) -> Result<(), Box<dyn std::error::Error>>
         #[cfg(not(windows))]
         return execute_pty_attach(record).await;
         #[cfg(windows)]
-        return Err("'attach -it' requires Unix domain sockets and is not supported on Windows".into());
+        return Err(
+            "'attach -it' requires Unix domain sockets and is not supported on Windows".into(),
+        );
     }
 
     // Original behavior: tail console log

@@ -53,28 +53,31 @@ fn parse_endpoint(s: &str) -> Endpoint {
 
 pub async fn execute(args: CpArgs) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(windows)]
-    { let _ = args; return Err("'cp' requires Unix domain sockets and is not supported on Windows".into()); }
+    {
+        let _ = args;
+        return Err("'cp' requires Unix domain sockets and is not supported on Windows".into());
+    }
 
     #[cfg(not(windows))]
     {
-    let src = parse_endpoint(&args.src);
-    let dst = parse_endpoint(&args.dst);
+        let src = parse_endpoint(&args.src);
+        let dst = parse_endpoint(&args.dst);
 
-    match (src, dst) {
-        (Endpoint::Box { name, path }, Endpoint::Host(host_path)) => {
-            copy_from_box(&name, &path, &host_path).await
+        match (src, dst) {
+            (Endpoint::Box { name, path }, Endpoint::Host(host_path)) => {
+                copy_from_box(&name, &path, &host_path).await
+            }
+            (Endpoint::Host(host_path), Endpoint::Box { name, path }) => {
+                copy_to_box(&host_path, &name, &path).await
+            }
+            (Endpoint::Host(_), Endpoint::Host(_)) => Err(
+                "Both source and destination are host paths. One must be a box path (BOX:/path)."
+                    .into(),
+            ),
+            (Endpoint::Box { .. }, Endpoint::Box { .. }) => {
+                Err("Copying between two boxes is not supported. Copy to host first.".into())
+            }
         }
-        (Endpoint::Host(host_path), Endpoint::Box { name, path }) => {
-            copy_to_box(&host_path, &name, &path).await
-        }
-        (Endpoint::Host(_), Endpoint::Host(_)) => Err(
-            "Both source and destination are host paths. One must be a box path (BOX:/path)."
-                .into(),
-        ),
-        (Endpoint::Box { .. }, Endpoint::Box { .. }) => {
-            Err("Copying between two boxes is not supported. Copy to host first.".into())
-        }
-    }
     } // #[cfg(not(windows))]
 }
 

@@ -9,6 +9,7 @@ pub mod attest_server;
 pub mod exec_server;
 pub mod namespace;
 pub mod network;
+pub mod port_forward;
 pub mod pty_server;
 
 pub use namespace::{spawn_isolated, NamespaceConfig, NamespaceError};

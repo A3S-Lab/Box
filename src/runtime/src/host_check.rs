@@ -3,6 +3,7 @@
 //! Checks if the current host supports hardware virtualization:
 //! - macOS: Hypervisor.framework (Apple Silicon only)
 //! - Linux: KVM (/dev/kvm)
+//! - Windows: WHPX / Windows Hypervisor Platform
 
 use a3s_box_core::error::{BoxError, Result};
 
@@ -29,10 +30,15 @@ pub fn check_virtualization_support() -> Result<VirtualizationSupport> {
         check_linux_kvm()
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        check_windows_whpx()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Err(BoxError::ConfigError(
-            "Unsupported platform: A3S Box requires macOS (Apple Silicon) or Linux with KVM"
+            "Unsupported platform: A3S Box requires macOS (Apple Silicon), Linux with KVM, or Windows with WHPX"
                 .to_string(),
         ))
     }
@@ -121,6 +127,49 @@ fn check_linux_kvm() -> Result<VirtualizationSupport> {
                 )))
             }
         }
+    }
+}
+
+/// Check for Windows Hypervisor Platform (WHPX) support on Windows.
+#[cfg(target_os = "windows")]
+fn check_windows_whpx() -> Result<VirtualizationSupport> {
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        return Err(BoxError::ConfigError(
+            "A3S Box on Windows currently requires x86_64 for the WHPX backend.".to_string(),
+        ));
+    }
+
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform).State",
+        ])
+        .output()
+        .map_err(|e| BoxError::ExecError(format!("Failed to query HypervisorPlatform: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(BoxError::ConfigError(format!(
+            "Failed to query Windows Hypervisor Platform state (exit code {:?})",
+            output.status.code()
+        )));
+    }
+
+    let state = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    if state == "enabled" {
+        Ok(VirtualizationSupport {
+            backend: "WHPX".to_string(),
+            details: "Windows Hypervisor Platform is enabled".to_string(),
+        })
+    } else {
+        Err(BoxError::ConfigError(format!(
+            "Windows Hypervisor Platform is not enabled (current state: {}). Enable the 'Windows Hypervisor Platform' optional feature and reboot.",
+            if state.is_empty() { "unknown" } else { &state }
+        )))
     }
 }
 

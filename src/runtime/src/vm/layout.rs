@@ -88,6 +88,18 @@ impl VmManager {
                     prom.rootfs_cache_hits.inc();
                 }
                 let rootfs_path = self.rootfs_provider.prepare(&box_dir, &cached_path)?;
+
+                #[cfg(target_os = "windows")]
+                if let Ok(guest_init_path) = Self::find_guest_init() {
+                    tracing::info!(
+                        guest_init = %guest_init_path.display(),
+                        "Refreshing guest init on cached Windows rootfs"
+                    );
+                    OciRootfsBuilder::new(&rootfs_path)
+                        .with_guest_init(guest_init_path)
+                        .install_guest_init_only()?;
+                }
+
                 let builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
                 (rootfs_path, Some(builder.image_config()?))
             } else {
@@ -328,7 +340,22 @@ impl VmManager {
     ///
     /// The binary must be a Linux ELF executable since it runs inside the VM.
     pub(crate) fn find_guest_init() -> Result<PathBuf> {
-        let candidates = Self::find_binary_candidates("a3s-box-guest-init");
+        let mut candidates = Self::find_binary_candidates("a3s-box-guest-init");
+
+        #[cfg(target_os = "windows")]
+        {
+            candidates.sort_by_key(|path| {
+                let path_str = path.to_string_lossy();
+                if path_str.contains("x86_64-unknown-linux-musl")
+                    || path_str.contains("aarch64-unknown-linux-musl")
+                {
+                    0
+                } else {
+                    1
+                }
+            });
+        }
+
         for path in candidates {
             if Self::is_linux_elf(&path) {
                 return Ok(path);

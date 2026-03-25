@@ -8,7 +8,9 @@
 //! - Launching the container entrypoint process
 //! - Reaping zombie processes and handling SIGTERM for graceful shutdown
 
-use a3s_box_guest_init::{attest_server, exec_server, namespace, network, pty_server};
+use a3s_box_guest_init::{
+    attest_server, exec_server, namespace, network, port_forward, pty_server,
+};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info, warn};
@@ -256,6 +258,13 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::spawn(|| {
         if let Err(e) = exec_server::run_exec_server() {
             error!("Exec server failed: {}", e);
+        }
+    });
+
+    // Step 8.25: Start Windows host-port forward control client when enabled.
+    std::thread::spawn(|| {
+        if let Err(e) = port_forward::run_port_forward_client() {
+            error!("Port-forward client failed: {}", e);
         }
     });
 

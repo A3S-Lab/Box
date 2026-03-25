@@ -1,6 +1,6 @@
 //! Instance spec building — entrypoint resolution, volume mounts, OCI config.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use a3s_box_core::config::TeeConfig;
 use a3s_box_core::error::{BoxError, Result};
@@ -12,6 +12,8 @@ use crate::vmm::{Entrypoint, FsMount, InstanceSpec};
 use super::{fnv1a_hash, BoxLayout, VmManager};
 
 const SBIN_INIT: &str = "/sbin/init";
+#[cfg(target_os = "windows")]
+const USR_SBIN_INIT: &str = "/usr/sbin/init";
 
 impl VmManager {
     /// Build InstanceSpec from config and layout.
@@ -85,10 +87,10 @@ impl VmManager {
 
         // Determine whether guest init is installed (it becomes PID 1 and passes
         // BOX_EXEC_* env vars to the container entrypoint).
-        let has_guest_init = layout.rootfs_path.join("sbin/init").exists();
+        let guest_init_exec = Self::guest_init_exec_path(&layout.rootfs_path);
 
         // Build entrypoint
-        let mut entrypoint = if has_guest_init {
+        let mut entrypoint = if let Some(guest_init_exec) = guest_init_exec {
             // Guest init is PID 1. Pass container entrypoint/env via BOX_EXEC_* env vars.
             let (exec, args, container_env) = match &layout.oci_config {
                 Some(oci_config) => {
@@ -177,10 +179,13 @@ impl VmManager {
                 env.push(("BOX_READONLY".to_string(), "1".to_string()));
             }
 
+            #[cfg(target_os = "windows")]
+            env.push(("KRUN_INIT_PID1".to_string(), "1".to_string()));
+
             tracing::debug!(env = ?env, "Using guest init as PID 1");
 
             Entrypoint {
-                executable: SBIN_INIT.to_string(),
+                executable: guest_init_exec.to_string(),
                 args: vec![],
                 env,
             }
@@ -238,6 +243,13 @@ impl VmManager {
             entrypoint
                 .env
                 .push(("A3S_TEE_SIMULATE".to_string(), "1".to_string()));
+        }
+
+        #[cfg(target_os = "windows")]
+        if !self.config.port_map.is_empty() {
+            entrypoint
+                .env
+                .push(("BOX_WINDOWS_PORT_FWD".to_string(), "1".to_string()));
         }
 
         // Inject sidecar configuration so guest-init can launch the sidecar process
@@ -333,6 +345,34 @@ impl VmManager {
             // Neither set: fall back to default init
             (SBIN_INIT.to_string(), vec![])
         }
+    }
+
+    fn guest_init_exec_path(rootfs_path: &Path) -> Option<&'static str> {
+        let sbin_init = rootfs_path.join("sbin").join("init");
+        if sbin_init.exists() {
+            return Some(SBIN_INIT);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let sbin_link = rootfs_path.join("sbin");
+            if let Ok(target) = std::fs::read_link(&sbin_link) {
+                let resolved = if target.is_absolute() {
+                    target
+                } else {
+                    rootfs_path.join(target)
+                };
+                if resolved.join("init").exists() {
+                    return Some(SBIN_INIT);
+                }
+            }
+
+            if rootfs_path.join("usr").join("sbin").join("init").exists() {
+                return Some(USR_SBIN_INIT);
+            }
+        }
+
+        None
     }
 
     /// Parse a volume mount string into an FsMount.
@@ -433,7 +473,10 @@ impl VmManager {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use tempfile::tempdir;
     use tempfile::TempDir;
 
     #[test]
@@ -641,5 +684,29 @@ mod tests {
             VmManager::resolve_oci_entrypoint(&config, &cmd_override, Some(&override_ep));
         assert_eq!(exec, "/bin/sh");
         assert_eq!(args, vec!["echo", "hello"]);
+    }
+
+    #[test]
+    fn test_guest_init_exec_path_prefers_sbin() {
+        let dir = tempdir().unwrap();
+        let rootfs = dir.path();
+        fs::create_dir_all(rootfs.join("sbin")).unwrap();
+        fs::write(rootfs.join("sbin").join("init"), b"guest-init").unwrap();
+
+        assert_eq!(VmManager::guest_init_exec_path(rootfs), Some("/sbin/init"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_guest_init_exec_path_supports_usr_sbin_without_sbin() {
+        let dir = tempdir().unwrap();
+        let rootfs = dir.path();
+        fs::create_dir_all(rootfs.join("usr").join("sbin")).unwrap();
+        fs::write(rootfs.join("usr").join("sbin").join("init"), b"guest-init").unwrap();
+
+        assert_eq!(
+            VmManager::guest_init_exec_path(rootfs),
+            Some("/usr/sbin/init")
+        );
     }
 }
