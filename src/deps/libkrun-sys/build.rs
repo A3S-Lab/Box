@@ -65,36 +65,39 @@ fn main() {
         return;
     }
 
-    if target_os() == "windows" {
+    #[cfg(target_os = "windows")]
+    {
         build_windows();
-        return;
     }
 
-    // Try to find system-installed libkrun first (unless A3S_BUILD_LIBKRUN is set)
-    if env::var("A3S_BUILD_LIBKRUN").is_err() {
-        if let Ok(lib_dir) = find_system_libkrun() {
-            println!(
-                "cargo:warning=Using system-installed libkrun from {}",
-                lib_dir.display()
-            );
-            configure_linking(&lib_dir, &lib_dir);
-            return;
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Try to find system-installed libkrun first (unless A3S_BUILD_LIBKRUN is set)
+        if env::var("A3S_BUILD_LIBKRUN").is_err() {
+            if let Ok(lib_dir) = find_system_libkrun() {
+                println!(
+                    "cargo:warning=Using system-installed libkrun from {}",
+                    lib_dir.display()
+                );
+                configure_linking(&lib_dir, &lib_dir);
+                return;
+            }
+            if let Some((libkrun_dir, libkrunfw_dir)) = find_cached_libkrun() {
+                println!(
+                    "cargo:warning=Using cached libkrun from {} and libkrunfw from {}",
+                    libkrun_dir.display(),
+                    libkrunfw_dir.display()
+                );
+                configure_linking(&libkrun_dir, &libkrunfw_dir);
+                return;
+            }
+        } else {
+            println!("cargo:warning=A3S_BUILD_LIBKRUN set: forcing build from source");
         }
-        if let Some((libkrun_dir, libkrunfw_dir)) = find_cached_libkrun() {
-            println!(
-                "cargo:warning=Using cached libkrun from {} and libkrunfw from {}",
-                libkrun_dir.display(),
-                libkrunfw_dir.display()
-            );
-            configure_linking(&libkrun_dir, &libkrunfw_dir);
-            return;
-        }
-    } else {
-        println!("cargo:warning=A3S_BUILD_LIBKRUN set: forcing build from source");
-    }
 
-    // Fall back to building from source (with prebuilt libkrunfw)
-    build();
+        // Fall back to building from source (with prebuilt libkrunfw)
+        build();
+    }
 }
 
 fn find_cached_libkrun() -> Option<(PathBuf, PathBuf)> {
@@ -159,6 +162,26 @@ fn target_root_from_out_dir(out_dir: &Path) -> Option<PathBuf> {
             return ancestor.parent()?.parent().map(Path::to_path_buf);
         }
     }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn find_sibling_libkrun_windows(triple: &str) -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").ok()?);
+    let repo_root = manifest_dir.join("../../../../..").canonicalize().ok()?;
+    let sibling_target = repo_root
+        .parent()?
+        .join("libkrun")
+        .join("target")
+        .join(triple);
+
+    for profile in ["release", "debug"] {
+        let candidate = sibling_target.join(profile);
+        if has_library(&candidate, "krun") && candidate.join("libkrunfw.dll").exists() {
+            return Some(candidate);
+        }
+    }
+
     None
 }
 
@@ -790,8 +813,9 @@ fn download_krun_windows_prebuilt(out_dir: &Path) -> PathBuf {
 ///
 /// Search order:
 ///   1. LIBKRUN_DIR env var (local build override)
-///   2. deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/ (vendored)
-///   3. Auto-download krun-windows-x64.zip from GitHub Releases into OUT_DIR
+///   2. ../libkrun/target/<triple>/{release,debug} (local sibling checkout)
+///   3. deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/ (vendored)
+///   4. Auto-download krun-windows-x64.zip from GitHub Releases into OUT_DIR
 fn build_windows() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
     let triple = format!("{}-pc-windows-msvc", target_arch);
@@ -799,6 +823,12 @@ fn build_windows() {
 
     let lib_dir = if let Ok(dir) = env::var("LIBKRUN_DIR") {
         PathBuf::from(dir)
+    } else if let Some(dir) = find_sibling_libkrun_windows(&triple) {
+        println!(
+            "cargo:warning=Using sibling libkrun Windows build from {}",
+            dir.display()
+        );
+        dir
     } else {
         let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
         let prebuilt = manifest_dir.join("prebuilt").join(&triple);

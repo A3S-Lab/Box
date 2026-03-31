@@ -22,6 +22,64 @@ pub struct VmController {
 }
 
 impl VmController {
+    #[cfg(target_os = "windows")]
+    fn configure_windows_shim_logs(&self, cmd: &mut Command, spec: &InstanceSpec) {
+        use std::fs::OpenOptions;
+
+        let Some(console_output) = spec.console_output.as_ref() else {
+            return;
+        };
+        let Some(log_dir) = console_output.parent() else {
+            return;
+        };
+
+        let stdout_path = log_dir.join("shim.stdout.log");
+        let stderr_path = log_dir.join("shim.stderr.log");
+
+        let stdout_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&stdout_path);
+        let stderr_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&stderr_path);
+
+        match (stdout_file, stderr_file) {
+            (Ok(stdout_file), Ok(stderr_file)) => {
+                tracing::debug!(
+                    box_id = %spec.box_id,
+                    stdout = %stdout_path.display(),
+                    stderr = %stderr_path.display(),
+                    "Redirecting Windows shim logs to per-box files"
+                );
+                cmd.stdout(Stdio::from(stdout_file))
+                    .stderr(Stdio::from(stderr_file));
+            }
+            (stdout_result, stderr_result) => {
+                if let Err(error) = stdout_result {
+                    tracing::warn!(
+                        box_id = %spec.box_id,
+                        path = %stdout_path.display(),
+                        error = %error,
+                        "Failed to open Windows shim stdout log file"
+                    );
+                }
+                if let Err(error) = stderr_result {
+                    tracing::warn!(
+                        box_id = %spec.box_id,
+                        path = %stderr_path.display(),
+                        error = %error,
+                        "Failed to open Windows shim stderr log file"
+                    );
+                }
+                cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+            }
+        }
+    }
+
     /// Create a new VmController.
     ///
     /// # Arguments
@@ -340,11 +398,13 @@ impl VmmProvider for VmController {
         );
 
         let mut cmd = Command::new(&self.shim_path);
-        cmd.arg("--config")
-            .arg(&config_json)
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit()) // Inherit for debugging
-            .stderr(Stdio::inherit());
+        cmd.arg("--config").arg(&config_json).stdin(Stdio::null());
+
+        #[cfg(target_os = "windows")]
+        self.configure_windows_shim_logs(&mut cmd, spec);
+
+        #[cfg(not(target_os = "windows"))]
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
 
         // On macOS, set DYLD_LIBRARY_PATH to help find libkrunfw
         #[cfg(target_os = "macos")]

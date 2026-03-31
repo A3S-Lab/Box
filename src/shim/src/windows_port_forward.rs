@@ -2,9 +2,13 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
@@ -20,6 +24,7 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
     PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
+use windows_sys::Win32::System::Threading::OpenProcess;
 
 const FRAME_OPEN: u8 = 1;
 const FRAME_OPEN_ACK: u8 = 2;
@@ -28,6 +33,9 @@ const FRAME_CLOSE: u8 = 4;
 const OPEN_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const OPEN_RETRY_WINDOW: Duration = Duration::from_secs(60);
 const OPEN_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const PORT_FWD_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
 
 #[derive(Clone, Copy, Debug)]
 struct PortMapping {
@@ -44,12 +52,110 @@ struct SharedControlState {
 type SharedControl = Arc<SharedControlState>;
 
 pub fn spawn_port_forward_manager(box_id: &str, port_map: &[String]) -> Result<String> {
-    let mappings = parse_port_map(port_map)?;
-    if mappings.is_empty() {
+    if parse_port_map(port_map)?.is_empty() {
         return Err(BoxError::NetworkError(
             "Windows port-forward manager requires at least one mapping".to_string(),
         ));
     }
+
+    let pipe_base_name = format!("a3s-box-portfwd-{}", box_id.replace('-', ""));
+    let ready_file = std::env::temp_dir().join(format!(
+        "a3s-box-portfwd-{}-{}.ready",
+        box_id.replace('-', ""),
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&ready_file);
+
+    let current_exe = std::env::current_exe().map_err(|err| {
+        BoxError::NetworkError(format!(
+            "failed to resolve shim executable for Windows port-forward worker: {}",
+            err
+        ))
+    })?;
+    let mut cmd = Command::new(current_exe);
+    cmd.arg("--port-fwd-worker")
+        .arg("--box-id")
+        .arg(box_id)
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .arg("--ready-file")
+        .arg(&ready_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .creation_flags(CREATE_NO_WINDOW);
+    for mapping in port_map {
+        cmd.arg("--port-map").arg(mapping);
+    }
+
+    let mut child = cmd.spawn().map_err(|err| {
+        BoxError::NetworkError(format!(
+            "failed to spawn Windows port-forward worker: {}",
+            err
+        ))
+    })?;
+
+    let ready_started = Instant::now();
+    loop {
+        if let Ok(contents) = fs::read_to_string(&ready_file) {
+            let _ = fs::remove_file(&ready_file);
+            let trimmed = contents.trim();
+            if trimmed.eq_ignore_ascii_case("ok") {
+                tracing::info!(
+                    box_id,
+                    pipe = %pipe_base_name,
+                    worker_pid = child.id(),
+                    "Windows port-forward worker ready"
+                );
+                return Ok(pipe_base_name);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(BoxError::NetworkError(format!(
+                "Windows port-forward worker failed: {}",
+                trimmed
+            )));
+        }
+
+        if let Ok(Some(status)) = child.try_wait() {
+            let _ = fs::remove_file(&ready_file);
+            return Err(BoxError::NetworkError(format!(
+                "Windows port-forward worker exited before readiness (status: {})",
+                status
+            )));
+        }
+
+        if ready_started.elapsed() >= PORT_FWD_READY_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_file(&ready_file);
+            return Err(BoxError::NetworkError(
+                "timed out waiting for Windows port-forward worker readiness".to_string(),
+            ));
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub fn run_port_forward_worker(
+    box_id: &str,
+    port_map: &[String],
+    parent_pid: u32,
+    ready_file: &Path,
+) -> Result<()> {
+    let mappings = parse_port_map(port_map)?;
+    if mappings.is_empty() {
+        write_ready_file(
+            ready_file,
+            "Windows port-forward worker requires at least one mapping",
+        );
+        return Err(BoxError::NetworkError(
+            "Windows port-forward worker requires at least one mapping".to_string(),
+        ));
+    }
+
+    spawn_parent_watchdog(parent_pid);
 
     let pipe_base_name = format!("a3s-box-portfwd-{}", box_id.replace('-', ""));
     let pipe_path = format!(r"\\.\pipe\{}", pipe_base_name);
@@ -58,20 +164,85 @@ pub fn spawn_port_forward_manager(box_id: &str, port_map: &[String]) -> Result<S
         cvar: Condvar::new(),
         next_stream_id: AtomicU32::new(1),
     });
-    tracing::debug!(pipe = %pipe_path, mappings = ?port_map, "Spawning Windows port-forward manager");
 
-    {
-        let pipe_path = pipe_path.clone();
-        let shared_control = shared_control.clone();
-        thread::spawn(move || pipe_server_loop(pipe_path, shared_control));
-    }
+    let initial_server = match NamedPipeServer::create(&pipe_path) {
+        Ok(server) => server,
+        Err(err) => {
+            write_ready_file(
+                ready_file,
+                &format!(
+                    "failed to create Windows port-forward pipe {}: {}",
+                    pipe_path, err
+                ),
+            );
+            return Err(BoxError::NetworkError(format!(
+                "failed to create Windows port-forward pipe {}: {}",
+                pipe_path, err
+            )));
+        }
+    };
+    tracing::info!(pipe = %pipe_path, "Windows published-port control pipe ready");
 
     for mapping in mappings {
+        let listener = match TcpListener::bind(("0.0.0.0", mapping.host_port)) {
+            Ok(listener) => listener,
+            Err(err) => {
+                write_ready_file(
+                    ready_file,
+                    &format!(
+                        "failed to bind Windows published port 0.0.0.0:{} -> {}: {}",
+                        mapping.host_port, mapping.guest_port, err
+                    ),
+                );
+                return Err(BoxError::NetworkError(format!(
+                    "failed to bind Windows published port 0.0.0.0:{} -> {}: {}",
+                    mapping.host_port, mapping.guest_port, err
+                )));
+            }
+        };
+        tracing::info!(
+            host_port = mapping.host_port,
+            guest_port = mapping.guest_port,
+            "Windows published port listener ready"
+        );
+
         let shared_control = shared_control.clone();
-        thread::spawn(move || listen_host_port(mapping, shared_control));
+        thread::spawn(move || listen_host_port_loop(listener, mapping, shared_control));
     }
 
-    Ok(pipe_base_name)
+    write_ready_file(ready_file, "ok");
+    pipe_server_loop(initial_server, pipe_path, shared_control);
+    Ok(())
+}
+
+fn write_ready_file(path: &Path, contents: &str) {
+    if let Err(err) = fs::write(path, contents) {
+        tracing::warn!(error = %err, path = %path.display(), "Failed to write Windows port-forward readiness file");
+    }
+}
+
+fn spawn_parent_watchdog(parent_pid: u32) {
+    thread::spawn(move || loop {
+        if !process_exists(parent_pid) {
+            tracing::info!(
+                parent_pid,
+                "Windows port-forward worker exiting because shim parent is gone"
+            );
+            std::process::exit(0);
+        }
+        thread::sleep(Duration::from_millis(500));
+    });
+}
+
+fn process_exists(pid: u32) -> bool {
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE_ACCESS, 0, pid) };
+    if handle == 0 {
+        return false;
+    }
+    unsafe {
+        CloseHandle(handle);
+    }
+    true
 }
 
 fn parse_port_map(port_map: &[String]) -> Result<Vec<PortMapping>> {
@@ -100,26 +271,11 @@ fn parse_port_map(port_map: &[String]) -> Result<Vec<PortMapping>> {
         .collect()
 }
 
-fn listen_host_port(mapping: PortMapping, shared_control: SharedControl) {
-    let listener = match TcpListener::bind(("0.0.0.0", mapping.host_port)) {
-        Ok(listener) => listener,
-        Err(err) => {
-            tracing::error!(
-                error = %err,
-                host_port = mapping.host_port,
-                guest_port = mapping.guest_port,
-                "Failed to bind Windows published port"
-            );
-            return;
-        }
-    };
-
-    tracing::info!(
-        host_port = mapping.host_port,
-        guest_port = mapping.guest_port,
-        "Windows published port listener ready"
-    );
-
+fn listen_host_port_loop(
+    listener: TcpListener,
+    mapping: PortMapping,
+    shared_control: SharedControl,
+) {
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
@@ -270,15 +426,23 @@ fn wait_for_control(
     }
 }
 
-fn pipe_server_loop(pipe_path: String, shared_control: SharedControl) {
+fn pipe_server_loop(
+    initial_server: NamedPipeServer,
+    pipe_path: String,
+    shared_control: SharedControl,
+) {
+    let mut next_server = Some(initial_server);
     loop {
-        let server = match NamedPipeServer::create(&pipe_path) {
-            Ok(server) => server,
-            Err(err) => {
-                tracing::error!(error = %err, pipe = %pipe_path, "Failed to create port-forward pipe");
-                thread::sleep(Duration::from_secs(1));
-                continue;
-            }
+        let server = match next_server.take() {
+            Some(server) => server,
+            None => match NamedPipeServer::create(&pipe_path) {
+                Ok(server) => server,
+                Err(err) => {
+                    tracing::error!(error = %err, pipe = %pipe_path, "Failed to create port-forward pipe");
+                    thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+            },
         };
 
         if let Err(err) = server.connect() {

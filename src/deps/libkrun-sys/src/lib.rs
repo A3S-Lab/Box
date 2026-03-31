@@ -204,7 +204,7 @@ extern "C" {
     pub fn krun_setgid(ctx_id: u32, gid: libc::gid_t) -> i32;
 }
 
-/// On Windows `uid_t` / `gid_t` do not exist; libkrun uses `uint32_t` directly.
+// On Windows `uid_t` / `gid_t` do not exist; libkrun uses `uint32_t` directly.
 #[cfg(target_os = "windows")]
 extern "C" {
     pub fn krun_setuid(ctx_id: u32, uid: u32) -> i32;
@@ -267,10 +267,9 @@ extern "C" {
 // Windows-only bindings (WHPX backend)
 // ============================================================================
 
-/// Windows-only: add a virtio-net device backed by an optional TCP socket.
-///
-/// `c_mac` must point to a 6-byte MAC address array.
-/// `c_tcp_addr` is a `"host:port"` string, or null for a disconnected device.
+// Windows-only: add a virtio-net device backed by an optional TCP socket.
+// `c_mac` must point to a 6-byte MAC address array.
+// `c_tcp_addr` is a `"host:port"` string, or null for a disconnected device.
 #[cfg(target_os = "windows")]
 extern "C" {
     pub fn krun_add_net_tcp(

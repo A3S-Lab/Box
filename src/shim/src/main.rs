@@ -25,6 +25,8 @@ use a3s_box_runtime::PORT_FWD_VSOCK_PORT;
 #[cfg(not(target_os = "windows"))]
 use a3s_box_runtime::PTY_VSOCK_PORT;
 use clap::Parser;
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[cfg(target_os = "windows")]
@@ -37,7 +39,27 @@ mod windows_port_forward;
 struct Args {
     /// JSON-encoded InstanceSpec configuration
     #[arg(long)]
-    config: String,
+    config: Option<String>,
+
+    #[cfg(target_os = "windows")]
+    #[arg(long, hide = true)]
+    port_fwd_worker: bool,
+
+    #[cfg(target_os = "windows")]
+    #[arg(long, hide = true)]
+    box_id: Option<String>,
+
+    #[cfg(target_os = "windows")]
+    #[arg(long, hide = true)]
+    parent_pid: Option<u32>,
+
+    #[cfg(target_os = "windows")]
+    #[arg(long, hide = true)]
+    ready_file: Option<PathBuf>,
+
+    #[cfg(target_os = "windows")]
+    #[arg(long, hide = true)]
+    port_map: Vec<String>,
 }
 
 fn main() {
@@ -56,12 +78,37 @@ fn main() {
 fn run() -> Result<()> {
     let args = Args::parse();
 
-    // Parse configuration
-    let spec: InstanceSpec =
-        serde_json::from_str(&args.config).map_err(|e| BoxError::BoxBootError {
-            message: format!("Failed to parse config: {}", e),
+    #[cfg(target_os = "windows")]
+    if args.port_fwd_worker {
+        let box_id = args.box_id.ok_or_else(|| BoxError::BoxBootError {
+            message: "Missing --box-id for Windows port-forward worker".to_string(),
             hint: None,
         })?;
+        let parent_pid = args.parent_pid.ok_or_else(|| BoxError::BoxBootError {
+            message: "Missing --parent-pid for Windows port-forward worker".to_string(),
+            hint: None,
+        })?;
+        let ready_file = args.ready_file.ok_or_else(|| BoxError::BoxBootError {
+            message: "Missing --ready-file for Windows port-forward worker".to_string(),
+            hint: None,
+        })?;
+        return windows_port_forward::run_port_forward_worker(
+            &box_id,
+            &args.port_map,
+            parent_pid,
+            &ready_file,
+        );
+    }
+
+    // Parse configuration
+    let config = args.config.ok_or_else(|| BoxError::BoxBootError {
+        message: "Missing --config".to_string(),
+        hint: None,
+    })?;
+    let spec: InstanceSpec = serde_json::from_str(&config).map_err(|e| BoxError::BoxBootError {
+        message: format!("Failed to parse config: {}", e),
+        hint: None,
+    })?;
 
     #[cfg(target_os = "macos")]
     tracing::info!(

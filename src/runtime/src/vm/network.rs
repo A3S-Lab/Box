@@ -9,6 +9,7 @@ use super::VmManager;
 impl VmManager {
     /// Set up bridge networking by looking up the network, spawning passt,
     /// and building the NetworkInstanceConfig for the VM spec.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn setup_bridge_network(
         &mut self,
         network_name: &str,
@@ -40,7 +41,7 @@ impl VmManager {
             .and_then(|s| s.parse().ok())
             .unwrap_or(24);
 
-        // Parse MAC address from hex string "02:42:0a:58:00:02" → [u8; 6]
+        // Parse MAC address from hex string "02:42:0a:58:00:02" into [u8; 6]
         let mac_address = parse_mac(&endpoint.mac_address).map_err(|e| {
             BoxError::NetworkError(format!(
                 "invalid MAC address '{}': {}",
@@ -84,29 +85,30 @@ impl VmManager {
             (path, fd, proxy_fd)
         };
 
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let _ = box_dir;
-            return Err(BoxError::NetworkError(
-                "Bridge networking (--network) is not supported on this platform".to_string(),
-            ));
-        }
+        Ok(NetworkInstanceConfig {
+            net_socket_path: socket_path,
+            #[cfg(target_os = "macos")]
+            net_socket_fd,
+            #[cfg(target_os = "macos")]
+            net_proxy_fd,
+            ip_address: ip,
+            gateway,
+            prefix_len,
+            mac_address,
+            dns_servers,
+        })
+    }
 
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            Ok(NetworkInstanceConfig {
-                net_socket_path: socket_path,
-                #[cfg(target_os = "macos")]
-                net_socket_fd,
-                #[cfg(target_os = "macos")]
-                net_proxy_fd,
-                ip_address: ip,
-                gateway,
-                prefix_len,
-                mac_address,
-                dns_servers,
-            })
-        }
+    /// Set up bridge networking by looking up the network, spawning passt,
+    /// and building the NetworkInstanceConfig for the VM spec.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(crate) fn setup_bridge_network(
+        &mut self,
+        _network_name: &str,
+    ) -> Result<NetworkInstanceConfig> {
+        Err(BoxError::NetworkError(
+            "Bridge networking (--network) is not supported on this platform".to_string(),
+        ))
     }
 
     /// Write /etc/hosts to the guest rootfs for DNS service discovery.
@@ -148,6 +150,7 @@ impl VmManager {
 }
 
 /// Parse a MAC address string "02:42:0a:58:00:02" into [u8; 6].
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 pub(crate) fn parse_mac(mac_str: &str) -> std::result::Result<[u8; 6], String> {
     let parts: Vec<&str> = mac_str.split(':').collect();
     if parts.len() != 6 {

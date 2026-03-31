@@ -266,22 +266,31 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         })?;
 
         if meta.is_symlink() {
-            let target = std::fs::read_link(&src_path).map_err(|e| {
-                BoxError::CacheError(format!(
-                    "Failed to read symlink {}: {}",
-                    src_path.display(),
-                    e
-                ))
-            })?;
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &dst_path).map_err(|e| {
-                BoxError::CacheError(format!(
-                    "Failed to create symlink {} -> {}: {}",
-                    dst_path.display(),
-                    target.display(),
-                    e
-                ))
-            })?;
+            {
+                let target = std::fs::read_link(&src_path).map_err(|e| {
+                    BoxError::CacheError(format!(
+                        "Failed to read symlink {}: {}",
+                        src_path.display(),
+                        e
+                    ))
+                })?;
+                std::os::unix::fs::symlink(&target, &dst_path).map_err(|e| {
+                    BoxError::CacheError(format!(
+                        "Failed to create symlink {} -> {}: {}",
+                        dst_path.display(),
+                        target.display(),
+                        e
+                    ))
+                })?;
+            }
+            #[cfg(not(unix))]
+            {
+                return Err(BoxError::CacheError(format!(
+                    "Symlink copy is not supported on this platform: {}",
+                    src_path.display()
+                )));
+            }
         } else if meta.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
