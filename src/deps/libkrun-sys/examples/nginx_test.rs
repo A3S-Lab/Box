@@ -95,15 +95,18 @@ fn main() {
         println!("   ✓ Root: {}\n", rootfs_path);
 
         // 5. Configure networking
-        println!("5. Configuring network...");
-        let iface = CString::new("eth0").unwrap();
-        let mac: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
-        // Use null TCP backend (disconnected device) for now
-        let ret = krun_add_net_tcp(ctx_id, iface.as_ptr(), mac.as_ptr(), std::ptr::null());
-        if ret != 0 {
-            eprintln!("Warning: krun_add_net_tcp returned {}", ret);
+        #[cfg(windows)]
+        {
+            println!("5. Configuring network...");
+            let iface = CString::new("eth0").unwrap();
+            let mac: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+            // Use null TCP backend (disconnected device) for now
+            let ret = krun_add_net_tcp(ctx_id, iface.as_ptr(), mac.as_ptr(), std::ptr::null());
+            if ret != 0 {
+                eprintln!("Warning: krun_add_net_tcp returned {}", ret);
+            }
+            println!("   ✓ Network: virtio-net device (disconnected)\n");
         }
-        println!("   ✓ Network: virtio-net device (disconnected)\n");
 
         // 6. Configure console
         println!("6. Configuring console...");
