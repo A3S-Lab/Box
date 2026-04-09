@@ -132,9 +132,9 @@ impl PersistentCriStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container::ContainerState;
     use crate::state::{JsonStateStore, NoopStateStore};
     use std::collections::HashMap;
-    use crate::container::ContainerState;
 
     fn sample_sandbox(id: &str) -> PodSandbox {
         PodSandbox {

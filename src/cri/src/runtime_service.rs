@@ -22,7 +22,9 @@ use crate::cri_api::*;
 use crate::error::box_error_to_status;
 use crate::persistent_store::PersistentCriStore;
 use crate::sandbox::{PodSandbox, SandboxState};
-use crate::state::{default_state_path, JsonStateStore, NoopStateStore, StateStore};
+use crate::state::{default_state_path, JsonStateStore, StateStore};
+#[cfg(test)]
+use crate::state::NoopStateStore;
 use crate::streaming::{SessionKind, StreamingHandle, StreamingSession};
 
 /// A3S Box implementation of the CRI RuntimeService.
@@ -1746,7 +1748,7 @@ mod tests {
         let result =
             WarmPool::start(pool_config, BoxConfig::default(), EventEmitter::new(64)).await;
 
-        if let Ok(mut pool) = result {
+        if let Ok(pool) = result {
             let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
             let streaming_server = crate::streaming::StreamingServer::new(addr);
             let handle = streaming_server.handle();

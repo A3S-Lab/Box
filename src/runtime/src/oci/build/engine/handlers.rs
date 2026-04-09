@@ -105,7 +105,7 @@ pub(super) fn handle_run(
     command: &str,
     rootfs_dir: &Path,
     layers_dir: &Path,
-    workdir: &str,
+    #[allow(unused_variables)] workdir: &str,
     env: &[(String, String)],
     shell: &[String],
     layer_index: usize,
@@ -114,7 +114,7 @@ pub(super) fn handle_run(
     #[cfg(target_os = "macos")]
     {
         // On macOS, use a3s-box MicroVM to execute RUN commands
-        return handle_run_via_microvm(
+        handle_run_via_microvm(
             command,
             rootfs_dir,
             layers_dir,
@@ -123,7 +123,7 @@ pub(super) fn handle_run(
             shell,
             layer_index,
             quiet,
-        );
+        )
     }
 
     // Linux: execute via chroot
