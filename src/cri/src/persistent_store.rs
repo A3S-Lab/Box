@@ -3,10 +3,9 @@
 //! Wraps SandboxStore and ContainerStore together so every mutation
 //! can atomically snapshot both to disk via a StateStore.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::container::{Container, ContainerState, ContainerStore};
+use crate::container::{Container, ContainerStore};
 use crate::sandbox::{PodSandbox, SandboxState, SandboxStore};
 use crate::state::{PersistedState, StateStore};
 
@@ -134,6 +133,8 @@ impl PersistentCriStore {
 mod tests {
     use super::*;
     use crate::state::{JsonStateStore, NoopStateStore};
+    use std::collections::HashMap;
+    use crate::container::ContainerState;
 
     fn sample_sandbox(id: &str) -> PodSandbox {
         PodSandbox {
