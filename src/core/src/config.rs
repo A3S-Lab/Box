@@ -1067,12 +1067,14 @@ mod tests {
 
     #[test]
     fn test_box_config_with_sidecar_roundtrip() {
-        let mut config = BoxConfig::default();
-        config.sidecar = Some(SidecarConfig {
-            image: "safeclaw:latest".to_string(),
-            vsock_port: 4092,
-            env: vec![],
-        });
+        let config = BoxConfig {
+            sidecar: Some(SidecarConfig {
+                image: "safeclaw:latest".to_string(),
+                vsock_port: 4092,
+                env: vec![],
+            }),
+            ..Default::default()
+        };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: BoxConfig = serde_json::from_str(&json).unwrap();
         let sidecar = parsed.sidecar.unwrap();
