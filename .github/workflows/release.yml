@@ -359,7 +359,14 @@ jobs:
         run: |
           cd sdk/python
           maturin build --release --strip
-      - name: Upload wheel
+      - name: Upload wheel to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd sdk/python
+          gh release upload "$GITHUB_REF_NAME" target/wheels/*.whl --clobber
+
+      - name: Upload wheel to PyPI
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
