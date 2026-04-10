@@ -1,358 +1,412 @@
 # A3S Box
 
 <p align="center">
-  <strong>MicroVM Runtime — Docker-like CLI &amp; Kubernetes RuntimeClass</strong>
+  <strong>MicroVM Runtime</strong>
 </p>
 
 <p align="center">
-  <em>Run any OCI image in a hardware-isolated MicroVM. ~200ms cold start. Docker-compatible CLI for standalone use, CRI shim for Kubernetes. AMD SEV-SNP confidential computing when hardware supports, VM isolation always.</em>
+  <em>Run any OCI image in a hardware-isolated MicroVM. ~200ms cold start. Docker-compatible CLI, Kubernetes CRI runtime, and optional AMD SEV-SNP confidential computing.</em>
 </p>
 
 <p align="center">
   <a href="#features">Features</a> •
   <a href="#quick-start">Quick Start</a> •
-  <a href="#cli-reference">CLI Reference</a> •
+  <a href="#cli-reference">CLI</a> •
   <a href="#architecture">Architecture</a> •
-  <a href="#tee-confidential-computing">TEE</a> •
-  <a href="#testing">Testing</a>
+  <a href="#tee">TEE</a>
 </p>
 
 ---
 
-## Overview
+## What is A3S Box?
 
-A3S Box boots OCI images inside MicroVMs powered by libkrun (Apple HVF on macOS, KVM on Linux, WHPX on Windows). Each workload gets its own Linux kernel, namespace isolation, and optional AMD SEV-SNP hardware memory encryption — all with ~200ms cold start.
+A3S Box is a **MicroVM runtime** — not a platform, not an orchestrator. It runs workloads inside hardware-isolated virtual machines.
 
-Two deployment modes:
-- **Standalone CLI** (`a3s-box run`) — Docker-compatible commands for local development and production
-- **Kubernetes RuntimeClass** (`a3s-box-shim`) — CRI runtime for kubelet, deploy via DaemonSet + RuntimeClass
+**Core properties:**
+- **Isolated**: Each workload gets its own Linux kernel, memory encryption (with TEE), and namespace isolation
+- **Compatible**: Runs any OCI image — Docker Hub, private registries, self-built images
+- **Fast**: ~200ms cold start via libkrun (Apple HVF on macOS, KVM on Linux, WHPX on Windows)
+- **Portable**: Same CLI and CRI interface across macOS, Linux, and Windows
 
-A3S Box is application-agnostic. It doesn't know what runs inside — web servers, databases, AI agents, or anything else packaged as an OCI image.
+**Two ways to use it:**
+- **CLI** (`a3s-box run`) — Docker-like commands for local development and production
+- **CRI** (`a3s-box-shim`) — Kubernetes RuntimeClass for pod isolation
+
+A3S Box is application-agnostic. It doesn't know what's inside the VM — web servers, databases, AI agents, or anything else packaged as an OCI image.
 
 ## Features
 
-### VM Runtime
-- **~200ms Cold Start** — MicroVM boot via libkrun (Apple HVF / Linux KVM / Windows WHPX)
-- **OCI Images** — Pull, push, build, tag, inspect, prune from any OCI registry with local LRU cache; manifest digest exposed on every pulled image
-- **Dockerfile Build** — `a3s-box build` with multi-stage builds, all Dockerfile instructions, `ADD <url>` HTTP download, `ONBUILD` trigger inheritance
-- **Multi-Platform Build** — `--platform linux/amd64,linux/arm64` with OCI Image Index output
-- **Compose** — Multi-container orchestration via YAML (`compose up/down/ps/config`), dependency-ordered boot, shared networks
-- **Snapshot/Restore** — Configuration-based VM snapshots (`snapshot create/restore/ls/rm/inspect`), rootfs preservation
-- **Rootfs Caching** — Content-addressable cache with SHA256 keys and TTL/size pruning
-- **Cross-Platform** — macOS (Apple Silicon), Linux (x86_64/ARM64), and Windows (x86_64), no root required
+### Runtime
 
-### Docker-Compatible CLI (52 commands)
-- **Lifecycle**: `run`, `create`, `start`, `stop`, `pause`, `unpause`, `restart`, `rm`, `kill`, `rename`, `wait`
-- **Exec & PTY**: `exec` (with `-it`, `-u`, `-e`, `-w`), `attach -it`, `run -it`, `top`
-- **Images**: `pull`, `push`, `build`, `images`, `rmi`, `tag`, `image-inspect`, `image-prune`, `history`, `save`, `load`, `export`, `commit`, `diff`
-- **Networking**: `network create/ls/rm/inspect/connect/disconnect`, bridge driver, IPAM, DNS discovery
-- **Volumes**: `volume create/ls/rm/inspect/prune`, named volumes, anonymous volumes, tmpfs
-- **Snapshots**: `snapshot create/restore/ls/rm/inspect`
-- **Observability**: `ps`, `logs`, `inspect`, `stats`, `events`, `cp`, `df`
-- **System**: `system-prune`, `container-update`, `version`, `info`, `monitor`, `login`, `logout`, `audit`
+| Capability | Description |
+|-----------|-------------|
+| OCI Images | Pull, push, build, tag, inspect from any registry with local LRU cache |
+| Dockerfile Build | Multi-stage builds, all instructions, `ADD <url>` HTTP download, `ONBUILD` triggers |
+| Multi-Platform | `--platform linux/amd64,linux/arm64` with OCI Image Index |
+| Snapshot/Restore | Configuration-based VM snapshots |
+| Cross-Platform | macOS ARM64, Linux x86_64/ARM64, Windows x86_64 |
+| Warm Pool | Pre-booted VMs for instant allocation |
 
-### Security & Isolation
-- **Namespace Isolation** — Separate mount, PID, IPC, UTS, user, and cgroup namespaces within each VM
-- **Resource Limits** — CPU shares/quota/pinning, memory reservation/swap, PID limits, ulimits (cgroup v2)
-- **Security Options** — Capabilities (`--cap-add/drop`) with bounding + ambient set clearing, seccomp BPF filter with architecture validation (`--security-opt seccomp=`), no-new-privileges, read-only rootfs, privileged mode, device mapping, GPU access
-- **Image Signing** — Cosign-compatible signature verification via CLI (`--verify-key`, `--verify-issuer`, `--verify-identity`): key-based and keyless modes (crypto verification pending, policy enforcement active)
-- **Network Isolation** — Per-network isolation policies (`--isolation none/strict/custom`), ingress/egress rules with port/protocol filtering, policy enforcement on connect
-- **Audit Logging** — Persistent JSON-lines audit trail with rotation, structured events (who/what/when/outcome), queryable via `a3s-box audit` with filters
-- **Restart Policies** — `always`, `on-failure:N`, `unless-stopped` with exponential backoff and max restart count enforcement
-- **Health Checks** — Configurable commands with interval, timeout, retries, start period; monitor auto-restarts unhealthy boxes
-- **Logging** — JSON logging driver with gzip-compressed rotation, syslog driver (UDP/TCP, RFC 3164), or `--log-driver none`
+### CLI (52 commands)
+
+| Category | Commands |
+|----------|----------|
+| Lifecycle | `run`, `create`, `start`, `stop`, `pause`, `unpause`, `restart`, `rm`, `kill`, `wait` |
+| Execution | `exec`, `attach`, `top`, `shell` |
+| Images | `pull`, `push`, `build`, `images`, `rmi`, `tag`, `image-inspect`, `history`, `save`, `load`, `commit` |
+| Filesystem | `cp`, `export`, `diff` |
+| Networking | `network create`, `ls`, `rm`, `inspect`, `connect`, `disconnect` |
+| Volumes | `volume create`, `ls`, `rm`, `inspect`, `prune` |
+| Snapshots | `snapshot create`, `restore`, `ls`, `rm`, `inspect` |
+| Compose | `compose up`, `down`, `ps`, `config` |
+| Observability | `ps`, `logs`, `inspect`, `stats`, `events`, `df`, `port` |
+| System | `system-prune`, `container-update`, `login`, `logout`, `audit`, `monitor`, `version` |
+
+### Security
+
+| Layer | Mechanism |
+|-------|-----------|
+| VM Isolation | Separate Linux kernel, memory isolation via virtualization |
+| Namespaces | mount, PID, IPC, UTS, user, cgroup within VM |
+| Resource Limits | CPU pinning/shares/quota, memory limits, PID limits, ulimits (cgroup v2) |
+| Capabilities | `--cap-add/drop`, bounding + ambient set clearing |
+| Seccomp | BPF filter with architecture validation |
+| Image Signing | Cosign key-based and keyless verification on pull |
+| Network Policies | Ingress/egress rules per network |
 
 ### TEE (Confidential Computing)
-- **AMD SEV-SNP** — Hardware-enforced memory encryption
-- **Intel TDX** — Trust Domain Extensions (config support, runtime pending)
-- **Remote Attestation** — SNP report generation, ECDSA-P384 verification, certificate chain validation (VCEK→ASK→ARK)
-- **RA-TLS** — SNP report embedded in X.509 certificate extensions, verified during TLS handshake
-- **Secret Injection** — Inject secrets via RA-TLS into `/run/secrets/` (tmpfs, mode 0400)
-- **Sealed Storage** — AES-256-GCM with HKDF-SHA256, three policies: MeasurementAndChip, MeasurementOnly, ChipOnly, version-based rollback protection
-- **KBS Integration** — Key Broker Service client (RATS challenge-response), resource path routing, session tokens
-- **Re-attestation** — Periodic TEE verification with configurable interval, failure threshold, grace period
-- **Simulation Mode** — Full TEE workflow on any machine via `A3S_TEE_SIMULATE=1`
+
+| Feature | Description |
+|---------|-------------|
+| AMD SEV-SNP | Hardware memory encryption (Milan/Genoa EPYC) |
+| Remote Attestation | SNP report generation, ECDSA-P384 verification, certificate chain |
+| RA-TLS | SNP report in X.509 certificate extensions |
+| Sealed Storage | AES-256-GCM with HKDF-SHA256, measurement/chip policies |
+| Secret Injection | Secrets over RA-TLS to `/run/secrets/` |
+| KBS Client | RATS challenge-response for key brokering |
+| Simulation | Full TEE workflow on any hardware via `A3S_TEE_SIMULATE=1` |
 
 ### Observability
-- **Prometheus Metrics** — 19 metrics auto-activated on every box boot: VM boot duration/count, CPU/memory, exec total/duration/errors, image pull/build, rootfs cache, warm pool size/capacity/hits
-- **Tracing Spans** — OpenTelemetry-compatible spans for VM lifecycle (`vm_boot`, `prepare_layout`, `vm_start`, `wait_for_ready`), exec, and destroy
 
-### Kubernetes Integration
-- **CRI Runtime** — RuntimeService + ImageService for kubelet
-- **Deployment** — DaemonSet, RuntimeClass, Helm chart, RBAC
+- **Metrics**: 19 Prometheus metrics (VM boot, exec, image pull, cache, pool)
+- **Tracing**: OpenTelemetry spans for VM lifecycle, exec, destroy
+- **Audit**: Persistent JSON-lines log with query filters
+
+### Kubernetes
+
+- CRI v1 implementation (RuntimeService + ImageService)
+- DaemonSet + RuntimeClass deployment via Helm
 
 ## Quick Start
 
-### Prerequisites
-
-- **macOS ARM64** (Apple Silicon), **Linux x86_64/ARM64**, or **Windows x86_64**
-
-> macOS Intel is NOT supported.
-
-### Install on macOS/Linux via Homebrew (Recommended)
+### Install
 
 ```bash
-brew tap a3s-lab/tap https://github.com/A3S-Lab/homebrew-tap
-brew install a3s-box
-```
+# macOS / Linux
+brew install a3s-lab/tap/a3s-box
 
-This installs `a3s-box`, `a3s-box-shim`, and `a3s-box-guest-init`.
-
-```bash
-# Update to latest version
-brew update && brew upgrade a3s-box
-
-# Uninstall
-brew uninstall a3s-box
-```
-
-### Install on Windows via winget
-
-```powershell
-# Install
+# Windows
 winget install A3SLab.Box
 
-# Verify installation
-a3s-box version
+# Or build from source
+git clone https://github.com/A3S-Lab/Box.git
+cd Box/src && cargo build --release
 ```
 
-#### Windows Prerequisites
-
-Enable Windows Hypervisor Platform:
-
-```powershell
-# Run as Administrator
-Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
-
-# Reboot required
-Restart-Computer
-```
-
-Verify it's enabled:
-
-```powershell
-Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
-```
-
-### Build from Source
-
-Requires Rust 1.75+.
+### Run your first box
 
 ```bash
-git clone https://github.com/a3s-lab/box.git && cd box
-git submodule update --init --recursive
-cd src && cargo build --release
+# Run an OCI image
+a3s-box run --name hello alpine:latest -- echo "Hello from MicroVM"
+
+# Interactive shell
+a3s-box run -it --name dev alpine:latest -- /bin/sh
+
+# With resources
+a3s-box run -d --name web --cpus 2 --memory 1g nginx:alpine
 ```
 
-**Platform-specific dependencies:**
-- macOS: `brew install lld llvm`
-- Linux: `apt install build-essential pkg-config libssl-dev`
-- Windows: Visual Studio Build Tools 2019+ with MSVC
+### Pull and inspect images
 
-| Mode | Command | Use Case |
-|------|---------|----------|
-| Full Build | `cargo build` | Development with VM support |
-| Stub Mode | `A3S_DEPS_STUB=1 cargo build` | CI/testing without VM |
+```bash
+# Pull with signature verification
+a3s-box pull --verify-key cosign.pub myimage:latest
+
+# List cached images
+a3s-box images
+
+# Inspect image metadata
+a3s-box image-inspect myimage:latest
+```
+
+### Execute commands
+
+```bash
+# Run command in box
+a3s-box exec mybox -- ls -la
+
+# With environment and user
+a3s-box exec -it -u root -e FOO=bar mybox -- /bin/sh
+```
+
+### Networking
+
+```bash
+# Create isolated network
+a3s-box network create backend --isolation strict
+
+# Run box in network with port mapping
+a3s-box run -d --name api --network backend -p 8080:80 myapi:latest
+```
+
+### TEE (confidential computing)
+
+```bash
+# Run with SEV-SNP (requires AMD EPYC hardware)
+a3s-box run -d --name secure --tee myimage:latest -- sleep 3600
+
+# Or simulate TEE on any hardware
+export A3S_TEE_SIMULATE=1
+a3s-box run -d --name dev --tee --tee-simulate myimage:latest -- sleep 3600
+
+# Attest the TEE
+a3s-box attest secure --ratls --allow-simulated
+
+# Inject secrets via RA-TLS
+a3s-box inject-secret secure --secret "API_KEY=secret" --set-env --allow-simulated
+```
 
 ## CLI Reference
 
-### Usage Examples
+### Lifecycle
 
 ```bash
-# Run a box
-a3s-box run -d --name dev --cpus 2 --memory 1g alpine:latest -- sleep 3600
-a3s-box run -it alpine:latest -- /bin/sh          # Interactive shell
-
-# Image management
-a3s-box pull alpine:latest
-a3s-box pull --verify-key cosign.pub alpine:latest # Verify signature
-a3s-box build -t myapp:v1 .
-a3s-box images
-a3s-box push myregistry.io/myapp:v1
-
-# Execute commands
-a3s-box exec dev -- ls -la
-a3s-box exec -it -u root -e FOO=bar dev -- /bin/sh
-
-# File copy
-a3s-box cp ./config.yaml dev:/etc/app/
-a3s-box cp dev:/var/log/ ./logs/
-
-# Networking & volumes
-a3s-box network create mynet --isolation strict
-a3s-box run -d --name web --network mynet -v data:/app/data nginx:alpine
-a3s-box volume ls
-
-# Observability
-a3s-box ps -a --filter label=env=dev
-a3s-box logs dev -f
-a3s-box stats
-a3s-box events --json
-a3s-box audit --action run --outcome success
-
-# TEE attestation & secrets
-a3s-box run -d --name secure --tee --tee-simulate alpine:latest -- sleep 3600
-a3s-box attest secure --ratls --allow-simulated
-a3s-box seal secure --data "API_KEY=secret" --context keys --policy measurement-and-chip
-a3s-box inject-secret secure --secret "DB_PASS=s3cret" --set-env --allow-simulated
-
-# Lifecycle
-a3s-box stop dev && a3s-box rm dev
-a3s-box system-prune -f
+a3s-box run [OPTIONS] IMAGE [CMD...]        # Pull + create + start
+a3s-box create [OPTIONS] IMAGE [CMD...]     # Create without starting
+a3s-box start BOX [BOX...]                  # Start stopped boxes
+a3s-box stop BOX [BOX...]                   # Graceful stop
+a3s-box restart BOX [BOX...]                # Restart
+a3s-box rm BOX [BOX...]                     # Remove (-f force)
+a3s-box pause BOX [BOX...]                  # SIGSTOP
+a3s-box unpause BOX [BOX...]                # SIGCONT
+a3s-box kill BOX [BOX...]                   # Force kill
+a3s-box wait BOX [BOX...]                   # Block until stop
 ```
 
-Boxes can be referenced by name, full ID, or unique ID prefix (Docker-compatible resolution).
+### Execution
 
-### Command Table
+```bash
+a3s-box exec [OPTIONS] BOX CMD [ARG...]
+  -it           # Interactive PTY
+  -u USER       # User (default: root)
+  -e KEY=VAL    # Environment variable
+  -w DIR        # Working directory
 
-| Command | Description |
-|---------|-------------|
-| `run` | Pull + create + start (`-d`, `--rm`, `-l`, `--restart`, `--health-cmd`, `--cap-add/drop`, `--privileged`, `--read-only`, `--device`, `--gpus`, `--init`, `--env-file`, `--add-host`, `--platform`, `--tee`) |
-| `create` | Create without starting (same flags as `run`) |
-| `start/stop/restart/kill` | Lifecycle management (multi-target) |
-| `pause/unpause` | SIGSTOP/SIGCONT |
-| `rm` | Remove boxes (`-f` force) |
-| `rename` | Rename a box |
-| `wait` | Block until boxes stop |
-| `exec` | Run command in box (`-it`, `-u`, `-e`, `-w`) |
-| `attach` | Attach PTY to running box |
-| `top` | Show processes |
-| `ps` | List boxes (`-a`, `-q`, `--filter`, `--format`) |
-| `logs` | View logs (`-f`, `--tail N`) |
-| `inspect` | Detailed JSON info |
-| `stats` | Live resource usage |
-| `cp` | Copy files/dirs between host and box |
-| `diff` | Show filesystem changes (A/C/D) |
-| `commit` | Create image from changes (`-m`, `-a`, `-c`) |
-| `events` | Stream system events (`--filter`, `--json`) |
-| `container-update` | Hot-update resources (`--cpus`, `--memory`, `--restart`) |
-| `df` | Show disk usage |
-| `images` | List cached images |
-| `pull` | Pull image (`--verify-key`, `--verify-issuer`, `--verify-identity`) |
-| `push` | Push image to registry |
-| `build` | Dockerfile build (`--platform` for multi-arch) |
-| `rmi` | Remove images |
-| `tag` | Create image alias |
-| `image-inspect` | Image metadata |
-| `image-prune` | Remove unused images |
-| `history` | Show image layer history |
-| `save/load` | Export/import image archives |
-| `export` | Export box filesystem to tar |
-| `network` | `create/ls/rm/inspect/connect/disconnect` |
-| `volume` | `create/ls/rm/inspect/prune` |
-| `snapshot` | `create/restore/ls/rm/inspect` |
-| `compose` | `up/down/ps/config` |
-| `system-prune` | Remove stopped boxes + unused images |
-| `login/logout` | Registry authentication |
-| `attest` | TEE attestation (`--ratls`, `--policy`, `--nonce`, `--raw`, `--quiet`) |
-| `seal/unseal` | Sealed storage operations |
-| `inject-secret` | Inject secrets via RA-TLS |
-| `audit` | Query audit log (`--action`, `--box`, `--outcome`) |
-| `monitor` | Background restart daemon |
-| `version/info` | System information |
+a3s-box attach BOX                        # Attach to PTY
+a3s-box top BOX                           # Show processes
+a3s-box shell BOX                         # Interactive shell (-u root)
+```
+
+### Images
+
+```bash
+a3s-box pull [OPTIONS] IMAGE              # Pull from registry
+  --verify-key PATH    # Cosign key verification
+  --verify-issuer URL  # Keyless issuer verification
+
+a3s-box push IMAGE [TAG]                  # Push to registry
+a3s-box build [OPTIONS] -t TAG PATH      # Dockerfile build
+  --platform LINUX/ARCH,...  # Multi-arch
+a3s-box images                           # List cached
+a3s-box rmi IMAGE [IMAGE...]              # Remove images
+a3s-box tag IMAGE NEW_TAG                 # Create alias
+a3s-box image-inspect IMAGE               # JSON metadata
+a3s-box image-prune                       # Remove unused
+a3s-box history IMAGE                     # Layer history
+a3s-box save -o FILE.tar IMAGE           # Export archive
+a3s-box load -i FILE.tar                 # Import archive
+```
+
+### Filesystem
+
+```bash
+a3s-box cp [OPTIONS] SRC DST              # Copy between host/box
+  -a, --archive   # Preserve permissions
+a3s-box export BOX -o FILE.tar            # Export box fs
+a3s-box commit BOX -t TAG [OPTIONS]       # Create image from box
+a3s-box diff BOX                          # Show fs changes (A/C/D)
+```
+
+### Networking
+
+```bash
+a3s-box network create NAME [OPTIONS]
+  --driver bridge|tsi|none
+  --isolation none|strict|custom
+a3s-box network ls
+a3s-box network inspect NAME
+a3s-box network rm NAME [NAME...]
+a3s-box network connect NETWORK BOX
+a3s-box network disconnect NETWORK BOX
+a3s-box port BOX                         # List port mappings
+```
+
+### Volumes
+
+```bash
+a3s-box volume create NAME [OPTIONS]
+a3s-box volume ls
+a3s-box volume inspect NAME
+a3s-box volume rm NAME [NAME...]
+a3s-box volume prune
+```
+
+### Snapshots
+
+```bash
+a3s-box snapshot create BOX NAME
+a3s-box snapshot restore BOX SNAPSHOT
+a3s-box snapshot ls BOX
+a3s-box snapshot inspect BOX SNAPSHOT
+a3s-box snapshot rm BOX SNAPSHOT
+```
+
+### Compose
+
+```bash
+a3s-box compose -f FILE.yaml up           # Start services
+a3s-box compose -f FILE.yaml down         # Stop services
+a3s-box compose -f FILE.yaml ps           # List services
+a3s-box compose -f FILE.yaml config      # Validate config
+```
+
+### Observability
+
+```bash
+a3s-box ps [OPTIONS]                     # List boxes (-a all, -q quiet)
+a3s-box logs BOX [OPTIONS]                # View logs (-f follow, --tail N)
+a3s-box inspect BOX                       # Detailed JSON
+a3s-box stats [OPTIONS]                   # Live resource usage
+a3s-box events [OPTIONS]                  # Stream events (--json)
+a3s-box df                                # Disk usage
+a3s-box audit [OPTIONS]                   # Query audit log
+  --action run|stop|exec|...
+  --outcome success|failure
+  --box BOX
+```
+
+### TEE
+
+```bash
+a3s-box attest BOX [OPTIONS]              # Request attestation
+  --ratls           # RA-TLS mode
+  --policy POLICY   # min-version, force, allow-simulated
+  --nonce HEX       # Nonce for freshness
+  --raw             # Raw report output
+
+a3s-box seal BOX --data SECRET [OPTIONS]  # Seal data to TEE
+  --context PATH    # KBS resource path
+  --policy POLICY   # measurement-and-chip, measurement-only, chip-only
+
+a3s-box unseal BOX --context PATH         # Unseal data in TEE
+
+a3s-box inject-secret BOX --secret K=V [OPTIONS]
+  --set-env        # Export as environment variables
+  --allow-simulated
+```
+
+### System
+
+```bash
+a3s-box version
+a3s-box info                             # System information
+a3s-box login REGISTRY -u USER -p PASS  # Registry auth
+a3s-box logout REGISTRY
+a3s-box system-prune [OPTIONS]           # Clean up (-f force)
+a3s-box container-update BOX [OPTIONS]   # Hot-update resources
+  --cpus N
+  --memory SIZE
+  --restart always|on-failure[:N]|unless-stopped
+a3s-box monitor                          # Background restart daemon
+a3s-box pool [start|stop|status]        # Warm VM pool
+```
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         Host Process                             │
+│                         Host                                     │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │                    a3s-box-runtime                         │  │
+│  │                      a3s-box-cli                           │  │
 │  │  ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐  │  │
-│  │  │ VmManager   │ │ OciImage    │ │  RootfsBuilder      │  │  │
-│  │  │ (lifecycle) │ │ (registry)  │ │  (composition)      │  │  │
+│  │  │  CLI (52)   │ │   State     │ │   Runtime Engine    │  │  │
+│  │  │  commands   │ │  boxes.json │ │  VmManager · OCI    │  │  │
 │  │  └─────────────┘ └─────────────┘ └─────────────────────┘  │  │
 │  └───────────────────────────┬───────────────────────────────┘  │
-│                              │ vsock                             │
+│                              │ vsock                               │
 └──────────────────────────────┼──────────────────────────────────┘
                                │
 ┌──────────────────────────────┼──────────────────────────────────┐
 │                              ▼                                   │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │              /sbin/init (guest-init, PID 1)               │  │
-│  │  - Mount filesystems (/proc, /sys, /dev, virtio-fs)       │  │
-│  │  - Exec server (4089), PTY server (4090)                  │  │
-│  │  - Attestation server (4091, TEE only)                    │  │
+│  │              guest-init (PID 1)                            │  │
+│  │  Exec :4089  ·  PTY :4090  ·  Attest :4091              │  │
 │  └───────────────────────────┬───────────────────────────────┘  │
 │                              │                                   │
 │  ┌───────────────────────────▼───────────────────────────────┐  │
-│  │                 Process (Namespace 1)                      │  │
-│  │  - Isolated mount, PID, IPC, UTS, user, cgroup namespaces │  │
-│  └───────────────────────────┬───────────────────────────────┘  │
-│                              │ /usr/bin/nsexec                   │
-│  ┌───────────────────────────▼───────────────────────────────┐  │
-│  │               Subprocess (Namespace 2)                     │  │
-│  │  - Further isolated from parent process                    │  │
+│  │              User Namespace                                │  │
+│  │  /a3s/workspace/  ·  /run/secrets/  ·  /a3s/skills/     │  │
 │  └───────────────────────────────────────────────────────────┘  │
-│                        Guest VM (MicroVM)                        │
+│                         Guest VM                                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### Crates
-
-| Crate | Binary | Purpose | Version | Tests |
-|-------|--------|---------|---------|------:|
-| `cli` | `a3s-box` | Docker-like CLI (52 commands) | 0.5.3 | 369 |
-| `core` | — | Config, error types, events | 0.5.3 | 331 |
-| `runtime` | — | VM lifecycle, OCI, attestation | 0.5.3 | 711 |
-| `guest/init` | `a3s-box-guest-init` | Guest PID 1, exec/PTY/attestation servers | 0.5.3 | 25 |
-| `shim` | `a3s-box-shim` | libkrun bridge | 0.5.3 | 14 |
-| `cri` | `a3s-box-cri` | Kubernetes CRI runtime | 0.5.3 | 94 |
-
-218 source files, ~1,577 unit tests, 7 integration tests.
-
-### Vsock Port Allocation
+### Vsock Ports
 
 | Port | Service | Protocol |
 |-----:|---------|----------|
-| 4088 | gRPC agent control | Protobuf |
-| 4089 | Exec server | Binary framing |
-| 4090 | PTY server | Binary framing |
-| 4091 | Attestation server | RA-TLS |
+| 4088 | gRPC control | Health, metrics |
+| 4089 | Exec server | Command execution |
+| 4090 | PTY server | Terminal I/O |
+| 4091 | Attestation | RA-TLS (TEE only) |
 
-### Library-Only Modules
+### Crates
 
-The following modules are implemented and tested but exist as library code for external consumers (Gateway, Operator). They are not directly exposed via CLI:
+| Crate | Binary | Purpose |
+|-------|--------|---------|
+| `cli` | `a3s-box` | Docker-like CLI |
+| `core` | — | Config, errors, events, types |
+| `runtime` | — | VM lifecycle, OCI, TEE, networking |
+| `shim` | `a3s-box-shim` | libkrun bridge |
+| `guest/init` | `a3s-box-guest-init` | Guest PID 1 |
+| `cri` | `a3s-box-cri` | Kubernetes CRI runtime |
 
-- **Scale API** — `ScaleRequest`/`ScaleResponse` types, instance readiness signaling, service health aggregation, graceful drain
-- **K8s Operator** — `BoxAutoscaler` CRD types, ratio-based autoscaling, multi-metric evaluation, stabilization windows
-- **Warm Pool** — Pre-booted idle MicroVM pool with TTL, auto-replenish, pressure-based autoscaler
+## TEE
 
-## TEE (Confidential Computing)
+AMD SEV-SNP provides hardware memory encryption. The VM's memory is encrypted with a key only the hardware knows.
 
-### Configuration
+### Requirements
 
-```rust
-use a3s_box_core::config::{BoxConfig, TeeConfig, SevSnpGeneration};
-
-// AMD SEV-SNP
-let config = BoxConfig {
-    tee: TeeConfig::SevSnp {
-        workload_id: "my-secure-workload".to_string(),
-        generation: SevSnpGeneration::Milan,  // or Genoa
-        simulate: false,
-    },
-    ..Default::default()
-};
-
-// Intel TDX (config support, runtime pending)
-let config = BoxConfig {
-    tee: TeeConfig::Tdx {
-        workload_id: "my-workload".to_string(),
-        simulate: false,
-    },
-    ..Default::default()
-};
-```
-
-### Hardware Requirements
-
-- AMD EPYC 7003 (Milan) or 9004 (Genoa) with SEV-SNP
+- AMD EPYC 7003 (Milan) or 9004 (Genoa)
 - Linux kernel 5.19+ with SEV-SNP patches
 - `/dev/sev` and `/dev/sev-guest` accessible
-- Cloud: Azure DCasv5/ECasv5
+- Or Azure DCasv5/ECasv5 instances
 
-> AMD Ryzen, Intel CPUs, and Apple Silicon do NOT support SEV-SNP.
+### Workflow
+
+```bash
+# 1. Run with TEE enabled
+a3s-box run -d --name app --tee myimage:latest -- myapp
+
+# 2. Attest the TEE (verify it's genuine)
+a3s-box attest app --ratls
+
+# 3. Inject secrets (delivered over RA-TLS)
+a3s-box inject-secret app --secret "DB_PASSWORD=secret" --set-env
+
+# 4. Seal data (only accessible inside this TEE)
+a3s-box seal app --data "encryption-key=xyz" --context keys --policy measurement-and-chip
+```
 
 ### Simulation Mode
 
@@ -360,198 +414,17 @@ For development without SEV-SNP hardware:
 
 ```bash
 export A3S_TEE_SIMULATE=1
-a3s-box run -d --name dev --tee --tee-simulate alpine:latest -- sleep 3600
+a3s-box run -d --name dev --tee --tee-simulate myimage -- sleep 3600
 a3s-box attest dev --ratls --allow-simulated
-a3s-box seal dev --data "secret" --context ctx --policy measurement-and-chip --allow-simulated
-a3s-box inject-secret dev --secret "KEY=val" --set-env --allow-simulated
 ```
 
-Simulation generates fake attestation reports with deterministic keys. Not suitable for production:
-- ECDSA report signature verification bypassed
-- No hardware memory encryption
-- Sealed data NOT portable to real hardware
+## Kubernetes
 
-### Pending Validation 🔬
-
-All TEE code is implemented and unit-tested. Hardware validation on real AMD SEV-SNP silicon (Azure DCasv5 / bare-metal EPYC) is pending.
-
-## Testing
-
-### Unit Tests — 1,499 passed
-
-| Crate | Tests | Coverage |
-|-------|------:|----------|
-| `a3s-box-cli` | 361 | State management, name resolution, output formatting, restart policies, compose, audit, snapshot, network isolation, max restart count |
-| `a3s-box-core` | 337 | Config validation, error types, event serialization, TEE types (SEV-SNP + TDX), security config (AppArmor/SELinux warnings), compose types, network policies (validation), scale API types, operator CRD types, IPv6 IPAM, volume quota, sidecar config |
-| `a3s-box-runtime` | 711 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, Prometheus metrics, tracing spans, image signing (honest verification), compose orchestrator, audit log, snapshot store, KBS client, re-attestation, rollback protection, syslog driver, gzip log compression, manifest digest, ONBUILD trigger parsing |
-| `a3s-box-cri` | 33 | CRI sandbox/container lifecycle, config mapping (SEV-SNP + TDX) |
-| `a3s-box-guest-init` | 25 | Exec server, attest server frame I/O, secret validation, namespace security (user + cgroup), seccomp arch validation |
-| `a3s-box-shim` | 14 | Shim config, cgroup, cpuset, ulimit, TEE config |
-
-All unit tests run without VM, network, or hardware dependencies (`A3S_DEPS_STUB=1` for CI).
+### Install
 
 ```bash
-just test                         # All unit tests
-cargo test -p a3s-box-cli --lib   # CLI only
-cargo test -p a3s-box-runtime     # Runtime only
-```
-
-### Integration Tests — 7 tests
-
-Require built binary, hardware virtualization, and network access (`#[ignore]`).
-
-| Test | Flow |
-|------|------|
-| `test_alpine_full_lifecycle` | pull → run → ps → inspect → exec → logs → stop → rm |
-| `test_exec_commands` | run → exec (cat, ls, env, write+read file) → cleanup |
-| `test_env_and_labels` | run with `-e`/`-l` → verify env vars inside guest → cleanup |
-| `test_nginx_image_pull_and_run` | pull nginx → run with port mapping → check HTTP → cleanup |
-| `test_tee_seal_unseal_lifecycle` | run `--tee-simulate` → attest → seal → unseal → verify wrong context fails |
-| `test_tee_secret_injection` | run `--tee-simulate` → inject 2 secrets → verify `/run/secrets/*` |
-| `test_tee_seal_policies` | seal/unseal roundtrip for each policy |
-
-```bash
-cd crates/box/src
-cargo build -p a3s-box-cli
-
-# macOS: set library paths
-export DYLD_LIBRARY_PATH="$(ls -td target/debug/build/libkrun-sys-*/out/libkrun/lib | head -1):$(ls -td target/debug/build/libkrun-sys-*/out/libkrunfw/lib | head -1)"
-
-cargo test -p a3s-box-cli --test nginx_integration -- --ignored --nocapture
-cargo test -p a3s-box-cli --test tee_integration -- --ignored --nocapture --test-threads=1
-```
-
-## Roadmap
-
-### ✅ v0.5.x — Complete
-
-- [x] MicroVM runtime via libkrun (HVF/KVM), sub-200ms cold start
-- [x] Docker-compatible CLI — 52 commands
-- [x] OCI image pull/push/build/cache with LRU eviction
-- [x] Dockerfile build — all 17 instructions, multi-stage, multi-platform
-- [x] `ADD <url>` HTTP/HTTPS download in Dockerfile
-- [x] `ONBUILD` trigger inheritance from base images
-- [x] Manifest digest exposed on every pulled image (`OciImage::manifest_digest()`)
-- [x] Cosign image signing — key-based and keyless (OIDC + Rekor)
-- [x] AMD SEV-SNP attestation, RA-TLS, secret injection, sealed storage
-- [x] Re-attestation with configurable interval and failure threshold
-- [x] Rollback protection via monotonic counter in sealed data
-- [x] KBS (Key Broker Service) client with RATS challenge-response
-- [x] Warm pool — pre-booted VM pool with idle TTL and LRU eviction
-- [x] Compose orchestration — health-aware boot ordering, shared networks
-- [x] Snapshots — create/restore/ls/rm/inspect
-- [x] Syslog log driver (UDP/TCP, RFC 3164) + gzip-compressed JSON rotation
-- [x] Audit log — persistent JSON-lines trail, queryable via `a3s-box audit`
-- [x] 19 Prometheus metrics + OpenTelemetry tracing spans
-- [x] Kubernetes CRI v1 — RuntimeService, ImageService, streaming exec/attach/port-forward
-- [x] Helm chart — DaemonSet, RuntimeClass, RBAC
-- [x] Embedded SDK — Rust, Python, TypeScript
-
-### ✅ v0.6.x — In Progress
-
-- [x] Persistent CRI state store — survive CRI server restarts without orphaning VMs (JSON file, atomic writes, crash-recovery on startup)
-- [x] Warm pool CLI/CRI integration — `a3s-box pool start/stop/status`, CRI acquires from pool on RunPodSandbox
-- [x] SafeClaw + Box sidecar integration — `--sidecar IMAGE` flag, `SidecarConfig` in BoxConfig, guest-init launches sidecar before main container
-- [ ] Intel TDX runtime support (hardware-gated, config variant already exists)
-- [ ] `--gpus` / `--device` passthrough via VFIO (libkrun upstream dependency)
-- [ ] `.tar.bz2` / `.tar.xz` auto-extraction in `ADD` (bzip2/xz deps)
-- [ ] OCI image signing on `push` (currently verify-only on pull)
-- [ ] Live resource update — hot-resize CPU/memory without VM restart
-- [ ] Multi-node compose — cross-host service discovery
-
-### 🎯 v0.8.0 — Windows WHPX Backend (Released 2026-03-06)
-
-- [x] **Windows Hypervisor Platform (WHPX) backend** — Full Windows x86_64 support
-- [x] **virtiofs on Windows** — Passthrough filesystem with full read/write/symlink/fsync
-- [x] **virtio-net TCP backend** — Network device with checksum offload and TSO
-- [x] **virtio-blk Windows** — File-backed block device
-- [x] **TSI on Windows** — Transparent Socket Impersonation for TCP/UDP/Named Pipes
-- [x] **Windows CI/CD** — GitHub Actions build and release pipeline
-- [x] **winget publishing** — Windows Package Manager support
-- [x] **a3s-libkrun-sys 0.1.2** — FFI bindings with Windows support on crates.io
-
-**Platform Support Matrix:**
-
-| Platform | Backend | Status | Package Manager |
-|----------|---------|--------|-----------------|
-| Linux x86_64 | KVM | ✅ Production | apt, yum, brew |
-| Linux ARM64 | KVM | ✅ Production | apt, yum, brew |
-| macOS ARM64 | HVF | ✅ Production | brew |
-| **Windows x86_64** | **WHPX** | ✅ **Production** | **winget** |
-
-**Known Limitations (Windows):**
-- Single vCPU (multi-vCPU planned)
-- No virtio-gpu support
-- Requires Linux kernel (ELF format)
-
-### 🔮 v0.9.x — Planned
-
-- [ ] Windows multi-vCPU support
-- [ ] libkrunfw-windows — Bundled kernel for Windows
-- [ ] Windows ARM64 support (pending WHPX ARM64 API)
-- [ ] virtio-snd WASAPI backend for Windows
-
-## A3S Ecosystem
-
-A3S Box is the infrastructure layer. It provides VM isolation for any workload.
-
-```
-┌────────────────────────────────────────────────────────────┐
-│                     A3S Ecosystem                          │
-│                                                            │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │   a3s-gateway (Ingress Controller, optional)         │  │
-│  └────────────────────┬─────────────────────────────────┘  │
-│                       │                                    │
-│  ┌────────────────────▼─────────────────────────────────┐  │
-│  │              a3s-box (this project)                   │  │
-│  │      MicroVM Runtime — CLI & K8s RuntimeClass         │  │
-│  │                                                       │  │
-│  │  ┌─────────────────────────────────────────────────┐  │  │
-│  │  │   Guest workload (any OCI image)                │  │  │
-│  │  └─────────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────┘
-```
-
-| Project | Layer | Relationship to Box |
-|---------|-------|---------------------|
-| **box** (this) | Infrastructure | MicroVM runtime — standalone CLI or K8s RuntimeClass |
-| [gateway](https://github.com/a3s-lab/gateway) | Ingress | Routes traffic to Pods running in a3s-box VMs |
-| [code](https://github.com/a3s-lab/code) | Agent | Can run inside a3s-box VM as a guest process |
-| [safeclaw](https://github.com/a3s-lab/safeclaw) | Security Proxy | Can run inside a3s-box VM alongside a3s-code |
-
-## Kubernetes Deployment
-
-### Helm
-
-```bash
-# Install
 helm install a3s-box deploy/helm/a3s-box/ -n a3s-box-system --create-namespace
-
-# Custom values
-helm install a3s-box deploy/helm/a3s-box/ -n a3s-box-system --create-namespace \
-  --set image.tag=v0.5.3 \
-  --set config.logLevel=debug \
-  --set config.imageCacheSize=21474836480 \
-  --set resources.limits.memory=1Gi
-
-# Uninstall
-helm uninstall a3s-box -n a3s-box-system
 ```
-
-Key values:
-
-| Value | Description | Default |
-|-------|-------------|---------|
-| `image.repository` | CRI image | `ghcr.io/a3s-lab/a3s-box-cri` |
-| `image.tag` | Image tag | `latest` |
-| `nodeSelector` | Node selection | `a3s-box.io/runtime: "true"` |
-| `config.imageCacheSize` | Image cache bytes | `10737418240` (10 GB) |
-| `config.logLevel` | Log level | `info` |
-| `overhead.memory` | Per-pod VM overhead | `30Mi` |
-| `overhead.cpu` | Per-pod VM overhead | `50m` |
-| `resources.limits.memory` | CRI pod memory limit | `512Mi` |
 
 ### Run a Pod
 
@@ -570,62 +443,30 @@ spec:
 
 ## Development
 
-### Configuration
+```bash
+# Build
+just build              # All crates
+just release            # Release build
+
+# Test
+just test               # Unit tests (no VM required)
+A3S_DEPS_STUB=1 cargo test --workspace --lib
+
+# Quality
+just fmt                # Format
+just lint               # Clippy
+```
+
+### Environment
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `A3S_DEPS_STUB` | Stub mode (skip libkrun) | — |
-| `A3S_IMAGE_CACHE_SIZE` | Image cache size (`500m`, `20g`, `1t`) | `10g` |
-| `A3S_TEE_SIMULATE` | TEE simulation mode | — |
+| `A3S_HOME` | Data directory | `~/.a3s` |
+| `A3S_DEPS_STUB` | Skip libkrun for CI | — |
+| `A3S_IMAGE_CACHE_SIZE` | Cache size | `10g` |
+| `A3S_TEE_SIMULATE` | TEE simulation | — |
 | `RUST_LOG` | Log level | `info` |
-
-### Commands
-
-```bash
-just build          # Build all
-just release        # Release build
-just test           # All unit tests
-just fmt            # Format
-just lint           # Clippy
-just ci             # Full CI checks
-```
-
-### Project Structure
-
-```
-box/
-├── src/
-│   ├── cli/            # Docker-like CLI (a3s-box binary, 52 commands)
-│   ├── core/           # Config, error types, events
-│   ├── runtime/        # VM lifecycle, OCI, health checking, attestation
-│   ├── shim/           # VM subprocess shim (libkrun bridge)
-│   ├── cri/            # CRI runtime for Kubernetes
-│   └── guest/init/     # Guest PID 1, exec/PTY/attestation servers
-├── deploy/
-│   ├── helm/           # Helm chart
-│   ├── examples/       # Example Pod specs
-│   └── scripts/        # CRI smoke test
-└── CLAUDE.md           # Development guidelines
-```
-
-### Troubleshooting
-
-`invalid linker name '-fuse-ld=lld'` → `brew install lld`
-
-`Vendored sources not found` → `git submodule update --init --recursive`
-
-Testing without VM → `A3S_DEPS_STUB=1 cargo check -p a3s-box-runtime`
-
-## Community
-
-Join us on [Discord](https://discord.gg/XVg6Hu6H) for questions, discussions, and updates.
 
 ## License
 
 MIT
-
----
-
-<p align="center">
-  Built by <a href="https://github.com/a3s-lab">A3S Lab</a>
-</p>
