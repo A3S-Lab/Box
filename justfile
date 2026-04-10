@@ -553,7 +553,7 @@ cov:
     echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
     echo "┃                    🧪 Running Tests with Coverage                     ┃"
     echo "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛"
-    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim \
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri  -p a3s-box-guest-init -p a3s-box-shim \
         --lcov --output-path "$COV_FILE" 2>&1 | grep -E "^test result"
     echo ""
     echo "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓"
@@ -568,15 +568,15 @@ cov-module MOD:
 
 # Coverage with HTML report (opens in browser)
 cov-html:
-    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim --html --open
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri  -p a3s-box-guest-init -p a3s-box-shim --html --open
 
 # Coverage with detailed file-by-file table
 cov-table:
-    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri  -p a3s-box-guest-init -p a3s-box-shim
 
 # Coverage for CI (generates lcov.info)
 cov-ci:
-    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim --lcov --output-path lcov.info
+    cd src && cargo llvm-cov --lib -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri  -p a3s-box-guest-init -p a3s-box-shim --lcov --output-path lcov.info
 
 # ============================================================================
 # Code Quality
@@ -747,7 +747,7 @@ publish:
 
     # Test
     print_step "Running tests..."
-    if (cd src && cargo test -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri -p a3s-box-sdk -p a3s-box-guest-init -p a3s-box-shim --lib); then
+    if (cd src && cargo test -p a3s-box-core -p a3s-box-runtime -p a3s-box-cli -p a3s-box-cri  -p a3s-box-guest-init -p a3s-box-shim --lib); then
         print_success "Tests OK"
     else
         print_error "Tests failed."

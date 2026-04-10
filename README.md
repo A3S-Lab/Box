@@ -386,7 +386,6 @@ All TEE code is implemented and unit-tested. Hardware validation on real AMD SEV
 | `a3s-box-runtime` | 711 | OCI parsing, rootfs, health checking, attestation, RA-TLS, sealed storage, Prometheus metrics, tracing spans, image signing (honest verification), compose orchestrator, audit log, snapshot store, KBS client, re-attestation, rollback protection, syslog driver, gzip log compression, manifest digest, ONBUILD trigger parsing |
 | `a3s-box-cri` | 33 | CRI sandbox/container lifecycle, config mapping (SEV-SNP + TDX) |
 | `a3s-box-guest-init` | 25 | Exec server, attest server frame I/O, secret validation, namespace security (user + cgroup), seccomp arch validation |
-| `a3s-box-sdk` | 24 | SDK init, config building, exec result conversion, port forwards, workspaces, serde roundtrip, pause/resume |
 | `a3s-box-shim` | 14 | Shim config, cgroup, cpuset, ulimit, TEE config |
 
 All unit tests run without VM, network, or hardware dependencies (`A3S_DEPS_STUB=1` for CI).
@@ -601,11 +600,7 @@ box/
 │   ├── runtime/        # VM lifecycle, OCI, health checking, attestation
 │   ├── shim/           # VM subprocess shim (libkrun bridge)
 │   ├── cri/            # CRI runtime for Kubernetes
-│   ├── sdk/            # Embedded sandbox SDK
 │   └── guest/init/     # Guest PID 1, exec/PTY/attestation servers
-├── sdk/
-│   ├── python/         # Python SDK (PyO3)
-│   └── node/           # TypeScript SDK (napi-rs)
 ├── deploy/
 │   ├── helm/           # Helm chart
 │   ├── examples/       # Example Pod specs
