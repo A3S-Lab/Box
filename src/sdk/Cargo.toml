@@ -16,8 +16,8 @@ default = []
 embed-shim = []
 
 [dependencies]
-a3s-box-core = { version = "0.8", path = "../core" }
-a3s-box-runtime = { version = "0.8", path = "../runtime" }
+a3s-box-core = { version = "2.0.0", path = "../core" }
+a3s-box-runtime = { version = "2.0.0", path = "../runtime" }
 a3s-transport = { workspace = true }
 
 tokio = { workspace = true }
