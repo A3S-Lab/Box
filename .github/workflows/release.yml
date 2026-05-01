@@ -204,7 +204,7 @@ jobs:
           mkdir -p "$DIR/lib"
 
           # Copy launcher
-          cp src/win-launcher/target/x86_64-pc-windows-msvc/release/a3s-box-win.exe "$DIR/"
+          cp src/target/x86_64-pc-windows-msvc/release/a3s-box-win.exe "$DIR/"
 
           # Copy krun.dll from prebuilt
           if [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll" ]; then
