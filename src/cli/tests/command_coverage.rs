@@ -1280,7 +1280,7 @@ fn test_real_compose_smoke() {
     let compose_file = compose_dir.join("compose.yaml");
     std::fs::write(
         &compose_file,
-        &format!(
+        format!(
             r#"services:
   worker:
     image: {image}

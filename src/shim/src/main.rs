@@ -422,9 +422,8 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     tracing::info!("Adding filesystem mounts via virtiofs:");
     for mount in &spec.fs_mounts {
         let host_path = &mount.host_path;
-        let mount_path: std::path::PathBuf;
 
-        if host_path.is_file() {
+        let mount_path: std::path::PathBuf = if host_path.is_file() {
             // Create a temporary directory to hold the file
             let temp_dir = std::env::temp_dir().join(format!("a3s-fs-mount-{}", spec.box_id));
             let file_name = host_path.file_name().unwrap();
@@ -445,10 +444,10 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
                 temp = %temp_dir.display(),
                 "File mount converted to directory mount"
             );
-            mount_path = temp_dir;
+            temp_dir
         } else {
-            mount_path = host_path.clone();
-        }
+            host_path.clone()
+        };
 
         let path_str = mount_path.to_str().ok_or_else(|| BoxError::BoxBootError {
             message: format!("Invalid path: {}", mount_path.display()),

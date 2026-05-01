@@ -106,7 +106,7 @@ impl ExecutionAdapter for HttpExecutionAdapter {
     ) -> crate::Result<serde_json::Value> {
         execute_http(handler, input, timeout)
             .await
-            .map_err(|e| crate::SdkError::ExecutionFailed(e))
+            .map_err(crate::SdkError::ExecutionFailed)
     }
 }
 

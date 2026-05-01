@@ -414,7 +414,7 @@ impl VmManager {
         // Detect whether a mode suffix is present by checking if the LAST
         // colon-separated segment is "ro" or "rw".
         let last = parts.last();
-        let has_mode = last.map_or(false, |s| s == &"ro" || s == &"rw");
+        let has_mode = last.is_some_and(|s| s == &"ro" || s == &"rw");
 
         // If the last segment is NOT a valid mode (ro/rw), check if it looks like
         // a path component. If it does NOT, it's an invalid mode suffix (e.g. :invalid).
@@ -425,10 +425,10 @@ impl VmManager {
                 || s.starts_with("./")
                 || s.starts_with("../")
                 || (s.len() == 2
-                    && s.chars().next().map_or(false, |c| c.is_alphabetic())
+                    && s.chars().next().is_some_and(|c| c.is_alphabetic())
                     && s.ends_with(':'))
         };
-        if parts.len() >= 2 && !has_mode && !last.map_or(false, looks_like_path) {
+        if parts.len() >= 2 && !has_mode && !last.is_some_and(looks_like_path) {
             return Err(BoxError::ConfigError(format!(
                 "Invalid volume mode '{}' (expected 'ro' or 'rw'): {}",
                 last.unwrap(),

@@ -7,20 +7,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Execution launch mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ExecutionLaunchMode {
     /// Run in actual MicroVMs
     MicroVM,
     /// Run using host adapters (for testing/development)
+    #[default]
     HostAdapterCompat,
     /// Hybrid mode - MicroVM when available, host otherwise
     Hybrid,
-}
-
-impl Default for ExecutionLaunchMode {
-    fn default() -> Self {
-        ExecutionLaunchMode::HostAdapterCompat
-    }
 }
 
 /// Runtime class - the type of runtime to use
@@ -181,11 +176,10 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_class_default() {
-        // RuntimeClass doesn't implement Default, but we can test Clone and Eq
+    fn test_runtime_class_copy_and_eq() {
         let original = RuntimeClass::A3sBox;
-        let cloned = original.clone();
-        assert_eq!(cloned, original);
+        let copied = original;
+        assert_eq!(copied, original);
     }
 
     // ── WorkloadKind tests ────────────────────────────────────────────────
