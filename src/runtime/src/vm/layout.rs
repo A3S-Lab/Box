@@ -65,7 +65,8 @@ impl VmManager {
         let mut puller = crate::oci::ImagePuller::new(
             std::sync::Arc::new(store),
             crate::oci::RegistryAuth::from_credential_store(&image_reference.registry),
-        );
+        )
+        .with_default_registry(&default_registry);
         if let Some(ref m) = self.prom {
             puller = puller.set_metrics(m.clone());
         }

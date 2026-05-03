@@ -21,6 +21,7 @@ pub struct ImagePuller {
     store: Arc<ImageStore>,
     puller: RegistryPuller,
     metrics: Option<crate::prom::RuntimeMetrics>,
+    default_registry: String,
 }
 
 impl ImagePuller {
@@ -30,7 +31,19 @@ impl ImagePuller {
             store,
             puller: RegistryPuller::with_auth(auth),
             metrics: None,
+            default_registry: configured_default_registry(),
         }
+    }
+
+    /// Set the default registry for short image references.
+    pub fn with_default_registry(mut self, registry: impl Into<String>) -> Self {
+        let registry = registry.into();
+        self.default_registry = if a3s_box_core::is_docker_hub_registry(&registry) {
+            a3s_box_core::DOCKER_HUB_IMAGE_REGISTRY.to_string()
+        } else {
+            a3s_box_core::normalize_registry_server(&registry)
+        };
+        self
     }
 
     /// Attach Prometheus metrics to this puller.
@@ -55,10 +68,11 @@ impl ImagePuller {
     ///
     /// Returns the loaded OCI image from the store.
     pub async fn pull(&self, reference: &str) -> Result<OciImage> {
-        let parsed = ImageReference::parse(reference)?;
+        let parsed = self.parse_reference(reference)?;
+        let full_ref = parsed.full_reference();
 
         // Check cache first
-        if let Some(stored) = self.store.find(reference).await {
+        if let Some(stored) = self.store.find(&full_ref).await {
             tracing::info!(
                 reference = %reference,
                 digest = %stored.digest,
@@ -73,7 +87,7 @@ impl ImagePuller {
 
     /// Pull an image, bypassing the local cache.
     pub async fn force_pull(&self, reference: &str) -> Result<OciImage> {
-        let parsed = ImageReference::parse(reference)?;
+        let parsed = self.parse_reference(reference)?;
 
         // Remove from cache if present
         let full_ref = parsed.full_reference();
@@ -86,7 +100,7 @@ impl ImagePuller {
 
     /// Check if an image is already cached.
     pub async fn is_cached(&self, reference: &str) -> bool {
-        let parsed = match ImageReference::parse(reference) {
+        let parsed = match self.parse_reference(reference) {
             Ok(p) => p,
             Err(_) => return false,
         };
@@ -95,7 +109,7 @@ impl ImagePuller {
 
     /// Remove a cached image by reference.
     pub async fn remove_cached(&self, reference: &str) -> Result<bool> {
-        let parsed = ImageReference::parse(reference)?;
+        let parsed = self.parse_reference(reference)?;
         let full_ref = parsed.full_reference();
         if self.store.find(&full_ref).await.is_some() {
             self.store.remove_resolved(&full_ref).await?;
@@ -114,6 +128,10 @@ impl ImagePuller {
             .into_iter()
             .map(|img| img.reference)
             .collect())
+    }
+
+    fn parse_reference(&self, reference: &str) -> Result<ImageReference> {
+        ImageReference::parse_with_default_registry(reference, &self.default_registry)
     }
 
     /// Pull from registry and store locally.
@@ -184,7 +202,7 @@ impl ImagePuller {
 impl a3s_box_core::traits::ImageRegistry for ImagePuller {
     async fn pull(&self, reference: &str) -> Result<a3s_box_core::traits::PulledImage> {
         let image = self.pull(reference).await?;
-        let parsed = ImageReference::parse(reference)?;
+        let parsed = self.parse_reference(reference)?;
         Ok(a3s_box_core::traits::PulledImage {
             path: image.root_dir().to_path_buf(),
             digest: image.manifest_digest().to_string(),
@@ -194,7 +212,7 @@ impl a3s_box_core::traits::ImageRegistry for ImagePuller {
 
     async fn force_pull(&self, reference: &str) -> Result<a3s_box_core::traits::PulledImage> {
         let image = self.force_pull(reference).await?;
-        let parsed = ImageReference::parse(reference)?;
+        let parsed = self.parse_reference(reference)?;
         Ok(a3s_box_core::traits::PulledImage {
             path: image.root_dir().to_path_buf(),
             digest: image.manifest_digest().to_string(),
@@ -213,6 +231,12 @@ impl a3s_box_core::traits::ImageRegistry for ImagePuller {
     async fn list_cached(&self) -> Result<Vec<String>> {
         self.list_cached().await
     }
+}
+
+fn configured_default_registry() -> String {
+    a3s_box_core::A3sConfig::load_default()
+        .map(|config| config.registry.default_image_registry())
+        .unwrap_or_else(|_| a3s_box_core::DOCKER_HUB_IMAGE_REGISTRY.to_string())
 }
 
 #[cfg(test)]
@@ -255,5 +279,30 @@ mod tests {
         assert!(puller.metrics.is_some());
         assert_eq!(metrics.image_pull_total.get(), 0);
         assert_eq!(metrics.image_pull_duration.get_sample_count(), 0);
+    }
+
+    #[test]
+    fn test_with_default_registry_parses_short_references() {
+        let tmp = TempDir::new().unwrap();
+        let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
+        let puller = ImagePuller::new(store, RegistryAuth::anonymous())
+            .with_default_registry("registry.example.com");
+
+        let parsed = puller.parse_reference("nginx:1.25").unwrap();
+        assert_eq!(parsed.registry, "registry.example.com");
+        assert_eq!(parsed.repository, "nginx");
+        assert_eq!(parsed.tag.as_deref(), Some("1.25"));
+    }
+
+    #[test]
+    fn test_with_docker_hub_default_keeps_library_namespace() {
+        let tmp = TempDir::new().unwrap();
+        let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
+        let puller =
+            ImagePuller::new(store, RegistryAuth::anonymous()).with_default_registry("docker.io");
+
+        let parsed = puller.parse_reference("nginx").unwrap();
+        assert_eq!(parsed.registry, "docker.io");
+        assert_eq!(parsed.repository, "library/nginx");
     }
 }
