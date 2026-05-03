@@ -32,12 +32,19 @@ pub struct BoxRuntimeService {
     store: Arc<PersistentCriStore>,
     /// Local OCI image store used for resolving image config defaults.
     image_store: Arc<ImageStore>,
+    /// Runtime network configuration last received from kubelet.
+    runtime_network: Arc<RwLock<RuntimeNetworkState>>,
     /// Maps sandbox_id → VmManager for running VMs.
     vm_managers: Arc<RwLock<HashMap<String, VmManager>>>,
     /// Handle for registering CRI streaming sessions.
     streaming: StreamingHandle,
     /// Optional warm pool for instant VM acquisition.
     warm_pool: Option<Arc<RwLock<WarmPool>>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RuntimeNetworkState {
+    pod_cidr: String,
 }
 
 impl BoxRuntimeService {
@@ -76,6 +83,7 @@ impl BoxRuntimeService {
         Self {
             store,
             image_store,
+            runtime_network: Arc::new(RwLock::new(RuntimeNetworkState::default())),
             vm_managers: Arc::new(RwLock::new(HashMap::new())),
             streaming,
             warm_pool: None,
@@ -173,6 +181,66 @@ impl BoxRuntimeService {
 
         let image = OciImage::from_path(&stored.path).map_err(box_error_to_status)?;
         Ok(Some(image.config().clone()))
+    }
+
+    async fn runtime_status_info(&self) -> HashMap<String, String> {
+        let sandboxes = self.store.sandboxes.list(None).await;
+        let containers = self.store.containers.list(None, None).await;
+        let images = self.image_store.list().await;
+        let image_bytes = self.image_store.total_size().await;
+        let running_vms = self.vm_managers.read().await.len();
+        let network = self.runtime_network.read().await.clone();
+
+        let sandbox_ready = sandboxes
+            .iter()
+            .filter(|sandbox| sandbox.state == SandboxState::Ready)
+            .count();
+        let container_created = containers
+            .iter()
+            .filter(|container| container.state == ContainerState::Created)
+            .count();
+        let container_running = containers
+            .iter()
+            .filter(|container| container.state == ContainerState::Running)
+            .count();
+        let container_exited = containers
+            .iter()
+            .filter(|container| container.state == ContainerState::Exited)
+            .count();
+
+        HashMap::from([
+            ("a3s.runtime.name".to_string(), "a3s-box".to_string()),
+            (
+                "a3s.runtime.version".to_string(),
+                a3s_box_runtime::VERSION.to_string(),
+            ),
+            ("a3s.sandbox.total".to_string(), sandboxes.len().to_string()),
+            ("a3s.sandbox.ready".to_string(), sandbox_ready.to_string()),
+            (
+                "a3s.container.total".to_string(),
+                containers.len().to_string(),
+            ),
+            (
+                "a3s.container.created".to_string(),
+                container_created.to_string(),
+            ),
+            (
+                "a3s.container.running".to_string(),
+                container_running.to_string(),
+            ),
+            (
+                "a3s.container.exited".to_string(),
+                container_exited.to_string(),
+            ),
+            ("a3s.vm.running".to_string(), running_vms.to_string()),
+            ("a3s.image.count".to_string(), images.len().to_string()),
+            ("a3s.image.bytes".to_string(), image_bytes.to_string()),
+            (
+                "a3s.image.store_dir".to_string(),
+                self.image_store.store_dir().display().to_string(),
+            ),
+            ("a3s.network.pod_cidr".to_string(), network.pod_cidr),
+        ])
     }
 
     /// Release a VM back to the warm pool, or destroy it if no pool.
@@ -848,8 +916,9 @@ impl RuntimeService for BoxRuntimeService {
 
     async fn status(
         &self,
-        _request: Request<StatusRequest>,
+        request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
+        let req = request.into_inner();
         let conditions = vec![
             RuntimeCondition {
                 r#type: "RuntimeReady".to_string(),
@@ -864,18 +933,30 @@ impl RuntimeService for BoxRuntimeService {
                 message: String::new(),
             },
         ];
+        let info = if req.verbose {
+            self.runtime_status_info().await
+        } else {
+            Default::default()
+        };
 
         Ok(Response::new(StatusResponse {
             status: Some(RuntimeStatus { conditions }),
-            info: Default::default(),
+            info,
         }))
     }
 
     async fn update_runtime_config(
         &self,
-        _request: Request<UpdateRuntimeConfigRequest>,
+        request: Request<UpdateRuntimeConfigRequest>,
     ) -> Result<Response<UpdateRuntimeConfigResponse>, Status> {
-        // Accept but ignore runtime config updates for now
+        let req = request.into_inner();
+        let pod_cidr = req
+            .runtime_config
+            .and_then(|config| config.network_config)
+            .map(|network| network.pod_cidr)
+            .unwrap_or_default();
+
+        self.runtime_network.write().await.pod_cidr = pod_cidr;
         Ok(Response::new(UpdateRuntimeConfigResponse {}))
     }
 
@@ -1253,6 +1334,7 @@ mod tests {
         BoxRuntimeService {
             store: Arc::new(PersistentCriStore::new(Arc::new(NoopStateStore))),
             image_store,
+            runtime_network: Arc::new(RwLock::new(RuntimeNetworkState::default())),
             vm_managers: Arc::new(RwLock::new(HashMap::new())),
             streaming: handle,
             warm_pool: None,
@@ -1445,6 +1527,42 @@ mod tests {
             .conditions
             .iter()
             .any(|c| c.r#type == "NetworkReady" && c.status));
+        assert!(resp.info.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_status_verbose_includes_runtime_summary() {
+        let svc = make_test_service();
+        svc.store.add_sandbox(test_sandbox("sb-1")).await;
+        svc.store.add_container(test_container("c-1", "sb-1")).await;
+
+        let resp = svc
+            .status(Request::new(StatusRequest { verbose: true }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            resp.info.get("a3s.runtime.name").map(String::as_str),
+            Some("a3s-box")
+        );
+        assert_eq!(
+            resp.info.get("a3s.sandbox.total").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            resp.info.get("a3s.sandbox.ready").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            resp.info.get("a3s.container.total").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            resp.info.get("a3s.container.created").map(String::as_str),
+            Some("1")
+        );
+        assert!(resp.info.contains_key("a3s.image.store_dir"));
     }
 
     // ── UpdateRuntimeConfig ──────────────────────────────────────────
@@ -1454,10 +1572,24 @@ mod tests {
         let svc = make_test_service();
         let result = svc
             .update_runtime_config(Request::new(UpdateRuntimeConfigRequest {
-                runtime_config: None,
+                runtime_config: Some(RuntimeConfig {
+                    network_config: Some(NetworkConfig {
+                        pod_cidr: "10.42.0.0/24".to_string(),
+                    }),
+                }),
             }))
             .await;
         assert!(result.is_ok());
+
+        let status = svc
+            .status(Request::new(StatusRequest { verbose: true }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            status.info.get("a3s.network.pod_cidr").map(String::as_str),
+            Some("10.42.0.0/24")
+        );
     }
 
     // ── Pod Sandbox Status / List ────────────────────────────────────
@@ -2356,6 +2488,7 @@ mod tests {
                     ImageStore::new(&tempfile::tempdir().unwrap().path().join("images"), 1024)
                         .unwrap(),
                 ),
+                runtime_network: Arc::new(RwLock::new(RuntimeNetworkState::default())),
                 vm_managers: Arc::new(RwLock::new(HashMap::new())),
                 streaming: handle,
                 warm_pool: None,
