@@ -5,6 +5,7 @@
 //! - Container → Session within Box
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -506,6 +507,53 @@ fn pod_sandbox_stats_from_record(
             containers: container_stats,
         }),
     }
+}
+
+fn write_cri_log_output(
+    log_path: &str,
+    output: &a3s_box_core::exec::ExecOutput,
+) -> std::io::Result<()> {
+    if log_path.is_empty() {
+        return Ok(());
+    }
+
+    let log_path = Path::new(log_path);
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+
+    write_cri_log_stream(&mut file, "stdout", &output.stdout)?;
+    write_cri_log_stream(&mut file, "stderr", &output.stderr)?;
+    Ok(())
+}
+
+fn write_cri_log_stream(
+    file: &mut std::fs::File,
+    stream: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    let text = String::from_utf8_lossy(bytes);
+    for mut line in text.split_inclusive('\n') {
+        if line.ends_with('\n') {
+            line = &line[..line.len() - 1];
+            if line.ends_with('\r') {
+                line = &line[..line.len() - 1];
+            }
+        }
+        let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+        writeln!(file, "{timestamp} {stream} F {line}")?;
+    }
+
+    Ok(())
 }
 
 fn container_mount_from_cri(mount: &Mount) -> ContainerMount {
@@ -1063,6 +1111,9 @@ impl RuntimeService for BoxRuntimeService {
         self.store
             .mark_container_exited(container_id, finished_at, output.exit_code)
             .await;
+
+        write_cri_log_output(&container.log_path, &output)
+            .map_err(|e| Status::internal(format!("Failed to write CRI container log: {e}")))?;
 
         if output.exit_code != 0 {
             return Err(Status::unknown(format!(
@@ -3160,6 +3211,37 @@ mod tests {
         // File should be truncated
         let content = std::fs::read_to_string(&log_path).unwrap();
         assert!(content.is_empty());
+    }
+
+    #[test]
+    fn test_write_cri_log_output_writes_stdout_and_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("container.log");
+        let output = a3s_box_core::exec::ExecOutput {
+            stdout: b"hello\nworld".to_vec(),
+            stderr: b"oops\n".to_vec(),
+            exit_code: 0,
+        };
+
+        write_cri_log_output(log_path.to_str().unwrap(), &output).unwrap();
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines = content.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains(" stdout F hello"));
+        assert!(lines[1].contains(" stdout F world"));
+        assert!(lines[2].contains(" stderr F oops"));
+    }
+
+    #[test]
+    fn test_write_cri_log_output_ignores_empty_path() {
+        let output = a3s_box_core::exec::ExecOutput {
+            stdout: b"hello".to_vec(),
+            stderr: vec![],
+            exit_code: 0,
+        };
+
+        write_cri_log_output("", &output).unwrap();
     }
 
     // ── Stop/Remove Pod Sandbox (store-only, no VM) ──────────────────
