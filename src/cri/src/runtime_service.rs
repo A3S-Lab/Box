@@ -19,7 +19,7 @@ use a3s_box_runtime::pool::WarmPool;
 use a3s_box_runtime::vm::VmManager;
 
 use crate::config_mapper::pod_sandbox_config_to_box_config_with_defaults;
-use crate::container::{Container, ContainerState};
+use crate::container::{Container, ContainerMount, ContainerState};
 use crate::cri_api::runtime_service_server::RuntimeService;
 use crate::cri_api::*;
 use crate::error::box_error_to_status;
@@ -505,6 +505,26 @@ fn pod_sandbox_stats_from_record(
     }
 }
 
+fn container_mount_from_cri(mount: &Mount) -> ContainerMount {
+    ContainerMount {
+        container_path: mount.container_path.clone(),
+        host_path: mount.host_path.clone(),
+        readonly: mount.readonly,
+        selinux_relabel: mount.selinux_relabel,
+        propagation: mount.propagation,
+    }
+}
+
+fn container_mount_to_cri(mount: &ContainerMount) -> Mount {
+    Mount {
+        container_path: mount.container_path.clone(),
+        host_path: mount.host_path.clone(),
+        readonly: mount.readonly,
+        selinux_relabel: mount.selinux_relabel,
+        propagation: mount.propagation,
+    }
+}
+
 #[tonic::async_trait]
 impl RuntimeService for BoxRuntimeService {
     // ── Version ──────────────────────────────────────────────────────
@@ -883,6 +903,7 @@ impl RuntimeService for BoxRuntimeService {
             labels: config.labels.clone(),
             annotations: config.annotations.clone(),
             log_path: config.log_path,
+            mounts: config.mounts.iter().map(container_mount_from_cri).collect(),
             command,
             args,
             envs,
@@ -1076,7 +1097,11 @@ impl RuntimeService for BoxRuntimeService {
             message: String::new(),
             labels: container.labels.clone(),
             annotations: container.annotations.clone(),
-            mounts: vec![],
+            mounts: container
+                .mounts
+                .iter()
+                .map(container_mount_to_cri)
+                .collect(),
             log_path: container.log_path.clone(),
         };
         let info = if req.verbose {
@@ -1092,6 +1117,10 @@ impl RuntimeService for BoxRuntimeService {
                 (
                     "a3s.env".to_string(),
                     serde_json::to_string(&container.exec_env()).unwrap_or_default(),
+                ),
+                (
+                    "a3s.mounts".to_string(),
+                    serde_json::to_string(&container.mounts).unwrap_or_default(),
                 ),
                 (
                     "a3s.working_dir".to_string(),
@@ -1838,6 +1867,7 @@ mod tests {
             labels: HashMap::from([("app".to_string(), "test".to_string())]),
             annotations: HashMap::new(),
             log_path: String::new(),
+            mounts: vec![],
             command: vec!["echo".to_string()],
             args: vec!["hello".to_string()],
             envs: vec![],
@@ -2283,6 +2313,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_create_container_preserves_mounts() {
+        let svc = make_test_service();
+        svc.store.sandboxes.add(test_sandbox("sb-1")).await;
+
+        let resp = svc
+            .create_container(Request::new(CreateContainerRequest {
+                pod_sandbox_id: "sb-1".to_string(),
+                config: Some(ContainerConfig {
+                    metadata: Some(ContainerMetadata {
+                        name: "my-container".to_string(),
+                        attempt: 0,
+                    }),
+                    image: Some(ImageSpec {
+                        image: "nginx:latest".to_string(),
+                        annotations: HashMap::new(),
+                    }),
+                    command: vec!["echo".to_string()],
+                    mounts: vec![Mount {
+                        container_path: "/etc/config".to_string(),
+                        host_path: "/var/lib/kubelet/pods/pod1/volumes/config".to_string(),
+                        readonly: true,
+                        selinux_relabel: false,
+                        propagation: 0,
+                    }],
+                    ..Default::default()
+                }),
+                sandbox_config: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let stored = svc.store.containers.get(&resp.container_id).await.unwrap();
+        assert_eq!(stored.mounts.len(), 1);
+        assert_eq!(stored.mounts[0].container_path, "/etc/config");
+        assert!(stored.mounts[0].readonly);
+    }
+
+    #[tokio::test]
     async fn test_create_container_resolves_image_config_defaults() {
         let store_tmp = tempfile::tempdir().unwrap();
         let image_store = Arc::new(ImageStore::new(store_tmp.path(), 100 * 1024 * 1024).unwrap());
@@ -2572,8 +2641,37 @@ mod tests {
         assert_eq!(resp.info.get("a3s.command").unwrap(), r#"["echo"]"#);
         assert_eq!(resp.info.get("a3s.args").unwrap(), r#"["hello"]"#);
         assert_eq!(resp.info.get("a3s.env").unwrap(), r#"["KEY=VALUE"]"#);
+        assert!(resp.info.contains_key("a3s.mounts"));
         assert_eq!(resp.info.get("a3s.working_dir").unwrap(), "/workspace");
         assert_eq!(resp.info.get("a3s.tty").unwrap(), "true");
+    }
+
+    #[tokio::test]
+    async fn test_container_status_reports_mounts() {
+        let svc = make_test_service();
+        let mut container = test_container("c-1", "sb-1");
+        container.mounts = vec![ContainerMount {
+            container_path: "/etc/config".to_string(),
+            host_path: "/var/lib/kubelet/pods/pod1/volumes/config".to_string(),
+            readonly: true,
+            selinux_relabel: false,
+            propagation: 0,
+        }];
+        svc.store.containers.add(container).await;
+
+        let resp = svc
+            .container_status(Request::new(ContainerStatusRequest {
+                container_id: "c-1".to_string(),
+                verbose: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mounts = resp.status.unwrap().mounts;
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].container_path, "/etc/config");
+        assert!(mounts[0].readonly);
     }
 
     #[tokio::test]

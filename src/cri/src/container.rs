@@ -19,6 +19,23 @@ pub enum ContainerState {
     Exited,
 }
 
+/// CRI mount captured from ContainerConfig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerMount {
+    /// Path inside the container/session.
+    pub container_path: String,
+    /// Host path backing the mount.
+    pub host_path: String,
+    /// Whether the mount should be read-only.
+    pub readonly: bool,
+    /// Whether SELinux relabel was requested.
+    #[serde(default)]
+    pub selinux_relabel: bool,
+    /// CRI mount propagation enum value.
+    #[serde(default)]
+    pub propagation: i32,
+}
+
 /// Represents a container (session) within a pod sandbox (Box).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Container {
@@ -46,6 +63,9 @@ pub struct Container {
     pub annotations: HashMap<String, String>,
     /// Log file path.
     pub log_path: String,
+    /// Mounts captured from CRI ContainerConfig.
+    #[serde(default)]
+    pub mounts: Vec<ContainerMount>,
     /// Entrypoint command captured from CRI ContainerConfig.
     #[serde(default)]
     pub command: Vec<String>,
@@ -213,6 +233,7 @@ mod tests {
             labels: HashMap::from([("app".to_string(), "test".to_string())]),
             annotations: HashMap::new(),
             log_path: format!("/var/log/pods/{}.log", id),
+            mounts: vec![],
             command: vec!["echo".to_string()],
             args: vec!["hello".to_string()],
             envs: vec![("KEY".to_string(), "VALUE".to_string())],
@@ -254,6 +275,7 @@ mod tests {
         let container: Container = serde_json::from_str(json).unwrap();
 
         assert!(container.command.is_empty());
+        assert!(container.mounts.is_empty());
         assert!(container.args.is_empty());
         assert!(container.envs.is_empty());
         assert_eq!(container.working_dir, None);
