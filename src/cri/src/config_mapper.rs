@@ -1,8 +1,9 @@
 //! Map Kubernetes CRI config to A3S Box config.
 //!
 //! Reads A3S-specific annotations from pod/container configs:
-//! - `a3s.box/image` → OCI image reference
+//! - `a3s.box/agent-image` → sandbox agent image reference
 //! - `a3s.box/vcpus`, `a3s.box/memory-mb` → ResourceConfig
+//! - `a3s.box/network` → A3S bridge network name
 //! - `a3s.box/tee` → TeeConfig
 
 use std::collections::HashMap;
@@ -24,7 +25,7 @@ const ANN_TEE_WORKLOAD_ID: &str = "a3s.box/tee-workload-id";
 
 /// Convert a CRI PodSandboxConfig to an A3S BoxConfig.
 pub fn pod_sandbox_config_to_box_config(config: &PodSandboxConfig) -> Result<BoxConfig> {
-    pod_sandbox_config_to_box_config_with_default(config, None)
+    pod_sandbox_config_to_box_config_with_defaults(config, None, None)
 }
 
 /// Convert a CRI PodSandboxConfig to an A3S BoxConfig with a runtime default
@@ -32,6 +33,16 @@ pub fn pod_sandbox_config_to_box_config(config: &PodSandboxConfig) -> Result<Box
 pub fn pod_sandbox_config_to_box_config_with_default(
     config: &PodSandboxConfig,
     default_agent_image: Option<&str>,
+) -> Result<BoxConfig> {
+    pod_sandbox_config_to_box_config_with_defaults(config, default_agent_image, None)
+}
+
+/// Convert a CRI PodSandboxConfig to an A3S BoxConfig with runtime defaults
+/// used when the pod omits A3S-specific annotations.
+pub fn pod_sandbox_config_to_box_config_with_defaults(
+    config: &PodSandboxConfig,
+    default_agent_image: Option<&str>,
+    default_network: Option<&str>,
 ) -> Result<BoxConfig> {
     let annotations = &config.annotations;
 
@@ -49,7 +60,7 @@ pub fn pod_sandbox_config_to_box_config_with_default(
         })?;
 
     let resources = parse_resources(annotations);
-    let network = parse_network(annotations);
+    let network = parse_network(annotations, default_network);
     let tee = parse_tee_config(annotations)?;
 
     Ok(BoxConfig {
@@ -86,12 +97,20 @@ fn parse_resources(annotations: &HashMap<String, String>) -> ResourceConfig {
     }
 }
 
-fn parse_network(annotations: &HashMap<String, String>) -> NetworkMode {
+fn parse_network(
+    annotations: &HashMap<String, String>,
+    default_network: Option<&str>,
+) -> NetworkMode {
     annotations
         .get(ANN_NETWORK)
         .map(String::as_str)
         .map(str::trim)
         .filter(|network| !network.is_empty())
+        .or_else(|| {
+            default_network
+                .map(str::trim)
+                .filter(|network| !network.is_empty())
+        })
         .map(|network| NetworkMode::Bridge {
             network: network.to_string(),
         })
@@ -214,6 +233,38 @@ mod tests {
         assert!(matches!(
             box_config.network,
             NetworkMode::Bridge { ref network } if network == "k8s-pods"
+        ));
+    }
+
+    #[test]
+    fn test_default_network_used_without_annotation() {
+        let annotations =
+            HashMap::from([(ANN_AGENT_IMAGE.to_string(), "alpine:latest".to_string())]);
+        let config = make_config(annotations);
+        let box_config =
+            pod_sandbox_config_to_box_config_with_defaults(&config, None, Some("k8s-pods"))
+                .unwrap();
+
+        assert!(matches!(
+            box_config.network,
+            NetworkMode::Bridge { ref network } if network == "k8s-pods"
+        ));
+    }
+
+    #[test]
+    fn test_network_annotation_overrides_default() {
+        let annotations = HashMap::from([
+            (ANN_AGENT_IMAGE.to_string(), "alpine:latest".to_string()),
+            (ANN_NETWORK.to_string(), "pod-network".to_string()),
+        ]);
+        let config = make_config(annotations);
+        let box_config =
+            pod_sandbox_config_to_box_config_with_defaults(&config, None, Some("runtime-network"))
+                .unwrap();
+
+        assert!(matches!(
+            box_config.network,
+            NetworkMode::Bridge { ref network } if network == "pod-network"
         ));
     }
 

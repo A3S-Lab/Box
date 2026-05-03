@@ -17,7 +17,7 @@ use a3s_box_runtime::oci::{ImageStore, OciImage, OciImageConfig, RegistryAuth};
 use a3s_box_runtime::pool::WarmPool;
 use a3s_box_runtime::vm::VmManager;
 
-use crate::config_mapper::pod_sandbox_config_to_box_config_with_default;
+use crate::config_mapper::pod_sandbox_config_to_box_config_with_defaults;
 use crate::container::{Container, ContainerState};
 use crate::cri_api::runtime_service_server::RuntimeService;
 use crate::cri_api::*;
@@ -38,6 +38,8 @@ pub struct BoxRuntimeService {
     runtime_network: Arc<RwLock<RuntimeNetworkState>>,
     /// Default sandbox/agent image used when pods omit the A3S annotation.
     default_sandbox_image: Option<String>,
+    /// Default A3S bridge network used when pods omit the A3S annotation.
+    default_sandbox_network: Option<String>,
     /// Maps sandbox_id → VmManager for running VMs.
     vm_managers: Arc<RwLock<HashMap<String, VmManager>>>,
     /// Handle for registering CRI streaming sessions.
@@ -89,6 +91,7 @@ impl BoxRuntimeService {
             image_store,
             runtime_network: Arc::new(RwLock::new(RuntimeNetworkState::default())),
             default_sandbox_image: None,
+            default_sandbox_network: None,
             vm_managers: Arc::new(RwLock::new(HashMap::new())),
             streaming,
             warm_pool: None,
@@ -105,6 +108,13 @@ impl BoxRuntimeService {
     /// the A3S-specific image annotation.
     pub fn with_default_sandbox_image(mut self, image: Option<String>) -> Self {
         self.default_sandbox_image = image.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Set the runtime default A3S bridge network for pods that do not carry
+    /// the A3S-specific network annotation.
+    pub fn with_default_sandbox_network(mut self, network: Option<String>) -> Self {
+        self.default_sandbox_network = network.filter(|value| !value.trim().is_empty());
         self
     }
 
@@ -276,6 +286,10 @@ impl BoxRuntimeService {
                 self.image_store.store_dir().display().to_string(),
             ),
             ("a3s.network.pod_cidr".to_string(), network.pod_cidr),
+            (
+                "a3s.network.default_sandbox_network".to_string(),
+                self.default_sandbox_network.clone().unwrap_or_default(),
+            ),
         ])
     }
 
@@ -393,9 +407,10 @@ impl RuntimeService for BoxRuntimeService {
         );
 
         // Convert CRI config to BoxConfig
-        let box_config = pod_sandbox_config_to_box_config_with_default(
+        let box_config = pod_sandbox_config_to_box_config_with_defaults(
             &config,
             self.default_sandbox_image.as_deref(),
+            self.default_sandbox_network.as_deref(),
         )
         .map_err(box_error_to_status)?;
 
@@ -1449,6 +1464,7 @@ mod tests {
             image_store,
             runtime_network: Arc::new(RwLock::new(RuntimeNetworkState::default())),
             default_sandbox_image: None,
+            default_sandbox_network: None,
             vm_managers: Arc::new(RwLock::new(HashMap::new())),
             streaming: handle,
             warm_pool: None,
@@ -1648,7 +1664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_status_verbose_includes_runtime_summary() {
-        let svc = make_test_service();
+        let svc = make_test_service().with_default_sandbox_network(Some("k8s-pods".to_string()));
         svc.store.add_sandbox(test_sandbox("sb-1")).await;
         svc.store.add_container(test_container("c-1", "sb-1")).await;
 
@@ -1679,6 +1695,12 @@ mod tests {
             Some("1")
         );
         assert!(resp.info.contains_key("a3s.image.store_dir"));
+        assert_eq!(
+            resp.info
+                .get("a3s.network.default_sandbox_network")
+                .map(String::as_str),
+            Some("k8s-pods")
+        );
     }
 
     // ── UpdateRuntimeConfig ──────────────────────────────────────────
@@ -2647,6 +2669,7 @@ mod tests {
                 ),
                 runtime_network: Arc::new(RwLock::new(RuntimeNetworkState::default())),
                 default_sandbox_image: None,
+                default_sandbox_network: None,
                 vm_managers: Arc::new(RwLock::new(HashMap::new())),
                 streaming: handle,
                 warm_pool: None,

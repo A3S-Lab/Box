@@ -30,6 +30,10 @@ struct Args {
     #[arg(long)]
     sandbox_image: Option<String>,
 
+    /// Default A3S bridge network used when a pod omits a3s.box/network.
+    #[arg(long)]
+    sandbox_network: Option<String>,
+
     /// Maximum image cache size in bytes (default: 10GB).
     #[arg(long, default_value = "10737418240")]
     image_cache_size: u64,
@@ -62,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket = %args.socket.display(),
         image_dir = %image_dir.display(),
         sandbox_image = args.sandbox_image.as_deref().unwrap_or(""),
+        sandbox_network = args.sandbox_network.as_deref().unwrap_or(""),
         cache_size = args.image_cache_size,
         streaming_addr = %args.streaming_addr,
         "Starting A3S Box CRI Runtime"
@@ -79,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create and start CRI server
     let server = CriServer::new(args.socket, image_store, auth)
         .with_default_sandbox_image(args.sandbox_image)
+        .with_default_sandbox_network(args.sandbox_network)
         .with_streaming_addr(args.streaming_addr);
     server.serve().await?;
 
@@ -111,5 +117,11 @@ mod tests {
             args.sandbox_image.as_deref(),
             Some("registry.local/a3s:cri")
         );
+    }
+
+    #[test]
+    fn test_args_custom_sandbox_network() {
+        let args = Args::try_parse_from(["a3s-box-cri", "--sandbox-network", "k8s-pods"]).unwrap();
+        assert_eq!(args.sandbox_network.as_deref(), Some("k8s-pods"));
     }
 }

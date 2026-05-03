@@ -31,6 +31,8 @@ pub struct CriServer {
     auth: RegistryAuth,
     /// Default sandbox/agent image for pods without an A3S image annotation.
     default_sandbox_image: Option<String>,
+    /// Default A3S bridge network for pods without an A3S network annotation.
+    default_sandbox_network: Option<String>,
     /// Streaming server bind address.
     streaming_addr: SocketAddr,
 }
@@ -46,6 +48,7 @@ impl CriServer {
             image_store,
             auth,
             default_sandbox_image: None,
+            default_sandbox_network: None,
             streaming_addr: SocketAddr::from(DEFAULT_STREAMING_ADDR),
         }
     }
@@ -53,6 +56,12 @@ impl CriServer {
     /// Set the default sandbox/agent image used by RuntimeService.
     pub fn with_default_sandbox_image(mut self, image: Option<String>) -> Self {
         self.default_sandbox_image = image.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Set the default A3S bridge network used by RuntimeService.
+    pub fn with_default_sandbox_network(mut self, network: Option<String>) -> Self {
+        self.default_sandbox_network = network.filter(|value| !value.trim().is_empty());
         self
     }
 
@@ -93,7 +102,8 @@ impl CriServer {
             streaming_handle,
             cri_store.clone(),
         )
-        .with_default_sandbox_image(self.default_sandbox_image.clone());
+        .with_default_sandbox_image(self.default_sandbox_image.clone())
+        .with_default_sandbox_network(self.default_sandbox_network.clone());
         runtime_service.load_state().await;
         let image_service = BoxImageService::new(self.image_store.clone(), self.auth.clone())
             .with_cri_store(cri_store);
