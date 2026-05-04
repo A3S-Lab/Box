@@ -218,4 +218,31 @@ mod tests {
         let big_timeout_ns = u64::MAX.saturating_mul(1_000_000_000);
         assert_eq!(big_timeout_ns, u64::MAX); // saturates instead of overflowing
     }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_always() {
+        assert!(should_restart_on_unhealthy("always"));
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_unless_stopped() {
+        assert!(should_restart_on_unhealthy("unless-stopped"));
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_no() {
+        assert!(!should_restart_on_unhealthy("no"));
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_on_failure() {
+        // on-failure policy should NOT restart on unhealthy status
+        // It only restarts on non-zero exit codes
+        assert!(!should_restart_on_unhealthy("on-failure"));
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_unknown() {
+        assert!(!should_restart_on_unhealthy("unknown-policy"));
+    }
 }
