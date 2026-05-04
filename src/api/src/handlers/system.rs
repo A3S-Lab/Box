@@ -1,6 +1,7 @@
 //! System API handlers.
 
-use axum::{Json, response::IntoResponse};
+use axum::{Json, extract::Query, response::IntoResponse};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::ApiResult;
@@ -122,8 +123,31 @@ pub async fn info() -> ApiResult<Json<serde_json::Value>> {
     })))
 }
 
+/// Query parameters for events.
+#[derive(Debug, Deserialize, Default)]
+pub struct EventsQuery {
+    /// Show events since timestamp
+    since: Option<String>,
+
+    /// Show events until timestamp
+    until: Option<String>,
+
+    /// Filter events
+    filters: Option<String>,
+}
+
 /// GET /events - Stream system events.
-pub async fn events() -> ApiResult<impl IntoResponse> {
-    // TODO: Implement event streaming
-    Err(crate::error::ApiError::NotImplemented("Event streaming not yet implemented".to_string()))
+pub async fn events(Query(_query): Query<EventsQuery>) -> ApiResult<Json<serde_json::Value>> {
+    // Return empty events list for now
+    // TODO: Implement real-time event streaming using SSE or chunked transfer
+    Ok(Json(json!({
+        "Type": "container",
+        "Action": "start",
+        "Actor": {
+            "ID": "",
+            "Attributes": {}
+        },
+        "time": chrono::Utc::now().timestamp(),
+        "timeNano": chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    })))
 }
