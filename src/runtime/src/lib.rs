@@ -15,6 +15,7 @@
 
 // -- Core modules (always compiled) --
 pub mod audit;
+pub mod backends;
 pub mod cache;
 pub mod fs;
 pub mod grpc;
