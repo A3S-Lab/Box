@@ -223,6 +223,7 @@ dependencies = [
  "libc",
  "num_cpus",
  "pkg-config",
+ "tempfile",
  "windows-sys 0.59.0",
 ]
 

@@ -16,6 +16,9 @@ links = "a3s_krun"
 pkg-config = "0.3"
 num_cpus = "1.16"
 
+[dev-dependencies]
+tempfile = "3.10"
+
 [dependencies]
 libc = "0.2"
 
