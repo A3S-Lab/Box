@@ -19,6 +19,78 @@ pub enum ContainerState {
     Exited,
 }
 
+/// CRI mount captured from ContainerConfig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerMount {
+    /// Path inside the container/session.
+    pub container_path: String,
+    /// Host path backing the mount.
+    pub host_path: String,
+    /// Whether the mount should be read-only.
+    pub readonly: bool,
+    /// Whether SELinux relabel was requested.
+    #[serde(default)]
+    pub selinux_relabel: bool,
+    /// CRI mount propagation enum value.
+    #[serde(default)]
+    pub propagation: i32,
+}
+
+/// CRI device captured from ContainerConfig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerDevice {
+    /// Path inside the container/session.
+    pub container_path: String,
+    /// Host path backing the device.
+    pub host_path: String,
+    /// Device permissions string.
+    pub permissions: String,
+}
+
+/// Linux resources captured from CRI ContainerConfig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerLinuxResources {
+    pub cpu_period: i64,
+    pub cpu_quota: i64,
+    pub cpu_shares: i64,
+    pub memory_limit_in_bytes: i64,
+    pub oom_score_adj: i64,
+    pub cpuset_cpus: String,
+    pub cpuset_mems: String,
+    pub unified: HashMap<String, String>,
+    pub memory_swap_limit_in_bytes: i64,
+}
+
+/// Linux security context captured from CRI ContainerConfig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerLinuxSecurityContext {
+    pub namespace_network: i32,
+    pub namespace_pid: i32,
+    pub namespace_ipc: i32,
+    pub namespace_user: i32,
+    pub namespace_target_id: String,
+    pub selinux_user: String,
+    pub selinux_role: String,
+    pub selinux_type: String,
+    pub selinux_level: String,
+    pub run_as_user: Option<i64>,
+    pub run_as_username: String,
+    pub run_as_group: Option<i64>,
+    pub readonly_rootfs: bool,
+    pub supplemental_groups: Vec<i64>,
+    pub privileged: bool,
+    pub no_new_privs: bool,
+}
+
+/// Linux config captured from CRI ContainerConfig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerLinuxConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ContainerLinuxResources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<ContainerLinuxSecurityContext>,
+}
+
 /// Represents a container (session) within a pod sandbox (Box).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Container {
@@ -46,6 +118,50 @@ pub struct Container {
     pub annotations: HashMap<String, String>,
     /// Log file path.
     pub log_path: String,
+    /// Mounts captured from CRI ContainerConfig.
+    #[serde(default)]
+    pub mounts: Vec<ContainerMount>,
+    /// Devices captured from CRI ContainerConfig.
+    #[serde(default)]
+    pub devices: Vec<ContainerDevice>,
+    /// Linux config captured from CRI ContainerConfig.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux: Option<ContainerLinuxConfig>,
+    /// Entrypoint command captured from CRI ContainerConfig.
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// Arguments captured from CRI ContainerConfig.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables captured from CRI ContainerConfig.
+    #[serde(default)]
+    pub envs: Vec<(String, String)>,
+    /// Working directory captured from CRI ContainerConfig.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// Whether stdin was requested.
+    #[serde(default)]
+    pub stdin: bool,
+    /// Whether TTY was requested.
+    #[serde(default)]
+    pub tty: bool,
+}
+
+impl Container {
+    /// Return the command line that can be executed inside the sandbox VM.
+    pub fn session_command(&self) -> Vec<String> {
+        let mut cmd = self.command.clone();
+        cmd.extend(self.args.iter().cloned());
+        cmd
+    }
+
+    /// Return environment variables in guest exec format.
+    pub fn exec_env(&self) -> Vec<String> {
+        self.envs
+            .iter()
+            .map(|(key, value)| format!("{}={}", key, value))
+            .collect()
+    }
 }
 
 /// In-memory store for containers.
@@ -178,6 +294,15 @@ mod tests {
             labels: HashMap::from([("app".to_string(), "test".to_string())]),
             annotations: HashMap::new(),
             log_path: format!("/var/log/pods/{}.log", id),
+            mounts: vec![],
+            devices: vec![],
+            linux: None,
+            command: vec!["echo".to_string()],
+            args: vec!["hello".to_string()],
+            envs: vec![("KEY".to_string(), "VALUE".to_string())],
+            working_dir: Some("/workspace".to_string()),
+            stdin: false,
+            tty: false,
         }
     }
 
@@ -189,6 +314,38 @@ mod tests {
         let c = store.get("c1").await.unwrap();
         assert_eq!(c.name, "container-c1");
         assert_eq!(c.state, ContainerState::Created);
+        assert_eq!(c.session_command(), vec!["echo", "hello"]);
+        assert_eq!(c.exec_env(), vec!["KEY=VALUE"]);
+    }
+
+    #[test]
+    fn test_deserialize_legacy_container_defaults_session_fields() {
+        let json = r#"{
+            "id": "c1",
+            "sandbox_id": "sb1",
+            "name": "container-c1",
+            "image_ref": "nginx:latest",
+            "state": "Created",
+            "created_at": 1000000000,
+            "started_at": 0,
+            "finished_at": 0,
+            "exit_code": 0,
+            "labels": {},
+            "annotations": {},
+            "log_path": "/var/log/pods/c1.log"
+        }"#;
+
+        let container: Container = serde_json::from_str(json).unwrap();
+
+        assert!(container.command.is_empty());
+        assert!(container.mounts.is_empty());
+        assert!(container.devices.is_empty());
+        assert!(container.linux.is_none());
+        assert!(container.args.is_empty());
+        assert!(container.envs.is_empty());
+        assert_eq!(container.working_dir, None);
+        assert!(!container.stdin);
+        assert!(!container.tty);
     }
 
     #[tokio::test]

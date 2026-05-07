@@ -349,6 +349,29 @@ impl VmManager {
         cmd: Vec<String>,
         timeout_ns: u64,
     ) -> Result<a3s_box_core::exec::ExecOutput> {
+        let request = a3s_box_core::exec::ExecRequest {
+            cmd,
+            timeout_ns,
+            env: vec![],
+            working_dir: None,
+            stdin: None,
+            user: None,
+            streaming: false,
+        };
+
+        self.exec_request(request).await
+    }
+
+    /// Execute a fully-specified command request in the guest VM.
+    ///
+    /// This is used by CRI and SDK paths that need to pass env, working dir,
+    /// stdin, or user metadata through to guest-init's exec server.
+    #[cfg(unix)]
+    #[tracing::instrument(skip(self, request), fields(box_id = %self.box_id))]
+    pub async fn exec_request(
+        &self,
+        request: a3s_box_core::exec::ExecRequest,
+    ) -> Result<a3s_box_core::exec::ExecOutput> {
         let state = self.state.read().await;
         match *state {
             BoxState::Ready | BoxState::Busy | BoxState::Compacting => {}
@@ -366,16 +389,6 @@ impl VmManager {
             .as_ref()
             .ok_or_else(|| BoxError::ExecError("Exec client not connected".to_string()))?;
 
-        let request = a3s_box_core::exec::ExecRequest {
-            cmd,
-            timeout_ns,
-            env: vec![],
-            working_dir: None,
-            stdin: None,
-            user: None,
-            streaming: false,
-        };
-
         let exec_start = std::time::Instant::now();
         let result = client.exec_command(&request).await;
 
@@ -390,6 +403,29 @@ impl VmManager {
         }
 
         result
+    }
+
+    /// Execute a command in the guest VM.
+    #[cfg(not(unix))]
+    pub async fn exec_command(
+        &self,
+        _cmd: Vec<String>,
+        _timeout_ns: u64,
+    ) -> Result<a3s_box_core::exec::ExecOutput> {
+        Err(BoxError::ExecError(
+            "guest exec is not supported on this host platform yet".to_string(),
+        ))
+    }
+
+    /// Execute a fully-specified command request in the guest VM.
+    #[cfg(not(unix))]
+    pub async fn exec_request(
+        &self,
+        _request: a3s_box_core::exec::ExecRequest,
+    ) -> Result<a3s_box_core::exec::ExecOutput> {
+        Err(BoxError::ExecError(
+            "guest exec is not supported on this host platform yet".to_string(),
+        ))
     }
 
     /// Boot the VM.

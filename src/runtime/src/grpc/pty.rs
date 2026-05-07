@@ -101,6 +101,31 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
 
+    fn socket_tempdir() -> tempfile::TempDir {
+        #[cfg(target_os = "macos")]
+        {
+            tempfile::Builder::new()
+                .prefix("a3s-pty-test-")
+                .tempdir_in("/private/tmp")
+                .unwrap()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            tempfile::TempDir::new().unwrap()
+        }
+    }
+
+    fn bind_test_listener(path: &Path) -> Option<UnixListener> {
+        match UnixListener::bind(path) {
+            Ok(listener) => Some(listener),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping Unix socket test: {}", err);
+                None
+            }
+            Err(err) => panic!("failed to bind test socket {}: {}", path.display(), err),
+        }
+    }
+
     #[tokio::test]
     async fn test_pty_client_connect_nonexistent() {
         let result = PtyClient::connect(Path::new("/tmp/nonexistent-pty-test.sock")).await;
@@ -109,9 +134,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_frame_roundtrip() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = socket_tempdir();
         let sock_path = tmp.path().join("pty.sock");
-        let listener = UnixListener::bind(&sock_path).unwrap();
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
 
         let sock_path_clone = sock_path.clone();
         let server = tokio::spawn(async move {
@@ -145,9 +172,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_send_resize() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = socket_tempdir();
         let sock_path = tmp.path().join("pty_resize.sock");
-        let listener = UnixListener::bind(&sock_path).unwrap();
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -170,9 +199,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_pty_read_frame_eof() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = socket_tempdir();
         let sock_path = tmp.path().join("pty_eof.sock");
-        let listener = UnixListener::bind(&sock_path).unwrap();
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();

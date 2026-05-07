@@ -55,12 +55,18 @@ impl VmManager {
         // Pull OCI image from registry and extract at rootfs root.
         // Extracting at root preserves absolute symlinks and dynamic linker paths.
         let reference = &self.config.image;
+        let config = a3s_box_core::A3sConfig::load_default()?;
+        let default_registry = config.registry.default_image_registry();
+        let image_reference =
+            crate::oci::ImageReference::parse_with_default_registry(reference, &default_registry)?;
+        let full_reference = image_reference.full_reference();
         let images_dir = self.home_dir.join("images");
         let store = crate::oci::ImageStore::new(&images_dir, crate::DEFAULT_IMAGE_CACHE_SIZE)?;
         let mut puller = crate::oci::ImagePuller::new(
             std::sync::Arc::new(store),
-            crate::oci::RegistryAuth::from_env(),
-        );
+            crate::oci::RegistryAuth::from_credential_store(&image_reference.registry),
+        )
+        .with_default_registry(&default_registry);
         if let Some(ref m) = self.prom {
             puller = puller.set_metrics(m.clone());
         }
@@ -68,14 +74,14 @@ impl VmManager {
             puller = puller.with_progress_fn(f.clone());
         }
 
-        tracing::info!(reference = %reference, "Pulling OCI image from registry");
+        tracing::info!(reference = %full_reference, "Pulling OCI image from registry");
 
-        let oci_image = puller.pull(reference).await?;
+        let oci_image = puller.pull(&full_reference).await?;
 
         let image_path = oci_image.root_dir().to_path_buf();
 
         // Try rootfs cache first — on hit, use the rootfs provider (overlay or copy)
-        let cache_key = RootfsCache::compute_key(reference, &[], &[], &[]);
+        let cache_key = RootfsCache::compute_key(&full_reference, &[], &[], &[]);
         let (rootfs_path, oci_config) =
             if let Some(cached_path) = self.try_rootfs_cache_path(&cache_key)? {
                 tracing::info!(

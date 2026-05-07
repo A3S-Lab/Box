@@ -17,7 +17,7 @@ pub struct HistoryArgs {
 pub async fn execute(args: HistoryArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = super::open_image_store()?;
     let stored = store
-        .get(&args.image)
+        .find(&args.image)
         .await
         .ok_or_else(|| format!("Image not found: {}", args.image))?;
     let oci_config = load_image_configuration(&stored.path)?;

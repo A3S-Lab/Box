@@ -23,17 +23,25 @@ pub struct PushArgs {
 
 pub async fn execute(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(super::open_image_store()?);
+    let config = a3s_box_core::A3sConfig::load_default()?;
+    let default_registry = config.registry.default_image_registry();
 
     // Parse the target reference
-    let reference = a3s_box_runtime::ImageReference::parse(&args.image)?;
+    let reference = a3s_box_runtime::ImageReference::parse_with_default_registry(
+        &args.image,
+        &default_registry,
+    )?;
 
     // Look up the image in the local store
-    let stored = store.get(&args.image).await.ok_or_else(|| {
-        format!(
-            "Image '{}' not found locally. Pull or build it first.",
-            args.image
-        )
-    })?;
+    let stored = match store.find(&reference.full_reference()).await {
+        Some(stored) => stored,
+        None => store.find(&args.image).await.ok_or_else(|| {
+            format!(
+                "Image '{}' not found locally. Pull or build it first.",
+                args.image
+            )
+        })?,
+    };
 
     if !args.quiet {
         println!("Pushing {}...", args.image);

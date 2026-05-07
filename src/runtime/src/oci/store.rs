@@ -14,6 +14,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use super::reference::ImageReference;
+
 /// Persistent index stored as JSON on disk.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct StoreIndex {
@@ -76,6 +78,35 @@ impl ImageStore {
         let mut index = self.index.write().await;
         let found = index.values_mut().find(|img| img.digest == digest);
         if let Some(image) = found {
+            image.last_used = Utc::now();
+            let updated = image.clone();
+            drop(index);
+            if let Err(e) = self.save_index_inner().await {
+                tracing::warn!(error = %e, "Failed to persist image store index (last_used may be stale)");
+            }
+            Some(updated)
+        } else {
+            None
+        }
+    }
+
+    /// Find an image using Docker-compatible reference matching.
+    ///
+    /// This accepts exact stored references, Docker short names (e.g. `nginx`),
+    /// fully-qualified names (`docker.io/library/nginx:latest`), digest-only
+    /// references, and repo-digest references.
+    pub async fn find(&self, reference: &str) -> Option<StoredImage> {
+        let mut index = self.index.write().await;
+        let key = index
+            .iter()
+            .filter_map(|(key, image)| {
+                image_reference_match_score(reference, image).map(|score| (key.clone(), score))
+            })
+            .max_by_key(|(_, score)| *score)
+            .map(|(key, _)| key);
+
+        if let Some(key) = key {
+            let image = index.get_mut(&key)?;
             image.last_used = Utc::now();
             let updated = image.clone();
             drop(index);
@@ -157,6 +188,16 @@ impl ImageStore {
                 reference
             )))
         }
+    }
+
+    /// Remove an image using Docker-compatible reference matching.
+    pub async fn remove_resolved(&self, reference: &str) -> Result<StoredImage> {
+        let stored = self
+            .find(reference)
+            .await
+            .ok_or_else(|| BoxError::OciImageError(format!("Image not found: {}", reference)))?;
+        self.remove(&stored.reference).await?;
+        Ok(stored)
     }
 
     /// List all stored images.
@@ -259,6 +300,50 @@ impl ImageStore {
     pub fn store_dir(&self) -> &Path {
         &self.store_dir
     }
+}
+
+fn image_reference_match_score(query: &str, image: &StoredImage) -> Option<u8> {
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+
+    if query == image.reference {
+        return Some(100);
+    }
+    if query == image.digest {
+        return Some(80);
+    }
+
+    let query_ref = ImageReference::parse(query).ok()?;
+    if query_ref.full_reference() == image.reference {
+        return Some(100);
+    }
+
+    let image_ref = ImageReference::parse(&image.reference).ok();
+    if let Some(query_digest) = query_ref.digest.as_deref() {
+        if image.digest != query_digest {
+            return None;
+        }
+
+        if let Some(image_ref) = image_ref {
+            if image_ref.registry == query_ref.registry
+                && image_ref.repository == query_ref.repository
+            {
+                if query_ref.tag.is_none() || query_ref.tag == image_ref.tag {
+                    return Some(95);
+                }
+            }
+        }
+
+        return None;
+    }
+
+    let image_ref = image_ref?;
+    (image_ref.registry == query_ref.registry
+        && image_ref.repository == query_ref.repository
+        && image_ref.tag == query_ref.tag)
+        .then_some(90)
 }
 
 #[async_trait::async_trait]
@@ -382,6 +467,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_find_matches_docker_short_and_full_references() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        create_test_oci_layout(&source_dir);
+
+        let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
+        store
+            .put(
+                "docker.io/library/nginx:latest",
+                "sha256:abc123",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(store.find("nginx").await.unwrap().digest, "sha256:abc123");
+        assert_eq!(
+            store.find("nginx:latest").await.unwrap().reference,
+            "docker.io/library/nginx:latest"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_repo_digest_prefers_matching_reference() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        create_test_oci_layout(&source_dir);
+
+        let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
+        store
+            .put(
+                "docker.io/library/nginx:latest",
+                "sha256:abc123",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                "docker.io/library/alpine:3.18",
+                "sha256:abc123",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .find("alpine:3.18@sha256:abc123")
+                .await
+                .unwrap()
+                .reference,
+            "docker.io/library/alpine:3.18"
+        );
+        assert!(store.find("redis:7@sha256:abc123").await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_remove() {
         let tmp = TempDir::new().unwrap();
         let store_dir = tmp.path().join("store");
@@ -403,6 +548,28 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = ImageStore::new(tmp.path(), 1024 * 1024).unwrap();
         assert!(store.remove("nonexistent").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_remove_resolved_removes_compatible_reference() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        create_test_oci_layout(&source_dir);
+
+        let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
+        store
+            .put(
+                "docker.io/library/nginx:latest",
+                "sha256:abc123",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+
+        let removed = store.remove_resolved("nginx").await.unwrap();
+        assert_eq!(removed.reference, "docker.io/library/nginx:latest");
+        assert!(store.find("nginx").await.is_none());
     }
 
     #[tokio::test]

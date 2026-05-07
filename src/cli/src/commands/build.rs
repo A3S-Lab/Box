@@ -63,6 +63,7 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
             .map_err(|e| format!("Invalid --platform: {e}"))?,
         None => vec![],
     };
+    validate_build_platforms(&platforms)?;
 
     let config = a3s_box_runtime::BuildConfig {
         context_dir,
@@ -78,6 +79,38 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     if args.quiet {
         println!("{}", result.digest);
+    }
+
+    Ok(())
+}
+
+fn validate_build_platforms(
+    platforms: &[a3s_box_core::platform::Platform],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if platforms.len() > 1 {
+        return Err(
+            "multi-platform image indexes are not implemented yet; pass a single --platform".into(),
+        );
+    }
+
+    let Some(platform) = platforms.first() else {
+        return Ok(());
+    };
+    if platform.os != "linux" {
+        return Err(format!(
+            "build platform '{}' is not supported: a3s-box builds Linux images only",
+            platform
+        )
+        .into());
+    }
+
+    let host_arch = a3s_box_core::platform::Platform::host().architecture;
+    if platform.architecture != host_arch {
+        return Err(format!(
+            "build platform '{}' requires cross-architecture execution, which is not implemented; host architecture is {}",
+            platform, host_arch
+        )
+        .into());
     }
 
     Ok(())
@@ -197,5 +230,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("Dockerfile or Containerfile"));
+    }
+
+    #[test]
+    fn test_validate_build_platforms_rejects_multiple() {
+        let platforms = vec![
+            a3s_box_core::platform::Platform::linux_amd64(),
+            a3s_box_core::platform::Platform::linux_arm64(),
+        ];
+        let err = validate_build_platforms(&platforms)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("multi-platform"));
+    }
+
+    #[test]
+    fn test_validate_build_platforms_rejects_non_linux() {
+        let platforms = vec![a3s_box_core::platform::Platform::new("darwin", "arm64")];
+        let err = validate_build_platforms(&platforms)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Linux images only"));
     }
 }

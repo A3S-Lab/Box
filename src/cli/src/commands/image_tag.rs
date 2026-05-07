@@ -15,7 +15,7 @@ pub async fn execute(args: ImageTagArgs) -> Result<(), Box<dyn std::error::Error
     let store = super::open_image_store()?;
 
     let source = store
-        .get(&args.source)
+        .find(&args.source)
         .await
         .ok_or_else(|| format!("Image not found: {}", args.source))?;
 

@@ -570,6 +570,31 @@ mod tests {
     use super::*;
     use tokio::net::UnixListener;
 
+    fn socket_tempdir() -> tempfile::TempDir {
+        #[cfg(target_os = "macos")]
+        {
+            tempfile::Builder::new()
+                .prefix("a3s-attest-test-")
+                .tempdir_in("/private/tmp")
+                .unwrap()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            tempfile::TempDir::new().unwrap()
+        }
+    }
+
+    fn bind_test_listener(path: &Path) -> Option<UnixListener> {
+        match UnixListener::bind(path) {
+            Ok(listener) => Some(listener),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping Unix socket test: {}", err);
+                None
+            }
+            Err(err) => panic!("failed to bind test socket {}: {}", path.display(), err),
+        }
+    }
+
     #[tokio::test]
     async fn test_attestation_connect_nonexistent_socket() {
         let result =
@@ -581,9 +606,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_attestation_connect_and_socket_path() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = socket_tempdir();
         let sock_path = tmp.path().join("attest.sock");
-        let _listener = UnixListener::bind(&sock_path).unwrap();
+        let Some(_listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
 
         let client = AttestationClient::connect(&sock_path).await.unwrap();
         assert_eq!(client.socket_path(), sock_path);

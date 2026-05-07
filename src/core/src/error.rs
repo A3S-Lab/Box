@@ -78,6 +78,14 @@ pub enum BoxError {
     #[error("Resize error: {0}")]
     ResizeError(String),
 
+    /// Feature not implemented yet
+    #[error("Not implemented: {feature}")]
+    NotImplemented { feature: String },
+
+    /// Feature not supported on this platform
+    #[error("Not supported on {platform}: {feature}")]
+    NotSupported { feature: String, platform: String },
+
     /// Generic error
     #[error("{0}")]
     Other(String),

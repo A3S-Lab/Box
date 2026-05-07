@@ -50,6 +50,14 @@ service RuntimeService {
     rpc UpdateContainerResources(UpdateContainerResourcesRequest) returns (UpdateContainerResourcesResponse) {}
     // ReopenContainerLog asks runtime to reopen the stdout/stderr log file for the container.
     rpc ReopenContainerLog(ReopenContainerLogRequest) returns (ReopenContainerLogResponse) {}
+    // ContainerStats returns stats of the container.
+    rpc ContainerStats(ContainerStatsRequest) returns (ContainerStatsResponse) {}
+    // ListContainerStats returns stats of all containers.
+    rpc ListContainerStats(ListContainerStatsRequest) returns (ListContainerStatsResponse) {}
+    // PodSandboxStats returns stats of the pod sandbox.
+    rpc PodSandboxStats(PodSandboxStatsRequest) returns (PodSandboxStatsResponse) {}
+    // ListPodSandboxStats returns stats of all pod sandboxes.
+    rpc ListPodSandboxStats(ListPodSandboxStatsRequest) returns (ListPodSandboxStatsResponse) {}
 
     // Status returns the status of the runtime.
     rpc Status(StatusRequest) returns (StatusResponse) {}
@@ -667,4 +675,107 @@ message FilesystemUsage {
 
 message ImageFsInfoResponse {
     repeated FilesystemUsage image_filesystems = 1;
+}
+
+// ContainerAttributes contains basic container metadata for stats responses.
+message ContainerAttributes {
+    string id = 1;
+    ContainerMetadata metadata = 2;
+    map<string, string> labels = 3;
+    map<string, string> annotations = 4;
+}
+
+// CpuUsage provides the CPU usage information.
+message CpuUsage {
+    int64 timestamp = 1;
+    UInt64Value usage_core_nano_seconds = 2;
+    UInt64Value usage_nano_cores = 3;
+}
+
+// MemoryUsage provides the memory usage information.
+message MemoryUsage {
+    int64 timestamp = 1;
+    UInt64Value working_set_bytes = 2;
+    UInt64Value available_bytes = 3;
+    UInt64Value usage_bytes = 4;
+    UInt64Value rss_bytes = 5;
+    UInt64Value page_faults = 6;
+    UInt64Value major_page_faults = 7;
+}
+
+// WritableLayerUsage provides the writable layer usage information.
+message WritableLayerUsage {
+    int64 timestamp = 1;
+    FilesystemIdentifier fs_id = 2;
+    UInt64Value used_bytes = 3;
+    UInt64Value inodes_used = 4;
+}
+
+// ContainerStats provides resource usage stats for a container.
+message ContainerStats {
+    ContainerAttributes attributes = 1;
+    CpuUsage cpu = 2;
+    MemoryUsage memory = 3;
+    WritableLayerUsage writable_layer = 4;
+}
+
+message ContainerStatsRequest {
+    string container_id = 1;
+}
+
+message ContainerStatsResponse {
+    ContainerStats stats = 1;
+}
+
+message ContainerStatsFilter {
+    string id = 1;
+    string pod_sandbox_id = 2;
+    map<string, string> label_selector = 3;
+}
+
+message ListContainerStatsRequest {
+    ContainerStatsFilter filter = 1;
+}
+
+message ListContainerStatsResponse {
+    repeated ContainerStats stats = 1;
+}
+
+message PodSandboxAttributes {
+    string id = 1;
+    PodSandboxMetadata metadata = 2;
+    map<string, string> labels = 3;
+    map<string, string> annotations = 4;
+}
+
+message LinuxPodSandboxStats {
+    CpuUsage cpu = 1;
+    MemoryUsage memory = 2;
+    repeated ContainerStats containers = 3;
+}
+
+message PodSandboxStats {
+    PodSandboxAttributes attributes = 1;
+    LinuxPodSandboxStats linux = 2;
+}
+
+message PodSandboxStatsRequest {
+    string pod_sandbox_id = 1;
+}
+
+message PodSandboxStatsResponse {
+    PodSandboxStats stats = 1;
+}
+
+message PodSandboxStatsFilter {
+    string id = 1;
+    map<string, string> label_selector = 2;
+}
+
+message ListPodSandboxStatsRequest {
+    PodSandboxStatsFilter filter = 1;
+}
+
+message ListPodSandboxStatsResponse {
+    repeated PodSandboxStats stats = 1;
 }

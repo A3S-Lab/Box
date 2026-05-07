@@ -19,7 +19,7 @@ pub async fn execute(args: SaveArgs) -> Result<(), Box<dyn std::error::Error>> {
     let store = super::open_image_store()?;
 
     let stored = store
-        .get(&args.image)
+        .find(&args.image)
         .await
         .ok_or_else(|| format!("Image not found: {}", args.image))?;
 

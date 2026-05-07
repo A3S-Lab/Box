@@ -98,7 +98,8 @@ pub(super) fn handle_copy(
 
 /// Handle RUN: execute a command in the rootfs.
 ///
-/// On Linux, uses chroot. On macOS, tries Docker/Podman, or skips with a warning.
+/// On Linux, uses chroot. On macOS, host execution is disabled unless explicitly
+/// opted in for development because it cannot match Linux container semantics.
 /// Returns Some(LayerInfo) if a layer was created, None if skipped.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_run(
@@ -210,10 +211,11 @@ pub(super) fn handle_run(
     }
 }
 
-/// Execute RUN command directly on host (macOS fallback).
+/// Execute RUN command directly on host (macOS development fallback).
 ///
-/// Since MicroVM execution on macOS has limitations, we execute commands
-/// directly on the host filesystem within the rootfs directory.
+/// This is intentionally opt-in. Running Dockerfile `RUN` instructions on the
+/// Darwin host can produce layers that do not behave like Linux container
+/// layers, so normal builds fail clearly until the MicroVM build executor lands.
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 fn handle_run_via_microvm(
@@ -228,8 +230,15 @@ fn handle_run_via_microvm(
 ) -> Result<Option<LayerInfo>> {
     use super::super::layer::DirSnapshot;
 
+    if std::env::var("A3S_BOX_ALLOW_HOST_RUN").as_deref() != Ok("1") {
+        return Err(BoxError::BuildError(
+            "Dockerfile RUN is not supported on macOS yet because the MicroVM build executor is not implemented. Set A3S_BOX_ALLOW_HOST_RUN=1 to use the unsafe host-execution fallback for development."
+                .to_string(),
+        ));
+    }
+
     if !quiet {
-        println!("→ Executing RUN command on host");
+        println!("→ Executing RUN command on host (A3S_BOX_ALLOW_HOST_RUN=1)");
     }
 
     // Capture filesystem state before execution
@@ -565,6 +574,7 @@ fn download_url(url: &str) -> std::result::Result<Vec<u8>, String> {
     tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(async {
             let client = reqwest::Client::builder()
+                .no_proxy()
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .map_err(|e| format!("Failed to build HTTP client: {}", e))?;

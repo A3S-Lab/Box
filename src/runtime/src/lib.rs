@@ -15,6 +15,7 @@
 
 // -- Core modules (always compiled) --
 pub mod audit;
+pub mod backends;
 pub mod cache;
 pub mod fs;
 pub mod grpc;
@@ -63,7 +64,10 @@ pub use network::NetworkStore;
 
 // OCI images
 pub use a3s_box_core::StoredImage;
-pub use oci::{CredentialStore, PushResult, RegistryPusher};
+pub use oci::{
+    CredentialStore, DockerConfigCredentialStore, PushResult, RegistryLoginOptions,
+    RegistryLoginVerifier, RegistryPusher,
+};
 pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth};
 pub use oci::{OciImage, SignResult, SignaturePolicy};
 

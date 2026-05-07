@@ -57,6 +57,11 @@ async fn start_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std
     record.restart_count = 0;
     state.save()?;
 
+    // Notify monitor about the started container
+    if let Some(pid) = result.pid {
+        crate::monitor_global::notify_container_started(box_id.clone(), pid).await;
+    }
+
     println!("{name}");
     Ok(())
 }

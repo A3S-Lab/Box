@@ -3,16 +3,20 @@
 //! Uses the `oci-distribution` crate to interact with container registries
 //! (Docker Hub, GHCR, etc.).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::Platform as A3sPlatform;
 use oci_distribution::client::{ClientConfig, ClientProtocol, Config, ImageLayer, PushResponse};
 use oci_distribution::manifest::{ImageIndexEntry, OciImageManifest};
 use oci_distribution::secrets::RegistryAuth as OciRegistryAuth;
 use oci_distribution::{Client, Reference};
+use reqwest::StatusCode;
 
-use super::credentials::CredentialStore;
+use super::credentials::{CredentialStore, DockerConfigCredentialStore};
 use super::reference::ImageReference;
 use super::signing::{verify_image_signature, SignaturePolicy, VerifyResult};
 
@@ -27,6 +31,227 @@ fn registry_protocol_from_env() -> ClientProtocol {
 
 /// Callback type for layer pull progress: `(current, total, digest, size_bytes)`.
 type PullProgressFn = Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>;
+
+/// Options for validating registry login credentials.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RegistryLoginOptions {
+    /// Use plain HTTP and accept invalid TLS certificates for custom registries.
+    pub insecure: bool,
+}
+
+/// Validates credentials against Docker Registry HTTP API v2.
+pub struct RegistryLoginVerifier {
+    client: reqwest::Client,
+    options: RegistryLoginOptions,
+}
+
+impl RegistryLoginVerifier {
+    /// Create a login verifier.
+    pub fn new(options: RegistryLoginOptions) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .danger_accept_invalid_certs(options.insecure)
+            .build()
+            .map_err(|e| BoxError::RegistryError {
+                registry: String::new(),
+                message: format!("Failed to create registry login client: {e}"),
+            })?;
+
+        Ok(Self { client, options })
+    }
+
+    /// Verify username/password against a registry's `/v2/` endpoint.
+    pub async fn verify(&self, registry: &str, username: &str, password: &str) -> Result<()> {
+        let registry = a3s_box_core::normalize_registry_server(registry);
+        let scheme = if self.options.insecure {
+            "http"
+        } else {
+            "https"
+        };
+        let url = format!("{scheme}://{registry}/v2/");
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(username, Some(password))
+            .send()
+            .await
+            .map_err(|e| BoxError::RegistryError {
+                registry: registry.clone(),
+                message: format!("Failed to connect to registry: {e}"),
+            })?;
+
+        match response.status() {
+            status if status.is_success() => Ok(()),
+            StatusCode::UNAUTHORIZED => {
+                let challenge = response
+                    .headers()
+                    .get(reqwest::header::WWW_AUTHENTICATE)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_www_authenticate);
+
+                match challenge.as_ref().map(|c| c.scheme.as_str()) {
+                    Some("bearer") => {
+                        let token = self
+                            .request_bearer_token(&registry, challenge.unwrap(), username, password)
+                            .await?;
+                        self.verify_with_bearer_token(&registry, &url, &token).await
+                    }
+                    Some("basic") | None => Err(BoxError::RegistryError {
+                        registry,
+                        message: "Authentication failed".to_string(),
+                    }),
+                    Some(scheme) => Err(BoxError::RegistryError {
+                        registry,
+                        message: format!("Unsupported authentication challenge: {scheme}"),
+                    }),
+                }
+            }
+            StatusCode::FORBIDDEN => Err(BoxError::RegistryError {
+                registry,
+                message: "Authentication failed".to_string(),
+            }),
+            status => Err(BoxError::RegistryError {
+                registry,
+                message: format!("Registry login check failed with HTTP {status}"),
+            }),
+        }
+    }
+
+    async fn request_bearer_token(
+        &self,
+        registry: &str,
+        challenge: AuthChallenge,
+        username: &str,
+        password: &str,
+    ) -> Result<String> {
+        let realm = challenge
+            .params
+            .get("realm")
+            .ok_or_else(|| BoxError::RegistryError {
+                registry: registry.to_string(),
+                message: "Bearer challenge is missing realm".to_string(),
+            })?;
+
+        let mut request = self.client.get(realm).basic_auth(username, Some(password));
+        if let Some(service) = challenge.params.get("service") {
+            request = request.query(&[("service", service)]);
+        }
+        if let Some(scope) = challenge.params.get("scope") {
+            request = request.query(&[("scope", scope)]);
+        }
+
+        let response = request.send().await.map_err(|e| BoxError::RegistryError {
+            registry: registry.to_string(),
+            message: format!("Failed to request registry token: {e}"),
+        })?;
+
+        if !response.status().is_success() {
+            return Err(BoxError::RegistryError {
+                registry: registry.to_string(),
+                message: "Authentication failed".to_string(),
+            });
+        }
+
+        let body: serde_json::Value =
+            response.json().await.map_err(|e| BoxError::RegistryError {
+                registry: registry.to_string(),
+                message: format!("Invalid registry token response: {e}"),
+            })?;
+
+        body.get("token")
+            .or_else(|| body.get("access_token"))
+            .and_then(|value| value.as_str())
+            .filter(|token| !token.is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| BoxError::RegistryError {
+                registry: registry.to_string(),
+                message: "Registry token response did not include a token".to_string(),
+            })
+    }
+
+    async fn verify_with_bearer_token(&self, registry: &str, url: &str, token: &str) -> Result<()> {
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| BoxError::RegistryError {
+                registry: registry.to_string(),
+                message: format!("Failed to verify registry token: {e}"),
+            })?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(BoxError::RegistryError {
+                registry: registry.to_string(),
+                message: "Authentication failed".to_string(),
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthChallenge {
+    scheme: String,
+    params: HashMap<String, String>,
+}
+
+fn parse_www_authenticate(header: &str) -> Option<AuthChallenge> {
+    let (scheme, rest) = header.trim().split_once(' ')?;
+    let params = parse_auth_params(rest);
+    Some(AuthChallenge {
+        scheme: scheme.to_ascii_lowercase(),
+        params,
+    })
+}
+
+fn parse_auth_params(input: &str) -> HashMap<String, String> {
+    let mut params = HashMap::new();
+
+    for part in split_quoted_commas(input) {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value)
+            .replace("\\\"", "\"");
+        params.insert(key.trim().to_ascii_lowercase(), value);
+    }
+
+    params
+}
+
+fn split_quoted_commas(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for (idx, ch) in input.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                parts.push(input[start..idx].trim());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(input[start..].trim());
+
+    parts
+}
 
 /// Authentication credentials for a container registry.
 #[derive(Debug, Clone)]
@@ -70,14 +295,46 @@ impl RegistryAuth {
     /// Create authentication from the credential store, falling back to env vars,
     /// then anonymous.
     pub fn from_credential_store(registry: &str) -> Self {
-        // Try credential store first
         if let Ok(store) = CredentialStore::default_path() {
-            if let Ok(Some((username, password))) = store.get(registry) {
-                return Self::basic(username, password);
+            let docker_store = DockerConfigCredentialStore::default_path().ok();
+            if let Some(auth) =
+                Self::from_credential_sources(registry, Some(&store), docker_store.as_ref())
+            {
+                return auth;
             }
         }
+
+        if let Ok(docker_store) = DockerConfigCredentialStore::default_path() {
+            if let Some(auth) = Self::from_credential_sources(registry, None, Some(&docker_store)) {
+                return auth;
+            }
+        }
+
         // Fall back to env vars, then anonymous
         Self::from_env()
+    }
+
+    fn from_credential_sources(
+        registry: &str,
+        store: Option<&CredentialStore>,
+        docker_store: Option<&DockerConfigCredentialStore>,
+    ) -> Option<Self> {
+        // Try the native a3s credential store first.
+        if let Some(store) = store {
+            if let Ok(Some((username, password))) = store.get(registry) {
+                return Some(Self::basic(username, password));
+            }
+        }
+
+        // Then reuse Docker CLI credentials when available. This covers users
+        // who already ran `docker login` for Docker Hub or a private registry.
+        if let Some(store) = docker_store {
+            if let Ok(Some((username, password))) = store.get(registry) {
+                return Some(Self::basic(username, password));
+            }
+        }
+
+        None
     }
 
     /// Convert to oci-distribution auth type.
@@ -113,12 +370,7 @@ impl RegistryPuller {
 
     /// Create a new registry puller with the given authentication.
     pub fn with_auth(auth: RegistryAuth) -> Self {
-        let config = ClientConfig {
-            protocol: registry_protocol_from_env(),
-            platform_resolver: Some(Box::new(linux_platform_resolver)),
-            ..Default::default()
-        };
-        let client = Client::new(config);
+        let client = registry_client(default_linux_platform());
 
         Self {
             client,
@@ -126,6 +378,12 @@ impl RegistryPuller {
             signature_policy: SignaturePolicy::default(),
             progress_fn: None,
         }
+    }
+
+    /// Select the target platform when resolving multi-architecture image indexes.
+    pub fn with_platform(mut self, platform: A3sPlatform) -> Self {
+        self.client = registry_client(platform);
+        self
     }
 
     /// Set the signature verification policy.
@@ -506,24 +764,43 @@ impl RegistryPusher {
     }
 }
 
-/// Platform resolver that always selects linux images matching the host architecture.
+fn registry_client(platform: A3sPlatform) -> Client {
+    let config = ClientConfig {
+        protocol: registry_protocol_from_env(),
+        platform_resolver: Some(Box::new(move |manifests| {
+            select_platform_digest(manifests, &platform)
+        })),
+        ..Default::default()
+    };
+    Client::new(config)
+}
+
+/// Platform resolver that selects linux images matching the host architecture.
 ///
 /// Container images run inside a Linux microVM regardless of the host OS,
 /// so we always look for `os: "linux"` with the host's CPU architecture.
-fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
+fn default_linux_platform() -> A3sPlatform {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         other => other,
     };
 
+    A3sPlatform::new("linux", arch)
+}
+
+fn select_platform_digest(manifests: &[ImageIndexEntry], platform: &A3sPlatform) -> Option<String> {
     manifests
         .iter()
         .find(|entry| {
-            entry
-                .platform
-                .as_ref()
-                .is_some_and(|p| p.os == "linux" && p.architecture == arch)
+            entry.platform.as_ref().is_some_and(|p| {
+                p.os == platform.os
+                    && p.architecture == platform.architecture
+                    && match platform.variant.as_ref() {
+                        Some(variant) => p.variant.as_ref() == Some(variant),
+                        None => true,
+                    }
+            })
         })
         .map(|entry| entry.digest.clone())
 }
@@ -531,7 +808,9 @@ fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oci_distribution::manifest::Platform as OciPlatform;
     use std::sync::{Mutex, OnceLock};
+    use tempfile::TempDir;
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -553,6 +832,34 @@ mod tests {
     }
 
     #[test]
+    fn test_registry_auth_uses_docker_config_fallback() {
+        let docker_config = TempDir::new().unwrap();
+
+        std::fs::write(
+            docker_config.path().join("config.json"),
+            r#"{
+                "auths": {
+                    "registry.example.com": {
+                        "auth": "YWxpY2U6c2VjcmV0"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let docker_store =
+            DockerConfigCredentialStore::new(docker_config.path().join("config.json"));
+        let auth = RegistryAuth::from_credential_sources(
+            "registry.example.com",
+            None,
+            Some(&docker_store),
+        )
+        .unwrap();
+        assert_eq!(auth.username.as_deref(), Some("alice"));
+        assert_eq!(auth.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
     fn test_registry_auth_to_oci_anonymous() {
         let auth = RegistryAuth::anonymous();
         let oci_auth = auth.to_oci_auth();
@@ -564,6 +871,28 @@ mod tests {
         let auth = RegistryAuth::basic("user", "pass");
         let oci_auth = auth.to_oci_auth();
         assert!(matches!(oci_auth, OciRegistryAuth::Basic(_, _)));
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_bearer() {
+        let challenge = parse_www_authenticate(
+            r#"Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/alpine:pull""#,
+        )
+        .unwrap();
+
+        assert_eq!(challenge.scheme, "bearer");
+        assert_eq!(
+            challenge.params.get("realm").map(String::as_str),
+            Some("https://auth.docker.io/token")
+        );
+        assert_eq!(
+            challenge.params.get("service").map(String::as_str),
+            Some("registry.docker.io")
+        );
+        assert_eq!(
+            challenge.params.get("scope").map(String::as_str),
+            Some("repository:library/alpine:pull")
+        );
     }
 
     #[test]
@@ -593,6 +922,51 @@ mod tests {
             ClientProtocol::Https
         ));
         std::env::remove_var(REGISTRY_PROTOCOL_ENV);
+    }
+
+    fn index_entry(
+        digest: &str,
+        os: &str,
+        architecture: &str,
+        variant: Option<&str>,
+    ) -> ImageIndexEntry {
+        ImageIndexEntry {
+            media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+            digest: digest.to_string(),
+            size: 1,
+            platform: Some(OciPlatform {
+                architecture: architecture.to_string(),
+                os: os.to_string(),
+                os_version: None,
+                os_features: None,
+                variant: variant.map(ToOwned::to_owned),
+                features: None,
+            }),
+            annotations: None,
+        }
+    }
+
+    #[test]
+    fn test_select_platform_digest_matches_requested_architecture() {
+        let entries = vec![
+            index_entry("sha256:amd64", "linux", "amd64", None),
+            index_entry("sha256:arm64", "linux", "arm64", None),
+        ];
+
+        let digest = select_platform_digest(&entries, &A3sPlatform::linux_arm64());
+        assert_eq!(digest.as_deref(), Some("sha256:arm64"));
+    }
+
+    #[test]
+    fn test_select_platform_digest_matches_variant() {
+        let entries = vec![
+            index_entry("sha256:armv6", "linux", "arm", Some("v6")),
+            index_entry("sha256:armv7", "linux", "arm", Some("v7")),
+        ];
+
+        let digest =
+            select_platform_digest(&entries, &A3sPlatform::with_variant("linux", "arm", "v7"));
+        assert_eq!(digest.as_deref(), Some("sha256:armv7"));
     }
 
     #[test]

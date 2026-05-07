@@ -112,6 +112,8 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 // ============================================================================
 
 async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error::Error>> {
+    common::validate_common_args(&args.common)?;
+
     let memory_mb =
         parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
     let resource_limits = common::build_resource_limits(&args.common)?;
@@ -163,13 +165,6 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         None => a3s_box_core::NetworkMode::Tsi,
     };
     let tee = build_tee_config(args);
-
-    if !args.common.device.is_empty() {
-        eprintln!("Warning: --device is not supported by the libkrun backend (devices are stored but not passed through)");
-    }
-    if args.common.gpus.is_some() {
-        eprintln!("Warning: --gpus is not yet implemented (stored but not enforced)");
-    }
 
     let config = build_box_config(
         args,

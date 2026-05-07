@@ -16,7 +16,9 @@ use a3s_box_runtime::oci::{ImageStore, RegistryAuth};
 use crate::cri_api::image_service_server::ImageServiceServer;
 use crate::cri_api::runtime_service_server::RuntimeServiceServer;
 use crate::image_service::BoxImageService;
+use crate::persistent_store::PersistentCriStore;
 use crate::runtime_service::BoxRuntimeService;
+use crate::state::{default_state_path, JsonStateStore, StateStore};
 use crate::streaming::StreamingServer;
 
 /// CRI gRPC server configuration.
@@ -27,6 +29,10 @@ pub struct CriServer {
     image_store: Arc<ImageStore>,
     /// Registry authentication.
     auth: RegistryAuth,
+    /// Default sandbox/agent image for pods without an A3S image annotation.
+    default_sandbox_image: Option<String>,
+    /// Default A3S bridge network for pods without an A3S network annotation.
+    default_sandbox_network: Option<String>,
     /// Streaming server bind address.
     streaming_addr: SocketAddr,
 }
@@ -41,8 +47,22 @@ impl CriServer {
             socket_path,
             image_store,
             auth,
+            default_sandbox_image: None,
+            default_sandbox_network: None,
             streaming_addr: SocketAddr::from(DEFAULT_STREAMING_ADDR),
         }
+    }
+
+    /// Set the default sandbox/agent image used by RuntimeService.
+    pub fn with_default_sandbox_image(mut self, image: Option<String>) -> Self {
+        self.default_sandbox_image = image.filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Set the default A3S bridge network used by RuntimeService.
+    pub fn with_default_sandbox_network(mut self, network: Option<String>) -> Self {
+        self.default_sandbox_network = network.filter(|value| !value.trim().is_empty());
+        self
     }
 
     /// Set the streaming server bind address.
@@ -73,13 +93,20 @@ impl CriServer {
             }
         });
 
-        let runtime_service = BoxRuntimeService::new(
+        let state_store: Arc<dyn StateStore> = Arc::new(JsonStateStore::new(default_state_path()));
+        let cri_store = Arc::new(PersistentCriStore::new(state_store));
+
+        let runtime_service = BoxRuntimeService::with_persistent_store(
             self.image_store.clone(),
             self.auth.clone(),
             streaming_handle,
-        );
+            cri_store.clone(),
+        )
+        .with_default_sandbox_image(self.default_sandbox_image.clone())
+        .with_default_sandbox_network(self.default_sandbox_network.clone());
         runtime_service.load_state().await;
-        let image_service = BoxImageService::new(self.image_store.clone(), self.auth.clone());
+        let image_service = BoxImageService::new(self.image_store.clone(), self.auth.clone())
+            .with_cri_store(cri_store);
 
         let uds = UnixListener::bind(&self.socket_path)?;
         let uds_stream = UnixListenerStream::new(uds);

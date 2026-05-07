@@ -110,6 +110,8 @@ mod tests {
             annotations: HashMap::new(),
             log_directory: "/var/log/pods".to_string(),
             runtime_handler: "a3s".to_string(),
+            network_name: None,
+            ip_address: None,
         }
     }
 
@@ -127,6 +129,15 @@ mod tests {
             labels: HashMap::new(),
             annotations: HashMap::new(),
             log_path: String::new(),
+            mounts: vec![],
+            devices: vec![],
+            linux: None,
+            command: vec!["true".to_string()],
+            args: vec![],
+            envs: vec![],
+            working_dir: None,
+            stdin: false,
+            tty: false,
         }
     }
 

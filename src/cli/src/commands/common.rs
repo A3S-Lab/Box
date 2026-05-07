@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use a3s_box_core::config::ResourceLimits;
+use a3s_box_core::platform::Platform;
 use clap::Args;
 
 /// Common arguments shared between `run` and `create` commands.
@@ -194,6 +195,65 @@ pub struct CommonBoxArgs {
     /// Preserve filesystem changes across stop/start cycles
     #[arg(long)]
     pub persistent: bool,
+}
+
+/// Validate options shared by create/run before any state is persisted or a VM is booted.
+pub(crate) fn validate_common_args(args: &CommonBoxArgs) -> Result<(), String> {
+    if args.cpus == 0 {
+        return Err("--cpus must be greater than 0".to_string());
+    }
+    if args.cpus > u8::MAX as u32 {
+        return Err(format!(
+            "--cpus={} exceeds the libkrun backend limit of {}",
+            args.cpus,
+            u8::MAX
+        ));
+    }
+
+    if !args.device.is_empty() {
+        return Err(
+            "--device is not supported by the libkrun backend yet; remove it or use a runtime with device passthrough"
+                .to_string(),
+        );
+    }
+
+    if args.gpus.is_some() {
+        return Err("--gpus is not supported by a3s-box yet".to_string());
+    }
+
+    let security = a3s_box_core::SecurityConfig::from_options(
+        &args.security_opt,
+        &args.cap_add,
+        &args.cap_drop,
+        args.privileged,
+    );
+    security.validate()?;
+
+    if let Some(platform) = &args.platform {
+        validate_runtime_platform(platform)?;
+    }
+
+    Ok(())
+}
+
+fn validate_runtime_platform(platform: &str) -> Result<(), String> {
+    let platform = Platform::parse(platform)?;
+    if platform.os != "linux" {
+        return Err(format!(
+            "runtime platform '{}' is not supported: a3s-box runs Linux guests only",
+            platform
+        ));
+    }
+
+    let host_arch = Platform::host().architecture;
+    if platform.architecture != host_arch {
+        return Err(format!(
+            "runtime platform '{}' requires CPU emulation, which is not implemented; host architecture is {}",
+            platform, host_arch
+        ));
+    }
+
+    Ok(())
 }
 
 /// Parse KEY=VALUE pairs into a HashMap.

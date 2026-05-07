@@ -4,6 +4,8 @@ pub mod boot;
 pub mod cleanup;
 pub mod commands;
 pub mod health;
+pub mod monitor;
+pub mod monitor_global;
 pub mod output;
 pub mod platform;
 pub mod process;

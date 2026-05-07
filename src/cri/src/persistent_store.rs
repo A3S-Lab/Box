@@ -66,6 +66,24 @@ impl PersistentCriStore {
         updated
     }
 
+    pub async fn update_sandbox_network(
+        &self,
+        id: &str,
+        network_name: Option<String>,
+        ip_address: Option<String>,
+    ) -> bool {
+        let updated = self
+            .sandboxes
+            .update_network(id, network_name, ip_address)
+            .await;
+        if updated {
+            if let Err(e) = self.persist().await {
+                tracing::warn!(error = %e, "Failed to persist CRI state after update_sandbox_network");
+            }
+        }
+        updated
+    }
+
     pub async fn remove_sandbox(&self, id: &str) -> Option<PodSandbox> {
         let removed = self.sandboxes.remove(id).await;
         if removed.is_some() {
@@ -148,6 +166,8 @@ mod tests {
             annotations: HashMap::new(),
             log_directory: "/var/log/pods".to_string(),
             runtime_handler: "a3s".to_string(),
+            network_name: None,
+            ip_address: None,
         }
     }
 
@@ -165,6 +185,15 @@ mod tests {
             labels: HashMap::new(),
             annotations: HashMap::new(),
             log_path: String::new(),
+            mounts: vec![],
+            devices: vec![],
+            linux: None,
+            command: vec!["true".to_string()],
+            args: vec![],
+            envs: vec![],
+            working_dir: None,
+            stdin: false,
+            tty: false,
         }
     }
 
@@ -218,6 +247,29 @@ mod tests {
 
         let sb = store2.sandboxes.get("sb1").await.unwrap();
         assert_eq!(sb.state, SandboxState::NotReady);
+    }
+
+    #[tokio::test]
+    async fn test_update_sandbox_network_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let store = PersistentCriStore::new(Arc::new(JsonStateStore::new(&path)));
+
+        store.add_sandbox(sample_sandbox("sb1")).await;
+        store
+            .update_sandbox_network(
+                "sb1",
+                Some("k8s-pods".to_string()),
+                Some("10.88.0.2".to_string()),
+            )
+            .await;
+
+        let store2 = PersistentCriStore::new(Arc::new(JsonStateStore::new(&path)));
+        store2.load().await.unwrap();
+
+        let sb = store2.sandboxes.get("sb1").await.unwrap();
+        assert_eq!(sb.network_name.as_deref(), Some("k8s-pods"));
+        assert_eq!(sb.ip_address.as_deref(), Some("10.88.0.2"));
     }
 
     #[tokio::test]

@@ -13,6 +13,8 @@ pub struct CreateArgs {
 }
 
 pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    common::validate_common_args(&args.common)?;
+
     // Validate restart policy
     let (restart_policy, max_restart_count) =
         crate::state::parse_restart_policy(&args.common.restart)

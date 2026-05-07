@@ -19,9 +19,9 @@ pub async fn execute(args: RmiArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut errors: Vec<String> = Vec::new();
 
     for reference in &args.images {
-        match store.remove(reference).await {
-            Ok(()) => {
-                println!("Removed: {reference}");
+        match store.remove_resolved(reference).await {
+            Ok(stored) => {
+                println!("Removed: {}", stored.reference);
             }
             Err(e) => {
                 if args.force {

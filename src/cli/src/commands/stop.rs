@@ -85,6 +85,9 @@ async fn stop_one(
     record.pid = None;
     record.stopped_by_user = true;
 
+    // Notify monitor that container was stopped by user
+    crate::monitor_global::notify_container_stopped(&box_id).await;
+
     if auto_remove {
         let _ = std::fs::remove_dir_all(&box_dir);
         cleanup::cleanup_external_socket_dir(&box_dir, &exec_socket_path);

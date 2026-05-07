@@ -49,10 +49,12 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "commit",
     "diff",
     "events",
+    "container",
     "container-update",
     "compose",
     "snapshot",
     "build",
+    "image",
     "images",
     "pull",
     "push",
@@ -69,6 +71,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "network",
     "volume",
     "df",
+    "system",
     "system-prune",
     "version",
     "info",
@@ -915,6 +918,7 @@ fn test_local_state_command_smoke() {
         "coverage",
         "--password",
         "secret",
+        "--skip-verify",
     ]);
     cli.ok(&["logout", "example.invalid"]);
 

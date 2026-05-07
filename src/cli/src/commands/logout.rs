@@ -4,12 +4,16 @@ use clap::Args;
 
 #[derive(Args)]
 pub struct LogoutArgs {
-    /// Registry server (default: index.docker.io)
+    /// Registry server (default: ~/.a3s/config.json registry.default or Docker Hub)
     pub server: Option<String>,
 }
 
 pub async fn execute(args: LogoutArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let server = args.server.unwrap_or_else(|| "index.docker.io".to_string());
+    let config = a3s_box_core::A3sConfig::load_default()?;
+    let server_input = args
+        .server
+        .unwrap_or_else(|| config.registry.default_login_registry());
+    let server = a3s_box_core::normalize_registry_server(&server_input);
 
     let store = a3s_box_runtime::CredentialStore::default_path()?;
     let removed = store.remove(&server)?;

@@ -93,6 +93,11 @@ async fn restart_one(
     record.started_at = Some(chrono::Utc::now());
     state.save()?;
 
+    // Notify monitor about the restarted container
+    if let Some(pid) = result.pid {
+        crate::monitor_global::notify_container_started(box_id.clone(), pid).await;
+    }
+
     println!("{name}");
     Ok(())
 }

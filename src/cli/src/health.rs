@@ -44,13 +44,21 @@ pub fn spawn_health_checker(
 async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCheck) {
     use std::time::Duration;
 
-    // Honour start_period before the first probe
+    // Set initial status to "starting" during start_period
     if hc.start_period_secs > 0 {
+        if let Ok(mut state) = StateFile::load_default() {
+            if let Some(record) = state.find_by_id_mut(&box_id) {
+                record.health_status = "starting".to_string();
+                let _ = state.save();
+            }
+        }
         tokio::time::sleep(Duration::from_secs(hc.start_period_secs)).await;
     }
 
     let interval = Duration::from_secs(hc.interval_secs.max(1));
     let timeout_ns = hc.timeout_secs.saturating_mul(1_000_000_000);
+    let mut consecutive_failures = 0u32;
+    let mut was_unhealthy = false;
 
     loop {
         tokio::time::sleep(interval).await;
@@ -69,19 +77,92 @@ async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCh
             break; // Box removed from state
         };
 
+        let previous_status = record.health_status.clone();
+
         if healthy {
             record.health_status = "healthy".to_string();
+            consecutive_failures = 0;
             record.health_retries = 0;
+
+            // Log recovery from unhealthy state
+            if was_unhealthy {
+                tracing::info!(
+                    box_id = %box_id,
+                    box_name = %record.name,
+                    "Container recovered from unhealthy state"
+                );
+                was_unhealthy = false;
+            }
         } else {
-            record.health_retries += 1;
-            if record.health_retries >= hc.retries {
+            consecutive_failures += 1;
+            record.health_retries = consecutive_failures;
+
+            if consecutive_failures >= hc.retries {
+                let newly_unhealthy = record.health_status != "unhealthy";
                 record.health_status = "unhealthy".to_string();
+                was_unhealthy = true;
+
+                if newly_unhealthy {
+                    tracing::warn!(
+                        box_id = %box_id,
+                        box_name = %record.name,
+                        consecutive_failures = consecutive_failures,
+                        "Container marked as unhealthy after {} consecutive failures",
+                        consecutive_failures
+                    );
+
+                    // Check if we should restart the container based on restart policy
+                    if should_restart_on_unhealthy(&record.restart_policy) {
+                        tracing::info!(
+                            box_id = %box_id,
+                            box_name = %record.name,
+                            restart_policy = %record.restart_policy,
+                            "Triggering container restart due to unhealthy status"
+                        );
+
+                        // Notify the monitor to restart the container
+                        // The monitor will handle the actual restart logic
+                        crate::monitor_global::notify_container_stopped(&box_id).await;
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    box_id = %box_id,
+                    box_name = %record.name,
+                    consecutive_failures = consecutive_failures,
+                    retries_threshold = hc.retries,
+                    "Health check failed ({}/{})",
+                    consecutive_failures,
+                    hc.retries
+                );
             }
         }
+
         record.health_last_check = Some(chrono::Utc::now());
+
+        // Log status transitions
+        if previous_status != record.health_status {
+            tracing::info!(
+                box_id = %box_id,
+                box_name = %record.name,
+                previous_status = %previous_status,
+                new_status = %record.health_status,
+                "Health status changed: {} → {}",
+                previous_status,
+                record.health_status
+            );
+        }
 
         let _ = state.save();
     }
+}
+
+/// Check if the container should be restarted when it becomes unhealthy.
+///
+/// Containers with "always" or "unless-stopped" restart policies should be
+/// restarted when they become unhealthy.
+fn should_restart_on_unhealthy(restart_policy: &str) -> bool {
+    matches!(restart_policy, "always" | "unless-stopped")
 }
 
 #[cfg(not(windows))]
@@ -136,5 +217,32 @@ mod tests {
 
         let big_timeout_ns = u64::MAX.saturating_mul(1_000_000_000);
         assert_eq!(big_timeout_ns, u64::MAX); // saturates instead of overflowing
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_always() {
+        assert!(should_restart_on_unhealthy("always"));
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_unless_stopped() {
+        assert!(should_restart_on_unhealthy("unless-stopped"));
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_no() {
+        assert!(!should_restart_on_unhealthy("no"));
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_on_failure() {
+        // on-failure policy should NOT restart on unhealthy status
+        // It only restarts on non-zero exit codes
+        assert!(!should_restart_on_unhealthy("on-failure"));
+    }
+
+    #[test]
+    fn test_should_restart_on_unhealthy_unknown() {
+        assert!(!should_restart_on_unhealthy("unknown-policy"));
     }
 }

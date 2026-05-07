@@ -3,6 +3,7 @@
 //! This module provides the foundational types, traits, and abstractions
 //! used across the A3S Box MicroVM runtime.
 
+pub mod app_config;
 pub mod audit;
 pub mod compose;
 pub mod config;
@@ -25,6 +26,10 @@ pub mod volume;
 pub mod workload;
 
 // Re-export commonly used types
+pub use app_config::{
+    is_docker_hub_registry, normalize_registry_server, registry_uses_http, A3sConfig,
+    RegistryConfig, DOCKER_HUB_AUTH_REGISTRY, DOCKER_HUB_IMAGE_REGISTRY,
+};
 pub use audit::{AuditAction, AuditConfig, AuditEvent, AuditOutcome};
 pub use compose::ComposeConfig;
 pub use config::{BoxConfig, ResourceConfig, ResourceLimits};

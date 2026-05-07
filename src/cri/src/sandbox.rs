@@ -42,6 +42,12 @@ pub struct PodSandbox {
     pub log_directory: String,
     /// Runtime handler name.
     pub runtime_handler: String,
+    /// A3S network name assigned to this sandbox, if bridge networking is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_name: Option<String>,
+    /// Pod sandbox IP address assigned by A3S IPAM, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
 }
 
 /// In-memory store for pod sandboxes.
@@ -101,6 +107,23 @@ impl SandboxStore {
             false
         }
     }
+
+    /// Update the stored network assignment for a sandbox.
+    pub async fn update_network(
+        &self,
+        id: &str,
+        network_name: Option<String>,
+        ip_address: Option<String>,
+    ) -> bool {
+        let mut store = self.sandboxes.write().await;
+        if let Some(sb) = store.get_mut(id) {
+            sb.network_name = network_name;
+            sb.ip_address = ip_address;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Default for SandboxStore {
@@ -125,6 +148,8 @@ mod tests {
             annotations: HashMap::new(),
             log_directory: "/var/log/pods".to_string(),
             runtime_handler: "a3s".to_string(),
+            network_name: None,
+            ip_address: None,
         }
     }
 
@@ -193,5 +218,25 @@ mod tests {
     async fn test_update_state_nonexistent() {
         let store = SandboxStore::new();
         assert!(!store.update_state("missing", SandboxState::NotReady).await);
+    }
+
+    #[tokio::test]
+    async fn test_update_network() {
+        let store = SandboxStore::new();
+        store.add(test_sandbox("sb1")).await;
+
+        assert!(
+            store
+                .update_network(
+                    "sb1",
+                    Some("k8s-pods".to_string()),
+                    Some("10.88.0.2".to_string()),
+                )
+                .await
+        );
+
+        let sb = store.get("sb1").await.unwrap();
+        assert_eq!(sb.network_name.as_deref(), Some("k8s-pods"));
+        assert_eq!(sb.ip_address.as_deref(), Some("10.88.0.2"));
     }
 }
