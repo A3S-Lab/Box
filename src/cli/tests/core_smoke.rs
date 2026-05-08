@@ -14,7 +14,7 @@
 //! - `A3S_BOX_SMOKE_IMAGE`: image to use (default: `docker.io/library/alpine:latest`)
 //! - `A3S_BOX_SMOKE_IMAGE_TAR`: load this OCI archive into the isolated `A3S_HOME`
 //!   before running, useful for offline HVF/KVM smoke tests
-//! - `A3S_BOX_TEST_ALPINE_TAR`: fallback OCI archive path shared with command coverage
+//! - `A3S_BOX_TEST_ALPINE_TAR`: fallback OCI archive path shared with host smoke coverage
 //! - `A3S_BOX_SMOKE_SKIP_PULL=1`: skip the explicit `pull` step for cached images
 //! - `A3S_BOX_SMOKE_TIMEOUT_SECS`: command and polling timeout (default: 300)
 

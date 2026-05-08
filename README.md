@@ -513,7 +513,7 @@ A3S_BOX_SMOKE_IMAGE_TAR=/path/to/alpine.tar cargo test -p a3s-box-cli --test cor
 # diff/export/commit/snapshot, and Compose multi-service health/volume
 # coverage on Unix HVF/KVM hosts.
 # Opt-in Linux RUN build smoke: requires root and a local Alpine OCI tar
-A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine.tar cargo test -p a3s-box-cli --test command_coverage test_linux_build_run_chroot_smoke -- --ignored --nocapture
+A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine.tar cargo test -p a3s-box-cli --test host_smoke test_linux_build_run_chroot_smoke -- --ignored --nocapture
 
 # Quality
 just fmt                # Format

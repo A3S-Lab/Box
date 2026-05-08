@@ -45,6 +45,10 @@ Current notes:
   harness for the core path: `pull`, detached `run`, non-TTY `exec`, `logs`,
   `stop`, and `rm`, with an isolated `A3S_HOME` and configurable image,
   timeout, and cached-image mode.
+- `src/cli/tests/command_coverage.rs` now contains only local-state command
+  coverage. Host-dependent command tests live in
+  `src/cli/tests/host_smoke.rs` and remain ignored by default for explicit
+  Linux root, registry, or HVF/KVM smoke runs.
 
 ### Gate 2: Runtime Correctness
 
@@ -306,7 +310,7 @@ Current notes:
 - The real core lifecycle smoke harness can now preload an OCI image archive into
   its isolated `A3S_HOME` via `A3S_BOX_SMOKE_IMAGE_TAR` or
   `A3S_BOX_TEST_ALPINE_TAR`, so HVF/KVM validation can run offline with the same
-  image bits used by command coverage.
+  image bits used by host smoke coverage.
 - Real macOS HVF smoke now covers `create`/`start` command overrides plus
   detached `run`, foreground non-zero exit-code propagation, non-TTY `exec`,
   `run -it`, `exec -it`, `attach -it`, hostname/static-host injection,
@@ -589,9 +593,9 @@ Acceptance criteria:
 1. Run the Linux-only Dockerfile `RUN` build smoke on a root-capable Linux host
    with a local Alpine OCI tar. The Linux chroot path now has root/shell/workdir
    preflight checks, but still needs real Linux execution validation.
-2. Split network/host-dependent tests from pure unit tests. The cosign keyless
-   registry lookup test is now ignored by default and should be run explicitly
-   when registry network access is available.
+2. Run the opt-in host-dependent command smoke jobs (`host_smoke`) on suitable
+   Linux root, registry, and HVF/KVM hosts. Pure command coverage is now split
+   from those host-dependent checks.
 3. Run and harden the opt-in kubelet/crictl CRI smoke suite on a host with
    `crictl`, image availability, and microVM support. Pure unit coverage now
    verifies one-container and multi-container CRI lifecycle paths through a fake
