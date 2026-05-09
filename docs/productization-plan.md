@@ -332,6 +332,20 @@ Current notes:
   lifecycle commands.
 - The full ignored `core_smoke` suite has been run with an offline Alpine OCI
   archive on macOS HVF and all 14 real-runtime tests passed.
+- The ignored `host_smoke` VM command matrix and Compose smoke have now also
+  passed on macOS HVF with the same offline Alpine OCI archive. Registry push
+  coverage stayed skipped because `A3S_BOX_PUSH_TEST_REF` was not configured.
+- `scripts/host-integration-smoke.sh` now provides one macOS/Linux validation
+  entrypoint. It runs stub-backed format, clippy, unit, and integration compile
+  checks by default, and opt-in `--core`, `--host`, `--linux-run`, and `--cri`
+  modes run the ignored HVF/KVM, Linux chroot, and crictl suites with the same
+  offline image environment documented in `docs/host-integration.md`. The
+  runner requires an OCI archive by default for `--core` and `--host`; live
+  registry pulls require explicit `A3S_BOX_ALLOW_REGISTRY_PULL=1`.
+- Host-dependent smoke tests now accept `A3S_BOX_HOST_SMOKE_IMAGE` and
+  `A3S_BOX_HOST_SMOKE_TIMEOUT_SECS`, so macOS HVF and Linux KVM runs can reuse
+  private mirrors, preloaded OCI archives, and slower CI hosts without editing
+  test code.
 
 ### Gate 4: Kubernetes CRI MVP
 
@@ -583,19 +597,30 @@ Goal: make installation behavior match platform claims.
 Acceptance criteria:
 
 - macOS and Linux packages ship matching binaries and guest assets.
-- Windows clearly chooses one path: native WHPX or WSL launcher, with command
-  support matrix and tests.
+- Windows clearly chooses one path: native WHPX, with command support matrix
+  and tests. WSL is not a runtime dependency.
 - Version numbers and package metadata are aligned across workspace crates,
   Homebrew, winget, and docs.
 
+Current notes:
+
+- Windows packaging now chooses the native WHPX path explicitly. The Windows
+  release package ships `a3s-box.exe`, `a3s-box-shim.exe`, the Linux
+  `a3s-box-guest-init` binary that runs inside the MicroVM, and `krun.dll`.
+- The Windows package requires Windows Hypervisor Platform and does not require
+  WSL. Host/guest control uses Windows named pipes where implemented.
+- Winget metadata advertises native WHPX support and declares
+  `HypervisorPlatform` as the Windows feature dependency.
+
 ## Immediate Development Queue
 
-1. Run the Linux-only Dockerfile `RUN` build smoke on a root-capable Linux host
-   with a local Alpine OCI tar. The Linux chroot path now has root/shell/workdir
-   preflight checks, but still needs real Linux execution validation.
-2. Run the opt-in host-dependent command smoke jobs (`host_smoke`) on suitable
-   Linux root, registry, and HVF/KVM hosts. Pure command coverage is now split
-   from those host-dependent checks.
+1. Run `scripts/host-integration-smoke.sh --core --host` on both macOS HVF and
+   Linux KVM hosts with the same offline Alpine OCI archive, then record the
+   exact host/image/test metadata in the release notes.
+2. Run `sudo -E scripts/host-integration-smoke.sh --linux-run --no-pure` on a
+   root-capable Linux host with a local Alpine OCI tar. The Linux chroot path
+   now has root/shell/workdir preflight checks, but still needs real Linux
+   execution validation in this branch.
 3. Run and harden the opt-in kubelet/crictl CRI smoke suite on a host with
    `crictl`, image availability, and microVM support. Pure unit coverage now
    verifies one-container and multi-container CRI lifecycle paths through a fake
@@ -604,5 +629,5 @@ Acceptance criteria:
 4. Replace macOS host-side Dockerfile `RUN` execution with an isolated execution
    path. It now fails by default and requires `A3S_BOX_UNSAFE_HOST_RUN=1` for
    explicit unsafe local experiments.
-5. Add a Windows command support matrix and make unsupported commands hidden or
-   explicitly documented.
+5. Add a Windows/WHPX command support matrix and make unsupported Windows
+   commands hidden or explicitly documented.

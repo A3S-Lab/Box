@@ -170,10 +170,10 @@ jobs:
 
   # ── Create GitHub Release ──────────────────────────────────────
 
-  # ── Windows launcher build ─────────────────────────────────────
+  # ── Windows native WHPX build ──────────────────────────────────
   build-windows:
     name: Build Windows (WHPX Backend)
-    needs: test
+    needs: [test, build]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -187,14 +187,16 @@ jobs:
           workspaces: src
           key: release-windows
 
-      - name: Build Windows runtime and launcher
+      - name: Build Windows native binaries
         run: |
           cd src
-          # Build runtime with Windows WHPX backend
-          cargo build --release -p a3s-box-runtime --target x86_64-pc-windows-msvc
-          # Build Windows launcher (not in workspace)
-          cd win-launcher
-          cargo build --release --target x86_64-pc-windows-msvc
+          cargo build --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
+
+      - name: Download Linux guest init artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: linux-x86_64
 
       - name: Package Windows release
         shell: bash
@@ -203,12 +205,19 @@ jobs:
           DIR="a3s-box-${TAG}-windows-x86_64"
           mkdir -p "$DIR/lib"
 
-          # Copy launcher
-          cp src/target/x86_64-pc-windows-msvc/release/a3s-box-win.exe "$DIR/"
+          cp src/target/x86_64-pc-windows-msvc/release/a3s-box.exe "$DIR/"
+          cp src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe "$DIR/"
 
-          # Copy krun.dll from prebuilt
-          if [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll" ]; then
+          tar -xzf "linux-x86_64/a3s-box-${TAG}-linux-x86_64.tar.gz" -C linux-x86_64
+          cp "linux-x86_64/a3s-box-${TAG}-linux-x86_64/a3s-box-guest-init" "$DIR/"
+
+          if [ -f "src/target/x86_64-pc-windows-msvc/release/krun.dll" ]; then
+            cp src/target/x86_64-pc-windows-msvc/release/krun.dll "$DIR/lib/"
+          elif [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll" ]; then
             cp src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll "$DIR/lib/"
+          else
+            echo "krun.dll is required for the native WHPX package" >&2
+            exit 1
           fi
 
           # Copy README and LICENSE

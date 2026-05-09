@@ -245,7 +245,7 @@ fn validate_rootfs_request(rootfs: Option<&str>, working_dir: Option<&str>) -> R
 
     #[cfg(not(target_os = "linux"))]
     {
-        return Err("Rootfs PTY execution requires a Linux guest".to_string());
+        Err("Rootfs PTY execution requires a Linux guest".to_string())
     }
 
     #[cfg(target_os = "linux")]

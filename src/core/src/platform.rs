@@ -155,8 +155,8 @@ pub struct PlatformCapabilities {
 pub enum VmBackend {
     /// Native libkrun-backed VM execution.
     Krun,
-    /// Windows launcher that delegates execution into WSL2.
-    WslLauncher,
+    /// Native Windows Hypervisor Platform backend through libkrun.
+    Whpx,
     /// No supported VM backend for this host.
     Unsupported,
 }
@@ -165,7 +165,7 @@ impl fmt::Display for VmBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Krun => write!(f, "krun"),
-            Self::WslLauncher => write!(f, "wsl-launcher"),
+            Self::Whpx => write!(f, "whpx"),
             Self::Unsupported => write!(f, "unsupported"),
         }
     }
@@ -239,7 +239,7 @@ impl PlatformCapabilities {
 
     /// Whether the host can run the VM runtime directly.
     pub fn supports_native_vm(&self) -> bool {
-        self.vm_backend == VmBackend::Krun
+        matches!(self.vm_backend, VmBackend::Krun | VmBackend::Whpx)
     }
 
     /// Whether the host has a supported control channel.
@@ -273,7 +273,7 @@ fn current_vm_backend() -> VmBackend {
 
 #[cfg(windows)]
 fn current_vm_backend() -> VmBackend {
-    VmBackend::Krun
+    VmBackend::Whpx
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -469,7 +469,7 @@ mod tests {
 
         #[cfg(windows)]
         {
-            assert_eq!(capabilities.vm_backend, VmBackend::Krun);
+            assert_eq!(capabilities.vm_backend, VmBackend::Whpx);
             assert_eq!(capabilities.host_guest_channel, HostGuestChannel::NamedPipe);
             assert!(!capabilities.unix_sockets);
             assert!(capabilities.named_pipes);
@@ -481,7 +481,9 @@ mod tests {
     #[test]
     fn test_platform_capability_display_values() {
         assert_eq!(VmBackend::Krun.to_string(), "krun");
+        assert_eq!(VmBackend::Whpx.to_string(), "whpx");
         assert_eq!(HostGuestChannel::UnixSocket.to_string(), "unix-socket");
+        assert_eq!(HostGuestChannel::NamedPipe.to_string(), "named-pipe");
         assert_eq!(BridgeNetworkBackend::Netproxy.to_string(), "netproxy");
     }
 

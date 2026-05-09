@@ -244,16 +244,14 @@ impl CoreSmoke {
         eprintln!("    $ [pty] a3s-box {}", args.join(" "));
 
         let (master_fd, slave_fd) = open_pty()?;
-        let stdout_fd = duplicate_fd(slave_fd).map_err(|e| {
+        let stdout_fd = duplicate_fd(slave_fd).inspect_err(|_| {
             close_fd(master_fd);
             close_fd(slave_fd);
-            e
         })?;
-        let stderr_fd = duplicate_fd(slave_fd).map_err(|e| {
+        let stderr_fd = duplicate_fd(slave_fd).inspect_err(|_| {
             close_fd(master_fd);
             close_fd(slave_fd);
             close_fd(stdout_fd);
-            e
         })?;
 
         let mut master = unsafe { File::from_raw_fd(master_fd) };

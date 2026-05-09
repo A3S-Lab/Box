@@ -4,6 +4,11 @@
 //! chroot builds, registry credentials/network access, or a working HVF/KVM
 //! MicroVM runtime. Keep them separate from `command_coverage.rs` so pure
 //! command coverage never depends on those capabilities.
+//!
+//! Useful environment:
+//! - `A3S_BOX_TEST_ALPINE_TAR`: load an offline Alpine OCI archive instead of pulling.
+//! - `A3S_BOX_HOST_SMOKE_IMAGE`: override the runnable Linux image reference.
+//! - `A3S_BOX_HOST_SMOKE_TIMEOUT_SECS`: override host VM wait timeouts.
 
 use std::path::Path;
 use std::time::Duration;
@@ -110,7 +115,8 @@ fn test_real_packages_service_push() {
 fn test_real_vm_command_matrix() {
     let cli = CliTest::new();
     let socket_dirs_before = host_socket_dirs();
-    let image = "docker.io/library/alpine:latest";
+    let image = host_smoke_image();
+    let boot_timeout = host_smoke_timeout(45);
     let built_image = "coverage-built:latest";
     let pool_image = "coverage-pool:latest";
     let main_box = "cov-vm-main";
@@ -125,15 +131,18 @@ fn test_real_vm_command_matrix() {
     cleanup(&cli, renamed_box);
     cleanup(&cli, restored_box);
 
-    seed_runnable_alpine_image(&cli, image);
+    seed_runnable_alpine_image(&cli, &image);
     let images = cli.ok(&["images"]);
-    assert!(images.contains("alpine"));
-    cli.ok(&["image-inspect", image]);
-    cli.ok(&["history", image]);
+    assert!(
+        !images.trim().is_empty(),
+        "images output should include the seeded smoke image"
+    );
+    cli.ok(&["image-inspect", &image]);
+    cli.ok(&["history", &image]);
 
     let image_tar = cli.home_path().join("alpine.tar");
     let image_tar = image_tar.to_string_lossy().to_string();
-    cli.ok(&["save", image, "--output", &image_tar]);
+    cli.ok(&["save", &image, "--output", &image_tar]);
     cli.ok(&[
         "load",
         "--input",
@@ -141,7 +150,7 @@ fn test_real_vm_command_matrix() {
         "--tag",
         "coverage-loaded:latest",
     ]);
-    cli.ok(&["tag", image, "coverage-alias:latest"]);
+    cli.ok(&["tag", &image, "coverage-alias:latest"]);
 
     let build_dir = cli.home_path().join("build-context");
     std::fs::create_dir_all(&build_dir).expect("create build context");
@@ -211,7 +220,7 @@ fn test_real_vm_command_matrix() {
         "sleep",
         "3600",
     ]);
-    wait_for_running(&cli, built_box, Duration::from_secs(45));
+    wait_for_running(&cli, built_box, boot_timeout);
     let built_message = cli.ok(&["exec", built_box, "--", "cat", "/message.txt"]);
     assert!(built_message.contains("built-image-ok"));
     cli.ok(&["rm", "--force", built_box]);
@@ -227,12 +236,12 @@ fn test_real_vm_command_matrix() {
         "A3S_COVERAGE=1",
         "--label",
         "purpose=coverage",
-        image,
+        &image,
         "--",
         "sleep",
         "3600",
     ]);
-    wait_for_running(&cli, main_box, Duration::from_secs(45));
+    wait_for_running(&cli, main_box, boot_timeout);
 
     cli.ok(&["ps"]);
     cli.ok(&["ps", "-a", "--filter", "name=cov-vm"]);
@@ -294,7 +303,10 @@ fn test_real_vm_command_matrix() {
     let guest_file = guest_file.to_string_lossy().to_string();
     cli.ok(&["cp", &format!("{main_box}:/etc/os-release"), &guest_file]);
     let copied = std::fs::read_to_string(&guest_file).expect("read copied file");
-    assert!(copied.contains("Alpine"));
+    assert!(
+        !copied.trim().is_empty(),
+        "copied guest /etc/os-release should not be empty"
+    );
 
     cli.ok(&["container-update", main_box, "--memory-reservation", "128m"]);
     cli.ok(&["diff", main_box]);
@@ -334,19 +346,25 @@ fn test_real_vm_command_matrix() {
     cli.ok(&["snapshot", "rm", &snapshot_id]);
 
     cli.ok(&["network", "create", "covvmnet", "--subnet", "10.124.0.0/24"]);
+    cli.ok(&["stop", main_box]);
     cli.ok(&["network", "connect", "covvmnet", main_box]);
     cli.ok(&["network", "inspect", "covvmnet"]);
+    cli.ok_status(&["start", main_box]);
+    wait_for_running(&cli, main_box, boot_timeout);
+    cli.ok(&["stop", main_box]);
     cli.ok(&["network", "disconnect", "covvmnet", main_box]);
     cli.ok(&["network", "rm", "covvmnet"]);
+    cli.ok_status(&["start", main_box]);
+    wait_for_running(&cli, main_box, boot_timeout);
 
     cli.ok(&["pause", main_box]);
     cli.ok(&["unpause", main_box]);
     cli.ok_status(&["restart", main_box]);
-    wait_for_running(&cli, main_box, Duration::from_secs(45));
+    wait_for_running(&cli, main_box, boot_timeout);
     cli.ok(&["stop", main_box]);
     cli.ok(&["wait", main_box]);
     cli.ok_status(&["start", main_box]);
-    wait_for_running(&cli, main_box, Duration::from_secs(45));
+    wait_for_running(&cli, main_box, boot_timeout);
     cli.ok(&["rename", main_box, renamed_box]);
     cli.ok(&["kill", "--signal", "TERM", renamed_box]);
     cli.ok(&["wait", renamed_box]);
@@ -369,12 +387,13 @@ fn test_real_vm_command_matrix() {
 #[ignore]
 fn test_real_compose_smoke() {
     let cli = CliTest::new();
-    let image = "docker.io/library/alpine:latest";
+    let image = host_smoke_image();
+    let boot_timeout = host_smoke_timeout(45);
     let project = "covcompose";
     let service_box = "covcompose-worker";
 
     cleanup(&cli, service_box);
-    seed_runnable_alpine_image(&cli, image);
+    seed_runnable_alpine_image(&cli, &image);
 
     let compose_dir = cli.home_path().join("compose");
     std::fs::create_dir_all(&compose_dir).expect("create compose dir");
@@ -413,7 +432,7 @@ fn test_real_compose_smoke() {
         "up",
         "--detach",
     ]);
-    wait_for_running(&cli, service_box, Duration::from_secs(45));
+    wait_for_running(&cli, service_box, boot_timeout);
     cli.ok(&[
         "compose",
         "--file",

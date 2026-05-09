@@ -9,6 +9,7 @@
 
 use clap::Args;
 
+#[cfg(not(windows))]
 use super::common;
 #[cfg(not(windows))]
 use crate::resolve;

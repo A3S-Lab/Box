@@ -1041,7 +1041,7 @@ impl CriLogWriter {
     }
 }
 
-fn spawn_container_exit_supervisor(
+struct ContainerExitSupervisor {
     store: Arc<PersistentCriStore>,
     attach_streams: AttachStreamMap,
     workload_stdins: WorkloadStdinMap,
@@ -1053,8 +1053,23 @@ fn spawn_container_exit_supervisor(
     attach_tx: AttachStreamSender,
     stop_rx: oneshot::Receiver<()>,
     workload: SupervisedWorkload,
-) {
+}
+
+fn spawn_container_exit_supervisor(supervisor: ContainerExitSupervisor) {
     tokio::spawn(async move {
+        let ContainerExitSupervisor {
+            store,
+            attach_streams,
+            workload_stdins,
+            workload_stops,
+            container_events,
+            container_id,
+            sandbox_id,
+            log_path,
+            attach_tx,
+            stop_rx,
+            workload,
+        } = supervisor;
         let mut workload = workload;
         let mut stop_rx = stop_rx;
         let mut stop_requested = false;
@@ -1841,12 +1856,15 @@ impl RuntimeService for BoxRuntimeService {
         // controls so supervised containers can publish their real exit status
         // before the sandbox VM is torn down.
         let containers = self.store.containers.list(Some(sandbox_id), None).await;
-        let stop_results = join_all(containers.iter().filter_map(|container| {
-            (container.state == ContainerState::Running).then(|| async move {
-                let stopped = self.stop_container_workload(container, 0).await?;
-                Ok::<_, Status>((container, stopped))
-            })
-        }))
+        let stop_results = join_all(
+            containers
+                .iter()
+                .filter(|container| container.state == ContainerState::Running)
+                .map(|container| async move {
+                    let stopped = self.stop_container_workload(container, 0).await?;
+                    Ok::<_, Status>((container, stopped))
+                }),
+        )
         .await;
 
         for result in stop_results {
@@ -2388,19 +2406,19 @@ impl RuntimeService for BoxRuntimeService {
             );
         }
 
-        spawn_container_exit_supervisor(
-            self.store.clone(),
-            self.attach_streams.clone(),
-            self.workload_stdins.clone(),
-            self.workload_stops.clone(),
-            self.container_events.clone(),
-            container_id.clone(),
-            container.sandbox_id.clone(),
-            container.log_path.clone(),
+        spawn_container_exit_supervisor(ContainerExitSupervisor {
+            store: self.store.clone(),
+            attach_streams: self.attach_streams.clone(),
+            workload_stdins: self.workload_stdins.clone(),
+            workload_stops: self.workload_stops.clone(),
+            container_events: self.container_events.clone(),
+            container_id: container_id.clone(),
+            sandbox_id: container.sandbox_id.clone(),
+            log_path: container.log_path.clone(),
             attach_tx,
             stop_rx,
             workload,
-        );
+        });
 
         if !started {
             return Err(Status::failed_precondition(format!(
@@ -3966,9 +3984,7 @@ mod tests {
     {
         let tmp = tempdir_for_unix_socket("a3s-cri-exec-test");
         let socket_path = tmp.path().join("exec.sock");
-        let Some(listener) = bind_test_exec_listener(&socket_path) else {
-            return None;
-        };
+        let listener = bind_test_exec_listener(&socket_path)?;
 
         tokio::spawn(async move {
             let mut assert_request = Some(assert_request);
@@ -4059,9 +4075,7 @@ mod tests {
     ) -> Option<TestExecServer> {
         let tmp = tempdir_for_unix_socket("a3s-cri-multi-exec-test");
         let socket_path = tmp.path().join("exec.sock");
-        let Some(listener) = bind_test_exec_listener(&socket_path) else {
-            return None;
-        };
+        let listener = bind_test_exec_listener(&socket_path)?;
 
         let expected = Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::from(
             expected,
@@ -4136,9 +4150,7 @@ mod tests {
         let tmp = tempdir_for_unix_socket("a3s-cri-pty-test");
         let exec_socket_path = tmp.path().join("exec.sock");
         let pty_socket_path = tmp.path().join("pty.sock");
-        let Some(listener) = bind_test_exec_listener(&pty_socket_path) else {
-            return None;
-        };
+        let listener = bind_test_exec_listener(&pty_socket_path)?;
 
         tokio::spawn(async move {
             let mut assert_request = Some(assert_request);
@@ -4188,9 +4200,7 @@ mod tests {
     async fn spawn_cancelable_exec_stream_server() -> Option<TestExecServer> {
         let tmp = tempdir_for_unix_socket("a3s-cri-exec-cancel-test");
         let socket_path = tmp.path().join("exec.sock");
-        let Some(listener) = bind_test_exec_listener(&socket_path) else {
-            return None;
-        };
+        let listener = bind_test_exec_listener(&socket_path)?;
 
         tokio::spawn(async move {
             loop {

@@ -240,7 +240,7 @@ impl StreamingHandle {
         let kind = session.kind.path_segment();
         let addr = *self.advertised_addr.read().await;
         let mut sessions = self.sessions.write().await;
-        prune_expired_sessions(&mut *sessions, Instant::now());
+        prune_expired_sessions(&mut sessions, Instant::now());
         sessions.insert(
             token.clone(),
             PendingStreamingSession::new(session, DEFAULT_STREAMING_SESSION_TTL),
@@ -281,7 +281,7 @@ async fn handle_connection(
     // registered operation. A typo should not burn a still-valid token.
     let session = {
         let mut sessions = sessions.write().await;
-        prune_expired_sessions(&mut *sessions, Instant::now());
+        prune_expired_sessions(&mut sessions, Instant::now());
         match sessions
             .get(token)
             .map(|session| session.session.kind.path_segment() == kind)

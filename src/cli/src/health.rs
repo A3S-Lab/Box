@@ -12,9 +12,11 @@
 
 use std::path::PathBuf;
 
+#[cfg(any(not(windows), test))]
+use crate::state::BoxRecord;
+use crate::state::HealthCheck;
 #[cfg(not(windows))]
 use crate::state::StateFile;
-use crate::state::{BoxRecord, HealthCheck};
 
 /// Spawn a background health checker task for a running box.
 ///
@@ -110,10 +112,12 @@ pub(crate) async fn run_probe(
     }
 }
 
+#[cfg(any(not(windows), test))]
 pub(crate) fn probe_timeout_ns(hc: &HealthCheck) -> u64 {
     hc.timeout_secs.saturating_mul(1_000_000_000)
 }
 
+#[cfg(any(not(windows), test))]
 pub(crate) fn should_probe(record: &BoxRecord, now: chrono::DateTime<chrono::Utc>) -> bool {
     let Some(hc) = record.health_check.as_ref() else {
         return false;
@@ -136,6 +140,7 @@ pub(crate) fn should_probe(record: &BoxRecord, now: chrono::DateTime<chrono::Utc
     now >= last_check + bounded_chrono_seconds(hc.interval_secs.max(1))
 }
 
+#[cfg(any(not(windows), test))]
 pub(crate) fn apply_probe_result(
     record: &mut BoxRecord,
     healthy: bool,
@@ -159,6 +164,7 @@ pub(crate) fn apply_probe_result(
     record.health_last_check = Some(checked_at);
 }
 
+#[cfg(any(not(windows), test))]
 fn bounded_chrono_seconds(seconds: u64) -> chrono::Duration {
     chrono::Duration::seconds(seconds.min(i64::MAX as u64) as i64)
 }

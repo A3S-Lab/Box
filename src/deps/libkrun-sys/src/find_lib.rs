@@ -214,8 +214,8 @@ mod tests {
         // In CI, the actual libkrun might not be installed
         let result = find_library_in_common_paths("krun");
         // Result depends on whether libkrun is actually installed
-        if result.is_some() {
-            assert!(result.unwrap().exists());
+        if let Some(path) = result {
+            assert!(path.exists());
         }
     }
 

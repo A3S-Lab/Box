@@ -24,7 +24,7 @@ A3S Box is built toward production use, but it is not a full Docker, containerd,
 | Compose | A useful local subset is implemented: image, command, entrypoint, env, env_file, ports, volumes, depends_on, networks, DNS, tmpfs, workdir, hostname, extra_hosts, labels, healthcheck, restart, CPU/memory, capabilities, and privileged mode. |
 | TEE | AMD SEV-SNP-oriented attestation, RA-TLS, sealing, and secret injection flows exist, plus simulation mode for development. Hardware-backed operation depends on SEV-SNP-capable hosts and libkrun support. TDX is not a productized path. |
 | Kubernetes CRI | Experimental. RuntimeService/ImageService, streaming exec/attach/port-forward pieces, RuntimeClass image overrides, and crictl smoke harnesses exist. It is not the current core completion target and is not supported on Windows. |
-| Windows | Native Windows/WHPX-related code exists, but the supported product documentation and smoke coverage currently focus on macOS and Linux. Windows CRI is intentionally out of scope. |
+| Windows | Native WHPX backend through libkrun. The Windows package runs directly on Windows with Windows Hypervisor Platform enabled; it does not require WSL. Windows CRI is intentionally out of scope. |
 
 ## What A3S Box is
 
@@ -49,7 +49,9 @@ The ignored `core_smoke` suite covers the core CLI path on a real MicroVM host:
 - bridge network endpoint allocation, peer `/etc/hosts`, connect/disconnect, and force removal cleanup;
 - named volumes, `cp`, `diff`, `export`, `commit`, `snapshot`, restart-policy monitor recovery, and Compose health/volume flow.
 
-The most recent local record in this branch: all 14 ignored `core_smoke` tests passed on macOS HVF with an offline Alpine OCI archive.
+The most recent local record in this branch: all 14 ignored `core_smoke` tests
+passed on macOS HVF with an offline Alpine OCI archive, and the ignored
+`host_smoke` VM command matrix plus Compose smoke passed with the same archive.
 
 ## Install
 
@@ -58,12 +60,18 @@ The most recent local record in this branch: all 14 ignored `core_smoke` tests p
 brew install a3s-lab/tap/a3s-box
 
 # From source
-git clone https://github.com/A3S-Lab/Box.git
+git clone https://github.com/AI45Lab/Box.git
 cd Box/src
 cargo build --release
 ```
 
-On macOS, use Apple Silicon. On Linux, use a host with KVM/libkrun support. Run `a3s-box info` first; it reports virtualization, platform, bridge backend, port-publishing support, and TEE availability.
+On macOS, use Apple Silicon. On Linux, use a host with KVM/libkrun support. On Windows, enable Windows Hypervisor Platform for the native WHPX backend:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+```
+
+Run `a3s-box info` first; it reports virtualization, platform, bridge backend, port-publishing support, and TEE availability.
 
 ## Quick start
 
@@ -293,22 +301,33 @@ cargo test -p a3s-box-cli --test host_smoke --quiet
 cargo test -p a3s-box-cli --test core_smoke --quiet
 ```
 
+Or run the macOS/Linux validation ladder from `crates/box`:
+
+```bash
+cd crates/box
+scripts/host-integration-smoke.sh
+```
+
 Opt-in real runtime smoke:
 
 ```bash
+cd crates/box
 A3S_BOX_SMOKE_IMAGE_TAR=/path/to/alpine.tar \
 A3S_BOX_SMOKE_TIMEOUT_SECS=300 \
-cargo test -p a3s-box-cli --test core_smoke -- --ignored --nocapture --test-threads=1
+scripts/host-integration-smoke.sh --core
 ```
 
 Opt-in Linux Dockerfile `RUN` smoke:
 
 ```bash
+cd crates/box
 A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine.tar \
-cargo test -p a3s-box-cli --test host_smoke test_linux_build_run_chroot_smoke -- --ignored --nocapture
+sudo -E scripts/host-integration-smoke.sh --linux-run --no-pure
 ```
 
 The Linux `RUN` smoke must run as root on a root-capable Linux builder.
+See `docs/host-integration.md` for the macOS HVF, Linux KVM, host command
+matrix, and CRI smoke procedures.
 
 ## Environment variables
 
@@ -319,6 +338,10 @@ The Linux `RUN` smoke must run as root on a root-capable Linux builder.
 | `A3S_TEE_SIMULATE` | Enables simulated TEE report behavior. |
 | `A3S_REGISTRY_PROTOCOL` | Registry protocol override for local/insecure registry tests. |
 | `A3S_BOX_CRI_AGENT_IMAGE` | Default CRI sandbox agent/rootfs image. |
+| `A3S_BOX_SMOKE_IMAGE_TAR` | OCI archive used by the ignored core MicroVM smoke suite. |
+| `A3S_BOX_TEST_ALPINE_TAR` | Shared offline Alpine OCI archive for core and host smoke suites. |
+| `A3S_BOX_ALLOW_REGISTRY_PULL` | Set to `1` to let the host integration runner use live registry pulls when no OCI archive is provided. |
+| `A3S_BOX_HOST_SMOKE_TIMEOUT_SECS` | Boot timeout override for ignored host smoke tests. |
 | `A3S_BOX_UNSAFE_HOST_RUN` | Opt into unsafe macOS host execution for Dockerfile `RUN` experiments. |
 | `RUST_LOG` | Rust tracing log level. |
 

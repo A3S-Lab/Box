@@ -46,14 +46,7 @@ fn pause_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std::erro
     }
 
     let pid = lifecycle::require_live_pid(record, "pause")?;
-    let box_id = record.id.clone();
-    let name = record.name.clone();
 
-    #[cfg(unix)]
-    {
-        process::send_signal(pid, libc::SIGSTOP)
-            .map_err(|err| format!("Failed to pause box {name} with SIGSTOP: {err}"))?;
-    }
     #[cfg(windows)]
     {
         let _ = pid;
@@ -63,13 +56,27 @@ fn pause_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std::erro
         ));
     }
 
-    // Update status to paused
-    let record = resolve::resolve_mut(state, &box_id)?;
-    record.status = "paused".to_string();
-    state.save()?;
+    #[cfg(unix)]
+    {
+        let box_id = record.id.clone();
+        let name = record.name.clone();
 
-    println!("{name}");
-    Ok(())
+        process::send_signal(pid, libc::SIGSTOP)
+            .map_err(|err| format!("Failed to pause box {name} with SIGSTOP: {err}"))?;
+
+        let record = resolve::resolve_mut(state, &box_id)?;
+        record.status = "paused".to_string();
+        state.save()?;
+
+        println!("{name}");
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Err("'pause' requires host process suspension support".into())
+    }
 }
 
 #[cfg(test)]

@@ -115,9 +115,9 @@ jobs:
             cargo check --release -p a3s-box-cri
           fi
 
-  # ── Windows launcher build check ───────────────────────────────
+  # ── Windows native WHPX build check ────────────────────────────
   build-windows:
-    name: Build Windows Launcher
+    name: Build Windows WHPX
     needs: [fmt, clippy, test]
     runs-on: windows-latest
     steps:
@@ -130,12 +130,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src
-          key: windows-launcher
-      - name: Build Windows launcher
-        working-directory: src/win-launcher
-        run: cargo build --release --bin a3s-box-win --target x86_64-pc-windows-msvc
+          key: windows-whpx
+      - name: Build Windows native binaries
+        run: |
+          Remove-Item Env:A3S_DEPS_STUB -ErrorAction SilentlyContinue
+          cd src
+          cargo build --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: a3s-box-win
-          path: src/target/x86_64-pc-windows-msvc/release/a3s-box-win.exe
+          name: windows-whpx
+          path: |
+            src/target/x86_64-pc-windows-msvc/release/a3s-box.exe
+            src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe

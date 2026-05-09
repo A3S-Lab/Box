@@ -16,4 +16,3 @@ pub mod status;
 #[cfg(not(windows))]
 pub mod terminal;
 pub mod test_helpers;
-pub mod windows;

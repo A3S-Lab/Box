@@ -4,6 +4,8 @@
 //! - Pod Sandbox → Box instance (one microVM per pod)
 //! - Container → Session within Box
 
+#![allow(clippy::result_large_err)]
+
 pub mod config_mapper;
 pub mod container;
 pub mod error;

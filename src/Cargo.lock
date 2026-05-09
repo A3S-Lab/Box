@@ -194,14 +194,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "a3s-box-win"
-version = "0.8.0"
-dependencies = [
- "dirs",
- "tempfile",
-]
-
-[[package]]
 name = "a3s-common"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

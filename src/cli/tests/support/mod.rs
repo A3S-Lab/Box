@@ -16,6 +16,8 @@ use flate2::Compression;
 use sha2::{Digest, Sha256};
 
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+pub const HOST_SMOKE_IMAGE_ENV: &str = "A3S_BOX_HOST_SMOKE_IMAGE";
+pub const HOST_SMOKE_TIMEOUT_SECS_ENV: &str = "A3S_BOX_HOST_SMOKE_TIMEOUT_SECS";
 pub const TEST_ALPINE_TAR_ENV: &str = "A3S_BOX_TEST_ALPINE_TAR";
 
 fn find_binary() -> PathBuf {
@@ -730,6 +732,19 @@ pub fn seed_runnable_alpine_image(cli: &CliTest, image: &str) {
     }
 
     cli.ok(&["pull", image]);
+}
+
+pub fn host_smoke_image() -> String {
+    std::env::var(HOST_SMOKE_IMAGE_ENV)
+        .unwrap_or_else(|_| "docker.io/library/alpine:latest".to_string())
+}
+
+pub fn host_smoke_timeout(default_secs: u64) -> Duration {
+    std::env::var(HOST_SMOKE_TIMEOUT_SECS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(default_secs))
 }
 
 #[cfg(unix)]

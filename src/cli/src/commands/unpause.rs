@@ -46,14 +46,7 @@ fn unpause_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std::er
     }
 
     let pid = lifecycle::require_live_pid(record, "unpause")?;
-    let box_id = record.id.clone();
-    let name = record.name.clone();
 
-    #[cfg(unix)]
-    {
-        process::send_signal(pid, libc::SIGCONT)
-            .map_err(|err| format!("Failed to unpause box {name} with SIGCONT: {err}"))?;
-    }
     #[cfg(windows)]
     {
         let _ = pid;
@@ -63,13 +56,27 @@ fn unpause_one(state: &mut StateFile, query: &str) -> Result<(), Box<dyn std::er
         ));
     }
 
-    // Update status back to running
-    let record = resolve::resolve_mut(state, &box_id)?;
-    record.status = "running".to_string();
-    state.save()?;
+    #[cfg(unix)]
+    {
+        let box_id = record.id.clone();
+        let name = record.name.clone();
 
-    println!("{name}");
-    Ok(())
+        process::send_signal(pid, libc::SIGCONT)
+            .map_err(|err| format!("Failed to unpause box {name} with SIGCONT: {err}"))?;
+
+        let record = resolve::resolve_mut(state, &box_id)?;
+        record.status = "running".to_string();
+        state.save()?;
+
+        println!("{name}");
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        Err("'unpause' requires host process resume support".into())
+    }
 }
 
 #[cfg(test)]

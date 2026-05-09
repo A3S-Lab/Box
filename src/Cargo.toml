@@ -9,7 +9,6 @@ members = [
     "cri",
     "cli",
     "sdk",
-    "win-launcher",
 ]
 resolver = "2"
 
@@ -18,7 +17,7 @@ version = "2.0.4"
 edition = "2021"
 authors = ["A3S Lab Team"]
 license = "MIT"
-repository = "https://github.com/A3S-Lab/Box"
+repository = "https://github.com/AI45Lab/Box"
 
 [workspace.dependencies]
 # Async runtime

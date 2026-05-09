@@ -138,14 +138,16 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
     if exec_req.streaming {
         let input_rx = spawn_exec_input_monitor(&stream)?;
         execute_command_streaming(
-            &exec_req.cmd,
-            exec_req.timeout_ns,
-            &exec_req.env,
-            exec_req.working_dir.as_deref(),
-            exec_req.rootfs.as_deref(),
-            exec_req.stdin.as_deref(),
-            exec_req.stdin_streaming,
-            exec_req.user.as_deref(),
+            ExecCommandSpec {
+                cmd: &exec_req.cmd,
+                timeout_ns: exec_req.timeout_ns,
+                env: &exec_req.env,
+                working_dir: exec_req.working_dir.as_deref(),
+                rootfs: exec_req.rootfs.as_deref(),
+                stdin_data: exec_req.stdin.as_deref(),
+                stdin_streaming: exec_req.stdin_streaming,
+                user: exec_req.user.as_deref(),
+            },
             Some(input_rx),
             &mut stream,
         )?;
@@ -318,6 +320,19 @@ fn write_exec_exit(w: &mut impl Write, exit_code: i32) -> Result<(), Box<dyn std
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy)]
+struct ExecCommandSpec<'a> {
+    cmd: &'a [String],
+    timeout_ns: u64,
+    env: &'a [String],
+    working_dir: Option<&'a str>,
+    rootfs: Option<&'a str>,
+    stdin_data: Option<&'a [u8]>,
+    stdin_streaming: bool,
+    user: Option<&'a str>,
+}
+
 /// Execute a command with timeout, environment variables, working directory, optional stdin, and optional user.
 ///
 /// When `user` is specified, guest-init applies the numeric UID/GID in the
@@ -325,16 +340,9 @@ fn write_exec_exit(w: &mut impl Write, exit_code: i32) -> Result<(), Box<dyn std
 /// implemented.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn build_command(
-    cmd: &[String],
-    timeout_ns: u64,
-    env: &[String],
-    working_dir: Option<&str>,
-    rootfs: Option<&str>,
-    stdin_data: Option<&[u8]>,
-    stdin_streaming: bool,
-    user: Option<&str>,
+    spec: ExecCommandSpec<'_>,
 ) -> Result<(std::process::Command, Duration), ExecOutput> {
-    if cmd.is_empty() {
+    if spec.cmd.is_empty() {
         return Err(ExecOutput {
             stdout: vec![],
             stderr: b"Empty command".to_vec(),
@@ -342,14 +350,14 @@ fn build_command(
         });
     }
 
-    let timeout_ns = if timeout_ns == 0 {
+    let timeout_ns = if spec.timeout_ns == 0 {
         DEFAULT_EXEC_TIMEOUT_NS
     } else {
-        timeout_ns
+        spec.timeout_ns
     };
     let timeout = Duration::from_nanos(timeout_ns);
-    let workdir = working_dir.unwrap_or("/");
-    let process_user = match parse_process_user(user) {
+    let workdir = spec.working_dir.unwrap_or("/");
+    let process_user = match parse_process_user(spec.user) {
         Ok(process_user) => process_user,
         Err(error) => {
             return Err(ExecOutput {
@@ -360,7 +368,7 @@ fn build_command(
         }
     };
 
-    if let Some(rootfs) = rootfs {
+    if let Some(rootfs) = spec.rootfs {
         if rootfs.is_empty()
             || !rootfs.starts_with('/')
             || rootfs.contains('\0')
@@ -402,8 +410,8 @@ fn build_command(
         }
     }
 
-    let program = cmd[0].clone();
-    let args = cmd[1..].to_vec();
+    let program = spec.cmd[0].clone();
+    let args = spec.cmd[1..].to_vec();
 
     let mut command = std::process::Command::new(&program);
     command
@@ -411,19 +419,19 @@ fn build_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    if stdin_data.is_some() || stdin_streaming {
+    if spec.stdin_data.is_some() || spec.stdin_streaming {
         command.stdin(std::process::Stdio::piped());
     }
 
-    for entry in env {
+    for entry in spec.env {
         if let Some((key, value)) = entry.split_once('=') {
             command.env(key, value);
         }
     }
 
-    configure_child_process(&mut command, rootfs, workdir, process_user);
-    if rootfs.is_none() {
-        if let Some(dir) = working_dir {
+    configure_child_process(&mut command, spec.rootfs, workdir, process_user);
+    if spec.rootfs.is_none() {
+        if let Some(dir) = spec.working_dir {
             command.current_dir(dir);
         }
     }
@@ -468,16 +476,16 @@ fn execute_command(
     stdin_data: Option<&[u8]>,
     user: Option<&str>,
 ) -> ExecOutput {
-    let (mut command, timeout) = match build_command(
+    let (mut command, timeout) = match build_command(ExecCommandSpec {
         cmd,
         timeout_ns,
         env,
         working_dir,
         rootfs,
         stdin_data,
-        false,
+        stdin_streaming: false,
         user,
-    ) {
+    }) {
         Ok(command) => command,
         Err(output) => return output,
     };
@@ -694,27 +702,11 @@ fn write_live_child_stdin(child: &mut std::process::Child, data: &[u8]) {
 /// Execute a command and emit stdout/stderr chunks while the process is running.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn execute_command_streaming(
-    cmd: &[String],
-    timeout_ns: u64,
-    env: &[String],
-    working_dir: Option<&str>,
-    rootfs: Option<&str>,
-    stdin_data: Option<&[u8]>,
-    stdin_streaming: bool,
-    user: Option<&str>,
+    spec: ExecCommandSpec<'_>,
     input_rx: Option<mpsc::Receiver<ExecInputEvent>>,
     writer: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut command, timeout) = match build_command(
-        cmd,
-        timeout_ns,
-        env,
-        working_dir,
-        rootfs,
-        stdin_data,
-        stdin_streaming,
-        user,
-    ) {
+    let (mut command, timeout) = match build_command(spec) {
         Ok(command) => command,
         Err(output) => {
             write_exec_stream_response(writer, &output)?;
@@ -727,7 +719,7 @@ fn execute_command_streaming(
         Err(e) => {
             let output = ExecOutput {
                 stdout: vec![],
-                stderr: format!("Failed to spawn command '{}': {}", cmd[0], e).into_bytes(),
+                stderr: format!("Failed to spawn command '{}': {}", spec.cmd[0], e).into_bytes(),
                 exit_code: 127,
             };
             write_exec_stream_response(writer, &output)?;
@@ -735,7 +727,7 @@ fn execute_command_streaming(
         }
     };
 
-    write_child_stdin(&mut child, stdin_data, stdin_streaming);
+    write_child_stdin(&mut child, spec.stdin_data, spec.stdin_streaming);
 
     let (sender, receiver) = mpsc::channel();
     let mut readers = Vec::new();
@@ -976,16 +968,16 @@ mod tests {
 
     #[test]
     fn test_build_command_rejects_named_user() {
-        let output = build_command(
-            &["id".to_string()],
-            0,
-            &[],
-            None,
-            None,
-            None,
-            false,
-            Some("node"),
-        )
+        let output = build_command(ExecCommandSpec {
+            cmd: &["id".to_string()],
+            timeout_ns: 0,
+            env: &[],
+            working_dir: None,
+            rootfs: None,
+            stdin_data: None,
+            stdin_streaming: false,
+            user: Some("node"),
+        })
         .unwrap_err();
 
         assert_eq!(output.exit_code, 1);
@@ -994,16 +986,16 @@ mod tests {
 
     #[test]
     fn test_build_command_keeps_original_program_with_numeric_user() {
-        let (command, _) = build_command(
-            &["echo".to_string(), "hello".to_string()],
-            0,
-            &[],
-            None,
-            None,
-            None,
-            false,
-            Some("1000:1000"),
-        )
+        let (command, _) = build_command(ExecCommandSpec {
+            cmd: &["echo".to_string(), "hello".to_string()],
+            timeout_ns: 0,
+            env: &[],
+            working_dir: None,
+            rootfs: None,
+            stdin_data: None,
+            stdin_streaming: false,
+            user: Some("1000:1000"),
+        })
         .unwrap();
 
         assert_eq!(command.get_program(), "echo");
@@ -1142,18 +1134,20 @@ mod tests {
     fn test_execute_command_streaming_writes_output_and_exit() {
         let mut buf = Vec::new();
         execute_command_streaming(
-            &[
-                "sh".to_string(),
-                "-c".to_string(),
-                "printf out; printf err >&2; exit 7".to_string(),
-            ],
-            0,
-            &[],
-            None,
-            None,
-            None,
-            false,
-            None,
+            ExecCommandSpec {
+                cmd: &[
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf out; printf err >&2; exit 7".to_string(),
+                ],
+                timeout_ns: 0,
+                env: &[],
+                working_dir: None,
+                rootfs: None,
+                stdin_data: None,
+                stdin_streaming: false,
+                user: None,
+            },
             None,
             &mut buf,
         )
@@ -1219,18 +1213,20 @@ mod tests {
                 buffer: Vec::new(),
             };
             execute_command_streaming(
-                &[
-                    "sh".to_string(),
-                    "-c".to_string(),
-                    "printf ready; sleep 1; printf done".to_string(),
-                ],
-                5_000_000_000,
-                &[],
-                None,
-                None,
-                None,
-                false,
-                None,
+                ExecCommandSpec {
+                    cmd: &[
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "printf ready; sleep 1; printf done".to_string(),
+                    ],
+                    timeout_ns: 5_000_000_000,
+                    env: &[],
+                    working_dir: None,
+                    rootfs: None,
+                    stdin_data: None,
+                    stdin_streaming: false,
+                    user: None,
+                },
                 None,
                 &mut writer,
             )
@@ -1257,14 +1253,16 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut buf = Vec::new();
             execute_command_streaming(
-                &["cat".to_string()],
-                5_000_000_000,
-                &[],
-                None,
-                None,
-                None,
-                true,
-                None,
+                ExecCommandSpec {
+                    cmd: &["cat".to_string()],
+                    timeout_ns: 5_000_000_000,
+                    env: &[],
+                    working_dir: None,
+                    rootfs: None,
+                    stdin_data: None,
+                    stdin_streaming: true,
+                    user: None,
+                },
                 Some(input_rx),
                 &mut buf,
             )
@@ -1313,18 +1311,20 @@ mod tests {
         });
 
         execute_command_streaming(
-            &[
-                "sh".to_string(),
-                "-c".to_string(),
-                "printf ready; sleep 5; printf done".to_string(),
-            ],
-            10_000_000_000,
-            &[],
-            None,
-            None,
-            None,
-            false,
-            None,
+            ExecCommandSpec {
+                cmd: &[
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf ready; sleep 5; printf done".to_string(),
+                ],
+                timeout_ns: 10_000_000_000,
+                env: &[],
+                working_dir: None,
+                rootfs: None,
+                stdin_data: None,
+                stdin_streaming: false,
+                user: None,
+            },
             Some(input_rx),
             &mut buf,
         )

@@ -328,6 +328,7 @@ impl VmController {
         }
         if let Some(dir) = shim_path.parent() {
             dirs.push(dir.to_path_buf());
+            dirs.push(dir.join("lib"));
         }
 
         let mut seen = HashSet::new();
@@ -336,7 +337,7 @@ impl VmController {
             if !seen.insert(dir.clone()) {
                 continue;
             }
-            if dir.join("krun.dll").exists() && dir.join("libkrunfw.dll").exists() {
+            if dir.join("krun.dll").exists() {
                 path_entries.push(dir);
             }
         }

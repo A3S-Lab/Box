@@ -241,13 +241,13 @@ impl ImagePuller {
         let mut matches = Vec::new();
 
         for image in images {
-            if digest_matches(&image.digest, digest) || image.reference == digest {
-                if !matches
-                    .iter()
-                    .any(|matched: &StoredImage| matched.reference == image.reference)
-                {
-                    matches.push(image);
-                }
+            let already_matched = matches
+                .iter()
+                .any(|matched: &StoredImage| matched.reference == image.reference);
+            if (digest_matches(&image.digest, digest) || image.reference == digest)
+                && !already_matched
+            {
+                matches.push(image);
             }
         }
 

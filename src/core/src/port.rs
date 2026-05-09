@@ -58,7 +58,7 @@ pub fn parse_port_mapping(input: &str) -> Result<PortMapping, String> {
     let protocol = match protocol_split.next() {
         None => PortProtocol::Tcp,
         Some(value) if value.eq_ignore_ascii_case("tcp") => PortProtocol::Tcp,
-        Some(value) if value.is_empty() => {
+        Some("") => {
             return Err(format!(
                 "Invalid port mapping '{input}': protocol must not be empty"
             ));

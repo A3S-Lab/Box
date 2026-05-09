@@ -8,7 +8,7 @@ pub(crate) fn record_network_name(record: &BoxRecord) -> Option<&str> {
     record
         .network_name
         .as_deref()
-        .or_else(|| match &record.network_mode {
+        .or(match &record.network_mode {
             a3s_box_core::NetworkMode::Bridge { network } => Some(network.as_str()),
             _ => None,
         })
