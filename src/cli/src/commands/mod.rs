@@ -208,6 +208,31 @@ pub(crate) fn open_image_store() -> Result<a3s_box_runtime::ImageStore, Box<dyn 
     Ok(store)
 }
 
+/// Resolve a box's on-disk full root filesystem directory.
+///
+/// The overlay provider (default on Linux) materializes the rootfs at
+/// `<box_dir>/merged`, while the plain/copy provider uses `<box_dir>/rootfs`.
+/// Returns the first that exists and is non-empty so that `export`/`commit`
+/// work regardless of provider. Returns `None` if neither is available (e.g.
+/// the overlay is unmounted because the box is stopped).
+pub(crate) fn resolve_box_rootfs(box_dir: &std::path::Path) -> Option<PathBuf> {
+    let is_populated = |p: &std::path::Path| -> bool {
+        p.is_dir()
+            && std::fs::read_dir(p)
+                .map(|mut it| it.next().is_some())
+                .unwrap_or(false)
+    };
+    let merged = box_dir.join("merged");
+    if is_populated(&merged) {
+        return Some(merged);
+    }
+    let rootfs = box_dir.join("rootfs");
+    if rootfs.is_dir() {
+        return Some(rootfs);
+    }
+    None
+}
+
 /// Tail a file, printing new content as it appears.
 ///
 /// Waits for the file to exist, then continuously reads and prints new data.

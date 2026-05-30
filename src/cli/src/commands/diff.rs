@@ -39,10 +39,13 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.name)?;
 
-    let rootfs_dir = record.box_dir.join("rootfs");
-    if !rootfs_dir.exists() {
-        return Err(format!("Rootfs not found at {}", rootfs_dir.display()).into());
-    }
+    let rootfs_dir = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
+        format!(
+            "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/)",
+            args.name,
+            record.box_dir.display()
+        )
+    })?;
 
     // Snapshot the original image to compare against
     let snapshot_path = record.box_dir.join("rootfs_snapshot.json");
@@ -102,9 +105,13 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
 pub(crate) fn create_box_baseline_snapshot(
     box_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let rootfs_dir = box_dir.join("rootfs");
     let snapshot_path = box_dir.join("rootfs_snapshot.json");
-    if rootfs_dir.exists() && !snapshot_path.exists() {
+    if snapshot_path.exists() {
+        return Ok(());
+    }
+    // Resolve the provider's rootfs: `merged` (overlay) is the freshly-mounted
+    // pristine image at boot time; `rootfs` (plain provider) likewise.
+    if let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) {
         create_snapshot(&rootfs_dir, &snapshot_path)?;
     }
     Ok(())
