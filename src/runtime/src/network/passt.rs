@@ -23,14 +23,19 @@ pub struct PasstManager {
 impl PasstManager {
     /// Create a new PasstManager.
     ///
-    /// The socket and PID file are placed under the box's sockets directory:
-    /// `~/.a3s/boxes/<box_id>/sockets/passt.sock`
-    /// `~/.a3s/boxes/<box_id>/sockets/passt.pid`
-    pub fn new(box_dir: &Path) -> Self {
-        let sockets_dir = box_dir.join("sockets");
+    /// The socket and PID file are placed directly in the provided runtime
+    /// socket directory (the same directory that holds the exec/PTY control
+    /// sockets, e.g. `/tmp/a3s-box-sockets/<box_id>`).
+    ///
+    /// This directory MUST be reachable by the user passt runs as. When passt
+    /// is started as root it drops privileges to `nobody`, so the socket
+    /// directory has to be world-traversable — the box's `~/.a3s/boxes/<id>`
+    /// home is mode 0700 for root and would leave passt unable to bind its
+    /// socket, silently breaking all bridge networking and Compose.
+    pub fn new(socket_dir: &Path) -> Self {
         Self {
-            socket_path: sockets_dir.join("passt.sock"),
-            pid_file: sockets_dir.join("passt.pid"),
+            socket_path: socket_dir.join("passt.sock"),
+            pid_file: socket_dir.join("passt.pid"),
             child: None,
         }
     }
@@ -54,7 +59,7 @@ impl PasstManager {
         prefix_len: u8,
         dns_servers: &[Ipv4Addr],
     ) -> Result<()> {
-        // Ensure parent directory exists
+        // Ensure parent directory exists.
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 BoxError::NetworkError(format!(
@@ -63,6 +68,26 @@ impl PasstManager {
                     e
                 ))
             })?;
+
+            // passt drops privileges to `nobody` when launched as root, so the
+            // directory it binds its socket (and writes its PID file) in must be
+            // writable by that user. Widen the directory permissions; the path
+            // is an ephemeral, per-box runtime directory under a world-traversable
+            // base, so this only affects this box's control sockets.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) =
+                    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o777))
+                {
+                    tracing::warn!(
+                        dir = %parent.display(),
+                        error = %e,
+                        "Failed to widen passt socket directory permissions; \
+                         passt may be unable to bind its socket after dropping privileges"
+                    );
+                }
+            }
         }
 
         // Remove stale socket if it exists
@@ -90,9 +115,23 @@ impl PasstManager {
             cmd.arg("--dns").arg(dns.to_string());
         }
 
-        // Suppress stdout/stderr to avoid noise
-        cmd.stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+        // Capture passt's stderr to a log file so spawn failures (bad args,
+        // unsupported flags, permission errors after dropping privileges) are
+        // diagnosable instead of silently discarded to /dev/null.
+        cmd.stdout(std::process::Stdio::null());
+        match self
+            .socket_path
+            .parent()
+            .map(|p| p.join("passt.stderr.log"))
+            .and_then(|p| std::fs::File::create(p).ok())
+        {
+            Some(file) => {
+                cmd.stderr(std::process::Stdio::from(file));
+            }
+            None => {
+                cmd.stderr(std::process::Stdio::null());
+            }
+        }
 
         let child = cmd.spawn().map_err(|e| {
             BoxError::NetworkError(format!(
@@ -118,18 +157,45 @@ impl PasstManager {
     }
 
     /// Wait for the passt socket to become available.
-    fn wait_for_socket(&self) -> Result<()> {
+    ///
+    /// Also detects immediate passt exit (e.g. bad args or a permission failure
+    /// after dropping privileges) so the real cause is surfaced instead of a
+    /// misleading 5-second timeout.
+    fn wait_for_socket(&mut self) -> Result<()> {
+        let stderr_path = self.socket_path.parent().map(|p| p.join("passt.stderr.log"));
+        let read_stderr = |path: &Option<PathBuf>| -> String {
+            path.as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|s| {
+                    let mut tail: Vec<&str> = s.lines().rev().take(4).collect();
+                    tail.reverse();
+                    tail.join("; ")
+                })
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| format!(" (passt stderr: {s})"))
+                .unwrap_or_default()
+        };
+
         let max_attempts = 50; // 5 seconds total
         for _ in 0..max_attempts {
             if self.socket_path.exists() {
                 return Ok(());
             }
+            if let Some(child) = self.child.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(BoxError::NetworkError(format!(
+                        "passt exited early with {status} before creating its socket{}",
+                        read_stderr(&stderr_path)
+                    )));
+                }
+            }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         Err(BoxError::NetworkError(format!(
-            "passt socket {} did not appear within 5 seconds",
-            self.socket_path.display()
+            "passt socket {} did not appear within 5 seconds{}",
+            self.socket_path.display(),
+            read_stderr(&stderr_path)
         )))
     }
 
