@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- CRI server is now reachable by standard gRPC clients (`crictl`, the kubelet,
+  `critest`) over its Unix domain socket. `grpc-go >= 1.57` sends the
+  percent-encoded socket path as the HTTP/2 `:authority`, which upstream `h2`
+  rejected with a `PROTOCOL_ERROR` stream reset before any CRI RPC ran. A
+  vendored `h2` patch (`third_party/h2`, wired via `[patch.crates-io]`) relaxes
+  authority validation for UDS-style values; the full pod+container lifecycle
+  (`runp`/`create`/`start`/`ps`/`stop`/`rm`/`stopp`/`rmp`) now works end to end.
+
 ## [2.0.4] — 2026-05-09
 
 ### Changed
