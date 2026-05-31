@@ -399,7 +399,13 @@ fn build_command(
 
         #[cfg(target_os = "linux")]
         match std::fs::metadata(rootfs) {
-            Ok(metadata) if metadata.is_dir() => {}
+            Ok(metadata) if metadata.is_dir() => {
+                // Containers chroot into this rootfs, so the guest-root /proc
+                // and /sys are invisible to them. Mount fresh pseudo-filesystems
+                // inside the rootfs (idempotent) so in-container reads of
+                // /proc/self/* and /sys/class/* work like any container runtime.
+                ensure_container_pseudo_filesystems(rootfs);
+            }
             Ok(_) => {
                 return Err(ExecOutput {
                     stdout: vec![],
@@ -866,6 +872,48 @@ fn configure_child_process(
     _user: Option<ProcessUser>,
     _supplemental_groups: Vec<u32>,
 ) {
+}
+
+/// Mount fresh `proc` and `sysfs` instances inside a container `rootfs`.
+///
+/// Containers `chroot` into their overlay rootfs, where the guest-root `/proc`
+/// and `/sys` are not visible. This mounts pseudo-filesystems at
+/// `<rootfs>/proc` and `<rootfs>/sys` so in-container processes can read
+/// `/proc/self/status`, `/sys/class/net`, etc. Best-effort and idempotent: an
+/// existing mount (detected by a differing `st_dev`) is left untouched, and any
+/// failure is logged without aborting the exec.
+#[cfg(target_os = "linux")]
+fn ensure_container_pseudo_filesystems(rootfs: &str) {
+    use nix::mount::{mount, MsFlags};
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(root_dev) = std::fs::metadata(rootfs).map(|meta| meta.dev()) else {
+        return;
+    };
+
+    for (subdir, fstype) in [("proc", "proc"), ("sys", "sysfs")] {
+        let target = format!("{rootfs}/{subdir}");
+        match std::fs::metadata(&target) {
+            // Already a distinct mount (procfs/sysfs has its own device).
+            Ok(meta) if meta.dev() != root_dev => continue,
+            Ok(_) => {}
+            Err(_) => {
+                if let Err(e) = std::fs::create_dir_all(&target) {
+                    warn!("Failed to create {target}: {e}");
+                    continue;
+                }
+            }
+        }
+        if let Err(e) = mount(
+            Some(fstype),
+            target.as_str(),
+            Some(fstype),
+            MsFlags::empty(),
+            None::<&str>,
+        ) {
+            warn!("Failed to mount {fstype} at {target}: {e}");
+        }
+    }
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
