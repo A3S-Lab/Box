@@ -329,16 +329,45 @@ message KeyValue {
 }
 
 // LinuxContainerSecurityContext holds linux security configuration.
+// Capabilities to add or drop. Field numbers MUST match the official
+// Kubernetes CRI v1 proto so messages from crictl/kubelet decode correctly.
+message Capability {
+    repeated string add_capabilities = 1;
+    repeated string drop_capabilities = 2;
+    repeated string add_ambient_capabilities = 3;
+}
+
+// SecurityProfile defines a seccomp/AppArmor profile selection.
+message SecurityProfile {
+    enum ProfileType {
+        RuntimeDefault = 0;
+        Unconfined = 1;
+        Localhost = 2;
+    }
+    ProfileType profile_type = 1;
+    string localhost_ref = 2;
+}
+
+// Field numbers below MUST match the official Kubernetes CRI v1 proto; the
+// previous hand-numbered version shifted fields (e.g. privileged at 8 instead
+// of 2), so any pod/container with a security context failed to decode.
 message LinuxContainerSecurityContext {
-    NamespaceOption namespace_options = 1;
-    SELinuxOption selinux_options = 2;
-    Int64Value run_as_user = 3;
-    string run_as_username = 4;
-    Int64Value run_as_group = 5;
-    bool readonly_rootfs = 6;
-    repeated int64 supplemental_groups = 7;
-    bool privileged = 8;
-    bool no_new_privs = 9;
+    Capability capabilities = 1;
+    bool privileged = 2;
+    NamespaceOption namespace_options = 3;
+    SELinuxOption selinux_options = 4;
+    Int64Value run_as_user = 5;
+    string run_as_username = 6;
+    bool readonly_rootfs = 7;
+    repeated int64 supplemental_groups = 8;
+    string apparmor_profile = 9 [deprecated = true];
+    string seccomp_profile_path = 10 [deprecated = true];
+    bool no_new_privs = 11;
+    Int64Value run_as_group = 12;
+    repeated string masked_paths = 13;
+    repeated string readonly_paths = 14;
+    SecurityProfile seccomp = 15;
+    SecurityProfile apparmor = 16;
 }
 
 // LinuxContainerConfig contains platform-specific configuration for Linux-based containers.
