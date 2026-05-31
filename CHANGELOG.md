@@ -4,6 +4,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [2.0.5] — 2026-05-31
+
+### Added
+- CRI `exec` works end to end over the Kubernetes SPDY/3.1 `remotecommand`
+  protocol — `kubectl exec` / `crictl exec` (non-TTY and TTY), stdin, stdout,
+  stderr, and exit-code propagation. Implemented in `cri/src/spdy.rs`; the two
+  critest exec conformance specs now pass.
+
 ### Fixed
 - CRI server is now reachable by standard gRPC clients (`crictl`, the kubelet,
   `critest`) over its Unix domain socket. `grpc-go >= 1.57` sends the
@@ -12,6 +20,10 @@ All notable changes to A3S Box will be documented in this file.
   vendored `h2` patch (`third_party/h2`, wired via `[patch.crates-io]`) relaxes
   authority validation for UDS-style values; the full pod+container lifecycle
   (`runp`/`create`/`start`/`ps`/`stop`/`rm`/`stopp`/`rmp`) now works end to end.
+
+### Changed
+- Split the 7732-line `cri/src/runtime_service.rs` into a focused
+  `runtime_service/` module (no behavior change).
 
 ## [2.0.4] — 2026-05-09
 
