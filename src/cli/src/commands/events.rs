@@ -72,6 +72,26 @@ fn take_snapshot(state: &StateFile) -> StatusSnapshot {
         .collect()
 }
 
+/// Parse a `--since`/`--until` argument: an RFC3339 timestamp, or a relative
+/// duration like `30s`, `5m`, `1h`, `2d` interpreted as that long ago.
+fn parse_time_arg(s: &str) -> Option<DateTime<Utc>> {
+    let s = s.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let n: i64 = num.parse().ok()?;
+    let secs = match unit {
+        "" | "s" => n,
+        "m" => n.checked_mul(60)?,
+        "h" => n.checked_mul(3600)?,
+        "d" => n.checked_mul(86400)?,
+        _ => return None,
+    };
+    Some(Utc::now() - chrono::Duration::seconds(secs))
+}
+
 fn parse_filters(filters: &[String]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for f in filters {
@@ -128,12 +148,16 @@ fn status_to_action(old: Option<&str>, new: &str) -> Option<&'static str> {
 pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let filters = parse_filters(&args.filter);
 
-    // Parse --until for auto-stop
-    let until: Option<DateTime<Utc>> = args.until.as_ref().and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .map(|dt| dt.with_timezone(&Utc))
-            .ok()
-    });
+    // Parse --since/--until (RFC3339 or relative like "30s"/"5m"/"1h").
+    let until: Option<DateTime<Utc>> = args.until.as_deref().and_then(parse_time_arg);
+    let since: Option<DateTime<Utc>> = args.since.as_deref().and_then(parse_time_arg);
+
+    // A --until already in the past means there is no live window to watch.
+    if let Some(deadline) = until {
+        if Utc::now() > deadline {
+            return Ok(());
+        }
+    }
 
     let state = StateFile::load_default()?;
     let mut prev = take_snapshot(&state);
@@ -148,14 +172,14 @@ pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>>
     println!("Listening for events... (Ctrl+C to stop)");
 
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-
-        // Check --until
-        if let Some(ref deadline) = until {
-            if Utc::now() > *deadline {
+        // Stop once the --until deadline passes.
+        if let Some(deadline) = until {
+            if Utc::now() > deadline {
                 break;
             }
         }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         let state = StateFile::load_default()?;
         let current = take_snapshot(&state);
@@ -187,7 +211,7 @@ pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>>
                     },
                 };
 
-                if matches_filters(&event, &filters) {
+                if matches_filters(&event, &filters) && since.is_none_or(|s| event.time >= s) {
                     if args.json {
                         println!("{}", serde_json::to_string(&event)?);
                     } else {
@@ -216,7 +240,7 @@ pub async fn execute(args: EventsArgs) -> Result<(), Box<dyn std::error::Error>>
                     },
                 };
 
-                if matches_filters(&event, &filters) {
+                if matches_filters(&event, &filters) && since.is_none_or(|s| event.time >= s) {
                     if args.json {
                         println!("{}", serde_json::to_string(&event)?);
                     } else {
@@ -274,6 +298,25 @@ mod tests {
     #[test]
     fn test_status_to_action_no_change() {
         assert_eq!(status_to_action(Some("running"), "running"), None);
+    }
+
+    #[test]
+    fn test_parse_time_arg_relative_and_rfc3339() {
+        // Relative durations resolve to a time in the past.
+        assert!(parse_time_arg("1s").unwrap() <= Utc::now());
+        assert!(parse_time_arg("5m").is_some());
+        assert!(parse_time_arg("2h").is_some());
+        assert!(parse_time_arg("1d").is_some());
+        assert!(parse_time_arg("30").is_some()); // bare number = seconds
+        // RFC3339 parses exactly.
+        assert_eq!(
+            parse_time_arg("2024-01-15T10:30:00Z").unwrap(),
+            chrono::DateTime::parse_from_rfc3339("2024-01-15T10:30:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+        // Garbage returns None (does not hang or panic).
+        assert!(parse_time_arg("nonsense").is_none());
     }
 
     #[test]

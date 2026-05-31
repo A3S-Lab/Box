@@ -104,7 +104,7 @@ impl VmManager {
             // (next to the exec/PTY sockets), not under the box's 0700 home.
             let passt_socket_dir = self.socket_dir();
             let mut passt = crate::network::PasstManager::new(&passt_socket_dir);
-            passt.spawn(ip, gateway, prefix_len, &dns_servers)?;
+            passt.spawn(ip, gateway, prefix_len, &dns_servers, &self.config.port_map)?;
             let path = passt.socket_path().to_path_buf();
             self.net_manager = Some(Box::new(passt));
             tracing::info!(network = network_name, ip = %ip, gateway = %gateway, "Bridge networking configured via passt");

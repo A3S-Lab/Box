@@ -69,6 +69,10 @@ pub fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
     let Some(socket_dir) = exec_socket_path.parent() else {
         return;
     };
+    // Reap the box's passt daemon (Linux bridge mode). passt outlives the
+    // process that launched it, so box teardown terminates it via its PID file.
+    #[cfg(target_os = "linux")]
+    a3s_box_runtime::network::terminate_passt(socket_dir);
     if socket_dir.starts_with(box_dir) {
         return;
     }
@@ -96,6 +100,14 @@ pub fn cleanup_removed_box(record: &BoxRecord) {
         }
     }
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
+
+    // The shim stages single-file bind mounts in $TMPDIR/a3s-fs-mount-<box_id>
+    // and can never clean it up itself (it takes over the process via libkrun
+    // and never returns). Remove it here on box teardown.
+    let fs_mount_dir = std::env::temp_dir().join(format!("a3s-fs-mount-{}", record.id));
+    if fs_mount_dir.exists() {
+        let _ = std::fs::remove_dir_all(&fs_mount_dir);
+    }
 }
 
 /// Roll back a box record that was partially created.

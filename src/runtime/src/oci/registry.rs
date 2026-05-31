@@ -25,28 +25,121 @@ fn registry_protocol_from_env() -> ClientProtocol {
     }
 }
 
-/// Verify that `data` hashes to the `expected` content digest before it is
-/// stored content-addressed. Unknown digest algorithms are skipped with a
-/// warning rather than silently trusted.
-fn verify_blob_digest(data: &[u8], expected: &str, what: &str, registry: &str) -> Result<()> {
-    let Some(expected_hex) = expected.strip_prefix("sha256:") else {
-        tracing::warn!(
-            digest = %expected,
-            "Unrecognized digest algorithm; skipping {what} content verification"
-        );
-        return Ok(());
-    };
-    use sha2::{Digest, Sha256};
-    let actual_hex = format!("{:x}", Sha256::digest(data));
-    if !actual_hex.eq_ignore_ascii_case(expected_hex) {
+/// An `AsyncWrite` that streams bytes straight to a file while computing their
+/// SHA-256, so a pulled blob is hashed and written in bounded chunks instead of
+/// being fully buffered in memory.
+struct HashingFileWriter {
+    file: tokio::fs::File,
+    hasher: sha2::Sha256,
+}
+
+impl HashingFileWriter {
+    fn new(file: tokio::fs::File) -> Self {
+        use sha2::Digest;
+        Self {
+            file,
+            hasher: sha2::Sha256::new(),
+        }
+    }
+
+    fn finalize_hex(self) -> String {
+        use sha2::Digest;
+        format!("{:x}", self.hasher.finalize())
+    }
+}
+
+impl tokio::io::AsyncWrite for HashingFileWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        use sha2::Digest;
+        let this = self.get_mut();
+        match std::pin::Pin::new(&mut this.file).poll_write(cx, buf) {
+            std::task::Poll::Ready(Ok(n)) => {
+                this.hasher.update(&buf[..n]);
+                std::task::Poll::Ready(Ok(n))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().file).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().file).poll_shutdown(cx)
+    }
+}
+
+/// Stream a blob to `dest`, verifying its SHA-256 against `descriptor.digest`
+/// as it downloads. The blob is written to a `.partial` temp file and only
+/// renamed into place once the digest checks out, so a failed/corrupted pull
+/// never leaves a bad blob under its content-addressed name. Unknown digest
+/// algorithms are stored with a warning rather than silently trusted.
+async fn stream_and_verify_blob(
+    client: &Client,
+    oci_ref: &Reference,
+    descriptor: &oci_distribution::manifest::OciDescriptor,
+    dest: &Path,
+    what: &str,
+    registry: &str,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let tmp = dest.with_extension("partial");
+    let file = tokio::fs::File::create(&tmp)
+        .await
+        .map_err(|e| BoxError::RegistryError {
+            registry: registry.to_string(),
+            message: format!("Failed to create {what} file: {e}"),
+        })?;
+    let mut writer = HashingFileWriter::new(file);
+
+    if let Err(e) = client.pull_blob(oci_ref, descriptor, &mut writer).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
         return Err(BoxError::RegistryError {
             registry: registry.to_string(),
-            message: format!(
-                "{what} digest mismatch: expected sha256:{expected_hex}, computed sha256:{actual_hex}"
-            ),
+            message: format!("Failed to pull {what}: {e}"),
         });
     }
-    Ok(())
+    let _ = writer.flush().await;
+    let _ = writer.shutdown().await;
+    let actual_hex = writer.finalize_hex();
+
+    match descriptor.digest.strip_prefix("sha256:") {
+        Some(expected_hex) if actual_hex.eq_ignore_ascii_case(expected_hex) => {}
+        Some(expected_hex) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(BoxError::RegistryError {
+                registry: registry.to_string(),
+                message: format!(
+                    "{what} digest mismatch: expected sha256:{expected_hex}, computed sha256:{actual_hex}"
+                ),
+            });
+        }
+        None => {
+            tracing::warn!(
+                digest = %descriptor.digest,
+                "Unrecognized digest algorithm; skipping {what} content verification"
+            );
+        }
+    }
+
+    tokio::fs::rename(&tmp, dest)
+        .await
+        .map_err(|e| BoxError::RegistryError {
+            registry: registry.to_string(),
+            message: format!("Failed to store {what} blob: {e}"),
+        })
 }
 
 /// Callback type for layer pull progress: `(current, total, digest, size_bytes)`.
@@ -304,33 +397,25 @@ impl RegistryPuller {
         blobs_dir: &Path,
         registry: &str,
     ) -> Result<()> {
-        // Pull config blob using pull_blob (streams to a Vec<u8>)
+        // Stream the config blob to disk, verifying its digest on the fly.
+        // pull_blob delivers raw bytes without validation, so the streaming
+        // hasher both bounds memory and guards against a buggy/malicious
+        // registry or a corrupted transfer being stored content-addressed and
+        // later extracted into the guest.
         let config_descriptor = &manifest.config;
-        let mut config_data: Vec<u8> = Vec::new();
-        self.client
-            .pull_blob(oci_ref, config_descriptor, &mut config_data)
-            .await
-            .map_err(|e| BoxError::RegistryError {
-                registry: registry.to_string(),
-                message: format!("Failed to pull config blob: {}", e),
-            })?;
-
-        // Verify the received bytes match the digest the manifest advertises.
-        // pull_blob streams raw bytes without validation, so without this a
-        // buggy/malicious registry or a corrupted transfer could be stored
-        // content-addressed-by-filename and later extracted into the guest.
-        verify_blob_digest(&config_data, &config_descriptor.digest, "config blob", registry)?;
-
         let config_digest_hex = config_descriptor
             .digest
             .strip_prefix("sha256:")
             .unwrap_or(&config_descriptor.digest);
-        std::fs::write(blobs_dir.join(config_digest_hex), &config_data).map_err(|e| {
-            BoxError::RegistryError {
-                registry: registry.to_string(),
-                message: format!("Failed to write config blob: {}", e),
-            }
-        })?;
+        stream_and_verify_blob(
+            &self.client,
+            oci_ref,
+            config_descriptor,
+            &blobs_dir.join(config_digest_hex),
+            "config blob",
+            registry,
+        )
+        .await?;
 
         // Pull layer blobs
         let total = manifest.layers.len();
@@ -345,33 +430,24 @@ impl RegistryPuller {
                 f(idx + 1, total, &layer.digest, layer.size);
             }
 
-            let mut layer_data: Vec<u8> = Vec::new();
-            self.client
-                .pull_blob(oci_ref, layer, &mut layer_data)
-                .await
-                .map_err(|e| BoxError::RegistryError {
-                    registry: registry.to_string(),
-                    message: format!("Failed to pull layer {}: {}", layer.digest, e),
-                })?;
-
-            // Verify the layer content matches its advertised digest before storing.
-            verify_blob_digest(&layer_data, &layer.digest, "layer", registry)?;
+            let layer_digest_hex = layer
+                .digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&layer.digest);
+            stream_and_verify_blob(
+                &self.client,
+                oci_ref,
+                layer,
+                &blobs_dir.join(layer_digest_hex),
+                "layer",
+                registry,
+            )
+            .await?;
 
             // Call progress callback again with negative size to signal completion
             if let Some(ref f) = self.progress_fn {
                 f(idx + 1, total, &layer.digest, -(layer.size));
             }
-
-            let layer_digest_hex = layer
-                .digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&layer.digest);
-            std::fs::write(blobs_dir.join(layer_digest_hex), &layer_data).map_err(|e| {
-                BoxError::RegistryError {
-                    registry: registry.to_string(),
-                    message: format!("Failed to write layer blob: {}", e),
-                }
-            })?;
         }
 
         Ok(())
@@ -576,6 +652,29 @@ mod tests {
         let auth = RegistryAuth::anonymous();
         assert!(auth.username.is_none());
         assert!(auth.password.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_hashing_file_writer_matches_sha256() {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob");
+        let payload = b"a3s-box streaming blob hash test payload";
+
+        let mut writer = HashingFileWriter::new(tokio::fs::File::create(&path).await.unwrap());
+        // Write in two chunks to exercise incremental hashing.
+        writer.write_all(&payload[..10]).await.unwrap();
+        writer.write_all(&payload[10..]).await.unwrap();
+        writer.flush().await.unwrap();
+        writer.shutdown().await.unwrap();
+        let streamed = writer.finalize_hex();
+
+        let expected = format!("{:x}", Sha256::digest(payload));
+        assert_eq!(streamed, expected, "streamed hash must equal sha256(payload)");
+        // The file on disk must contain exactly the written bytes.
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
     }
 
     #[test]

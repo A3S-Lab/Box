@@ -361,14 +361,13 @@ fn tsi_port_map_for_spec(spec: &InstanceSpec) -> Vec<String> {
         .collect()
 }
 
-#[cfg(all(not(target_os = "windows"), target_os = "macos"))]
+// On both macOS (netproxy) and Linux (passt), bridge-mode published ports are
+// forwarded by the native network backend, not TSI. libkrun discards the TSI
+// host_port_map once a virtio-net device is attached anyway, so feeding it the
+// port map is dead work; let the backend own forwarding instead.
+#[cfg(not(target_os = "windows"))]
 fn native_bridge_port_forwarding_handles_spec(spec: &InstanceSpec) -> bool {
     spec.network.is_some()
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn native_bridge_port_forwarding_handles_spec(_spec: &InstanceSpec) -> bool {
-    false
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -998,14 +997,15 @@ mod tests {
 
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     #[test]
-    fn test_tsi_port_map_for_spec_keeps_bridge_ports_without_native_forwarder() {
+    fn test_tsi_port_map_for_spec_skips_linux_bridge_ports() {
+        // On Linux, bridge-mode ports are forwarded by passt, not TSI.
         let spec = InstanceSpec {
             port_map: vec!["8080:80".to_string()],
             network: Some(test_network_config()),
             ..Default::default()
         };
 
-        assert_eq!(tsi_port_map_for_spec(&spec), vec!["8080:80".to_string()]);
+        assert!(tsi_port_map_for_spec(&spec).is_empty());
     }
 
     #[cfg(not(target_os = "windows"))]

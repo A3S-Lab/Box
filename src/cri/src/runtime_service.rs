@@ -1305,10 +1305,53 @@ impl BoxRuntimeService {
         self
     }
 
-    /// Load persisted state from disk. Call once after construction.
+    /// Load persisted state from disk and reconcile it against live VMs.
+    /// Call once after construction.
     pub async fn load_state(&self) {
         if let Err(e) = self.store.load().await {
             tracing::warn!(error = %e, "Failed to load persisted CRI state — starting fresh");
+            return;
+        }
+
+        // The microVMs do not survive a CRI server restart, and `vm_managers` is
+        // empty on a fresh process, so every sandbox/container loaded from disk
+        // has no backing VM. Without reconciliation, sandboxes stay
+        // `SandboxReady` and containers stay `Running` forever, hiding the
+        // restart from the kubelet. Mark orphaned sandboxes `NotReady` and
+        // downgrade their not-yet-exited containers to `Exited` (code 255) so the
+        // kubelet sees an accurate state and can recreate the pods. Mirrors the
+        // existing StopContainer/StopPodSandbox no-VM reconcile.
+        let live_sandboxes: std::collections::HashSet<String> = {
+            let vm_managers = self.vm_managers.read().await;
+            vm_managers.keys().cloned().collect()
+        };
+        let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+        for sandbox in self.store.sandboxes.list(None).await {
+            if !live_sandboxes.contains(&sandbox.id) {
+                self.store
+                    .update_sandbox_state(&sandbox.id, SandboxState::NotReady)
+                    .await;
+            }
+        }
+
+        let mut reconciled = 0usize;
+        for container in self.store.containers.list(None, None).await {
+            if !live_sandboxes.contains(&container.sandbox_id)
+                && container.state != ContainerState::Exited
+                && self
+                    .store
+                    .mark_container_exited(&container.id, now_ns, 255)
+                    .await
+            {
+                reconciled += 1;
+            }
+        }
+        if reconciled > 0 {
+            tracing::info!(
+                count = reconciled,
+                "Reconciled containers without a live VM to Exited after CRI restart"
+            );
         }
     }
 
