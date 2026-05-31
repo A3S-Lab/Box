@@ -44,6 +44,15 @@ impl ImageStore {
             ))
         })?;
 
+        // Sweep leftover pull staging directories from prior crashed/aborted
+        // pulls so they don't linger under store_dir/tmp forever.
+        let tmp_dir = store_dir.join("tmp");
+        if tmp_dir.is_dir() {
+            if let Err(e) = std::fs::remove_dir_all(&tmp_dir) {
+                tracing::debug!(path = %tmp_dir.display(), error = %e, "Failed to sweep image store tmp dir");
+            }
+        }
+
         let mut store = Self {
             store_dir: store_dir.to_path_buf(),
             index: Arc::new(RwLock::new(HashMap::new())),

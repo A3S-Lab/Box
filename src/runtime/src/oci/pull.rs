@@ -192,7 +192,14 @@ impl ImagePuller {
         }
 
         let pull_start = std::time::Instant::now();
-        self.puller.pull(reference, &tmp_dir).await?;
+        // Remove the partially-written temp directory on ANY failure so aborted
+        // pulls (network error, signature failure, disk error) don't accumulate
+        // under store_dir/tmp — each can be hundreds of MB and is never counted
+        // toward the cache size or evicted by the LRU.
+        if let Err(e) = self.puller.pull(reference, &tmp_dir).await {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(e);
+        }
         if let Some(ref m) = self.metrics {
             m.image_pull_total.inc();
             m.image_pull_duration
@@ -200,7 +207,13 @@ impl ImagePuller {
         }
 
         // Store in the image store
-        let stored = self.store.put(&full_ref, &digest, &tmp_dir).await?;
+        let stored = match self.store.put(&full_ref, &digest, &tmp_dir).await {
+            Ok(stored) => stored,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return Err(e);
+            }
+        };
 
         // Clean up temp directory
         if let Err(e) = std::fs::remove_dir_all(&tmp_dir) {

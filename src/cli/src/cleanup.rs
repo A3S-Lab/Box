@@ -100,6 +100,14 @@ pub fn cleanup_removed_box(record: &BoxRecord) {
         }
     }
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
+
+    // The shim stages single-file bind mounts in $TMPDIR/a3s-fs-mount-<box_id>
+    // and can never clean it up itself (it takes over the process via libkrun
+    // and never returns). Remove it here on box teardown.
+    let fs_mount_dir = std::env::temp_dir().join(format!("a3s-fs-mount-{}", record.id));
+    if fs_mount_dir.exists() {
+        let _ = std::fs::remove_dir_all(&fs_mount_dir);
+    }
 }
 
 /// Roll back a box record that was partially created.
