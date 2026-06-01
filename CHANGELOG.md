@@ -11,6 +11,9 @@ All notable changes to A3S Box will be documented in this file.
 - CRI `SecurityContext.no_new_privs`: the guest sets `PR_SET_NO_NEW_PRIVS`
   before exec, so a setuid/setgid or file-capability binary can no longer raise
   the container process's privileges (privileged containers opt out).
+- CRI `SecurityContext.readonly_rootfs`: the guest remounts the container root
+  read-only before exec (writes to `/` fail), while `/proc`, `/sys`, and inner
+  mounts stay writable.
 
 ### Fixed
 - CRI image identity now follows the digest, matching real runtimes:
@@ -26,6 +29,9 @@ All notable changes to A3S Box will be documented in this file.
     reference as a `repo_digest` and empty `repo_tags` (digest pins have no tag).
   - `ImageStatus`/`ListImages` surface the image's configured user as `uid`
     (numeric `uid`/`uid:gid`) or `username` (named user), from the OCI config.
+  - `CreateContainer` resolves the image the same way (exact ref, digest id,
+    `name@sha256:` pin, or unnormalized name), via a shared `ImageStore::resolve`
+    — so a container referencing an image by an untagged name now starts.
   - The full critest Image Manager conformance suite now passes (7/7): public
     image pull/remove by tag, without tag, and by digest; image status across
     all reference kinds; non-empty uid/username; and the listImage image and

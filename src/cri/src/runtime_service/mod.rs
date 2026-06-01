@@ -931,6 +931,12 @@ impl RuntimeService for BoxRuntimeService {
             if sc.no_new_privs && !sc.privileged {
                 env.push(("A3S_SEC_NO_NEW_PRIVS".to_string(), "1".to_string()));
             }
+            // readonly_rootfs: the guest remounts the container root read-only
+            // before exec. This is a deliberate config (not a hardening default),
+            // so it applies to privileged containers too.
+            if sc.readonly_rootfs {
+                env.push(("A3S_SEC_READONLY_ROOTFS".to_string(), "1".to_string()));
+            }
         }
         let user = container_user_from_linux_config(config.linux.as_ref())
             .or_else(|| image_config.and_then(|image| image.user.clone()));

@@ -412,6 +412,16 @@ fn build_command(
                 if !masked.is_empty() || !readonly.is_empty() {
                     apply_container_path_restrictions(rootfs, &masked, &readonly);
                 }
+                // CRI readonly_rootfs: remount the container root read-only
+                // AFTER the pseudo-filesystems and path restrictions are set up,
+                // so /proc, /sys, and any inner mounts stay writable.
+                if spec
+                    .env
+                    .iter()
+                    .any(|entry| entry == "A3S_SEC_READONLY_ROOTFS=1")
+                {
+                    remount_rootfs_readonly(rootfs);
+                }
             }
             Ok(_) => {
                 return Err(ExecOutput {
@@ -1154,6 +1164,46 @@ fn apply_container_path_restrictions(rootfs: &str, masked: &[&str], readonly: &[
         ) {
             warn!("Failed to remount {target} read-only: {e}");
         }
+    }
+}
+
+/// Remount a container `rootfs` read-only (CRI `readonly_rootfs`).
+///
+/// Recursively bind-mounts the rootfs onto itself, then remounts the top
+/// `MS_RDONLY`, so writes to the container root fail while pseudo-filesystems
+/// and volumes mounted inside it (separate mounts) stay writable. Idempotent: a
+/// rootfs that is already read-only is left untouched, so re-exec into the
+/// container does not stack mounts.
+#[cfg(target_os = "linux")]
+fn remount_rootfs_readonly(rootfs: &str) {
+    use nix::mount::{mount, MsFlags};
+
+    if nix::sys::statvfs::statvfs(rootfs)
+        .map(|s| s.flags().contains(nix::sys::statvfs::FsFlags::ST_RDONLY))
+        .unwrap_or(false)
+    {
+        return; // already read-only
+    }
+    // A fresh bind is read-write regardless of the source, so bind (recursively,
+    // to carry the inner pseudo-filesystems) then remount the top read-only.
+    if let Err(e) = mount(
+        Some(rootfs),
+        rootfs,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REC,
+        None::<&str>,
+    ) {
+        warn!("Failed to bind rootfs {rootfs} for read-only: {e}");
+        return;
+    }
+    if let Err(e) = mount(
+        None::<&str>,
+        rootfs,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+        None::<&str>,
+    ) {
+        warn!("Failed to remount rootfs {rootfs} read-only: {e}");
     }
 }
 

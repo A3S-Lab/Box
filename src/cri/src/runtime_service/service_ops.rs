@@ -79,7 +79,7 @@ impl BoxRuntimeService {
             return Ok(None);
         }
 
-        let Some(stored) = self.image_store.get(image_ref).await else {
+        let Some(stored) = self.image_store.resolve(image_ref).await else {
             return Err(Status::not_found(format!(
                 "Image not found locally: {image_ref}; pull it before CreateContainer"
             )));

@@ -9,7 +9,7 @@ use futures::Stream;
 use tonic::{Request, Response, Status};
 
 use a3s_box_core::StoredImage;
-use a3s_box_runtime::oci::{ImagePuller, ImageReference, ImageStore, OciImage, RegistryAuth};
+use a3s_box_runtime::oci::{ImagePuller, ImageStore, OciImage, RegistryAuth};
 
 use crate::cri_api::image_service_server::ImageService;
 use crate::cri_api::*;
@@ -141,23 +141,7 @@ impl BoxImageService {
     /// (digest), or by an unnormalized name (e.g. without a tag, which
     /// defaults to `:latest`).
     async fn resolve_digest(&self, image: &str) -> Option<String> {
-        // Exact stored reference (e.g. `repo:tag`).
-        if let Some(img) = self.image_store.get(image).await {
-            return Some(img.digest);
-        }
-        // Image id (a bare `sha256:...`) or a `name@sha256:...` digest pin —
-        // match on the digest component.
-        let digest_part = image.rsplit_once('@').map_or(image, |(_, digest)| digest);
-        if let Some(img) = self.image_store.get_by_digest(digest_part).await {
-            return Some(img.digest);
-        }
-        // Unnormalized name (e.g. a tagless name defaulting to `:latest`).
-        if let Ok(parsed) = ImageReference::parse(image) {
-            if let Some(img) = self.image_store.get(&parsed.full_reference()).await {
-                return Some(img.digest);
-            }
-        }
-        None
+        self.image_store.resolve(image).await.map(|img| img.digest)
     }
 }
 

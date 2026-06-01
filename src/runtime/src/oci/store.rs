@@ -97,6 +97,25 @@ impl ImageStore {
         }
     }
 
+    /// Resolve an image reference to a stored image.
+    ///
+    /// CRI callers may address an image by an exact stored reference, by its
+    /// image id (a bare `sha256:...` or a `name@sha256:...` digest pin), or by
+    /// an unnormalized name (e.g. a tagless name that defaults to `:latest`).
+    pub async fn resolve(&self, image: &str) -> Option<StoredImage> {
+        if let Some(found) = self.get(image).await {
+            return Some(found);
+        }
+        let digest_part = image.rsplit_once('@').map_or(image, |(_, digest)| digest);
+        if let Some(found) = self.get_by_digest(digest_part).await {
+            return Some(found);
+        }
+        match super::ImageReference::parse(image) {
+            Ok(parsed) => self.get(&parsed.full_reference()).await,
+            Err(_) => None,
+        }
+    }
+
     /// Store an image from a source directory.
     ///
     /// Copies the OCI image layout from `source_dir` into the store
@@ -487,6 +506,46 @@ mod tests {
         assert!(store.get("img:v1").await.is_none());
         assert!(store.get("img:latest").await.is_none());
         assert!(!path.exists(), "shared layout should be deleted");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_by_name_digest_and_normalized() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        create_test_oci_layout(&source_dir);
+
+        let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
+        store
+            .put(
+                "gcr.io/x/test-image-predefined-group:latest",
+                "sha256:grp",
+                &source_dir,
+            )
+            .await
+            .unwrap();
+
+        // Exact reference.
+        assert!(store
+            .resolve("gcr.io/x/test-image-predefined-group:latest")
+            .await
+            .is_some());
+        // Unnormalized name (no tag -> :latest) — the CreateContainer case.
+        assert_eq!(
+            store
+                .resolve("gcr.io/x/test-image-predefined-group")
+                .await
+                .map(|i| i.digest),
+            Some("sha256:grp".to_string())
+        );
+        // Image id (bare digest) and a name@digest pin.
+        assert!(store.resolve("sha256:grp").await.is_some());
+        assert!(store
+            .resolve("gcr.io/x/test-image-predefined-group@sha256:grp")
+            .await
+            .is_some());
+        // Unknown.
+        assert!(store.resolve("nope:latest").await.is_none());
     }
 
     #[tokio::test]
