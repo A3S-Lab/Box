@@ -17,7 +17,7 @@ suite so regressions are visible and progress is measurable.
 | `critest` | v1.30.1 |
 | a3s-box | 2.0.5 (+ unreleased CRI maturity work, heading to 2.0.6) |
 | Host | Linux KVM node (`/dev/kvm`), Ubuntu 24.04 |
-| Result | **~44 Passed · ~38 Failed · 15 Skipped** (42/40 measured at the full re-run; +2 from writable volume mounts landed since) |
+| Result | **44 Passed · 38 Failed · 15 Skipped** (ran 82 of 97 specs; full re-run at the hardened HEAD, no regressions) |
 
 This is up from the original **21 Passed / 59 Failed** baseline (2.0.4): streaming
 exec/attach, container logs + reopen, force-RemoveContainer, safe sysctls,
