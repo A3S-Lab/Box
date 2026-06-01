@@ -760,6 +760,18 @@ impl RuntimeService for BoxRuntimeService {
                     .join(",");
                 env.push(("A3S_SEC_SUPPLEMENTAL_GROUPS".to_string(), groups));
             }
+            // CRI MaskedPaths/ReadonlyPaths — ':'-separated absolute paths the
+            // guest masks (bind /dev/null or ro tmpfs) / remounts read-only
+            // inside the container rootfs.
+            if !sc.masked_paths.is_empty() {
+                env.push(("A3S_SEC_MASKED_PATHS".to_string(), sc.masked_paths.join(":")));
+            }
+            if !sc.readonly_paths.is_empty() {
+                env.push((
+                    "A3S_SEC_READONLY_PATHS".to_string(),
+                    sc.readonly_paths.join(":"),
+                ));
+            }
         }
         let user = container_user_from_linux_config(config.linux.as_ref())
             .or_else(|| image_config.and_then(|image| image.user.clone()));

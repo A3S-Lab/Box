@@ -405,6 +405,13 @@ fn build_command(
                 // inside the rootfs (idempotent) so in-container reads of
                 // /proc/self/* and /sys/class/* work like any container runtime.
                 ensure_container_pseudo_filesystems(rootfs);
+                // CRI MaskedPaths/ReadonlyPaths arrive as ':'-separated absolute
+                // paths over A3S_SEC_MASKED_PATHS / A3S_SEC_READONLY_PATHS.
+                let masked = parse_sec_path_list(spec.env, "A3S_SEC_MASKED_PATHS=");
+                let readonly = parse_sec_path_list(spec.env, "A3S_SEC_READONLY_PATHS=");
+                if !masked.is_empty() || !readonly.is_empty() {
+                    apply_container_path_restrictions(rootfs, &masked, &readonly);
+                }
             }
             Ok(_) => {
                 return Err(ExecOutput {
@@ -912,6 +919,88 @@ fn ensure_container_pseudo_filesystems(rootfs: &str) {
             None::<&str>,
         ) {
             warn!("Failed to mount {fstype} at {target}: {e}");
+        }
+    }
+}
+
+/// Parse a `':'`-separated absolute-path list from an `A3S_SEC_*` env entry.
+#[cfg(target_os = "linux")]
+fn parse_sec_path_list<'a>(env: &'a [String], prefix: &str) -> Vec<&'a str> {
+    env.iter()
+        .find_map(|entry| entry.strip_prefix(prefix))
+        .map(|value| value.split(':').filter(|path| !path.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// Apply CRI `MaskedPaths` and `ReadonlyPaths` inside a container `rootfs`.
+///
+/// Mirrors the standard OCI runtime behaviour, mounting under `<rootfs>` (in the
+/// guest mount namespace) before the container `chroot`s in:
+/// - a masked *file* is shadowed by a bind mount of `/dev/null` (so execing or
+///   reading it yields EACCES — "Permission denied");
+/// - a masked *directory* is shadowed by an empty read-only `tmpfs`;
+/// - a read-only path is bind-mounted onto itself and remounted `MS_RDONLY`
+///   (so writes yield EROFS — "Read-only file system").
+///
+/// Best-effort: an absent path is skipped and any mount failure is logged.
+#[cfg(target_os = "linux")]
+fn apply_container_path_restrictions(rootfs: &str, masked: &[&str], readonly: &[&str]) {
+    use nix::mount::{mount, MsFlags};
+
+    for path in masked {
+        let target = format!("{rootfs}{path}");
+        match std::fs::metadata(&target) {
+            Ok(meta) if meta.is_dir() => {
+                if let Err(e) = mount(
+                    Some("tmpfs"),
+                    target.as_str(),
+                    Some("tmpfs"),
+                    MsFlags::MS_RDONLY,
+                    Some("size=0k"),
+                ) {
+                    warn!("Failed to mask directory {target}: {e}");
+                }
+            }
+            Ok(_) => {
+                if let Err(e) = mount(
+                    Some("/dev/null"),
+                    target.as_str(),
+                    None::<&str>,
+                    MsFlags::MS_BIND,
+                    None::<&str>,
+                ) {
+                    warn!("Failed to mask file {target}: {e}");
+                }
+            }
+            Err(_) => {} // path absent in this rootfs; nothing to mask
+        }
+    }
+
+    for path in readonly {
+        let target = format!("{rootfs}{path}");
+        if !std::path::Path::new(&target).exists() {
+            continue;
+        }
+        // A fresh bind is read-write regardless of the source, so bind then
+        // remount read-only — the order matters.
+        if let Err(e) = mount(
+            Some(target.as_str()),
+            target.as_str(),
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        ) {
+            warn!("Failed to bind {target} for read-only: {e}");
+            continue;
+        }
+        if let Err(e) = mount(
+            None::<&str>,
+            target.as_str(),
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+            None::<&str>,
+        ) {
+            warn!("Failed to remount {target} read-only: {e}");
         }
     }
 }
