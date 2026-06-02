@@ -1210,7 +1210,12 @@ fn apply_container_path_restrictions(rootfs: &str, masked: &[&str], readonly: &[
     // differs from its parent directory's. This makes re-application on every
     // exec idempotent (build_command runs per-exec) instead of stacking mounts.
     let is_mountpoint = |target: &str| -> bool {
-        let Ok(dev) = std::fs::metadata(target).map(|m| m.dev()) else {
+        // lstat, not stat: a masked symlink (e.g. busybox's /bin/ls) must be
+        // compared as the link entry itself. Following it would resolve to a
+        // different filesystem (the guest-root busybox), making st_dev differ
+        // from the parent and wrongly reporting "already a mount" — which would
+        // skip masking the symlink on the very first exec.
+        let Ok(dev) = std::fs::symlink_metadata(target).map(|m| m.dev()) else {
             return false;
         };
         std::path::Path::new(target)
@@ -1229,7 +1234,9 @@ fn apply_container_path_restrictions(rootfs: &str, masked: &[&str], readonly: &[
         if is_mountpoint(&target) {
             continue; // already masked
         }
-        match std::fs::metadata(&target) {
+        // lstat (no symlink follow): a masked symlink must be treated as a file
+        // so we mask the entry itself, not whatever it points at.
+        match std::fs::symlink_metadata(&target) {
             Ok(meta) if meta.is_dir() => {
                 if let Err(e) = mount(
                     Some("tmpfs"),
@@ -1242,14 +1249,34 @@ fn apply_container_path_restrictions(rootfs: &str, masked: &[&str], readonly: &[
                 }
             }
             Ok(_) => {
-                if let Err(e) = mount(
-                    Some("/dev/null"),
+                // Bind /dev/null over the entry WITHOUT following it: open with
+                // O_PATH|O_NOFOLLOW and mount onto /proc/self/fd/N so a symlinked
+                // target (e.g. busybox's /bin/ls -> /bin/busybox) masks the
+                // symlink itself — exec'ing it then yields EACCES — instead of
+                // resolving the link against the guest root and masking the wrong
+                // file. (Same technique container runtimes use against symlink
+                // attacks.)
+                use std::os::fd::AsRawFd;
+                match nix::fcntl::open(
                     target.as_str(),
-                    None::<&str>,
-                    MsFlags::MS_BIND,
-                    None::<&str>,
+                    nix::fcntl::OFlag::O_PATH
+                        | nix::fcntl::OFlag::O_NOFOLLOW
+                        | nix::fcntl::OFlag::O_CLOEXEC,
+                    nix::sys::stat::Mode::empty(),
                 ) {
-                    warn!("Failed to mask file {target}: {e}");
+                    Ok(entry_fd) => {
+                        let fd_path = format!("/proc/self/fd/{}", entry_fd.as_raw_fd());
+                        if let Err(e) = mount(
+                            Some("/dev/null"),
+                            fd_path.as_str(),
+                            None::<&str>,
+                            MsFlags::MS_BIND,
+                            None::<&str>,
+                        ) {
+                            warn!("Failed to mask file {target}: {e}");
+                        }
+                    }
+                    Err(e) => warn!("Failed to open masked file {target}: {e}"),
                 }
             }
             Err(_) => {} // path absent in this rootfs; nothing to mask
