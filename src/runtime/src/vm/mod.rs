@@ -814,6 +814,27 @@ impl VmManager {
             );
         }
 
+        // Remove the box working directory itself (overlay upper/work, logs,
+        // leftover metadata) for non-persistent boxes. Without this, ephemeral
+        // CRI pods leak their `boxes/<id>` directory on every destroy; the
+        // accumulation slows later RunPodSandbox calls until they time out
+        // (observed: pod #21 after churning 20). Persistent boxes keep their
+        // dir intentionally.
+        if !self.config.persistent {
+            match std::fs::remove_dir_all(&box_dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(
+                        box_id = %self.box_id,
+                        path = %box_dir.display(),
+                        error = %e,
+                        "Failed to remove box directory on destroy"
+                    );
+                }
+            }
+        }
+
         // Record Prometheus metrics
         if let Some(ref prom) = self.prom {
             prom.vm_destroyed_total.inc();
