@@ -23,6 +23,13 @@ All notable changes to A3S Box will be documented in this file.
   `/etc/passwd` group when no `RunAsGroup` is set.
 
 ### Security
+- Host namespaces are now rejected fail-closed: a pod or container requesting
+  `HostNetwork`/`HostPID`/`HostIpc` (or a host user namespace) — `NamespaceMode::NODE`
+  — gets a clear `Unimplemented` error instead of being silently run fully
+  isolated. A microVM-per-pod cannot share the host's namespaces, so silently
+  accepting the request gave the workload wrong (fail-open) network/PID/IPC
+  semantics. (`POD`/`CONTAINER` are accepted; all pod containers share the one
+  VM-wide namespace set.)
 - AppArmor: a requested Localhost profile (modern `apparmor` SecurityProfile or
   the deprecated `apparmor_profile` string) is now validated against the host's
   loaded profiles and the container is rejected when the profile is not loaded,

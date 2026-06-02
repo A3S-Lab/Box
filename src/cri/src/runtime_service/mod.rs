@@ -470,6 +470,17 @@ impl RuntimeService for BoxRuntimeService {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("sandbox metadata required"))?;
 
+        // Reject host-namespace requests fail-closed (microVM cannot share the
+        // host's namespaces) before acquiring any VM or network resources.
+        convert::validate_namespace_options(
+            config
+                .linux
+                .as_ref()
+                .and_then(|linux| linux.security_context.as_ref())
+                .and_then(|sc| sc.namespace_options.as_ref()),
+            "RunPodSandbox",
+        )?;
+
         tracing::info!(
             name = %metadata.name,
             namespace = %metadata.namespace,
@@ -890,6 +901,15 @@ impl RuntimeService for BoxRuntimeService {
             .metadata
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("container metadata required"))?;
+        // Reject host-namespace requests fail-closed before allocating anything.
+        convert::validate_namespace_options(
+            config
+                .linux
+                .as_ref()
+                .and_then(|linux| linux.security_context.as_ref())
+                .and_then(|sc| sc.namespace_options.as_ref()),
+            "CreateContainer",
+        )?;
         if !config.devices.is_empty() {
             return Err(Status::unimplemented(
                 "CRI devices are not yet supported for microVM-backed containers",
