@@ -21,6 +21,11 @@ All notable changes to A3S Box will be documented in this file.
   the guest applies the groups that user belongs to per the image's `/etc/group`
   (runc-style initgroups) and defaults the primary gid to the user's
   `/etc/passwd` group when no `RunAsGroup` is set.
+- `build --target <stage>` builds only up to the named (or indexed) stage of a
+  multi-stage build and emits that stage's image; later stages are not executed.
+- `build --no-cache` disables the layer build cache so every layer is rebuilt.
+- `inspect <name>` is now polymorphic: it resolves a container first, then falls
+  back to an image (matching `docker inspect`), instead of only handling boxes.
 - `ADD --chown=user[:group]` is now supported (was "not supported yet").
 - COPY/ADD `--chown` now also resolves named users/groups from the rootfs
   `/etc/passwd`/`/etc/group`, not only numeric IDs.

@@ -1004,6 +1004,8 @@ mod tests {
             build_args: HashMap::new(),
             quiet: true,
             platforms: vec![],
+            target: None,
+            no_cache: false,
             metrics: None,
         };
         let tmp = tempfile::TempDir::new().unwrap();

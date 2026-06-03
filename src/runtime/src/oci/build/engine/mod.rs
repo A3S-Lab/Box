@@ -49,6 +49,11 @@ pub struct BuildConfig {
     /// Target platforms for multi-platform builds.
     /// Empty means build for the host platform only.
     pub platforms: Vec<Platform>,
+    /// Build only up to this stage (`--target`), by alias or numeric index.
+    /// `None` builds the final stage.
+    pub target: Option<String>,
+    /// Disable the layer build cache (`--no-cache`): every layer is rebuilt.
+    pub no_cache: bool,
     /// Prometheus metrics (optional).
     pub metrics: Option<crate::prom::RuntimeMetrics>,
 }
@@ -168,6 +173,20 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
     let stages = split_into_stages(&dockerfile.instructions);
     let total_stages = stages.len();
 
+    // Resolve --target to the stage that produces the output image (by alias or
+    // numeric index). Without --target the final stage is the output. Stages
+    // after the target are never executed.
+    let output_stage_idx = match config.target.as_deref() {
+        Some(target) => stages
+            .iter()
+            .position(|s| s.alias.as_deref() == Some(target))
+            .or_else(|| target.parse::<usize>().ok().filter(|i| *i < total_stages))
+            .ok_or_else(|| {
+                BoxError::BuildError(format!("target build stage '{}' not found", target))
+            })?,
+        None => total_stages - 1,
+    };
+
     // Track completed stages: (alias, rootfs_path)
     let mut completed_stages: Vec<(Option<String>, PathBuf)> = Vec::new();
 
@@ -183,7 +202,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
     let mut global_step = 0;
 
     for (stage_idx, stage) in stages.iter().enumerate() {
-        let is_final_stage = stage_idx == total_stages - 1;
+        let is_final_stage = stage_idx == output_stage_idx;
 
         let rootfs_dir = build_dir.path().join(format!("rootfs_{}", stage_idx));
         let layers_dir = build_dir.path().join(format!("layers_{}", stage_idx));
@@ -199,7 +218,11 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         let mut base_diff_ids: Vec<String> = Vec::new();
 
         // Layer-level build cache (best-effort; None disables caching).
-        let cache = BuildCache::open();
+        let cache = if config.no_cache {
+            None
+        } else {
+            BuildCache::open()
+        };
         // Running chain key over all instructions in this stage. Reset at FROM.
         let mut chain_key = String::new();
         // Once a cache miss forces re-execution, all later layers must be rebuilt.
@@ -725,10 +748,12 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
             final_state = state;
             final_base_layers = base_layers;
             final_base_diff_ids = base_diff_ids;
+            // Stages after the --target stage are not part of the output; stop.
+            break;
         }
     }
 
-    // Assemble the final OCI image from the last stage
+    // Assemble the final OCI image from the output (final or --target) stage
     let reference = config
         .tag
         .clone()
@@ -736,7 +761,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
     let final_layers_dir = build_dir
         .path()
-        .join(format!("layers_{}", total_stages - 1));
+        .join(format!("layers_{}", output_stage_idx));
 
     // Determine target platform (use first platform or host default)
     let target_platform = config

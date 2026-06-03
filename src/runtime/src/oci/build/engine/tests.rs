@@ -64,6 +64,8 @@ mod tests {
             build_args: HashMap::new(),
             quiet: true,
             platforms,
+            target: None,
+            no_cache: false,
             metrics: None,
         }
     }
@@ -124,6 +126,8 @@ LABEL org.opencontainers.image.title="scratch-smoke"
                 build_args: HashMap::new(),
                 quiet: true,
                 platforms: vec![],
+                target: None,
+                no_cache: false,
                 metrics: None,
             },
             store.clone(),
@@ -151,6 +155,68 @@ LABEL org.opencontainers.image.title="scratch-smoke"
     /// `context_dir.join("/abs")` discarded the base (Path::join semantics) and
     /// looked at the host root, so multi-stage copies failed with "source not
     /// found".
+    /// `--target <stage>` builds only up to the named stage and emits that
+    /// stage's image (not the final stage), and never runs later stages.
+    #[tokio::test]
+    async fn test_build_target_stage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let context = tmp.path().join("context");
+        let store_dir = tmp.path().join("images");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::write(context.join("a.txt"), "a").unwrap();
+        std::fs::write(context.join("b.txt"), "b").unwrap();
+        std::fs::write(
+            context.join("Dockerfile"),
+            "FROM scratch AS builder\nCOPY a.txt /a.txt\nCMD [\"builder\"]\n\nFROM scratch\nCOPY b.txt /b.txt\nCMD [\"final\"]\n",
+        )
+        .unwrap();
+
+        let store = Arc::new(ImageStore::new(&store_dir, 1024 * 1024 * 100).unwrap());
+        let result = build(
+            BuildConfig {
+                context_dir: context.clone(),
+                dockerfile_path: context.join("Dockerfile"),
+                tag: Some("targeted:latest".to_string()),
+                build_args: HashMap::new(),
+                quiet: true,
+                platforms: vec![],
+                target: Some("builder".to_string()),
+                no_cache: false,
+                metrics: None,
+            },
+            store.clone(),
+        )
+        .await
+        .unwrap();
+
+        // The output image is the `builder` stage: CMD ["builder"], and its
+        // single layer contains a.txt (NOT b.txt from the final stage).
+        let stored = store.get("targeted:latest").await.unwrap();
+        let image = OciImage::from_path(&stored.path).unwrap();
+        assert_eq!(image.config().cmd, Some(vec!["builder".to_string()]));
+        assert_eq!(result.layer_count, 1);
+
+        // An unknown --target is a clear error.
+        let err = build(
+            BuildConfig {
+                context_dir: context.clone(),
+                dockerfile_path: context.join("Dockerfile"),
+                tag: Some("x:latest".to_string()),
+                build_args: HashMap::new(),
+                quiet: true,
+                platforms: vec![],
+                target: Some("nope".to_string()),
+                no_cache: false,
+                metrics: None,
+            },
+            store.clone(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("target build stage 'nope' not found"));
+    }
+
     /// `.dockerignore` must keep ignored context paths (secrets, `.git`,
     /// `node_modules`) out of `COPY .`, with `!` negation re-including.
     #[tokio::test]
@@ -178,6 +244,8 @@ LABEL org.opencontainers.image.title="scratch-smoke"
                 build_args: HashMap::new(),
                 quiet: true,
                 platforms: vec![],
+                target: None,
+                no_cache: false,
                 metrics: None,
             },
             store.clone(),
@@ -235,6 +303,8 @@ CMD ["/work/run.sh"]
                 build_args: HashMap::new(),
                 quiet: true,
                 platforms: vec![],
+                target: None,
+                no_cache: false,
                 metrics: None,
             },
             store.clone(),
