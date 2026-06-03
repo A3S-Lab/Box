@@ -142,6 +142,8 @@ Unsupported or guarded options fail early instead of being silently stored: host
 a3s-box pull alpine:latest
 a3s-box pull --verify-key cosign.pub ghcr.io/org/image:v1
 a3s-box images
+a3s-box images --filter reference='alpine*' --filter label=tier=web
+a3s-box inspect alpine:latest          # polymorphic: resolves a container or an image
 a3s-box image-inspect alpine:latest
 a3s-box tag alpine:latest local-alpine:dev
 a3s-box save -o alpine.tar alpine:latest
@@ -157,13 +159,15 @@ Build support is intentionally explicit:
 a3s-box build -t app:dev .
 a3s-box build -t app:dev -f Containerfile .
 a3s-box build -t app:dev --build-arg VERSION=1.2.3 --platform linux/amd64 .
+a3s-box build -t builder --target builder --no-cache .   # stop at a stage, skip the cache
 ```
 
-Supported Dockerfile subset: `FROM` including `scratch`, shell-form `RUN`, shell-form `COPY`/`ADD`, `WORKDIR`, `ENV`, `ENTRYPOINT`, `CMD`, `EXPOSE`, `LABEL`, `USER`, `ARG`, `SHELL`, `STOPSIGNAL`, `HEALTHCHECK`, `ONBUILD` metadata triggers, and `VOLUME`.
+Supported Dockerfile subset: `FROM` including `scratch`, shell-form `RUN`, shell-form `COPY`/`ADD` (incl. `COPY --from=<stage>`, `COPY`/`ADD --chown=user[:group]`), `WORKDIR`, `ENV`, `ENTRYPOINT`, `CMD`, `EXPOSE`, `LABEL`, `USER`, `ARG`, `SHELL`, `STOPSIGNAL`, `HEALTHCHECK`, `ONBUILD` metadata triggers, and `VOLUME`. A context-root `.dockerignore` is honored.
+
+Build flags: `-t/--tag`, `-f/--file`, `--build-arg`, `--platform`, `--target <stage>` (build only up to a stage), `--no-cache` (rebuild every layer), `-q/--quiet`.
 
 Boundaries:
 
-- unsupported flags such as `COPY --chown` and `ADD --chown` fail explicitly;
 - `RUN` uses isolated Linux `chroot`, requires root-capable Linux, validates shell/workdir preconditions, and has a Linux-only ignored smoke test;
 - macOS `RUN` fails by default; `A3S_BOX_UNSAFE_HOST_RUN=1` enables unsafe host-side experiments only;
 - `--platform` records one target platform; multi-platform image indexes are not implemented.
