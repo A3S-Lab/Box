@@ -3,24 +3,43 @@
 use clap::Args;
 use serde::Serialize;
 
-use crate::resolve;
+use crate::resolve::{self, ResolveError};
 use crate::state::{BoxRecord, StateFile};
 use crate::status;
 
+use super::image_inspect;
+
 #[derive(Args)]
 pub struct InspectArgs {
-    /// Box name or ID
+    /// Container or image name/ID
     pub r#box: String,
 }
 
 pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?;
 
-    let json = inspect_json(record)?;
-    println!("{json}");
-
-    Ok(())
+    // `docker inspect` is polymorphic: try a container first, then fall back to
+    // an image so `inspect <image>` works the same as `inspect <container>`.
+    match resolve::resolve(&state, &args.r#box) {
+        Ok(record) => {
+            println!("{}", inspect_json(record)?);
+            Ok(())
+        }
+        Err(ResolveError::NotFound(_)) => {
+            match image_inspect::try_image_inspect_json(&args.r#box).await? {
+                Some(json) => {
+                    println!("{json}");
+                    Ok(())
+                }
+                None => Err(format!(
+                    "No such container or image: {}",
+                    args.r#box
+                )
+                .into()),
+            }
+        }
+        Err(other) => Err(other.into()),
+    }
 }
 
 #[derive(Serialize)]
