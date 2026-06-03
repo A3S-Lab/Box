@@ -921,15 +921,23 @@ fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-/// Perform graceful shutdown: forward SIGTERM to children, wait, then force-kill.
+/// Perform graceful shutdown: forward the stop signal to children, wait, then
+/// force-kill. The signal is the container's STOPSIGNAL (`BOX_STOP_SIGNAL`,
+/// e.g. SIGINT/SIGQUIT) if set, else SIGTERM — so an image's STOPSIGNAL is
+/// honored even though libkrun always delivers SIGTERM to PID 1.
 fn graceful_shutdown(timeout_ms: u64) {
-    // Step 1: Send SIGTERM to all processes (except ourselves, PID 1)
+    // Step 1: Send the stop signal to all processes (except ourselves, PID 1)
     #[cfg(target_os = "linux")]
     {
-        info!("Forwarding SIGTERM to all child processes");
-        // kill(-1, SIGTERM) sends to all processes except PID 1
+        let stop_signal = std::env::var("BOX_STOP_SIGNAL")
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .filter(|n| *n > 0 && *n < 64)
+            .unwrap_or(libc::SIGTERM);
+        info!(stop_signal, "Forwarding stop signal to all child processes");
+        // kill(-1, sig) sends to all processes except PID 1
         unsafe {
-            libc::kill(-1, libc::SIGTERM);
+            libc::kill(-1, stop_signal);
         }
     }
 

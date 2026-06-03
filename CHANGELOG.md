@@ -88,6 +88,11 @@ All notable changes to A3S Box will be documented in this file.
   shutdown already reaps VMs, so this is a no-op then.
 
 ### Fixed
+- Image `STOPSIGNAL` is now honored on stop: the container main process
+  receives the image-configured signal (e.g. `SIGINT`/`SIGQUIT`) for graceful
+  shutdown, instead of always `SIGTERM`. The signal is carried to guest init as
+  `BOX_STOP_SIGNAL` and forwarded to the container, since libkrun always
+  delivers SIGTERM to the guest PID 1 regardless of the host-side signal.
 - `RUN chmod` (mode-only changes) are now captured into the build layer, so
   the common `COPY script.sh` + `RUN chmod +x script.sh` makes the script
   executable in the image (previously the chmod was dropped and the script

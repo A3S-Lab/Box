@@ -145,6 +145,17 @@ impl VmManager {
                 env.push(("BOX_EXEC_USER".to_string(), user.clone()));
             }
 
+            // Pass the image STOPSIGNAL (resolved to a number) to guest init so
+            // that, on stop, it forwards THAT signal to the container instead of
+            // a hardcoded SIGTERM (host->libkrun delivers SIGTERM to PID 1
+            // regardless, so the desired signal must be carried in-band).
+            if let Some(sig) = layout.oci_config.as_ref().and_then(|c| c.stop_signal.as_ref()) {
+                let num = a3s_box_core::vmm::parse_signal_name(sig);
+                if num > 0 {
+                    env.push(("BOX_STOP_SIGNAL".to_string(), num.to_string()));
+                }
+            }
+
             // Pass container environment variables with BOX_EXEC_ENV_ prefix
             for (key, value) in container_env {
                 env.push((format!("BOX_EXEC_ENV_{}", key), value));
