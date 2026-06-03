@@ -79,20 +79,20 @@ pub struct CommonBoxArgs {
     #[arg(long)]
     pub health_cmd: Option<String>,
 
-    /// Health check interval in seconds (default: 30)
-    #[arg(long, default_value = "30")]
+    /// Health check interval, e.g. `30s`, `1m30s` (bare number = seconds; default: 30s)
+    #[arg(long, default_value = "30", value_parser = crate::output::parse_duration_secs)]
     pub health_interval: u64,
 
-    /// Health check timeout in seconds (default: 5)
-    #[arg(long, default_value = "5")]
+    /// Health check timeout, e.g. `5s`, `1m` (bare number = seconds; default: 5s)
+    #[arg(long, default_value = "5", value_parser = crate::output::parse_duration_secs)]
     pub health_timeout: u64,
 
     /// Health check retries before unhealthy (default: 3)
     #[arg(long, default_value = "3")]
     pub health_retries: u32,
 
-    /// Health check start period in seconds (default: 0)
-    #[arg(long, default_value = "0")]
+    /// Health check start period, e.g. `10s`, `1m` (bare number = seconds; default: 0s)
+    #[arg(long, default_value = "0", value_parser = crate::output::parse_duration_secs)]
     pub health_start_period: u64,
 
     /// Limit PIDs inside the box (--pids-limit)
