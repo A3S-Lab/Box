@@ -62,6 +62,46 @@ struct Args {
     port_map: Vec<String>,
 }
 
+/// Holds the libkrun graceful-shutdown event fd for the signal handler. Set
+/// before `start_enter`; -1 means unavailable.
+#[cfg(target_os = "linux")]
+static SHUTDOWN_EVENTFD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// SIGTERM/SIGINT handler: write to the krun shutdown event fd so libkrun (in
+/// start_enter) shuts the guest down cleanly, letting guest init forward the
+/// stop signal to the container instead of the VM being killed abruptly.
+/// Async-signal-safe: a single 8-byte `write` to an eventfd.
+#[cfg(target_os = "linux")]
+extern "C" fn shim_shutdown_handler(_: libc::c_int) {
+    let fd = SHUTDOWN_EVENTFD.load(std::sync::atomic::Ordering::SeqCst);
+    if fd >= 0 {
+        let val: u64 = 1;
+        unsafe {
+            libc::write(fd, &val as *const u64 as *const libc::c_void, 8);
+        }
+    }
+}
+
+/// Register the graceful-shutdown handler against the VM's krun shutdown
+/// eventfd. Must be called before `start_enter`.
+#[cfg(target_os = "linux")]
+fn install_graceful_shutdown(ctx: &KrunContext) {
+    let fd = ctx.shutdown_eventfd();
+    if fd < 0 {
+        tracing::warn!(fd, "krun shutdown eventfd unavailable; stop will be abrupt");
+        return;
+    }
+    SHUTDOWN_EVENTFD.store(fd, std::sync::atomic::Ordering::SeqCst);
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = shim_shutdown_handler as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    }
+    tracing::info!(fd, "Installed graceful-shutdown handler (SIGTERM/SIGINT -> krun shutdown)");
+}
+
 fn main() {
     // Initialize logging
     tracing_subscriber::fmt()
@@ -797,6 +837,12 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // Apply cgroup v2 resource limits (Linux only, best-effort)
     #[cfg(target_os = "linux")]
     apply_cgroup_limits(spec);
+
+    // Install the graceful-shutdown handler so a stop (SIGTERM/SIGINT to this
+    // shim) triggers a clean guest shutdown via the krun shutdown eventfd,
+    // rather than killing the VM abruptly.
+    #[cfg(target_os = "linux")]
+    install_graceful_shutdown(&ctx);
 
     // Start VM (process takeover - never returns on success)
     tracing::info!(box_id = %spec.box_id, "Starting VM (process takeover)");

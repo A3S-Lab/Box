@@ -21,9 +21,9 @@ use libkrun_sys::{krun_add_net_tcp, krun_add_vsock_port_windows, krun_set_kernel
 #[cfg(target_os = "linux")]
 use libkrun_sys::{krun_add_net_unixstream, krun_split_irqchip};
 use libkrun_sys::{
-    krun_add_virtiofs, krun_create_ctx, krun_free_ctx, krun_init_log, krun_set_console_output,
-    krun_set_env, krun_set_exec, krun_set_rlimits, krun_set_root, krun_set_vm_config,
-    krun_set_workdir, krun_setgid, krun_setuid, krun_start_enter,
+    krun_add_virtiofs, krun_create_ctx, krun_free_ctx, krun_get_shutdown_eventfd, krun_init_log,
+    krun_set_console_output, krun_set_env, krun_set_exec, krun_set_rlimits, krun_set_root,
+    krun_set_vm_config, krun_set_workdir, krun_setgid, krun_setuid, krun_start_enter,
 };
 
 /// Thin wrapper that owns a libkrun context.
@@ -601,6 +601,16 @@ impl KrunContext {
             tracing::error!(status, "krun_start_enter failed");
         }
         status
+    }
+
+    /// The libkrun graceful-shutdown event fd. Writing a `u64` to it asks
+    /// libkrun (while blocked in `start_enter`) to shut the guest down cleanly
+    /// — which lets guest init run its graceful shutdown (forwarding the stop
+    /// signal to the container) instead of being killed abruptly. Returns a
+    /// negative value if unavailable.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn shutdown_eventfd(&self) -> i32 {
+        unsafe { krun_get_shutdown_eventfd(self.ctx_id) }
     }
 }
 
