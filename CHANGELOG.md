@@ -21,6 +21,9 @@ All notable changes to A3S Box will be documented in this file.
   the guest applies the groups that user belongs to per the image's `/etc/group`
   (runc-style initgroups) and defaults the primary gid to the user's
   `/etc/passwd` group when no `RunAsGroup` is set.
+- `import` creates a single-layer image from a rootfs tarball (`.tar`/`.tar.gz`),
+  with Dockerfile-style `--change` directives (CMD/ENTRYPOINT/ENV/WORKDIR/USER/
+  EXPOSE/LABEL/VOLUME) and `--message` — matching `docker import`.
 - `images --filter` supports `reference=<glob>` and `label=<key>[=<value>]`
   (repeatable; all must match), matching common `docker images --filter` usage.
 - `build --target <stage>` builds only up to the named (or indexed) stage of a
