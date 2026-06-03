@@ -93,6 +93,18 @@ All notable changes to A3S Box will be documented in this file.
   shutdown already reaps VMs, so this is a no-op then.
 
 ### Fixed
+- Docker build/runtime parity (found via a 51-case real-Linux probe):
+  - `LABEL a=1 b=2 c=3` and `EXPOSE 80 443 8080/udp` on one line now parse every
+    item (previously LABEL merged into one key and EXPOSE kept only the first
+    port); bare EXPOSE ports normalize to `<port>/tcp`.
+  - `HEALTHCHECK --interval=1m30s` (Go compound durations) is accepted instead of
+    erroring "Invalid duration".
+  - `MAINTAINER` is accepted as deprecated-but-valid (builds, recorded as a
+    `maintainer` label) instead of failing the build.
+  - `--env-file` values are kept verbatim after the first `=` (Docker preserves
+    `PADDED=  x  `); previously the value was whitespace-trimmed.
+  - Runtime bare `-e KEY` (no `=`) copies `KEY` from the host environment
+    (Docker passthrough) instead of erroring; `--label`/`--log-opt` stay strict.
 - Short-lived `run` no longer stalls ~10s before returning. A container that
   exits quickly (e.g. `run alpine -- echo hi`) made the VM halt and the shim
   become a zombie; the boot-readiness wait checked liveness with `kill(pid,0)`,
