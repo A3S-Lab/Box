@@ -418,7 +418,10 @@ mod tests {
             .into_inner();
 
         assert_eq!(resp.images.len(), 1);
-        assert!(resp.images[0].repo_tags.is_empty(), "no tag for a digest pin");
+        assert!(
+            resp.images[0].repo_tags.is_empty(),
+            "no tag for a digest pin"
+        );
         assert!(resp.images[0]
             .repo_digests
             .contains(&"gcr.io/x/img@sha256:pinned".to_string()));
@@ -429,7 +432,12 @@ mod tests {
         // CRI ImageStatus may be queried by an untagged name; it must resolve
         // to the stored `:latest` reference and report it in repo_tags.
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "docker.io/library/nginx:latest", "sha256:n1").await;
+        put_test_image(
+            &svc.image_store,
+            "docker.io/library/nginx:latest",
+            "sha256:n1",
+        )
+        .await;
 
         let resp = svc
             .image_status(Request::new(ImageStatusRequest {

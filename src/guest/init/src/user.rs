@@ -84,9 +84,15 @@ pub fn resolve_named_user(user: &str, rootfs: &str) -> Option<String> {
 ///
 /// Pure file reads with no allocation constraints — call before `fork`, never
 /// in the post-fork child.
-pub fn resolve_image_groups(rootfs: &str, uid: u32, explicit_gid: Option<u32>, user: &str) -> Vec<u32> {
+pub fn resolve_image_groups(
+    rootfs: &str,
+    uid: u32,
+    explicit_gid: Option<u32>,
+    user: &str,
+) -> Vec<u32> {
     let name_part = user.trim().split(':').next().unwrap_or("").trim();
-    let is_named = !name_part.is_empty() && name_part != "root" && name_part.parse::<u32>().is_err();
+    let is_named =
+        !name_part.is_empty() && name_part != "root" && name_part.parse::<u32>().is_err();
     let passwd_entry = passwd_entry_for_uid(rootfs, uid);
     let username: Option<String> = if is_named {
         Some(name_part.to_string())
@@ -275,7 +281,10 @@ mod tests {
         // explicit primary gid (matches a runtime that cannot enumerate groups).
         let dir = write_rootfs("root:x:0:0:root:/root:/sh\n", "root:x:0:\nfoo:x:5000:bar\n");
         let rootfs = dir.path().to_str().unwrap();
-        assert_eq!(resolve_image_groups(rootfs, 4242, None, "4242"), Vec::<u32>::new());
+        assert_eq!(
+            resolve_image_groups(rootfs, 4242, None, "4242"),
+            Vec::<u32>::new()
+        );
         assert_eq!(resolve_image_groups(rootfs, 4242, Some(7), "4242"), vec![7]);
     }
 
@@ -284,6 +293,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().to_str().unwrap();
         // No /etc/passwd or /etc/group: only an explicit primary gid survives.
-        assert_eq!(resolve_image_groups(rootfs, 1000, Some(1000), "1000"), vec![1000]);
+        assert_eq!(
+            resolve_image_groups(rootfs, 1000, Some(1000), "1000"),
+            vec![1000]
+        );
     }
 }

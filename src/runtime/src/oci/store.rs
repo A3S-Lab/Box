@@ -182,7 +182,10 @@ impl ImageStore {
 
         if keys.is_empty() {
             drop(index);
-            return Err(BoxError::OciImageError(format!("Image not found: {}", image)));
+            return Err(BoxError::OciImageError(format!(
+                "Image not found: {}",
+                image
+            )));
         }
 
         let removed: Vec<StoredImage> = keys.iter().filter_map(|k| index.remove(k)).collect();

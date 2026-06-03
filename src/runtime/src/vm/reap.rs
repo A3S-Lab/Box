@@ -75,9 +75,7 @@ fn wait_for_exit(pids: &[i32], timeout: std::time::Duration) {
     let mut remaining = (timeout.as_millis() / step.as_millis().max(1)) as u32;
     while remaining > 0 {
         // `kill(pid, 0)` returns ESRCH once the pid is gone (and reaped).
-        let any_alive = pids
-            .iter()
-            .any(|&pid| unsafe { libc::kill(pid, 0) } == 0);
+        let any_alive = pids.iter().any(|&pid| unsafe { libc::kill(pid, 0) } == 0);
         if !any_alive {
             return;
         }

@@ -26,8 +26,8 @@ pub async fn execute(args: SaveArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Stage the layout in a temp dir and stamp the image reference into the
     // index.json `org.opencontainers.image.ref.name` annotation, so the tag
     // round-trips through `load` (the stored layout carries no annotation).
-    let staging = tempfile::TempDir::new()
-        .map_err(|e| format!("Failed to create staging dir: {e}"))?;
+    let staging =
+        tempfile::TempDir::new().map_err(|e| format!("Failed to create staging dir: {e}"))?;
     copy_layout(&stored.path, staging.path())?;
     stamp_ref_annotation(&staging.path().join("index.json"), &stored.reference)?;
 
@@ -57,7 +57,11 @@ fn copy_layout(
         let entry = entry.map_err(|e| format!("Failed to read layout entry: {e}"))?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if entry.file_type().map_err(|e| format!("stat failed: {e}"))?.is_dir() {
+        if entry
+            .file_type()
+            .map_err(|e| format!("stat failed: {e}"))?
+            .is_dir()
+        {
             copy_layout(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)
@@ -91,8 +95,8 @@ fn stamp_ref_annotation(
             );
         }
     }
-    let out =
-        serde_json::to_vec_pretty(&index).map_err(|e| format!("Failed to encode index.json: {e}"))?;
+    let out = serde_json::to_vec_pretty(&index)
+        .map_err(|e| format!("Failed to encode index.json: {e}"))?;
     std::fs::write(index_path, out).map_err(|e| format!("Failed to write index.json: {e}"))?;
     Ok(())
 }
@@ -155,7 +159,10 @@ mod tests {
 
         copy_layout(src.path(), dst.path()).unwrap();
 
-        assert_eq!(fs::read_to_string(dst.path().join("index.json")).unwrap(), "{}");
+        assert_eq!(
+            fs::read_to_string(dst.path().join("index.json")).unwrap(),
+            "{}"
+        );
         assert_eq!(
             fs::read_to_string(dst.path().join("blobs/sha256/abc")).unwrap(),
             "blob"

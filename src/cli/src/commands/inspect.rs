@@ -31,11 +31,7 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
                     println!("{json}");
                     Ok(())
                 }
-                None => Err(format!(
-                    "No such container or image: {}",
-                    args.r#box
-                )
-                .into()),
+                None => Err(format!("No such container or image: {}", args.r#box).into()),
             }
         }
         Err(other) => Err(other.into()),

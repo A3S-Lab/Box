@@ -30,7 +30,8 @@ impl DockerIgnore {
     /// Load `<context_dir>/.dockerignore`. Returns an empty (matches-nothing)
     /// matcher when the file is absent or unreadable.
     pub(crate) fn load(context_dir: &Path) -> Self {
-        let contents = std::fs::read_to_string(context_dir.join(".dockerignore")).unwrap_or_default();
+        let contents =
+            std::fs::read_to_string(context_dir.join(".dockerignore")).unwrap_or_default();
         Self::parse(&contents)
     }
 
@@ -46,10 +47,7 @@ impl DockerIgnore {
                 None => (false, line),
             };
             // Normalise: drop a leading "./" and leading/trailing "/".
-            let cleaned = body
-                .strip_prefix("./")
-                .unwrap_or(body)
-                .trim_matches('/');
+            let cleaned = body.strip_prefix("./").unwrap_or(body).trim_matches('/');
             if cleaned.is_empty() {
                 continue;
             }
@@ -94,9 +92,7 @@ fn segments_match(pattern: &[String], path: &[&str]) -> bool {
                 (0..=path.len()).any(|i| segments_match(rest, &path[i..]))
             } else {
                 match path.split_first() {
-                    Some((ph, ptail)) if wildcard_match(head, ph) => {
-                        segments_match(rest, ptail)
-                    }
+                    Some((ph, ptail)) if wildcard_match(head, ph) => segments_match(rest, ptail),
                     _ => false,
                 }
             }

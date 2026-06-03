@@ -96,7 +96,7 @@ mod tests {
         assert_eq!(shares_to_weight(2), 1);
         assert_eq!(shares_to_weight(262_144), 10_000);
         assert_eq!(shares_to_weight(1024), 39); // runc's mapping for the default
-        // Out-of-range inputs are clamped, never panic / overflow.
+                                                // Out-of-range inputs are clamped, never panic / overflow.
         assert_eq!(shares_to_weight(0), 1);
         assert_eq!(shares_to_weight(u64::MAX), 10_000);
     }
@@ -155,7 +155,8 @@ impl ContainerCgroup {
         }
         if want_weight {
             let weight = shares_to_weight(cpu_shares.unwrap_or(1024));
-            if let Err(error) = write_cgroup_file(&format!("{path}/cpu.weight"), &weight.to_string())
+            if let Err(error) =
+                write_cgroup_file(&format!("{path}/cpu.weight"), &weight.to_string())
             {
                 warn!(error = %error, weight, "cgroup: failed to set cpu.weight");
             }

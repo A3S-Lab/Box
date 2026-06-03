@@ -273,8 +273,14 @@ mod tests {
     #[test]
     fn test_image_matches_reference() {
         let img = sample_stored("docker.io/library/webapp:2", "sha256:abc", 100);
-        assert!(image_matches(&img, &ImageFilter::Reference("webapp".into())));
-        assert!(image_matches(&img, &ImageFilter::Reference("web*:2".into())));
+        assert!(image_matches(
+            &img,
+            &ImageFilter::Reference("webapp".into())
+        ));
+        assert!(image_matches(
+            &img,
+            &ImageFilter::Reference("web*:2".into())
+        ));
         assert!(image_matches(
             &img,
             &ImageFilter::Reference("docker.io/library/webapp:2".into())

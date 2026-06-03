@@ -328,8 +328,7 @@ fn resolve_user_and_groups(user: Option<&str>) -> (Option<crate::user::ProcessUs
     if process_user.gid.is_none() {
         process_user.gid = crate::user::primary_gid_for_uid("/", process_user.uid);
     }
-    let groups =
-        crate::user::resolve_image_groups("/", process_user.uid, process_user.gid, user);
+    let groups = crate::user::resolve_image_groups("/", process_user.uid, process_user.gid, user);
     (Some(process_user), groups)
 }
 
@@ -705,7 +704,13 @@ fn set_capability_sets(mask: [u32; 2]) -> Result<(), std::io::Error> {
         },
     ];
 
-    if unsafe { libc::syscall(libc::SYS_capset, &mut header as *mut CapHeader, data.as_ptr()) } != 0
+    if unsafe {
+        libc::syscall(
+            libc::SYS_capset,
+            &mut header as *mut CapHeader,
+            data.as_ptr(),
+        )
+    } != 0
     {
         return Err(std::io::Error::last_os_error());
     }

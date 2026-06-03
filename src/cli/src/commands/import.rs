@@ -51,8 +51,8 @@ pub async fn execute(args: ImportArgs) -> Result<(), Box<dyn std::error::Error>>
     let layer_digest = hex::encode(Sha256::digest(&layer_blob));
 
     // Assemble an OCI layout in a temp dir.
-    let staging = tempfile::TempDir::new()
-        .map_err(|e| format!("Failed to create staging dir: {e}"))?;
+    let staging =
+        tempfile::TempDir::new().map_err(|e| format!("Failed to create staging dir: {e}"))?;
     let blobs = staging.path().join("blobs").join("sha256");
     std::fs::create_dir_all(&blobs)?;
     std::fs::write(blobs.join(&layer_digest), &layer_blob)?;

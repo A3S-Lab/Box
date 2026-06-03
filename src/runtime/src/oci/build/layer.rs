@@ -331,8 +331,9 @@ fn append_dir_with_chown<W: std::io::Write>(
 ) -> Result<()> {
     if let Some((uid, gid)) = chown {
         let mut header = tar::Header::new_gnu();
-        let meta = std::fs::symlink_metadata(dir_path)
-            .map_err(|e| BoxError::BuildError(format!("Failed to stat {}: {}", dir_path.display(), e)))?;
+        let meta = std::fs::symlink_metadata(dir_path).map_err(|e| {
+            BoxError::BuildError(format!("Failed to stat {}: {}", dir_path.display(), e))
+        })?;
         header.set_metadata_in_mode(&meta, tar::HeaderMode::Complete);
         header.set_uid(uid as u64);
         header.set_gid(gid as u64);
@@ -369,10 +370,9 @@ fn append_file_with_chown<W: std::io::Write>(
         let body: Box<dyn std::io::Read> = if meta.file_type().is_symlink() {
             Box::new(std::io::empty())
         } else {
-            Box::new(
-                std::fs::File::open(file_path)
-                    .map_err(|e| BoxError::BuildError(format!("Failed to open {}: {}", file_path.display(), e)))?,
-            )
+            Box::new(std::fs::File::open(file_path).map_err(|e| {
+                BoxError::BuildError(format!("Failed to open {}: {}", file_path.display(), e))
+            })?)
         };
         builder
             .append_data(&mut header, tar_path, body)

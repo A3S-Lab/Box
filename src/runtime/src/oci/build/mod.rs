@@ -19,8 +19,8 @@
 //! instead of being silently ignored.
 
 pub(crate) mod cache;
-pub(crate) mod dockerignore;
 pub mod dockerfile;
+pub(crate) mod dockerignore;
 pub mod engine;
 pub mod layer;
 
