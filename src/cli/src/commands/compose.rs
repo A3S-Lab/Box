@@ -388,7 +388,14 @@ async fn execute_up(
                 )
                 .await;
             }
-            let endpoint = match net_config.connect(&box_id, &box_name) {
+            // Register the bare service name as a DNS alias so peers can reach
+            // this service as `svc` (Docker Compose behavior), not only as the
+            // `{project}-{svc}` box name.
+            let endpoint = match net_config.connect_with_aliases(
+                &box_id,
+                &box_name,
+                std::slice::from_ref(svc_name),
+            ) {
                 Ok(endpoint) => endpoint,
                 Err(error) => {
                     return rollback_compose_up(
