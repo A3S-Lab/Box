@@ -38,18 +38,42 @@ pub async fn execute(args: InspectArgs) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
+/// Docker-shaped `State` sub-object so tooling can read `.[0].State.Running` etc.
+#[derive(Serialize)]
+struct DockerState {
+    #[serde(rename = "Status")]
+    status: String,
+    #[serde(rename = "Running")]
+    running: bool,
+    #[serde(rename = "Paused")]
+    paused: bool,
+    #[serde(rename = "ExitCode")]
+    exit_code: i32,
+}
+
 #[derive(Serialize)]
 struct InspectView<'a> {
     #[serde(flatten)]
     record: &'a BoxRecord,
     status_detail: status::StatusDetails,
+    #[serde(rename = "State")]
+    state: DockerState,
 }
 
 fn inspect_json(record: &BoxRecord) -> Result<String, serde_json::Error> {
-    serde_json::to_string_pretty(&InspectView {
+    let view = InspectView {
         record,
         status_detail: status::status_details(record),
-    })
+        state: DockerState {
+            status: record.status.clone(),
+            // Docker: a paused container is still Running (Running=true, Paused=true).
+            running: matches!(record.status.as_str(), "running" | "paused"),
+            paused: record.status == "paused",
+            exit_code: record.exit_code.unwrap_or(0),
+        },
+    };
+    // `docker inspect` returns a top-level JSON array, even for one container.
+    serde_json::to_string_pretty(&vec![view])
 }
 
 #[cfg(test)]
@@ -64,9 +88,31 @@ mod tests {
 
         let json = inspect_json(&record).unwrap();
 
+        // Top-level array (docker inspect) with a Docker-shaped State object.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_array());
+        assert_eq!(parsed[0]["State"]["Status"], "dead");
+        assert_eq!(parsed[0]["State"]["Running"], false);
+        assert_eq!(parsed[0]["State"]["ExitCode"], 137);
+
         assert!(json.contains("\"status\": \"dead\""));
         assert!(json.contains("\"status_detail\""));
         assert!(json.contains("\"summary\": \"dead (Exit 137)\""));
         assert!(json.contains("a3s-box restart box"));
+    }
+
+    #[test]
+    fn test_inspect_state_running_and_paused() {
+        let running = make_record("id", "box", "running", Some(1));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&inspect_json(&running).unwrap()).unwrap();
+        assert_eq!(parsed[0]["State"]["Running"], true);
+        assert_eq!(parsed[0]["State"]["Paused"], false);
+
+        let paused = make_record("id", "box", "paused", Some(1));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&inspect_json(&paused).unwrap()).unwrap();
+        assert_eq!(parsed[0]["State"]["Running"], true);
+        assert_eq!(parsed[0]["State"]["Paused"], true);
     }
 }
