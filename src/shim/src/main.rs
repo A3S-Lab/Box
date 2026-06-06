@@ -759,33 +759,30 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         // Split console: guest stdout -> console.log, stderr -> console.err.log
         // (libkrun's 3-fd virtio-console separates the streams), so the log
         // processor can tag each line's stream like Docker's json-file driver.
-        // Falls back to the merged single-file console if the err file can't be
-        // opened. BOX_NO_SPLIT_STDERR forces the legacy merged behavior.
-        use std::os::unix::io::AsRawFd;
-        let opened = if std::env::var_os("BOX_NO_SPLIT_STDERR").is_none() {
+        // Unix only (uses raw fds); Windows always uses the merged single-file
+        // console. Falls back to merged if the err file can't be opened, and
+        // BOX_NO_SPLIT_STDERR forces the legacy merged behavior.
+        #[allow(unused_mut)]
+        let mut split_done = false;
+        #[cfg(unix)]
+        if std::env::var_os("BOX_NO_SPLIT_STDERR").is_none() {
+            use std::os::unix::io::AsRawFd;
             let err_path = console_path.with_file_name("console.err.log");
             let open = |p: &std::path::Path| {
                 std::fs::OpenOptions::new().create(true).append(true).open(p)
             };
-            match (open(console_path), open(&err_path)) {
-                (Ok(out_f), Ok(err_f)) => Some((out_f, err_f)),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        match opened {
-            Some((out_f, err_f)) => {
+            if let (Ok(out_f), Ok(err_f)) = (open(console_path), open(&err_path)) {
                 ctx.add_split_console(-1, out_f.as_raw_fd(), err_f.as_raw_fd())?;
                 // Keep the fds open for the VM's lifetime.
                 std::mem::forget(out_f);
                 std::mem::forget(err_f);
                 tracing::debug!("split console enabled (stdout/stderr separated)");
+                split_done = true;
             }
-            None => {
-                tracing::debug!(console_path = console_str, "Redirecting console output (merged)");
-                ctx.set_console_output(console_str)?;
-            }
+        }
+        if !split_done {
+            tracing::debug!(console_path = console_str, "Redirecting console output (merged)");
+            ctx.set_console_output(console_str)?;
         }
     }
 
