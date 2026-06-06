@@ -473,7 +473,11 @@ fn build_box_config(
             vsock_port: args.sidecar_vsock_port,
             env: vec![],
         }),
-        persistent: args.common.persistent,
+        // A box without `--rm` survives its stop like a Docker stopped
+        // container: keep its dir (logs + overlay upper) so `logs`/`start` work
+        // afterwards. `--rm` boxes and CRI pods stay non-persistent (removed on
+        // teardown). `rm` force-removes either way (cleanup_removed_box).
+        persistent: args.common.persistent || !args.rm,
         ..Default::default()
     })
 }
