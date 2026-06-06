@@ -4,6 +4,38 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [2.0.7] — 2026-06-06
+
+### Added
+- **Container log stream tagging**: `logs` now distinguishes a container's
+  stdout from stderr (Docker json-file `stream` field), via libkrun's 3-fd
+  split virtio-console (guest stdout → `console.log`, stderr →
+  `console.err.log`). Foreground `run`/`attach` send the container's stdout to
+  the terminal's stdout and stderr to its stderr; `logs` routes stderr lines to
+  its stderr.
+
+### Fixed
+- **Container logs are now complete and correct.** The log processor moved from
+  the ephemeral launching CLI into the shim (the box's lifetime process), so a
+  detached `run -d` box no longer truncates its logs when the CLI exits — this
+  also gives `--timestamps` real per-line emission times. The processor tails
+  `console.log` like `tail -f` (it previously stopped at the first EOF, dropping
+  lines a container logged after a quiet period). Runtime internals (guest-init
+  tracing → `/dev/kmsg`; libkrun's `init.krun:` preamble filtered) are kept out
+  of container logs.
+- A box without `--rm` now survives its stop like a Docker stopped container —
+  it keeps its dir and logs (so `logs`/`start` work afterwards) until `rm`.
+- Single-file bind mount (`-v /host/file:/container/file`) no longer clobbers
+  the target's parent directory.
+- A rebuilt or re-tagged image becomes a prunable `<none>` dangling image
+  instead of silently orphaning its on-disk layout (a disk leak); `images`
+  renders it as `<none> <none>`.
+- `-p 0:<container>` / `-p 0` now resolves to a real free host port.
+- Named `--user` / `exec -u` is resolved inside the guest; `inspect` returns a
+  JSON array with a Docker-shaped `State`; image-management parity (`inspect`
+  array, `rmi` by short id / `--force`, `commit --change`, `tag` validation);
+  `volume rm` exit code + `volume inspect` schema; `cp` mode + large-file.
+
 ### Added
 - Registry mirrors: `A3S_REGISTRY_MIRRORS=host=mirror,...` pulls image content
   from a configured mirror while preserving the canonical image identity in the

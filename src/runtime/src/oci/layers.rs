@@ -326,6 +326,12 @@ mod tests {
             let mut header = tar::Header::new_gnu();
             header.set_size(content.len() as u64);
             header.set_mode(0o644);
+            // Set uid/gid explicitly: a bare GNU header leaves those octal fields
+            // blank, which makes a root-side extraction with preserved ownership
+            // fail to parse the uid ("numeric field was not a number"). Real OCI
+            // layers always carry valid uid/gid fields.
+            header.set_uid(0);
+            header.set_gid(0);
             header.set_cksum();
 
             builder.append_data(&mut header, name, *content).unwrap();

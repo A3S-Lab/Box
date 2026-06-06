@@ -493,6 +493,10 @@ mod tests {
             let mut header = tar::Header::new_gnu();
             header.set_size(content.len() as u64);
             header.set_mode(0o644);
+            // uid/gid must be set or a root-side ownership-preserving extraction
+            // can't parse the (blank) uid field. Real OCI layers always set them.
+            header.set_uid(0);
+            header.set_gid(0);
             header.set_cksum();
 
             builder.append_data(&mut header, filename, content).unwrap();
