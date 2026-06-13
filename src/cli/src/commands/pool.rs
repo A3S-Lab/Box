@@ -972,15 +972,15 @@ mod tests {
 
     #[cfg(not(windows))]
     #[tokio::test]
-    async fn test_execute_status_no_daemon_errors() {
-        // With no daemon listening, status fails with a connect hint (not a panic).
+    async fn test_execute_status_no_daemon_succeeds_empty() {
+        // With no daemon listening, status reports "nothing running" and SUCCEEDS —
+        // a status query shouldn't fail just because no pool is up (like `ps`).
         let result = execute_status(PoolStatusArgs {
             socket: "/tmp/a3s-box-pool-does-not-exist.sock".to_string(),
             json: false,
         })
         .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("pool daemon"));
+        assert!(result.is_ok());
     }
 
     #[test]
