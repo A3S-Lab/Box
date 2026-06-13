@@ -16,8 +16,16 @@ impl VmManager {
     /// later are caught by `wait_for_exec_ready`'s `has_exited` checks, which gate
     /// the rest of boot anyway.
     pub(crate) async fn wait_for_vm_running(&self) -> Result<()> {
-        const MAX_WAIT_MS: u64 = 250;
-        const POLL_MS: u64 = 25;
+        // This is a crash-detection grace period, not a readiness wait: the VM
+        // process is alive the instant the shim is spawned, and we just watch for it
+        // exiting immediately. A snapshot-restored VM reaches its run loop in ~20ms
+        // (no cold boot), so a short grace catches an immediate restore failure while
+        // saving ~200ms on the fork fast-path; a cold boot keeps the longer grace.
+        #[cfg(unix)]
+        let max_wait_ms: u64 = if super::is_restore_mode() { 40 } else { 250 };
+        #[cfg(not(unix))]
+        let max_wait_ms: u64 = 250;
+        const POLL_MS: u64 = 10;
 
         tracing::debug!("Confirming VM process started");
         let start = std::time::Instant::now();
@@ -32,7 +40,7 @@ impl VmManager {
                     });
                 }
             }
-            if start.elapsed().as_millis() >= MAX_WAIT_MS as u128 {
+            if start.elapsed().as_millis() >= max_wait_ms as u128 {
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(POLL_MS)).await;
