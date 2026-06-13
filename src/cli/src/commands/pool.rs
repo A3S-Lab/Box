@@ -83,6 +83,11 @@ pub struct PoolStartArgs {
     #[arg(long)]
     pub ksm: bool,
 
+    /// Fill the pool by snapshot-fork: boot one template VM, snapshot it, then
+    /// restore every other slot (MAP_PRIVATE CoW) instead of cold-booting each.
+    #[arg(long)]
+    pub snapshot_fork: bool,
+
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -282,6 +287,8 @@ struct PoolRegistry {
     deferred: bool,
     /// Mark pooled VM memory KSM-mergeable (host page dedup across same-image VMs).
     ksm: bool,
+    /// Fill the pool by snapshot-fork (one template, restore the rest).
+    snapshot_fork: bool,
 }
 
 impl PoolRegistry {
@@ -300,6 +307,7 @@ impl PoolRegistry {
             min_idle: size,
             max_size,
             idle_ttl_secs: self.ttl,
+            snapshot_fork: self.snapshot_fork,
             ..Default::default()
         };
         let box_config = BoxConfig {
@@ -379,6 +387,7 @@ async fn execute_start(args: PoolStartArgs) -> Result<(), Box<dyn std::error::Er
         ttl: args.ttl,
         deferred: args.deferred,
         ksm: args.ksm,
+        snapshot_fork: args.snapshot_fork,
     });
 
     // Pre-warm the default image, if one was given.
@@ -918,6 +927,7 @@ mod tests {
             warm: vec![],
             deferred: false,
             ksm: false,
+            snapshot_fork: false,
             json: false,
         };
         let result = execute_start(args).await;
@@ -936,6 +946,7 @@ mod tests {
             warm: vec![],
             deferred: false,
             ksm: false,
+            snapshot_fork: false,
             json: false,
         };
         let result = execute_start(args).await;
