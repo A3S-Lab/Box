@@ -500,6 +500,10 @@ impl WarmPool {
 
     /// Send a `snapshot <state>` request to libkrun's per-template trigger socket and
     /// wait for the `ok` reply (the socket appears once the template's vCPUs run).
+    ///
+    /// Snapshot-fork is a Linux/KVM (Unix) feature; on non-Unix hosts the trigger
+    /// socket does not exist, so this is unavailable (see the `not(unix)` stub).
+    #[cfg(unix)]
     async fn trigger_snapshot(sock: &std::path::Path, state_file: &std::path::Path) -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // The socket is bound by libkrun after the guest starts; poll briefly.
@@ -532,6 +536,16 @@ impl WarmPool {
                 reply.trim()
             )))
         }
+    }
+
+    /// Non-Unix stub: snapshot-fork relies on libkrun's Unix trigger socket and KVM
+    /// state save/restore, neither of which exist on Windows. `--snapshot-fork` is
+    /// Linux/KVM-only, so this path is never reached there in practice.
+    #[cfg(not(unix))]
+    async fn trigger_snapshot(_sock: &std::path::Path, _state_file: &std::path::Path) -> Result<()> {
+        Err(BoxError::PoolError(
+            "snapshot-fork is only supported on Linux/KVM hosts".to_string(),
+        ))
     }
 
     /// Fill the pool to the minimum idle count.
