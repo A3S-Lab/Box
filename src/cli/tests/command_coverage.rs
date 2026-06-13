@@ -235,6 +235,11 @@ fn test_local_state_command_smoke() {
     assert!(inspect.contains("cov-created"));
     let inspect_json: serde_json::Value =
         serde_json::from_str(&inspect).expect("inspect output should be JSON");
+    // inspect returns a Docker-style array; the single box is element 0.
+    let inspect_json = match inspect_json {
+        serde_json::Value::Array(mut a) if !a.is_empty() => a.remove(0),
+        other => other,
+    };
     assert_eq!(
         inspect_json["cmd"],
         serde_json::json!(["/bin/sh", "-c", "echo created-command"])
@@ -330,6 +335,11 @@ CMD ["cat", "/opt/message.txt"]
     let inspect = cli.ok(&["image-inspect", &image]);
     let inspect: serde_json::Value =
         serde_json::from_str(&inspect).expect("image-inspect output should be JSON");
+    // image-inspect returns a Docker-style array; inspect the single image (elem 0).
+    let inspect = match inspect {
+        serde_json::Value::Array(mut a) if !a.is_empty() => a.remove(0),
+        other => other,
+    };
     assert_eq!(inspect["Reference"], image);
     assert_eq!(inspect["LayerCount"], 1);
     assert_eq!(
