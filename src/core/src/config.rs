@@ -117,6 +117,13 @@ pub struct PoolConfig {
     /// Autoscaling policy for dynamic min_idle adjustment
     #[serde(default)]
     pub scaling: ScalingPolicy,
+
+    /// Fill the pool by snapshot-fork instead of cold boot: boot ONE template VM
+    /// once, snapshot it, then replenish every other slot by restoring that snapshot
+    /// (MAP_PRIVATE CoW) — turning per-VM fill from a full cold boot (~1.7s) into a
+    /// restore (~tens of ms). All same-image pool VMs share one RAM image.
+    #[serde(default)]
+    pub snapshot_fork: bool,
 }
 
 /// Autoscaling policy for dynamic warm pool sizing.
@@ -199,6 +206,7 @@ impl Default for PoolConfig {
             max_size: 5,
             idle_ttl_secs: 300,
             scaling: ScalingPolicy::default(),
+            snapshot_fork: false,
         }
     }
 }
