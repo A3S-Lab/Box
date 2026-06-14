@@ -697,12 +697,17 @@ impl RuntimeService for BoxRuntimeService {
             }
         }
 
-        self.destroy_sandbox_vm(sandbox_id, None).await?;
+        // Mark the sandbox NotReady regardless of whether VM teardown succeeds:
+        // its containers are already Exited and their streams removed, so it must
+        // not remain Ready — otherwise a later CreateContainer (which only checks
+        // the sandbox is Ready) would attach to a sandbox whose VM is gone. A
+        // VM-destroy error is surfaced after the state is made consistent.
+        let destroy_result = self.destroy_sandbox_vm(sandbox_id, None).await;
         self.disconnect_sandbox_network(&sandbox).await;
-
         self.store
             .update_sandbox_state(sandbox_id, SandboxState::NotReady)
             .await;
+        destroy_result?;
 
         Ok(Response::new(StopPodSandboxResponse {}))
     }
@@ -2383,18 +2388,23 @@ impl RuntimeService for BoxRuntimeService {
             .await
             .ok_or_else(|| Status::not_found(format!("Container not found: {}", container_id)))?;
 
-        let running = self
-            .store
-            .containers
-            .list(Some(&container.sandbox_id), None)
-            .await
-            .into_iter()
-            .filter(|c| c.state == ContainerState::Running)
-            .count();
-        let usage = self
-            .sandbox_vm_usage(&container.sandbox_id)
-            .await
-            .per_container(running);
+        // Only a running container consumes VM resources; a Created/Exited one
+        // reports zero rather than a share of the pod VM's usage.
+        let usage = if container.state == ContainerState::Running {
+            let running = self
+                .store
+                .containers
+                .list(Some(&container.sandbox_id), None)
+                .await
+                .into_iter()
+                .filter(|c| c.state == ContainerState::Running)
+                .count();
+            self.sandbox_vm_usage(&container.sandbox_id)
+                .await
+                .per_container(running)
+        } else {
+            VmUsage::default()
+        };
         Ok(Response::new(ContainerStatsResponse {
             stats: Some(container_stats(&container, usage).await),
         }))
@@ -2440,9 +2450,14 @@ impl RuntimeService for BoxRuntimeService {
             std::collections::HashMap::new();
         for container in &containers {
             if !usage_by_sandbox.contains_key(&container.sandbox_id) {
+                // Split across RUNNING containers only (a non-running one consumes
+                // nothing) so the running ones get an accurate share.
                 let running = containers
                     .iter()
-                    .filter(|c| c.sandbox_id == container.sandbox_id)
+                    .filter(|c| {
+                        c.sandbox_id == container.sandbox_id
+                            && c.state == ContainerState::Running
+                    })
                     .count();
                 let usage = self
                     .sandbox_vm_usage(&container.sandbox_id)
@@ -2452,10 +2467,15 @@ impl RuntimeService for BoxRuntimeService {
             }
         }
         let stats = join_all(containers.iter().map(|c| {
-            let usage = usage_by_sandbox
-                .get(&c.sandbox_id)
-                .copied()
-                .unwrap_or_default();
+            // Only running containers report a share of the VM usage; others zero.
+            let usage = if c.state == ContainerState::Running {
+                usage_by_sandbox
+                    .get(&c.sandbox_id)
+                    .copied()
+                    .unwrap_or_default()
+            } else {
+                VmUsage::default()
+            };
             container_stats(c, usage)
         }))
         .await;
