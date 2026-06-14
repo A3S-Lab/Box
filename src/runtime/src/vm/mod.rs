@@ -260,6 +260,16 @@ impl VmManager {
     /// Remove the box directory on the host.
     fn cleanup_box_dir(&self) {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+
+        // Reap the box's passt daemon (Linux bridge mode) BEFORE removing its
+        // socket dir. A boot that fails after passt spawned but before
+        // `self.net_manager` was assigned leaves `net_manager.stop()` a no-op, so
+        // passt would otherwise survive holding the published port — the
+        // "Address already in use" on the next start. terminate_passt reads
+        // `socket_dir/passt.pid` and is a no-op when there is no passt.
+        #[cfg(target_os = "linux")]
+        crate::network::terminate_passt(&self.socket_dir());
+
         if let Err(error) = self.rootfs_provider.cleanup(&box_dir, false) {
             tracing::warn!(
                 box_id = %self.box_id,
