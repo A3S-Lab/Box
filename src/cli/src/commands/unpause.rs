@@ -91,32 +91,32 @@ mod tests {
 
     #[test]
     fn test_unpause_rejects_running() {
-        let (_tmp, mut state) = setup_state(vec![make_record(
+        let (_tmp, state) = setup_state(vec![make_record(
             "id-1",
             "running_box",
             "running",
             Some(99999),
         )]);
-        let result = unpause_one(&mut state, "running_box");
+        let result = unpause_one(&state, "running_box");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cannot unpause"));
     }
 
     #[test]
     fn test_unpause_rejects_stopped() {
-        let (_tmp, mut state) =
+        let (_tmp, state) =
             setup_state(vec![make_record("id-1", "stopped_box", "stopped", None)]);
-        let result = unpause_one(&mut state, "stopped_box");
+        let result = unpause_one(&state, "stopped_box");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cannot unpause"));
     }
 
     #[test]
     fn test_unpause_rejects_paused_without_pid() {
-        let (_tmp, mut state) =
+        let (_tmp, state) =
             setup_state(vec![make_record("id-1", "paused_box", "paused", None)]);
 
-        let result = unpause_one(&mut state, "paused_box");
+        let result = unpause_one(&state, "paused_box");
 
         assert!(result.is_err());
         let error = result.unwrap_err().to_string();
@@ -131,8 +131,8 @@ mod tests {
 
     #[test]
     fn test_unpause_not_found() {
-        let (_tmp, mut state) = setup_state(vec![]);
-        let result = unpause_one(&mut state, "nonexistent");
+        let (_tmp, state) = setup_state(vec![]);
+        let result = unpause_one(&state, "nonexistent");
         assert!(result.is_err());
     }
 }
