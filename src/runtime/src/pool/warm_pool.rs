@@ -499,7 +499,10 @@ impl WarmPool {
                 *guard = TemplateState::Ready(tpl.clone());
                 event_emitter.emit(BoxEvent::with_string(
                     "pool.template.built",
-                    format!("Snapshot-fork template built for image {}", box_config.image),
+                    format!(
+                        "Snapshot-fork template built for image {}",
+                        box_config.image
+                    ),
                 ));
                 Ok(tpl)
             }
