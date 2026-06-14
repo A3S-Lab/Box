@@ -42,6 +42,9 @@ pub fn cleanup_record_resources(record: &BoxRecord) {
 /// Remove transient host resources for a stopped box while keeping its state.
 pub fn cleanup_stopped_box(record: &BoxRecord) {
     cleanup_record_resources(record);
+    // Release the overlayfs mount so a stopped box never leaves a live mount
+    // (and a later restart re-mounts cleanly instead of stacking).
+    a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
 }
 
@@ -91,6 +94,9 @@ pub fn cleanup_removed_box(record: &BoxRecord) {
     cleanup_anonymous_volumes(&record.anonymous_volumes);
 
     if record.box_dir.exists() {
+        // Release the overlayfs mount FIRST: otherwise remove_dir_all deletes
+        // into the live mount ("Stale file handle") and leaks it.
+        a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
         if let Err(err) = std::fs::remove_dir_all(&record.box_dir) {
             tracing::debug!(
                 path = %record.box_dir.display(),

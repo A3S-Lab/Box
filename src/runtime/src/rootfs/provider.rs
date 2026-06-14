@@ -93,6 +93,13 @@ impl RootfsProvider for OverlayProvider {
             })?;
         }
 
+        // Idempotent: a restart re-runs prepare(); without this guard each call
+        // stacks another overlay on `merged` (the leaked double/triple mounts).
+        if super::is_mountpoint(&merged) {
+            tracing::debug!(merged = %merged.display(), "Overlay already mounted; reusing");
+            return Ok(merged);
+        }
+
         super::overlay::overlay_mount(cache_dir, &upper, &work, &merged)?;
 
         tracing::info!(
