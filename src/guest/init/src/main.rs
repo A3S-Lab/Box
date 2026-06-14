@@ -252,7 +252,9 @@ impl ExecConfig {
         // libkrun's env serialization. Decode them back; fall back to the raw value
         // on any decode error or when the marker is absent (older runtime).
         use base64::Engine;
-        let b64 = std::env::var("BOX_EXEC_B64").map(|v| v == "1").unwrap_or(false);
+        let b64 = std::env::var("BOX_EXEC_B64")
+            .map(|v| v == "1")
+            .unwrap_or(false);
         let decode = |s: String| -> String {
             if !b64 {
                 return s;
@@ -274,7 +276,11 @@ impl ExecConfig {
             .and_then(|s| s.parse::<usize>().ok())
         {
             Some(argc) => (0..argc)
-                .filter_map(|i| std::env::var(format!("BOX_EXEC_ARG_{}", i)).ok().map(&decode))
+                .filter_map(|i| {
+                    std::env::var(format!("BOX_EXEC_ARG_{}", i))
+                        .ok()
+                        .map(&decode)
+                })
                 .collect(),
             None => vec![],
         };

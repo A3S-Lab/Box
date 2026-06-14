@@ -756,6 +756,17 @@ mod tests {
     use tempfile::tempdir;
     use tempfile::TempDir;
 
+    /// Decode a base64 (URL-safe, no pad) `BOX_EXEC_*` value the way guest-init
+    /// does, so assertions can compare against the original raw value.
+    fn b64d(s: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(s.as_bytes())
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_else(|| s.to_string())
+    }
+
     fn test_oci_config(workdir: Option<&str>, user: Option<&str>) -> OciImageConfig {
         OciImageConfig {
             entrypoint: Some(vec!["/bin/app".to_string()]),
@@ -1074,12 +1085,12 @@ mod tests {
             .entrypoint
             .env
             .iter()
-            .any(|(key, value)| key == "BOX_EXEC_USER" && value == "1000:1000"));
+            .any(|(key, value)| key == "BOX_EXEC_USER" && b64d(value) == "1000:1000"));
         assert!(spec
             .entrypoint
             .env
             .iter()
-            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && value == "/override"));
+            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && b64d(value) == "/override"));
     }
 
     #[test]
@@ -1126,12 +1137,12 @@ mod tests {
             .entrypoint
             .env
             .iter()
-            .any(|(key, value)| key == "BOX_EXEC_USER" && value == "2000:2000"));
+            .any(|(key, value)| key == "BOX_EXEC_USER" && b64d(value) == "2000:2000"));
         assert!(spec
             .entrypoint
             .env
             .iter()
-            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && value == "/oci"));
+            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && b64d(value) == "/oci"));
     }
 
     #[test]
@@ -1147,7 +1158,7 @@ mod tests {
             .entrypoint
             .env
             .iter()
-            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && value == GUEST_WORKDIR));
+            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && b64d(value) == GUEST_WORKDIR));
     }
 
     #[test]
@@ -1191,17 +1202,17 @@ mod tests {
             .entrypoint
             .env
             .iter()
-            .any(|(key, value)| key == "BOX_EXEC_ENV_FOO" && value == "cli"));
+            .any(|(key, value)| key == "BOX_EXEC_ENV_FOO" && b64d(value) == "cli"));
         assert!(spec
             .entrypoint
             .env
             .iter()
-            .any(|(key, value)| key == "BOX_EXEC_ENV_BAR" && value == "image"));
+            .any(|(key, value)| key == "BOX_EXEC_ENV_BAR" && b64d(value) == "image"));
         assert!(spec
             .entrypoint
             .env
             .iter()
-            .any(|(key, value)| key == "BOX_EXEC_ENV_BAZ" && value == "cli"));
+            .any(|(key, value)| key == "BOX_EXEC_ENV_BAZ" && b64d(value) == "cli"));
         assert!(!spec
             .entrypoint
             .env
