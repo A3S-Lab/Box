@@ -22,7 +22,11 @@ impl VmManager {
         // (no cold boot), so a short grace catches an immediate restore failure while
         // saving ~200ms on the fork fast-path; a cold boot keeps the longer grace.
         #[cfg(unix)]
-        let max_wait_ms: u64 = if super::is_restore_mode(&self.config) { 40 } else { 250 };
+        let max_wait_ms: u64 = if super::is_restore_mode(&self.config) {
+            40
+        } else {
+            250
+        };
         #[cfg(not(unix))]
         let max_wait_ms: u64 = 250;
         const POLL_MS: u64 = 10;
@@ -142,13 +146,10 @@ impl VmManager {
         if let Ok(Ok(client)) =
             tokio::time::timeout(ATTEMPT_TIMEOUT, ExecClient::connect(exec_socket_path)).await
         {
-            match tokio::time::timeout(ATTEMPT_TIMEOUT, client.heartbeat()).await {
-                Ok(Ok(true)) => {
-                    tracing::debug!("restore: exec server heartbeat passed");
-                    self.exec_client = Some(client);
-                    return;
-                }
-                _ => {}
+            if let Ok(Ok(true)) = tokio::time::timeout(ATTEMPT_TIMEOUT, client.heartbeat()).await {
+                tracing::debug!("restore: exec server heartbeat passed");
+                self.exec_client = Some(client);
+                return;
             }
         }
         tracing::debug!(

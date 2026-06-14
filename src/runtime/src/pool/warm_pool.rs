@@ -462,9 +462,10 @@ impl WarmPool {
             return Ok(t.clone());
         }
 
-        let dir = a3s_box_core::dirs_home()
-            .join("pool")
-            .join(format!("tpl-{:016x}", crate::vm::fnv1a_hash(&box_config.image)));
+        let dir = a3s_box_core::dirs_home().join("pool").join(format!(
+            "tpl-{:016x}",
+            crate::vm::fnv1a_hash(&box_config.image)
+        ));
         std::fs::create_dir_all(&dir).map_err(BoxError::IoError)?;
         let mem_file = dir.join("template.ram");
         let sock = dir.join("template.sock");
@@ -542,7 +543,10 @@ impl WarmPool {
     /// state save/restore, neither of which exist on Windows. `--snapshot-fork` is
     /// Linux/KVM-only, so this path is never reached there in practice.
     #[cfg(not(unix))]
-    async fn trigger_snapshot(_sock: &std::path::Path, _state_file: &std::path::Path) -> Result<()> {
+    async fn trigger_snapshot(
+        _sock: &std::path::Path,
+        _state_file: &std::path::Path,
+    ) -> Result<()> {
         Err(BoxError::PoolError(
             "snapshot-fork is only supported on Linux/KVM hosts".to_string(),
         ))

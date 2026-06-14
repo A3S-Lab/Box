@@ -60,10 +60,24 @@ mod tests {
 
     #[test]
     fn test_is_prunable_box_only_inactive() {
-        assert!(!is_prunable_box(&make_record("a", "running", "running", Some(1))));
-        assert!(!is_prunable_box(&make_record("b", "paused", "paused", Some(1))));
-        assert!(is_prunable_box(&make_record("c", "stopped", "stopped", None)));
+        assert!(!is_prunable_box(&make_record(
+            "a",
+            "running",
+            "running",
+            Some(1)
+        )));
+        assert!(!is_prunable_box(&make_record(
+            "b",
+            "paused",
+            "paused",
+            Some(1)
+        )));
+        assert!(is_prunable_box(&make_record(
+            "c", "stopped", "stopped", None
+        )));
         assert!(is_prunable_box(&make_record("d", "dead", "dead", None)));
-        assert!(is_prunable_box(&make_record("e", "created", "created", None)));
+        assert!(is_prunable_box(&make_record(
+            "e", "created", "created", None
+        )));
     }
 }
