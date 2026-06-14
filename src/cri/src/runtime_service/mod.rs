@@ -2455,8 +2455,7 @@ impl RuntimeService for BoxRuntimeService {
                 let running = containers
                     .iter()
                     .filter(|c| {
-                        c.sandbox_id == container.sandbox_id
-                            && c.state == ContainerState::Running
+                        c.sandbox_id == container.sandbox_id && c.state == ContainerState::Running
                     })
                     .count();
                 let usage = self
