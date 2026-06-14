@@ -1438,10 +1438,22 @@ impl RuntimeService for BoxRuntimeService {
         // ReopenContainerLog test, before the container has produced any output
         // — finds it. The supervisor would otherwise create it lazily in its
         // task, racing the caller.
-        let log_writer = log_writer::CriLogWriter::open(&container.log_path)
-            .await
-            .ok()
-            .flatten();
+        let log_writer = match log_writer::CriLogWriter::open(&container.log_path).await {
+            Ok(writer) => writer,
+            Err(e) => {
+                // The container still runs — logging degrades rather than failing
+                // StartContainer — but surface the failure instead of swallowing it
+                // silently, so an unwritable log path (permissions, full disk) is
+                // diagnosable.
+                tracing::warn!(
+                    container = %container_id,
+                    log_path = %container.log_path,
+                    error = %e,
+                    "Failed to open container log file; container output will not be logged"
+                );
+                None
+            }
+        };
 
         spawn_container_exit_supervisor(ContainerExitSupervisor {
             store: self.store.clone(),
