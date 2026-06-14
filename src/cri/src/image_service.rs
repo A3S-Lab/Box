@@ -322,8 +322,20 @@ impl ImageService for BoxImageService {
 
         tracing::info!(image = %image_spec.image, "CRI RemoveImage");
 
+        // Resolve the reference to its digest the same way ImageStatus does, so
+        // `rmi <short-tag>` matches an image stored under its fully-qualified name
+        // (ImageStatus resolved it but RemoveImage previously passed the raw ref to
+        // store.remove, which only exact-matches a key or digest). Removing by the
+        // resolved digest drops every reference to the image — the CRI
+        // "remove the image" semantic. Fall back to the raw ref (a bare digest/id,
+        // or an unknown image) so store.remove still handles it / errors as before.
+        let target = self
+            .resolve_digest(&image_spec.image)
+            .await
+            .unwrap_or_else(|| image_spec.image.clone());
+
         self.image_store
-            .remove(&image_spec.image)
+            .remove(&target)
             .await
             .map_err(box_error_to_status)?;
 
