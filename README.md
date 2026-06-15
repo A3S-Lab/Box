@@ -351,11 +351,16 @@ Vsock/control services:
 
 | Port | Service |
 | ---: | --- |
-| 4088 | gRPC control / health / metrics |
+| 4088 | gRPC control / health (guest↔host) |
 | 4089 | exec server |
 | 4090 | PTY server |
 | 4091 | attestation / RA-TLS |
 | 4092 | optional sidecar vsock port |
+
+These are **vsock** ports (guest↔host), not host TCP endpoints. For
+host-scrapable Prometheus metrics + a health probe, run the monitor with
+`a3s-box monitor --metrics-addr 127.0.0.1:9100` (serves `/metrics` and
+`/healthz`) — see [`docs/monitor-service.md`](docs/monitor-service.md).
 
 Crates:
 

@@ -42,6 +42,11 @@ pub struct MonitorArgs {
     /// Disable and remove the installed monitor service, then exit.
     #[arg(long)]
     pub uninstall: bool,
+
+    /// Serve Prometheus metrics + `/healthz` on this address (e.g.
+    /// `127.0.0.1:9100`). Off when unset. Bind loopback — there is no auth.
+    #[arg(long)]
+    pub metrics_addr: Option<String>,
 }
 
 /// Per-box backoff state for restart attempts.
@@ -158,6 +163,15 @@ pub async fn execute(args: MonitorArgs) -> Result<(), Box<dyn std::error::Error>
         "a3s-box monitor started (poll interval: {}s)",
         args.interval
     );
+
+    // Optional metrics/health endpoint, served alongside the poll loop.
+    if let Some(addr) = args.metrics_addr.clone() {
+        tokio::spawn(async move {
+            if let Err(e) = super::monitor_metrics::serve(addr).await {
+                eprintln!("monitor metrics: failed to serve: {e}");
+            }
+        });
+    }
 
     loop {
         if let Err(e) = poll_once(&mut tracker).await {

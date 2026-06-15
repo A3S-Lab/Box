@@ -110,6 +110,13 @@ impl StateFile {
         }
     }
 
+    /// Load the default state **read-only**: no reconcile sweep, no PID-liveness
+    /// cleanup, no write-back. For consumers that only need a snapshot of the
+    /// records (e.g. metrics scraping) and must not cause side effects.
+    pub(crate) fn load_readonly() -> Result<Self, std::io::Error> {
+        Self::load_default_raw()
+    }
+
     /// Save state to disk atomically under the cross-process state lock.
     pub fn save(&self) -> Result<(), std::io::Error> {
         let _lock = super::lock::StateLock::acquire()?;

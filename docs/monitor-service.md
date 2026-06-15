@@ -45,3 +45,33 @@ a3s-box monitor --uninstall
 If automatic enable/load fails (e.g. systemd/launchctl unavailable in your
 environment), `--install` still writes the unit file and prints the manual
 `systemctl --user enable --now …` / `launchctl load -w …` command to finish.
+
+## Metrics + health endpoint
+
+The monitor is the one always-on process and already polls every box's state,
+so it can also export operator-scrapable observability. Pass `--metrics-addr`:
+
+```bash
+a3s-box monitor --metrics-addr 127.0.0.1:9100
+```
+
+It then serves (plain HTTP, **off by default**, bind loopback — there is no auth):
+
+| Path | Response |
+|------|----------|
+| `GET /healthz` | `200 ok` — liveness probe |
+| `GET /metrics` | Prometheus text of box-state metrics |
+
+Exported metrics (read fresh from state per scrape, no side effects):
+
+```
+a3s_box_total                         # boxes tracked
+a3s_box_state{status="running"|"paused"|"dead"|"created"|"other"}
+a3s_box_restarts_total                # sum of per-box restart counts
+a3s_box_health{status="healthy"|"unhealthy"}
+```
+
+To run the metrics endpoint under the installed service, append the flag to the
+unit's `ExecStart`/`ProgramArguments` (or re-run `--install` after we wire a
+`--metrics-addr` passthrough). A Prometheus scrape config simply targets
+`127.0.0.1:9100`.
