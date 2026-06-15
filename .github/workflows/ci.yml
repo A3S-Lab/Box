@@ -165,14 +165,25 @@ jobs:
     needs: [fmt, clippy, test]
     if: vars.KVM_CI == 'true'
     runs-on: [self-hosted, linux, kvm]
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
-      - uses: dtolnay/rust-toolchain@stable
+      # The self-hosted runner already has a working rustup/cargo. Using
+      # dtolnay/rust-toolchain forces rustup to re-sync the whole `stable`
+      # channel (7 components) on every run — ~20 min on this box's network,
+      # which blew the job timeout. Use the runner's existing toolchain: add the
+      # musl target (a fast no-op if already installed) and put cargo on PATH
+      # for later steps (the runner service env does not source a login shell).
+      - name: Use the runner's existing Rust toolchain
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
         with:
-          targets: x86_64-unknown-linux-musl
+          workspaces: src
+          key: kvm-integration
       - name: Verify /dev/kvm is present
         run: |
           if [ ! -e /dev/kvm ]; then
