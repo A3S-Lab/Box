@@ -166,6 +166,12 @@ jobs:
     if: vars.KVM_CI == 'true'
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 75
+    # The runner has no direct docker.io egress (CN network), so the smoke
+    # tests pull alpine/busybox through a mirror. The image keeps its canonical
+    # docker.io identity; only the fetch is redirected. Override per-runner with
+    # the KVM_CI_REGISTRY_MIRRORS repo variable.
+    env:
+      A3S_REGISTRY_MIRRORS: ${{ vars.KVM_CI_REGISTRY_MIRRORS || 'docker.io=docker.m.daocloud.io' }}
     steps:
       - uses: actions/checkout@v4
       - name: Init submodules
@@ -208,7 +214,7 @@ jobs:
         env:
           A3S_BOX_CRI_SMOKE: "1"
           A3S_BOX_CRI_SMOKE_AGENT_IMAGE: ${{ vars.KVM_CI_AGENT_IMAGE || 'docker.m.daocloud.io/library/alpine:latest' }}
-          A3S_REGISTRY_MIRRORS: ${{ vars.KVM_CI_REGISTRY_MIRRORS }}
+          # A3S_REGISTRY_MIRRORS inherited from the job env (covers docker.io).
         run: |
           unset A3S_DEPS_STUB
           cd src
