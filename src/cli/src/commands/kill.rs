@@ -105,7 +105,10 @@ async fn kill_one(
     let box_id = record.id.clone();
     let name = record.name.clone();
 
-    if record.status == "paused" && is_stopping_signal(signal) && signal != SIGKILL {
+    // Resume a paused box before terminating it. This now also applies to
+    // SIGKILL: a paused box is SIGSTOP'd, and leaving it frozen would otherwise
+    // strand the VM (and the via-guest path below cannot reach a frozen guest).
+    if record.status == "paused" && is_stopping_signal(signal) {
         lifecycle::resume_paused_for_termination(&record, pid, "kill")
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     }
@@ -116,8 +119,18 @@ async fn kill_one(
         // signalling the host shim never reaches the container and would kill the
         // VM abruptly. Fall back to a host signal only when no guest exec server
         // is reachable (older box / socket gone).
+        //
+        // SIGKILL is the exception: it cannot be caught/handled, so routing it
+        // through the guest exec server is pointless AND it HANGS on a box whose
+        // guest was frozen (the read has no timeout). Force-kill the host shim
+        // directly — abruptly tearing down the VM is exactly what -9 wants.
         let exec_socket = crate::socket_paths::exec(&record);
-        if !process::deliver_signal_via_guest(&exec_socket, signal).await {
+        let delivered = if signal == SIGKILL {
+            false
+        } else {
+            process::deliver_signal_via_guest(&exec_socket, signal).await
+        };
+        if !delivered {
             process::send_signal(pid, signal).map_err(|err| {
                 format!(
                     "Failed to send signal {signal} to box {} (PID {pid}): {err}",

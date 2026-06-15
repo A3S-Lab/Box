@@ -1266,6 +1266,25 @@ impl RuntimeService for BoxRuntimeService {
             rootfs_guest_path,
         };
 
+        // Re-validate the sandbox right before registering the container. The
+        // heavy async work above (image resolve + rootfs build, which yields the
+        // task) could have run concurrently with a StopPodSandbox/
+        // RemovePodSandbox that tore the sandbox (and its rootfs tree) down.
+        // Without this re-check we would register an orphan container whose
+        // sandbox is gone — and whose rootfs we just recreated under a
+        // now-deleted sandbox tree — that nothing ever reaps.
+        match self.store.sandboxes.get(&container.sandbox_id).await {
+            Some(sb) if sb.state == SandboxState::Ready => {}
+            _ => {
+                self.cleanup_container_rootfs_path(&container.rootfs_path)
+                    .await;
+                return Err(Status::failed_precondition(format!(
+                    "Sandbox {} is no longer ready; aborting CreateContainer",
+                    container.sandbox_id
+                )));
+            }
+        }
+
         self.store.add_container(container.clone()).await;
         self.emit_container_event(
             &container.id,
