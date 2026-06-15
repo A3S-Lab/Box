@@ -180,10 +180,10 @@ jobs:
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustup" target add x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src
-          key: kvm-integration
+      # NOTE: no Swatinem/rust-cache here — fetching that action from
+      # codeload.github.com times out on this runner's network, which fails
+      # "Set up job". The self-hosted runner keeps a warm cargo registry, and
+      # the 75-min budget covers a cold libkrun build.
       - name: Verify /dev/kvm is present
         run: |
           if [ ! -e /dev/kvm ]; then
