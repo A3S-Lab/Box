@@ -932,8 +932,8 @@ pub(crate) fn build_seccomp_errno_filter(blocked_syscalls: &[u32]) -> Vec<libc::
     const AUDIT_ARCH: u32 = 0xC000_00B7; // AUDIT_ARCH_AARCH64
 
     let num_blocked = blocked_syscalls.len();
-    // +5: arch_load, arch_check, syscall_load, allow, deny
-    let mut filter = Vec::with_capacity(num_blocked + 5);
+    // +6: arch_load, arch_check, syscall_load, allow, deny, kill
+    let mut filter = Vec::with_capacity(num_blocked + 6);
 
     // 1. Load architecture: LD [data[4]] (offset 4 = arch in seccomp_data)
     filter.push(libc::sock_filter {
@@ -947,8 +947,13 @@ pub(crate) fn build_seccomp_errno_filter(blocked_syscalls: &[u32]) -> Vec<libc::
     //    JEQ AUDIT_ARCH, next(0), kill(num_blocked + 2)
     filter.push(libc::sock_filter {
         code: BPF_JMP | BPF_JEQ | BPF_K,
-        jt: 0,                       // continue to syscall check
-        jf: (num_blocked + 2) as u8, // jump to kill (past load + all checks + allow)
+        jt: 0, // continue to syscall check
+        // On arch MISMATCH jump to the final KILL instruction. A BPF jump goes
+        // to pc+1+jf; this instr is at pc=1, so jf = num_blocked + 3 lands on
+        // index num_blocked + 5 (= KILL). (Was num_blocked + 2, which landed on
+        // the EPERM/deny instr and left KILL as dead code — wrong-arch was only
+        // denied, not killed.)
+        jf: (num_blocked + 3) as u8,
         k: AUDIT_ARCH,
     });
 
@@ -1209,7 +1214,15 @@ mod tests {
         assert_eq!(filter[0].k, 4); // offset 4 = arch field
                                     // Second instruction should be JEQ (arch check)
         assert_eq!(filter[1].code, 0x15); // BPF_JMP | BPF_JEQ | BPF_K
-                                          // Third instruction should be BPF_LD (load syscall nr)
+                                          // On arch mismatch it must jump to the FINAL kill instruction, not the
+                                          // deny (a BPF jump lands at pc+1+jf; arch-check is at pc=1). This is the
+                                          // off-by-one regression guard: jf must target the last instruction.
+        assert_eq!(
+            1 + 1 + filter[1].jf as usize,
+            filter.len() - 1,
+            "arch-mismatch must jump to KILL_PROCESS (last instr), not deny"
+        );
+        // Third instruction should be BPF_LD (load syscall nr)
         assert_eq!(filter[2].code, 0x20);
         assert_eq!(filter[2].k, 0); // offset 0 = syscall nr
                                     // Last instruction should be BPF_RET (kill — wrong arch)
