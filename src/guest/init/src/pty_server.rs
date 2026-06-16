@@ -233,6 +233,72 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
     #[cfg(not(target_os = "linux"))]
     let _ = (&sec_cap_drop, &sec_cap_keep, sec_no_new_privs);
 
+    // Create the per-container cgroup from the A3S_SEC_* limits so the TTY
+    // workload is bounded by cpu.max / pids.max / memory.* like the exec path —
+    // the PTY path previously created NO cgroup, so tty containers escaped every
+    // resource limit. Created here in the parent (allocates); the child joins it
+    // (writes its PID to cgroup.procs) before chroot. The handle lives for the
+    // connection so the cgroup dir is removed once the child exits.
+    #[cfg(target_os = "linux")]
+    let parse_u64 = |prefix: &str| {
+        request
+            .env
+            .iter()
+            .find_map(|entry| entry.strip_prefix(prefix))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+    };
+    #[cfg(target_os = "linux")]
+    let parse_i64 = |prefix: &str| {
+        request
+            .env
+            .iter()
+            .find_map(|entry| entry.strip_prefix(prefix))
+            .and_then(|value| value.trim().parse::<i64>().ok())
+    };
+    #[cfg(target_os = "linux")]
+    let _container_cgroup = crate::cgroup::ContainerCgroup::create(
+        parse_u64("A3S_SEC_MEM_LIMIT="),
+        parse_u64("A3S_SEC_MEM_LOW="),
+        parse_i64("A3S_SEC_MEM_SWAP="),
+        parse_i64("A3S_SEC_CPU_QUOTA="),
+        parse_u64("A3S_SEC_CPU_PERIOD="),
+        parse_u64("A3S_SEC_CPU_SHARES="),
+        parse_u64("A3S_SEC_PIDS_LIMIT="),
+    );
+    #[cfg(target_os = "linux")]
+    let cgroup_procs: Option<std::ffi::CString> = _container_cgroup
+        .as_ref()
+        .and_then(|cgroup| std::ffi::CString::new(cgroup.procs_path()).ok());
+
+    // Set up the container rootfs before the fork — the child shares this mount
+    // namespace and chroots into it. The exec path does all of this per spawn;
+    // the PTY path did NONE of it, so a tty container was missing /proc + /dev and
+    // its securityContext path restrictions went unenforced. Mirror the exec path
+    // exactly (same critest-validated functions), in the same order.
+    #[cfg(target_os = "linux")]
+    if let Some(ref rootfs) = request.rootfs {
+        // /proc + /sys, then the standard /dev nodes — many workloads read
+        // /proc/self/* or /dev/urandom and won't start without them. Idempotent.
+        crate::exec_server::ensure_container_pseudo_filesystems(rootfs);
+        crate::exec_server::ensure_container_dev_nodes(rootfs);
+        // CRI MaskedPaths / ReadonlyPaths (best-effort; a path that doesn't exist
+        // is skipped) — these need /proc + /sys mounted above.
+        let masked = crate::exec_server::parse_sec_path_list(&request.env, "A3S_SEC_MASKED_PATHS=");
+        let readonly =
+            crate::exec_server::parse_sec_path_list(&request.env, "A3S_SEC_READONLY_PATHS=");
+        if !masked.is_empty() || !readonly.is_empty() {
+            crate::exec_server::apply_container_path_restrictions(rootfs, &masked, &readonly);
+        }
+        // readOnlyRootFilesystem — last, after /proc, /sys and inner mounts are up.
+        if request
+            .env
+            .iter()
+            .any(|entry| entry == "A3S_SEC_READONLY_ROOTFS=1")
+        {
+            crate::exec_server::remount_rootfs_readonly(rootfs);
+        }
+    }
+
     // Step 2: Allocate PTY
     let pty = openpty(None, None)?;
     let master_fd = pty.master;
@@ -246,6 +312,37 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
         ForkResult::Child => {
             // Child: set up PTY slave as stdin/stdout/stderr, then exec
             drop(master_fd);
+
+            // Join the per-container cgroup FIRST, before chroot makes
+            // /sys/fs/cgroup unreachable, so this process and everything it forks
+            // is bounded from birth. Async-signal-safe: open + getpid + a
+            // stack-only itoa + write + close, no allocation.
+            #[cfg(target_os = "linux")]
+            if let Some(ref procs) = cgroup_procs {
+                let fd = unsafe { libc::open(procs.as_ptr(), libc::O_WRONLY) };
+                if fd >= 0 {
+                    let mut buf = [0u8; 20];
+                    let mut i = buf.len();
+                    let mut n = unsafe { libc::getpid() } as u64;
+                    if n == 0 {
+                        i -= 1;
+                        buf[i] = b'0';
+                    }
+                    while n > 0 {
+                        i -= 1;
+                        buf[i] = b'0' + (n % 10) as u8;
+                        n /= 10;
+                    }
+                    unsafe {
+                        libc::write(
+                            fd,
+                            buf[i..].as_ptr() as *const libc::c_void,
+                            (buf.len() - i) as libc::size_t,
+                        );
+                        libc::close(fd);
+                    }
+                }
+            }
 
             // Create new session (detach from controlling terminal)
             setsid().ok();
