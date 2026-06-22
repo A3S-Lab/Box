@@ -64,6 +64,10 @@ pub struct SnapshotLsArgs {
 pub struct SnapshotRmArgs {
     /// Snapshot ID(s) to remove
     pub ids: Vec<String>,
+    /// Remove even if a restored box still references the snapshot as its
+    /// copy-on-write overlay lower (`.snapshot-lower`).
+    #[arg(long, short)]
+    pub force: bool,
 }
 
 /// Arguments for `snapshot inspect`.
@@ -214,7 +218,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     let socket_dir = box_dir.join("sockets");
     let logs_dir = box_dir.join("logs");
 
-    // Arm cleanup: every step below (create dirs, copy rootfs, register) can
+    // Arm cleanup: every step below (create dirs, write marker, register) can
     // fail with `?`. Until the box is in the state file it is invisible to
     // `prune`/`rm`, so a half-created box dir would leak on disk forever. The
     // guard removes it on any early return and is disarmed once registered.
@@ -223,14 +227,19 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     std::fs::create_dir_all(&socket_dir)?;
     std::fs::create_dir_all(&logs_dir)?;
 
-    // Copy snapshot rootfs to new box
+    // Point the restored box's overlay at the snapshot's pristine stored rootfs
+    // as a read-only lower (copy-on-write): the box writes to its own upper, the
+    // snapshot stays shared and untouched across all forks, and nothing is
+    // copied. The runtime reads `.snapshot-lower` in `prepare_layout` and mounts
+    // the overlay (or, on a non-overlay host, the CopyProvider falls back to a
+    // full copy — same result, slower). This replaces a full per-restore rootfs
+    // deep-copy, so forking a warmed snapshot is near-instant and space-cheap.
     let snap_rootfs = store.rootfs_path(&meta.id);
-    let box_rootfs = box_dir.join("rootfs");
     if snap_rootfs.exists() {
-        copy_dir_recursive_io(&snap_rootfs, &box_rootfs)?;
-        // Mark the box so the runtime boots directly from this restored rootfs
-        // instead of rebuilding from the image (preserves the snapshot's fs).
-        std::fs::write(box_dir.join(".snapshot-rootfs"), b"")?;
+        std::fs::write(
+            box_dir.join(".snapshot-lower"),
+            snap_rootfs.to_string_lossy().as_bytes(),
+        )?;
     }
 
     let record = BoxRecord {
@@ -345,12 +354,33 @@ async fn execute_ls(args: SnapshotLsArgs) -> Result<(), Box<dyn std::error::Erro
 }
 
 /// Remove snapshots.
+///
+/// Refuses to remove a snapshot that a restored box still references as its
+/// copy-on-write overlay lower (`.snapshot-lower`): the snapshot's rootfs is
+/// shared read-only into every fork, so deleting it would break a live overlay
+/// (ESTALE) or stop a restored box from re-starting. Pass `--force` to override.
 async fn execute_rm(args: SnapshotRmArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::state::StateFile;
     use a3s_box_runtime::SnapshotStore;
 
     let store = SnapshotStore::default_path()?;
+    let state = StateFile::load_default()?;
 
+    let mut refused = false;
     for id in &args.ids {
+        if !args.force {
+            let users = boxes_referencing_snapshot(&state, &store.rootfs_path(id));
+            if !users.is_empty() {
+                refused = true;
+                eprintln!(
+                    "Cannot remove snapshot '{}': still used as a copy-on-write lower by box(es): {}. \
+                     Remove the box(es) first, or re-run with --force.",
+                    id,
+                    users.join(", ")
+                );
+                continue;
+            }
+        }
         if store.delete(id)? {
             println!("{}", id);
         } else {
@@ -358,7 +388,30 @@ async fn execute_rm(args: SnapshotRmArgs) -> Result<(), Box<dyn std::error::Erro
         }
     }
 
+    if refused {
+        return Err("one or more snapshots are still in use (not removed)".into());
+    }
     Ok(())
+}
+
+/// Names of boxes whose `.snapshot-lower` marker points at `snap_rootfs`.
+fn boxes_referencing_snapshot(
+    state: &crate::state::StateFile,
+    snap_rootfs: &std::path::Path,
+) -> Vec<String> {
+    state
+        .records()
+        .iter()
+        .filter(|r| box_references_lower(&r.box_dir, snap_rootfs))
+        .map(|r| r.name.clone())
+        .collect()
+}
+
+/// Whether the box at `box_dir` references `snap_rootfs` as its CoW overlay lower.
+fn box_references_lower(box_dir: &std::path::Path, snap_rootfs: &std::path::Path) -> bool {
+    std::fs::read_to_string(box_dir.join(".snapshot-lower"))
+        .map(|s| std::path::Path::new(s.trim()) == snap_rootfs)
+        .unwrap_or(false)
 }
 
 /// Inspect a snapshot.
@@ -439,58 +492,28 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Simple recursive directory copy (std::io version for CLI).
-fn copy_dir_recursive_io(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            copy_symlink_io(&src_path, &dst_path)?;
-        } else if file_type.is_dir() {
-            copy_dir_recursive_io(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_symlink_io(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    let target = std::fs::read_link(src)?;
-
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&target, dst)?;
-    }
-
-    #[cfg(windows)]
-    {
-        let is_dir = src.metadata().map(|m| m.is_dir()).unwrap_or(false);
-        if is_dir {
-            std::os::windows::fs::symlink_dir(&target, dst)?;
-        } else {
-            std::os::windows::fs::symlink_file(&target, dst)?;
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = target;
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "symlink copy is not supported on this platform",
-        ));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_box_references_lower() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let box_dir = tmp.path();
+        let snap = std::path::PathBuf::from("/root/.a3s/snapshots/snap-1/rootfs");
+        // no marker -> not referencing
+        assert!(!box_references_lower(box_dir, &snap));
+        // marker points elsewhere -> not referencing
+        std::fs::write(box_dir.join(".snapshot-lower"), "/other/snap/rootfs").unwrap();
+        assert!(!box_references_lower(box_dir, &snap));
+        // marker points at the snapshot (trailing whitespace tolerated) -> referencing
+        std::fs::write(
+            box_dir.join(".snapshot-lower"),
+            "/root/.a3s/snapshots/snap-1/rootfs\n",
+        )
+        .unwrap();
+        assert!(box_references_lower(box_dir, &snap));
+    }
 
     #[test]
     fn test_format_size_bytes() {
