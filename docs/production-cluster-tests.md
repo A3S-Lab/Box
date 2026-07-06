@@ -95,7 +95,7 @@ with `--from-dir` so the exact local artifacts are installed everywhere.
 
 ```bash
 sudo deploy/scripts/install-runtimeclass.sh \
-  --version v2.6.0 \
+  --version v3.0.0 \
   --from-dir /opt/a3s-box-artifacts \
   --warmup-image docker.m.daocloud.io/library/busybox:latest
 ```

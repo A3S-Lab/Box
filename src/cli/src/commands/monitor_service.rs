@@ -23,7 +23,7 @@ pub fn systemd_unit(exe: &Path, interval: u64) -> String {
     format!(
         "[Unit]\n\
          Description=a3s-box monitor — restarts dead/unhealthy detached boxes\n\
-         Documentation=https://github.com/AI45Lab/Box\n\
+         Documentation=https://github.com/A3S-Lab/Box\n\
          After=network.target\n\
          \n\
          [Service]\n\

@@ -471,7 +471,7 @@ curl -fsSL https://raw.githubusercontent.com/A3S-Lab/Box/main/deploy/scripts/ins
 
 # or from a checkout:
 sudo deploy/scripts/install-runtimeclass.sh                  # default version
-sudo deploy/scripts/install-runtimeclass.sh --version v2.6.0 # pin a version
+sudo deploy/scripts/install-runtimeclass.sh --version v3.0.0 # pin a version
 ```
 
 Then label the node from a machine with `kubectl`:

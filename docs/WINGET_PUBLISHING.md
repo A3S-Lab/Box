@@ -57,7 +57,7 @@ manifest 文件位于 `.winget/` 目录：
 # 下载发布资产
 $Version = "0.8.0"
 $Tag = "v$Version"
-$Url = "https://github.com/AI45Lab/Box/releases/download/$Tag/a3s-box-$Tag-windows-x86_64.zip"
+$Url = "https://github.com/A3S-Lab/Box/releases/download/$Tag/a3s-box-$Tag-windows-x86_64.zip"
 Invoke-WebRequest -Uri $Url -OutFile "a3s-box.zip"
 
 # 计算 SHA256
