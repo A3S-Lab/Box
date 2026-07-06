@@ -8,9 +8,11 @@ use std::sync::Arc;
 
 use a3s_box_core::error::{BoxError, Result};
 use oci_distribution::client::{ClientConfig, ClientProtocol, Config, ImageLayer, PushResponse};
-use oci_distribution::manifest::{ImageIndexEntry, OciImageManifest};
+use oci_distribution::errors::{OciDistributionError, OciErrorCode};
+use oci_distribution::manifest::{ImageIndexEntry, OciImageManifest, OCI_IMAGE_MEDIA_TYPE};
 use oci_distribution::secrets::RegistryAuth as OciRegistryAuth;
 use oci_distribution::{Client, Reference};
+use oci_reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 
 use super::credentials::CredentialStore;
 use super::reference::ImageReference;
@@ -226,6 +228,9 @@ impl RegistryAuth {
                 return Self::basic(username, password);
             }
         }
+        if let Some((username, password)) = super::credentials::docker_credentials(registry) {
+            return Self::basic(username, password);
+        }
         // Fall back to env vars, then anonymous
         Self::from_env()
     }
@@ -235,6 +240,15 @@ impl RegistryAuth {
         match (&self.username, &self.password) {
             (Some(u), Some(p)) => OciRegistryAuth::Basic(u.clone(), p.clone()),
             _ => OciRegistryAuth::Anonymous,
+        }
+    }
+
+    fn basic_credentials(&self) -> Option<(String, String)> {
+        match (&self.username, &self.password) {
+            (Some(username), Some(password)) if !username.is_empty() && !password.is_empty() => {
+                Some((username.clone(), password.clone()))
+            }
+            _ => None,
         }
     }
 }
@@ -634,16 +648,16 @@ impl RegistryPusher {
             ));
         }
 
-        // Push to registry
-        let auth = self.auth.to_oci_auth();
-        let response: PushResponse = self
-            .client
-            .push(&oci_ref, &layers, config, &auth, Some(manifest))
-            .await
-            .map_err(|e| BoxError::RegistryError {
-                registry: reference.registry.clone(),
-                message: format!("Failed to push image: {}", e),
-            })?;
+        let response = self
+            .push_with_repository_create_retry(
+                reference,
+                &oci_ref,
+                &layers,
+                &config,
+                &manifest,
+                &manifest_data,
+            )
+            .await?;
 
         tracing::info!(
             reference = %reference,
@@ -670,6 +684,385 @@ impl RegistryPusher {
             BoxError::OciImageError(format!("Invalid OCI reference '{}': {}", ref_str, e))
         })
     }
+
+    async fn push_with_repository_create_retry(
+        &self,
+        reference: &ImageReference,
+        oci_ref: &Reference,
+        layers: &[ImageLayer],
+        config: &Config,
+        manifest: &OciImageManifest,
+        manifest_data: &[u8],
+    ) -> Result<PushResponse> {
+        match self
+            .push_once(reference, oci_ref, layers, config, manifest, manifest_data)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(first_error) if is_repository_already_exists_push_error(&first_error) => {
+                tracing::warn!(
+                    reference = %reference,
+                    error = %push_error_summary(&first_error),
+                    "Registry reported repository already exists during push; retrying once"
+                );
+                self.push_once(reference, oci_ref, layers, config, manifest, manifest_data)
+                    .await
+                    .map_err(|retry_error| BoxError::RegistryError {
+                        registry: reference.registry.clone(),
+                        message: format!(
+                            "Failed to push image after retrying repository creation race: first error: {}; retry error: {}",
+                            push_error_summary(&first_error),
+                            push_error_summary(&retry_error)
+                        ),
+                    })
+            }
+            Err(error) => Err(BoxError::RegistryError {
+                registry: reference.registry.clone(),
+                message: format!("Failed to push image: {}", push_error_summary(&error)),
+            }),
+        }
+    }
+
+    async fn push_once(
+        &self,
+        reference: &ImageReference,
+        oci_ref: &Reference,
+        layers: &[ImageLayer],
+        config: &Config,
+        manifest: &OciImageManifest,
+        manifest_data: &[u8],
+    ) -> std::result::Result<PushResponse, OciDistributionError> {
+        let auth = self.auth.to_oci_auth();
+        match self
+            .client
+            .push(
+                oci_ref,
+                layers,
+                config.clone(),
+                &auth,
+                Some(manifest.clone()),
+            )
+            .await
+        {
+            Err(first_error)
+                if is_unauthorized_push_error(&first_error)
+                    && self.auth.basic_credentials().is_some() =>
+            {
+                tracing::warn!(
+                    reference = %reference,
+                    error = %push_error_summary(&first_error),
+                    "Registry rejected the default OCI push auth flow; retrying with preemptive Basic auth"
+                );
+                self.push_with_preemptive_basic_auth(
+                    reference,
+                    layers,
+                    config,
+                    manifest,
+                    manifest_data,
+                )
+                .await
+                .map_err(|fallback_error| {
+                    OciDistributionError::GenericError(Some(format!(
+                        "default push auth failed: {}; preemptive Basic auth retry failed: {}",
+                        push_error_summary(&first_error),
+                        push_error_summary(&fallback_error)
+                    )))
+                })
+            }
+            result => result,
+        }
+    }
+
+    async fn push_with_preemptive_basic_auth(
+        &self,
+        reference: &ImageReference,
+        layers: &[ImageLayer],
+        config: &Config,
+        manifest: &OciImageManifest,
+        manifest_data: &[u8],
+    ) -> std::result::Result<PushResponse, OciDistributionError> {
+        let (username, password) = self.auth.basic_credentials().ok_or_else(|| {
+            OciDistributionError::GenericError(Some(
+                "preemptive Basic auth retry requires non-empty credentials".to_string(),
+            ))
+        })?;
+        let http = oci_reqwest::Client::new();
+        let base = registry_base_url(reference)?;
+
+        for (layer, descriptor) in layers.iter().zip(&manifest.layers) {
+            push_blob_with_basic_auth(
+                &http,
+                &base,
+                &reference.repository,
+                &username,
+                &password,
+                &descriptor.digest,
+                &layer.data,
+            )
+            .await?;
+        }
+
+        let config_url = push_blob_with_basic_auth(
+            &http,
+            &base,
+            &reference.repository,
+            &username,
+            &password,
+            &manifest.config.digest,
+            &config.data,
+        )
+        .await?;
+
+        let manifest_ref = reference
+            .tag
+            .as_deref()
+            .or(reference.digest.as_deref())
+            .unwrap_or("latest");
+        let manifest_url = registry_manifest_url(&base, &reference.repository, manifest_ref)?;
+        let media_type = manifest
+            .media_type
+            .as_deref()
+            .unwrap_or(OCI_IMAGE_MEDIA_TYPE);
+        let response = http
+            .put(manifest_url.clone())
+            .basic_auth(&username, Some(&password))
+            .header(CONTENT_TYPE, media_type)
+            .body(manifest_data.to_vec())
+            .send()
+            .await?;
+        let response = ensure_registry_status(
+            response,
+            &[
+                oci_reqwest::StatusCode::CREATED,
+                oci_reqwest::StatusCode::OK,
+            ],
+            manifest_url.as_str(),
+        )
+        .await?;
+        let manifest_url = response_location_or_url(&response, &manifest_url)?;
+
+        Ok(PushResponse {
+            config_url,
+            manifest_url,
+        })
+    }
+}
+
+fn registry_base_url(
+    reference: &ImageReference,
+) -> std::result::Result<oci_reqwest::Url, OciDistributionError> {
+    let scheme = match registry_protocol_from_env() {
+        ClientProtocol::Http => "http",
+        ClientProtocol::Https | ClientProtocol::HttpsExcept(_) => "https",
+    };
+    oci_reqwest::Url::parse(&format!("{scheme}://{}", reference.registry))
+        .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))
+}
+
+fn registry_blob_upload_url(
+    base: &oci_reqwest::Url,
+    repository: &str,
+) -> std::result::Result<oci_reqwest::Url, OciDistributionError> {
+    oci_reqwest::Url::parse(&format!(
+        "{}/v2/{repository}/blobs/uploads/",
+        base.as_str().trim_end_matches('/')
+    ))
+    .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))
+}
+
+fn registry_manifest_url(
+    base: &oci_reqwest::Url,
+    repository: &str,
+    reference: &str,
+) -> std::result::Result<oci_reqwest::Url, OciDistributionError> {
+    oci_reqwest::Url::parse(&format!(
+        "{}/v2/{repository}/manifests/{reference}",
+        base.as_str().trim_end_matches('/')
+    ))
+    .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))
+}
+
+fn resolve_registry_location(
+    base: &oci_reqwest::Url,
+    location: &str,
+) -> std::result::Result<oci_reqwest::Url, OciDistributionError> {
+    oci_reqwest::Url::parse(location)
+        .or_else(|_| base.join(location))
+        .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))
+}
+
+fn append_digest_param(location: &oci_reqwest::Url, digest: &str) -> oci_reqwest::Url {
+    let mut url = location.clone();
+    url.query_pairs_mut().append_pair("digest", digest);
+    url
+}
+
+fn response_location_or_url(
+    response: &oci_reqwest::Response,
+    fallback: &oci_reqwest::Url,
+) -> std::result::Result<String, OciDistributionError> {
+    response
+        .headers()
+        .get(LOCATION)
+        .map(|value| value.to_str().map(str::to_string))
+        .transpose()
+        .map(|location| location.unwrap_or_else(|| fallback.as_str().to_string()))
+        .map_err(OciDistributionError::HeaderValueError)
+}
+
+async fn ensure_registry_status(
+    response: oci_reqwest::Response,
+    expected: &[oci_reqwest::StatusCode],
+    url: &str,
+) -> std::result::Result<oci_reqwest::Response, OciDistributionError> {
+    let status = response.status();
+    if expected.contains(&status) {
+        return Ok(response);
+    }
+
+    let message = response.text().await.unwrap_or_default();
+    if status == oci_reqwest::StatusCode::UNAUTHORIZED {
+        return Err(OciDistributionError::UnauthorizedError {
+            url: url.to_string(),
+        });
+    }
+
+    Err(OciDistributionError::ServerError {
+        code: status.as_u16(),
+        url: url.to_string(),
+        message,
+    })
+}
+
+async fn push_blob_with_basic_auth(
+    http: &oci_reqwest::Client,
+    base: &oci_reqwest::Url,
+    repository: &str,
+    username: &str,
+    password: &str,
+    digest: &str,
+    data: &[u8],
+) -> std::result::Result<String, OciDistributionError> {
+    if data.is_empty() {
+        return Err(OciDistributionError::PushNoDataError);
+    }
+
+    let upload_url = registry_blob_upload_url(base, repository)?;
+    let response = http
+        .post(upload_url.clone())
+        .basic_auth(username, Some(password))
+        .header(CONTENT_LENGTH, "0")
+        .send()
+        .await?;
+    let response = ensure_registry_status(
+        response,
+        &[oci_reqwest::StatusCode::ACCEPTED],
+        upload_url.as_str(),
+    )
+    .await?;
+    let location = response
+        .headers()
+        .get(LOCATION)
+        .ok_or(OciDistributionError::RegistryNoLocationError)?
+        .to_str()?;
+    let location = resolve_registry_location(base, location)?;
+
+    let response = http
+        .patch(location.clone())
+        .basic_auth(username, Some(password))
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(CONTENT_LENGTH, data.len().to_string())
+        .body(data.to_vec())
+        .send()
+        .await?;
+    let response = ensure_registry_status(
+        response,
+        &[oci_reqwest::StatusCode::ACCEPTED],
+        location.as_str(),
+    )
+    .await?;
+    let location = response
+        .headers()
+        .get(LOCATION)
+        .map(|value| value.to_str())
+        .transpose()?
+        .map(|location| resolve_registry_location(base, location))
+        .transpose()?
+        .unwrap_or(location);
+
+    let complete_url = append_digest_param(&location, digest);
+    let response = http
+        .put(complete_url.clone())
+        .basic_auth(username, Some(password))
+        .header(CONTENT_LENGTH, "0")
+        .send()
+        .await?;
+    let response = ensure_registry_status(
+        response,
+        &[oci_reqwest::StatusCode::CREATED],
+        complete_url.as_str(),
+    )
+    .await?;
+    response_location_or_url(&response, &complete_url)
+}
+
+fn is_unauthorized_push_error(error: &OciDistributionError) -> bool {
+    match error {
+        OciDistributionError::UnauthorizedError { .. }
+        | OciDistributionError::AuthenticationFailure(_)
+        | OciDistributionError::ServerError { code: 401, .. } => true,
+        OciDistributionError::RegistryError { envelope, .. } => envelope
+            .errors
+            .iter()
+            .any(|err| matches!(err.code, OciErrorCode::Unauthorized)),
+        _ => false,
+    }
+}
+
+fn is_repository_already_exists_push_error(error: &OciDistributionError) -> bool {
+    match error {
+        OciDistributionError::ServerError { code, message, .. } => {
+            *code == 409 || looks_like_repository_already_exists(message)
+        }
+        OciDistributionError::RegistryError { envelope, .. } => envelope.errors.iter().any(|err| {
+            let name_error = matches!(
+                &err.code,
+                OciErrorCode::NameInvalid | OciErrorCode::NameUnknown
+            );
+            (name_error || matches!(&err.code, OciErrorCode::Denied))
+                && (looks_like_repository_already_exists(&err.message)
+                    || looks_like_repository_already_exists(&err.detail.to_string()))
+        }),
+        OciDistributionError::GenericError(Some(message))
+        | OciDistributionError::SpecViolationError(message) => {
+            looks_like_repository_already_exists(message)
+        }
+        _ => false,
+    }
+}
+
+fn looks_like_repository_already_exists(message: &str) -> bool {
+    let message = message.to_lowercase();
+    message.contains("already exists")
+        || message.contains("resource exists")
+        || message.contains("duplicate")
+        || message.contains("已存在")
+        || message.contains("重复创建")
+}
+
+fn push_error_summary(error: &OciDistributionError) -> String {
+    let mut message = error.to_string();
+    if matches!(
+        error,
+        OciDistributionError::UnauthorizedError { .. }
+            | OciDistributionError::AuthenticationFailure(_)
+            | OciDistributionError::ServerError { code: 401, .. }
+    ) {
+        message.push_str(
+            "; checked A3S credentials, Docker config/credential helpers, and REGISTRY_USERNAME/REGISTRY_PASSWORD",
+        );
+    }
+    message
 }
 
 /// Platform resolver that always selects linux images matching the host architecture.
@@ -869,6 +1262,38 @@ mod tests {
             ClientProtocol::Https
         ));
         std::env::remove_var(REGISTRY_PROTOCOL_ENV);
+    }
+
+    #[test]
+    fn test_repository_exists_push_error_matches_chinese_registry_message() {
+        let error = OciDistributionError::ServerError {
+            code: 500,
+            url: "http://10.12.111.133:49164/v2/a3s/api/blobs/uploads/".to_string(),
+            message: "该资源已存在，请勿重复创建".to_string(),
+        };
+
+        assert!(is_repository_already_exists_push_error(&error));
+    }
+
+    #[test]
+    fn test_repository_exists_push_error_retries_conflict_status() {
+        let error = OciDistributionError::ServerError {
+            code: 409,
+            url: "http://registry.example.com/v2/a3s/api/blobs/uploads/".to_string(),
+            message: "conflict".to_string(),
+        };
+
+        assert!(is_repository_already_exists_push_error(&error));
+    }
+
+    #[test]
+    fn test_unauthorized_push_error_is_not_repository_retryable() {
+        let error = OciDistributionError::UnauthorizedError {
+            url: "http://registry.example.com/v2/a3s/web/blobs/uploads/".to_string(),
+        };
+
+        assert!(!is_repository_already_exists_push_error(&error));
+        assert!(push_error_summary(&error).contains("Docker config/credential helpers"));
     }
 
     #[test]

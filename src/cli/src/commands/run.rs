@@ -7,13 +7,22 @@ use a3s_box_core::config::{BoxConfig, ResourceConfig, SidecarConfig, TeeConfig};
 use a3s_box_core::event::EventEmitter;
 use a3s_box_core::vmm::{parse_signal_name, DEFAULT_SHUTDOWN_TIMEOUT_MS};
 use a3s_box_runtime::VmManager;
-use clap::Args;
+use clap::{Args, ValueEnum};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::common::{self, CommonBoxArgs};
 use crate::output::parse_memory;
 use crate::state::{generate_name, BoxRecord, StateFile};
+
+const PNPM_CACHE_VOLUME_SPEC: &str = "a3s-cache-pnpm:/a3s-cache/pnpm";
+const PNPM_STORE_ENV: &str = "npm_config_store_dir";
+const PNPM_STORE_DIR: &str = "/a3s-cache/pnpm/store";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum PackageCache {
+    Pnpm,
+}
 
 #[derive(Args)]
 pub struct RunArgs {
@@ -35,6 +44,10 @@ pub struct RunArgs {
     /// Automatically remove the box when it stops
     #[arg(long)]
     pub rm: bool,
+
+    /// Mount a persistent package-manager cache (currently: pnpm)
+    #[arg(long = "package-cache", value_enum)]
+    pub package_cache: Vec<PackageCache>,
 
     /// Command to run (override entrypoint)
     #[arg(last = true)]
@@ -78,6 +91,7 @@ struct RunContext {
     box_id: String,
     box_dir: PathBuf,
     name: String,
+    record: BoxRecord,
     exec_socket_path: PathBuf,
     #[cfg_attr(windows, allow(dead_code))]
     pty_socket_path: PathBuf,
@@ -148,7 +162,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
     };
 
     let name = args.common.name.clone().unwrap_or_else(generate_name);
-    let env = common::build_env_map(&args.common)?;
+    let mut env = common::build_env_map(&args.common)?;
     let port_map = common::normalize_port_maps(&args.common.publish)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let labels = common::parse_env_vars(&args.common.labels)
@@ -158,7 +172,9 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         .entrypoint
         .as_ref()
         .map(|ep| ep.split_whitespace().map(String::from).collect::<Vec<_>>());
-    let (resolved_volumes, volume_names) = resolve_volumes(&args.common.volumes)?;
+    let mut volume_specs = args.common.volumes.clone();
+    apply_package_caches(&args.package_cache, &mut volume_specs, &mut env);
+    let (resolved_volumes, volume_names) = resolve_volumes(&volume_specs)?;
 
     // Parse --shm-size once; reuse for both tmpfs entry and the box record.
     let shm_size = match &args.common.shm_size {
@@ -405,6 +421,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         box_id,
         box_dir,
         name,
+        record,
         exec_socket_path,
         pty_socket_path,
         volume_names,
@@ -704,6 +721,9 @@ async fn run_foreground(
         .await;
     log_handle.abort();
 
+    let exit_code = foreground_exit_code(stop_reason, ctx.vm.exit_code());
+    archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
+
     // Best-effort teardown: a stop failure (wedged VM, transient store error)
     // must not orphan the box's other resources, so every step runs regardless
     // of whether an earlier one failed.
@@ -717,7 +737,6 @@ async fn run_foreground(
     {
         tracing::warn!(box_id = %ctx.box_id, %error, "Failed to destroy VM on stop; continuing teardown");
     }
-    let exit_code = foreground_exit_code(stop_reason, ctx.vm.exit_code());
     teardown_box_resources(
         &ctx,
         args.common.network.as_deref(),
@@ -852,6 +871,27 @@ fn resolve_volumes(
     Ok((resolved, names))
 }
 
+fn apply_package_caches(
+    caches: &[PackageCache],
+    volume_specs: &mut Vec<String>,
+    env: &mut std::collections::HashMap<String, String>,
+) {
+    for cache in caches {
+        match cache {
+            PackageCache::Pnpm => {
+                if !volume_specs
+                    .iter()
+                    .any(|spec| spec == PNPM_CACHE_VOLUME_SPEC)
+                {
+                    volume_specs.push(PNPM_CACHE_VOLUME_SPEC.to_string());
+                }
+                env.entry(PNPM_STORE_ENV.to_string())
+                    .or_insert_with(|| PNPM_STORE_DIR.to_string());
+            }
+        }
+    }
+}
+
 /// Disconnect from network if connected.
 fn disconnect_network(
     box_id: &str,
@@ -882,6 +922,7 @@ async fn cleanup_box(
     if let Some(ref handle) = ctx.health_checker {
         handle.abort();
     }
+    archive_auto_removed_logs(ctx, auto_remove, exit_code, false);
     if let Err(error) = ctx
         .vm
         .destroy_with_options(ctx.stop_signal, ctx.stop_timeout_ms)
@@ -915,7 +956,7 @@ fn teardown_box_resources(
 
     if auto_remove {
         crate::cleanup::cleanup_anonymous_volumes(&ctx.anonymous_volumes);
-        if let Err(error) = StateFile::remove_record(&ctx.box_id) {
+        if let Err(error) = remove_auto_removed_record(&ctx.box_id, exit_code, stopped_by_user) {
             tracing::warn!(box_id = %ctx.box_id, %error, "Failed to remove box record during teardown");
         }
         let _ = std::fs::remove_dir_all(&ctx.box_dir);
@@ -925,6 +966,49 @@ fn teardown_box_resources(
     }) {
         tracing::warn!(box_id = %ctx.box_id, %error, "Failed to mark box stopped during teardown");
     }
+}
+
+fn archive_auto_removed_logs(
+    ctx: &RunContext,
+    auto_remove: bool,
+    exit_code: Option<i32>,
+    stopped_by_user: bool,
+) {
+    if !auto_remove {
+        return;
+    }
+
+    let archive_record = stopped_record_for_archive(&ctx.record, exit_code, stopped_by_user);
+    if let Err(error) = crate::log_archive::archive_removed_logs(&archive_record) {
+        tracing::debug!(
+            box_id = %ctx.box_id,
+            error = %error,
+            "Failed to archive auto-removed box logs"
+        );
+    }
+}
+
+fn remove_auto_removed_record(
+    box_id: &str,
+    exit_code: Option<i32>,
+    stopped_by_user: bool,
+) -> Result<Option<BoxRecord>, std::io::Error> {
+    StateFile::take_record(box_id).map(|record| {
+        record.map(|record| stopped_record_for_archive(&record, exit_code, stopped_by_user))
+    })
+}
+
+fn stopped_record_for_archive(
+    record: &BoxRecord,
+    exit_code: Option<i32>,
+    stopped_by_user: bool,
+) -> BoxRecord {
+    let mut record = record.clone();
+    record.status = "stopped".to_string();
+    record.pid = None;
+    record.exit_code = exit_code;
+    record.stopped_by_user = stopped_by_user;
+    record
 }
 
 fn mark_record_stopped(
@@ -1038,6 +1122,7 @@ mod tests {
             interactive: false,
             tty: false,
             rm: false,
+            package_cache: vec![],
             cmd: vec![],
             log_driver: "json-file".to_string(),
             log_opts: vec![],
@@ -1142,6 +1227,50 @@ mod tests {
         args.detach = true;
 
         assert!(validate_run_mode(&args, false).is_ok());
+    }
+
+    #[test]
+    fn test_apply_package_caches_adds_pnpm_volume_and_env() {
+        let mut volumes = Vec::new();
+        let mut env = std::collections::HashMap::new();
+
+        apply_package_caches(&[PackageCache::Pnpm], &mut volumes, &mut env);
+
+        assert_eq!(volumes, vec![PNPM_CACHE_VOLUME_SPEC.to_string()]);
+        assert_eq!(
+            env.get(PNPM_STORE_ENV).map(String::as_str),
+            Some(PNPM_STORE_DIR)
+        );
+    }
+
+    #[test]
+    fn test_apply_package_caches_preserves_user_pnpm_store_env() {
+        let mut volumes = Vec::new();
+        let mut env = std::collections::HashMap::from([(
+            PNPM_STORE_ENV.to_string(),
+            "/custom/pnpm-store".to_string(),
+        )]);
+
+        apply_package_caches(&[PackageCache::Pnpm], &mut volumes, &mut env);
+
+        assert_eq!(
+            env.get(PNPM_STORE_ENV).map(String::as_str),
+            Some("/custom/pnpm-store")
+        );
+    }
+
+    #[test]
+    fn test_apply_package_caches_deduplicates_pnpm_volume() {
+        let mut volumes = vec![PNPM_CACHE_VOLUME_SPEC.to_string()];
+        let mut env = std::collections::HashMap::new();
+
+        apply_package_caches(
+            &[PackageCache::Pnpm, PackageCache::Pnpm],
+            &mut volumes,
+            &mut env,
+        );
+
+        assert_eq!(volumes, vec![PNPM_CACHE_VOLUME_SPEC.to_string()]);
     }
 
     #[test]

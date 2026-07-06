@@ -105,9 +105,14 @@ brew install a3s-lab/tap/a3s-box
 
 # From source
 git clone https://github.com/A3S-Lab/Box.git
-cd Box/src
-cargo build --release
+cd Box
+just release
 ```
+
+For development builds that you plan to run locally, build the static Linux
+guest init as well: `just build-guest debug`. `a3s-box` refreshes this binary
+into each guest rootfs as PID 1; without it, cached images may keep an older
+guest init and miss newer runtime behavior such as staged environment variables.
 
 On macOS, use Apple Silicon. On Linux, use a host with KVM/libkrun support. On Windows, enable Windows Hypervisor Platform for the native WHPX backend:
 
@@ -174,9 +179,12 @@ Important supported options:
 - `--name`, `--label`, `--restart no|always|on-failure[:N]|unless-stopped`;
 - `--cpus`, `--memory`, `--timeout`, `--pids-limit`, `--cpuset-cpus`, `--ulimit`, CPU quota/shares, memory reservation/swap;
 - `-e/--env`, `--env-file`, `--entrypoint`, `-u/--user`, `-w/--workdir`, `--hostname`, `--add-host`;
+- `--package-cache pnpm` to mount a persistent pnpm store for repeated throwaway Node boxes;
 - `--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`, `--health-start-period`, `--no-healthcheck`;
 - `--stop-signal`, `--stop-timeout`, `--persistent`, `--log-driver json-file|none`;
 - `--cap-add`, `--cap-drop`, `--security-opt seccomp=default|seccomp=unconfined|no-new-privileges`, `--privileged`.
+
+`a3s-box wait` prints a low-frequency stderr keepalive while it is blocking so long CI or SSH sessions do not look idle; use `--no-heartbeat` or `--heartbeat-interval <seconds>` to tune it.
 
 Unsupported or guarded options fail early instead of being silently stored: host devices, GPUs, AppArmor labels, SELinux labels, custom seccomp profiles, unsupported users, invalid workdirs, unsupported port syntax, and unsupported network policies.
 
@@ -228,6 +236,7 @@ and everything after it. The cache lives at `~/.a3s/buildcache` and is size-capp
 ```bash
 a3s-box volume create data
 a3s-box run -d --name app -v data:/data alpine:latest -- sleep 3600
+a3s-box run --rm --package-cache pnpm node:22-alpine -- sh -lc 'corepack enable && pnpm install --frozen-lockfile'
 a3s-box cp ./file.txt app:/data/file.txt
 a3s-box diff app
 a3s-box export app -o rootfs.tar
@@ -236,6 +245,8 @@ a3s-box snapshot create app checkpoint-1
 a3s-box snapshot restore checkpoint-1 --name restored-app
 a3s-box snapshot prune --keep 5          # bound disk: keep the 5 newest
 ```
+
+`--package-cache pnpm` creates/reuses the named volume `a3s-cache-pnpm` and sets `npm_config_store_dir=/a3s-cache/pnpm/store`, so dependency downloads survive across `--rm` boxes without making the whole rootfs persistent. Auto-removed boxes also archive their last logs under `~/.a3s/removed-logs/`, and `a3s-box logs <name-or-id>` can read that archive after the box directory is gone.
 
 The `snapshot` command produces configuration/filesystem-oriented Box snapshots, not a live RAM checkpoint. The live RAM Copy-on-Write facility is a separate, lower-level mechanism described in [Warm pool and snapshot-fork](#warm-pool-and-snapshot-fork).
 
@@ -471,7 +482,7 @@ curl -fsSL https://raw.githubusercontent.com/A3S-Lab/Box/main/deploy/scripts/ins
 
 # or from a checkout:
 sudo deploy/scripts/install-runtimeclass.sh                  # default version
-sudo deploy/scripts/install-runtimeclass.sh --version v3.0.0 # pin a version
+sudo deploy/scripts/install-runtimeclass.sh --version v3.0.1 # pin a version
 ```
 
 Then label the node from a machine with `kubectl`:

@@ -18,6 +18,7 @@ use super::BuildState;
 
 #[cfg(target_os = "macos")]
 const UNSAFE_HOST_RUN_ENV: &str = "A3S_BOX_UNSAFE_HOST_RUN";
+const RUN_OUTPUT_CONTEXT_BYTES: usize = 16 * 1024;
 
 /// Whether a COPY/ADD source contains shell glob metacharacters.
 fn has_glob_meta(s: &str) -> bool {
@@ -278,9 +279,11 @@ pub(super) fn handle_run(
         use super::super::layer::DirSnapshot;
 
         validate_linux_run_preconditions(rootfs_dir, shell, linux_effective_uid())?;
+        prepare_linux_run_filesystem(rootfs_dir)?;
         let workdir_path = ensure_linux_run_workdir(rootfs_dir, workdir)?;
 
         let before = DirSnapshot::capture(rootfs_dir)?;
+        let run_mounts = LinuxRunMounts::mount(rootfs_dir)?;
 
         // Build the command using the configured shell
         let mut cmd = std::process::Command::new("chroot");
@@ -315,20 +318,10 @@ pub(super) fn handle_run(
             .map_err(|e| BoxError::BuildError(format!("Failed to execute RUN command: {}", e)))?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(BoxError::BuildError(format!(
-                "RUN command failed (exit {}): {}",
-                output.status.code().unwrap_or(-1),
-                stderr.trim()
-            )));
+            return Err(run_command_failed_error(command, &output));
         }
-
-        if !quiet {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.is_empty() {
-                print!("{}", stdout);
-            }
-        }
+        print_run_output(&output, quiet);
+        run_mounts.unmount()?;
 
         // Capture diff
         let after = DirSnapshot::capture(rootfs_dir)?;
@@ -429,6 +422,287 @@ fn ensure_linux_run_workdir(rootfs_dir: &Path, workdir: &str) -> Result<PathBuf>
     Ok(workdir_path)
 }
 
+fn print_run_output(output: &std::process::Output, quiet: bool) {
+    if quiet {
+        return;
+    }
+
+    if !output.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        use std::io::Write as _;
+        let _ = std::io::stderr().write_all(String::from_utf8_lossy(&output.stderr).as_bytes());
+    }
+}
+
+fn run_command_failed_error(command: &str, output: &std::process::Output) -> BoxError {
+    let exit = output
+        .status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let mut message = format!("RUN command failed (exit {exit}): {command}");
+
+    append_output_context(&mut message, "stdout", &output.stdout);
+    append_output_context(&mut message, "stderr", &output.stderr);
+
+    if output.stdout.is_empty() && output.stderr.is_empty() {
+        message.push_str("\n(no stdout or stderr captured)");
+    }
+
+    BoxError::BuildError(message)
+}
+
+fn append_output_context(message: &mut String, label: &str, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+
+    message.push('\n');
+    message.push_str(label);
+    message.push_str(":\n");
+    message.push_str(&lossy_tail(bytes, RUN_OUTPUT_CONTEXT_BYTES));
+}
+
+fn lossy_tail(bytes: &[u8], max_bytes: usize) -> String {
+    let (slice, truncated) = if bytes.len() > max_bytes {
+        (&bytes[bytes.len() - max_bytes..], true)
+    } else {
+        (bytes, false)
+    };
+    let mut output = String::new();
+    if truncated {
+        output.push_str(&format!(
+            "[showing last {} bytes of {} captured bytes]\n",
+            max_bytes,
+            bytes.len()
+        ));
+    }
+    output.push_str(String::from_utf8_lossy(slice).trim_end());
+    output
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_linux_run_filesystem(rootfs_dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    for dir in ["dev", "proc", "tmp", "var/tmp", "etc"] {
+        std::fs::create_dir_all(rootfs_dir.join(dir)).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to prepare RUN directory {}: {}",
+                rootfs_dir.join(dir).display(),
+                e
+            ))
+        })?;
+    }
+
+    for dir in ["tmp", "var/tmp"] {
+        let path = rootfs_dir.join(dir);
+        let mut perms = std::fs::metadata(&path)
+            .map_err(|e| {
+                BoxError::BuildError(format!("Failed to inspect {}: {}", path.display(), e))
+            })?
+            .permissions();
+        perms.set_mode(0o1777);
+        std::fs::set_permissions(&path, perms).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to set sticky tmp permissions on {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+    }
+
+    for dev in ["null", "zero", "random", "urandom"] {
+        let target = rootfs_dir.join("dev").join(dev);
+        if !target.exists() {
+            std::fs::File::create(&target).map_err(|e| {
+                BoxError::BuildError(format!("Failed to create {}: {}", target.display(), e))
+            })?;
+        }
+    }
+
+    ensure_linux_run_symlink(rootfs_dir.join("dev/fd"), "/proc/self/fd")?;
+    ensure_linux_run_symlink(rootfs_dir.join("dev/stdin"), "/proc/self/fd/0")?;
+    ensure_linux_run_symlink(rootfs_dir.join("dev/stdout"), "/proc/self/fd/1")?;
+    ensure_linux_run_symlink(rootfs_dir.join("dev/stderr"), "/proc/self/fd/2")?;
+    ensure_linux_resolv_conf(rootfs_dir)?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_run_symlink(path: PathBuf, target: &str) -> Result<()> {
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => return Ok(()),
+        Ok(_) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(BoxError::BuildError(format!(
+                "Failed to inspect {}: {}",
+                path.display(),
+                err
+            )));
+        }
+    }
+
+    std::os::unix::fs::symlink(target, &path).map_err(|e| {
+        BoxError::BuildError(format!(
+            "Failed to create RUN symlink {} -> {}: {}",
+            path.display(),
+            target,
+            e
+        ))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_linux_resolv_conf(rootfs_dir: &Path) -> Result<()> {
+    let path = rootfs_dir.join("etc/resolv.conf");
+    if std::fs::metadata(&path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string("/etc/resolv.conf")
+        .unwrap_or_else(|_| "nameserver 8.8.8.8\nnameserver 8.8.4.4\n".to_string());
+    std::fs::write(&path, content)
+        .map_err(|e| BoxError::BuildError(format!("Failed to write {}: {}", path.display(), e)))
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxRunMounts {
+    mounted: Vec<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxRunMounts {
+    fn mount(rootfs_dir: &Path) -> Result<Self> {
+        let mut mounts = Self {
+            mounted: Vec::new(),
+        };
+
+        mounts.mount_proc(&rootfs_dir.join("proc"))?;
+        for dev in ["null", "zero", "random", "urandom"] {
+            mounts.bind_mount(
+                Path::new("/dev").join(dev),
+                rootfs_dir.join("dev").join(dev),
+            )?;
+        }
+
+        Ok(mounts)
+    }
+
+    fn mount_proc(&mut self, target: &Path) -> Result<()> {
+        mount_linux(
+            Some(Path::new("proc")),
+            target,
+            Some("proc"),
+            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+        )?;
+        self.mounted.push(target.to_path_buf());
+        Ok(())
+    }
+
+    fn bind_mount(&mut self, source: PathBuf, target: PathBuf) -> Result<()> {
+        mount_linux(Some(&source), &target, None, libc::MS_BIND)?;
+        self.mounted.push(target);
+        Ok(())
+    }
+
+    fn unmount(mut self) -> Result<()> {
+        let mut first_error = None;
+        for target in self.mounted.iter().rev() {
+            if let Err(error) = unmount_linux(target) {
+                first_error.get_or_insert(error);
+            }
+        }
+        self.mounted.clear();
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LinuxRunMounts {
+    fn drop(&mut self) {
+        for target in self.mounted.iter().rev() {
+            let _ = unmount_linux(target);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn unmount_linux(target: &Path) -> Result<()> {
+    let c_target = path_cstring(target, "unmount target")?;
+    let ret = unsafe { libc::umount2(c_target.as_ptr(), libc::MNT_DETACH) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(BoxError::BuildError(format!(
+            "Failed to unmount RUN support at {}: {}",
+            target.display(),
+            std::io::Error::last_os_error()
+        )))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mount_linux(
+    source: Option<&Path>,
+    target: &Path,
+    fstype: Option<&str>,
+    flags: libc::c_ulong,
+) -> Result<()> {
+    let c_source = source
+        .map(|source| path_cstring(source, "mount source"))
+        .transpose()?;
+    let c_target = path_cstring(target, "mount target")?;
+    let c_fstype = fstype
+        .map(std::ffi::CString::new)
+        .transpose()
+        .map_err(|_| BoxError::BuildError("Cannot mount fstype containing NUL".to_string()))?;
+
+    let ret = unsafe {
+        libc::mount(
+            c_source
+                .as_ref()
+                .map(|value| value.as_ptr())
+                .unwrap_or(std::ptr::null()),
+            c_target.as_ptr(),
+            c_fstype
+                .as_ref()
+                .map(|value| value.as_ptr())
+                .unwrap_or(std::ptr::null()),
+            flags,
+            std::ptr::null(),
+        )
+    };
+
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(BoxError::BuildError(format!(
+            "Failed to mount RUN support at {}: {}",
+            target.display(),
+            std::io::Error::last_os_error()
+        )))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn path_cstring(path: &Path, label: &str) -> Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| BoxError::BuildError(format!("{label} contains NUL: {}", path.display())))
+}
+
 #[cfg(target_os = "macos")]
 fn unsafe_host_run_enabled() -> bool {
     std::env::var(UNSAFE_HOST_RUN_ENV)
@@ -499,20 +773,9 @@ fn handle_run_on_host_unsafe(
         .map_err(|e| BoxError::BuildError(format!("Failed to execute command: {}", e)))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(BoxError::BuildError(format!(
-            "RUN command failed (exit {}): {}",
-            output.status.code().unwrap_or(-1),
-            stderr.trim()
-        )));
+        return Err(run_command_failed_error(command, &output));
     }
-
-    if !quiet {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !stdout.is_empty() {
-            print!("{}", stdout);
-        }
-    }
+    print_run_output(&output, quiet);
 
     // Capture filesystem state after execution
     let after = DirSnapshot::capture(rootfs_dir)?;
@@ -905,9 +1168,10 @@ mod tests {
     use super::super::super::dockerfile::Instruction;
     use super::{
         execute_onbuild_trigger, expand_glob_sources, glob_segment_match, handle_add,
-        instruction_to_string,
+        instruction_to_string, run_command_failed_error,
     };
     use crate::oci::build::engine::{BuildConfig, BuildState};
+    use a3s_box_core::error::BoxError;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -921,6 +1185,29 @@ mod tests {
         assert!(glob_segment_match("*", "anything"));
         assert!(glob_segment_match("pre*post", "pre_middle_post"));
         assert!(!glob_segment_match("pre*post", "pre_middle"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_command_failed_error_includes_stdout_and_stderr() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(2 << 8),
+            stdout: b"resolved package metadata\n".to_vec(),
+            stderr: b"corepack prepare failed\n".to_vec(),
+        };
+
+        let BoxError::BuildError(message) =
+            run_command_failed_error("corepack prepare pnpm@10.30.3 --activate", &output)
+        else {
+            panic!("expected build error");
+        };
+
+        assert!(message.contains("RUN command failed (exit 2)"));
+        assert!(message.contains("corepack prepare pnpm@10.30.3 --activate"));
+        assert!(message.contains("stdout:\nresolved package metadata"));
+        assert!(message.contains("stderr:\ncorepack prepare failed"));
     }
 
     #[test]

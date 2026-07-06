@@ -48,32 +48,48 @@ struct LogSource {
 
 pub async fn execute(args: LogsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state = StateFile::load_default()?;
-    let record = resolve::resolve(&state, &args.r#box)?;
-    let box_id = record.id.clone();
-
-    // If logging is disabled, tell the user
-    if record.log_config.driver == LogDriver::None {
-        return Err(format!(
-            "Logging is disabled for box {} (log-driver=none)",
-            record.name
-        )
-        .into());
-    }
-
     let since = args.since.as_deref().map(parse_time_filter).transpose()?;
     let until = args.until.as_deref().map(parse_time_filter).transpose()?;
 
-    let Some(log_source) = resolve_log_source(record) else {
-        if args.follow && record.status == "running" {
-            match wait_for_log_source(&box_id).await? {
-                Some(source) => return stream_logs(&box_id, source, args, since, until).await,
-                None => return Ok(()),
-            }
-        }
-        return Ok(());
-    };
+    match resolve::resolve(&state, &args.r#box) {
+        Ok(record) => {
+            let box_id = record.id.clone();
 
-    stream_logs(&box_id, log_source, args, since, until).await
+            // If logging is disabled, tell the user
+            if record.log_config.driver == LogDriver::None {
+                return Err(format!(
+                    "Logging is disabled for box {} (log-driver=none)",
+                    record.name
+                )
+                .into());
+            }
+
+            let Some(log_source) = resolve_log_source(record) else {
+                if args.follow && record.status == "running" {
+                    match wait_for_log_source(&box_id).await? {
+                        Some(source) => {
+                            return stream_logs(&box_id, source, args, since, until).await;
+                        }
+                        None => return Ok(()),
+                    }
+                }
+                return Ok(());
+            };
+
+            stream_logs(&box_id, log_source, args, since, until).await
+        }
+        Err(resolve_error) => {
+            let Some(archive) = crate::log_archive::resolve_archive(&args.r#box)? else {
+                return Err(resolve_error.into());
+            };
+            let Some(log_source) = resolve_archived_log_source(&archive) else {
+                return Ok(());
+            };
+            let mut args = args;
+            args.follow = false;
+            stream_logs(&archive.id, log_source, args, since, until).await
+        }
+    }
 }
 
 async fn stream_logs(
@@ -304,6 +320,29 @@ fn resolve_log_source(record: &BoxRecord) -> Option<LogSource> {
     None
 }
 
+fn resolve_archived_log_source(
+    archive: &crate::log_archive::RemovedLogArchive,
+) -> Option<LogSource> {
+    let log_dir = archive.log_dir();
+    let json_log = a3s_box_runtime::log::json_log_path(&log_dir);
+    if json_log.exists() {
+        return Some(LogSource {
+            path: json_log,
+            structured: true,
+        });
+    }
+
+    let console_log = archive.console_log();
+    if console_log.exists() {
+        return Some(LogSource {
+            path: console_log,
+            structured: false,
+        });
+    }
+
+    None
+}
+
 async fn wait_for_log_source(
     box_id: &str,
 ) -> Result<Option<LogSource>, Box<dyn std::error::Error>> {
@@ -449,6 +488,36 @@ fn extract_line_timestamp(line: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            let lock = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self {
+                _lock: lock,
+                key,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     #[cfg(unix)]
@@ -620,5 +689,30 @@ mod tests {
         record.console_log = record.box_dir.join("logs").join("console.log");
 
         assert!(resolve_log_source(&record).is_none());
+    }
+
+    #[test]
+    fn test_resolve_archived_log_source_prefers_structured_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set("A3S_HOME", tmp.path());
+        let archive = crate::log_archive::RemovedLogArchive {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            short_id: "550e8400e29b".to_string(),
+            name: "web".to_string(),
+            image: "alpine:latest".to_string(),
+            removed_at: Utc::now(),
+            created_at: Utc::now(),
+            started_at: None,
+            exit_code: Some(1),
+            log_config: a3s_box_core::log::LogConfig::default(),
+        };
+        std::fs::create_dir_all(archive.log_dir()).unwrap();
+        let json_log = a3s_box_runtime::log::json_log_path(&archive.log_dir());
+        std::fs::write(&json_log, "{}\n").unwrap();
+        std::fs::write(archive.console_log(), "console\n").unwrap();
+
+        let source = resolve_archived_log_source(&archive).unwrap();
+        assert!(source.structured);
+        assert_eq!(source.path, json_log);
     }
 }

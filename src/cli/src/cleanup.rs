@@ -132,6 +132,16 @@ pub fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
 
 /// Remove all host-side resources owned by a box record.
 pub fn cleanup_removed_box(record: &BoxRecord) {
+    if record.auto_remove {
+        if let Err(err) = crate::log_archive::archive_removed_logs(record) {
+            tracing::debug!(
+                box_id = %record.id,
+                error = %err,
+                "Failed to archive auto-removed box logs"
+            );
+        }
+    }
+
     cleanup_record_resources(record);
     cleanup_anonymous_volumes(&record.anonymous_volumes);
     remove_host_cgroup(&record.id);
