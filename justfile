@@ -19,6 +19,7 @@ build:
 # Build release
 release:
     cd src && cargo build --workspace --release
+    just build-guest release
     just sign-shim release
 
 # Sign the shim binary with Hypervisor.framework entitlement (macOS)
@@ -31,15 +32,45 @@ sign-shim profile="debug":
 sign-shim profile="debug":
     @echo "✓ No signing needed on Linux"
 
-# Build guest binaries (cross-compile for Linux aarch64 musl)
-build-guest profile="release":
-    cd src && cargo build -p a3s-box-guest-init --target aarch64-unknown-linux-musl --{{profile}}
-    @if [ "{{profile}}" = "release" ]; then \
-        aarch64-linux-musl-strip src/target/aarch64-unknown-linux-musl/release/a3s-box-guest-init; \
-        aarch64-linux-musl-strip src/target/aarch64-unknown-linux-musl/release/a3s-box-nsexec; \
+# Build the static Linux guest-init used as PID 1 inside boxes.
+build-guest profile="release" target="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    target="{{target}}"
+    if [ -z "$target" ]; then
+        case "$(uname -m)" in
+            arm64|aarch64) target="aarch64-unknown-linux-musl" ;;
+            x86_64|amd64) target="x86_64-unknown-linux-musl" ;;
+            *)
+                echo "Unsupported guest-init host architecture: $(uname -m)" >&2
+                echo "Pass an explicit target, e.g. just build-guest release x86_64-unknown-linux-musl" >&2
+                exit 1
+                ;;
+        esac
     fi
-    @echo "Guest binaries built at src/target/aarch64-unknown-linux-musl/{{profile}}/"
-    @ls -lh src/target/aarch64-unknown-linux-musl/{{profile}}/a3s-box-guest-init src/target/aarch64-unknown-linux-musl/{{profile}}/a3s-box-nsexec 2>/dev/null || true
+
+    case "{{profile}}" in
+        release) profile_flag="--release"; profile_dir="release" ;;
+        debug) profile_flag=""; profile_dir="debug" ;;
+        *) profile_flag="--profile {{profile}}"; profile_dir="{{profile}}" ;;
+    esac
+
+    cd src
+    cargo build -p a3s-box-guest-init --target "$target" $profile_flag
+
+    if [ "{{profile}}" = "release" ]; then
+        case "$target" in
+            aarch64-unknown-linux-musl) strip_tool="aarch64-linux-musl-strip" ;;
+            x86_64-unknown-linux-musl) strip_tool="x86_64-linux-musl-strip" ;;
+            *) strip_tool="" ;;
+        esac
+        if [ -n "$strip_tool" ] && command -v "$strip_tool" >/dev/null 2>&1; then
+            "$strip_tool" "target/$target/$profile_dir/a3s-box-guest-init"
+        fi
+    fi
+
+    echo "Guest init built at src/target/$target/$profile_dir/a3s-box-guest-init"
+    ls -lh "target/$target/$profile_dir/a3s-box-guest-init"
 
 # ============================================================================
 # Test (unified command with progress display)
@@ -806,4 +837,3 @@ version:
     echo "  a3s-box-core:    $(grep '^version' src/core/Cargo.toml | head -1 | sed 's/.*\"\(.*\)\".*/\1/')"
     echo "  a3s-box-runtime: $(grep '^version' src/runtime/Cargo.toml | head -1 | sed 's/.*\"\(.*\)\".*/\1/')"
     echo ""
-

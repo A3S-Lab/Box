@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s-box-cli"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-core"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "a3s-common",
  "async-trait",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-cri"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-guest-init"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "a3s-box-core",
  "a3s-common",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-lambda"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-netproxy"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "a3s-box-core",
  "libc",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-runtime"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "a3s-box-core",
  "a3s-box-netproxy",
@@ -163,6 +163,7 @@ dependencies = [
  "rand",
  "rcgen",
  "reqwest 0.11.27",
+ "reqwest 0.12.28",
  "ring",
  "rustls",
  "rustls-pki-types",
@@ -185,11 +186,11 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-sdk"
-version = "3.0.0"
+version = "3.0.1"
 
 [[package]]
 name = "a3s-box-shim"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "a3s-box-core",
  "a3s-box-netproxy",
@@ -223,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-libkrun-sys"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "libc",
  "num_cpus",

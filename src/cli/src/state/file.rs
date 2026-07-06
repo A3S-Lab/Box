@@ -226,6 +226,16 @@ impl StateFile {
         })
     }
 
+    /// Remove a record by id atomically under the state lock and return it.
+    pub(crate) fn take_record(id: &str) -> Result<Option<BoxRecord>, std::io::Error> {
+        Self::modify(|sf| {
+            let Some(index) = sf.records.iter().position(|record| record.id == id) else {
+                return Ok(None);
+            };
+            Ok::<Option<BoxRecord>, std::io::Error>(Some(sf.records.remove(index)))
+        })
+    }
+
     /// Add a record and persist.
     pub fn add(&mut self, record: BoxRecord) -> Result<(), std::io::Error> {
         self.records.push(record);

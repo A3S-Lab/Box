@@ -7,6 +7,7 @@ pub mod commands;
 pub mod health;
 pub mod image_usage;
 pub mod lifecycle;
+pub(crate) mod log_archive;
 pub mod output;
 pub mod platform;
 pub mod process;
