@@ -2,7 +2,7 @@
 
 All notable changes to A3S Box will be documented in this file.
 
-## [Unreleased]
+## [3.0.4] — 2026-07-08
 
 ### Added
 
