@@ -52,7 +52,14 @@ PNPM_A3S_CACHE_VOLUME="${PNPM_A3S_CACHE_VOLUME:-a3s-cache-pnpm}"
 PNPM_RESET_A3S_CACHE="${PNPM_RESET_A3S_CACHE:-0}"
 MODE="${1:-all}"
 
-now_ms() { date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))'; }
+now_ms() {
+  local ts
+  ts=$(date +%s%3N 2>/dev/null || true)
+  case "$ts" in
+    ''|*[!0-9]*) python3 -c 'import time;print(int(time.time()*1000))' ;;
+    *) echo "$ts" ;;
+  esac
+}
 
 # Percentile of a space-separated list of integers. $1=list $2=pct(0-100)
 pct() {
