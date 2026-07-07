@@ -658,9 +658,23 @@ async fn run_tty(_ctx: RunContext, _args: &RunArgs) -> Result<(), Box<dyn std::e
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ForegroundStopReason {
     ProcessExited,
-    UserInterrupted,
+    UserInterrupted(i32),
     VmUnhealthy,
 }
+
+#[cfg(unix)]
+type ForegroundTerminateSignal = Option<tokio::signal::unix::Signal>;
+#[cfg(not(unix))]
+type ForegroundTerminateSignal = ();
+
+#[cfg(unix)]
+const FOREGROUND_SIGINT: i32 = libc::SIGINT;
+#[cfg(not(unix))]
+const FOREGROUND_SIGINT: i32 = 2;
+#[cfg(unix)]
+const FOREGROUND_SIGTERM: i32 = libc::SIGTERM;
+#[cfg(not(unix))]
+const FOREGROUND_SIGTERM: i32 = 15;
 
 const FOREGROUND_LOG_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const FOREGROUND_LOG_DRAIN_QUIET: std::time::Duration = std::time::Duration::from_millis(300);
@@ -668,8 +682,30 @@ const FOREGROUND_LOG_DRAIN_POLL: std::time::Duration = std::time::Duration::from
 
 impl ForegroundStopReason {
     fn stopped_by_user(self) -> bool {
-        matches!(self, Self::UserInterrupted)
+        matches!(self, Self::UserInterrupted(_))
     }
+}
+
+#[cfg(unix)]
+fn foreground_terminate_signal() -> ForegroundTerminateSignal {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok()
+}
+
+#[cfg(not(unix))]
+fn foreground_terminate_signal() -> ForegroundTerminateSignal {}
+
+#[cfg(unix)]
+async fn recv_foreground_terminate(signal: &mut ForegroundTerminateSignal) {
+    if let Some(signal) = signal {
+        let _ = signal.recv().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn recv_foreground_terminate(_signal: &mut ForegroundTerminateSignal) {
+    std::future::pending::<()>().await;
 }
 
 async fn run_foreground(
@@ -700,11 +736,16 @@ async fn run_foreground(
     });
 
     let name = ctx.name.clone();
+    let mut terminate_signal = foreground_terminate_signal();
     let stop_reason = loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 println!("\nStopping box {}...", name);
-                break ForegroundStopReason::UserInterrupted;
+                break ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT);
+            }
+            _ = recv_foreground_terminate(&mut terminate_signal) => {
+                println!("\nStopping box {} after SIGTERM...", name);
+                break ForegroundStopReason::UserInterrupted(FOREGROUND_SIGTERM);
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                 if ctx.vm.try_wait_exit().await?.is_some() {
@@ -804,7 +845,7 @@ fn foreground_log_lengths(paths: &[(&std::path::Path, &AtomicU64)]) -> Vec<u64> 
 fn foreground_exit_code(reason: ForegroundStopReason, vm_exit_code: Option<i32>) -> Option<i32> {
     vm_exit_code.or(match reason {
         ForegroundStopReason::ProcessExited => None,
-        ForegroundStopReason::UserInterrupted => Some(130),
+        ForegroundStopReason::UserInterrupted(signal) => Some(128 + signal),
         ForegroundStopReason::VmUnhealthy => Some(1),
     })
 }
@@ -819,8 +860,8 @@ fn foreground_completion_message(
             format!("Box {name} exited and was removed.")
         }
         (ForegroundStopReason::ProcessExited, false) => format!("Box {name} exited."),
-        (ForegroundStopReason::UserInterrupted, true) => format!("Box {name} removed."),
-        (ForegroundStopReason::UserInterrupted, false) => format!("Box {name} stopped."),
+        (ForegroundStopReason::UserInterrupted(_), true) => format!("Box {name} removed."),
+        (ForegroundStopReason::UserInterrupted(_), false) => format!("Box {name} stopped."),
         (ForegroundStopReason::VmUnhealthy, true) => {
             format!("Box {name} stopped after VM health check failed and was removed.")
         }
@@ -1356,7 +1397,10 @@ mod tests {
     #[test]
     fn test_foreground_exit_code_preserves_vm_code() {
         assert_eq!(
-            foreground_exit_code(ForegroundStopReason::UserInterrupted, Some(143)),
+            foreground_exit_code(
+                ForegroundStopReason::UserInterrupted(FOREGROUND_SIGTERM),
+                Some(143)
+            ),
             Some(143)
         );
         assert_eq!(
@@ -1372,8 +1416,18 @@ mod tests {
             None
         );
         assert_eq!(
-            foreground_exit_code(ForegroundStopReason::UserInterrupted, None),
+            foreground_exit_code(
+                ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT),
+                None
+            ),
             Some(130)
+        );
+        assert_eq!(
+            foreground_exit_code(
+                ForegroundStopReason::UserInterrupted(FOREGROUND_SIGTERM),
+                None
+            ),
+            Some(143)
         );
         assert_eq!(
             foreground_exit_code(ForegroundStopReason::VmUnhealthy, None),
@@ -1383,7 +1437,7 @@ mod tests {
 
     #[test]
     fn test_foreground_stop_reason_user_flag() {
-        assert!(ForegroundStopReason::UserInterrupted.stopped_by_user());
+        assert!(ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT).stopped_by_user());
         assert!(!ForegroundStopReason::ProcessExited.stopped_by_user());
         assert!(!ForegroundStopReason::VmUnhealthy.stopped_by_user());
     }
@@ -1395,7 +1449,11 @@ mod tests {
             "Box box exited and was removed."
         );
         assert_eq!(
-            foreground_completion_message(ForegroundStopReason::UserInterrupted, false, "box"),
+            foreground_completion_message(
+                ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT),
+                false,
+                "box"
+            ),
             "Box box stopped."
         );
         assert_eq!(
