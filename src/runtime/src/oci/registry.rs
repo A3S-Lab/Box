@@ -12,13 +12,14 @@ use oci_distribution::errors::{OciDistributionError, OciErrorCode};
 use oci_distribution::manifest::{ImageIndexEntry, OciImageManifest, OCI_IMAGE_MEDIA_TYPE};
 use oci_distribution::secrets::RegistryAuth as OciRegistryAuth;
 use oci_distribution::{Client, Reference};
-use oci_reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+use oci_reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 
 use super::credentials::CredentialStore;
 use super::reference::ImageReference;
 use super::signing::{verify_image_signature, SignaturePolicy, VerifyResult};
 
 const REGISTRY_PROTOCOL_ENV: &str = "A3S_REGISTRY_PROTOCOL";
+const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
 
 fn registry_protocol_from_env() -> ClientProtocol {
     match std::env::var(REGISTRY_PROTOCOL_ENV) {
@@ -656,6 +657,7 @@ impl RegistryPusher {
                 &config,
                 &manifest,
                 &manifest_data,
+                manifest_digest,
             )
             .await?;
 
@@ -693,8 +695,9 @@ impl RegistryPusher {
         config: &Config,
         manifest: &OciImageManifest,
         manifest_data: &[u8],
+        expected_manifest_digest: &str,
     ) -> Result<PushResponse> {
-        match self
+        let response = match self
             .push_once(reference, oci_ref, layers, config, manifest, manifest_data)
             .await
         {
@@ -720,7 +723,11 @@ impl RegistryPusher {
                 registry: reference.registry.clone(),
                 message: format!("Failed to push image: {}", push_error_summary(&error)),
             }),
-        }
+        }?;
+
+        self.verify_pushed_manifest(reference, oci_ref, expected_manifest_digest)
+            .await?;
+        Ok(response)
     }
 
     async fn push_once(
@@ -846,6 +853,86 @@ impl RegistryPusher {
             manifest_url,
         })
     }
+
+    async fn verify_pushed_manifest(
+        &self,
+        reference: &ImageReference,
+        oci_ref: &Reference,
+        expected_digest: &str,
+    ) -> Result<()> {
+        let auth = self.auth.to_oci_auth();
+        match self.client.pull_manifest(oci_ref, &auth).await {
+            Ok((_manifest, remote_digest)) => {
+                verify_remote_manifest_digest(reference, expected_digest, &remote_digest)
+            }
+            Err(error)
+                if is_unauthorized_push_error(&error)
+                    && self.auth.basic_credentials().is_some() =>
+            {
+                let remote_digest = self
+                    .fetch_manifest_digest_with_basic_auth(reference)
+                    .await
+                    .map_err(|fallback_error| BoxError::RegistryError {
+                        registry: reference.registry.clone(),
+                        message: format!(
+                            "Manifest creation could not be verified after push: default verification failed: {}; preemptive Basic verification failed: {}",
+                            push_error_summary(&error),
+                            push_error_summary(&fallback_error)
+                        ),
+                    })?;
+                verify_remote_manifest_digest(reference, expected_digest, &remote_digest)
+            }
+            Err(error) => Err(BoxError::RegistryError {
+                registry: reference.registry.clone(),
+                message: format!(
+                    "Manifest creation could not be verified after push: {}; blobs may have uploaded but the manifest may be missing",
+                    push_error_summary(&error)
+                ),
+            }),
+        }
+    }
+
+    async fn fetch_manifest_digest_with_basic_auth(
+        &self,
+        reference: &ImageReference,
+    ) -> std::result::Result<String, OciDistributionError> {
+        let (username, password) = self.auth.basic_credentials().ok_or_else(|| {
+            OciDistributionError::GenericError(Some(
+                "preemptive Basic manifest verification requires non-empty credentials".to_string(),
+            ))
+        })?;
+        let http = oci_reqwest::Client::new();
+        let base = registry_base_url(reference)?;
+        let manifest_ref = reference
+            .tag
+            .as_deref()
+            .or(reference.digest.as_deref())
+            .unwrap_or("latest");
+        let manifest_url = registry_manifest_url(&base, &reference.repository, manifest_ref)?;
+        let response = http
+            .get(manifest_url.clone())
+            .basic_auth(username, Some(password))
+            .header(ACCEPT, MANIFEST_ACCEPT)
+            .send()
+            .await?;
+        let response = ensure_registry_status(
+            response,
+            &[oci_reqwest::StatusCode::OK],
+            manifest_url.as_str(),
+        )
+        .await?;
+        let header_digest = response
+            .headers()
+            .get("docker-content-digest")
+            .map(|value| value.to_str().map(str::to_string))
+            .transpose()?;
+        if let Some(digest) = header_digest {
+            return Ok(digest);
+        }
+
+        let bytes = response.bytes().await?;
+        Ok(manifest_digest_from_bytes(&bytes))
+    }
 }
 
 fn registry_base_url(
@@ -908,6 +995,34 @@ fn response_location_or_url(
         .transpose()
         .map(|location| location.unwrap_or_else(|| fallback.as_str().to_string()))
         .map_err(OciDistributionError::HeaderValueError)
+}
+
+fn verify_remote_manifest_digest(
+    reference: &ImageReference,
+    expected_digest: &str,
+    remote_digest: &str,
+) -> Result<()> {
+    if manifest_digests_match(expected_digest, remote_digest) {
+        return Ok(());
+    }
+
+    Err(BoxError::RegistryError {
+        registry: reference.registry.clone(),
+        message: format!(
+            "Manifest verification failed after push for {}/{}: expected {}, registry returned {}",
+            reference.registry, reference.repository, expected_digest, remote_digest
+        ),
+    })
+}
+
+fn manifest_digests_match(expected_digest: &str, remote_digest: &str) -> bool {
+    expected_digest.eq_ignore_ascii_case(remote_digest)
+}
+
+fn manifest_digest_from_bytes(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+
+    format!("sha256:{:x}", sha2::Sha256::digest(bytes))
 }
 
 async fn ensure_registry_status(
@@ -1294,6 +1409,37 @@ mod tests {
 
         assert!(!is_repository_already_exists_push_error(&error));
         assert!(push_error_summary(&error).contains("Docker config/credential helpers"));
+    }
+
+    #[test]
+    fn test_manifest_digest_from_bytes_uses_sha256() {
+        assert_eq!(
+            manifest_digest_from_bytes(b"hello"),
+            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn test_verify_remote_manifest_digest_accepts_matching_digest() {
+        let reference = test_image_reference();
+        let digest = format!("sha256:{}", "a".repeat(64));
+
+        verify_remote_manifest_digest(&reference, &digest, &digest.to_uppercase()).unwrap();
+    }
+
+    #[test]
+    fn test_verify_remote_manifest_digest_rejects_mismatch() {
+        let reference = test_image_reference();
+        let err = verify_remote_manifest_digest(
+            &reference,
+            &format!("sha256:{}", "a".repeat(64)),
+            &format!("sha256:{}", "b".repeat(64)),
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("Manifest verification failed after push"));
+        assert!(message.contains("registry.example.com/a3s/app"));
     }
 
     #[test]

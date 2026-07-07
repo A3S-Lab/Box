@@ -8,7 +8,7 @@
 # place real microVMs boot).
 #
 # Usage:
-#   bench/bench.sh [all|cold|warm|fork|leak|race]   (default: all)
+#   bench/bench.sh [all|cold|warm|fork|leak|race|pnpm]   (default: all)
 # Env:
 #   A3S_BOX   path to the a3s-box binary           (default: a3s-box on PATH)
 #   IMAGE     OCI image to benchmark                (default: alpine:latest)
@@ -16,6 +16,11 @@
 #   POOL_SIZE warm-pool / fork fill size            (default: 16)
 #   CHURN     create/run/remove cycles for the leak test (default: 30)
 #   RACE      concurrent `run -d` processes for the cross-process race (default: 8)
+#   PNPM_PROJECT project dir with package.json + pnpm-lock.yaml (required for pnpm mode)
+#   PNPM_IMAGE   Node image for pnpm mode             (default: node:22-alpine)
+#   PNPM_VERSION pnpm version for corepack prepare    (default: 10.30.3)
+#   PNPM_RUNS    pnpm install samples                 (default: 3)
+#   PNPM_CACHE   1 uses --package-cache pnpm, 0 disables it (default: 1)
 #
 # Exit code is non-zero if the leak assertion fails, so it is CI-gateable
 # (wire it into the self-hosted KVM job — see docs/ci-kvm-runner.md).
@@ -27,6 +32,11 @@ RUNS="${RUNS:-20}"
 POOL_SIZE="${POOL_SIZE:-16}"
 CHURN="${CHURN:-30}"
 RACE="${RACE:-8}"
+PNPM_PROJECT="${PNPM_PROJECT:-}"
+PNPM_IMAGE="${PNPM_IMAGE:-node:22-alpine}"
+PNPM_VERSION="${PNPM_VERSION:-10.30.3}"
+PNPM_RUNS="${PNPM_RUNS:-3}"
+PNPM_CACHE="${PNPM_CACHE:-1}"
 MODE="${1:-all}"
 
 now_ms() { date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))'; }
@@ -181,6 +191,57 @@ bench_race() {
   return "$rc"
 }
 
+bench_pnpm() {
+  echo "## pnpm install benchmark ($PNPM_RUNS runs, image=$PNPM_IMAGE)"
+  if [ -z "$PNPM_PROJECT" ]; then
+    echo "  ERROR: set PNPM_PROJECT to a project directory with package.json and pnpm-lock.yaml" >&2
+    return 2
+  fi
+  if [ ! -f "$PNPM_PROJECT/package.json" ] || [ ! -f "$PNPM_PROJECT/pnpm-lock.yaml" ]; then
+    echo "  ERROR: PNPM_PROJECT must contain package.json and pnpm-lock.yaml: $PNPM_PROJECT" >&2
+    return 2
+  fi
+
+  local project
+  project=$(cd "$PNPM_PROJECT" && pwd)
+  "$A3S_BOX" pull "$PNPM_IMAGE" >/dev/null 2>&1 || true
+
+  local boot_samples="" toolchain_samples="" install_samples=""
+  for _ in $(seq 1 "$PNPM_RUNS"); do
+    local s e
+
+    s=$(now_ms)
+    "$A3S_BOX" run --rm "$PNPM_IMAGE" -- true >/dev/null 2>&1
+    e=$(now_ms); boot_samples="$boot_samples $(( e - s ))"
+
+    s=$(now_ms)
+    "$A3S_BOX" run --rm "$PNPM_IMAGE" -- sh -lc "corepack enable && corepack prepare pnpm@$PNPM_VERSION --activate >/dev/null && pnpm --version >/dev/null" >/dev/null 2>&1
+    e=$(now_ms); toolchain_samples="$toolchain_samples $(( e - s ))"
+
+    local cache_args=""
+    [ "$PNPM_CACHE" = "1" ] && cache_args="--package-cache pnpm"
+    s=$(now_ms)
+    # shellcheck disable=SC2086
+    "$A3S_BOX" run --rm $cache_args -v "$project:/work" -w /work "$PNPM_IMAGE" -- sh -lc "corepack enable && corepack prepare pnpm@$PNPM_VERSION --activate >/dev/null && rm -rf node_modules && pnpm install --frozen-lockfile --reporter append-only" >/tmp/a3s-bench-pnpm-install.log 2>&1
+    local status=$?
+    e=$(now_ms); install_samples="$install_samples $(( e - s ))"
+    if [ "$status" -ne 0 ]; then
+      echo "  FAIL: pnpm install failed (see /tmp/a3s-bench-pnpm-install.log)" >&2
+      tail -80 /tmp/a3s-bench-pnpm-install.log >&2
+      return "$status"
+    fi
+  done
+
+  local boot_p50 toolchain_p50 install_p50
+  boot_p50=$(pct "$boot_samples" 50)
+  toolchain_p50=$(pct "$toolchain_samples" 50)
+  install_p50=$(pct "$install_samples" 50)
+  echo "  boot baseline:          p50=${boot_p50}ms p90=$(pct "$boot_samples" 90)ms"
+  echo "  corepack+pnpm baseline: p50=${toolchain_p50}ms p90=$(pct "$toolchain_samples" 90)ms"
+  echo "  frozen install total:   p50=${install_p50}ms p90=$(pct "$install_samples" 90)ms cache=$PNPM_CACHE"
+  echo "  rough p50 breakdown: boot~${boot_p50}ms toolchain~$(( toolchain_p50 - boot_p50 ))ms install/network/fs~$(( install_p50 - toolchain_p50 ))ms"
+}
+
 require_kvm
 echo "# a3s-box benchmark — $(uname -sm), image=$IMAGE"
 rc=0
@@ -190,6 +251,7 @@ case "$MODE" in
   fork) bench_fork ;;
   leak) bench_leak || rc=$? ;;
   race) bench_race || rc=$? ;;
+  pnpm) bench_pnpm || rc=$? ;;
   all)
     bench_cold
     bench_warm
@@ -197,6 +259,6 @@ case "$MODE" in
     bench_leak || rc=$?
     bench_race || rc=$?
     ;;
-  *) echo "unknown mode: $MODE (use all|cold|warm|fork|leak|race)"; exit 2 ;;
+  *) echo "unknown mode: $MODE (use all|cold|warm|fork|leak|race|pnpm)"; exit 2 ;;
 esac
 exit "$rc"

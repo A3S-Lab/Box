@@ -9,6 +9,26 @@ use crate::state::BoxRecord;
 
 const ARCHIVE_DIR: &str = "removed-logs";
 const METADATA_FILE: &str = "metadata.json";
+const DEFAULT_MAX_ARCHIVE_AGE_DAYS: i64 = 7;
+const DEFAULT_MAX_ARCHIVES: usize = 50;
+const DEFAULT_MAX_ARCHIVE_BYTES: u64 = 100 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LogArchiveRetention {
+    max_age_days: i64,
+    max_archives: usize,
+    max_total_bytes: u64,
+}
+
+impl Default for LogArchiveRetention {
+    fn default() -> Self {
+        Self {
+            max_age_days: DEFAULT_MAX_ARCHIVE_AGE_DAYS,
+            max_archives: DEFAULT_MAX_ARCHIVES,
+            max_total_bytes: DEFAULT_MAX_ARCHIVE_BYTES,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RemovedLogArchive {
@@ -72,6 +92,13 @@ pub(crate) fn archive_removed_logs(record: &BoxRecord) -> std::io::Result<Option
     let data = serde_json::to_vec_pretty(&metadata).map_err(std::io::Error::other)?;
     std::fs::write(archive_dir.join(METADATA_FILE), data)?;
 
+    if let Err(error) = prune_archives(LogArchiveRetention::default()) {
+        tracing::debug!(
+            error = %error,
+            "Failed to prune removed-log archives after archiving logs"
+        );
+    }
+
     Ok(Some(archive_dir))
 }
 
@@ -109,6 +136,19 @@ pub(crate) fn resolve_archive(query: &str) -> Result<Option<RemovedLogArchive>, 
 }
 
 fn load_archives() -> std::io::Result<Vec<RemovedLogArchive>> {
+    Ok(load_archive_entries()?
+        .into_iter()
+        .map(|entry| entry.archive)
+        .collect())
+}
+
+struct ArchiveEntry {
+    archive: RemovedLogArchive,
+    path: PathBuf,
+    size_bytes: u64,
+}
+
+fn load_archive_entries() -> std::io::Result<Vec<ArchiveEntry>> {
     let root = archive_root();
     if !root.exists() {
         return Ok(Vec::new());
@@ -125,10 +165,85 @@ fn load_archives() -> std::io::Result<Vec<RemovedLogArchive>> {
             continue;
         };
         if let Ok(archive) = serde_json::from_slice::<RemovedLogArchive>(&data) {
-            archives.push(archive);
+            let path = entry.path();
+            let size_bytes = dir_size(&path)?;
+            archives.push(ArchiveEntry {
+                archive,
+                path,
+                size_bytes,
+            });
         }
     }
     Ok(archives)
+}
+
+pub(crate) fn prune_archives(retention: LogArchiveRetention) -> std::io::Result<usize> {
+    let mut entries = load_archive_entries()?;
+    let now = Utc::now();
+    let mut removed = 0;
+
+    let mut kept_entries = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let too_old = now
+            .signed_duration_since(entry.archive.removed_at)
+            .num_days()
+            > retention.max_age_days;
+        if too_old {
+            match remove_archive_dir(&entry.path) {
+                Ok(()) => {
+                    removed += 1;
+                    continue;
+                }
+                Err(_) => kept_entries.push(entry),
+            }
+        } else {
+            kept_entries.push(entry);
+        }
+    }
+    entries = kept_entries;
+
+    entries.sort_by_key(|entry| entry.archive.removed_at);
+    while entries.len() > retention.max_archives {
+        let entry = entries.remove(0);
+        if remove_archive_dir(&entry.path).is_ok() {
+            removed += 1;
+        }
+    }
+
+    let mut total_bytes = entries.iter().map(|entry| entry.size_bytes).sum::<u64>();
+    while total_bytes > retention.max_total_bytes && !entries.is_empty() {
+        let entry = entries.remove(0);
+        total_bytes = total_bytes.saturating_sub(entry.size_bytes);
+        if remove_archive_dir(&entry.path).is_ok() {
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+fn remove_archive_dir(path: &Path) -> std::io::Result<()> {
+    if path.exists() {
+        std::fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn dir_size(path: &Path) -> std::io::Result<u64> {
+    let mut size = 0;
+    if !path.exists() {
+        return Ok(size);
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            size += dir_size(&entry.path())?;
+        } else if metadata.is_file() {
+            size += metadata.len();
+        }
+    }
+    Ok(size)
 }
 
 fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -213,5 +328,78 @@ mod tests {
         let archive = resolve_archive("web").unwrap().unwrap();
         assert_eq!(archive.id, record.id);
         assert!(archive.log_dir().join("container.json").exists());
+    }
+
+    #[test]
+    fn prunes_archives_by_age_and_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set("A3S_HOME", tmp.path());
+
+        write_archive("old", Utc::now() - chrono::Duration::days(30), 8);
+        write_archive("keep-1", Utc::now() - chrono::Duration::days(3), 8);
+        write_archive("keep-2", Utc::now() - chrono::Duration::days(2), 8);
+        write_archive("keep-3", Utc::now() - chrono::Duration::days(1), 8);
+
+        let removed = prune_archives(LogArchiveRetention {
+            max_age_days: 7,
+            max_archives: 2,
+            max_total_bytes: u64::MAX,
+        })
+        .unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(resolve_archive("old").unwrap().is_none());
+        assert!(resolve_archive("keep-1").unwrap().is_none());
+        assert!(resolve_archive("keep-2").unwrap().is_some());
+        assert!(resolve_archive("keep-3").unwrap().is_some());
+    }
+
+    #[test]
+    fn prunes_archives_by_total_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set("A3S_HOME", tmp.path());
+
+        write_archive("large-1", Utc::now() - chrono::Duration::days(3), 128);
+        write_archive("large-2", Utc::now() - chrono::Duration::days(2), 128);
+        write_archive("large-3", Utc::now() - chrono::Duration::days(1), 128);
+
+        let before = dir_size(&archive_root()).unwrap();
+        let removed = prune_archives(LogArchiveRetention {
+            max_age_days: 7,
+            max_archives: 10,
+            max_total_bytes: before.saturating_sub(1),
+        })
+        .unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(resolve_archive("large-1").unwrap().is_none());
+        assert!(resolve_archive("large-2").unwrap().is_some());
+        assert!(resolve_archive("large-3").unwrap().is_some());
+    }
+
+    fn write_archive(id: &str, removed_at: DateTime<Utc>, payload_bytes: usize) {
+        let dir = archive_dir(id);
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        std::fs::write(
+            dir.join("logs").join("console.log"),
+            vec![b'x'; payload_bytes],
+        )
+        .unwrap();
+        let metadata = RemovedLogArchive {
+            id: id.to_string(),
+            short_id: id.to_string(),
+            name: id.to_string(),
+            image: "alpine:latest".to_string(),
+            removed_at,
+            created_at: removed_at,
+            started_at: Some(removed_at),
+            exit_code: Some(1),
+            log_config: a3s_box_core::log::LogConfig::default(),
+        };
+        std::fs::write(
+            dir.join(METADATA_FILE),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
     }
 }

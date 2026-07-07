@@ -1023,13 +1023,30 @@ fn archive_auto_removed_logs(
     }
 
     let archive_record = stopped_record_for_archive(&ctx.record, exit_code, stopped_by_user);
-    if let Err(error) = crate::log_archive::archive_removed_logs(&archive_record) {
-        tracing::debug!(
-            box_id = %ctx.box_id,
-            error = %error,
-            "Failed to archive auto-removed box logs"
-        );
+    match crate::log_archive::archive_removed_logs(&archive_record) {
+        Ok(Some(path)) => {
+            if should_print_retained_log_hint(exit_code, stopped_by_user) {
+                eprintln!(
+                    "Retained logs for removed box {} at {}. View with: a3s-box logs {}",
+                    ctx.name,
+                    path.display(),
+                    ctx.name
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::debug!(
+                box_id = %ctx.box_id,
+                error = %error,
+                "Failed to archive auto-removed box logs"
+            );
+        }
     }
+}
+
+fn should_print_retained_log_hint(exit_code: Option<i32>, stopped_by_user: bool) -> bool {
+    matches!(exit_code, Some(code) if code != 0) && !stopped_by_user
 }
 
 fn remove_auto_removed_record(
@@ -1440,6 +1457,14 @@ mod tests {
         assert!(ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT).stopped_by_user());
         assert!(!ForegroundStopReason::ProcessExited.stopped_by_user());
         assert!(!ForegroundStopReason::VmUnhealthy.stopped_by_user());
+    }
+
+    #[test]
+    fn test_retained_log_hint_only_for_non_user_failures() {
+        assert!(should_print_retained_log_hint(Some(1), false));
+        assert!(!should_print_retained_log_hint(Some(0), false));
+        assert!(!should_print_retained_log_hint(None, false));
+        assert!(!should_print_retained_log_hint(Some(130), true));
     }
 
     #[test]

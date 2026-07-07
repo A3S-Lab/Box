@@ -20,6 +20,7 @@ bench/bench.sh cold       # cold-boot latency only
 bench/bench.sh warm       # warm-pool acquire latency
 bench/bench.sh fork       # snapshot-fork pool fill (cold-fill vs CoW restore)
 bench/bench.sh leak       # churn + leak assertion (exit != 0 on leak)
+PNPM_PROJECT=/path/to/app bench/bench.sh pnpm
 ```
 
 Tunables (env):
@@ -31,6 +32,11 @@ Tunables (env):
 | `RUNS` | `20` | samples per latency benchmark |
 | `POOL_SIZE` | `16` | warm-pool / fork fill size |
 | `CHURN` | `30` | create/run/remove cycles for the leak test |
+| `PNPM_PROJECT` | unset | project directory with `package.json` and `pnpm-lock.yaml` for `pnpm` mode |
+| `PNPM_IMAGE` | `node:22-alpine` | Node image used by `pnpm` mode |
+| `PNPM_VERSION` | `10.30.3` | version passed to `corepack prepare` |
+| `PNPM_RUNS` | `3` | samples for the `pnpm` benchmark |
+| `PNPM_CACHE` | `1` | use `--package-cache pnpm`; set `0` for a cold store path |
 
 ## What it measures
 
@@ -44,6 +50,12 @@ Tunables (env):
   `a3s-box-shim` processes, overlay mounts under `~/.a3s/boxes`, box dirs),
   runs `CHURN` `run --rm` cycles, then asserts they return to baseline.
   **Exits non-zero on any leak**, so it is CI-gateable.
+- **pnpm** — runs `node:22-alpine` against a real project mount and reports
+  p50/p90 for VM boot baseline, `corepack + pnpm` toolchain setup, and
+  `pnpm install --frozen-lockfile`. The final line gives a rough p50 breakdown:
+  boot, toolchain, and the remaining install/network/filesystem work. Compare
+  `PNPM_CACHE=0` with the default `PNPM_CACHE=1` to quantify the persistent
+  pnpm store path.
 
 ## Wiring into CI
 
