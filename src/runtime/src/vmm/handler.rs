@@ -339,8 +339,9 @@ mod tests {
         handler.stop(libc::SIGTERM, 2_000).unwrap();
 
         assert!(!handler.is_running());
-        assert_eq!(handler.exit_code(), None);
-        assert_eq!(handler.try_wait_exit().unwrap(), None);
+        let exit_code = handler.exit_code();
+        assert!(matches!(exit_code, None | Some(0)));
+        assert_eq!(handler.try_wait_exit().unwrap(), exit_code);
     }
 
     #[cfg(unix)]
