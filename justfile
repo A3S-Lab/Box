@@ -220,6 +220,18 @@ test-core:
 test-skills:
     cd src && cargo test -p a3s-box-runtime --lib -- skill
 
+# ============================================================================
+# Benchmarks
+# ============================================================================
+
+# Run benchmark harness (requires KVM for VM-backed benchmarks)
+bench target="all":
+    bench/bench.sh {{target}}
+
+# Run pnpm install benchmark against a project or the reduced fixture
+bench-pnpm project="bench/fixtures/pnpm":
+    PNPM_PROJECT="{{project}}" bench/bench.sh pnpm
+
 # Test a3s-box-runtime (check only, requires libkrun for actual tests)
 test-runtime:
     cd src && A3S_DEPS_STUB=1 cargo check -p a3s-box-runtime -p a3s-box-shim

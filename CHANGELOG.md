@@ -2,6 +2,24 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **pnpm install benchmark parity.** `bench/bench.sh pnpm` and `just bench-pnpm`
+  now benchmark a real project or the reduced `bench/fixtures/pnpm` fixture,
+  split install time into VM boot, Corepack/pnpm setup, `pnpm fetch`, offline
+  `node_modules` materialization on the project mount, tmpfs materialization,
+  and full frozen install. When Docker is available, the harness also reports
+  cold/hot Docker baselines and A3S/Docker ratios.
+
+### Fixed
+
+- **pnpm package-cache toolchain reuse.** `--package-cache pnpm` now persists
+  Corepack's prepared pnpm toolchain with `COREPACK_HOME=/a3s-cache/pnpm/corepack`
+  in addition to the pnpm store, avoiding repeated toolchain downloads across
+  throwaway boxes.
+
 ## [3.0.2] — 2026-07-07
 
 ### Fixed

@@ -21,6 +21,10 @@
 #   PNPM_VERSION pnpm version for corepack prepare    (default: 10.30.3)
 #   PNPM_RUNS    pnpm install samples                 (default: 3)
 #   PNPM_CACHE   1 uses --package-cache pnpm, 0 disables it (default: 1)
+#   PNPM_CPUS    CPUs for pnpm boxes/containers       (default: 4)
+#   PNPM_MEMORY  memory for pnpm boxes/containers     (default: 4g)
+#   PNPM_DOCKER  1 compares Docker cold/hot baselines, 0 skips (default: 1)
+#   PNPM_RESET_A3S_CACHE 1 removes a3s-cache-pnpm before cold A3S samples (default: 0)
 #
 # Exit code is non-zero if the leak assertion fails, so it is CI-gateable
 # (wire it into the self-hosted KVM job — see docs/ci-kvm-runner.md).
@@ -37,6 +41,15 @@ PNPM_IMAGE="${PNPM_IMAGE:-node:22-alpine}"
 PNPM_VERSION="${PNPM_VERSION:-10.30.3}"
 PNPM_RUNS="${PNPM_RUNS:-3}"
 PNPM_CACHE="${PNPM_CACHE:-1}"
+PNPM_CPUS="${PNPM_CPUS:-4}"
+PNPM_MEMORY="${PNPM_MEMORY:-4g}"
+PNPM_DOCKER="${PNPM_DOCKER:-1}"
+PNPM_TMPFS_SIZE="${PNPM_TMPFS_SIZE:-4g}"
+PNPM_NODE_MODULES="${PNPM_NODE_MODULES:-both}"
+PNPM_LOG_DIR="${PNPM_LOG_DIR:-/tmp/a3s-bench-pnpm}"
+PNPM_DOCKER_STORE_VOLUME="${PNPM_DOCKER_STORE_VOLUME:-a3s-bench-pnpm-store}"
+PNPM_A3S_CACHE_VOLUME="${PNPM_A3S_CACHE_VOLUME:-a3s-cache-pnpm}"
+PNPM_RESET_A3S_CACHE="${PNPM_RESET_A3S_CACHE:-0}"
 MODE="${1:-all}"
 
 now_ms() { date +%s%3N 2>/dev/null || python3 -c 'import time;print(int(time.time()*1000))'; }
@@ -49,6 +62,10 @@ pct() {
   local idx=$(( (count * $2 + 99) / 100 ))
   [ "$idx" -lt 1 ] && idx=1
   printf '%s\n' $nums | sed -n "${idx}p"
+}
+
+ratio() {
+  awk -v a="$1" -v b="$2" 'BEGIN { if (b <= 0) print "n/a"; else printf "%.2fx", a / b }'
 }
 
 require_kvm() {
@@ -201,45 +218,178 @@ bench_pnpm() {
     echo "  ERROR: PNPM_PROJECT must contain package.json and pnpm-lock.yaml: $PNPM_PROJECT" >&2
     return 2
   fi
+  case "$PNPM_NODE_MODULES" in
+    project|tmpfs|both) ;;
+    *) echo "  ERROR: PNPM_NODE_MODULES must be project, tmpfs, or both" >&2; return 2 ;;
+  esac
 
   local project
   project=$(cd "$PNPM_PROJECT" && pwd)
+  mkdir -p "$PNPM_LOG_DIR"
   "$A3S_BOX" pull "$PNPM_IMAGE" >/dev/null 2>&1 || true
 
-  local boot_samples="" toolchain_samples="" install_samples=""
+  echo "  config: project=$project cpus=$PNPM_CPUS memory=$PNPM_MEMORY package-cache=$PNPM_CACHE node_modules=$PNPM_NODE_MODULES reset-a3s-cache=$PNPM_RESET_A3S_CACHE"
+  echo "  logs:   $PNPM_LOG_DIR"
+
+  local prepare_cmd fetch_cmd offline_cmd full_cmd
+  prepare_cmd="corepack enable && corepack prepare pnpm@$PNPM_VERSION --activate >/dev/null && pnpm --version >/dev/null"
+  fetch_cmd="$prepare_cmd && rm -rf node_modules && pnpm fetch --frozen-lockfile --reporter append-only"
+  offline_cmd="$prepare_cmd && rm -rf node_modules && pnpm install --offline --frozen-lockfile --ignore-scripts --reporter append-only"
+  full_cmd="$prepare_cmd && rm -rf node_modules && pnpm install --frozen-lockfile --reporter append-only"
+
+  run_a3s_pnpm() {
+    local log_file="$1"; shift
+    local guest_cmd="$1"; shift
+    local cache_args=()
+    [ "$PNPM_CACHE" = "1" ] && cache_args=(--package-cache pnpm)
+    "$A3S_BOX" run --rm --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" "${cache_args[@]}" "$@" "$PNPM_IMAGE" -- sh -lc "$guest_cmd" >"$log_file" 2>&1
+  }
+
+  run_docker_pnpm() {
+    local log_file="$1"; shift
+    local guest_cmd="$1"; shift
+    docker run --rm --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" \
+      -v "$PNPM_DOCKER_STORE_VOLUME:/a3s-cache/pnpm" \
+      -e npm_config_store_dir=/a3s-cache/pnpm/store \
+      -e COREPACK_HOME=/a3s-cache/pnpm/corepack \
+      "$@" "$PNPM_IMAGE" sh -lc "$guest_cmd" >"$log_file" 2>&1
+  }
+
+  MEASURED_SAMPLES=""
+  measure_a3s_samples() {
+    local label="$1"; shift
+    local guest_cmd="$1"; shift
+    local samples="" i s e status log_file
+    for i in $(seq 1 "$PNPM_RUNS"); do
+      log_file="$PNPM_LOG_DIR/a3s-$label-$i.log"
+      if [ "$PNPM_RESET_A3S_CACHE" = "1" ] && [ "$PNPM_CACHE" = "1" ]; then
+        case "$label" in
+          toolchain|fetch|install-*) "$A3S_BOX" volume rm -f "$PNPM_A3S_CACHE_VOLUME" >/dev/null 2>&1 || true ;;
+        esac
+      fi
+      s=$(now_ms)
+      run_a3s_pnpm "$log_file" "$guest_cmd" "$@"
+      status=$?
+      e=$(now_ms); samples="$samples $(( e - s ))"
+      if [ "$status" -ne 0 ]; then
+        echo "  FAIL: A3S $label failed (see $log_file)" >&2
+        tail -80 "$log_file" >&2
+        return "$status"
+      fi
+    done
+    MEASURED_SAMPLES="$samples"
+  }
+
+  measure_docker_samples() {
+    local label="$1"; shift
+    local guest_cmd="$1"; shift
+    local samples="" i s e status log_file
+    for i in $(seq 1 "$PNPM_RUNS"); do
+      log_file="$PNPM_LOG_DIR/docker-$label-$i.log"
+      case "$label" in
+        cold-*) docker volume rm -f "$PNPM_DOCKER_STORE_VOLUME" >/dev/null 2>&1 || true ;;
+      esac
+      s=$(now_ms)
+      run_docker_pnpm "$log_file" "$guest_cmd" "$@"
+      status=$?
+      e=$(now_ms); samples="$samples $(( e - s ))"
+      if [ "$status" -ne 0 ]; then
+        echo "  FAIL: Docker $label failed (see $log_file)" >&2
+        tail -80 "$log_file" >&2
+        return "$status"
+      fi
+    done
+    MEASURED_SAMPLES="$samples"
+  }
+
+  local boot_samples="" toolchain_samples="" install_project_samples="" install_tmpfs_samples=""
+  local fetch_samples="" offline_project_samples="" offline_tmpfs_samples=""
   for _ in $(seq 1 "$PNPM_RUNS"); do
     local s e
 
     s=$(now_ms)
-    "$A3S_BOX" run --rm "$PNPM_IMAGE" -- true >/dev/null 2>&1
+    "$A3S_BOX" run --rm --cpus "$PNPM_CPUS" --memory "$PNPM_MEMORY" "$PNPM_IMAGE" -- true >/dev/null 2>&1
     e=$(now_ms); boot_samples="$boot_samples $(( e - s ))"
-
-    s=$(now_ms)
-    "$A3S_BOX" run --rm "$PNPM_IMAGE" -- sh -lc "corepack enable && corepack prepare pnpm@$PNPM_VERSION --activate >/dev/null && pnpm --version >/dev/null" >/dev/null 2>&1
-    e=$(now_ms); toolchain_samples="$toolchain_samples $(( e - s ))"
-
-    local cache_args=""
-    [ "$PNPM_CACHE" = "1" ] && cache_args="--package-cache pnpm"
-    s=$(now_ms)
-    # shellcheck disable=SC2086
-    "$A3S_BOX" run --rm $cache_args -v "$project:/work" -w /work "$PNPM_IMAGE" -- sh -lc "corepack enable && corepack prepare pnpm@$PNPM_VERSION --activate >/dev/null && rm -rf node_modules && pnpm install --frozen-lockfile --reporter append-only" >/tmp/a3s-bench-pnpm-install.log 2>&1
-    local status=$?
-    e=$(now_ms); install_samples="$install_samples $(( e - s ))"
-    if [ "$status" -ne 0 ]; then
-      echo "  FAIL: pnpm install failed (see /tmp/a3s-bench-pnpm-install.log)" >&2
-      tail -80 /tmp/a3s-bench-pnpm-install.log >&2
-      return "$status"
-    fi
   done
 
-  local boot_p50 toolchain_p50 install_p50
+  measure_a3s_samples "toolchain" "$prepare_cmd" || return $?
+  toolchain_samples="$MEASURED_SAMPLES"
+
+  if [ "$PNPM_CACHE" = "1" ]; then
+    measure_a3s_samples "fetch" "$fetch_cmd" -v "$project:/work" -w /work || return $?
+    fetch_samples="$MEASURED_SAMPLES"
+
+    measure_a3s_samples "offline-project" "$offline_cmd" -v "$project:/work" -w /work || return $?
+    offline_project_samples="$MEASURED_SAMPLES"
+
+    if [ "$PNPM_NODE_MODULES" = "tmpfs" ] || [ "$PNPM_NODE_MODULES" = "both" ]; then
+      measure_a3s_samples "offline-tmpfs" "$offline_cmd" -v "$project:/work" -w /work --tmpfs "/work/node_modules:size=$PNPM_TMPFS_SIZE" || return $?
+      offline_tmpfs_samples="$MEASURED_SAMPLES"
+    fi
+  fi
+
+  if [ "$PNPM_NODE_MODULES" = "project" ] || [ "$PNPM_NODE_MODULES" = "both" ]; then
+    measure_a3s_samples "install-project" "$full_cmd" -v "$project:/work" -w /work || return $?
+    install_project_samples="$MEASURED_SAMPLES"
+  fi
+
+  if [ "$PNPM_NODE_MODULES" = "tmpfs" ] || [ "$PNPM_NODE_MODULES" = "both" ]; then
+    measure_a3s_samples "install-tmpfs" "$full_cmd" -v "$project:/work" -w /work --tmpfs "/work/node_modules:size=$PNPM_TMPFS_SIZE" || return $?
+    install_tmpfs_samples="$MEASURED_SAMPLES"
+  fi
+
+  local boot_p50 toolchain_p50 fetch_p50 offline_project_p50 offline_tmpfs_p50 install_project_p50 install_tmpfs_p50
   boot_p50=$(pct "$boot_samples" 50)
   toolchain_p50=$(pct "$toolchain_samples" 50)
-  install_p50=$(pct "$install_samples" 50)
+  fetch_p50=0
+  offline_project_p50=0
+  offline_tmpfs_p50=0
+  install_project_p50=0
+  install_tmpfs_p50=0
+  [ -n "$fetch_samples" ] && fetch_p50=$(pct "$fetch_samples" 50)
+  [ -n "$offline_project_samples" ] && offline_project_p50=$(pct "$offline_project_samples" 50)
+  [ -n "$offline_tmpfs_samples" ] && offline_tmpfs_p50=$(pct "$offline_tmpfs_samples" 50)
+  [ -n "$install_project_samples" ] && install_project_p50=$(pct "$install_project_samples" 50)
+  [ -n "$install_tmpfs_samples" ] && install_tmpfs_p50=$(pct "$install_tmpfs_samples" 50)
+
   echo "  boot baseline:          p50=${boot_p50}ms p90=$(pct "$boot_samples" 90)ms"
   echo "  corepack+pnpm baseline: p50=${toolchain_p50}ms p90=$(pct "$toolchain_samples" 90)ms"
-  echo "  frozen install total:   p50=${install_p50}ms p90=$(pct "$install_samples" 90)ms cache=$PNPM_CACHE"
-  echo "  rough p50 breakdown: boot~${boot_p50}ms toolchain~$(( toolchain_p50 - boot_p50 ))ms install/network/fs~$(( install_p50 - toolchain_p50 ))ms"
+
+  if [ -n "$fetch_samples" ]; then
+    echo "  fetch/download+extract: p50=${fetch_p50}ms p90=$(pct "$fetch_samples" 90)ms target=pnpm-store"
+    echo "  offline install fs:     p50=${offline_project_p50}ms p90=$(pct "$offline_project_samples" 90)ms target=project-mount"
+    if [ -n "$offline_tmpfs_samples" ]; then
+      echo "  offline install fs:     p50=${offline_tmpfs_p50}ms p90=$(pct "$offline_tmpfs_samples" 90)ms target=tmpfs"
+      echo "  project fs overhead:    p50=$(( offline_project_p50 - offline_tmpfs_p50 ))ms vs tmpfs"
+    fi
+  else
+    echo "  fetch/offline split:    skipped (requires PNPM_CACHE=1 so store survives between boxes)"
+  fi
+
+  if [ -n "$install_project_samples" ]; then
+    echo "  frozen install total:   p50=${install_project_p50}ms p90=$(pct "$install_project_samples" 90)ms target=project-mount cache=$PNPM_CACHE"
+  fi
+  if [ -n "$install_tmpfs_samples" ]; then
+    echo "  frozen install total:   p50=${install_tmpfs_p50}ms p90=$(pct "$install_tmpfs_samples" 90)ms target=tmpfs cache=$PNPM_CACHE"
+  fi
+
+  if [ "$PNPM_DOCKER" = "1" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    docker pull "$PNPM_IMAGE" >/dev/null 2>&1 || true
+    docker volume rm -f "$PNPM_DOCKER_STORE_VOLUME" >/dev/null 2>&1 || true
+    measure_docker_samples "cold-project" "$full_cmd" -v "$project:/work" -w /work || return $?
+    local docker_cold_samples="$MEASURED_SAMPLES"
+    measure_docker_samples "hot-project" "$full_cmd" -v "$project:/work" -w /work || return $?
+    local docker_hot_samples="$MEASURED_SAMPLES"
+    local docker_cold_p50 docker_hot_p50
+    docker_cold_p50=$(pct "$docker_cold_samples" 50)
+    docker_hot_p50=$(pct "$docker_hot_samples" 50)
+    echo "  Docker cold baseline:   p50=${docker_cold_p50}ms p90=$(pct "$docker_cold_samples" 90)ms target=project-mount"
+    echo "  Docker hot baseline:    p50=${docker_hot_p50}ms p90=$(pct "$docker_hot_samples" 90)ms target=project-mount"
+    [ "$install_project_p50" -gt 0 ] && echo "  A3S/Docker hot ratio:   $(ratio "$install_project_p50" "$docker_hot_p50") target=project-mount"
+    [ "$install_tmpfs_p50" -gt 0 ] && echo "  A3S tmpfs/Docker hot:   $(ratio "$install_tmpfs_p50" "$docker_hot_p50")"
+  elif [ "$PNPM_DOCKER" = "1" ]; then
+    echo "  Docker baseline:        skipped (docker CLI or daemon unavailable)"
+  fi
 }
 
 require_kvm

@@ -236,7 +236,9 @@ and everything after it. The cache lives at `~/.a3s/buildcache` and is size-capp
 ```bash
 a3s-box volume create data
 a3s-box run -d --name app -v data:/data alpine:latest -- sleep 3600
-a3s-box run --rm --package-cache pnpm node:22-alpine -- sh -lc 'corepack enable && pnpm install --frozen-lockfile'
+a3s-box run --rm --cpus 4 --memory 4g --package-cache pnpm \
+  -v "$PWD:/work" -w /work --tmpfs /work/node_modules:size=4g \
+  node:22-alpine -- sh -lc 'corepack enable && pnpm install --frozen-lockfile'
 a3s-box cp ./file.txt app:/data/file.txt
 a3s-box diff app
 a3s-box export app -o rootfs.tar
@@ -246,7 +248,7 @@ a3s-box snapshot restore checkpoint-1 --name restored-app
 a3s-box snapshot prune --keep 5          # bound disk: keep the 5 newest
 ```
 
-`--package-cache pnpm` creates/reuses the named volume `a3s-cache-pnpm` and sets `npm_config_store_dir=/a3s-cache/pnpm/store`, so dependency downloads survive across `--rm` boxes without making the whole rootfs persistent. Auto-removed boxes also archive their last logs under `~/.a3s/removed-logs/`, and `a3s-box logs <name-or-id>` can read that archive after the box directory is gone.
+`--package-cache pnpm` creates/reuses the named volume `a3s-cache-pnpm`, sets `npm_config_store_dir=/a3s-cache/pnpm/store`, and sets `COREPACK_HOME=/a3s-cache/pnpm/corepack`, so dependency downloads and the Corepack-prepared pnpm toolchain survive across `--rm` boxes without making the whole rootfs persistent. For throwaway install/build jobs, mounting `node_modules` as tmpfs avoids pushing thousands of small files through the project bind mount; use `bench/bench.sh pnpm` or `just bench-pnpm` to compare A3S project-mount, A3S tmpfs, and Docker cold/hot baselines. Auto-removed boxes also archive their last logs under `~/.a3s/removed-logs/`, and `a3s-box logs <name-or-id>` can read that archive after the box directory is gone.
 
 The `snapshot` command produces configuration/filesystem-oriented Box snapshots, not a live RAM checkpoint. The live RAM Copy-on-Write facility is a separate, lower-level mechanism described in [Warm pool and snapshot-fork](#warm-pool-and-snapshot-fork).
 

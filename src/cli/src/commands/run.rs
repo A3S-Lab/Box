@@ -18,6 +18,8 @@ use crate::state::{generate_name, BoxRecord, StateFile};
 const PNPM_CACHE_VOLUME_SPEC: &str = "a3s-cache-pnpm:/a3s-cache/pnpm";
 const PNPM_STORE_ENV: &str = "npm_config_store_dir";
 const PNPM_STORE_DIR: &str = "/a3s-cache/pnpm/store";
+const PNPM_COREPACK_HOME_ENV: &str = "COREPACK_HOME";
+const PNPM_COREPACK_HOME_DIR: &str = "/a3s-cache/pnpm/corepack";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum PackageCache {
@@ -931,6 +933,8 @@ fn apply_package_caches(
                 }
                 env.entry(PNPM_STORE_ENV.to_string())
                     .or_insert_with(|| PNPM_STORE_DIR.to_string());
+                env.entry(PNPM_COREPACK_HOME_ENV.to_string())
+                    .or_insert_with(|| PNPM_COREPACK_HOME_DIR.to_string());
             }
         }
     }
@@ -1302,21 +1306,32 @@ mod tests {
             env.get(PNPM_STORE_ENV).map(String::as_str),
             Some(PNPM_STORE_DIR)
         );
+        assert_eq!(
+            env.get(PNPM_COREPACK_HOME_ENV).map(String::as_str),
+            Some(PNPM_COREPACK_HOME_DIR)
+        );
     }
 
     #[test]
-    fn test_apply_package_caches_preserves_user_pnpm_store_env() {
+    fn test_apply_package_caches_preserves_user_pnpm_env() {
         let mut volumes = Vec::new();
-        let mut env = std::collections::HashMap::from([(
-            PNPM_STORE_ENV.to_string(),
-            "/custom/pnpm-store".to_string(),
-        )]);
+        let mut env = std::collections::HashMap::from([
+            (PNPM_STORE_ENV.to_string(), "/custom/pnpm-store".to_string()),
+            (
+                PNPM_COREPACK_HOME_ENV.to_string(),
+                "/custom/corepack".to_string(),
+            ),
+        ]);
 
         apply_package_caches(&[PackageCache::Pnpm], &mut volumes, &mut env);
 
         assert_eq!(
             env.get(PNPM_STORE_ENV).map(String::as_str),
             Some("/custom/pnpm-store")
+        );
+        assert_eq!(
+            env.get(PNPM_COREPACK_HOME_ENV).map(String::as_str),
+            Some("/custom/corepack")
         );
     }
 

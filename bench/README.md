@@ -21,6 +21,7 @@ bench/bench.sh warm       # warm-pool acquire latency
 bench/bench.sh fork       # snapshot-fork pool fill (cold-fill vs CoW restore)
 bench/bench.sh leak       # churn + leak assertion (exit != 0 on leak)
 PNPM_PROJECT=/path/to/app bench/bench.sh pnpm
+just bench-pnpm           # reduced pnpm fixture
 ```
 
 Tunables (env):
@@ -37,6 +38,12 @@ Tunables (env):
 | `PNPM_VERSION` | `10.30.3` | version passed to `corepack prepare` |
 | `PNPM_RUNS` | `3` | samples for the `pnpm` benchmark |
 | `PNPM_CACHE` | `1` | use `--package-cache pnpm`; set `0` for a cold store path |
+| `PNPM_CPUS` | `4` | CPUs assigned to pnpm boxes and Docker baselines |
+| `PNPM_MEMORY` | `4g` | memory assigned to pnpm boxes and Docker baselines |
+| `PNPM_NODE_MODULES` | `both` | benchmark `project`, `tmpfs`, or `both` `node_modules` targets |
+| `PNPM_TMPFS_SIZE` | `4g` | tmpfs size for `/work/node_modules` when tmpfs mode is enabled |
+| `PNPM_DOCKER` | `1` | compare Docker cold/hot baselines when Docker is available |
+| `PNPM_RESET_A3S_CACHE` | `0` | set `1` to remove `a3s-cache-pnpm` before cold A3S samples |
 
 ## What it measures
 
@@ -50,12 +57,33 @@ Tunables (env):
   `a3s-box-shim` processes, overlay mounts under `~/.a3s/boxes`, box dirs),
   runs `CHURN` `run --rm` cycles, then asserts they return to baseline.
   **Exits non-zero on any leak**, so it is CI-gateable.
-- **pnpm** — runs `node:22-alpine` against a real project mount and reports
-  p50/p90 for VM boot baseline, `corepack + pnpm` toolchain setup, and
-  `pnpm install --frozen-lockfile`. The final line gives a rough p50 breakdown:
-  boot, toolchain, and the remaining install/network/filesystem work. Compare
-  `PNPM_CACHE=0` with the default `PNPM_CACHE=1` to quantify the persistent
-  pnpm store path.
+- **pnpm** — runs `node:22-alpine` against a real project mount or the reduced
+  fixture at [`fixtures/pnpm`](./fixtures/pnpm). It reports p50/p90 for VM boot,
+  `corepack + pnpm` setup, `pnpm fetch` (registry download plus extraction/import
+  into the pnpm store),
+  offline install to project-mounted `node_modules`, offline install to tmpfs
+  `node_modules`, and full `pnpm install --frozen-lockfile`. When Docker is
+  available it also reports Docker cold/hot baselines and A3S/Docker ratios.
+
+The pnpm benchmark intentionally separates the two likely slow paths:
+
+- store population: `pnpm fetch --frozen-lockfile` (download plus store extraction);
+- filesystem materialization: `pnpm install --offline --ignore-scripts`.
+
+If project-mounted `node_modules` is much slower than tmpfs, the bottleneck is
+small-file and metadata traffic through the project mount. Use tmpfs for
+throwaway install/build jobs:
+
+```bash
+a3s-box run --rm --cpus 4 --memory 4g --package-cache pnpm \
+  -v "$PWD:/work" -w /work --tmpfs /work/node_modules:size=4g \
+  node:22-alpine -- sh -lc 'corepack enable && pnpm install --frozen-lockfile'
+```
+
+For a true cold A3S package-cache sample, run with `PNPM_RESET_A3S_CACHE=1`;
+this removes the shared `a3s-cache-pnpm` volume before cold samples, so do not
+use it while another box is relying on that cache. The Docker cold baseline uses
+only the benchmark-owned `a3s-bench-pnpm-store` volume.
 
 ## Wiring into CI
 
