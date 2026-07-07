@@ -584,8 +584,11 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                     });
                 }
 
-                Instruction::Run { command } => {
-                    let created_by = format!("RUN {}", command);
+                Instruction::Run {
+                    command,
+                    cache_mounts,
+                } => {
+                    let created_by = instruction_to_string(instruction);
                     if try_reuse_cached_layer(
                         cache_valid,
                         cache.as_ref(),
@@ -607,10 +610,11 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                     cache_valid = false;
 
                     if !config.quiet {
-                        println!("Step {}/{}: RUN {}", step, total_instructions, command);
+                        println!("Step {}/{}: {}", step, total_instructions, created_by);
                     }
                     let layer_opt = handle_run(
                         command,
+                        cache_mounts,
                         &rootfs_dir,
                         &layers_dir,
                         &state.workdir,
@@ -627,12 +631,12 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                         state.diff_ids.push(diff_id);
                         state.layers.push(layer_info);
                         state.history.push(HistoryEntry {
-                            created_by: format!("RUN {}", command),
+                            created_by: created_by.clone(),
                             empty_layer: false,
                         });
                     } else {
                         state.history.push(HistoryEntry {
-                            created_by: format!("RUN {}", command),
+                            created_by: created_by.clone(),
                             empty_layer: true,
                         });
                     }

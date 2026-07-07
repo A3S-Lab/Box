@@ -34,6 +34,10 @@ pub struct ImageStore {
     max_size_bytes: u64,
 }
 
+fn state_dir_hint() -> &'static str {
+    "Set A3S_HOME to a writable directory to change the A3S Box state directory."
+}
+
 impl ImageStore {
     /// Create a new image store.
     ///
@@ -42,9 +46,10 @@ impl ImageStore {
     pub fn new(store_dir: &Path, max_size_bytes: u64) -> Result<Self> {
         std::fs::create_dir_all(store_dir).map_err(|e| {
             BoxError::OciImageError(format!(
-                "Failed to create image store directory {}: {}",
+                "Failed to create image store directory {}: {}. {}",
                 store_dir.display(),
-                e
+                e,
+                state_dir_hint()
             ))
         })?;
 
@@ -389,8 +394,9 @@ impl ImageStore {
                 .map_err(|e| BoxError::OciImageError(format!("index lock task failed: {e}")))?
                 .map_err(|e| {
                     BoxError::OciImageError(format!(
-                        "failed to lock image index {}: {e}",
-                        index_path.display()
+                        "failed to lock image index {}: {e}. {}",
+                        index_path.display(),
+                        state_dir_hint()
                     ))
                 })?
         };
@@ -422,18 +428,20 @@ impl ImageStore {
         let tmp_path = self.store_dir.join("index.json.tmp");
         tokio::fs::write(&tmp_path, data).await.map_err(|e| {
             BoxError::OciImageError(format!(
-                "Failed to write image store index {}: {}",
+                "Failed to write image store index {}: {}. {}",
                 tmp_path.display(),
-                e
+                e,
+                state_dir_hint()
             ))
         })?;
         tokio::fs::rename(&tmp_path, &index_path)
             .await
             .map_err(|e| {
                 BoxError::OciImageError(format!(
-                    "Failed to commit image store index {}: {}",
+                    "Failed to commit image store index {}: {}. {}",
                     index_path.display(),
-                    e
+                    e,
+                    state_dir_hint()
                 ))
             })?;
 

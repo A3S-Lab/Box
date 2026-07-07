@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
 
-use super::super::dockerfile::Instruction;
+use super::super::dockerfile::{Instruction, RunCacheMount};
 use super::super::dockerignore::DockerIgnore;
 use super::super::layer::{
     create_layer_from_dir_with_chown, create_layer_with_chown, create_layer_with_deletions,
@@ -243,6 +243,7 @@ pub(super) fn handle_copy(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_run(
     command: &str,
+    cache_mounts: &[RunCacheMount],
     rootfs_dir: &Path,
     layers_dir: &Path,
     workdir: &str,
@@ -263,6 +264,7 @@ pub(super) fn handle_run(
 
         handle_run_on_host_unsafe(
             command,
+            cache_mounts,
             rootfs_dir,
             layers_dir,
             workdir,
@@ -281,9 +283,11 @@ pub(super) fn handle_run(
         validate_linux_run_preconditions(rootfs_dir, shell, linux_effective_uid())?;
         prepare_linux_run_filesystem(rootfs_dir)?;
         let workdir_path = ensure_linux_run_workdir(rootfs_dir, workdir)?;
+        ensure_run_cache_mount_targets(rootfs_dir, cache_mounts)?;
 
         let before = DirSnapshot::capture(rootfs_dir)?;
         let run_mounts = LinuxRunMounts::mount(rootfs_dir)?;
+        let run_mounts = run_mounts.with_cache_mounts(rootfs_dir, cache_mounts)?;
 
         // Build the command using the configured shell
         let mut cmd = std::process::Command::new("chroot");
@@ -343,6 +347,7 @@ pub(super) fn handle_run(
         let _ = (
             rootfs_dir,
             layers_dir,
+            cache_mounts,
             workdir,
             env,
             shell,
@@ -420,6 +425,20 @@ fn ensure_linux_run_workdir(rootfs_dir: &Path, workdir: &str) -> Result<PathBuf>
         ))
     })?;
     Ok(workdir_path)
+}
+
+fn ensure_run_cache_mount_targets(rootfs_dir: &Path, cache_mounts: &[RunCacheMount]) -> Result<()> {
+    for mount in cache_mounts {
+        let target = rootfs_dir.join(mount.target.trim_start_matches('/'));
+        std::fs::create_dir_all(&target).map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to create RUN cache mount target {}: {}",
+                target.display(),
+                e
+            ))
+        })?;
+    }
+    Ok(())
 }
 
 fn print_run_output(output: &std::process::Output, quiet: bool) {
@@ -576,6 +595,7 @@ fn ensure_linux_resolv_conf(rootfs_dir: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 struct LinuxRunMounts {
     mounted: Vec<PathBuf>,
+    cache_dirs: Vec<tempfile::TempDir>,
 }
 
 #[cfg(target_os = "linux")]
@@ -583,6 +603,7 @@ impl LinuxRunMounts {
     fn mount(rootfs_dir: &Path) -> Result<Self> {
         let mut mounts = Self {
             mounted: Vec::new(),
+            cache_dirs: Vec::new(),
         };
 
         mounts.mount_proc(&rootfs_dir.join("proc"))?;
@@ -594,6 +615,25 @@ impl LinuxRunMounts {
         }
 
         Ok(mounts)
+    }
+
+    fn with_cache_mounts(
+        mut self,
+        rootfs_dir: &Path,
+        cache_mounts: &[RunCacheMount],
+    ) -> Result<Self> {
+        for mount in cache_mounts {
+            let cache_dir = tempfile::Builder::new()
+                .prefix("a3s-box-run-cache-")
+                .tempdir()
+                .map_err(|e| {
+                    BoxError::BuildError(format!("Failed to create RUN cache mount: {}", e))
+                })?;
+            let target = rootfs_dir.join(mount.target.trim_start_matches('/'));
+            self.bind_mount(cache_dir.path().to_path_buf(), target)?;
+            self.cache_dirs.push(cache_dir);
+        }
+        Ok(self)
     }
 
     fn mount_proc(&mut self, target: &Path) -> Result<()> {
@@ -718,6 +758,7 @@ fn unsafe_host_run_enabled() -> bool {
 #[allow(clippy::too_many_arguments)]
 fn handle_run_on_host_unsafe(
     command: &str,
+    cache_mounts: &[RunCacheMount],
     rootfs_dir: &Path,
     layers_dir: &Path,
     workdir: &str,
@@ -765,6 +806,7 @@ fn handle_run_on_host_unsafe(
             ))
         })?;
     }
+    ensure_run_cache_mount_targets(rootfs_dir, cache_mounts)?;
 
     let output = std::process::Command::new(&shell_cmd[0])
         .args(&shell_cmd[1..])
@@ -1011,7 +1053,21 @@ pub(super) fn execute_onbuild_trigger(
 /// Convert an Instruction back to a string representation for ONBUILD storage.
 pub(super) fn instruction_to_string(instr: &Instruction) -> String {
     match instr {
-        Instruction::Run { command } => format!("RUN {}", command),
+        Instruction::Run {
+            command,
+            cache_mounts,
+        } => {
+            let flags = cache_mounts
+                .iter()
+                .map(|mount| mount.raw.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if flags.is_empty() {
+                format!("RUN {}", command)
+            } else {
+                format!("RUN {} {}", flags, command)
+            }
+        }
         Instruction::Copy {
             src,
             dst,
@@ -1165,7 +1221,7 @@ fn download_url(url: &str) -> std::result::Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::dockerfile::Instruction;
+    use super::super::super::dockerfile::{Instruction, RunCacheMount};
     use super::{
         execute_onbuild_trigger, expand_glob_sources, glob_segment_match, handle_add,
         instruction_to_string, run_command_failed_error,
@@ -1227,8 +1283,24 @@ mod tests {
     fn test_instruction_to_string_run() {
         let instr = Instruction::Run {
             command: "echo hello".to_string(),
+            cache_mounts: vec![],
         };
         assert_eq!(instruction_to_string(&instr), "RUN echo hello");
+    }
+
+    #[test]
+    fn test_instruction_to_string_run_with_cache_mount() {
+        let instr = Instruction::Run {
+            command: "pnpm install".to_string(),
+            cache_mounts: vec![RunCacheMount {
+                raw: "--mount=type=cache,target=/root/.cache".to_string(),
+                target: "/root/.cache".to_string(),
+            }],
+        };
+        assert_eq!(
+            instruction_to_string(&instr),
+            "RUN --mount=type=cache,target=/root/.cache pnpm install"
+        );
     }
 
     #[test]
@@ -1445,6 +1517,7 @@ mod tests {
     fn test_instruction_to_string_onbuild() {
         let inner = Instruction::Run {
             command: "echo triggered".to_string(),
+            cache_mounts: vec![],
         };
         let instr = Instruction::OnBuild {
             instruction: Box::new(inner),
@@ -1599,7 +1672,8 @@ mod tests {
         std::fs::create_dir_all(&rootfs).unwrap();
         std::fs::create_dir_all(&layers).unwrap();
 
-        let result = super::handle_run("echo unsafe", &rootfs, &layers, "/", &[], &[], 0, true);
+        let result =
+            super::handle_run("echo unsafe", &[], &rootfs, &layers, "/", &[], &[], 0, true);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Dockerfile RUN is not supported on macOS yet"));
         assert!(err.contains(super::UNSAFE_HOST_RUN_ENV));

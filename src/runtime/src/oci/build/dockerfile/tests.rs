@@ -73,8 +73,33 @@ mod tests {
             result,
             Instruction::Run {
                 command: "apt-get update && apt-get install -y curl".to_string(),
+                cache_mounts: vec![],
             }
         );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount() {
+        let result =
+            parsers::parse_run("--mount=type=cache,target=/root/.cache pnpm install", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: "pnpm install".to_string(),
+                cache_mounts: vec![RunCacheMount {
+                    raw: "--mount=type=cache,target=/root/.cache".to_string(),
+                    target: "/root/.cache".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_unsupported_buildkit_mount_rejected() {
+        let err = parsers::parse_run("--mount=type=secret,id=npmrc npm install", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only type=cache is supported"));
     }
 
     #[test]
@@ -555,7 +580,7 @@ CMD ["app.py"]
         let content = "FROM alpine:3.19\nRUN apk add --no-cache \\\n    curl \\\n    wget";
         let df = Dockerfile::parse(content).unwrap();
         assert_eq!(df.instructions.len(), 2);
-        if let Instruction::Run { command } = &df.instructions[1] {
+        if let Instruction::Run { command, .. } = &df.instructions[1] {
             assert!(command.contains("curl"));
             assert!(command.contains("wget"));
         } else {
@@ -906,6 +931,7 @@ CMD ["app.py"]
             Instruction::OnBuild {
                 instruction: Box::new(Instruction::Run {
                     command: "echo hello".to_string(),
+                    cache_mounts: vec![],
                 }),
             }
         );
@@ -1086,7 +1112,8 @@ CMD ["app.py"]
         assert_eq!(
             instruction,
             Instruction::Run {
-                command: "echo ready".to_string()
+                command: "echo ready".to_string(),
+                cache_mounts: vec![],
             }
         );
     }

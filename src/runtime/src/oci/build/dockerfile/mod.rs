@@ -18,8 +18,11 @@ pub enum Instruction {
         image: String,
         alias: Option<String>,
     },
-    /// `RUN <command>` (shell form)
-    Run { command: String },
+    /// `RUN [--mount=type=cache,...] <command>` (shell form)
+    Run {
+        command: String,
+        cache_mounts: Vec<RunCacheMount>,
+    },
     /// `COPY [--from=<stage>] [--chown=user[:group]] <src>... <dst>`
     Copy {
         src: Vec<String>,
@@ -70,6 +73,13 @@ pub enum Instruction {
     OnBuild { instruction: Box<Instruction> },
     /// `VOLUME <path>...`
     Volume { paths: Vec<String> },
+}
+
+/// Supported subset of Docker BuildKit `RUN --mount=...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunCacheMount {
+    pub raw: String,
+    pub target: String,
 }
 
 /// Parsed Dockerfile: a list of instructions in order.

@@ -710,6 +710,9 @@ async fn run_foreground(
                 if ctx.vm.try_wait_exit().await?.is_some() {
                     break ForegroundStopReason::ProcessExited;
                 }
+                if ctx.vm.has_exited().await {
+                    break ForegroundStopReason::ProcessExited;
+                }
                 if !ctx.vm.health_check().await.unwrap_or(false) {
                     break ForegroundStopReason::VmUnhealthy;
                 }

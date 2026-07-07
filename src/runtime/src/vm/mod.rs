@@ -480,12 +480,29 @@ impl VmManager {
         self.shim_exit_code
     }
 
+    fn persisted_exit_code(&self) -> Option<i32> {
+        std::fs::read_to_string(
+            self.home_dir
+                .join("boxes")
+                .join(&self.box_id)
+                .join("upper")
+                .join(".a3s_exit_code"),
+        )
+        .ok()
+        .and_then(|contents| contents.trim().parse::<i32>().ok())
+    }
+
     /// Poll the owned VM process for natural exit without sending a signal.
     ///
     /// This is used by foreground CLI flows where the container command may
     /// finish on its own and the CLI should clean up instead of waiting for
     /// a Ctrl-C.
     pub async fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+        if let Some(code) = self.persisted_exit_code() {
+            self.shim_exit_code = Some(code);
+            return Ok(Some(code));
+        }
+
         let mut handler = self.handler.write().await;
         let Some(handler) = handler.as_mut() else {
             return Ok(self.shim_exit_code);
@@ -497,6 +514,21 @@ impl VmManager {
         }
 
         Ok(None)
+    }
+
+    /// Return true once the foreground container is known to have finished, even
+    /// if the shim exit status has not been reaped yet.
+    pub async fn has_exited(&self) -> bool {
+        if self.shim_exit_code.is_some() || self.persisted_exit_code().is_some() {
+            return true;
+        }
+
+        self.handler
+            .read()
+            .await
+            .as_ref()
+            .map(|handler| handler.has_exited())
+            .unwrap_or(false)
     }
 
     /// Run a command as the container MAIN in an IDLE-booted (deferred-main) VM.
@@ -1457,6 +1489,28 @@ mod tests {
         *vm.handler.write().await = Some(Box::new(ExitStateHandler { exited: false }));
 
         vm.wait_for_vm_running().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_try_wait_exit_reads_guest_persisted_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-exit-code".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+
+        let exit_path = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("upper")
+            .join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        std::fs::write(&exit_path, "42\n").unwrap();
+
+        assert_eq!(vm.try_wait_exit().await.unwrap(), Some(42));
+        assert_eq!(vm.exit_code(), Some(42));
+        assert!(vm.has_exited().await);
     }
 
     #[cfg(unix)]

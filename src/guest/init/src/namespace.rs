@@ -11,7 +11,7 @@ use std::os::fd::RawFd;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
@@ -273,9 +273,12 @@ fn child_process(
         }
     }
 
-    // Execute the command. `Command::exec` uses PATH for bare command names, so
-    // the preflight check needs to mirror that instead of statting "sleep".
-    if let Some(command_path) = resolve_command_path(command, env) {
+    // Resolve bare OCI entrypoints through the container PATH. Rust's
+    // Command::new does not search PATH for the environment we are about to set,
+    // so doing it here is required for images such as node:*-alpine whose
+    // entrypoint is "docker-entrypoint.sh".
+    let resolved_command = resolve_command_path(command, env);
+    if let Some(command_path) = &resolved_command {
         let metadata = std::fs::metadata(&command_path).ok();
         tracing::debug!(
             path = %command_path.display(),
@@ -293,7 +296,11 @@ fn child_process(
         );
     }
 
-    let mut cmd = Command::new(command);
+    let mut cmd = Command::new(
+        resolved_command
+            .as_deref()
+            .unwrap_or_else(|| Path::new(command)),
+    );
     cmd.args(args).current_dir(workdir);
 
     // Set environment variables
@@ -345,7 +352,10 @@ fn resolve_command_path(command: &str, env: &[(&str, &str)]) -> Option<PathBuf> 
         .iter()
         .rev()
         .find_map(|(key, value)| (*key == "PATH").then_some((*value).to_string()))
-        .or_else(|| std::env::var("PATH").ok())?;
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_else(|| {
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+        });
 
     path_env
         .split(':')
@@ -1065,14 +1075,19 @@ fn child_process(
     // On non-Linux, just exec without namespace isolation or security
     tracing::warn!("Namespace isolation and security enforcement not available on this platform");
 
-    let mut cmd = Command::new(command);
+    let resolved_command = resolve_command_path(command, env);
+    let mut cmd = Command::new(
+        resolved_command
+            .as_deref()
+            .unwrap_or_else(|| Path::new(command)),
+    );
     cmd.args(args).current_dir(workdir);
 
     for (key, value) in env {
         cmd.env(key, value);
     }
 
-    if let Some(command_path) = resolve_command_path(command, env) {
+    if let Some(command_path) = &resolved_command {
         tracing::debug!(path = %command_path.display(), "Command file resolved");
     }
 
@@ -1130,6 +1145,18 @@ mod tests {
     fn test_resolve_command_path_from_env_path() {
         let path = resolve_command_path("sh", &[("PATH", "/bin:/usr/bin")]);
         assert_eq!(path, Some(PathBuf::from("/bin/sh")));
+    }
+
+    #[test]
+    fn test_resolve_command_path_relative_oci_entrypoint_from_container_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("usr/local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let entrypoint = bin.join("docker-entrypoint.sh");
+        std::fs::write(&entrypoint, "#!/bin/sh\n").unwrap();
+
+        let path = resolve_command_path("docker-entrypoint.sh", &[("PATH", bin.to_str().unwrap())]);
+        assert_eq!(path, Some(entrypoint));
     }
 
     #[test]

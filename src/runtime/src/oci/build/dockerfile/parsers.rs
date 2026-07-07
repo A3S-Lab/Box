@@ -3,7 +3,7 @@
 use a3s_box_core::error::{BoxError, Result};
 
 use super::utils::{parse_duration_secs, parse_json_array, shell_split, unquote};
-use super::{split_first_word, Instruction};
+use super::{split_first_word, Instruction, RunCacheMount};
 
 pub(super) fn parse_from(rest: &str, line_num: usize) -> Result<Instruction> {
     if rest.is_empty() {
@@ -39,8 +39,83 @@ pub(super) fn parse_run(rest: &str, line_num: usize) -> Result<Instruction> {
         )));
     }
 
+    let (cache_mounts, command) = parse_run_options(rest, line_num)?;
+
     Ok(Instruction::Run {
-        command: rest.to_string(),
+        command: command.to_string(),
+        cache_mounts,
+    })
+}
+
+fn parse_run_options<'a>(rest: &'a str, line_num: usize) -> Result<(Vec<RunCacheMount>, &'a str)> {
+    let mut remaining = rest.trim_start();
+    let mut cache_mounts = Vec::new();
+
+    while remaining.starts_with("--") {
+        let (flag, tail) = split_first_word(remaining);
+        if let Some(spec) = flag.strip_prefix("--mount=") {
+            cache_mounts.push(parse_run_cache_mount(flag, spec, line_num)?);
+        } else {
+            return Err(BoxError::BuildError(format!(
+                "Line {}: RUN option '{}' is not supported yet; only BuildKit cache mounts (--mount=type=cache,...) are supported",
+                line_num, flag
+            )));
+        }
+        remaining = tail.trim_start();
+    }
+
+    if remaining.is_empty() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN requires a command after BuildKit options",
+            line_num
+        )));
+    }
+
+    Ok((cache_mounts, remaining))
+}
+
+fn parse_run_cache_mount(raw: &str, spec: &str, line_num: usize) -> Result<RunCacheMount> {
+    let mut mount_type = None;
+    let mut target = None;
+
+    for part in spec.split(',') {
+        let (key, value) = part.split_once('=').ok_or_else(|| {
+            BoxError::BuildError(format!(
+                "Line {}: Invalid RUN mount option '{}'",
+                line_num, raw
+            ))
+        })?;
+        match key {
+            "type" => mount_type = Some(value),
+            "target" | "dst" | "destination" => target = Some(value),
+            _ => {}
+        }
+    }
+
+    if mount_type != Some("cache") {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN mount '{}' is not supported yet; only type=cache is supported",
+            line_num, raw
+        )));
+    }
+
+    let Some(target) = target.filter(|target| !target.is_empty()) else {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN cache mount '{}' requires a target= path",
+            line_num, raw
+        )));
+    };
+
+    if !target.starts_with('/') {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN cache mount target '{}' must be absolute",
+            line_num, target
+        )));
+    }
+
+    Ok(RunCacheMount {
+        raw: raw.to_string(),
+        target: target.to_string(),
     })
 }
 

@@ -116,6 +116,7 @@ mod tests {
     fn make_run(cmd: &str) -> Instruction {
         Instruction::Run {
             command: cmd.to_string(),
+            cache_mounts: vec![],
         }
     }
 
