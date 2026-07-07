@@ -2,6 +2,23 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [3.0.2] — 2026-07-07
+
+### Fixed
+
+- **Dockerfile BuildKit cache mounts.** `a3s-box build` now parses
+  `RUN --mount=type=cache,target=... <command>` instead of passing the
+  `--mount` flag to `/bin/sh`, and fails clearly for unsupported mount types.
+- **Foreground run lifecycle.** `a3s-box run --rm` now observes persisted guest
+  exit codes and handles `SIGTERM` the same cleanup path as Ctrl-C, preventing
+  interrupted foreground runs from leaving active box records behind.
+- **OCI entrypoint resolution.** Relative image entrypoints such as
+  `docker-entrypoint.sh` are resolved through the container `PATH`, matching
+  common Docker image behavior.
+- **Image store state errors.** Image index write/lock failures now include the
+  affected path and an `A3S_HOME` hint so restricted environments can point Box
+  at a writable state directory.
+
 ## [3.0.0] — 2026-07-06
 
 ### Added
