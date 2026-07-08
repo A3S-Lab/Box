@@ -6,6 +6,7 @@ mod tests {
     use super::super::utils::*;
     use super::super::{
         build, default_target_platform, scratch_config, validate_build_config, BuildConfig,
+        BuildState,
     };
     use crate::oci::{ImageStore, OciImage};
     use a3s_box_core::platform::Platform;
@@ -46,6 +47,31 @@ mod tests {
     fn test_expand_args_no_match() {
         let args = HashMap::new();
         assert_eq!(expand_args("alpine:3.19", &args), "alpine:3.19");
+    }
+
+    #[test]
+    fn test_run_env_includes_declared_args_and_env_overrides() {
+        let mut build_args = HashMap::new();
+        build_args.insert(
+            "ALPINE_MIRROR".to_string(),
+            "mirrors.tencent.com".to_string(),
+        );
+        build_args.insert("MODE".to_string(), "prod".to_string());
+        build_args.insert("UNDECLARED".to_string(), "ignored".to_string());
+
+        let mut state = BuildState::new(build_args);
+        state.declared_args.insert("ALPINE_MIRROR".to_string());
+        state.declared_args.insert("MODE".to_string());
+        state.env.push(("MODE".to_string(), "debug".to_string()));
+
+        let env = state.run_env().into_iter().collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            env.get("ALPINE_MIRROR").map(String::as_str),
+            Some("mirrors.tencent.com")
+        );
+        assert_eq!(env.get("MODE").map(String::as_str), Some("debug"));
+        assert!(!env.contains_key("UNDECLARED"));
     }
 
     #[test]

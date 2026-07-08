@@ -2,6 +2,47 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [3.0.5] — 2026-07-08
+
+### Added
+
+- **Explicit plain-HTTP registry push.** `a3s-box push` now supports
+  `--plain-http`, `--insecure`, and Docker-compatible `--tls-verify=false` for
+  trusted private registries. The Rust SDK exposes the same protocol selection
+  through `RegistryProtocol` and `PushImage::plain_http(true)`.
+- **CI-safe foreground runs.** `a3s-box run` now closes guest stdin by default,
+  accepts `--no-stdin` for explicit non-interactive runs, and adds
+  `--timeout <seconds>` for foreground commands. Timed-out runs stop/remove the
+  box through the normal cleanup path and return exit code 124.
+
+### Changed
+
+- **Exec readiness waits are bounded and diagnosable.** Boot-time exec-server
+  readiness probing now defaults to a 15s safety cap, logs progress with the
+  socket path, exits early when the guest has already persisted an exit code,
+  and can be tuned with `A3S_EXEC_READY_TIMEOUT_MS`.
+- **More useful pnpm package caches.** `--package-cache pnpm` now also persists
+  Corepack, `PNPM_HOME`, and npm cache data, disables Corepack's download prompt,
+  and prefers offline package resolution by default. `a3s-box info` reports the
+  pnpm cache volume status and size.
+- **Stable host-volume traversal.** Guest virtio-fs mounts default to
+  `cache=none` for safer large host tree traversal on macOS/HVF. Set
+  `A3S_VIRTIOFS_CACHE=auto`, `always`, or `default` to override.
+
+### Fixed
+
+- **Rootfs writes through `/etc` symlinks.** Rootfs setup now writes generated
+  files such as `/etc/nsswitch.conf` inside the guest rootfs even when `/etc` is
+  an absolute symlink, fixing images such as `quay.io/skopeo/stable`.
+- **Dockerfile build blockers.** Linux `RUN` now honors `WORKDIR` inside the
+  chroot, declared `ARG` values are visible to `RUN`, unsafe macOS host-run
+  propagates the build environment, `RUN chown`-only changes produce a layer,
+  cached layers are copied into the active build directory before export, and
+  layer-copy errors include the missing source/destination context.
+- **Layer extraction directory-to-symlink replacements.** OCI layer extraction
+  now prepares symlink destinations so a later layer can replace an existing
+  directory with a symlink without failing.
+
 ## [3.0.4] — 2026-07-08
 
 ### Added

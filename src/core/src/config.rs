@@ -284,6 +284,12 @@ pub struct BoxConfig {
     #[serde(default)]
     pub cmd: Vec<String>,
 
+    /// Keep stdin open for the initial container process.
+    ///
+    /// Defaults to false so non-interactive runs do not block forever on prompts.
+    #[serde(default)]
+    pub stdin_open: bool,
+
     /// Entrypoint override (replaces OCI ENTRYPOINT when set)
     #[serde(default)]
     pub entrypoint_override: Option<Vec<String>>,
@@ -437,6 +443,7 @@ impl Default for BoxConfig {
             debug_grpc: false,
             tee: TeeConfig::default(),
             cmd: vec![],
+            stdin_open: false,
             entrypoint_override: None,
             user: None,
             workdir: None,

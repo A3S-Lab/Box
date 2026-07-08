@@ -1,12 +1,15 @@
 //! `a3s-box info` command.
 
 use clap::Args;
+use std::path::Path;
 
 use crate::state::BoxRecord;
 use crate::state::StateFile;
 use crate::status;
 
 use super::images_dir;
+
+const PNPM_CACHE_VOLUME_NAME: &str = "a3s-cache-pnpm";
 
 #[derive(Args)]
 pub struct InfoArgs;
@@ -64,6 +67,8 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     } else {
         println!("Images: 0 cached");
     }
+    print_package_cache_info();
+    print_host_mount_info();
 
     Ok(())
 }
@@ -100,6 +105,55 @@ fn availability(value: bool) -> &'static str {
     } else {
         "unavailable"
     }
+}
+
+fn print_package_cache_info() {
+    let Ok(store) = a3s_box_runtime::VolumeStore::default_path() else {
+        println!("Package cache (pnpm): unavailable");
+        return;
+    };
+
+    match store.get(PNPM_CACHE_VOLUME_NAME) {
+        Ok(Some(volume)) => {
+            let size = directory_size(Path::new(&volume.mount_point)).unwrap_or(0);
+            println!(
+                "Package cache (pnpm): {} at {}",
+                crate::output::format_bytes(size),
+                volume.mount_point
+            );
+        }
+        Ok(None) => println!("Package cache (pnpm): not created"),
+        Err(error) => println!("Package cache (pnpm): unavailable ({error})"),
+    }
+}
+
+fn print_host_mount_info() {
+    let cache_mode = std::env::var("A3S_VIRTIOFS_CACHE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "none".to_string());
+    println!("VirtioFS cache mode: {cache_mode}");
+}
+
+fn directory_size(path: &Path) -> std::io::Result<u64> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+
+    let mut total = 0_u64;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        total = total.saturating_add(directory_size(&entry.path())?);
+    }
+    Ok(total)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,5 +221,16 @@ mod tests {
     fn test_availability_labels() {
         assert_eq!(availability(true), "available");
         assert_eq!(availability(false), "unavailable");
+    }
+
+    #[test]
+    fn test_directory_size_sums_regular_files_without_following_missing_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("one"), b"1234").unwrap();
+        std::fs::create_dir(tmp.path().join("nested")).unwrap();
+        std::fs::write(tmp.path().join("nested").join("two"), b"12").unwrap();
+
+        assert_eq!(directory_size(tmp.path()).unwrap(), 6);
+        assert_eq!(directory_size(&tmp.path().join("missing")).unwrap(), 0);
     }
 }

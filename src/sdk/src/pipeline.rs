@@ -1,10 +1,10 @@
 //! Programmable CI on a3s-box. A pipeline is a Rust program; a3s-box is the
 //! execution backend — one Linux kernel per step, exit code = pass/fail.
 //!
-//! A thin, dependency-free wrapper over the `a3s-box` CLI (it owns the box
-//! lifecycle + state, so we drive it rather than re-implementing that). It hides
-//! the CLI footguns verified on a real KVM host: `run`/`exec` need `--` before
-//! the command; `snapshot restore` yields a *created* box that must be `start`ed
+//! This pipeline layer still drives lifecycle-heavy `a3s-box` CLI commands while
+//! the lower-level runtime exposes those flows as stable Rust APIs. It hides the
+//! CLI footguns verified on a real KVM host: `run`/`exec` need `--` before the
+//! command; `snapshot restore` yields a *created* box that must be `start`ed
 //! before exec; `snapshot rm` keys on snapshot ID, not name.
 //!
 //! Model: warm a base box once (clone + install deps), `snapshot` it, then fork

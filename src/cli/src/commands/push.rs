@@ -16,6 +16,14 @@ pub struct PushArgs {
     #[arg(short, long)]
     pub quiet: bool,
 
+    /// Use plain HTTP for a trusted private registry
+    #[arg(long, alias = "insecure")]
+    pub plain_http: bool,
+
+    /// Verify TLS for registry HTTPS connections; use `--tls-verify=false` for plain HTTP
+    #[arg(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    pub tls_verify: bool,
+
     /// Sign the image after push with a cosign-compatible ECDSA P-256 private key
     #[arg(long)]
     pub sign_key: Option<String>,
@@ -41,7 +49,8 @@ pub async fn execute(args: PushArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load auth from credential store (falls back to env vars, then anonymous)
     let auth = a3s_box_runtime::RegistryAuth::from_credential_store(&reference.registry);
-    let pusher = a3s_box_runtime::RegistryPusher::with_auth(auth);
+    let protocol = registry_protocol_from_args(args.plain_http, args.tls_verify);
+    let pusher = a3s_box_runtime::RegistryPusher::with_auth_and_protocol(auth, protocol);
 
     let result = pusher.push(&reference, &stored.path).await?;
 
@@ -89,6 +98,17 @@ fn push_reference_for_query(query: &str, resolved_reference: &str) -> Result<Str
     Ok(query.to_string())
 }
 
+fn registry_protocol_from_args(
+    plain_http: bool,
+    tls_verify: bool,
+) -> a3s_box_runtime::RegistryProtocol {
+    if plain_http || !tls_verify {
+        a3s_box_runtime::RegistryProtocol::Http
+    } else {
+        a3s_box_runtime::RegistryProtocol::Https
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,9 +118,13 @@ mod tests {
         let args = PushArgs {
             image: "ghcr.io/org/app:latest".to_string(),
             quiet: false,
+            plain_http: false,
+            tls_verify: true,
             sign_key: None,
         };
         assert!(!args.quiet);
+        assert!(!args.plain_http);
+        assert!(args.tls_verify);
         assert!(args.sign_key.is_none());
     }
 
@@ -109,6 +133,8 @@ mod tests {
         let args = PushArgs {
             image: "ghcr.io/org/app:latest".to_string(),
             quiet: false,
+            plain_http: false,
+            tls_verify: true,
             sign_key: Some("/path/to/cosign.key".to_string()),
         };
         assert_eq!(args.sign_key.as_deref(), Some("/path/to/cosign.key"));
@@ -135,5 +161,29 @@ mod tests {
         let error = push_reference_for_query("sha256:abc", "sha256:abc").unwrap_err();
 
         assert!(error.contains("Tag it first"));
+    }
+
+    #[test]
+    fn test_registry_protocol_from_args_defaults_to_https() {
+        assert_eq!(
+            registry_protocol_from_args(false, true),
+            a3s_box_runtime::RegistryProtocol::Https
+        );
+    }
+
+    #[test]
+    fn test_registry_protocol_from_plain_http_flag() {
+        assert_eq!(
+            registry_protocol_from_args(true, true),
+            a3s_box_runtime::RegistryProtocol::Http
+        );
+    }
+
+    #[test]
+    fn test_registry_protocol_from_tls_verify_false() {
+        assert_eq!(
+            registry_protocol_from_args(false, false),
+            a3s_box_runtime::RegistryProtocol::Http
+        );
     }
 }

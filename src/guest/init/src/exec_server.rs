@@ -91,6 +91,8 @@ struct DeferredMainSpec {
     workdir: Option<String>,
     #[serde(default)]
     user: Option<String>,
+    #[serde(default)]
+    stdin_null: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -124,6 +126,7 @@ pub fn set_deferred_main_spec(
     env: Vec<(String, String)>,
     workdir: Option<String>,
     user: Option<String>,
+    stdin_null: bool,
 ) {
     *DEFERRED_MAIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(DeferredMainSpec {
         executable,
@@ -131,6 +134,7 @@ pub fn set_deferred_main_spec(
         env,
         workdir,
         user,
+        stdin_null,
     });
 }
 
@@ -149,8 +153,8 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
     // Use the command carried in the frame (the pool path — a pre-warmed VM gets
     // its per-request command here), else the one stashed at boot from BOX_EXEC_*
     // (the `run` path, where the command is known at boot).
-    let (executable, args, env, workdir, user) = match frame {
-        Some(s) => (s.executable, s.args, s.env, s.workdir, s.user),
+    let (executable, args, env, workdir, user, stdin_null) = match frame {
+        Some(s) => (s.executable, s.args, s.env, s.workdir, s.user, s.stdin_null),
         None => {
             let guard = DEFERRED_MAIN.lock().unwrap_or_else(|e| e.into_inner());
             let spec = guard.as_ref().ok_or("no deferred-main command set")?;
@@ -160,6 +164,7 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
                 spec.env.clone(),
                 spec.workdir.clone(),
                 spec.user.clone(),
+                spec.stdin_null,
             )
         }
     };
@@ -205,8 +210,10 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
     .map_err(|out| String::from_utf8_lossy(&out.stderr).into_owned())?;
     command
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .stdin(std::process::Stdio::null());
+        .stderr(std::process::Stdio::inherit());
+    if stdin_null {
+        command.stdin(std::process::Stdio::null());
+    }
 
     // Idempotency: claim the sentinel (-1 → -2 pending); a second spawn-main loses.
     if CONTAINER_PID

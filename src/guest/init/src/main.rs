@@ -231,6 +231,8 @@ struct ExecConfig {
     /// Container user (`uid`, `uid:gid`, `root`, or a name resolved via the
     /// image `/etc/passwd`). Applied to the main process before exec.
     user: Option<String>,
+    /// Whether stdin should be connected to `/dev/null`.
+    stdin_null: bool,
 }
 
 impl ExecConfig {
@@ -294,6 +296,9 @@ impl ExecConfig {
             .ok()
             .map(&decode)
             .filter(|u| !u.is_empty());
+        let stdin_null = std::env::var("BOX_EXEC_STDIN")
+            .map(|value| value.eq_ignore_ascii_case("null"))
+            .unwrap_or(false);
 
         // Collect BOX_EXEC_ENV_* variables (values decoded as above). Skip
         // BOX_EXEC_ENV_FILE — it's the pointer to the staged env file, not a
@@ -331,6 +336,7 @@ impl ExecConfig {
             env,
             workdir,
             user,
+            stdin_null,
         }
     }
 }
@@ -682,6 +688,7 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
                 Some(exec_config.workdir.clone())
             },
             exec_config.user.clone(),
+            exec_config.stdin_null,
         );
         // Stash the cgroup's procs path too, so the deferred main joins the
         // per-container cgroup when spawned (the non-deferred branch below
@@ -707,6 +714,7 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
             &env_refs,
             &exec_config.workdir,
             exec_config.user.as_deref(),
+            exec_config.stdin_null,
             main_stdio,
             cgroup_procs.as_deref(),
         )?;
@@ -1097,13 +1105,7 @@ fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all("/workspace").ok();
 
         // Mount workspace share
-        mount(
-            Some("workspace"),
-            "/workspace",
-            Some("virtiofs"),
-            MsFlags::empty(),
-            None::<&str>,
-        )?;
+        mount_virtiofs("workspace", "/workspace", MsFlags::empty())?;
 
         // Mount user-defined volumes from environment variables.
         // Format: BOX_VOL_<index>=<tag>:<guest_path>[:ro]
@@ -1115,6 +1117,52 @@ fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
         info!("Skipping virtio-fs mount on non-Linux platform (development mode)");
     }
 
+    Ok(())
+}
+
+fn virtiofs_mount_options_from_env_value(value: Option<&str>) -> Option<String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("default") => None,
+        Some(mode) => Some(format!("cache={mode}")),
+        None => Some("cache=none".to_string()),
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn virtiofs_mount_options() -> Option<String> {
+    virtiofs_mount_options_from_env_value(std::env::var("A3S_VIRTIOFS_CACHE").ok().as_deref())
+}
+
+#[cfg(target_os = "linux")]
+fn mount_virtiofs(
+    tag: &str,
+    target: &str,
+    flags: nix::mount::MsFlags,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use nix::mount::mount;
+
+    if let Some(options) = virtiofs_mount_options() {
+        match mount(
+            Some(tag),
+            target,
+            Some("virtiofs"),
+            flags,
+            Some(options.as_str()),
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                warn!(
+                    tag = tag,
+                    target = target,
+                    options = options,
+                    error = %error,
+                    "virtio-fs mount with explicit cache mode failed; retrying with the kernel default"
+                );
+            }
+        }
+    }
+
+    mount(Some(tag), target, Some("virtiofs"), flags, None::<&str>)?;
     Ok(())
 }
 
@@ -1159,13 +1207,7 @@ fn mount_user_volumes() -> Result<(), Box<dyn std::error::Error>> {
                     let file_name = guest_path.rsplit('/').next().unwrap_or(guest_path);
                     let private_mp = format!("/run/.a3s-filemounts/{}", index);
                     std::fs::create_dir_all(&private_mp)?;
-                    mount(
-                        Some(tag),
-                        private_mp.as_str(),
-                        Some("virtiofs"),
-                        MsFlags::empty(),
-                        None::<&str>,
-                    )?;
+                    mount_virtiofs(tag, private_mp.as_str(), MsFlags::empty())?;
 
                     let src = format!("{}/{}", private_mp, file_name);
                     if !std::path::Path::new(&src).exists() {
@@ -1211,7 +1253,7 @@ fn mount_user_volumes() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     // Directory mount: mount the virtio-fs share directly at guest_path.
                     std::fs::create_dir_all(guest_path)?;
-                    mount(Some(tag), guest_path, Some("virtiofs"), flags, None::<&str>)?;
+                    mount_virtiofs(tag, guest_path, flags)?;
                     info!(
                         tag = tag,
                         guest_path = guest_path,
@@ -1570,6 +1612,23 @@ mod tests {
         for i in 0..10 {
             std::env::remove_var(format!("BOX_SIDECAR_ENV_{}", i));
         }
+    }
+
+    #[test]
+    fn test_virtiofs_mount_options_default_to_stable_cache_mode() {
+        assert_eq!(
+            virtiofs_mount_options_from_env_value(None).as_deref(),
+            Some("cache=none")
+        );
+        assert_eq!(
+            virtiofs_mount_options_from_env_value(Some("")).as_deref(),
+            Some("cache=none")
+        );
+        assert_eq!(
+            virtiofs_mount_options_from_env_value(Some("auto")).as_deref(),
+            Some("cache=auto")
+        );
+        assert_eq!(virtiofs_mount_options_from_env_value(Some("default")), None);
     }
 
     /// All sidecar env tests run sequentially in a single test to avoid

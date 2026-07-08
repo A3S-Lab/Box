@@ -173,6 +173,12 @@ impl VmManager {
             if let Some(user) = &user {
                 env.push(("BOX_EXEC_USER".to_string(), b64(user)));
             }
+            if !self.config.stdin_open {
+                env.push(("BOX_EXEC_STDIN".to_string(), "null".to_string()));
+            }
+            if let Some(cache_mode) = env_nonempty("A3S_VIRTIOFS_CACHE") {
+                env.push(("A3S_VIRTIOFS_CACHE".to_string(), cache_mode));
+            }
 
             // Container environment variables. Values are base64-encoded like the
             // rest (so `"`/spaces/etc. survive); the key stays raw (env names are a

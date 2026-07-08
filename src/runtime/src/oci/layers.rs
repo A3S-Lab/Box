@@ -178,6 +178,10 @@ fn extract_layer_with_cap(
             continue;
         }
 
+        if entry.header().entry_type() == tar::EntryType::Symlink {
+            prepare_symlink_destination(target_dir, &path)?;
+        }
+
         entry.unpack_in(target_dir).map_err(|e| {
             // Surface the underlying cause (e.g. the LimitedReader's size-cap
             // error) — tar's wrapper Display alone would just say "failed to
@@ -201,6 +205,31 @@ fn extract_layer_with_cap(
     Ok(())
 }
 
+fn prepare_symlink_destination(target_dir: &Path, path: &Path) -> Result<()> {
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let Some(parent) = resolve_within_or_base(target_dir, parent) else {
+        tracing::warn!(parent = %parent.display(), "Skipping symlink destination preparation: parent escapes the rootfs");
+        return Ok(());
+    };
+    let candidate = parent.join(name);
+    let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
+        return Ok(());
+    };
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(&candidate).map_err(|e| {
+            BoxError::OciImageError(format!(
+                "Failed to replace directory {} with symlink from layer: {}",
+                candidate.display(),
+                e
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// Resolve `rel` beneath `target_dir`, following symlinks, returning the real
 /// path ONLY if it stays inside `target_dir`.
 ///
@@ -212,7 +241,17 @@ fn extract_layer_with_cap(
 /// are allowed — the image may already mutate its own files; only escapes past
 /// `target_dir` are blocked.
 fn resolve_within(target_dir: &Path, rel: &Path) -> Option<PathBuf> {
+    if rel.as_os_str().is_empty() {
+        return target_dir.canonicalize().ok();
+    }
+    resolve_within_or_base(target_dir, rel)
+}
+
+fn resolve_within_or_base(target_dir: &Path, rel: &Path) -> Option<PathBuf> {
     let base = target_dir.canonicalize().ok()?;
+    if rel.as_os_str().is_empty() {
+        return Some(base);
+    }
     let resolved = base.join(rel).canonicalize().ok()?;
     resolved.starts_with(&base).then_some(resolved)
 }

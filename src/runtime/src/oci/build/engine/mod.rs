@@ -166,6 +166,19 @@ impl BuildState {
         vars
     }
 
+    /// Environment for RUN: declared ARG values are available while executing
+    /// the command, and ENV values override ARGs with the same name. ARGs are
+    /// not persisted into the final image config unless an ENV stores them.
+    fn run_env(&self) -> Vec<(String, String)> {
+        let mut vars = self.declared_build_args();
+        for (key, value) in &self.env {
+            vars.insert(key.clone(), value.clone());
+        }
+        let mut pairs = vars.into_iter().collect::<Vec<_>>();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
+    }
+
     /// Seed a global (pre-FROM) ARG into this stage: declare its name and apply
     /// its default unless a `--build-arg` already overrides it.
     fn seed_global_arg(&mut self, name: &str, default: Option<&str>) {
@@ -422,12 +435,16 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                         format!("COPY {} {}", src.join(" "), dst)
                     };
                     if try_reuse_cached_layer(
-                        cache_valid,
-                        cache.as_ref(),
-                        &chain_key,
-                        &rootfs_dir,
+                        CachedLayerReuse {
+                            cache_valid,
+                            cache: cache.as_ref(),
+                            chain_key: &chain_key,
+                            rootfs_dir: &rootfs_dir,
+                            layers_dir: &layers_dir,
+                            layer_index: state.layers.len() + base_layers.len(),
+                            created_by: &created_by,
+                        },
                         &mut state,
-                        &created_by,
                     )?
                     .is_some()
                     {
@@ -533,12 +550,16 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                 Instruction::Add { src, dst, chown } => {
                     let created_by = format!("ADD {} {}", src.join(" "), dst);
                     if try_reuse_cached_layer(
-                        cache_valid,
-                        cache.as_ref(),
-                        &chain_key,
-                        &rootfs_dir,
+                        CachedLayerReuse {
+                            cache_valid,
+                            cache: cache.as_ref(),
+                            chain_key: &chain_key,
+                            rootfs_dir: &rootfs_dir,
+                            layers_dir: &layers_dir,
+                            layer_index: state.layers.len() + base_layers.len(),
+                            created_by: &created_by,
+                        },
                         &mut state,
-                        &created_by,
                     )?
                     .is_some()
                     {
@@ -590,12 +611,16 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                 } => {
                     let created_by = instruction_to_string(instruction);
                     if try_reuse_cached_layer(
-                        cache_valid,
-                        cache.as_ref(),
-                        &chain_key,
-                        &rootfs_dir,
+                        CachedLayerReuse {
+                            cache_valid,
+                            cache: cache.as_ref(),
+                            chain_key: &chain_key,
+                            rootfs_dir: &rootfs_dir,
+                            layers_dir: &layers_dir,
+                            layer_index: state.layers.len() + base_layers.len(),
+                            created_by: &created_by,
+                        },
                         &mut state,
-                        &created_by,
                     )?
                     .is_some()
                     {
@@ -618,7 +643,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                         &rootfs_dir,
                         &layers_dir,
                         &state.workdir,
-                        &state.env,
+                        &state.run_env(),
                         &state.shell,
                         state.layers.len() + base_layers.len(),
                         config.quiet,
@@ -930,32 +955,55 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 /// instructions build on the correct rootfs, then records the layer, diff_id,
 /// and a non-empty history entry in `state`. Returns `Some(())` on a hit (the
 /// caller should `continue`), or `None` to fall through to normal execution.
-fn try_reuse_cached_layer(
+struct CachedLayerReuse<'a> {
     cache_valid: bool,
-    cache: Option<&BuildCache>,
-    chain_key: &str,
-    rootfs_dir: &Path,
+    cache: Option<&'a BuildCache>,
+    chain_key: &'a str,
+    rootfs_dir: &'a Path,
+    layers_dir: &'a Path,
+    layer_index: usize,
+    created_by: &'a str,
+}
+
+fn try_reuse_cached_layer(
+    request: CachedLayerReuse<'_>,
     state: &mut BuildState,
-    created_by: &str,
 ) -> Result<Option<()>> {
-    if !cache_valid {
+    if !request.cache_valid {
         return Ok(None);
     }
-    let Some(cached) = cache.and_then(|c| c.lookup(chain_key)) else {
+    let Some(cached) = request.cache.and_then(|c| c.lookup(request.chain_key)) else {
         return Ok(None);
     };
 
+    let local_layer = request.layers_dir.join(format!(
+        "cached_{}_{}.tar.gz",
+        request.layer_index, cached.digest
+    ));
+    if let Err(error) = std::fs::copy(&cached.blob_path, &local_layer) {
+        tracing::warn!(
+            key = %request.chain_key,
+            source = %cached.blob_path.display(),
+            error = %error,
+            "Build cache blob disappeared before it could be materialized; rebuilding instruction"
+        );
+        return Ok(None);
+    }
+
     // Apply the cached diff so subsequent instructions see the right rootfs.
-    extract_layer(&cached.blob_path, rootfs_dir)?;
+    extract_layer(&local_layer, request.rootfs_dir)?;
+    let local_size = std::fs::metadata(&local_layer)
+        .map(|metadata| metadata.len())
+        .unwrap_or(cached.size);
 
     state.layers.push(LayerInfo {
-        path: cached.blob_path,
+        path: local_layer,
         digest: cached.digest,
-        size: cached.size,
+        size: local_size,
     });
     state.diff_ids.push(cached.diff_id);
     state.history.push(HistoryEntry {
-        created_by: created_by.to_string(),
+        created_by: request.created_by.to_string(),
         empty_layer: false,
     });
     Ok(Some(()))
@@ -1110,8 +1158,7 @@ async fn assemble_image(
     for layer in base_layers {
         let blob_path = blobs_dir.join(&layer.digest);
         if !blob_path.exists() {
-            std::fs::copy(&layer.path, &blob_path)
-                .map_err(|e| BoxError::BuildError(format!("Failed to copy base layer: {}", e)))?;
+            copy_layer_blob(layer, &blob_path, "base layer")?;
         }
         all_layer_descriptors.push(serde_json::json!({
             "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
@@ -1124,8 +1171,7 @@ async fn assemble_image(
     for (i, layer) in state.layers.iter().enumerate() {
         let blob_path = blobs_dir.join(&layer.digest);
         if !blob_path.exists() {
-            std::fs::copy(&layer.path, &blob_path)
-                .map_err(|e| BoxError::BuildError(format!("Failed to copy layer {}: {}", i, e)))?;
+            copy_layer_blob(layer, &blob_path, &format!("layer {i}"))?;
         }
         all_layer_descriptors.push(serde_json::json!({
             "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
@@ -1299,4 +1345,25 @@ async fn assemble_image(
         size: stored.size_bytes,
         layer_count: total_layers,
     })
+}
+
+fn copy_layer_blob(layer: &LayerInfo, blob_path: &Path, label: &str) -> Result<()> {
+    if !layer.path.exists() {
+        return Err(BoxError::BuildError(format!(
+            "Failed to copy {label}: source layer {} for digest {} does not exist",
+            layer.path.display(),
+            layer.prefixed_digest()
+        )));
+    }
+
+    std::fs::copy(&layer.path, blob_path).map_err(|e| {
+        BoxError::BuildError(format!(
+            "Failed to copy {label} from {} to {} (digest {}): {}",
+            layer.path.display(),
+            blob_path.display(),
+            layer.prefixed_digest(),
+            e
+        ))
+    })?;
+    Ok(())
 }

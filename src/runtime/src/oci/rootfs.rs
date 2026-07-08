@@ -5,6 +5,7 @@
 
 use a3s_box_core::error::{BoxError, Result};
 use std::path::PathBuf;
+use std::path::{Component, Path};
 
 use super::image::OciImage;
 use super::layers::extract_layer;
@@ -295,7 +296,7 @@ impl OciRootfsBuilder {
     }
 
     fn ensure_passwd_entries(&self, required: &[(&str, &str)]) -> Result<()> {
-        let passwd_path = self.rootfs_path.join("etc/passwd");
+        let passwd_path = self.rootfs_file_path("etc/passwd")?;
         let existing = std::fs::read_to_string(&passwd_path).unwrap_or_default();
 
         let mut content = existing.clone();
@@ -317,7 +318,7 @@ impl OciRootfsBuilder {
     }
 
     fn ensure_group_entries(&self, required: &[(&str, &str)]) -> Result<()> {
-        let group_path = self.rootfs_path.join("etc/group");
+        let group_path = self.rootfs_file_path("etc/group")?;
         let existing = std::fs::read_to_string(&group_path).unwrap_or_default();
 
         let mut content = existing.clone();
@@ -339,9 +340,16 @@ impl OciRootfsBuilder {
     }
 
     fn write_file(&self, relative_path: &str, content: &str) -> Result<()> {
-        let full_path = self.rootfs_path.join(relative_path);
+        let full_path = self.rootfs_file_path(relative_path)?;
 
         if let Some(parent) = full_path.parent() {
+            if parent.exists() && !parent.is_dir() {
+                return Err(BoxError::BuildError(format!(
+                    "Cannot write {} because parent {} exists and is not a directory",
+                    full_path.display(),
+                    parent.display()
+                )));
+            }
             std::fs::create_dir_all(parent).map_err(|e| {
                 BoxError::BuildError(format!("Failed to create parent directory: {}", e))
             })?;
@@ -353,6 +361,76 @@ impl OciRootfsBuilder {
 
         tracing::debug!(path = %full_path.display(), "Created file");
         Ok(())
+    }
+
+    fn rootfs_file_path(&self, relative_path: &str) -> Result<PathBuf> {
+        let relative = Path::new(relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
+            return Err(BoxError::BuildError(format!(
+                "Invalid rootfs relative path: {relative_path}"
+            )));
+        }
+
+        let file_name = relative.file_name().ok_or_else(|| {
+            BoxError::BuildError(format!("Invalid rootfs file path: {relative_path}"))
+        })?;
+        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+        Ok(self.resolve_rootfs_dir(parent)?.join(file_name))
+    }
+
+    fn resolve_rootfs_dir(&self, relative_dir: &Path) -> Result<PathBuf> {
+        let mut current = self.rootfs_path.clone();
+
+        for component in relative_dir.components() {
+            let Component::Normal(name) = component else {
+                if matches!(component, Component::CurDir) {
+                    continue;
+                }
+                return Err(BoxError::BuildError(format!(
+                    "Invalid rootfs directory path: {}",
+                    relative_dir.display()
+                )));
+            };
+
+            let candidate = current.join(name);
+            match std::fs::symlink_metadata(&candidate) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let target = std::fs::read_link(&candidate).map_err(|e| {
+                        BoxError::BuildError(format!(
+                            "Failed to resolve rootfs symlink {}: {}",
+                            candidate.display(),
+                            e
+                        ))
+                    })?;
+                    current = if target.is_absolute() {
+                        let stripped = target.strip_prefix("/").map_err(|_| {
+                            BoxError::BuildError(format!(
+                                "Invalid absolute rootfs symlink target {}",
+                                target.display()
+                            ))
+                        })?;
+                        self.rootfs_path.join(stripped)
+                    } else {
+                        current.join(target)
+                    };
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(BoxError::BuildError(format!(
+                        "Cannot use {} as a rootfs directory because it is not a directory",
+                        candidate.display()
+                    )));
+                }
+                Ok(_) | Err(_) => {
+                    current = candidate;
+                }
+            }
+        }
+
+        Ok(current)
     }
 
     /// Get the OCI image configuration.
@@ -476,6 +554,32 @@ mod tests {
         let resolv_conf = fs::read_to_string(default_rootfs.join("etc/resolv.conf")).unwrap();
         assert!(resolv_conf.contains("nameserver 8.8.8.8"));
         assert!(resolv_conf.contains("nameserver 8.8.4.4"));
+    }
+
+    #[test]
+    fn test_oci_rootfs_builder_writes_essential_files_inside_absolute_etc_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs_path = temp_dir.path().join("rootfs");
+        let image = temp_dir.path().join("image");
+
+        create_test_oci_image_with_etc_symlink(&image);
+
+        OciRootfsBuilder::new(&rootfs_path)
+            .with_image(&image)
+            .build()
+            .unwrap();
+
+        assert!(rootfs_path
+            .join("etc")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(rootfs_path.join("usr/etc/passwd").exists());
+        assert!(rootfs_path.join("usr/etc/group").exists());
+        assert!(rootfs_path.join("usr/etc/hosts").exists());
+        assert!(rootfs_path.join("usr/etc/resolv.conf").exists());
+        assert!(rootfs_path.join("usr/etc/nsswitch.conf").exists());
     }
 
     #[test]
@@ -625,6 +729,10 @@ mod tests {
         create_test_oci_image_with_files(path, &[(filename, content)]);
     }
 
+    fn create_test_oci_image_with_etc_symlink(path: &Path) {
+        create_test_oci_image_with_entries(path, &[], Some(("/usr/etc", "etc")));
+    }
+
     fn entry_count(content: &str, name: &str) -> usize {
         content
             .lines()
@@ -633,6 +741,14 @@ mod tests {
     }
 
     fn create_test_oci_image_with_files(path: &Path, files: &[(&str, &[u8])]) {
+        create_test_oci_image_with_entries(path, files, None);
+    }
+
+    fn create_test_oci_image_with_entries(
+        path: &Path,
+        files: &[(&str, &[u8])],
+        symlink: Option<(&str, &str)>,
+    ) {
         use flate2::write::GzEncoder;
         use flate2::Compression;
         use tar::Builder;
@@ -659,6 +775,19 @@ mod tests {
 
                 builder
                     .append_data(&mut header, *filename, *content)
+                    .unwrap();
+            }
+            if let Some((target, link_name)) = symlink {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                header.set_mode(0o777);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_link_name(target).unwrap();
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, link_name, std::io::empty())
                     .unwrap();
             }
             builder.finish().unwrap();

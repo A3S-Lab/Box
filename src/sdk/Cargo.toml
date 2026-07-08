@@ -5,13 +5,45 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Rust SDK for a3s-box. Includes a programmable CI/CD pipeline API (pipelines as code, one MicroVM kernel per step)."
+description = "Rust SDK for a3s-box direct runtime-backed management APIs."
+
+[features]
+default = []
+pipeline-cli = []
 
 [dependencies]
-# none — a thin, dependency-free wrapper over the `a3s-box` CLI.
+a3s-box-core = { path = "../core" }
+a3s-box-runtime = { path = "../runtime" }
+chrono = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sysinfo = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
 
 # Thin runner that bridges any agent (a3s-code / Claude Code / Codex) to the
 # pipeline API: a line-based spec on stdin -> JSON Report on stdout.
 [[bin]]
 name = "a3s-box-ci"
 path = "src/bin/a3s-box-ci.rs"
+required-features = ["pipeline-cli"]
+
+[[example]]
+name = "pipeline"
+path = "examples/pipeline.rs"
+required-features = ["pipeline-cli"]
+
+[[test]]
+name = "integration_kvm"
+path = "tests/integration_kvm.rs"
+required-features = ["pipeline-cli"]
+
+[[test]]
+name = "soak_kvm"
+path = "tests/soak_kvm.rs"
+required-features = ["pipeline-cli"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

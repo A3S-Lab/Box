@@ -47,7 +47,7 @@ pub(super) fn parse_run(rest: &str, line_num: usize) -> Result<Instruction> {
     })
 }
 
-fn parse_run_options<'a>(rest: &'a str, line_num: usize) -> Result<(Vec<RunCacheMount>, &'a str)> {
+fn parse_run_options(rest: &str, line_num: usize) -> Result<(Vec<RunCacheMount>, &str)> {
     let mut remaining = rest.trim_start();
     let mut cache_mounts = Vec::new();
 

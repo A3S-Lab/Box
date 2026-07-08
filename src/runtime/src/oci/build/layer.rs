@@ -22,6 +22,11 @@ pub struct FileEntry {
     /// this — not size or mtime — so it must be part of the change check or the
     /// new mode is silently dropped from the layer.
     pub mode: u32,
+    /// Unix owner user ID. A `chown` can change only ownership, so uid/gid must
+    /// be tracked or the generated layer silently drops the change.
+    pub uid: u32,
+    /// Unix owner group ID.
+    pub gid: u32,
     /// Whether this is a directory
     pub is_dir: bool,
 }
@@ -60,6 +65,8 @@ impl DirSnapshot {
                     if before_entry.size != after_entry.size
                         || before_entry.mtime != after_entry.mtime
                         || before_entry.mode != after_entry.mode
+                        || before_entry.uid != after_entry.uid
+                        || before_entry.gid != after_entry.gid
                     {
                         changed.push(path.clone());
                     }
@@ -147,12 +154,16 @@ fn walk_dir(root: &Path, current: &Path, entries: &mut HashMap<PathBuf, FileEntr
             .unwrap_or(0);
 
         #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode()
+        let (mode, uid, gid) = {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            (
+                metadata.permissions().mode(),
+                metadata.uid(),
+                metadata.gid(),
+            )
         };
         #[cfg(not(unix))]
-        let mode = 0u32;
+        let (mode, uid, gid) = (0u32, 0u32, 0u32);
 
         entries.insert(
             relative.clone(),
@@ -161,6 +172,8 @@ fn walk_dir(root: &Path, current: &Path, entries: &mut HashMap<PathBuf, FileEntr
                 size: metadata.len(),
                 mtime,
                 mode,
+                uid,
+                gid,
                 is_dir: metadata.is_dir(),
             },
         );
@@ -519,6 +532,7 @@ pub(super) fn sha256_bytes(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::fs;
     use tempfile::TempDir;
 
@@ -654,6 +668,41 @@ mod tests {
         let after = DirSnapshot::capture(tmp.path()).unwrap();
 
         assert_eq!(before.diff(&after), vec![PathBuf::from("entry.sh")]);
+    }
+
+    #[test]
+    fn test_snapshot_diff_detects_chown_only() {
+        let path = PathBuf::from("app/node_modules/pkg/package.json");
+        let before = DirSnapshot {
+            entries: HashMap::from([(
+                path.clone(),
+                FileEntry {
+                    path: path.clone(),
+                    size: 1300,
+                    mtime: 1,
+                    mode: 0o100640,
+                    uid: 0,
+                    gid: 0,
+                    is_dir: false,
+                },
+            )]),
+        };
+        let after = DirSnapshot {
+            entries: HashMap::from([(
+                path.clone(),
+                FileEntry {
+                    path: path.clone(),
+                    size: 1300,
+                    mtime: 1,
+                    mode: 0o100640,
+                    uid: 1001,
+                    gid: 1001,
+                    is_dir: false,
+                },
+            )]),
+        };
+
+        assert_eq!(before.diff(&after), vec![path]);
     }
 
     #[test]

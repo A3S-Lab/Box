@@ -1533,6 +1533,36 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn test_wait_for_exec_ready_returns_when_guest_exit_code_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-exec-finished".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+
+        let exit_path = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("upper")
+            .join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        std::fs::write(&exit_path, "17\n").unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            vm.wait_for_exec_ready(&tmp.path().join("missing-exec.sock")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(vm.exit_code(), Some(17));
+        assert!(vm.exec_client.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn test_probe_exec_ready_once_ignores_missing_socket() {
         let mut vm = VmManager::with_box_id(
             BoxConfig::default(),

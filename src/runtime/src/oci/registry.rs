@@ -21,10 +21,36 @@ use super::signing::{verify_image_signature, SignaturePolicy, VerifyResult};
 const REGISTRY_PROTOCOL_ENV: &str = "A3S_REGISTRY_PROTOCOL";
 const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
 
-fn registry_protocol_from_env() -> ClientProtocol {
-    match std::env::var(REGISTRY_PROTOCOL_ENV) {
-        Ok(value) if value.eq_ignore_ascii_case("http") => ClientProtocol::Http,
-        _ => ClientProtocol::Https,
+/// Transport protocol used for registry operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryProtocol {
+    /// Use HTTPS and verify TLS certificates.
+    Https,
+    /// Use plain HTTP for trusted private registries.
+    Http,
+}
+
+impl RegistryProtocol {
+    /// Return the default protocol, honoring the legacy environment override.
+    pub fn from_env() -> Self {
+        match std::env::var(REGISTRY_PROTOCOL_ENV) {
+            Ok(value) if value.eq_ignore_ascii_case("http") => Self::Http,
+            _ => Self::Https,
+        }
+    }
+
+    fn client_protocol(self) -> ClientProtocol {
+        match self {
+            Self::Https => ClientProtocol::Https,
+            Self::Http => ClientProtocol::Http,
+        }
+    }
+
+    fn scheme(self) -> &'static str {
+        match self {
+            Self::Https => "https",
+            Self::Http => "http",
+        }
     }
 }
 
@@ -279,7 +305,7 @@ impl RegistryPuller {
     /// Create a new registry puller with the given authentication.
     pub fn with_auth(auth: RegistryAuth) -> Self {
         let config = ClientConfig {
-            protocol: registry_protocol_from_env(),
+            protocol: RegistryProtocol::from_env().client_protocol(),
             platform_resolver: Some(Box::new(linux_platform_resolver)),
             ..Default::default()
         };
@@ -302,7 +328,7 @@ impl RegistryPuller {
         };
         let arch = resolve_target_arch(Some(&platform));
         let config = ClientConfig {
-            protocol: registry_protocol_from_env(),
+            protocol: RegistryProtocol::from_env().client_protocol(),
             platform_resolver: Some(Box::new(platform_resolver_for(arch))),
             ..Default::default()
         };
@@ -552,10 +578,20 @@ pub struct PushResult {
     pub manifest_digest: String,
 }
 
+struct PushUpload<'a> {
+    oci_ref: &'a Reference,
+    layers: &'a [ImageLayer],
+    config: &'a Config,
+    manifest: &'a OciImageManifest,
+    manifest_data: &'a [u8],
+    expected_manifest_digest: &'a str,
+}
+
 /// Pushes OCI images to container registries.
 pub struct RegistryPusher {
     client: Client,
     auth: RegistryAuth,
+    protocol: RegistryProtocol,
 }
 
 impl Default for RegistryPusher {
@@ -572,12 +608,21 @@ impl RegistryPusher {
 
     /// Create a new registry pusher with the given authentication.
     pub fn with_auth(auth: RegistryAuth) -> Self {
+        Self::with_auth_and_protocol(auth, RegistryProtocol::from_env())
+    }
+
+    /// Create a new registry pusher with explicit authentication and protocol.
+    pub fn with_auth_and_protocol(auth: RegistryAuth, protocol: RegistryProtocol) -> Self {
         let config = ClientConfig {
-            protocol: registry_protocol_from_env(),
+            protocol: protocol.client_protocol(),
             ..Default::default()
         };
         let client = Client::new(config);
-        Self { client, auth }
+        Self {
+            client,
+            auth,
+            protocol,
+        }
     }
 
     /// Push a local OCI image layout to a registry.
@@ -652,12 +697,14 @@ impl RegistryPusher {
         let response = self
             .push_with_repository_create_retry(
                 reference,
-                &oci_ref,
-                &layers,
-                &config,
-                &manifest,
-                &manifest_data,
-                manifest_digest,
+                PushUpload {
+                    oci_ref: &oci_ref,
+                    layers: &layers,
+                    config: &config,
+                    manifest: &manifest,
+                    manifest_data: &manifest_data,
+                    expected_manifest_digest: manifest_digest,
+                },
             )
             .await?;
 
@@ -690,15 +737,17 @@ impl RegistryPusher {
     async fn push_with_repository_create_retry(
         &self,
         reference: &ImageReference,
-        oci_ref: &Reference,
-        layers: &[ImageLayer],
-        config: &Config,
-        manifest: &OciImageManifest,
-        manifest_data: &[u8],
-        expected_manifest_digest: &str,
+        upload: PushUpload<'_>,
     ) -> Result<PushResponse> {
         let response = match self
-            .push_once(reference, oci_ref, layers, config, manifest, manifest_data)
+            .push_once(
+                reference,
+                upload.oci_ref,
+                upload.layers,
+                upload.config,
+                upload.manifest,
+                upload.manifest_data,
+            )
             .await
         {
             Ok(response) => Ok(response),
@@ -708,16 +757,23 @@ impl RegistryPusher {
                     error = %push_error_summary(&first_error),
                     "Registry reported repository already exists during push; retrying once"
                 );
-                self.push_once(reference, oci_ref, layers, config, manifest, manifest_data)
-                    .await
-                    .map_err(|retry_error| BoxError::RegistryError {
-                        registry: reference.registry.clone(),
-                        message: format!(
-                            "Failed to push image after retrying repository creation race: first error: {}; retry error: {}",
-                            push_error_summary(&first_error),
-                            push_error_summary(&retry_error)
-                        ),
-                    })
+                self.push_once(
+                    reference,
+                    upload.oci_ref,
+                    upload.layers,
+                    upload.config,
+                    upload.manifest,
+                    upload.manifest_data,
+                )
+                .await
+                .map_err(|retry_error| BoxError::RegistryError {
+                    registry: reference.registry.clone(),
+                    message: format!(
+                        "Failed to push image after retrying repository creation race: first error: {}; retry error: {}",
+                        push_error_summary(&first_error),
+                        push_error_summary(&retry_error)
+                    ),
+                })
             }
             Err(error) => Err(BoxError::RegistryError {
                 registry: reference.registry.clone(),
@@ -725,7 +781,7 @@ impl RegistryPusher {
             }),
         }?;
 
-        self.verify_pushed_manifest(reference, oci_ref, expected_manifest_digest)
+        self.verify_pushed_manifest(reference, upload.oci_ref, upload.expected_manifest_digest)
             .await?;
         Ok(response)
     }
@@ -794,7 +850,7 @@ impl RegistryPusher {
             ))
         })?;
         let http = oci_reqwest::Client::new();
-        let base = registry_base_url(reference)?;
+        let base = registry_base_url(self.protocol, reference)?;
 
         for (layer, descriptor) in layers.iter().zip(&manifest.layers) {
             push_blob_with_basic_auth(
@@ -902,7 +958,7 @@ impl RegistryPusher {
             ))
         })?;
         let http = oci_reqwest::Client::new();
-        let base = registry_base_url(reference)?;
+        let base = registry_base_url(self.protocol, reference)?;
         let manifest_ref = reference
             .tag
             .as_deref()
@@ -936,13 +992,10 @@ impl RegistryPusher {
 }
 
 fn registry_base_url(
+    protocol: RegistryProtocol,
     reference: &ImageReference,
 ) -> std::result::Result<oci_reqwest::Url, OciDistributionError> {
-    let scheme = match registry_protocol_from_env() {
-        ClientProtocol::Http => "http",
-        ClientProtocol::Https | ClientProtocol::HttpsExcept(_) => "https",
-    };
-    oci_reqwest::Url::parse(&format!("{scheme}://{}", reference.registry))
+    oci_reqwest::Url::parse(&format!("{}://{}", protocol.scheme(), reference.registry))
         .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))
 }
 
@@ -1354,17 +1407,14 @@ mod tests {
     fn test_registry_protocol_defaults_to_https() {
         let _guard = env_lock();
         std::env::remove_var(REGISTRY_PROTOCOL_ENV);
-        assert!(matches!(
-            registry_protocol_from_env(),
-            ClientProtocol::Https
-        ));
+        assert_eq!(RegistryProtocol::from_env(), RegistryProtocol::Https);
     }
 
     #[test]
     fn test_registry_protocol_can_use_http_for_local_testing() {
         let _guard = env_lock();
         std::env::set_var(REGISTRY_PROTOCOL_ENV, "http");
-        assert!(matches!(registry_protocol_from_env(), ClientProtocol::Http));
+        assert_eq!(RegistryProtocol::from_env(), RegistryProtocol::Http);
         std::env::remove_var(REGISTRY_PROTOCOL_ENV);
     }
 
@@ -1372,11 +1422,26 @@ mod tests {
     fn test_registry_protocol_rejects_unknown_values_to_https() {
         let _guard = env_lock();
         std::env::set_var(REGISTRY_PROTOCOL_ENV, "ftp");
-        assert!(matches!(
-            registry_protocol_from_env(),
-            ClientProtocol::Https
-        ));
+        assert_eq!(RegistryProtocol::from_env(), RegistryProtocol::Https);
         std::env::remove_var(REGISTRY_PROTOCOL_ENV);
+    }
+
+    #[test]
+    fn registry_base_url_uses_explicit_protocol() {
+        let reference = test_image_reference();
+
+        assert_eq!(
+            registry_base_url(RegistryProtocol::Https, &reference)
+                .unwrap()
+                .as_str(),
+            "https://registry.example.com/"
+        );
+        assert_eq!(
+            registry_base_url(RegistryProtocol::Http, &reference)
+                .unwrap()
+                .as_str(),
+            "http://registry.example.com/"
+        );
     }
 
     #[test]

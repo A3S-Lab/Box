@@ -120,7 +120,7 @@ On macOS, use Apple Silicon. On Linux, use a host with KVM/libkrun support. On W
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
 
-Run `a3s-box info` first; it reports virtualization, platform, bridge backend, port-publishing support, and TEE availability.
+Run `a3s-box info` first; it reports virtualization, platform, bridge backend, port-publishing support, TEE availability, package-cache state, and the current virtio-fs cache mode.
 
 ## Quick start
 
@@ -177,14 +177,15 @@ a3s-box wait BOX [BOX...]
 Important supported options:
 
 - `--name`, `--label`, `--restart no|always|on-failure[:N]|unless-stopped`;
-- `--cpus`, `--memory`, `--timeout`, `--pids-limit`, `--cpuset-cpus`, `--ulimit`, CPU quota/shares, memory reservation/swap;
+- `--cpus`, `--memory`, `--timeout <seconds>` for foreground runs, `--pids-limit`, `--cpuset-cpus`, `--ulimit`, CPU quota/shares, memory reservation/swap;
 - `-e/--env`, `--env-file`, `--entrypoint`, `-u/--user`, `-w/--workdir`, `--hostname`, `--add-host`;
-- `--package-cache pnpm` to mount a persistent pnpm store for repeated throwaway Node boxes;
+- `-i/--interactive` to keep stdin open; non-interactive runs close guest stdin by default, and `--no-stdin` makes that explicit;
+- `--package-cache pnpm` to mount persistent pnpm/Corepack/npm caches for repeated throwaway Node boxes;
 - `--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`, `--health-start-period`, `--no-healthcheck`;
 - `--stop-signal`, `--stop-timeout`, `--persistent`, `--log-driver json-file|none`;
 - `--cap-add`, `--cap-drop`, `--security-opt seccomp=default|seccomp=unconfined|no-new-privileges`, `--privileged`.
 
-`a3s-box wait` prints a low-frequency stderr keepalive while it is blocking so long CI or SSH sessions do not look idle; use `--no-heartbeat` or `--heartbeat-interval <seconds>` to tune it.
+For CI-style one-shot commands, prefer foreground `run --rm --timeout <seconds>` and avoid `-i` unless the command truly needs stdin. A timed-out foreground run stops/removes the box according to the usual `--rm` behavior and exits with code 124. `a3s-box wait` prints a low-frequency stderr keepalive while it is blocking so long CI or SSH sessions do not look idle; use `--no-heartbeat` or `--heartbeat-interval <seconds>` to tune it.
 
 Unsupported or guarded options fail early instead of being silently stored: host devices, GPUs, AppArmor labels, SELinux labels, custom seccomp profiles, unsupported users, invalid workdirs, unsupported port syntax, and unsupported network policies.
 
@@ -201,9 +202,12 @@ a3s-box tag alpine:latest local-alpine:dev
 a3s-box save -o alpine.tar alpine:latest
 a3s-box load -i alpine.tar --tag local-alpine:dev
 a3s-box push registry.example/org/image:v1
+a3s-box push --plain-http localhost:5000/org/image:v1
 ```
 
 Docker Hub aliases share cache resolution, so `alpine`, `alpine:latest`, and `docker.io/library/alpine:latest` can resolve to the same local image when unambiguous. Digest-only references resolve locally when the digest matches exactly or by unique prefix.
+
+Use `a3s-box push --plain-http` for an explicit HTTP registry. `--insecure` is accepted as an alias, and `--tls-verify=false` maps to the same behavior for Docker-compatible scripts.
 
 Build support is intentionally explicit:
 
@@ -248,7 +252,9 @@ a3s-box snapshot restore checkpoint-1 --name restored-app
 a3s-box snapshot prune --keep 5          # bound disk: keep the 5 newest
 ```
 
-`--package-cache pnpm` creates/reuses the named volume `a3s-cache-pnpm`, sets `npm_config_store_dir=/a3s-cache/pnpm/store`, and sets `COREPACK_HOME=/a3s-cache/pnpm/corepack`, so dependency downloads and the Corepack-prepared pnpm toolchain survive across `--rm` boxes without making the whole rootfs persistent. For throwaway install/build jobs, mounting `node_modules` as tmpfs avoids pushing thousands of small files through the project bind mount; use `bench/bench.sh pnpm` or `just bench-pnpm` to compare A3S project-mount, A3S tmpfs, and Docker cold/hot baselines. Auto-removed boxes also archive their last logs under `~/.a3s/removed-logs/`, and `a3s-box logs <name-or-id>` can read that archive after the box directory is gone.
+`--package-cache pnpm` creates/reuses the named volume `a3s-cache-pnpm` and sets cache-friendly defaults: `npm_config_store_dir=/a3s-cache/pnpm/store`, `COREPACK_HOME=/a3s-cache/pnpm/corepack`, `PNPM_HOME=/a3s-cache/pnpm/home`, `npm_config_cache=/a3s-cache/pnpm/npm-cache`, `npm_config_prefer_offline=true`, and `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`. Dependency downloads and the Corepack-prepared pnpm toolchain survive across `--rm` boxes without making the whole rootfs persistent. Override any of those with `-e KEY=VALUE` when a build needs a specific registry or cache policy. For throwaway install/build jobs, mounting `node_modules` as tmpfs avoids pushing thousands of small files through the project bind mount; use `bench/bench.sh pnpm` or `just bench-pnpm` to compare A3S project-mount, A3S tmpfs, and Docker cold/hot baselines. Auto-removed boxes also archive their last logs under `~/.a3s/removed-logs/`, and `a3s-box logs <name-or-id>` can read that archive after the box directory is gone.
+
+Host directory volumes are mounted with virtio-fs `cache=none` by default to favor stable traversal on macOS/HVF workloads with large source trees. Set `A3S_VIRTIOFS_CACHE=auto`, `always`, or `default` to override that mode for local experiments; `a3s-box info` prints the active setting.
 
 The `snapshot` command produces configuration/filesystem-oriented Box snapshots, not a live RAM checkpoint. The live RAM Copy-on-Write facility is a separate, lower-level mechanism described in [Warm pool and snapshot-fork](#warm-pool-and-snapshot-fork).
 
@@ -667,7 +673,9 @@ matrix, CRI smoke, and host soak procedures.
 | `A3S_HOME` | Data directory. Default: `~/.a3s`. |
 | `A3S_IMAGE_CACHE_SIZE` | Image cache size. Default: `10g`. |
 | `A3S_TEE_SIMULATE` | Enables simulated TEE report behavior. |
-| `A3S_REGISTRY_PROTOCOL` | Registry protocol override for local/insecure registry tests. |
+| `A3S_REGISTRY_PROTOCOL` | Legacy registry protocol override for local/insecure registry tests. Prefer `a3s-box push --plain-http` for push. |
+| `A3S_EXEC_READY_TIMEOUT_MS` | Safety cap for guest exec-server readiness probing during boot. Default: 15000. |
+| `A3S_VIRTIOFS_CACHE` | virtio-fs cache mode for host directory volumes: `none` by default, or `auto`, `always`, `default`. |
 | `A3S_BOX_CRI_AGENT_IMAGE` | Default CRI sandbox agent/rootfs image. |
 | `A3S_BOX_SMOKE_IMAGE_TAR` | OCI archive used by the ignored core MicroVM smoke suite. |
 | `A3S_BOX_TEST_ALPINE_TAR` | Shared offline Alpine OCI archive for core and host smoke suites. |

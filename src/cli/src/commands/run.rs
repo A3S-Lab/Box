@@ -20,6 +20,14 @@ const PNPM_STORE_ENV: &str = "npm_config_store_dir";
 const PNPM_STORE_DIR: &str = "/a3s-cache/pnpm/store";
 const PNPM_COREPACK_HOME_ENV: &str = "COREPACK_HOME";
 const PNPM_COREPACK_HOME_DIR: &str = "/a3s-cache/pnpm/corepack";
+const PNPM_HOME_ENV: &str = "PNPM_HOME";
+const PNPM_HOME_DIR: &str = "/a3s-cache/pnpm/home";
+const PNPM_NPM_CACHE_ENV: &str = "npm_config_cache";
+const PNPM_NPM_CACHE_DIR: &str = "/a3s-cache/pnpm/npm-cache";
+const PNPM_PREFER_OFFLINE_ENV: &str = "npm_config_prefer_offline";
+const PNPM_PREFER_OFFLINE_VALUE: &str = "true";
+const COREPACK_DOWNLOAD_PROMPT_ENV: &str = "COREPACK_ENABLE_DOWNLOAD_PROMPT";
+const COREPACK_DOWNLOAD_PROMPT_VALUE: &str = "0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum PackageCache {
@@ -39,9 +47,17 @@ pub struct RunArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
+    /// Close STDIN for the guest command
+    #[arg(long)]
+    pub no_stdin: bool,
+
     /// Allocate a pseudo-TTY
     #[arg(short = 't', long = "tty")]
     pub tty: bool,
+
+    /// Stop the box if the foreground run exceeds this many seconds
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
 
     /// Automatically remove the box when it stops
     #[arg(long)]
@@ -130,6 +146,18 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn validate_run_mode(args: &RunArgs, stdin_is_terminal: bool) -> Result<(), &'static str> {
     if args.detach && args.tty {
         return Err("Cannot use -t (tty) with -d (detach)");
+    }
+    if args.interactive && args.no_stdin {
+        return Err("Cannot use --interactive with --no-stdin");
+    }
+    if args.timeout.is_some() && args.detach {
+        return Err("Cannot use --timeout with -d (detach)");
+    }
+    if args.timeout.is_some() && args.tty {
+        return Err("Cannot use --timeout with -t (tty)");
+    }
+    if matches!(args.timeout, Some(0)) {
+        return Err("--timeout must be greater than zero seconds");
     }
     if args.tty && !stdin_is_terminal {
         return Err("The -t flag requires a terminal (stdin is not a TTY)");
@@ -481,6 +509,7 @@ fn build_box_config(
             ..Default::default()
         },
         cmd,
+        stdin_open: args.interactive && !args.no_stdin,
         entrypoint_override,
         user: common::normalize_user_option(args.common.user.as_deref())?,
         workdir: args.common.workdir.clone(),
@@ -662,6 +691,7 @@ enum ForegroundStopReason {
     ProcessExited,
     UserInterrupted(i32),
     VmUnhealthy,
+    TimedOut,
 }
 
 #[cfg(unix)]
@@ -739,6 +769,9 @@ async fn run_foreground(
 
     let name = ctx.name.clone();
     let mut terminate_signal = foreground_terminate_signal();
+    let timeout_at = args
+        .timeout
+        .map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
     let stop_reason = loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -748,6 +781,10 @@ async fn run_foreground(
             _ = recv_foreground_terminate(&mut terminate_signal) => {
                 println!("\nStopping box {} after SIGTERM...", name);
                 break ForegroundStopReason::UserInterrupted(FOREGROUND_SIGTERM);
+            }
+            _ = recv_foreground_timeout(timeout_at) => {
+                println!("\nStopping box {} after --timeout expired...", name);
+                break ForegroundStopReason::TimedOut;
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                 if ctx.vm.try_wait_exit().await?.is_some() {
@@ -804,6 +841,14 @@ async fn run_foreground(
     Ok(())
 }
 
+async fn recv_foreground_timeout(deadline: Option<tokio::time::Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 async fn wait_for_foreground_log_drain(paths: &[(&std::path::Path, &AtomicU64)]) {
     let start = std::time::Instant::now();
     let mut last_lens = foreground_log_lengths(paths);
@@ -849,6 +894,7 @@ fn foreground_exit_code(reason: ForegroundStopReason, vm_exit_code: Option<i32>)
         ForegroundStopReason::ProcessExited => None,
         ForegroundStopReason::UserInterrupted(signal) => Some(128 + signal),
         ForegroundStopReason::VmUnhealthy => Some(1),
+        ForegroundStopReason::TimedOut => Some(124),
     })
 }
 
@@ -869,6 +915,12 @@ fn foreground_completion_message(
         }
         (ForegroundStopReason::VmUnhealthy, false) => {
             format!("Box {name} stopped after VM health check failed.")
+        }
+        (ForegroundStopReason::TimedOut, true) => {
+            format!("Box {name} stopped after --timeout expired and was removed.")
+        }
+        (ForegroundStopReason::TimedOut, false) => {
+            format!("Box {name} stopped after --timeout expired.")
         }
     }
 }
@@ -935,6 +987,14 @@ fn apply_package_caches(
                     .or_insert_with(|| PNPM_STORE_DIR.to_string());
                 env.entry(PNPM_COREPACK_HOME_ENV.to_string())
                     .or_insert_with(|| PNPM_COREPACK_HOME_DIR.to_string());
+                env.entry(PNPM_HOME_ENV.to_string())
+                    .or_insert_with(|| PNPM_HOME_DIR.to_string());
+                env.entry(PNPM_NPM_CACHE_ENV.to_string())
+                    .or_insert_with(|| PNPM_NPM_CACHE_DIR.to_string());
+                env.entry(PNPM_PREFER_OFFLINE_ENV.to_string())
+                    .or_insert_with(|| PNPM_PREFER_OFFLINE_VALUE.to_string());
+                env.entry(COREPACK_DOWNLOAD_PROMPT_ENV.to_string())
+                    .or_insert_with(|| COREPACK_DOWNLOAD_PROMPT_VALUE.to_string());
             }
         }
     }
@@ -1185,7 +1245,9 @@ mod tests {
             },
             detach: false,
             interactive: false,
+            no_stdin: false,
             tty: false,
+            timeout: None,
             rm: false,
             package_cache: vec![],
             cmd: vec![],
@@ -1295,6 +1357,38 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_run_mode_rejects_no_stdin_with_interactive() {
+        let mut args = default_run_args();
+        args.interactive = true;
+        args.no_stdin = true;
+
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("--interactive"));
+    }
+
+    #[test]
+    fn test_validate_run_mode_rejects_invalid_timeout_modes() {
+        let mut args = default_run_args();
+        args.timeout = Some(0);
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("greater than zero"));
+
+        let mut args = default_run_args();
+        args.timeout = Some(30);
+        args.detach = true;
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("--timeout"));
+        assert!(err.contains("detach"));
+
+        let mut args = default_run_args();
+        args.timeout = Some(30);
+        args.tty = true;
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("--timeout"));
+        assert!(err.contains("tty"));
+    }
+
+    #[test]
     fn test_apply_package_caches_adds_pnpm_volume_and_env() {
         let mut volumes = Vec::new();
         let mut env = std::collections::HashMap::new();
@@ -1310,6 +1404,22 @@ mod tests {
             env.get(PNPM_COREPACK_HOME_ENV).map(String::as_str),
             Some(PNPM_COREPACK_HOME_DIR)
         );
+        assert_eq!(
+            env.get(PNPM_HOME_ENV).map(String::as_str),
+            Some(PNPM_HOME_DIR)
+        );
+        assert_eq!(
+            env.get(PNPM_NPM_CACHE_ENV).map(String::as_str),
+            Some(PNPM_NPM_CACHE_DIR)
+        );
+        assert_eq!(
+            env.get(PNPM_PREFER_OFFLINE_ENV).map(String::as_str),
+            Some(PNPM_PREFER_OFFLINE_VALUE)
+        );
+        assert_eq!(
+            env.get(COREPACK_DOWNLOAD_PROMPT_ENV).map(String::as_str),
+            Some(COREPACK_DOWNLOAD_PROMPT_VALUE)
+        );
     }
 
     #[test]
@@ -1321,6 +1431,13 @@ mod tests {
                 PNPM_COREPACK_HOME_ENV.to_string(),
                 "/custom/corepack".to_string(),
             ),
+            (PNPM_HOME_ENV.to_string(), "/custom/pnpm-home".to_string()),
+            (
+                PNPM_NPM_CACHE_ENV.to_string(),
+                "/custom/npm-cache".to_string(),
+            ),
+            (PNPM_PREFER_OFFLINE_ENV.to_string(), "false".to_string()),
+            (COREPACK_DOWNLOAD_PROMPT_ENV.to_string(), "1".to_string()),
         ]);
 
         apply_package_caches(&[PackageCache::Pnpm], &mut volumes, &mut env);
@@ -1332,6 +1449,22 @@ mod tests {
         assert_eq!(
             env.get(PNPM_COREPACK_HOME_ENV).map(String::as_str),
             Some("/custom/corepack")
+        );
+        assert_eq!(
+            env.get(PNPM_HOME_ENV).map(String::as_str),
+            Some("/custom/pnpm-home")
+        );
+        assert_eq!(
+            env.get(PNPM_NPM_CACHE_ENV).map(String::as_str),
+            Some("/custom/npm-cache")
+        );
+        assert_eq!(
+            env.get(PNPM_PREFER_OFFLINE_ENV).map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            env.get(COREPACK_DOWNLOAD_PROMPT_ENV).map(String::as_str),
+            Some("1")
         );
     }
 
@@ -1401,6 +1534,59 @@ mod tests {
     }
 
     #[test]
+    fn test_build_box_config_controls_stdin_open() {
+        let args = default_run_args();
+        let config = build_box_config(
+            &args,
+            512,
+            Default::default(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            a3s_box_core::NetworkMode::Tsi,
+            vec![],
+            TeeConfig::None,
+        )
+        .unwrap();
+        assert!(!config.stdin_open);
+
+        let mut args = default_run_args();
+        args.interactive = true;
+        let config = build_box_config(
+            &args,
+            512,
+            Default::default(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            a3s_box_core::NetworkMode::Tsi,
+            vec![],
+            TeeConfig::None,
+        )
+        .unwrap();
+        assert!(config.stdin_open);
+
+        let mut args = default_run_args();
+        args.no_stdin = true;
+        let config = build_box_config(
+            &args,
+            512,
+            Default::default(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            a3s_box_core::NetworkMode::Tsi,
+            vec![],
+            TeeConfig::None,
+        )
+        .unwrap();
+        assert!(!config.stdin_open);
+    }
+
+    #[test]
     fn test_mark_record_stopped_persists_exit_context() {
         let record = crate::test_helpers::fixtures::make_record(
             "550e8400-e29b-41d4-a716-446655440000",
@@ -1465,6 +1651,10 @@ mod tests {
             foreground_exit_code(ForegroundStopReason::VmUnhealthy, None),
             Some(1)
         );
+        assert_eq!(
+            foreground_exit_code(ForegroundStopReason::TimedOut, None),
+            Some(124)
+        );
     }
 
     #[test]
@@ -1472,6 +1662,7 @@ mod tests {
         assert!(ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT).stopped_by_user());
         assert!(!ForegroundStopReason::ProcessExited.stopped_by_user());
         assert!(!ForegroundStopReason::VmUnhealthy.stopped_by_user());
+        assert!(!ForegroundStopReason::TimedOut.stopped_by_user());
     }
 
     #[test]
@@ -1499,6 +1690,10 @@ mod tests {
         assert_eq!(
             foreground_completion_message(ForegroundStopReason::VmUnhealthy, true, "box"),
             "Box box stopped after VM health check failed and was removed."
+        );
+        assert_eq!(
+            foreground_completion_message(ForegroundStopReason::TimedOut, false, "box"),
+            "Box box stopped after --timeout expired."
         );
     }
 

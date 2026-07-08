@@ -7,6 +7,20 @@ use crate::grpc::ExecClient;
 
 use super::VmManager;
 
+const DEFAULT_EXEC_READY_TIMEOUT_MS: u64 = 15_000;
+const EXEC_READY_PROGRESS_LOG_MS: u64 = 5_000;
+
+fn parse_exec_ready_timeout_ms(value: Option<&str>) -> u64 {
+    value
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|timeout| *timeout > 0)
+        .unwrap_or(DEFAULT_EXEC_READY_TIMEOUT_MS)
+}
+
+fn exec_ready_timeout_ms() -> u64 {
+    parse_exec_ready_timeout_ms(std::env::var("A3S_EXEC_READY_TIMEOUT_MS").ok().as_deref())
+}
+
 impl VmManager {
     /// Confirm the VM didn't fail on launch (for generic OCI images without an agent).
     ///
@@ -83,21 +97,29 @@ impl VmManager {
         const POLL_INTERVAL: Duration = Duration::from_millis(200);
         // Last-resort backstop against a wedged-but-alive guest that binds but
         // never accepts. A healthy guest passes the heartbeat the instant its
-        // accept loop runs (however late), and an exited VM returns immediately
-        // below — so this cap is not the expected wait.
-        const MAX_WAIT_MS: u64 = 120_000;
+        // accept loop runs, and an exited VM returns immediately below. Keep the
+        // default short enough that foreground `run` starts streaming the guest's
+        // logs promptly; callers that truly need a longer cold-boot grace can set
+        // A3S_EXEC_READY_TIMEOUT_MS.
+        let max_wait_ms = exec_ready_timeout_ms();
 
         tracing::debug!(
             socket_path = %exec_socket_path.display(),
+            timeout_ms = max_wait_ms,
             "Waiting for exec server readiness"
         );
 
         let start = std::time::Instant::now();
+        let mut next_progress_log_ms = EXEC_READY_PROGRESS_LOG_MS;
 
         loop {
             // Return at once if the VM has already exited (zombie-aware: has_exited
             // treats a zombie shim as exited, unlike is_running's kill(pid,0)). A
             // fast-exiting container never stalls here.
+            if self.try_wait_exit().await?.is_some() {
+                tracing::debug!("VM exited before exec server became ready");
+                return Ok(());
+            }
             if let Some(ref handler) = *self.handler.read().await {
                 if handler.has_exited() {
                     tracing::debug!("VM exited before exec server became ready");
@@ -119,12 +141,25 @@ impl VmManager {
                 }
             }
 
-            if start.elapsed().as_millis() >= MAX_WAIT_MS as u128 {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            if elapsed_ms >= max_wait_ms {
                 tracing::warn!(
-                    timeout_ms = MAX_WAIT_MS,
-                    "Exec server did not become ready within the safety cap; exec/attach connect on demand and may still succeed once the guest finishes starting"
+                    timeout_ms = max_wait_ms,
+                    elapsed_ms,
+                    socket_path = %exec_socket_path.display(),
+                    "Exec server did not become ready within the safety cap; proceeding so foreground logs and process exit are visible. Exec/attach will connect on demand once the guest finishes starting."
                 );
                 return Ok(());
+            }
+            if elapsed_ms >= next_progress_log_ms {
+                tracing::warn!(
+                    elapsed_ms,
+                    timeout_ms = max_wait_ms,
+                    socket_path = %exec_socket_path.display(),
+                    "Still waiting for exec server readiness; guest init may be mounting volumes, starting the container, or blocked before its accept loop"
+                );
+                next_progress_log_ms =
+                    next_progress_log_ms.saturating_add(EXEC_READY_PROGRESS_LOG_MS);
             }
 
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -155,5 +190,27 @@ impl VmManager {
         tracing::debug!(
             "restore: exec server did not answer an immediate heartbeat; exec/attach will connect on demand"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_exec_ready_timeout_ms() {
+        assert_eq!(
+            parse_exec_ready_timeout_ms(None),
+            DEFAULT_EXEC_READY_TIMEOUT_MS
+        );
+        assert_eq!(
+            parse_exec_ready_timeout_ms(Some("0")),
+            DEFAULT_EXEC_READY_TIMEOUT_MS
+        );
+        assert_eq!(
+            parse_exec_ready_timeout_ms(Some("not-a-number")),
+            DEFAULT_EXEC_READY_TIMEOUT_MS
+        );
+        assert_eq!(parse_exec_ready_timeout_ms(Some("2500")), 2500);
     }
 }

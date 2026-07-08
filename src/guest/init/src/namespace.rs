@@ -165,6 +165,7 @@ pub fn spawn_isolated(
     env: &[(&str, &str)],
     workdir: &str,
     user: Option<&str>,
+    stdin_null: bool,
     main_stdio: Option<(RawFd, RawFd)>,
     cgroup_procs: Option<&str>,
 ) -> Result<u32, NamespaceError> {
@@ -187,6 +188,7 @@ pub fn spawn_isolated(
                 env,
                 workdir,
                 user,
+                stdin_null,
                 main_stdio,
                 cgroup_procs,
             ) {
@@ -214,6 +216,7 @@ fn child_process(
     env: &[(&str, &str)],
     workdir: &str,
     user: Option<&str>,
+    stdin_null: bool,
     main_stdio: Option<(RawFd, RawFd)>,
     cgroup_procs: Option<&str>,
 ) -> Result<(), NamespaceError> {
@@ -302,6 +305,9 @@ fn child_process(
             .unwrap_or_else(|| Path::new(command)),
     );
     cmd.args(args).current_dir(workdir);
+    if stdin_null {
+        cmd.stdin(std::process::Stdio::null());
+    }
 
     // Set environment variables
     for (key, value) in env {
@@ -1069,6 +1075,7 @@ fn child_process(
     env: &[(&str, &str)],
     workdir: &str,
     _user: Option<&str>,
+    stdin_null: bool,
     _main_stdio: Option<(RawFd, RawFd)>,
     _cgroup_procs: Option<&str>,
 ) -> Result<(), NamespaceError> {
@@ -1082,6 +1089,9 @@ fn child_process(
             .unwrap_or_else(|| Path::new(command)),
     );
     cmd.args(args).current_dir(workdir);
+    if stdin_null {
+        cmd.stdin(std::process::Stdio::null());
+    }
 
     for (key, value) in env {
         cmd.env(key, value);

@@ -282,7 +282,7 @@ pub(super) fn handle_run(
 
         validate_linux_run_preconditions(rootfs_dir, shell, linux_effective_uid())?;
         prepare_linux_run_filesystem(rootfs_dir)?;
-        let workdir_path = ensure_linux_run_workdir(rootfs_dir, workdir)?;
+        ensure_linux_run_workdir(rootfs_dir, workdir)?;
         ensure_run_cache_mount_targets(rootfs_dir, cache_mounts)?;
 
         let before = DirSnapshot::capture(rootfs_dir)?;
@@ -303,8 +303,8 @@ pub(super) fn handle_run(
             cmd.arg("/bin/sh");
             cmd.arg("-c");
         }
-        cmd.arg(command);
-        cmd.current_dir(&workdir_path);
+        let run_command = shell_command_in_workdir(workdir, command);
+        cmd.arg(&run_command);
 
         // Set environment
         cmd.env_clear();
@@ -359,6 +359,34 @@ pub(super) fn handle_run(
             command
         )))
     }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn shell_command_in_workdir(workdir: &str, command: &str) -> String {
+    let workdir = if workdir.trim().is_empty() {
+        "/"
+    } else {
+        workdir
+    };
+    if workdir == "/" {
+        command.to_string()
+    } else {
+        format!("cd {} && {}", shell_quote(workdir), command)
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn shell_quote(value: &str) -> String {
+    let mut out = String::from("'");
+    for ch in value.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -762,7 +790,7 @@ fn handle_run_on_host_unsafe(
     rootfs_dir: &Path,
     layers_dir: &Path,
     workdir: &str,
-    _env: &[(String, String)],
+    env: &[(String, String)],
     shell: &[String],
     layer_index: usize,
     quiet: bool,
@@ -808,9 +836,12 @@ fn handle_run_on_host_unsafe(
     }
     ensure_run_cache_mount_targets(rootfs_dir, cache_mounts)?;
 
-    let output = std::process::Command::new(&shell_cmd[0])
-        .args(&shell_cmd[1..])
-        .current_dir(&workdir_path)
+    let mut cmd = std::process::Command::new(&shell_cmd[0]);
+    cmd.args(&shell_cmd[1..]).current_dir(&workdir_path);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let output = cmd
         .output()
         .map_err(|e| BoxError::BuildError(format!("Failed to execute command: {}", e)))?;
 
@@ -1224,7 +1255,7 @@ mod tests {
     use super::super::super::dockerfile::{Instruction, RunCacheMount};
     use super::{
         execute_onbuild_trigger, expand_glob_sources, glob_segment_match, handle_add,
-        instruction_to_string, run_command_failed_error,
+        instruction_to_string, run_command_failed_error, shell_command_in_workdir,
     };
     use crate::oci::build::engine::{BuildConfig, BuildState};
     use a3s_box_core::error::BoxError;
@@ -1301,6 +1332,19 @@ mod tests {
             instruction_to_string(&instr),
             "RUN --mount=type=cache,target=/root/.cache pnpm install"
         );
+    }
+
+    #[test]
+    fn test_shell_command_in_workdir_enters_workdir_inside_chroot() {
+        assert_eq!(
+            shell_command_in_workdir("/app", "pnpm install"),
+            "cd '/app' && pnpm install"
+        );
+        assert_eq!(
+            shell_command_in_workdir("/app's dir", "pwd"),
+            "cd '/app'\\''s dir' && pwd"
+        );
+        assert_eq!(shell_command_in_workdir("/", "pwd"), "pwd");
     }
 
     #[test]
