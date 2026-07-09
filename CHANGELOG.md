@@ -2,6 +2,14 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [3.0.8] — 2026-07-09
+
+### Changed
+
+- **Release automation temporarily skips Windows.** GitHub Actions releases now
+  publish Linux x86_64, Linux arm64, and macOS arm64 artifacts without waiting
+  for the Windows WHPX runner or triggering winget publishing.
+
 ## [3.0.7] — 2026-07-09
 
 ### Fixed

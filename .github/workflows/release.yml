@@ -169,77 +169,9 @@ jobs:
           path: ${{ env.ASSET }}
 
   # ── Create GitHub Release ──────────────────────────────────────
-
-  # ── Windows native WHPX build ──────────────────────────────────
-  build-windows:
-    name: Build Windows (WHPX Backend)
-    needs: [test, build]
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Init submodules
-        run: git -c http.extraheader= submodule update --init --recursive
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src
-          key: release-windows
-
-      - name: Build Windows native binaries
-        run: |
-          cd src
-          cargo build --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
-
-      - name: Download Linux guest init artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-x86_64
-          path: linux-x86_64
-
-      - name: Package Windows release
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          DIR="a3s-box-${TAG}-windows-x86_64"
-          mkdir -p "$DIR/lib"
-
-          cp src/target/x86_64-pc-windows-msvc/release/a3s-box.exe "$DIR/"
-          cp src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe "$DIR/"
-
-          tar -xzf "linux-x86_64/a3s-box-${TAG}-linux-x86_64.tar.gz" -C linux-x86_64
-          cp "linux-x86_64/a3s-box-${TAG}-linux-x86_64/a3s-box-guest-init" "$DIR/"
-
-          if [ -f "src/target/x86_64-pc-windows-msvc/release/krun.dll" ]; then
-            cp src/target/x86_64-pc-windows-msvc/release/krun.dll "$DIR/lib/"
-          elif [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll" ]; then
-            cp src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll "$DIR/lib/"
-          else
-            echo "krun.dll is required for the native WHPX package" >&2
-            exit 1
-          fi
-
-          # Copy README and LICENSE
-          cp README.md "$DIR/" 2>/dev/null || true
-          cp LICENSE "$DIR/" 2>/dev/null || true
-
-          # List package contents
-          echo "Package contents:"
-          ls -lhR "$DIR/"
-
-          # Create zip archive (Windows-friendly)
-          powershell Compress-Archive -Path "$DIR" -DestinationPath "${DIR}.zip"
-          echo "ASSET=${DIR}.zip" >> "$GITHUB_ENV"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-x86_64
-          path: ${{ env.ASSET }}
-
   release:
     name: GitHub Release
-    needs: [build, build-windows]
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -256,7 +188,6 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/**/*.tar.gz
-            artifacts/**/*.zip
 
   # ── Publish to crates.io ───────────────────────────────────────
   publish-crates:
@@ -285,7 +216,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         # NOTE: crates.io is NOT the primary distribution channel — the GitHub
-        # Release tarballs + Homebrew + winget are. This step is best-effort but
+        # Release tarballs + Homebrew are. This step is best-effort but
         # MUST NOT silently report success on a real failure (it used to:
         # `cargo publish || echo "Skipped"` masked 403s / version-requirement
         # errors as "may already be published"). Now an already-published
@@ -309,7 +240,7 @@ jobs:
               echo "✓ published $crate@$VERSION"
               sleep 30   # let the sparse index update before dependents publish
             else
-              echo "::warning title=crates.io publish failed::$crate@$VERSION failed (token/auth or version requirement). GitHub Release + Homebrew + winget are unaffected."
+              echo "::warning title=crates.io publish failed::$crate@$VERSION failed (token/auth or version requirement). GitHub Release + Homebrew are unaffected."
               FAILED="$FAILED $crate"
             fi
           done
@@ -408,29 +339,3 @@ jobs:
           git add Formula/a3s-box.rb
           git commit -m "chore: update a3s-box to ${{ steps.version.outputs.tag }}"
           git push
-
-  # ── Trigger winget publishing ───────────────────────────────────
-  trigger-winget:
-    name: Trigger winget Publishing
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger winget workflow
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const tag = context.ref.replace('refs/tags/', '');
-            const version = tag.replace('v', '');
-
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'publish-winget.yml',
-              ref: 'main',
-              inputs: {
-                version: version
-              }
-            });
-
-            console.log(`Triggered winget publishing for version ${version}`);
