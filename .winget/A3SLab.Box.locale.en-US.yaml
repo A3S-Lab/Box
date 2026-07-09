@@ -5,12 +5,12 @@ PackageIdentifier: A3SLab.Box
 PackageVersion: 0.8.0
 PackageLocale: en-US
 Publisher: A3S Lab
-PublisherUrl: https://github.com/AI45Lab
-PublisherSupportUrl: https://github.com/AI45Lab/Box/issues
+PublisherUrl: https://github.com/A3S-Lab
+PublisherSupportUrl: https://github.com/A3S-Lab/Box/issues
 PackageName: a3s-box
-PackageUrl: https://github.com/AI45Lab/Box
+PackageUrl: https://github.com/A3S-Lab/Box
 License: MIT
-LicenseUrl: https://github.com/AI45Lab/Box/blob/main/LICENSE
+LicenseUrl: https://github.com/A3S-Lab/Box/blob/main/LICENSE
 ShortDescription: MicroVM sandbox runtime with native Windows WHPX support
 Description: |-
   a3s-box is a Docker-like MicroVM runtime for Linux OCI workloads. The Windows
@@ -45,6 +45,6 @@ ReleaseNotes: |-
   - Requires Windows Hypervisor Platform.
   - Does not require WSL.
   - Windows CRI is unsupported.
-ReleaseNotesUrl: https://github.com/AI45Lab/Box/releases/tag/v0.8.0
+ReleaseNotesUrl: https://github.com/A3S-Lab/Box/releases/tag/v0.8.0
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

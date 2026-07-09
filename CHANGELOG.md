@@ -2,6 +2,18 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [3.0.7] — 2026-07-09
+
+### Fixed
+
+- **SDK crates.io publishing metadata.** `a3s-box-sdk` now declares crates.io
+  version requirements for its internal Box dependencies, allowing release
+  automation to publish the SDK crate.
+- **Winget release automation clarity.** The winget workflow now uses the
+  requested release tag for workflow-dispatch runs and reports a non-blocking
+  first-submission warning when `A3SLab.Box` has not yet been added to
+  `microsoft/winget-pkgs`.
+
 ## [3.0.6] — 2026-07-09
 
 ### Added

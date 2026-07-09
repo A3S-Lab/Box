@@ -65,6 +65,11 @@ jobs:
           # Update installer URL and SHA256
           sed -i "s|InstallerUrl: .*|InstallerUrl: https://github.com/${REPO}/releases/download/${TAG}/a3s-box-${TAG}-windows-x86_64.zip|" .winget/A3SLab.Box.installer.yaml
           sed -i "s/InstallerSha256: .*/InstallerSha256: $SHA256/" .winget/A3SLab.Box.installer.yaml
+          sed -i "s|PublisherUrl: .*|PublisherUrl: https://github.com/A3S-Lab|" .winget/A3SLab.Box.locale.en-US.yaml
+          sed -i "s|PublisherSupportUrl: .*|PublisherSupportUrl: https://github.com/${REPO}/issues|" .winget/A3SLab.Box.locale.en-US.yaml
+          sed -i "s|PackageUrl: .*|PackageUrl: https://github.com/${REPO}|" .winget/A3SLab.Box.locale.en-US.yaml
+          sed -i "s|LicenseUrl: .*|LicenseUrl: https://github.com/${REPO}/blob/main/LICENSE|" .winget/A3SLab.Box.locale.en-US.yaml
+          sed -i "s|ReleaseNotesUrl: .*|ReleaseNotesUrl: https://github.com/${REPO}/releases/tag/${TAG}|" .winget/A3SLab.Box.locale.en-US.yaml
 
           # Update nested installer path
           sed -i "s|RelativeFilePath: a3s-box-v[0-9.]*-windows-x86_64|RelativeFilePath: a3s-box-${TAG}-windows-x86_64|g" .winget/A3SLab.Box.installer.yaml
@@ -74,24 +79,43 @@ jobs:
           cat .winget/A3SLab.Box.installer.yaml
           cat .winget/A3SLab.Box.locale.en-US.yaml
 
+      - name: Check winget package status
+        id: winget_package
+        shell: bash
+        run: |
+          PACKAGE_URL="https://github.com/microsoft/winget-pkgs/tree/master/manifests/a/A3SLab/Box"
+          STATUS=$(curl -sL -o /dev/null -w "%{http_code}" "$PACKAGE_URL")
+          if [ "$STATUS" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "A3SLab.Box exists in winget-pkgs; publishing update."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=winget first submission required::A3SLab.Box is not in winget-pkgs yet. Skipping automatic update; submit the generated manifests as the first package version."
+          fi
+
       - name: Submit to winget-pkgs
+        id: submit_winget
+        if: steps.winget_package.outputs.exists == 'true'
+        continue-on-error: true
         uses: vedantmgoyal9/winget-releaser@main
         with:
           identifier: A3SLab.Box
           version: ${{ steps.version.outputs.version }}
           installers-regex: 'a3s-box-v.*-windows-x86_64\.zip$'
+          release-tag: ${{ steps.version.outputs.tag }}
+          release-notes-url: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}
           token: ${{ secrets.WINGET_TOKEN }}
           fork-user: ${{ secrets.WINGET_FORK_USER }}
           max-versions-to-keep: 5
 
       # Alternative: Manual PR creation if vedantmgoyal9/winget-releaser doesn't work
       - name: Create winget-pkgs PR (fallback)
-        if: failure()
+        if: steps.winget_package.outputs.exists != 'true' || steps.submit_winget.outcome == 'failure'
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
-          echo "Automatic submission failed. Please manually submit to winget-pkgs:"
+          echo "::warning::Automatic winget submission did not complete. Please manually submit to winget-pkgs:"
           echo ""
           echo "1. Fork https://github.com/microsoft/winget-pkgs"
           echo "2. Create directory: manifests/a/A3SLab/Box/$VERSION/"
@@ -100,6 +124,3 @@ jobs:
           echo "   - .winget/A3SLab.Box.installer.yaml"
           echo "   - .winget/A3SLab.Box.locale.en-US.yaml"
           echo "4. Create PR to microsoft/winget-pkgs"
-          echo ""
-          echo "Or use wingetcreate:"
-          echo "wingetcreate update A3SLab.Box -v $VERSION -u https://github.com/${GITHUB_REPOSITORY}/releases/download/v$VERSION/a3s-box-v$VERSION-windows-x86_64.zip -t ${{ secrets.GITHUB_TOKEN }}"
