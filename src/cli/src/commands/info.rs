@@ -10,6 +10,7 @@ use crate::status;
 use super::images_dir;
 
 const PNPM_CACHE_VOLUME_NAME: &str = "a3s-cache-pnpm";
+const NPM_CACHE_VOLUME_NAME: &str = "a3s-cache-npm";
 
 #[derive(Args)]
 pub struct InfoArgs;
@@ -110,20 +111,26 @@ fn availability(value: bool) -> &'static str {
 fn print_package_cache_info() {
     let Ok(store) = a3s_box_runtime::VolumeStore::default_path() else {
         println!("Package cache (pnpm): unavailable");
+        println!("Package cache (npm): unavailable");
         return;
     };
 
-    match store.get(PNPM_CACHE_VOLUME_NAME) {
+    print_named_package_cache(&store, "pnpm", PNPM_CACHE_VOLUME_NAME);
+    print_named_package_cache(&store, "npm", NPM_CACHE_VOLUME_NAME);
+}
+
+fn print_named_package_cache(store: &a3s_box_runtime::VolumeStore, label: &str, volume_name: &str) {
+    match store.get(volume_name) {
         Ok(Some(volume)) => {
             let size = directory_size(Path::new(&volume.mount_point)).unwrap_or(0);
             println!(
-                "Package cache (pnpm): {} at {}",
+                "Package cache ({label}): {} at {}",
                 crate::output::format_bytes(size),
                 volume.mount_point
             );
         }
-        Ok(None) => println!("Package cache (pnpm): not created"),
-        Err(error) => println!("Package cache (pnpm): unavailable ({error})"),
+        Ok(None) => println!("Package cache ({label}): not created"),
+        Err(error) => println!("Package cache ({label}): unavailable ({error})"),
     }
 }
 

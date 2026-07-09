@@ -414,6 +414,7 @@ fn config_from_record(record: &BoxRecord) -> Result<BoxConfig, String> {
         workdir: record.workdir.clone(),
         hostname: record.hostname.clone(),
         volumes: record.volumes.clone(),
+        virtiofs_cache: record.virtiofs_cache.clone(),
         extra_env: record
             .env
             .iter()
@@ -453,6 +454,7 @@ mod tests {
             cpus: 4,
             memory_mb: 2048,
             volumes: vec!["/host:/guest".to_string()],
+            virtiofs_cache: Some("always".to_string()),
             env: {
                 let mut m = HashMap::new();
                 m.insert("FOO".to_string(), "bar".to_string());
@@ -543,6 +545,7 @@ mod tests {
         let config = config_from_record(&record).unwrap();
 
         assert_eq!(config.volumes, vec!["/host:/guest"]);
+        assert_eq!(config.virtiofs_cache.as_deref(), Some("always"));
         assert_eq!(config.tmpfs, vec!["/tmp"]);
     }
 

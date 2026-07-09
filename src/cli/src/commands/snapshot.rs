@@ -253,6 +253,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
         cpus: meta.vcpus,
         memory_mb: meta.memory_mb,
         volumes: meta.volumes.clone(),
+        virtiofs_cache: None,
         env: meta.env.clone(),
         cmd: meta.cmd.clone(),
         entrypoint: meta.entrypoint.clone(),

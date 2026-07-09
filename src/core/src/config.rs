@@ -312,6 +312,11 @@ pub struct BoxConfig {
     #[serde(default)]
     pub volumes: Vec<String>,
 
+    /// virtio-fs cache mode for host directory volumes (`none`, `auto`,
+    /// `always`, or `default`). `None` uses the host environment/default.
+    #[serde(default)]
+    pub virtiofs_cache: Option<String>,
+
     /// Extra environment variables for the entrypoint
     #[serde(default)]
     pub extra_env: Vec<(String, String)>,
@@ -449,6 +454,7 @@ impl Default for BoxConfig {
             workdir: None,
             hostname: None,
             volumes: vec![],
+            virtiofs_cache: None,
             extra_env: vec![],
             cache: CacheConfig::default(),
             pool: PoolConfig::default(),

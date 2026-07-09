@@ -255,6 +255,17 @@ fn preserve_owner(meta: &std::fs::Metadata, dst: &Path) {
 fn preserve_owner(_meta: &std::fs::Metadata, _dst: &Path) {}
 
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let dst_preexisted = dst.exists();
+        if copy_dir_recursive_cow(src, dst).unwrap_or(false) {
+            return Ok(());
+        }
+        if !dst_preexisted && dst.exists() {
+            let _ = std::fs::remove_dir_all(dst);
+        }
+    }
+
     std::fs::create_dir_all(dst).map_err(|e| {
         BoxError::CacheError(format!(
             "Failed to create directory {}: {}",
@@ -276,7 +287,7 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         let dst_path = dst.join(entry.file_name());
 
         // Use symlink_metadata so is_symlink() works correctly (does not follow links).
-        let meta = entry.metadata().map_err(|e| {
+        let meta = std::fs::symlink_metadata(&src_path).map_err(|e| {
             BoxError::CacheError(format!(
                 "Failed to read metadata for {}: {}",
                 src_path.display(),
@@ -329,12 +340,36 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Copy a regular file, preferring a copy-on-write reflink (`FICLONE`) so a new
-/// box's rootfs shares blocks with the cached image — instant, no extra disk — on
-/// reflink-capable filesystems (btrfs, XFS `reflink=1`, bcachefs). Falls back to a
-/// plain byte copy when reflink is unsupported (e.g. ext4) or the source and
-/// destination are on different filesystems. Overlay is preferred on Linux, so
-/// this only runs on the `CopyProvider` fallback path.
+#[cfg(target_os = "macos")]
+fn copy_dir_recursive_cow(src: &Path, dst: &Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let src_c = std::ffi::CString::new(src.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "source path contains a NUL byte",
+        )
+    })?;
+    let dst_c = std::ffi::CString::new(dst.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination path contains a NUL byte",
+        )
+    })?;
+    let flags = libc::COPYFILE_CLONE | libc::COPYFILE_RECURSIVE;
+    // SAFETY: both C strings are valid NUL-terminated paths for the duration of
+    // the call. A non-zero result means the system fast path could not handle
+    // this tree, so callers fall back to the portable recursive copy.
+    let rc = unsafe { libc::copyfile(src_c.as_ptr(), dst_c.as_ptr(), std::ptr::null_mut(), flags) };
+    Ok(rc == 0)
+}
+
+/// Copy a regular file, preferring copy-on-write cloning so a new box's rootfs
+/// shares blocks with the cached image — instant, no extra disk — on capable
+/// filesystems (Linux FICLONE, macOS APFS clonefile). Falls back to a plain byte
+/// copy when cloning is unsupported or the source and destination are on
+/// different filesystems. Overlay is preferred on Linux, so this mostly helps
+/// macOS/HVF and Linux `CopyProvider` fallback paths.
 fn copy_file_cow(src: &Path, dst: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -366,6 +401,43 @@ fn copy_file_cow(src: &Path, dst: &Path) -> std::io::Result<()> {
             return Ok(());
         }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let cloned = (|| -> std::io::Result<bool> {
+            let src_c = std::ffi::CString::new(src.as_os_str().as_bytes()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "source path contains a NUL byte",
+                )
+            })?;
+            let dst_c = std::ffi::CString::new(dst.as_os_str().as_bytes()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "destination path contains a NUL byte",
+                )
+            })?;
+
+            // SAFETY: both C strings are valid NUL-terminated paths for the
+            // duration of the call. A non-zero result means clonefile is not
+            // available for this path/filesystem and we fall back to byte copy.
+            let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
+            if rc != 0 {
+                return Ok(false);
+            }
+            if let Ok(perm) = std::fs::metadata(src).map(|m| m.permissions()) {
+                let _ = std::fs::set_permissions(dst, perm);
+            }
+            Ok(true)
+        })()
+        .unwrap_or(false);
+        if cloned {
+            return Ok(());
+        }
+    }
+
     std::fs::copy(src, dst).map(|_| ())
 }
 
@@ -767,6 +839,26 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dst.join("sub/deep/c.txt")).unwrap(),
             "ccc"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_copy_dir_recursive_preserves_symlinks() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("target.txt"), "target").unwrap();
+        std::os::unix::fs::symlink("target.txt", src.join("link.txt")).unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        let link_meta = std::fs::symlink_metadata(dst.join("link.txt")).unwrap();
+        assert!(link_meta.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(dst.join("link.txt")).unwrap(),
+            std::path::PathBuf::from("target.txt")
         );
     }
 

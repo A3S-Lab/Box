@@ -26,6 +26,12 @@ impl StateLock {
     }
 
     #[cfg(unix)]
+    pub(crate) fn acquire_for_state_path(path: &std::path::Path) -> std::io::Result<Self> {
+        let lock_path = path.with_extension("json.lock");
+        Self::acquire_path(&lock_path)
+    }
+
+    #[cfg(unix)]
     fn acquire_path(path: &std::path::Path) -> std::io::Result<Self> {
         use std::os::unix::io::AsRawFd;
 
@@ -49,6 +55,11 @@ impl StateLock {
     /// reads; multi-writer concurrency is not a supported Windows scenario.
     #[cfg(not(unix))]
     pub(crate) fn acquire() -> std::io::Result<Self> {
+        Ok(Self {})
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn acquire_for_state_path(_path: &std::path::Path) -> std::io::Result<Self> {
         Ok(Self {})
     }
 }

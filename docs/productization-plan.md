@@ -296,12 +296,25 @@ Current notes:
   silently producing a single-platform or wrong-OS image. The default output
   platform is Linux with the host architecture, not the host OS.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
-  Linux uses isolated `chroot`; macOS fails by default unless the user explicitly
-  opts into unsafe host execution with `A3S_BOX_UNSAFE_HOST_RUN=1`.
+  Linux uses isolated `chroot`; macOS `RUN` builds are moving to
+  BuildKit-in-A3S-VM. The MVP uses `a3s-box build --builder=buildkit-vm` and
+  imports BuildKit's OCI output back into the A3S image store by default, with
+  `--push` / `--plain-http` for direct registry release output and targeted
+  credential injection into the BuildKit VM. On Apple Silicon, `linux/amd64`
+  builds are routed through BuildKit's Linux builder path and may use emulation,
+  so native `linux/arm64` remains faster. The unsafe host execution path still
+  requires `A3S_BOX_UNSAFE_HOST_RUN=1`.
 - Linux `RUN` now has explicit preflight diagnostics for the chroot path:
   non-root builders fail before execution with root-capable builder guidance,
   configured shells must be absolute and present in the rootfs, and the build
   workdir is created before chroot execution so `RUN` honors `WORKDIR`.
+- Large workspace verification now has a first-class run profile: use
+  `--package-cache pnpm` (or `--package-cache npm` for npm-only jobs),
+  `--tmpfs <workspace>/node_modules`, and per-run `--virtiofs-cache=always`
+  when the host checkout is stable during release verification. macOS/APFS
+  rootfs copies prefer recursive `copyfile(3)` cloning before falling back to
+  byte copies, reducing cached-image startup cost on short-lived build
+  containers.
 - CLI build smoke coverage now includes a pure `FROM scratch` build that verifies
   `COPY`, image metadata, history, save/exported layer contents, and local image
   removal without registry or VM access. An ignored Linux-only smoke harness

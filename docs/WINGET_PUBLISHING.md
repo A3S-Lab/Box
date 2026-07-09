@@ -125,7 +125,7 @@ NestedInstallerFiles:
 - RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\lib\krun.dll
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/AI45Lab/Box/releases/download/v0.8.0/a3s-box-v0.8.0-windows-x86_64.zip
+  InstallerUrl: https://github.com/A3S-Lab/Box/releases/download/v0.8.0/a3s-box-v0.8.0-windows-x86_64.zip
   InstallerSha256: <COMPUTED_SHA256>
   Dependencies:
     WindowsFeatures:

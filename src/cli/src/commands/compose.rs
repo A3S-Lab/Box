@@ -512,6 +512,7 @@ async fn execute_up(
                 .and_then(|m| crate::output::parse_memory(m).ok())
                 .unwrap_or(512),
             volumes: resolved_volumes,
+            virtiofs_cache: None,
             env: record_env,
             cmd: svc
                 .and_then(|s| s.command.as_ref())

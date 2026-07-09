@@ -52,6 +52,7 @@ mod tests {
             cpus: 2,
             memory_mb: 512,
             volumes: vec![],
+            virtiofs_cache: None,
             env: HashMap::new(),
             cmd: vec![],
             entrypoint: None,

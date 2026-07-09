@@ -4,10 +4,33 @@ use std::collections::HashMap;
 
 use a3s_box_core::config::ResourceLimits;
 use a3s_box_runtime::oci::{OciHealthCheck, OciImageConfig};
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::image_usage;
 use crate::state::HealthCheck;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum VirtiofsCacheMode {
+    /// Stable host/guest traversal, matching the default.
+    None,
+    /// Let virtio-fs choose its automatic cache policy.
+    Auto,
+    /// Prefer faster host source-tree reads when the host tree is not changing.
+    Always,
+    /// Do not pass an explicit cache option to virtio-fs.
+    Default,
+}
+
+impl VirtiofsCacheMode {
+    pub(crate) fn as_guest_value(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Default => "default",
+        }
+    }
+}
 
 /// Common arguments shared between `run` and `create` commands.
 #[derive(Args)]
@@ -70,6 +93,10 @@ pub struct CommonBoxArgs {
     /// Mount a tmpfs (e.g., "/tmp" or "/tmp:size=100m"), can be repeated
     #[arg(long)]
     pub tmpfs: Vec<String>,
+
+    /// virtio-fs cache mode for host directory volumes.
+    #[arg(long = "virtiofs-cache", value_enum)]
+    pub virtiofs_cache: Option<VirtiofsCacheMode>,
 
     /// Connect to a network (e.g., "mynet")
     #[arg(long)]
@@ -842,6 +869,7 @@ mod tests {
             restart: "no".to_string(),
             labels: vec![],
             tmpfs: vec![],
+            virtiofs_cache: None,
             network: None,
             health_cmd: None,
             health_interval: 30,

@@ -270,7 +270,8 @@ impl RegistryAuth {
         }
     }
 
-    fn basic_credentials(&self) -> Option<(String, String)> {
+    /// Return basic credentials when this auth value is not anonymous.
+    pub fn basic_credentials(&self) -> Option<(String, String)> {
         match (&self.username, &self.password) {
             (Some(username), Some(password)) if !username.is_empty() && !password.is_empty() => {
                 Some((username.clone(), password.clone()))

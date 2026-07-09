@@ -164,7 +164,7 @@ impl StateFile {
 
     /// Save state to disk atomically under the cross-process state lock.
     pub fn save(&self) -> Result<(), std::io::Error> {
-        let _lock = super::lock::StateLock::acquire()?;
+        let _lock = super::lock::StateLock::acquire_for_state_path(&self.path)?;
         self.write_to_disk()
     }
 
@@ -378,7 +378,7 @@ impl StateFile {
     /// so a concurrent writer is never clobbered and two readers cannot tear down
     /// the same box twice (the second's fresh re-load sees the box already gone).
     fn flush_reconcile(path: &Path) -> std::io::Result<()> {
-        let _lock = super::lock::StateLock::acquire()?;
+        let _lock = super::lock::StateLock::acquire_for_state_path(path)?;
         let records = if path.exists() {
             let data = std::fs::read_to_string(path)?;
             Self::parse_or_quarantine(path, &data)

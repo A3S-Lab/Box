@@ -257,7 +257,8 @@ pub(super) fn handle_run(
         if !unsafe_host_run_enabled() {
             return Err(BoxError::BuildError(format!(
                 "Dockerfile RUN is not supported on macOS yet because isolated Linux build \
-                 execution is not implemented. Re-run on Linux or set {UNSAFE_HOST_RUN_ENV}=1 \
+                 execution is not implemented locally. Re-run on Linux, delegate with \
+                 `a3s-box build --builder=buildkit-vm`, or set {UNSAFE_HOST_RUN_ENV}=1 \
                  to opt into unsafe host-side execution for local experiments."
             )));
         }
@@ -1720,6 +1721,7 @@ mod tests {
             super::handle_run("echo unsafe", &[], &rootfs, &layers, "/", &[], &[], 0, true);
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Dockerfile RUN is not supported on macOS yet"));
+        assert!(err.contains("--builder=buildkit-vm"));
         assert!(err.contains(super::UNSAFE_HOST_RUN_ENV));
     }
 }

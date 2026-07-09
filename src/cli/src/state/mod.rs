@@ -45,6 +45,9 @@ pub struct BoxRecord {
     pub memory_mb: u32,
     /// Volume mounts ("host:guest" pairs)
     pub volumes: Vec<String>,
+    /// virtio-fs cache mode for host directory volumes.
+    #[serde(default)]
+    pub virtiofs_cache: Option<String>,
     /// Environment variables
     pub env: HashMap<String, String>,
     /// Command override

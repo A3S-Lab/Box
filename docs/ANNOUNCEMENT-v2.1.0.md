@@ -1,6 +1,6 @@
 # A3S Box v2.1.0：虚拟机的隔离，容器的启动速度
 
-> 发布日期：2026-06-13 · 仓库：[AI45Lab/Box](https://github.com/AI45Lab/Box)
+> 发布日期：2026-06-13 · 仓库：[A3S-Lab/Box](https://github.com/A3S-Lab/Box)
 
 长期以来，运行不可信代码只有两个糟糕的选择：**容器**快、密度高，但和宿主机共享同一个内核，隔离薄弱；**虚拟机**有自己的内核、隔离过硬，却启动慢、扛不住规模化。A3S Box v2.1.0 把这个取舍彻底拆掉了——让每个工作负载拥有**自己的真实内核**（虚拟机级别的隔离），同时获得**容器级别的启动速度与密度**。
 
@@ -12,7 +12,7 @@
 
 ## A3S Box 是什么
 
-A3S Box 是一个类 Docker 的 MicroVM 运行时（开源，仓库 `AI45Lab/Box`）。它把每个 Linux OCI 工作负载跑在自己的 libkrun MicroVM 里（**一个 box 一个真实内核**），并提供：
+A3S Box 是一个类 Docker 的 MicroVM 运行时（开源，仓库 `A3S-Lab/Box`）。它把每个 Linux OCI 工作负载跑在自己的 libkrun MicroVM 里（**一个 box 一个真实内核**），并提供：
 
 - Docker 式 CLI（`run` / `build` / `exec` / `logs` / `compose`）
 - OCI 镜像存储
@@ -140,7 +140,7 @@ a3s-box info
 
 ## 链接
 
-- **发布页**：https://github.com/AI45Lab/Box/releases/tag/v2.1.0
-- **仓库**：https://github.com/AI45Lab/Box
+- **发布页**：https://github.com/A3S-Lab/Box/releases/tag/v2.1.0
+- **仓库**：https://github.com/A3S-Lab/Box
 
 虚拟机的隔离，容器的速度。现在就 `brew install a3s-lab/tap/a3s-box`，跑一条 `a3s-box info` 看看你的宿主机能解锁什么。

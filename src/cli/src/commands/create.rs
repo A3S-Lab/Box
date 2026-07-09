@@ -116,6 +116,10 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         cpus: args.common.cpus,
         memory_mb,
         volumes: resolved_volumes,
+        virtiofs_cache: args
+            .common
+            .virtiofs_cache
+            .map(|mode| mode.as_guest_value().to_string()),
         env,
         cmd: args.cmd.clone(),
         entrypoint,

@@ -251,22 +251,11 @@ impl ExecConfig {
         // not exist on Alpine and was the original cause of issue #3.
         // BOX_EXEC_* values are base64-encoded (URL-safe, no pad) by the runtime
         // when BOX_EXEC_B64=1, so arbitrary bytes (quotes, spaces, `$`, …) survive
-        // libkrun's env serialization. Decode them back; fall back to the raw value
-        // on any decode error or when the marker is absent (older runtime).
-        use base64::Engine;
-        let b64 = std::env::var("BOX_EXEC_B64")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let decode = |s: String| -> String {
-            if !b64 {
-                return s;
-            }
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(s.as_bytes())
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
-                .unwrap_or(s)
-        };
+        // libkrun's env serialization. Some libkrun init builds import BOX_EXEC_*
+        // values from /proc/cmdline but miss the marker; in that case, infer the
+        // encoded form from BOX_EXEC_EXEC so current runtimes still boot.
+        let b64 = should_decode_box_exec_values();
+        let decode = |s: String| decode_box_exec_value(s, b64);
 
         let executable = std::env::var("BOX_EXEC_EXEC")
             .map(&decode)
@@ -339,6 +328,49 @@ impl ExecConfig {
             stdin_null,
         }
     }
+}
+
+fn should_decode_box_exec_values() -> bool {
+    if std::env::var("BOX_EXEC_B64")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    std::env::var("BOX_EXEC_EXEC")
+        .ok()
+        .and_then(|raw| decode_box_exec_value_if_valid(&raw))
+        .as_deref()
+        .is_some_and(is_plausible_exec)
+}
+
+fn decode_box_exec_value(value: String, decode: bool) -> String {
+    if decode {
+        decode_box_exec_value_if_valid(&value).unwrap_or(value)
+    } else {
+        value
+    }
+}
+
+fn decode_box_exec_value_if_valid(value: &str) -> Option<String> {
+    use base64::Engine;
+
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value.as_bytes())
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .filter(|decoded| !decoded.is_empty() && !decoded.contains('\0'))
+}
+
+fn is_plausible_exec(value: &str) -> bool {
+    !value.is_empty()
+        && (value.starts_with('/')
+            || value.starts_with("./")
+            || value.starts_with("../")
+            || value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+' | ':')))
 }
 
 /// Sidecar process configuration parsed from environment variables.
@@ -526,6 +558,13 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 2.5: Mount tmpfs volumes
     mount_tmpfs_volumes()?;
+
+    // Step 2.55: Make the unified cgroup hierarchy visible even when no A3S
+    // resource limit requested a per-container cgroup. Nested runtimes such as
+    // BuildKit/runc expect /sys/fs/cgroup to exist before they spawn build
+    // containers; failures are best-effort and logged by the cgroup module.
+    #[cfg(target_os = "linux")]
+    let _ = a3s_box_guest_init::cgroup::ensure_cgroup2_ready();
 
     // Step 2.6: Bind the exec (vsock 4089) and PTY (vsock 4090) listening sockets
     // NOW, before the slower network bring-up and container spawn below. These are
@@ -1047,13 +1086,15 @@ fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
                     dev_moved = true;
                 }
 
-                // Change directory to new root
-                std::env::set_current_dir("/mnt/newroot")?;
-
-                // Pivot root via chroot
-                use nix::unistd::{chdir, chroot};
-                chroot("/mnt/newroot")?;
-                chdir("/")?;
+                if let Err(e) = pivot_to_rootfs("/mnt/newroot") {
+                    warn!(
+                        error = %e,
+                        "Failed to pivot to root filesystem; falling back to chroot"
+                    );
+                    use nix::unistd::{chdir, chroot};
+                    chroot("/mnt/newroot")?;
+                    chdir("/")?;
+                }
 
                 // Re-mount any filesystems that couldn't be moved (MS_MOVE failed).
                 // This ensures /proc, /sys, /dev are available in the new rootfs.
@@ -1115,6 +1156,55 @@ fn mount_virtio_fs_shares() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "linux"))]
     {
         info!("Skipping virtio-fs mount on non-Linux platform (development mode)");
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn pivot_to_rootfs(new_root: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use nix::mount::{mount, umount2, MntFlags, MsFlags};
+    use nix::unistd::chdir;
+    use std::ffi::CString;
+
+    let put_old = format!("{new_root}/.a3s-old-root");
+    std::fs::create_dir_all(&put_old)?;
+
+    // Nested runtimes such as runc require a real pivot_root-capable mount
+    // namespace. Make the current tree private so the pivot and later unmount do
+    // not propagate back to shared mounts created by the host kernel.
+    mount(
+        Some(""),
+        "/",
+        None::<&str>,
+        MsFlags::MS_PRIVATE | MsFlags::MS_REC,
+        None::<&str>,
+    )?;
+
+    let new_root_c = CString::new(new_root)?;
+    let put_old_c = CString::new(put_old.as_str())?;
+    // SAFETY: `new_root_c` and `put_old_c` are valid NUL-terminated paths for
+    // the duration of the syscall; pivot_root has no Rust wrapper in nix 0.29.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_pivot_root,
+            new_root_c.as_ptr(),
+            put_old_c.as_ptr(),
+        )
+    };
+    if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        let _ = std::fs::remove_dir(&put_old);
+        return Err(error.into());
+    }
+
+    chdir("/")?;
+    match umount2("/.a3s-old-root", MntFlags::MNT_DETACH) {
+        Ok(()) => {}
+        Err(error) => warn!(error = %error, "Failed to detach old root after pivot_root"),
+    }
+    if let Err(error) = std::fs::remove_dir("/.a3s-old-root") {
+        warn!(error = %error, "Failed to remove old root mount point after pivot_root");
     }
 
     Ok(())
@@ -1629,6 +1719,27 @@ mod tests {
             Some("cache=auto")
         );
         assert_eq!(virtiofs_mount_options_from_env_value(Some("default")), None);
+    }
+
+    #[test]
+    fn test_box_exec_auto_decode_accepts_runtime_encoded_exec() {
+        assert!(is_plausible_exec(
+            &decode_box_exec_value_if_valid("L2Jpbi9zaA").unwrap()
+        ));
+        assert_eq!(
+            decode_box_exec_value("YnVpbGRjdGwtZGFlbW9ubGVzcy5zaA".to_string(), true),
+            "buildctl-daemonless.sh"
+        );
+    }
+
+    #[test]
+    fn test_box_exec_auto_decode_preserves_raw_legacy_values() {
+        assert_eq!(
+            decode_box_exec_value("/bin/sh".to_string(), false),
+            "/bin/sh"
+        );
+        assert!(decode_box_exec_value_if_valid("/bin/sh").is_none());
+        assert!(!is_plausible_exec(""));
     }
 
     /// All sidecar env tests run sequentially in a single test to avoid

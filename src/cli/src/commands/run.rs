@@ -16,22 +16,30 @@ use crate::output::parse_memory;
 use crate::state::{generate_name, BoxRecord, StateFile};
 
 const PNPM_CACHE_VOLUME_SPEC: &str = "a3s-cache-pnpm:/a3s-cache/pnpm";
+const PNPM_CONFIG_STORE_ENV: &str = "PNPM_CONFIG_STORE_DIR";
 const PNPM_STORE_ENV: &str = "npm_config_store_dir";
 const PNPM_STORE_DIR: &str = "/a3s-cache/pnpm/store";
 const PNPM_COREPACK_HOME_ENV: &str = "COREPACK_HOME";
 const PNPM_COREPACK_HOME_DIR: &str = "/a3s-cache/pnpm/corepack";
 const PNPM_HOME_ENV: &str = "PNPM_HOME";
 const PNPM_HOME_DIR: &str = "/a3s-cache/pnpm/home";
-const PNPM_NPM_CACHE_ENV: &str = "npm_config_cache";
+const PNPM_NPM_CACHE_ENV: &str = NPM_CACHE_ENV;
 const PNPM_NPM_CACHE_DIR: &str = "/a3s-cache/pnpm/npm-cache";
-const PNPM_PREFER_OFFLINE_ENV: &str = "npm_config_prefer_offline";
-const PNPM_PREFER_OFFLINE_VALUE: &str = "true";
+const PNPM_CONFIG_PREFER_OFFLINE_ENV: &str = "PNPM_CONFIG_PREFER_OFFLINE";
+const PNPM_PREFER_OFFLINE_ENV: &str = NPM_PREFER_OFFLINE_ENV;
+const PNPM_PREFER_OFFLINE_VALUE: &str = NPM_PREFER_OFFLINE_VALUE;
+const NPM_CACHE_VOLUME_SPEC: &str = "a3s-cache-npm:/a3s-cache/npm";
+const NPM_CACHE_ENV: &str = "npm_config_cache";
+const NPM_CACHE_DIR: &str = "/a3s-cache/npm/cache";
+const NPM_PREFER_OFFLINE_ENV: &str = "npm_config_prefer_offline";
+const NPM_PREFER_OFFLINE_VALUE: &str = "true";
 const COREPACK_DOWNLOAD_PROMPT_ENV: &str = "COREPACK_ENABLE_DOWNLOAD_PROMPT";
 const COREPACK_DOWNLOAD_PROMPT_VALUE: &str = "0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum PackageCache {
     Pnpm,
+    Npm,
 }
 
 #[derive(Args)]
@@ -63,7 +71,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub rm: bool,
 
-    /// Mount a persistent package-manager cache (currently: pnpm)
+    /// Mount a persistent package-manager cache (pnpm or npm)
     #[arg(long = "package-cache", value_enum)]
     pub package_cache: Vec<PackageCache>,
 
@@ -349,6 +357,10 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         cpus: args.common.cpus,
         memory_mb,
         volumes: resolved_volumes,
+        virtiofs_cache: args
+            .common
+            .virtiofs_cache
+            .map(|mode| mode.as_guest_value().to_string()),
         env,
         cmd: args.cmd.clone(),
         entrypoint: entrypoint_override.clone(),
@@ -515,6 +527,10 @@ fn build_box_config(
         workdir: args.common.workdir.clone(),
         hostname: args.common.hostname.clone(),
         volumes: resolved_volumes,
+        virtiofs_cache: args
+            .common
+            .virtiofs_cache
+            .map(|mode| mode.as_guest_value().to_string()),
         extra_env,
         port_map,
         dns: args.common.dns.clone(),
@@ -977,12 +993,9 @@ fn apply_package_caches(
     for cache in caches {
         match cache {
             PackageCache::Pnpm => {
-                if !volume_specs
-                    .iter()
-                    .any(|spec| spec == PNPM_CACHE_VOLUME_SPEC)
-                {
-                    volume_specs.push(PNPM_CACHE_VOLUME_SPEC.to_string());
-                }
+                ensure_package_cache_volume(volume_specs, PNPM_CACHE_VOLUME_SPEC);
+                env.entry(PNPM_CONFIG_STORE_ENV.to_string())
+                    .or_insert_with(|| PNPM_STORE_DIR.to_string());
                 env.entry(PNPM_STORE_ENV.to_string())
                     .or_insert_with(|| PNPM_STORE_DIR.to_string());
                 env.entry(PNPM_COREPACK_HOME_ENV.to_string())
@@ -991,12 +1004,27 @@ fn apply_package_caches(
                     .or_insert_with(|| PNPM_HOME_DIR.to_string());
                 env.entry(PNPM_NPM_CACHE_ENV.to_string())
                     .or_insert_with(|| PNPM_NPM_CACHE_DIR.to_string());
+                env.entry(PNPM_CONFIG_PREFER_OFFLINE_ENV.to_string())
+                    .or_insert_with(|| PNPM_PREFER_OFFLINE_VALUE.to_string());
                 env.entry(PNPM_PREFER_OFFLINE_ENV.to_string())
                     .or_insert_with(|| PNPM_PREFER_OFFLINE_VALUE.to_string());
                 env.entry(COREPACK_DOWNLOAD_PROMPT_ENV.to_string())
                     .or_insert_with(|| COREPACK_DOWNLOAD_PROMPT_VALUE.to_string());
             }
+            PackageCache::Npm => {
+                ensure_package_cache_volume(volume_specs, NPM_CACHE_VOLUME_SPEC);
+                env.entry(NPM_CACHE_ENV.to_string())
+                    .or_insert_with(|| NPM_CACHE_DIR.to_string());
+                env.entry(NPM_PREFER_OFFLINE_ENV.to_string())
+                    .or_insert_with(|| NPM_PREFER_OFFLINE_VALUE.to_string());
+            }
         }
+    }
+}
+
+fn ensure_package_cache_volume(volume_specs: &mut Vec<String>, volume_spec: &str) {
+    if !volume_specs.iter().any(|spec| spec == volume_spec) {
+        volume_specs.push(volume_spec.to_string());
     }
 }
 
@@ -1210,6 +1238,7 @@ mod tests {
                 restart: "no".to_string(),
                 labels: vec![],
                 tmpfs: vec![],
+                virtiofs_cache: None,
                 network: None,
                 health_cmd: None,
                 health_interval: 30,
@@ -1397,6 +1426,10 @@ mod tests {
 
         assert_eq!(volumes, vec![PNPM_CACHE_VOLUME_SPEC.to_string()]);
         assert_eq!(
+            env.get(PNPM_CONFIG_STORE_ENV).map(String::as_str),
+            Some(PNPM_STORE_DIR)
+        );
+        assert_eq!(
             env.get(PNPM_STORE_ENV).map(String::as_str),
             Some(PNPM_STORE_DIR)
         );
@@ -1413,6 +1446,10 @@ mod tests {
             Some(PNPM_NPM_CACHE_DIR)
         );
         assert_eq!(
+            env.get(PNPM_CONFIG_PREFER_OFFLINE_ENV).map(String::as_str),
+            Some(PNPM_PREFER_OFFLINE_VALUE)
+        );
+        assert_eq!(
             env.get(PNPM_PREFER_OFFLINE_ENV).map(String::as_str),
             Some(PNPM_PREFER_OFFLINE_VALUE)
         );
@@ -1426,6 +1463,10 @@ mod tests {
     fn test_apply_package_caches_preserves_user_pnpm_env() {
         let mut volumes = Vec::new();
         let mut env = std::collections::HashMap::from([
+            (
+                PNPM_CONFIG_STORE_ENV.to_string(),
+                "/custom/pnpm-config-store".to_string(),
+            ),
             (PNPM_STORE_ENV.to_string(), "/custom/pnpm-store".to_string()),
             (
                 PNPM_COREPACK_HOME_ENV.to_string(),
@@ -1436,12 +1477,20 @@ mod tests {
                 PNPM_NPM_CACHE_ENV.to_string(),
                 "/custom/npm-cache".to_string(),
             ),
+            (
+                PNPM_CONFIG_PREFER_OFFLINE_ENV.to_string(),
+                "false".to_string(),
+            ),
             (PNPM_PREFER_OFFLINE_ENV.to_string(), "false".to_string()),
             (COREPACK_DOWNLOAD_PROMPT_ENV.to_string(), "1".to_string()),
         ]);
 
         apply_package_caches(&[PackageCache::Pnpm], &mut volumes, &mut env);
 
+        assert_eq!(
+            env.get(PNPM_CONFIG_STORE_ENV).map(String::as_str),
+            Some("/custom/pnpm-config-store")
+        );
         assert_eq!(
             env.get(PNPM_STORE_ENV).map(String::as_str),
             Some("/custom/pnpm-store")
@@ -1457,6 +1506,10 @@ mod tests {
         assert_eq!(
             env.get(PNPM_NPM_CACHE_ENV).map(String::as_str),
             Some("/custom/npm-cache")
+        );
+        assert_eq!(
+            env.get(PNPM_CONFIG_PREFER_OFFLINE_ENV).map(String::as_str),
+            Some("false")
         );
         assert_eq!(
             env.get(PNPM_PREFER_OFFLINE_ENV).map(String::as_str),
@@ -1480,6 +1533,61 @@ mod tests {
         );
 
         assert_eq!(volumes, vec![PNPM_CACHE_VOLUME_SPEC.to_string()]);
+    }
+
+    #[test]
+    fn test_apply_package_caches_adds_npm_volume_and_env() {
+        let mut volumes = Vec::new();
+        let mut env = std::collections::HashMap::new();
+
+        apply_package_caches(&[PackageCache::Npm], &mut volumes, &mut env);
+
+        assert_eq!(volumes, vec![NPM_CACHE_VOLUME_SPEC.to_string()]);
+        assert_eq!(
+            env.get(NPM_CACHE_ENV).map(String::as_str),
+            Some(NPM_CACHE_DIR)
+        );
+        assert_eq!(
+            env.get(NPM_PREFER_OFFLINE_ENV).map(String::as_str),
+            Some(NPM_PREFER_OFFLINE_VALUE)
+        );
+        assert!(!env.contains_key(PNPM_STORE_ENV));
+        assert!(!env.contains_key(PNPM_COREPACK_HOME_ENV));
+        assert!(!env.contains_key(PNPM_HOME_ENV));
+    }
+
+    #[test]
+    fn test_apply_package_caches_preserves_user_npm_env() {
+        let mut volumes = Vec::new();
+        let mut env = std::collections::HashMap::from([
+            (NPM_CACHE_ENV.to_string(), "/custom/npm-cache".to_string()),
+            (NPM_PREFER_OFFLINE_ENV.to_string(), "false".to_string()),
+        ]);
+
+        apply_package_caches(&[PackageCache::Npm], &mut volumes, &mut env);
+
+        assert_eq!(
+            env.get(NPM_CACHE_ENV).map(String::as_str),
+            Some("/custom/npm-cache")
+        );
+        assert_eq!(
+            env.get(NPM_PREFER_OFFLINE_ENV).map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn test_apply_package_caches_deduplicates_npm_volume() {
+        let mut volumes = vec![NPM_CACHE_VOLUME_SPEC.to_string()];
+        let mut env = std::collections::HashMap::new();
+
+        apply_package_caches(
+            &[PackageCache::Npm, PackageCache::Npm],
+            &mut volumes,
+            &mut env,
+        );
+
+        assert_eq!(volumes, vec![NPM_CACHE_VOLUME_SPEC.to_string()]);
     }
 
     #[test]
@@ -1507,6 +1615,28 @@ mod tests {
             config.entrypoint_override,
             Some(interactive_keepalive_entrypoint())
         );
+    }
+
+    #[test]
+    fn test_build_box_config_plumbs_virtiofs_cache_mode() {
+        let mut args = default_run_args();
+        args.common.virtiofs_cache = Some(common::VirtiofsCacheMode::Always);
+
+        let config = build_box_config(
+            &args,
+            512,
+            Default::default(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            a3s_box_core::NetworkMode::Tsi,
+            vec![],
+            TeeConfig::None,
+        )
+        .unwrap();
+
+        assert_eq!(config.virtiofs_cache.as_deref(), Some("always"));
     }
 
     #[test]

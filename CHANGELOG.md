@@ -2,6 +2,35 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [3.0.6] — 2026-07-09
+
+### Added
+
+- **BuildKit VM backend for macOS Dockerfile `RUN`.** `a3s-box build` now
+  supports `--builder auto|host|buildkit-vm`; on macOS, Dockerfiles containing
+  `RUN` automatically delegate to BuildKit inside an A3S Linux VM unless the
+  unsafe host-run escape hatch is explicitly enabled. The BuildKit VM backend can
+  load OCI output back into the A3S image store or push directly with
+  `--push --plain-http`.
+- **Large workspace verification profile.** `a3s-box run` now supports
+  `--package-cache pnpm|npm` and per-run `--virtiofs-cache`, with documented
+  pnpm/npm cache, tmpfs, and virtio-fs settings for package-manager-heavy
+  release checks.
+
+### Changed
+
+- **Faster cached rootfs copies on APFS.** macOS rootfs copy fallback now prefers
+  copy-on-write cloning before byte-copying, reducing startup cost for
+  short-lived cached-image boxes.
+- **Nested runtime readiness inside guests.** Guest init prepares cgroup v2
+  earlier so BuildKit/runc can start build containers inside the helper VM.
+
+### Fixed
+
+- **macOS release builds no longer require unsafe host `RUN`.** Dockerfile builds
+  with `RUN` now have a supported isolated local path on Apple Silicon, including
+  `linux/amd64` BuildKit builds.
+
 ## [3.0.5] — 2026-07-08
 
 ### Added

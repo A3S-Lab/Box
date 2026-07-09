@@ -98,9 +98,66 @@ sudo -E env A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar \
   scripts/host-integration-smoke.sh --linux-run --no-pure
 ```
 
-macOS does not run Dockerfile `RUN` by default. The unsafe host execution path
-is only for local experiments and requires `A3S_BOX_UNSAFE_HOST_RUN=1`; it is
-not part of the product smoke matrix.
+macOS does not run Dockerfile `RUN` on the host. The first supported local path
+runs BuildKit inside an A3S Linux VM and loads the resulting OCI archive back
+into the A3S image store:
+
+```bash
+a3s-box build --builder=buildkit-vm \
+  --platform linux/arm64 \
+  -f docker/Dockerfile.web \
+  -t a3s/web:v1 \
+  .
+```
+
+On Apple Silicon, `linux/amd64` builds run through the BuildKit Linux builder
+path and may use emulation, so expect them to be slower than native
+`linux/arm64`. For release builds, push directly from the BuildKit VM:
+
+```bash
+a3s-box build --builder=buildkit-vm \
+  --platform linux/arm64 \
+  --push --plain-http \
+  -f docker/Dockerfile.web \
+  -t 10.0.0.2:5000/a3s/web:v1 \
+  .
+```
+
+BuildKit VM push uses the same credential lookup as `a3s-box push`: the A3S
+credential store, Docker config or helpers, then `REGISTRY_USERNAME` /
+`REGISTRY_PASSWORD`. Only the target registry auth is written to a temporary
+Docker config and mounted into the BuildKit VM.
+
+The unsafe host execution path is only for local experiments and requires
+`A3S_BOX_UNSAFE_HOST_RUN=1`; it is not part of the product smoke matrix.
+
+## Large Workspace Verification
+
+For package-manager-heavy monorepo checks, prefer an explicit cache profile
+instead of a raw host mount:
+
+```bash
+a3s-box run --rm --cpus 4 --memory 8g \
+  --package-cache pnpm \
+  --virtiofs-cache=always \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  --tmpfs /workspace/node_modules:size=4g \
+  node:24-bookworm -- \
+  sh -lc 'corepack enable && corepack prepare pnpm@11.10.0 --activate && pnpm --filter @a3s-lab/web build'
+```
+
+`--package-cache pnpm` keeps the pnpm store, Corepack home, pnpm home, and npm
+cache in the named `a3s-cache-pnpm` volume across `--rm` runs.
+For npm-only checks, use `--package-cache npm` to keep the npm cache in
+`a3s-cache-npm`.
+`--tmpfs .../node_modules` prevents large dependency trees from being written
+through the host workspace mount. `--virtiofs-cache=always` is intended for
+release verification jobs where the host checkout is stable for the duration of
+the run; omit it or use `none` when host-side edits must be visible immediately.
+For cold package stores, registry downloads and project-level supply-chain
+policy checks can still dominate the first run. Prime the named cache volume
+before a release window when the monorepo depends on thousands of packages.
 
 ## Host command matrix
 

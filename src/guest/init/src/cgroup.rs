@@ -29,7 +29,7 @@ static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// individual limit (memory.max / cpu.max / pids.max) is best-effort in
 /// `ContainerCgroup::create`, so a missing controller degrades to "that limit
 /// is not enforced" rather than failing the launch.
-fn ensure_cgroup2_ready() -> bool {
+pub fn ensure_cgroup2_ready() -> bool {
     let controllers_path = format!("{CGROUP_ROOT}/cgroup.controllers");
     if std::fs::metadata(&controllers_path).is_err() {
         // Not mounted yet — mount the unified hierarchy.

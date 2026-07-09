@@ -176,7 +176,12 @@ impl VmManager {
             if !self.config.stdin_open {
                 env.push(("BOX_EXEC_STDIN".to_string(), "null".to_string()));
             }
-            if let Some(cache_mode) = env_nonempty("A3S_VIRTIOFS_CACHE") {
+            if let Some(cache_mode) = self
+                .config
+                .virtiofs_cache
+                .clone()
+                .or_else(|| env_nonempty("A3S_VIRTIOFS_CACHE"))
+            {
                 env.push(("A3S_VIRTIOFS_CACHE".to_string(), cache_mode));
             }
 
@@ -894,6 +899,20 @@ mod tests {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn test_build_instance_spec_passes_configured_virtiofs_cache_mode() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), Some(test_oci_config(None, None)), true);
+        let mut vm = test_vm_manager(BoxConfig {
+            virtiofs_cache: Some("always".to_string()),
+            ..Default::default()
+        });
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(env_value(&spec, "A3S_VIRTIOFS_CACHE"), Some("always"));
     }
 
     #[test]

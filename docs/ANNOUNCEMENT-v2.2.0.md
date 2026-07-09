@@ -1,6 +1,6 @@
 # A3S Box v2.2.0：把 v2.1.0 的能力焊死在正确性上
 
-> 发布日期：2026-06-15 · 仓库：[AI45Lab/Box](https://github.com/AI45Lab/Box)
+> 发布日期：2026-06-15 · 仓库：[A3S-Lab/Box](https://github.com/A3S-Lab/Box)
 
 v2.1.0 带来了原生 snapshot-fork（虚拟机的隔离 + 容器的启动速度）。v2.2.0 不加新卖点，而是把已有能力**焊死在正确性上**：24 个修复，覆盖 CLI 状态机、运行时资源限制、guest-init 的 I/O、OCI 镜像存储、网络、温池（warm pool），以及 CRI 服务端。没有破坏性变更，CRI 一致性零回归。
 

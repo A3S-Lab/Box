@@ -38,7 +38,7 @@ As of **v2.4.0**, three adversarial audits — production-operability (24 findin
 | --- | --- |
 | Local CLI runtime | Implemented for macOS Apple Silicon/HVF and Linux/KVM style hosts. Real macOS HVF core and host smoke suites have passed with Alpine pulled from the registry; offline archive runs remain the release-gate default. |
 | OCI images | Pull, load, save, tag, inspect, history, remove, and local cache resolution are implemented. Push and cosign signing/verification paths exist and require registry access for end-to-end validation. |
-| Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell-form `RUN` are implemented. `RUN` is isolated with Linux `chroot` and requires root-capable Linux; macOS fails by default unless explicitly unsafe host execution is enabled. |
+| Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell-form `RUN` are implemented by the host engine on Linux. On macOS, `RUN` builds are delegated to BuildKit inside an A3S Linux VM (`--builder=buildkit-vm`); unsafe host execution remains an explicit experiment-only escape hatch. |
 | Lifecycle and exec | `run`, `create`, `start`, `stop`, `restart`, `rm`, `wait`, foreground/detached runs, non-PTY exec, PTY exec, logs, stats, and inspect are implemented. |
 | Warm pool and snapshot-fork | A warm pool serves pre-booted sandboxes over a socket. Native snapshot-fork (Copy-on-Write microVM cloning) snapshots one booted template and restores many forks from it, each mapping the template RAM `MAP_PRIVATE`. Verified on `/dev/kvm`: ~4× faster than a cold boot per fork, 100 forks in under ~1 s (~8 ms amortized each). Requires `/dev/kvm`; opt in with `pool start --snapshot-fork` or the `KRUN_SNAPSHOT_*` / `KRUN_RESTORE_FROM` env. |
 | Networking | Default TSI networking, TCP `host:guest` publishing, user-defined bridge networks, network inspect/connect/disconnect/rm, and `/etc/hosts` peer discovery are implemented with documented platform boundaries. |
@@ -180,7 +180,7 @@ Important supported options:
 - `--cpus`, `--memory`, `--timeout <seconds>` for foreground runs, `--pids-limit`, `--cpuset-cpus`, `--ulimit`, CPU quota/shares, memory reservation/swap;
 - `-e/--env`, `--env-file`, `--entrypoint`, `-u/--user`, `-w/--workdir`, `--hostname`, `--add-host`;
 - `-i/--interactive` to keep stdin open; non-interactive runs close guest stdin by default, and `--no-stdin` makes that explicit;
-- `--package-cache pnpm` to mount persistent pnpm/Corepack/npm caches for repeated throwaway Node boxes;
+- `--package-cache pnpm|npm` to mount persistent package-manager caches for repeated throwaway Node boxes;
 - `--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`, `--health-start-period`, `--no-healthcheck`;
 - `--stop-signal`, `--stop-timeout`, `--persistent`, `--log-driver json-file|none`;
 - `--cap-add`, `--cap-drop`, `--security-opt seccomp=default|seccomp=unconfined|no-new-privileges`, `--privileged`.
@@ -216,16 +216,21 @@ a3s-box build -t app:dev .
 a3s-box build -t app:dev -f Containerfile .
 a3s-box build -t app:dev --build-arg VERSION=1.2.3 --platform linux/amd64 .
 a3s-box build -t builder --target builder --no-cache .   # stop at a stage, skip the cache
+a3s-box build --builder=buildkit-vm --platform linux/arm64 -t app:dev . # safe macOS RUN path
+a3s-box build --builder=buildkit-vm --push --plain-http -t 10.0.0.2:5000/app:v1 .
 ```
 
 Supported Dockerfile subset: `FROM` including `scratch`, shell-form `RUN`, shell-form `COPY`/`ADD` (incl. `COPY --from=<stage>`, `COPY`/`ADD --chown=user[:group]`), `WORKDIR`, `ENV`, `ENTRYPOINT`, `CMD`, `EXPOSE`, `LABEL`, `USER`, `ARG`, `SHELL`, `STOPSIGNAL`, `HEALTHCHECK`, `ONBUILD` metadata triggers, and `VOLUME`. A context-root `.dockerignore` is honored.
 
-Build flags: `-t/--tag`, `-f/--file`, `--build-arg`, `--platform`, `--target <stage>` (build only up to a stage), `--no-cache` (rebuild every layer), `-q/--quiet`.
+Build flags: `-t/--tag`, `-f/--file`, `--build-arg`, `--platform`, `--target <stage>` (build only up to a stage), `--no-cache` (rebuild every layer), `--builder auto|host|buildkit-vm`, `--push`, `--plain-http`, `--buildkit-image <image>`, `--buildkit-cpus <n>`, `--buildkit-memory <size>`, `-q/--quiet`.
 
 Boundaries:
 
 - `RUN` uses isolated Linux `chroot`, requires root-capable Linux, validates shell/workdir preconditions, and has a Linux-only ignored smoke test;
-- macOS `RUN` fails by default; `A3S_BOX_UNSAFE_HOST_RUN=1` enables unsafe host-side experiments only;
+- macOS `RUN` auto-selects the BuildKit VM backend unless `A3S_BOX_UNSAFE_HOST_RUN=1` is set; explicit `--builder=host` keeps the built-in host engine behavior;
+- the BuildKit VM backend loads `type=oci` output back into the A3S image store by default; `--push` writes directly to the tagged registry reference, uses the same credentials as `a3s-box push`, and `--plain-http` marks that registry as trusted HTTP for BuildKit;
+- Apple Silicon `--builder=buildkit-vm --platform linux/amd64` is handled by BuildKit's Linux builder path and may use emulation, so expect slower builds than native `linux/arm64`;
+- `A3S_BOX_UNSAFE_HOST_RUN=1` enables unsafe macOS host-side experiments only;
 - `--platform` records one target platform; multi-platform image indexes are not implemented.
 
 Builds use a Docker/BuildKit-style **layer cache**: each instruction extends a
@@ -240,7 +245,7 @@ and everything after it. The cache lives at `~/.a3s/buildcache` and is size-capp
 ```bash
 a3s-box volume create data
 a3s-box run -d --name app -v data:/data alpine:latest -- sleep 3600
-a3s-box run --rm --cpus 4 --memory 4g --package-cache pnpm \
+a3s-box run --rm --cpus 4 --memory 4g --package-cache pnpm --virtiofs-cache=always \
   -v "$PWD:/work" -w /work --tmpfs /work/node_modules:size=4g \
   node:22-alpine -- sh -lc 'corepack enable && pnpm install --frozen-lockfile'
 a3s-box cp ./file.txt app:/data/file.txt
@@ -252,9 +257,9 @@ a3s-box snapshot restore checkpoint-1 --name restored-app
 a3s-box snapshot prune --keep 5          # bound disk: keep the 5 newest
 ```
 
-`--package-cache pnpm` creates/reuses the named volume `a3s-cache-pnpm` and sets cache-friendly defaults: `npm_config_store_dir=/a3s-cache/pnpm/store`, `COREPACK_HOME=/a3s-cache/pnpm/corepack`, `PNPM_HOME=/a3s-cache/pnpm/home`, `npm_config_cache=/a3s-cache/pnpm/npm-cache`, `npm_config_prefer_offline=true`, and `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`. Dependency downloads and the Corepack-prepared pnpm toolchain survive across `--rm` boxes without making the whole rootfs persistent. Override any of those with `-e KEY=VALUE` when a build needs a specific registry or cache policy. For throwaway install/build jobs, mounting `node_modules` as tmpfs avoids pushing thousands of small files through the project bind mount; use `bench/bench.sh pnpm` or `just bench-pnpm` to compare A3S project-mount, A3S tmpfs, and Docker cold/hot baselines. Auto-removed boxes also archive their last logs under `~/.a3s/removed-logs/`, and `a3s-box logs <name-or-id>` can read that archive after the box directory is gone.
+`--package-cache pnpm` creates/reuses the named volume `a3s-cache-pnpm` and sets cache-friendly defaults: `PNPM_CONFIG_STORE_DIR=/a3s-cache/pnpm/store`, `npm_config_store_dir=/a3s-cache/pnpm/store`, `COREPACK_HOME=/a3s-cache/pnpm/corepack`, `PNPM_HOME=/a3s-cache/pnpm/home`, `npm_config_cache=/a3s-cache/pnpm/npm-cache`, `PNPM_CONFIG_PREFER_OFFLINE=true`, `npm_config_prefer_offline=true`, and `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`. Dependency downloads and the Corepack-prepared pnpm toolchain survive across `--rm` boxes without making the whole rootfs persistent. `--package-cache npm` creates/reuses `a3s-cache-npm` and sets `npm_config_cache=/a3s-cache/npm/cache` plus `npm_config_prefer_offline=true` for npm-only jobs. Override any of those with `-e KEY=VALUE` when a build needs a specific registry or cache policy. For throwaway install/build jobs, mounting `node_modules` as tmpfs avoids pushing thousands of small files through the project bind mount; prime the named cache volume before a release window when cold registry downloads or project-level supply-chain policy checks are known to dominate the first run. Use `bench/bench.sh pnpm` or `just bench-pnpm` to compare A3S project-mount, A3S tmpfs, and Docker cold/hot baselines. Auto-removed boxes also archive their last logs under `~/.a3s/removed-logs/`, and `a3s-box logs <name-or-id>` can read that archive after the box directory is gone.
 
-Host directory volumes are mounted with virtio-fs `cache=none` by default to favor stable traversal on macOS/HVF workloads with large source trees. Set `A3S_VIRTIOFS_CACHE=auto`, `always`, or `default` to override that mode for local experiments; `a3s-box info` prints the active setting.
+Host directory volumes are mounted with virtio-fs `cache=none` by default to favor stable traversal on macOS/HVF workloads with large source trees. Use `--virtiofs-cache=always` for release verification jobs where the host source tree is not changing during the run, or `--virtiofs-cache=auto|default` for local experiments; `A3S_VIRTIOFS_CACHE` remains available as a process-wide fallback and `a3s-box info` prints the active fallback setting. On macOS/APFS, the rootfs copy fallback uses recursive `copyfile(3)` cloning before byte-copying, so cached-image startup can share file blocks with the cached rootfs when the filesystem supports it.
 
 The `snapshot` command produces configuration/filesystem-oriented Box snapshots, not a live RAM checkpoint. The live RAM Copy-on-Write facility is a separate, lower-level mechanism described in [Warm pool and snapshot-fork](#warm-pool-and-snapshot-fork).
 
@@ -675,7 +680,7 @@ matrix, CRI smoke, and host soak procedures.
 | `A3S_TEE_SIMULATE` | Enables simulated TEE report behavior. |
 | `A3S_REGISTRY_PROTOCOL` | Legacy registry protocol override for local/insecure registry tests. Prefer `a3s-box push --plain-http` for push. |
 | `A3S_EXEC_READY_TIMEOUT_MS` | Safety cap for guest exec-server readiness probing during boot. Default: 15000. |
-| `A3S_VIRTIOFS_CACHE` | virtio-fs cache mode for host directory volumes: `none` by default, or `auto`, `always`, `default`. |
+| `A3S_VIRTIOFS_CACHE` | Process-wide fallback virtio-fs cache mode for host directory volumes: `none` by default, or `auto`, `always`, `default`. Prefer per-run `--virtiofs-cache` when scripting release verification. |
 | `A3S_BOX_CRI_AGENT_IMAGE` | Default CRI sandbox agent/rootfs image. |
 | `A3S_BOX_SMOKE_IMAGE_TAR` | OCI archive used by the ignored core MicroVM smoke suite. |
 | `A3S_BOX_TEST_ALPINE_TAR` | Shared offline Alpine OCI archive for core and host smoke suites. |
@@ -697,6 +702,9 @@ matrix, CRI smoke, and host soak procedures.
 | `A3S_BOX_CLUSTER_SOAK_VERIFY_MIN_SAMPLE_SPAN_SECS` | Optional RuntimeClass soak evidence gate for first-to-last sample span. |
 | `A3S_BOX_CLUSTER_SOAK_VERIFY_MAX_SAMPLE_GAP_SECS` | Optional RuntimeClass soak evidence gate for maximum consecutive sample gap. |
 | `A3S_BOX_CLUSTER_SOAK_CLEANUP_TIMEOUT_SECS` | RuntimeClass cleanup wait before collecting `post-cleanup-counts.tsv`. Default: 300. |
+| `A3S_BOX_BUILDKIT_IMAGE` | BuildKit image used by `--builder=buildkit-vm`. Default: `moby/buildkit:latest`. |
+| `A3S_BOX_BUILDKIT_CPUS` | CPU count for the BuildKit VM helper box. Default: `4`. |
+| `A3S_BOX_BUILDKIT_MEMORY` | Memory limit for the BuildKit VM helper box. Default: `8g`. |
 | `A3S_BOX_UNSAFE_HOST_RUN` | Opt into unsafe macOS host execution for Dockerfile `RUN` experiments. |
 | `A3S_BOX_BUILDCACHE_MAX_BYTES` | Cap on the total size of cached build layers at `~/.a3s/buildcache` (oldest evicted first). Default: 2 GiB. |
 | `A3S_BOX_MAX_LAYER_BYTES` | Cap on total decompressed bytes per OCI image layer during `pull` (decompression-bomb guard). Default: 16 GiB. |
