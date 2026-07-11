@@ -61,41 +61,41 @@ jobs:
 
           # Create README
           @"
-# a3s-libkrun-sys Windows Build
+          # a3s-libkrun-sys Windows Build
 
-Version: $VERSION
-Platform: Windows x86_64 (WHPX)
-Built: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+          Version: $VERSION
+          Platform: Windows x86_64 (WHPX)
+          Built: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
 
-## Contents
+          ## Contents
 
-- lib/krun.dll - libkrun Windows WHPX backend
+          - lib/krun.dll - libkrun Windows WHPX backend
 
-## Usage
+          ## Usage
 
-Add to your Cargo.toml:
+          Add to your Cargo.toml:
 
-``````toml
-[dependencies]
-a3s-libkrun-sys = "$VERSION"
-``````
+          ``````toml
+          [dependencies]
+          a3s-libkrun-sys = "$VERSION"
+          ``````
 
-The krun.dll must be in your PATH or in the same directory as your executable.
+          The krun.dll must be in your PATH or in the same directory as your executable.
 
-## Features
+          ## Features
 
-- Windows Hypervisor Platform (WHPX) backend
-- virtiofs passthrough filesystem
-- virtio-net TCP backend
-- virtio-blk block device
-- virtio-console
-- TSI (Transparent Socket Impersonation) for vsock
+          - Windows Hypervisor Platform (WHPX) backend
+          - virtiofs passthrough filesystem
+          - virtio-net TCP backend
+          - virtio-blk block device
+          - virtio-console
+          - TSI (Transparent Socket Impersonation) for vsock
 
-## Requirements
+          ## Requirements
 
-- Windows 10/11 with Hyper-V Platform enabled
-- Run: ``Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform``
-"@ | Out-File -FilePath $DIR\README.md -Encoding UTF8
+          - Windows 10/11 with Hyper-V Platform enabled
+          - Run: ``Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform``
+          "@ | Out-File -FilePath $DIR\README.md -Encoding UTF8
 
           # Create zip
           Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"
@@ -181,4 +181,3 @@ The krun.dll must be in your PATH or in the same directory as your executable.
             artifacts/*.zip
           draft: false
           prerelease: false
-
