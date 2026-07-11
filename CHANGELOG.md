@@ -2,6 +2,35 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [3.0.9] — 2026-07-11
+
+### Added
+
+- **macOS fault-injection endurance runner.** A new isolated Apple Silicon/HVF
+  harness supports staged 2-hour, 24-hour, and 72-hour soak validation with
+  shim/CLI termination, recovery assertions, resource sampling, admission
+  gates, and machine-readable evidence.
+
+### Changed
+
+- **Native Node.js 24 GitHub Actions.** Checkout and artifact actions now use
+  their native Node.js 24 releases, removing deprecation warnings from CI and
+  release workflows.
+- **Faster and more predictable runtime paths.** Package-cache preparation,
+  warm-pool routing, bounded `info`, and macOS BuildKit VM execution have been
+  tightened for repeated development and CI workloads.
+
+### Fixed
+
+- **Runtime correctness across lifecycle, networking, and storage.** Fixes
+  include detached health scheduling, Compose variable defaults, quoted build
+  arguments, commit metadata preservation, bridge peer and published Redis data
+  paths, case-sensitive APFS rootfs handling, and virtiofs descriptor lifetime.
+- **Cross-platform builds.** OCI metadata and warm-pool clients now compile on
+  Windows, with Unix-only commit and health paths correctly gated.
+- **Release automation.** The libkrun publish workflow is valid YAML again and
+  no longer creates failed zero-job runs on every push.
+
 ## [3.0.8] — 2026-07-09
 
 ### Changed
