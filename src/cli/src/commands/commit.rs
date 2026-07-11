@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(unix)]
 use base64::Engine;
 use clap::Args;
 use sha2::{Digest, Sha256};
@@ -110,6 +111,7 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+#[cfg(unix)]
 async fn capture_rootfs_tar(
     record: &crate::state::BoxRecord,
     rootfs_dir: &Path,
@@ -141,6 +143,16 @@ async fn capture_rootfs_tar(
         .validate()
         .map_err(|error| format!("Invalid guest rootfs metadata: {error}"))?;
     create_tar_from_guest_metadata(rootfs_dir, &manifest, output)
+}
+
+#[cfg(windows)]
+async fn capture_rootfs_tar(
+    _record: &crate::state::BoxRecord,
+    _rootfs_dir: &Path,
+    _output: &Path,
+    _pause: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("committing box filesystems is not supported on Windows".into())
 }
 
 #[cfg(unix)]

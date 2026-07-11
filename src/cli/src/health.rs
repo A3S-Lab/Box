@@ -11,9 +11,10 @@
 //! - After `retries` consecutive failures → status becomes "unhealthy"
 //! - Socket disappearing → box has stopped; checker exits
 
-use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
+use std::path::Path;
+use std::path::PathBuf;
 
-#[cfg(any(not(windows), test))]
 use crate::state::BoxRecord;
 use crate::state::HealthCheck;
 #[cfg(not(windows))]
