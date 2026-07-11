@@ -9,6 +9,7 @@ const DEFAULT_BUILDKIT_IMAGE: &str = "moby/buildkit:latest";
 const DEFAULT_BUILDKIT_CPUS: &str = "4";
 const DEFAULT_BUILDKIT_MEMORY: &str = "8g";
 const OUTPUT_TAR: &str = "image.tar";
+const BUILD_SCRIPT: &str = "a3s-buildkit-build.sh";
 const DOCKER_CONFIG_GUEST_PATH: &str = "/root/.docker/config.json";
 const BUILDKIT_STATE_DIR: &str = "/var/lib/buildkit";
 
@@ -58,11 +59,12 @@ pub(super) async fn execute(options: Build) -> Result<(), Box<dyn std::error::Er
         None
     };
 
+    let buildctl_args = buildctl_args(&options, &dockerfile_arg, &output_tar)?;
+    write_build_script(output_dir.path(), &buildctl_args)?;
+
     let run_args = run_args(
         &options,
-        &dockerfile_arg,
         output_dir.path(),
-        &output_tar,
         auth_config.as_ref().map(BuildkitAuthConfig::path),
     )?;
     if !options.quiet {
@@ -142,9 +144,7 @@ fn dockerfile_arg(
 
 fn run_args(
     options: &Build,
-    dockerfile_arg: &str,
     output_dir: &Path,
-    output_tar: &Path,
     auth_config: Option<&Path>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let context = options.context_dir.to_str().ok_or_else(|| {
@@ -159,11 +159,6 @@ fn run_args(
             output_dir.display()
         )
     })?;
-    let output_name = output_tar
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("Invalid BuildKit output file: {}", output_tar.display()))?;
-
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
@@ -194,9 +189,24 @@ fn run_args(
 
     args.extend([
         "--entrypoint".to_string(),
-        "buildctl-daemonless.sh".to_string(),
+        "/bin/sh".to_string(),
         options.image.clone(),
         "--".to_string(),
+        format!("/out/{BUILD_SCRIPT}"),
+    ]);
+    Ok(args)
+}
+
+fn buildctl_args(
+    options: &Build,
+    dockerfile_arg: &str,
+    output_tar: &Path,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let output_name = output_tar
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid BuildKit output file: {}", output_tar.display()))?;
+    let mut args = vec![
         "build".to_string(),
         "--frontend".to_string(),
         "dockerfile.v0".to_string(),
@@ -206,7 +216,7 @@ fn run_args(
         "dockerfile=/workspace".to_string(),
         "--opt".to_string(),
         format!("filename={dockerfile_arg}"),
-    ]);
+    ];
 
     for build_arg in &options.build_args {
         args.push("--opt".to_string());
@@ -227,6 +237,30 @@ fn run_args(
     args.push("--output".to_string());
     args.push(output_attr(options, output_name)?);
     Ok(args)
+}
+
+fn write_build_script(
+    output_dir: &Path,
+    args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let script_path = output_dir.join(BUILD_SCRIPT);
+    let mut script = String::from("#!/bin/sh\nset -eu\nexec buildctl-daemonless.sh");
+    for arg in args {
+        script.push(' ');
+        script.push_str(&shell_quote(arg));
+    }
+    script.push('\n');
+    std::fs::write(&script_path, script).map_err(|error| {
+        format!(
+            "Failed to write BuildKit helper script {}: {error}",
+            script_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn buildkit_auth_config(
@@ -383,29 +417,29 @@ mod tests {
     #[test]
     fn test_run_args_buildkit_daemonless_oci_output() {
         let options = base_options();
-        let args = run_args(
+        let args = run_args(&options, Path::new("/tmp/out"), None).unwrap();
+        let build_args = buildctl_args(
             &options,
             "docker/Dockerfile.web",
-            Path::new("/tmp/out"),
             Path::new("/tmp/out/image.tar"),
-            None,
         )
         .unwrap();
 
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--privileged".to_string()));
         assert!(args.contains(&"moby/buildkit:latest".to_string()));
-        assert!(args.contains(&"buildctl-daemonless.sh".to_string()));
-        assert!(args.contains(&"context=/workspace".to_string()));
-        assert!(args.contains(&"dockerfile=/workspace".to_string()));
-        assert!(args.contains(&"filename=docker/Dockerfile.web".to_string()));
+        assert!(args.contains(&"/bin/sh".to_string()));
+        assert!(args.contains(&format!("/out/{BUILD_SCRIPT}")));
         assert!(args.contains(&"--tmpfs".to_string()));
         assert!(args.contains(&"/var/lib/buildkit".to_string()));
-        assert!(args.contains(&"build-arg:VERSION=1.2.3".to_string()));
-        assert!(args.contains(&"platform=linux/arm64".to_string()));
-        assert!(args.contains(&"target=builder".to_string()));
-        assert!(args.contains(&"--no-cache".to_string()));
-        assert!(args.contains(&"type=oci,dest=/out/image.tar".to_string()));
+        assert!(build_args.contains(&"context=/workspace".to_string()));
+        assert!(build_args.contains(&"dockerfile=/workspace".to_string()));
+        assert!(build_args.contains(&"filename=docker/Dockerfile.web".to_string()));
+        assert!(build_args.contains(&"build-arg:VERSION=1.2.3".to_string()));
+        assert!(build_args.contains(&"platform=linux/arm64".to_string()));
+        assert!(build_args.contains(&"target=builder".to_string()));
+        assert!(build_args.contains(&"--no-cache".to_string()));
+        assert!(build_args.contains(&"type=oci,dest=/out/image.tar".to_string()));
     }
 
     #[test]
@@ -413,12 +447,10 @@ mod tests {
         let mut options = base_options();
         options.push = true;
         options.plain_http = true;
-        let args = run_args(
+        let args = buildctl_args(
             &options,
             "docker/Dockerfile.web",
-            Path::new("/tmp/out"),
             Path::new("/tmp/out/image.tar"),
-            None,
         )
         .unwrap();
 
@@ -433,14 +465,31 @@ mod tests {
         let options = base_options();
         let args = run_args(
             &options,
-            "docker/Dockerfile.web",
             Path::new("/tmp/out"),
-            Path::new("/tmp/out/image.tar"),
             Some(Path::new("/tmp/auth/config.json")),
         )
         .unwrap();
 
         assert!(args.contains(&"/tmp/auth/config.json:/root/.docker/config.json:ro".to_string()));
+    }
+
+    #[test]
+    fn test_build_script_preserves_spaces_quotes_and_multiple_build_args() {
+        let tmp = tempfile::tempdir().unwrap();
+        let args = vec![
+            "build".to_string(),
+            "--opt".to_string(),
+            "build-arg:PLAIN=custom".to_string(),
+            "--opt".to_string(),
+            "build-arg:QUOTED=two words and 'quote'".to_string(),
+        ];
+
+        write_build_script(tmp.path(), &args).unwrap();
+        let script = std::fs::read_to_string(tmp.path().join(BUILD_SCRIPT)).unwrap();
+
+        assert!(script.starts_with("#!/bin/sh\nset -eu\nexec buildctl-daemonless.sh "));
+        assert!(script.contains("'build-arg:PLAIN=custom'"));
+        assert!(script.contains("'build-arg:QUOTED=two words and '\"'\"'quote'\"'\"''"));
     }
 
     #[test]
@@ -501,12 +550,10 @@ mod tests {
         let mut options = base_options();
         options.platform = Some("linux/amd64".to_string());
 
-        let args = run_args(
+        let args = buildctl_args(
             &options,
             "docker/Dockerfile.web",
-            Path::new("/tmp/out"),
             Path::new("/tmp/out/image.tar"),
-            None,
         )
         .unwrap();
 

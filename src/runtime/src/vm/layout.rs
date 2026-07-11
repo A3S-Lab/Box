@@ -232,30 +232,52 @@ impl VmManager {
                     prom.rootfs_cache_misses.inc();
                 }
 
-                let rootfs_path = box_dir.join("rootfs");
+                let rootfs_path = self.rootfs_provider.prepare_empty(&box_dir)?;
+                let rootfs_populated = std::fs::read_dir(&rootfs_path)
+                    .map(|mut entries| entries.next().is_some())
+                    .map_err(|error| {
+                        BoxError::BuildError(format!(
+                            "Failed to inspect rootfs {}: {error}",
+                            rootfs_path.display()
+                        ))
+                    })?;
                 let mut builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
 
-                // Install guest init if available (runs as PID 1, mounts virtiofs shares,
-                // then execs the container entrypoint)
-                if let Ok(guest_init_path) = Self::find_guest_init() {
+                // A persistent copy/APFS provider already contains the prior
+                // terminal rootfs generation. Re-extracting the image would
+                // overwrite guest changes and fails on existing layer
+                // hardlinks. The image config remains immutable OCI metadata,
+                // so read it without rebuilding the filesystem.
+                if rootfs_populated {
                     tracing::info!(
-                        guest_init = %guest_init_path.display(),
-                        "Installing guest init"
+                        rootfs = %rootfs_path.display(),
+                        "Reusing populated persistent rootfs"
                     );
-                    builder = builder.with_guest_init(guest_init_path);
+                    let config = builder.image_config()?;
+                    (rootfs_path, Some(config))
                 } else {
-                    tracing::warn!(
-                        "Guest init binary not found; container entrypoint will run as PID 1"
-                    );
+                    // Install guest init if available (runs as PID 1, mounts virtiofs shares,
+                    // then execs the container entrypoint)
+                    if let Ok(guest_init_path) = Self::find_guest_init() {
+                        tracing::info!(
+                            guest_init = %guest_init_path.display(),
+                            "Installing guest init"
+                        );
+                        builder = builder.with_guest_init(guest_init_path);
+                    } else {
+                        tracing::warn!(
+                            "Guest init binary not found; container entrypoint will run as PID 1"
+                        );
+                    }
+
+                    builder.build()?;
+                    let config = builder.image_config()?;
+
+                    // Store in cache for next time
+                    self.store_rootfs_cache(&cache_key, &rootfs_path, reference);
+
+                    (rootfs_path, Some(config))
                 }
-
-                builder.build()?;
-                let config = builder.image_config()?;
-
-                // Store in cache for next time
-                self.store_rootfs_cache(&cache_key, &rootfs_path, reference);
-
-                (rootfs_path, Some(config))
             };
 
         // Generate TEE configuration if enabled
@@ -338,20 +360,48 @@ impl VmManager {
     /// Returns `Some(cached_path)` if cache hit, `None` if cache miss.
     /// The caller is responsible for preparing the rootfs via `RootfsProvider`.
     pub(crate) fn try_rootfs_cache_path(&self, cache_key: &str) -> Result<Option<PathBuf>> {
-        if !self.config.cache.enabled {
-            return Ok(None);
-        }
-
-        let cache_dir = self.resolve_cache_dir().join("rootfs");
-        let cache = match RootfsCache::new(&cache_dir) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to open rootfs cache, skipping");
+        #[cfg(target_os = "macos")]
+        {
+            if !self.config.cache.enabled {
                 return Ok(None);
             }
-        };
+            let image = self
+                .resolve_cache_dir()
+                .join("rootfs-apfs-v2")
+                .join(format!("{cache_key}.sparseimage"));
+            if image.is_file() {
+                // Cache pruning is LRU. Refresh both timestamps without changing
+                // sparse-image contents so frequently used images remain hot.
+                if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&image) {
+                    let now = std::time::SystemTime::now();
+                    let times = std::fs::FileTimes::new()
+                        .set_accessed(now)
+                        .set_modified(now);
+                    let _ = file.set_times(times);
+                }
+                Ok(Some(image))
+            } else {
+                Ok(None)
+            }
+        }
 
-        cache.get(cache_key)
+        #[cfg(not(target_os = "macos"))]
+        {
+            if !self.config.cache.enabled {
+                return Ok(None);
+            }
+
+            let cache_dir = self.resolve_cache_dir().join("rootfs");
+            let cache = match RootfsCache::new(&cache_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to open rootfs cache, skipping");
+                    return Ok(None);
+                }
+            };
+
+            cache.get(cache_key)
+        }
     }
 
     /// Store a built rootfs in the cache for future reuse.
@@ -363,40 +413,95 @@ impl VmManager {
         rootfs_path: &Path,
         description: &str,
     ) {
-        if !self.config.cache.enabled {
-            return;
-        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
 
-        let cache_dir = self.resolve_cache_dir().join("rootfs");
-        let cache = match RootfsCache::new(&cache_dir) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to open rootfs cache for storing");
+            if !self.config.cache.enabled {
                 return;
             }
-        };
-
-        match cache.put(cache_key, rootfs_path, description) {
-            Ok(_) => {
-                tracing::debug!(
-                    cache_key = %&cache_key[..cache_key.len().min(12)],
-                    description = %description,
-                    "Stored rootfs in cache"
-                );
-                // Prune if needed — but never evict a cache entry that is in use as
-                // a live overlay lower for a concurrent box (deleting the lowerdir
-                // under its mount(2) is the same-image concurrency bug this guards).
-                let protected = self.referenced_rootfs_cache_keys();
-                if let Err(e) = cache.prune_protecting(
-                    self.config.cache.max_rootfs_entries,
-                    self.config.cache.max_cache_bytes,
-                    &protected,
-                ) {
-                    tracing::warn!(error = %e, "Failed to prune rootfs cache");
-                }
+            let cache_dir = self.resolve_cache_dir().join("rootfs-apfs-v2");
+            if let Err(error) = std::fs::create_dir_all(&cache_dir) {
+                tracing::warn!(%error, "Failed to create APFS rootfs cache");
+                return;
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to store rootfs in cache");
+            let mountpoint = rootfs_path.parent().unwrap_or(rootfs_path);
+            let box_dir = mountpoint.parent().unwrap_or(mountpoint);
+            let source = box_dir.join("rootfs-apfs-v2.sparseimage");
+            let destination = cache_dir.join(format!("{cache_key}.sparseimage"));
+            let temporary = cache_dir.join(format!(".{cache_key}.tmp-{}", std::process::id()));
+
+            crate::rootfs::unmount_box_rootfs(rootfs_path);
+            let cloned = Command::new("cp")
+                .arg("-c")
+                .arg(&source)
+                .arg(&temporary)
+                .status()
+                .is_ok_and(|status| status.success());
+            if cloned {
+                if let Err(error) = std::fs::rename(&temporary, &destination) {
+                    tracing::warn!(%error, "Failed to publish APFS rootfs cache image");
+                } else {
+                    tracing::debug!(
+                        cache_key = %&cache_key[..cache_key.len().min(12)],
+                        %description,
+                        "Stored case-sensitive APFS rootfs cache"
+                    );
+                    if let Err(error) = prune_apfs_rootfs_cache(
+                        &cache_dir,
+                        self.config.cache.max_rootfs_entries,
+                        self.config.cache.max_cache_bytes,
+                        cache_key,
+                    ) {
+                        tracing::warn!(%error, "Failed to prune APFS rootfs cache");
+                    }
+                }
+            } else {
+                tracing::warn!(source = %source.display(), "Failed to clone APFS rootfs cache image");
+                let _ = std::fs::remove_file(&temporary);
+            }
+            if let Err(error) = self.rootfs_provider.prepare_empty(box_dir) {
+                tracing::warn!(%error, "Failed to remount rootfs after caching");
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if !self.config.cache.enabled {
+                return;
+            }
+
+            let cache_dir = self.resolve_cache_dir().join("rootfs");
+            let cache = match RootfsCache::new(&cache_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to open rootfs cache for storing");
+                    return;
+                }
+            };
+
+            match cache.put(cache_key, rootfs_path, description) {
+                Ok(_) => {
+                    tracing::debug!(
+                        cache_key = %&cache_key[..cache_key.len().min(12)],
+                        description = %description,
+                        "Stored rootfs in cache"
+                    );
+                    // Prune if needed — but never evict a cache entry that is in use as
+                    // a live overlay lower for a concurrent box (deleting the lowerdir
+                    // under its mount(2) is the same-image concurrency bug this guards).
+                    let protected = self.referenced_rootfs_cache_keys();
+                    if let Err(e) = cache.prune_protecting(
+                        self.config.cache.max_rootfs_entries,
+                        self.config.cache.max_cache_bytes,
+                        &protected,
+                    ) {
+                        tracing::warn!(error = %e, "Failed to prune rootfs cache");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to store rootfs in cache");
+                }
             }
         }
     }
@@ -412,6 +517,7 @@ impl VmManager {
     /// Rootfs-cache keys currently in use as an overlay lower by some live box.
     /// Boxes live under `<home>/boxes/<id>/`; a removed box's marker is gone with
     /// its dir, so an evictable key is simply one no live box references.
+    #[cfg(not(target_os = "macos"))]
     fn referenced_rootfs_cache_keys(&self) -> std::collections::HashSet<String> {
         let mut set = std::collections::HashSet::new();
         if let Ok(entries) = std::fs::read_dir(self.home_dir.join("boxes")) {
@@ -688,6 +794,72 @@ impl VmManager {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn prune_apfs_rootfs_cache(
+    cache_dir: &Path,
+    max_entries: usize,
+    max_allocated_bytes: u64,
+    protected_key: &str,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    struct Entry {
+        path: PathBuf,
+        key: String,
+        modified: std::time::SystemTime,
+        allocated_bytes: u64,
+    }
+
+    let mut entries = Vec::new();
+    for item in std::fs::read_dir(cache_dir)? {
+        let item = item?;
+        let path = item.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(key) = name.strip_suffix(".sparseimage") else {
+            continue;
+        };
+        if key.starts_with('.') || !item.file_type()?.is_file() {
+            continue;
+        }
+        let key = key.to_string();
+        let metadata = item.metadata()?;
+        entries.push(Entry {
+            path,
+            key,
+            modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+            // `len()` is the sparse image's 64 GiB virtual capacity. `blocks()`
+            // reflects physical 512-byte blocks and is the bounded resource.
+            allocated_bytes: metadata.blocks().saturating_mul(512),
+        });
+    }
+
+    entries.sort_by_key(|entry| entry.modified);
+    let mut count = entries.len();
+    let mut allocated: u64 = entries.iter().map(|entry| entry.allocated_bytes).sum();
+    for entry in entries {
+        if count <= max_entries && allocated <= max_allocated_bytes {
+            break;
+        }
+        if entry.key == protected_key {
+            continue;
+        }
+        match std::fs::remove_file(&entry.path) {
+            Ok(()) => {
+                count = count.saturating_sub(1);
+                allocated = allocated.saturating_sub(entry.allocated_bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                count = count.saturating_sub(1);
+                allocated = allocated.saturating_sub(entry.allocated_bytes);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 /// Read the snapshot-restore copy-on-write overlay lower marker, if present and
 /// non-empty. `snapshot restore` writes the snapshot's stored rootfs path here;
 /// the runtime mounts it as a read-only overlay lower instead of copying the
@@ -847,6 +1019,7 @@ mod tests {
         assert!(!cache_dir.exists());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn test_store_rootfs_cache_success() {
         let tmp = TempDir::new().unwrap();
@@ -865,6 +1038,7 @@ mod tests {
         assert!(result.is_some());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn test_store_rootfs_cache_prunes_on_store() {
         let tmp = TempDir::new().unwrap();
@@ -885,6 +1059,58 @@ mod tests {
         let cache_dir = tmp.path().join("cache").join("rootfs");
         let cache = RootfsCache::new(&cache_dir).unwrap();
         assert!(cache.entry_count().unwrap() <= 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_prune_apfs_rootfs_cache_bounds_entries_and_protects_new_entry() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("rootfs-apfs");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        for key in ["oldest", "middle", "new"] {
+            std::fs::write(
+                cache_dir.join(format!("{key}.sparseimage")),
+                vec![b'x'; 4096],
+            )
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::write(cache_dir.join(".partial.tmp-1"), b"temporary").unwrap();
+
+        prune_apfs_rootfs_cache(&cache_dir, 1, u64::MAX, "new").unwrap();
+
+        assert!(!cache_dir.join("oldest.sparseimage").exists());
+        assert!(!cache_dir.join("middle.sparseimage").exists());
+        assert!(cache_dir.join("new.sparseimage").exists());
+        assert!(cache_dir.join(".partial.tmp-1").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_prune_apfs_rootfs_cache_uses_allocated_bytes_not_virtual_length() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("rootfs-apfs");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let old = cache_dir.join("old.sparseimage");
+        let protected = cache_dir.join("protected.sparseimage");
+        std::fs::write(&old, vec![b'x'; 8192]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&protected, vec![b'y'; 4096]).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&protected)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 * 1024)
+            .unwrap();
+        let protected_allocated = protected.metadata().unwrap().blocks() * 512;
+
+        prune_apfs_rootfs_cache(&cache_dir, usize::MAX, protected_allocated, "protected").unwrap();
+
+        assert!(!old.exists());
+        assert!(protected.exists());
     }
 
     #[cfg(unix)]
@@ -977,6 +1203,7 @@ mod tests {
         assert_eq!(request.user, Some("1000:1000".to_string()));
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn test_try_and_store_roundtrip() {
         let tmp = TempDir::new().unwrap();

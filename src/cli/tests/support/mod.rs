@@ -144,6 +144,29 @@ impl CliTest {
             })
     }
 
+    pub fn interrupt_background(&self, child: &mut std::process::Child) {
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = child.kill();
+        }
+
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(30) {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(_) => return,
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     pub fn output_with_stdin(&self, args: &[&str], stdin: &[u8]) -> (String, String, bool) {
         eprintln!("    $ printf ... | a3s-box {}", args.join(" "));
 

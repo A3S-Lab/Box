@@ -38,7 +38,7 @@ As of **v2.4.0**, three adversarial audits — production-operability (24 findin
 | --- | --- |
 | Local CLI runtime | Implemented for macOS Apple Silicon/HVF and Linux/KVM style hosts. Real macOS HVF core and host smoke suites have passed with Alpine pulled from the registry; offline archive runs remain the release-gate default. |
 | OCI images | Pull, load, save, tag, inspect, history, remove, and local cache resolution are implemented. Push and cosign signing/verification paths exist and require registry access for end-to-end validation. |
-| Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell-form `RUN` are implemented by the host engine on Linux. On macOS, `RUN` builds are delegated to BuildKit inside an A3S Linux VM (`--builder=buildkit-vm`); unsafe host execution remains an explicit experiment-only escape hatch. |
+| Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell/exec-form `RUN` are implemented by the host engine on Linux. `--run-pool` can execute `RUN` through a leased warm-pool VM by mounting the mutable build rootfs into the guest. On macOS, auto `RUN` builds still delegate to BuildKit inside an A3S Linux VM (`--builder=buildkit-vm`) unless `--run-pool` is selected; unsafe host execution remains an explicit experiment-only escape hatch. |
 | Lifecycle and exec | `run`, `create`, `start`, `stop`, `restart`, `rm`, `wait`, foreground/detached runs, non-PTY exec, PTY exec, logs, stats, and inspect are implemented. |
 | Warm pool and snapshot-fork | A warm pool serves pre-booted sandboxes over a socket. Native snapshot-fork (Copy-on-Write microVM cloning) snapshots one booted template and restores many forks from it, each mapping the template RAM `MAP_PRIVATE`. Verified on `/dev/kvm`: ~4× faster than a cold boot per fork, 100 forks in under ~1 s (~8 ms amortized each). Requires `/dev/kvm`; opt in with `pool start --snapshot-fork` or the `KRUN_SNAPSHOT_*` / `KRUN_RESTORE_FROM` env. |
 | Networking | Default TSI networking, TCP `host:guest` publishing, user-defined bridge networks, network inspect/connect/disconnect/rm, and `/etc/hosts` peer discovery are implemented with documented platform boundaries. |
@@ -69,7 +69,7 @@ The ignored `core_smoke` suite covers the core CLI path on a real MicroVM host:
 - TCP published ports with host loopback HTTP reachability;
 - bridge network endpoint allocation, peer `/etc/hosts`, connect/disconnect, and force removal cleanup;
 - named volumes, `cp`, `diff`, `export`, `commit`, `snapshot`, restart-policy monitor recovery, and Compose health/volume flow;
-- warm pool (`pool start`/`pool run`): pre-warmed sandboxes served over a socket, with backpressure and multi-image lazy pools; `--deferred` runs each command as the box's real main for full box semantics (real exit code + json-file console logs) with no cold boot; `--snapshot-fork` fills the pool by Copy-on-Write restore from one booted template instead of cold booting each sandbox.
+- warm pool (`pool start`/`pool run`/`run --pool`): pre-warmed sandboxes served over a socket, with backpressure and multi-image lazy pools; `A3S_BOX_RUN_POOL_SOCKET` can auto-route compatible foreground `run --rm` commands through the daemon; `--deferred` runs each command as the box's real main for full box semantics (real exit code + json-file console logs) with no cold boot; `--snapshot-fork` fills the pool by Copy-on-Write restore from one booted template instead of cold booting each sandbox.
 
 The most recent local record, on June 29, 2026: all 15 ignored `core_smoke`
 tests passed on macOS Apple Silicon/HVF with Alpine pulled from the registry,
@@ -120,7 +120,7 @@ On macOS, use Apple Silicon. On Linux, use a host with KVM/libkrun support. On W
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
 
-Run `a3s-box info` first; it reports virtualization, platform, bridge backend, port-publishing support, TEE availability, package-cache state, and the current virtio-fs cache mode.
+Run `a3s-box info` first; it reports virtualization, platform, bridge backend, port-publishing support, TEE availability, package-cache state, the current virtio-fs cache mode, and any reachable warm-pool daemon on the default or configured sockets.
 
 ## Quick start
 
@@ -187,6 +187,12 @@ Important supported options:
 
 For CI-style one-shot commands, prefer foreground `run --rm --timeout <seconds>` and avoid `-i` unless the command truly needs stdin. A timed-out foreground run stops/removes the box according to the usual `--rm` behavior and exits with code 124. `a3s-box wait` prints a low-frequency stderr keepalive while it is blocking so long CI or SSH sessions do not look idle; use `--no-heartbeat` or `--heartbeat-interval <seconds>` to tune it.
 
+Health checks for detached `run`, Compose services, and boxes brought back by
+`start`/`restart` are owned by a generation-fenced background worker, not by the
+short-lived creating CLI. The worker stops when that box generation stops or is
+replaced; an installed `a3s-box monitor` detects the worker lock and does not
+duplicate its probes.
+
 Unsupported or guarded options fail early instead of being silently stored: host devices, GPUs, AppArmor labels, SELinux labels, custom seccomp profiles, unsupported users, invalid workdirs, unsupported port syntax, and unsupported network policies.
 
 ## Images and builds
@@ -218,16 +224,19 @@ a3s-box build -t app:dev --build-arg VERSION=1.2.3 --platform linux/amd64 .
 a3s-box build -t builder --target builder --no-cache .   # stop at a stage, skip the cache
 a3s-box build --builder=buildkit-vm --platform linux/arm64 -t app:dev . # safe macOS RUN path
 a3s-box build --builder=buildkit-vm --push --plain-http -t 10.0.0.2:5000/app:v1 .
+a3s-box pool start --image alpine:latest --size 1 --socket /tmp/a3s-build-pool.sock
+a3s-box build --run-pool --run-pool-socket /tmp/a3s-build-pool.sock -t app:dev .
 ```
 
-Supported Dockerfile subset: `FROM` including `scratch`, shell-form `RUN`, shell-form `COPY`/`ADD` (incl. `COPY --from=<stage>`, `COPY`/`ADD --chown=user[:group]`), `WORKDIR`, `ENV`, `ENTRYPOINT`, `CMD`, `EXPOSE`, `LABEL`, `USER`, `ARG`, `SHELL`, `STOPSIGNAL`, `HEALTHCHECK`, `ONBUILD` metadata triggers, and `VOLUME`. A context-root `.dockerignore` is honored.
+Supported Dockerfile subset: `FROM` including `scratch`, shell/exec-form `RUN` (including `RUN --mount=type=cache,target=...` with Docker's default `sharing=shared`, or explicit `sharing=locked`, optional `from=<stage-or-image>,source=...` cache seeding, `RUN --mount=type=bind,source=...,target=...` from the build context or `RUN --mount=type=bind,from=<stage-or-image>,source=...,target=...`, `RUN --mount=type=tmpfs,target=...` without `size=`, and Docker's no-op defaults `RUN --network=default` / `RUN --security=sandbox`), shell-form `COPY`/`ADD` (incl. `COPY --from=<stage>`, `COPY`/`ADD --chown=user[:group]`), `WORKDIR`, `ENV`, `ENTRYPOINT`, `CMD`, `EXPOSE`, `LABEL`, `USER`, `ARG`, `SHELL`, `STOPSIGNAL`, `HEALTHCHECK`, `ONBUILD` metadata triggers, and `VOLUME`. A context-root `.dockerignore` is honored.
 
-Build flags: `-t/--tag`, `-f/--file`, `--build-arg`, `--platform`, `--target <stage>` (build only up to a stage), `--no-cache` (rebuild every layer), `--builder auto|host|buildkit-vm`, `--push`, `--plain-http`, `--buildkit-image <image>`, `--buildkit-cpus <n>`, `--buildkit-memory <size>`, `-q/--quiet`.
+Build flags: `-t/--tag`, `-f/--file`, `--build-arg`, `--platform`, `--target <stage>` (build only up to a stage), `--no-cache` (rebuild every layer), `--builder auto|host|buildkit-vm`, `--push`, `--plain-http`, `--buildkit-image <image>`, `--buildkit-cpus <n>`, `--buildkit-memory <size>`, `--run-pool`, `--run-pool-socket <path>`, `--run-pool-autostart`, `--run-pool-image <image>`, `--run-pool-cpus <n>`, `--run-pool-memory <size>`, `--run-pool-timeout <duration>`, `--run-cache-dir <path>`, `-q/--quiet`.
 
 Boundaries:
 
 - `RUN` uses isolated Linux `chroot`, requires root-capable Linux, validates shell/workdir preconditions, and has a Linux-only ignored smoke test;
-- macOS `RUN` auto-selects the BuildKit VM backend unless `A3S_BOX_UNSAFE_HOST_RUN=1` is set; explicit `--builder=host` keeps the built-in host engine behavior;
+- `--run-pool` is the built-in engine's isolated VM path for `RUN`: it leases one warm-pool VM per build stage, mounts that stage's mutable rootfs at `/run/a3s/build-rootfs`, executes shell-form RUN through the configured shell and exec-form RUN as argv with the Dockerfile `WORKDIR`, `ENV`, and `USER`, then diffs the host rootfs into OCI layers. It requires a running `a3s-box pool start` daemon. `RUN --mount=type=cache` is treated as a persistent cache overlay keyed by `id=` (or by `target=` when `id` is omitted); cache contents are visible during matching `RUN` commands but are restored before layer diffing, so they are not committed to the image. Successful RUNs publish cache writes; failed RUNs restore the rootfs without publishing partial cache contents. A new cache can be seeded from `from=<stage-or-image>,source=<dir>`; once the persistent cache exists, it is not re-seeded. The warm-pool path accepts Docker's default omitted `sharing=shared`, explicit `sharing=shared`, and `sharing=locked`; because the host overlay hydrates and publishes cache directories around each RUN, access to the same cache key is serialized across builds to avoid writeback races. Cache-root `mode=`, `uid=`, and `gid=` are supported; cache `sharing=private` remains unsupported. `RUN --mount=type=bind` can mount sources from the build context, a previous build stage, or an external image with `from=<stage-or-image>`, defaults `source=.` when omitted, resolves relative targets from `WORKDIR`, honors `.dockerignore` only for context sources, and discards writes before layer diffing. `RUN --mount=type=tmpfs` creates an empty temporary target, resolves relative targets from `WORKDIR`, restores the original target after RUN, and discards writes before layer diffing; `tmpfs size=` is not supported yet. `RUN --network=default` and `RUN --security=sandbox` are accepted as Docker's default no-op values; non-default per-RUN network/security modes are rejected until the warm-pool exec path can enforce them.
+- macOS `RUN` auto-selects the BuildKit VM backend unless `--run-pool` or `A3S_BOX_UNSAFE_HOST_RUN=1` is set; explicit `--builder=host` keeps the built-in host engine behavior;
 - the BuildKit VM backend loads `type=oci` output back into the A3S image store by default; `--push` writes directly to the tagged registry reference, uses the same credentials as `a3s-box push`, and `--plain-http` marks that registry as trusted HTTP for BuildKit;
 - Apple Silicon `--builder=buildkit-vm --platform linux/amd64` is handled by BuildKit's Linux builder path and may use emulation, so expect slower builds than native `linux/arm64`;
 - `A3S_BOX_UNSAFE_HOST_RUN=1` enables unsafe macOS host-side experiments only;
@@ -259,7 +268,15 @@ a3s-box snapshot prune --keep 5          # bound disk: keep the 5 newest
 
 `--package-cache pnpm` creates/reuses the named volume `a3s-cache-pnpm` and sets cache-friendly defaults: `PNPM_CONFIG_STORE_DIR=/a3s-cache/pnpm/store`, `npm_config_store_dir=/a3s-cache/pnpm/store`, `COREPACK_HOME=/a3s-cache/pnpm/corepack`, `PNPM_HOME=/a3s-cache/pnpm/home`, `npm_config_cache=/a3s-cache/pnpm/npm-cache`, `PNPM_CONFIG_PREFER_OFFLINE=true`, `npm_config_prefer_offline=true`, and `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`. Dependency downloads and the Corepack-prepared pnpm toolchain survive across `--rm` boxes without making the whole rootfs persistent. `--package-cache npm` creates/reuses `a3s-cache-npm` and sets `npm_config_cache=/a3s-cache/npm/cache` plus `npm_config_prefer_offline=true` for npm-only jobs. Override any of those with `-e KEY=VALUE` when a build needs a specific registry or cache policy. For throwaway install/build jobs, mounting `node_modules` as tmpfs avoids pushing thousands of small files through the project bind mount; prime the named cache volume before a release window when cold registry downloads or project-level supply-chain policy checks are known to dominate the first run. Use `bench/bench.sh pnpm` or `just bench-pnpm` to compare A3S project-mount, A3S tmpfs, and Docker cold/hot baselines. Auto-removed boxes also archive their last logs under `~/.a3s/removed-logs/`, and `a3s-box logs <name-or-id>` can read that archive after the box directory is gone.
 
-Host directory volumes are mounted with virtio-fs `cache=none` by default to favor stable traversal on macOS/HVF workloads with large source trees. Use `--virtiofs-cache=always` for release verification jobs where the host source tree is not changing during the run, or `--virtiofs-cache=auto|default` for local experiments; `A3S_VIRTIOFS_CACHE` remains available as a process-wide fallback and `a3s-box info` prints the active fallback setting. On macOS/APFS, the rootfs copy fallback uses recursive `copyfile(3)` cloning before byte-copying, so cached-image startup can share file blocks with the cached rootfs when the filesystem supports it.
+Host directory volumes are mounted with virtio-fs `cache=none` by default to favor stable traversal on macOS/HVF workloads with large source trees. Use `--virtiofs-cache=always` for release verification jobs where the host source tree is not changing during the run, or `--virtiofs-cache=auto|default` for local experiments; `A3S_VIRTIOFS_CACHE` remains available as a process-wide fallback and `a3s-box info` prints the active fallback setting. On macOS, each Linux rootfs lives below a private directory in a case-sensitive APFS sparse image. Cached sparse images are cloned with APFS copy-on-write, preserving Linux path identity without exposing APFS volume-management entries to the guest.
+
+Image extraction and `commit` preserve Linux uid, gid, mode, and symlink
+metadata even when the macOS backing filesystem cannot represent OCI ownership
+directly. Box records rootless layer metadata during extraction and guest-init
+replays it before mounting any host workspace or volume; stopped persistent
+boxes use a guest-captured terminal manifest so a committed image reflects the
+container's final Linux-visible metadata rather than the host user's APFS
+ownership.
 
 The `snapshot` command produces configuration/filesystem-oriented Box snapshots, not a live RAM checkpoint. The live RAM Copy-on-Write facility is a separate, lower-level mechanism described in [Warm pool and snapshot-fork](#warm-pool-and-snapshot-fork).
 
@@ -293,12 +310,54 @@ json-file console logs).
 
 ```bash
 a3s-box pool start --image alpine:latest --size 8     # pre-warm 8 sandboxes
+a3s-box pool start --image alpine:latest --lease-ttl 30m  # reclaim abandoned leases
 a3s-box pool start --image alpine:latest --size 8 --snapshot-fork   # CoW fill
 a3s-box pool start --image alpine:latest --metrics-addr 127.0.0.1:9101   # + Prometheus /metrics
 a3s-box pool run alpine:latest -- echo hi             # served from the pool
+a3s-box run --pool --rm alpine:latest -- echo hi      # Docker-like run shape
+a3s-box run --pool-autostart --rm alpine:latest -- echo hi
+a3s-box run --pool --rm -v "$PWD:/work:ro" -w /work alpine:latest -- cat README.md
+a3s-box build --run-pool --run-pool-socket /tmp/a3s-box-pool.sock -t app:dev .
+a3s-box build --run-pool-autostart --run-pool-image alpine:latest -t app:dev .
 a3s-box pool status
 a3s-box pool stop
 ```
+
+`run --pool` is intentionally a foreground one-shot path today: it requires
+`--rm` and supports the common hot-loop dimensions (`--user`, `--workdir`,
+`--env`, `--env-file`, `--volume`, `--cpus`, `--memory`, and
+`--package-cache`, plus foreground `--timeout`). Image, volumes, vCPUs, and
+memory are part of the warm-pool key because virtio-fs mounts and VM resources
+are fixed at boot. Set
+`A3S_BOX_RUN_POOL_SOCKET=/path/to/pool.sock` to auto-route compatible
+foreground `run --rm` commands through the same daemon; incompatible runs keep
+the normal cold-start path unless `--pool` was requested explicitly. Use
+`--pool-autostart` to start a daemon on `--pool-socket` when one is not already
+running. Options that require persistent box state or a named lifecycle, such as
+`--name`, stay on the normal run path instead of being silently ignored by the
+one-shot pool path.
+
+`build --run-pool` uses the same daemon but with a lease protocol instead of a
+one-shot sandbox: a build stage keeps one warm VM while it executes every
+Dockerfile `RUN` in that stage with the current Dockerfile `WORKDIR`, `ENV`, and
+`USER`, then releases it. The stage rootfs remains the single source of truth;
+the VM only provides isolated Linux execution. Because each stage rootfs mount is
+unique and short-lived, volume-bound build leases are filled on demand instead
+of pre-warming a whole idle pool for every stage. Use
+`--run-pool-autostart --run-pool-image <helper-image>` when the build command
+should start the helper daemon itself.
+
+`pool status` reports idle sandboxes, active checked-out sandboxes, and active
+leases per pool key, which is useful when Dockerfile `RUN` stages are holding a
+warm VM. `a3s-box info` also performs a best-effort daemon probe against
+`A3S_BOX_RUN_POOL_SOCKET`, `A3S_BOX_BUILD_RUN_POOL_SOCKET`, and the default
+socket, then prints the aggregate max/idle/active/leased counts when one is
+reachable. `pool start --lease-ttl <duration>` reclaims unreleased internal
+leases that have been idle for too long (default: `1h`, `0` disables this);
+running lease exec requests are never reclaimed mid-command. `pool stop` sends a
+stop request over the daemon socket, drains idle and leased VMs, removes the
+socket, and exits. It succeeds when no daemon is running so cleanup scripts can
+call it unconditionally.
 
 `pool start --metrics-addr` serves a Prometheus `/metrics` endpoint with warm-pool hit/miss, VM-boot, and cache metrics for the long-running daemon (alongside `monitor --metrics-addr`'s box-state metrics + `/healthz`).
 
@@ -334,7 +393,7 @@ A3S Box has three network modes:
 
 | Mode | What it does | Current boundary |
 | --- | --- | --- |
-| TSI default | Guest socket operations are proxied through the host. Use this for simple outbound access. | No user-defined peer network, and **no in-guest loopback** — a container cannot reach its own services over `localhost`/`127.0.0.1` (e.g. a `localhost` health check or `exec curl localhost` fails). Use a bridge network when you need working localhost. |
+| TSI default | Guest socket operations are proxied through the host. Use this for simple outbound access. On macOS, publishing a TCP port automatically selects an isolated netproxy-backed interface so application bytes and guest loopback remain reliable while the CLI/network-mode contract stays unchanged. | Plain TSI boxes have no user-defined peer network and no in-guest loopback. Use a bridge network for peer discovery; publishing a port on macOS activates the isolated compatibility data path automatically. |
 | Bridge | Creates a real guest network interface for user-defined networks and peer discovery. | Linux uses `passt` with outbound NAT. macOS uses built-in `netproxy` for peer networking and published TCP ports; macOS bridge outbound NAT is unsupported. |
 | None | No network. | Useful for intentionally isolated workloads. |
 
@@ -362,6 +421,13 @@ a3s-box compose -f compose.yaml down
 ```
 
 Supported Compose keys: `image`, `command`, `entrypoint`, `environment`, `env_file`, `ports`, `volumes`, `depends_on` with `service_started` or `service_healthy`, `networks`, `dns`, `tmpfs`, `working_dir`, `hostname`, `extra_hosts`, `labels`, `healthcheck`, `restart`, `cpus`, `mem_limit`, `cap_add`, `cap_drop`, and `privileged`.
+
+Compose scalar values support `$VAR`, `${VAR}`, `${VAR-default}`,
+`${VAR:-default}`, `${VAR+replacement}`, and `${VAR:+replacement}` (plus the
+standard required-value forms). Values come from the project `.env` file next
+to the selected Compose file, with the invoking shell environment taking
+precedence. Expansion happens before typed service and port validation;
+mapping keys are not expanded, and `$$` emits a literal dollar sign.
 
 ## TEE workflows
 
@@ -669,7 +735,7 @@ sudo -E scripts/host-integration-smoke.sh --linux-run --no-pure
 
 The Linux `RUN` smoke must run as root on a root-capable Linux builder.
 See `docs/host-integration.md` for the macOS HVF, Linux KVM, host command
-matrix, CRI smoke, and host soak procedures.
+matrix, warm-pool Dockerfile `RUN` smoke, CRI smoke, and host soak procedures.
 
 ## Environment variables
 
@@ -705,6 +771,9 @@ matrix, CRI smoke, and host soak procedures.
 | `A3S_BOX_BUILDKIT_IMAGE` | BuildKit image used by `--builder=buildkit-vm`. Default: `moby/buildkit:latest`. |
 | `A3S_BOX_BUILDKIT_CPUS` | CPU count for the BuildKit VM helper box. Default: `4`. |
 | `A3S_BOX_BUILDKIT_MEMORY` | Memory limit for the BuildKit VM helper box. Default: `8g`. |
+| `A3S_BOX_RUN_POOL_SOCKET` | Auto-route compatible foreground `a3s-box run --rm` commands through the warm-pool daemon at this socket. Explicit `--pool-socket` still applies when `--pool` is passed. |
+| `A3S_BOX_BUILD_RUN_POOL_SOCKET` | Enable Dockerfile `RUN` warm-pool execution and use this pool daemon socket, equivalent to `a3s-box build --run-pool-socket <path>`. |
+| `A3S_BOX_BUILD_RUN_CACHE_DIR` | Override the persistent Dockerfile `RUN --mount=type=cache` directory used by the warm-pool build path. Defaults to `~/.a3s/buildcache/run-cache`. |
 | `A3S_BOX_UNSAFE_HOST_RUN` | Opt into unsafe macOS host execution for Dockerfile `RUN` experiments. |
 | `A3S_BOX_BUILDCACHE_MAX_BYTES` | Cap on the total size of cached build layers at `~/.a3s/buildcache` (oldest evicted first). Default: 2 GiB. |
 | `A3S_BOX_MAX_LAYER_BYTES` | Cap on total decompressed bytes per OCI image layer during `pull` (decompression-bomb guard). Default: 16 GiB. |

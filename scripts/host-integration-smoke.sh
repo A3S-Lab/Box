@@ -44,7 +44,7 @@ Options:
   --pure         Run stub-backed fmt, clippy, lib tests, and integration compile checks (default).
   --no-pure      Skip the stub-backed baseline checks.
   --core         Run the ignored real MicroVM core_smoke suite.
-  --host         Run ignored host_smoke VM, Compose, and optional registry suites.
+  --host         Run ignored host_smoke VM, warm-pool, Compose, and optional registry suites.
   --linux-run    Run the Linux-only Dockerfile RUN chroot smoke.
   --cri          Run the ignored crictl CRI smoke with A3S_BOX_CRI_SMOKE=1.
   --all          Run --core, --host, --linux-run, and --cri after the pure checks.
@@ -451,6 +451,10 @@ run_host_suite() {
     build_real_binaries
     log "Running host VM command matrix"
     run_real cargo test -p a3s-box-cli --test host_smoke test_real_vm_command_matrix -- --ignored --nocapture --test-threads=1
+    log "Running warm-pool command smoke"
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_pool_warm_run -- --ignored --nocapture --test-threads=1
+    log "Running warm-pool Dockerfile RUN smoke"
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_build_run_pool_smoke -- --ignored --nocapture --test-threads=1
     log "Running host Compose smoke"
     run_real cargo test -p a3s-box-cli --test host_smoke test_real_compose_smoke -- --ignored --nocapture --test-threads=1
 

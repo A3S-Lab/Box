@@ -377,6 +377,7 @@ impl A3sBoxClient {
                 target: request.target,
                 no_cache: request.no_cache,
                 metrics: None,
+                run_pool: None,
             },
             store,
         )

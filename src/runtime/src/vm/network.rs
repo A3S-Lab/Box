@@ -8,6 +8,46 @@ use crate::vmm::NetworkInstanceConfig;
 use super::VmManager;
 
 impl VmManager {
+    /// Configure an isolated virtio-net backend for a default-network box that
+    /// publishes host ports on macOS.
+    ///
+    /// libkrun's reverse TSI listener can accept TCP while stalling payloads,
+    /// especially when the client is another TSI guest. A private netproxy
+    /// instance provides the same outbound connectivity and published-port CLI
+    /// contract without joining a user-visible bridge network.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn setup_published_default_network(&mut self) -> Result<NetworkInstanceConfig> {
+        let ip = std::net::Ipv4Addr::new(10, 89, 0, 2);
+        let gateway = std::net::Ipv4Addr::new(10, 89, 0, 1);
+        let prefix_len = 24;
+        let dns_servers: Vec<std::net::Ipv4Addr> = if self.config.dns.is_empty() {
+            vec![std::net::Ipv4Addr::new(8, 8, 8, 8)]
+        } else {
+            self.config
+                .dns
+                .iter()
+                .filter_map(|value| value.parse().ok())
+                .collect()
+        };
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let mut netproxy = crate::network::NetProxyManager::new(&box_dir);
+        netproxy.spawn(ip, gateway, prefix_len, &dns_servers, &self.config.port_map)?;
+        let config = NetworkInstanceConfig {
+            net_socket_path: netproxy.socket_path().to_path_buf(),
+            net_stats_path: Some(netproxy.stats_path().to_path_buf()),
+            net_socket_fd: netproxy.net_socket_fd(),
+            net_proxy_fd: netproxy.net_proxy_fd(),
+            bridge_socket_dir: None,
+            ip_address: ip,
+            gateway,
+            prefix_len,
+            mac_address: [0x02, 0x42, 0x0a, 0x59, 0x00, 0x02],
+            dns_servers,
+        };
+        self.net_manager = Some(Box::new(netproxy));
+        Ok(config)
+    }
+
     /// Write `/etc/hostname` when a hostname override is configured.
     pub(crate) fn write_hostname_file(&self, layout: &super::BoxLayout) -> Result<()> {
         let Some(hostname) = self.config.hostname.as_deref() else {
@@ -131,6 +171,8 @@ impl VmManager {
             net_socket_fd,
             #[cfg(target_os = "macos")]
             net_proxy_fd,
+            #[cfg(target_os = "macos")]
+            bridge_socket_dir: Some(macos_bridge_socket_dir(&self.home_dir, network_name)),
             ip_address: ip,
             gateway,
             prefix_len,
@@ -228,6 +270,21 @@ impl VmManager {
         tracing::debug!(hosts = %hosts_content.trim(), "Configured guest /etc/hosts for DNS discovery");
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_bridge_socket_dir(home: &std::path::Path, network_name: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(home.as_os_str().as_encoded_bytes());
+    digest.update([0]);
+    digest.update(network_name.as_bytes());
+    let key = hex::encode(digest.finalize());
+    let uid = unsafe { libc::getuid() };
+    std::path::PathBuf::from("/private/tmp/a3s-box-switches")
+        .join(uid.to_string())
+        .join(&key[..24])
 }
 
 /// Parse a MAC address string "02:42:0a:58:00:02" into [u8; 6].

@@ -3,8 +3,15 @@
 //! Pre-boots MicroVMs so that `acquire()` returns an already-ready VM
 //! instead of waiting for the full boot sequence.
 
+pub mod client;
 pub mod scaler;
 pub mod warm_pool;
 
+pub use client::{
+    PoolClientLease, PoolClientOutput, PoolClientRun, PoolImageStat, PoolLeaseClient,
+    PoolLeaseExec, PoolLeaseExecRequest, PoolLeaseReleaseRequest, PoolLeaseReleaseResponse,
+    PoolLeaseRequest, PoolLeaseResponse, PoolRequest, PoolRunRequest, PoolRunResponse,
+    PoolStatusResponse, PoolStopResponse,
+};
 pub use scaler::{PoolScaler, ScaleDecision};
 pub use warm_pool::{PoolStats, WarmPool};

@@ -73,6 +73,11 @@ pub struct NetworkInstanceConfig {
     #[serde(default)]
     pub net_proxy_fd: Option<RawFd>,
 
+    /// Shared Unix-datagram Ethernet switch directory for this bridge network.
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_socket_dir: Option<PathBuf>,
+
     /// Assigned IPv4 address for this VM.
     pub ip_address: Ipv4Addr,
 
@@ -507,6 +512,8 @@ mod tests {
                 net_socket_fd: Some(42),
                 #[cfg(target_os = "macos")]
                 net_proxy_fd: Some(43),
+                #[cfg(target_os = "macos")]
+                bridge_socket_dir: Some(PathBuf::from("/tmp/a3s-switch")),
                 ip_address: "10.0.0.2".parse().unwrap(),
                 gateway: "10.0.0.1".parse().unwrap(),
                 prefix_len: 24,

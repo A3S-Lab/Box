@@ -47,6 +47,14 @@ pub struct MonitorArgs {
     /// `127.0.0.1:9100`). Off when unset. Bind loopback — there is no auth.
     #[arg(long)]
     pub metrics_addr: Option<String>,
+
+    /// Internal: run the process-owned health checker for one box.
+    #[arg(long, hide = true, requires = "health_generation")]
+    pub health_worker: Option<String>,
+
+    /// Internal: identify the exact boot generation owned by --health-worker.
+    #[arg(long, hide = true, requires = "health_worker")]
+    pub health_generation: Option<i64>,
 }
 
 /// Per-box backoff state for restart attempts.
@@ -149,6 +157,10 @@ impl BackoffTracker {
 }
 
 pub async fn execute(args: MonitorArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if let (Some(box_id), Some(generation)) = (args.health_worker.as_ref(), args.health_generation)
+    {
+        return crate::health::run_detached_health_worker(box_id.clone(), generation).await;
+    }
     if args.install {
         return super::monitor_service::install(args.interval);
     }
@@ -427,6 +439,7 @@ async fn run_due_health_checks(state: &StateFile) -> Result<(), Box<dyn std::err
         .records()
         .iter()
         .filter(|record| health::should_probe(record, now))
+        .filter(|record| !health::detached_health_worker_active(record))
         .filter_map(|record| {
             record.health_check.as_ref().map(|hc| {
                 (

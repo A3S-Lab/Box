@@ -45,12 +45,16 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
     // Persist the boot result atomically (load-fresh + mutate + save under the
     // state lock) so it cannot clobber a concurrent writer with our pre-boot
     // snapshot.
-    StateFile::modify(move |s| {
-        if let Some(record) = s.find_by_id_mut(&box_id) {
+    let started_record = StateFile::modify(move |s| {
+        Ok::<_, std::io::Error>(s.find_by_id_mut(&box_id).map(|record| {
             boot::apply_boot_result(record, result, boot::RestartCountUpdate::Reset);
-        }
-        Ok::<(), std::io::Error>(())
+            record.clone()
+        }))
     })?;
+    if let Some(record) = started_record {
+        crate::health::spawn_detached_health_checker(&record)
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    }
 
     println!("{name}");
     Ok(())

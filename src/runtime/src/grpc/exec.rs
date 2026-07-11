@@ -12,6 +12,11 @@ const EXEC_CONTROL_CANCEL: &[u8] = b"cancel";
 const EXEC_CONTROL_STDIN_CLOSE: &[u8] = b"stdin-close";
 /// Host→guest control: flush all buffered output and reply with a flush-ack.
 const EXEC_CONTROL_FLUSH: &[u8] = b"flush";
+/// Host→guest control: stream a tar archive of the guest-visible rootfs.
+const EXEC_CONTROL_ARCHIVE_ROOTFS: &[u8] = b"archive-rootfs-v1";
+const EXEC_CONTROL_ARCHIVE_ROOTFS_PAUSE: &[u8] = b"archive-rootfs-v1:pause";
+/// Guest→host marker after every archive data frame has been sent.
+const EXEC_ARCHIVE_ROOTFS_DONE: &[u8] = b"archive-rootfs-v1-done";
 /// Guest→host marker (carried in a Control frame) acknowledging a flush. Kept
 /// distinct from an `ExecExit` JSON payload so `next_event` can tell them apart.
 /// Must match the guest's `EXEC_FLUSH_ACK` in `guest/init/src/exec_server.rs`.
@@ -24,6 +29,9 @@ const EXEC_SIGNAL_MAIN_ACK: &[u8] = b"signal-main-ack";
 /// received and the container main spawned. Matches the guest's
 /// `EXEC_SPAWN_MAIN_ACK` in `guest/init/src/exec_server.rs`.
 const EXEC_SPAWN_MAIN_ACK: &[u8] = b"spawn-main-ack";
+/// Guest→host negative acknowledgement for `spawn-main`, followed by a UTF-8-ish
+/// diagnostic string from guest-init.
+const EXEC_SPAWN_MAIN_NACK: &[u8] = b"spawn-main-nack:";
 
 /// Host-side slack added to a one-shot exec's in-guest `timeout_ns` before the
 /// host gives up reading the reply. The in-guest timeout cannot fire if the
@@ -181,6 +189,83 @@ impl ExecClient {
             stderr_bytes: 0,
             done: false,
         })
+    }
+
+    /// Stream a guest-created rootfs tar archive into `output`.
+    ///
+    /// The guest performs `stat` and tar-header creation, preserving Linux
+    /// uid/gid/mode even when the host virtio-fs backing directory exposes
+    /// different macOS metadata. Mounted subtrees are excluded by guest-init.
+    pub async fn archive_rootfs<W>(&self, output: &mut W, pause: bool) -> Result<u64>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut stream = UnixStream::connect(&self.socket_path)
+            .await
+            .map_err(|error| {
+                BoxError::ExecError(format!(
+                    "Rootfs archive connection failed to {}: {error}",
+                    self.socket_path.display()
+                ))
+            })?;
+
+        let control = if pause {
+            EXEC_CONTROL_ARCHIVE_ROOTFS_PAUSE
+        } else {
+            EXEC_CONTROL_ARCHIVE_ROOTFS
+        };
+        let request = a3s_transport::Frame::control(control.to_vec());
+        stream
+            .write_all(&request.encode().map_err(|error| {
+                BoxError::ExecError(format!("Rootfs archive request encode failed: {error}"))
+            })?)
+            .await
+            .map_err(|error| {
+                BoxError::ExecError(format!("Rootfs archive request write failed: {error}"))
+            })?;
+
+        let (reader, _writer) = tokio::io::split(stream);
+        let mut reader = a3s_transport::FrameReader::new(reader);
+        let mut written = 0u64;
+        loop {
+            let frame = reader
+                .read_frame()
+                .await
+                .map_err(|error| {
+                    BoxError::ExecError(format!("Rootfs archive read failed: {error}"))
+                })?
+                .ok_or_else(|| {
+                    BoxError::ExecError(
+                        "Rootfs archive stream closed before completion".to_string(),
+                    )
+                })?;
+
+            match frame.frame_type {
+                a3s_transport::FrameType::Data => {
+                    output.write_all(&frame.payload).await.map_err(|error| {
+                        BoxError::ExecError(format!("Rootfs archive output write failed: {error}"))
+                    })?;
+                    written = written.saturating_add(frame.payload.len() as u64);
+                }
+                a3s_transport::FrameType::Control if frame.payload == EXEC_ARCHIVE_ROOTFS_DONE => {
+                    output.flush().await.map_err(|error| {
+                        BoxError::ExecError(format!("Rootfs archive output flush failed: {error}"))
+                    })?;
+                    return Ok(written);
+                }
+                a3s_transport::FrameType::Error => {
+                    return Err(BoxError::ExecError(format!(
+                        "Guest rootfs archive failed: {}",
+                        String::from_utf8_lossy(&frame.payload)
+                    )));
+                }
+                other => {
+                    return Err(BoxError::ExecError(format!(
+                        "Unexpected rootfs archive frame: {other:?}"
+                    )));
+                }
+            }
+        }
     }
 
     /// Transfer a file to/from the guest.
@@ -341,6 +426,15 @@ impl ExecClient {
                     && f.payload == EXEC_SPAWN_MAIN_ACK =>
             {
                 Ok(true)
+            }
+            Ok(Some(f))
+                if f.frame_type == a3s_transport::FrameType::Control
+                    && f.payload.starts_with(EXEC_SPAWN_MAIN_NACK) =>
+            {
+                let reason = String::from_utf8_lossy(&f.payload[EXEC_SPAWN_MAIN_NACK.len()..]);
+                Err(BoxError::ExecError(format!(
+                    "spawn-main rejected by guest: {reason}"
+                )))
             }
             _ => Ok(false),
         }
@@ -692,6 +786,45 @@ mod tests {
         };
         let result = client.heartbeat().await.unwrap();
         assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_archive_rootfs_streams_data_until_done_marker() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("archive.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            // ExecClient::connect performs one reachability connection first.
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = [0u8; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], a3s_transport::FrameType::Control as u8);
+            let length = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+            let mut payload = vec![0u8; length];
+            stream.read_exact(&mut payload).await.unwrap();
+            assert_eq!(payload, EXEC_CONTROL_ARCHIVE_ROOTFS);
+
+            for payload in [b"first".as_slice(), b"-second".as_slice()] {
+                let frame = a3s_transport::Frame::data(payload.to_vec());
+                stream.write_all(&frame.encode().unwrap()).await.unwrap();
+            }
+            let done = a3s_transport::Frame::control(EXEC_ARCHIVE_ROOTFS_DONE.to_vec());
+            stream.write_all(&done.encode().unwrap()).await.unwrap();
+        });
+
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let output_path = tmp.path().join("rootfs.tar");
+        let mut output = tokio::fs::File::create(&output_path).await.unwrap();
+        let written = client.archive_rootfs(&mut output, false).await.unwrap();
+        drop(output);
+
+        assert_eq!(written, 12);
+        assert_eq!(std::fs::read(output_path).unwrap(), b"first-second");
     }
 
     #[tokio::test]

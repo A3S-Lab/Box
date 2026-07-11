@@ -22,7 +22,7 @@ use a3s_box_core::PORT_FWD_VSOCK_PORT;
 #[cfg(not(target_os = "windows"))]
 use a3s_box_core::{ATTEST_VSOCK_PORT, PORT_FWD_VSOCK_PORT, PTY_VSOCK_PORT};
 #[cfg(target_os = "macos")]
-use a3s_box_netproxy::spawn_inherited_netproxy;
+use a3s_box_netproxy::{spawn_inherited_netproxy, InheritedNetProxyConfig};
 use clap::Parser;
 use krun::KrunContext;
 #[cfg(target_os = "windows")]
@@ -298,6 +298,7 @@ fn parse_cpuset_spec(spec: &str) -> std::result::Result<Vec<usize>, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn tsi_port_map_for_spec(spec: &InstanceSpec) -> Vec<String> {
     if native_bridge_port_forwarding_handles_spec(spec) {
         return Vec::new();
@@ -315,11 +316,13 @@ fn tsi_port_map_for_spec(spec: &InstanceSpec) -> Vec<String> {
 // host_port_map once a virtio-net device is attached anyway, so feeding it the
 // port map is dead work; let the backend own forwarding instead.
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn native_bridge_port_forwarding_handles_spec(spec: &InstanceSpec) -> bool {
     spec.network.is_some()
 }
 
 #[cfg(not(target_os = "windows"))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn is_auto_assigned_host_port(mapping: &str) -> bool {
     mapping
         .split_once(':')
@@ -477,7 +480,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // Must be called before add_vsock_port to avoid EINVAL from libkrun.
     // Skip entries handled by bridge-native forwarding or host_port=0
     // auto-assignment, which would fail with EINVAL in libkrun's TSI.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
         let valid_port_map = tsi_port_map_for_spec(spec);
 
@@ -661,12 +664,16 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             if let Some(proxy_fd) = net_config.net_proxy_fd {
                 spawn_inherited_netproxy(
                     proxy_fd,
-                    net_config.ip_address,
-                    net_config.gateway,
-                    net_config.prefix_len,
-                    &net_config.dns_servers,
-                    &spec.port_map,
-                    net_config.net_stats_path.clone(),
+                    InheritedNetProxyConfig {
+                        guest_ip: net_config.ip_address,
+                        gateway: net_config.gateway,
+                        prefix_len: net_config.prefix_len,
+                        dns_servers: &net_config.dns_servers,
+                        port_map: &spec.port_map,
+                        stats_path: net_config.net_stats_path.clone(),
+                        bridge_socket_dir: net_config.bridge_socket_dir.clone(),
+                        own_mac: net_config.mac_address,
+                    },
                 )?;
             }
             log_inherited_net_fd(fd);
@@ -698,6 +705,13 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         apply_user_config(&ctx, user)?;
     }
 
+    // Keep split-console descriptors owned by the shim until start_enter
+    // returns. Closing them before the final log drain establishes a real EOF
+    // boundary; leaking them with mem::forget made short detached output race
+    // the processor indefinitely.
+    #[cfg(unix)]
+    let mut split_console_files: Option<(std::fs::File, std::fs::File)> = None;
+
     // Configure console output if specified
     if let Some(console_path) = &spec.console_output {
         let console_str = console_path
@@ -726,9 +740,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             };
             if let (Ok(out_f), Ok(err_f)) = (open(console_path), open(&err_path)) {
                 ctx.add_split_console(-1, out_f.as_raw_fd(), err_f.as_raw_fd())?;
-                // Keep the fds open for the VM's lifetime.
-                std::mem::forget(out_f);
-                std::mem::forget(err_f);
+                split_console_files = Some((out_f, err_f));
                 tracing::debug!("split console enabled (stdout/stderr separated)");
                 split_done = true;
             }
@@ -795,6 +807,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // daemonless home for log processing — a detached `run -d` box keeps logging
     // after the launching CLI exits (the processor used to die with that CLI).
     let log_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let log_ready = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let log_thread = spec.console_output.as_ref().map(|console| {
         let console = console.clone();
         let log_dir = console
@@ -803,15 +816,45 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let config = spec.log_config.clone();
         let stop = log_stop.clone();
+        let ready = log_ready.clone();
         std::thread::spawn(move || {
-            a3s_box_core::log::run_log_processor(&console, &log_dir, &config, &stop);
+            a3s_box_core::log::run_log_processor_with_ready(
+                &console,
+                &log_dir,
+                &config,
+                &stop,
+                Some(&ready),
+            );
         })
     });
+
+    if log_thread.is_some() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while log_ready.load(std::sync::atomic::Ordering::Acquire) < 2 {
+            if std::time::Instant::now() >= deadline {
+                log_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(handle) = log_thread {
+                    let _ = handle.join();
+                }
+                return Err(BoxError::BoxBootError {
+                    message: "log processor did not become ready before VM start".to_string(),
+                    hint: None,
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
 
     // Start VM. start_enter RETURNS with the guest exit status once the guest
     // exits (status >= 0) or on a start failure (status < 0).
     tracing::info!(box_id = %spec.box_id, "Starting VM (process takeover)");
     let status = ctx.start_enter();
+
+    // No guest writes are valid after start_enter returns. Close the shim's
+    // console descriptors before signaling the readers so their final EOF is
+    // authoritative and all kernel-buffered output is visible.
+    #[cfg(unix)]
+    drop(split_console_files);
 
     // Guest has exited and console.log is fully flushed: signal the processor to
     // drain the remainder and stop, then join so the final lines reach
@@ -819,6 +862,38 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     log_stop.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(handle) = log_thread {
         let _ = handle.join();
+    }
+    if let Some(console) = spec.console_output.as_ref() {
+        let structured = a3s_box_core::log::json_log_path(
+            console
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        );
+        let stderr_console = a3s_box_core::log::stderr_console_path(console);
+        let structured_empty = structured.metadata().map(|m| m.len() == 0).unwrap_or(true);
+        let raw_has_output = console.metadata().map(|m| m.len() > 0).unwrap_or(false)
+            || stderr_console
+                .metadata()
+                .map(|m| m.len() > 0)
+                .unwrap_or(false);
+        if structured_empty
+            && raw_has_output
+            && spec.log_config.driver == a3s_box_core::log::LogDriver::JsonFile
+        {
+            // A very short VM can finish while the first processor is sitting
+            // on a provisional console EOF. Its raw files are authoritative at
+            // this point (start_enter returned and the write fds are closed), so
+            // repair the empty projection synchronously. The empty guard makes
+            // this idempotent and prevents duplicate records.
+            a3s_box_core::log::run_log_processor(
+                console,
+                console
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+                &spec.log_config,
+                &log_stop,
+            );
+        }
     }
 
     // If we reach here, either:
@@ -984,7 +1059,7 @@ mod tests {
         assert!(parse_ulimit("sigpending=100:200").is_some());
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     #[test]
     fn test_tsi_port_map_for_spec_filters_auto_assigned_host_ports() {
         let spec = InstanceSpec {
@@ -1036,6 +1111,8 @@ mod tests {
             net_socket_fd: Some(42),
             #[cfg(target_os = "macos")]
             net_proxy_fd: Some(43),
+            #[cfg(target_os = "macos")]
+            bridge_socket_dir: Some(std::path::PathBuf::from("/tmp/a3s-switch")),
             ip_address: "10.89.0.2".parse().unwrap(),
             gateway: "10.89.0.1".parse().unwrap(),
             prefix_len: 24,

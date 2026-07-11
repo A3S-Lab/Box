@@ -108,6 +108,7 @@ impl NetStats {
 /// ECONNRESET / EDESTADDRREQ in the peer's receive path.
 struct UnixgramDevice {
     socket: UnixDatagram,
+    bridge: Option<BridgePort>,
     rx_queue: VecDeque<Vec<u8>>,
     stats: Arc<NetStats>,
 }
@@ -115,6 +116,9 @@ struct UnixgramDevice {
 impl UnixgramDevice {
     /// Drain the socket into `rx_queue` (non-blocking, batch up to 64 frames).
     fn drain(&mut self) {
+        if let Some(bridge) = &self.bridge {
+            bridge.drain_to_guest(&self.socket, &self.stats);
+        }
         let mut buf = vec![0u8; MAX_FRAME];
         for _ in 0..64 {
             match self.socket.recv(&mut buf) {
@@ -124,7 +128,15 @@ impl UnixgramDevice {
                         "NetProxy received ethernet frame from guest/libkrun"
                     );
                     self.stats.record_tx(n);
-                    self.rx_queue.push_back(buf[..n].to_vec())
+                    let frame = &buf[..n];
+                    let deliver_locally = self
+                        .bridge
+                        .as_ref()
+                        .map(|bridge| bridge.forward_from_guest(frame))
+                        .unwrap_or(true);
+                    if deliver_locally {
+                        self.rx_queue.push_back(frame.to_vec());
+                    }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => {
@@ -134,6 +146,111 @@ impl UnixgramDevice {
             }
         }
     }
+}
+
+struct BridgePort {
+    socket: UnixDatagram,
+    directory: PathBuf,
+    own_path: PathBuf,
+}
+
+impl BridgePort {
+    fn bind(directory: &Path, own_mac: [u8; 6]) -> io::Result<Self> {
+        std::fs::create_dir_all(directory)?;
+        let own_path = directory.join(mac_socket_name(own_mac));
+        match std::fs::remove_file(&own_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let socket = UnixDatagram::bind(&own_path)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            socket,
+            directory: directory.to_path_buf(),
+            own_path,
+        })
+    }
+
+    /// Forward one guest frame. Returns whether the local gateway must also
+    /// receive it (broadcast/multicast or non-peer traffic).
+    fn forward_from_guest(&self, frame: &[u8]) -> bool {
+        let Some(destination) = ethernet_destination(frame) else {
+            return true;
+        };
+        if destination == GATEWAY_MAC.0 {
+            return true;
+        }
+        if is_group_mac(destination) {
+            self.flood(frame);
+            return true;
+        }
+
+        let peer = self.directory.join(mac_socket_name(destination));
+        if peer != self.own_path && peer.exists() {
+            if let Err(error) = self.socket.send_to(frame, &peer) {
+                tracing::debug!(%error, peer = %peer.display(), "Bridge peer send failed");
+            }
+            return false;
+        }
+
+        // Unknown unicast uses normal switch flooding while still allowing the
+        // local gateway stack to inspect traffic addressed outside this switch.
+        self.flood(frame);
+        true
+    }
+
+    fn flood(&self, frame: &[u8]) {
+        let Ok(entries) = std::fs::read_dir(&self.directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == self.own_path || path.extension().and_then(|v| v.to_str()) != Some("sock") {
+                continue;
+            }
+            let _ = self.socket.send_to(frame, path);
+        }
+    }
+
+    fn drain_to_guest(&self, guest: &UnixDatagram, stats: &NetStats) {
+        let mut buf = [0u8; MAX_FRAME];
+        for _ in 0..64 {
+            match self.socket.recv(&mut buf) {
+                Ok(size) => {
+                    if guest.send(&buf[..size]).is_ok() {
+                        stats.record_rx(size);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    tracing::debug!(%error, "Bridge peer receive failed");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl Drop for BridgePort {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.own_path);
+    }
+}
+
+fn ethernet_destination(frame: &[u8]) -> Option<[u8; 6]> {
+    frame.get(..6)?.try_into().ok()
+}
+
+fn is_group_mac(mac: [u8; 6]) -> bool {
+    mac[0] & 1 == 1
+}
+
+fn mac_socket_name(mac: [u8; 6]) -> String {
+    format!(
+        "{:02x}-{:02x}-{:02x}-{:02x}-{:02x}-{:02x}.sock",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
 }
 
 /// Owned received frame — consumed by smoltcp's interface layer.
@@ -235,6 +352,7 @@ struct ProxyEngineConfig {
     shutdown: Arc<AtomicBool>,
     stats: Arc<NetStats>,
     stats_path: Option<PathBuf>,
+    bridge: Option<BridgePort>,
 }
 
 struct ProxyEngine {
@@ -262,10 +380,12 @@ impl ProxyEngine {
             shutdown,
             stats,
             stats_path,
+            bridge,
         } = config;
 
         let mut device = UnixgramDevice {
             socket,
+            bridge,
             rx_queue: VecDeque::new(),
             stats: Arc::clone(&stats),
         };
@@ -641,21 +761,41 @@ impl Drop for NetProxyManager {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-pub fn spawn_inherited_netproxy(
-    fd: RawFd,
-    guest_ip: Ipv4Addr,
-    gateway: Ipv4Addr,
-    prefix_len: u8,
-    dns_servers: &[Ipv4Addr],
-    port_map: &[String],
-    stats_path: Option<PathBuf>,
-) -> Result<()> {
+pub struct InheritedNetProxyConfig<'a> {
+    pub guest_ip: Ipv4Addr,
+    pub gateway: Ipv4Addr,
+    pub prefix_len: u8,
+    pub dns_servers: &'a [Ipv4Addr],
+    pub port_map: &'a [String],
+    pub stats_path: Option<PathBuf>,
+    pub bridge_socket_dir: Option<PathBuf>,
+    pub own_mac: [u8; 6],
+}
+
+pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) -> Result<()> {
+    let InheritedNetProxyConfig {
+        guest_ip,
+        gateway,
+        prefix_len,
+        dns_servers,
+        port_map,
+        stats_path,
+        bridge_socket_dir,
+        own_mac,
+    } = config;
     let socket = unsafe { UnixDatagram::from_raw_fd(fd) };
     let port_forwards = parse_port_forwards(port_map, guest_ip)
         .map_err(|e| BoxError::NetworkError(format!("invalid port_map: {}", e)))?;
     let dns_servers = dns_servers.to_vec();
     let shutdown = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(NetStats::default());
+    let bridge = bridge_socket_dir
+        .as_deref()
+        .map(|directory| BridgePort::bind(directory, own_mac))
+        .transpose()
+        .map_err(|error| {
+            BoxError::NetworkError(format!("failed to join bridge Ethernet switch: {error}"))
+        })?;
 
     std::thread::Builder::new()
         .name("a3s-netproxy".to_string())
@@ -675,6 +815,7 @@ pub fn spawn_inherited_netproxy(
                 shutdown,
                 stats,
                 stats_path,
+                bridge,
             });
             engine.run();
             tracing::info!("NetProxy thread exiting");
@@ -785,6 +926,53 @@ mod tests {
         let ip = Ipv4Addr::new(127, 0, 0, 1);
         let smol_ip = to_smoltcp_ipv4(ip);
         assert_eq!(smol_ip.as_bytes(), &[127, 0, 0, 1]);
+    }
+
+    fn ethernet_frame(destination: [u8; 6], source: [u8; 6]) -> Vec<u8> {
+        let mut frame = vec![0u8; 64];
+        frame[..6].copy_from_slice(&destination);
+        frame[6..12].copy_from_slice(&source);
+        frame[12..14].copy_from_slice(&[0x08, 0x00]);
+        frame[14..].fill(0x5a);
+        frame
+    }
+
+    #[test]
+    fn bridge_port_unicasts_frame_to_matching_peer_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let mac_a = [0x02, 0x42, 10, 88, 0, 2];
+        let mac_b = [0x02, 0x42, 10, 88, 0, 3];
+        let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
+        let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
+        let (guest_b, proxy_b) = UnixDatagram::pair().unwrap();
+        guest_b.set_nonblocking(true).unwrap();
+        let frame = ethernet_frame(mac_b, mac_a);
+
+        assert!(!bridge_a.forward_from_guest(&frame));
+        bridge_b.drain_to_guest(&proxy_b, &NetStats::default());
+
+        let mut received = [0u8; MAX_FRAME];
+        let size = guest_b.recv(&mut received).unwrap();
+        assert_eq!(&received[..size], frame.as_slice());
+    }
+
+    #[test]
+    fn bridge_port_floods_broadcast_and_keeps_gateway_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mac_a = [0x02, 0x42, 10, 88, 0, 2];
+        let mac_b = [0x02, 0x42, 10, 88, 0, 3];
+        let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
+        let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
+        let (guest_b, proxy_b) = UnixDatagram::pair().unwrap();
+        guest_b.set_nonblocking(true).unwrap();
+        let frame = ethernet_frame([0xff; 6], mac_a);
+
+        assert!(bridge_a.forward_from_guest(&frame));
+        bridge_b.drain_to_guest(&proxy_b, &NetStats::default());
+
+        let mut received = [0u8; MAX_FRAME];
+        let size = guest_b.recv(&mut received).unwrap();
+        assert_eq!(&received[..size], frame.as_slice());
     }
 
     #[test]

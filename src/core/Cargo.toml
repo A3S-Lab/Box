@@ -19,6 +19,7 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 flate2 = "1.0"
+base64 = { workspace = true }
 
 [lib]
 name = "a3s_box_core"

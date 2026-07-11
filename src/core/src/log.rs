@@ -210,10 +210,24 @@ fn tail_next_line(
     stop: &AtomicBool,
     on_eof: Option<&dyn Fn() -> bool>,
 ) -> Option<String> {
+    // `krun_start_enter()` can return a few scheduler ticks before the
+    // virtio-console backend's final host write becomes visible. Treat the
+    // first stopped EOFs as provisional; otherwise a very short detached
+    // command can leave bytes in console.log after the processor has exited.
+    const STOPPED_EOF_SETTLE_POLLS: u8 = 25;
+    const STOPPED_EOF_SETTLE_MILLIS: u64 = 20;
+    let mut stopped_eof_polls = 0u8;
     loop {
         match reader.read_line(buf) {
             Ok(0) | Err(_) => {
                 if stop.load(Ordering::Relaxed) {
+                    stopped_eof_polls = stopped_eof_polls.saturating_add(1);
+                    if stopped_eof_polls < STOPPED_EOF_SETTLE_POLLS {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            STOPPED_EOF_SETTLE_MILLIS,
+                        ));
+                        continue;
+                    }
                     // VM exited and we are at EOF: flush a trailing partial line
                     // (no newline) once, then signal completion.
                     if buf.is_empty() {
@@ -235,7 +249,7 @@ fn tail_next_line(
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             }
-            Ok(_) => {}
+            Ok(_) => stopped_eof_polls = 0,
         }
         if !buf.ends_with('\n') {
             // Partial line at EOF — keep it buffered and wait for the rest.
@@ -256,6 +270,19 @@ pub fn run_log_processor(
     config: &LogConfig,
     stop: &AtomicBool,
 ) {
+    run_log_processor_with_ready(console_log, log_dir, config, stop, None);
+}
+
+/// Run the processor and optionally count each console reader once it has
+/// opened its file. A VM launcher can wait for two ready readers before start,
+/// preventing a short guest from exiting before the tail threads are alive.
+pub fn run_log_processor_with_ready(
+    console_log: &Path,
+    log_dir: &Path,
+    config: &LogConfig,
+    stop: &AtomicBool,
+    ready: Option<&std::sync::atomic::AtomicUsize>,
+) {
     match config.driver {
         // `none` produces no structured output, but libkrun still writes the raw
         // console for the VM's lifetime — drain + bound it so a chatty box with
@@ -265,6 +292,7 @@ pub fn run_log_processor(
             console_log,
             Some(console_cap(config.max_size(), config.max_file())),
             stop,
+            ready,
         ),
         LogDriver::JsonFile => run_json_file_processor(
             console_log,
@@ -272,6 +300,7 @@ pub fn run_log_processor(
             config.max_size(),
             config.max_file(),
             stop,
+            ready,
         ),
         LogDriver::Syslog => run_syslog_processor(
             console_log,
@@ -280,6 +309,7 @@ pub fn run_log_processor(
             config.tag().unwrap_or("a3s-box"),
             Some(console_cap(config.max_size(), config.max_file())),
             stop,
+            ready,
         ),
     }
 }
@@ -316,11 +346,15 @@ fn run_tagged_tail(
     bound: Option<u64>,
     stop: &AtomicBool,
     emit: &(dyn Fn(&str, &str) + Sync),
+    ready: Option<&std::sync::atomic::AtomicUsize>,
 ) {
     let f = match open_console(file, stop) {
         Some(f) => f,
         None => return,
     };
+    if let Some(ready) = ready {
+        ready.fetch_add(1, Ordering::Release);
+    }
     let mut reader = BufReader::new(f);
     let mut buf = String::new();
     // Bound the raw console file's growth at clean line boundaries (see
@@ -346,13 +380,18 @@ fn console_cap(max_size: u64, max_file: u32) -> u64 {
 /// (advancing to clean line boundaries) and truncate when over `cap`, emitting
 /// nothing. Without this, `--log-driver none` would leave libkrun's raw
 /// `console.log`/`console.err.log` to grow without limit.
-fn run_discard_processor(console_log: &Path, cap: Option<u64>, stop: &AtomicBool) {
+fn run_discard_processor(
+    console_log: &Path,
+    cap: Option<u64>,
+    stop: &AtomicBool,
+    ready: Option<&std::sync::atomic::AtomicUsize>,
+) {
     let err_log = stderr_console_path(console_log);
     let discard = |_line: &str, _stream: &str| {};
     let discard: &(dyn Fn(&str, &str) + Sync) = &discard;
     std::thread::scope(|s| {
-        s.spawn(|| run_tagged_tail(console_log, "stdout", false, cap, stop, discard));
-        s.spawn(|| run_tagged_tail(&err_log, "stderr", false, cap, stop, discard));
+        s.spawn(|| run_tagged_tail(console_log, "stdout", false, cap, stop, discard, ready));
+        s.spawn(|| run_tagged_tail(&err_log, "stderr", false, cap, stop, discard, ready));
     });
 }
 
@@ -362,6 +401,7 @@ fn run_json_file_processor(
     max_size: u64,
     max_file: u32,
     stop: &AtomicBool,
+    ready: Option<&std::sync::atomic::AtomicUsize>,
 ) {
     let json_path = json_log_path(log_dir);
     let writer = std::sync::Mutex::new(match RotatingWriter::new(&json_path, max_size, max_file) {
@@ -388,10 +428,10 @@ fn run_json_file_processor(
 
     let cap = Some(console_cap(max_size, max_file));
     std::thread::scope(|s| {
-        s.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit));
+        s.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit, ready));
         // libkrun's `init.krun:` preamble can land on EITHER stream, so filter
         // the noise on stderr too.
-        s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit));
+        s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready));
     });
 }
 
@@ -403,6 +443,7 @@ fn run_syslog_processor(
     tag: &str,
     cap: Option<u64>,
     stop: &AtomicBool,
+    ready: Option<&std::sync::atomic::AtomicUsize>,
 ) {
     use std::net::UdpSocket;
 
@@ -428,8 +469,8 @@ fn run_syslog_processor(
             };
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
             std::thread::scope(|s| {
-                s.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit));
-                s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit));
+                s.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit, ready));
+                s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready));
             });
         }
         "tcp" => {
@@ -450,8 +491,8 @@ fn run_syslog_processor(
             };
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
             std::thread::scope(|sc| {
-                sc.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit));
-                sc.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit));
+                sc.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit, ready));
+                sc.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready));
             });
         }
         _ => {}
@@ -716,7 +757,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let emit = move |line: &str, _stream: &str| c2.lock().unwrap().push(line.to_string());
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
-            run_tagged_tail(&p2, "stdout", false, Some(cap), &s2, emit);
+            run_tagged_tail(&p2, "stdout", false, Some(cap), &s2, emit, None);
         });
 
         // Let the tail drain l1..l3, hit EOF, and truncate (9 bytes > cap 4).
@@ -745,6 +786,36 @@ mod tests {
             final_len <= cap + 6,
             "console.log unbounded: {final_len} bytes"
         );
+    }
+
+    #[test]
+    fn test_stopped_tail_waits_for_delayed_final_console_write() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console.log");
+        std::fs::write(&path, b"").unwrap();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(writer_path)
+                .unwrap();
+            file.write_all(b"late-final-line\n").unwrap();
+            file.flush().unwrap();
+        });
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut reader = BufReader::new(file);
+        let mut buffer = String::new();
+        let stop = AtomicBool::new(true);
+        assert_eq!(
+            tail_next_line(&mut reader, &mut buffer, &stop, None),
+            Some("late-final-line".to_string())
+        );
+        assert_eq!(tail_next_line(&mut reader, &mut buffer, &stop, None), None);
+        writer.join().unwrap();
     }
 
     #[test]
@@ -799,7 +870,7 @@ mod tests {
         let console = dir.path().join("console.log");
         std::fs::write(&console, "AAA\ninit.krun: noise\nBBB\n").unwrap();
         let stop = AtomicBool::new(true);
-        run_json_file_processor(&console, dir.path(), 10 * 1024 * 1024, 3, &stop);
+        run_json_file_processor(&console, dir.path(), 10 * 1024 * 1024, 3, &stop, None);
         let json = std::fs::read_to_string(json_log_path(dir.path())).unwrap();
         assert!(json.contains("\"log\":\"AAA\\n\""), "AAA missing: {json}");
         assert!(

@@ -620,3 +620,185 @@ fn test_noninteractive_boundary_command_smoke() {
         "monitor did not announce startup\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+#[test]
+fn test_compose_config_interpolates_shell_over_project_dotenv() {
+    let cli = CliTest::new();
+    let project = cli.home_path().join("compose-interpolation");
+    std::fs::create_dir_all(&project).expect("create Compose project directory");
+    let compose = project.join("compose.yaml");
+    std::fs::write(
+        &compose,
+        r#"services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${A3S_COMPOSE_TEST_PORT:-6379}:6379"
+    environment:
+      FROM_DOTENV: ${A3S_COMPOSE_TEST_DOTENV-default}
+      EMPTY_DEFAULT: ${A3S_COMPOSE_TEST_EMPTY:-default}
+      EMPTY_SET: ${A3S_COMPOSE_TEST_EMPTY+replacement}
+      EMPTY_NONEMPTY: ${A3S_COMPOSE_TEST_EMPTY:+replacement}
+"#,
+    )
+    .expect("write Compose file");
+    std::fs::write(
+        project.join(".env"),
+        "A3S_COMPOSE_TEST_PORT=6379\nA3S_COMPOSE_TEST_DOTENV=dotenv\nA3S_COMPOSE_TEST_EMPTY=\n",
+    )
+    .expect("write project .env");
+    let compose_arg = compose.to_string_lossy().to_string();
+
+    let output = cli.ok_with_env(
+        &["compose", "--file", &compose_arg, "config"],
+        &[("A3S_COMPOSE_TEST_PORT", "16379")],
+    );
+
+    assert!(output.contains("ports: 16379:6379"));
+    assert!(output.contains("FROM_DOTENV=dotenv"));
+    assert!(output.contains("EMPTY_DEFAULT=default"));
+    assert!(output.contains("EMPTY_SET=replacement"));
+    assert!(output.contains("EMPTY_NONEMPTY="));
+    assert!(output.contains("Configuration is valid."));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_pool_status_json_reports_runtime_counters() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let cli = CliTest::new();
+    let socket = cli.home_path().join("fake-pool.sock");
+    let listener = UnixListener::bind(&socket).expect("bind fake pool socket");
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept pool status client");
+        let mut len = [0_u8; 4];
+        stream.read_exact(&mut len).expect("read request length");
+        let mut request = vec![0_u8; u32::from_le_bytes(len) as usize];
+        stream
+            .read_exact(&mut request)
+            .expect("read status request");
+        let request: serde_json::Value =
+            serde_json::from_slice(&request).expect("status request should be JSON");
+        assert_eq!(request["op"], "status");
+
+        let response = br#"{"images":[{"image":"alpine:latest","pool":"alpine:latest|vcpus=2|memory=512m","max":4,"idle":2,"active":1,"leased":1,"total_created":5,"total_acquired":3,"total_evicted":1}]}"#;
+        stream
+            .write_all(&(response.len() as u32).to_le_bytes())
+            .expect("write response length");
+        stream.write_all(response).expect("write status response");
+    });
+
+    let socket_arg = socket.to_string_lossy().to_string();
+    let stdout = cli.ok(&["pool", "status", "--json", "--socket", socket_arg.as_str()]);
+    server.join().expect("fake pool server should finish");
+
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("pool status output should be JSON");
+    let image = &value.as_array().expect("status JSON should be an array")[0];
+    assert_eq!(image["pool"], "alpine:latest|vcpus=2|memory=512m");
+    assert_eq!(image["max"], 4);
+    assert_eq!(image["idle"], 2);
+    assert_eq!(image["active"], 1);
+    assert_eq!(image["leased"], 1);
+    assert_eq!(image["total_created"], 5);
+    assert_eq!(image["total_acquired"], 3);
+    assert_eq!(image["total_evicted"], 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_info_reports_warm_pool_daemon_status() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let cli = CliTest::new();
+    let socket = cli.home_path().join("fake-info-pool.sock");
+    let listener = UnixListener::bind(&socket).expect("bind fake pool socket");
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept pool status client");
+        let mut len = [0_u8; 4];
+        stream.read_exact(&mut len).expect("read status length");
+        let mut request = vec![0_u8; u32::from_le_bytes(len) as usize];
+        stream
+            .read_exact(&mut request)
+            .expect("read status request");
+        let request: serde_json::Value =
+            serde_json::from_slice(&request).expect("status request should be JSON");
+        assert_eq!(request["op"], "status");
+
+        let response = br#"{"images":[{"image":"alpine:latest","pool":"alpine:latest|vcpus=2|memory=512m","max":4,"idle":2,"active":1,"leased":1,"total_created":5,"total_acquired":3,"total_evicted":1}]}"#;
+        stream
+            .write_all(&(response.len() as u32).to_le_bytes())
+            .expect("write status response length");
+        stream.write_all(response).expect("write status response");
+    });
+
+    let socket_arg = socket.to_string_lossy().to_string();
+    let stdout = cli.ok_with_env(
+        &["info"],
+        &[("A3S_BOX_RUN_POOL_SOCKET", socket_arg.as_str())],
+    );
+    server.join().expect("fake pool server should finish");
+
+    assert!(
+        stdout.contains("Warm pool daemon: running at"),
+        "info output did not report a running warm pool:\n{stdout}"
+    );
+    assert!(stdout.contains("max 4"));
+    assert!(stdout.contains("2 idle"));
+    assert!(stdout.contains("1 active"));
+    assert!(stdout.contains("1 leased"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_pool_timeout_is_sent_to_daemon() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let cli = CliTest::new();
+    let socket = cli.home_path().join("fake-run-pool.sock");
+    let listener = UnixListener::bind(&socket).expect("bind fake pool socket");
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept pool run client");
+        let mut len = [0_u8; 4];
+        stream.read_exact(&mut len).expect("read request length");
+        let mut request = vec![0_u8; u32::from_le_bytes(len) as usize];
+        stream.read_exact(&mut request).expect("read run request");
+        let request: serde_json::Value =
+            serde_json::from_slice(&request).expect("run request should be JSON");
+        assert_eq!(request["op"], "run");
+        assert_eq!(request["image"], "docker.io/library/alpine:latest");
+        assert_eq!(request["timeout_ns"], 7_000_000_000_u64);
+        assert_eq!(request["cmd"][0], "echo");
+
+        let response = br#"{"stdout":[111,107,10],"stderr":[],"exit_code":0,"error":null}"#;
+        stream
+            .write_all(&(response.len() as u32).to_le_bytes())
+            .expect("write response length");
+        stream.write_all(response).expect("write run response");
+    });
+
+    let socket_arg = socket.to_string_lossy().to_string();
+    let stdout = cli.ok(&[
+        "run",
+        "--pool",
+        "--pool-socket",
+        socket_arg.as_str(),
+        "--rm",
+        "--timeout",
+        "7",
+        "docker.io/library/alpine:latest",
+        "--",
+        "echo",
+        "ok",
+    ]);
+    server.join().expect("fake pool server should finish");
+
+    assert_eq!(stdout, "ok\n");
+}

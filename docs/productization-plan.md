@@ -94,6 +94,27 @@ Current notes:
   inline overrides. CLI `--env` continues to override `--env-file`, Compose
   `environment` overrides `env_file`, and guest-init receives merged container
   variables as `BOX_EXEC_ENV_*` instead of dropping them into PID 1 only.
+- Compose scalar interpolation now supports unset-versus-empty default and
+  replacement operators. The project `.env` is loaded first, the invoking
+  shell overrides it, and expansion completes before typed port validation.
+- Detached health checks now run in one generation-fenced child worker per box
+  instead of a Tokio task owned by the short-lived creating CLI. Compose and
+  `start`/`restart` use the same worker; the long-running monitor skips a box
+  while its worker lock is held, preventing duplicate probes.
+- `commit` now captures tar headers inside the Linux guest instead of deriving
+  uid/gid/mode from the macOS virtio-fs backing tree. Persistent boxes also
+  save a terminal metadata manifest before shutdown. Rootless OCI extraction
+  carries layer ownership through a protected manifest, applies whiteout
+  semantics to it, and guest-init replays image then terminal metadata before
+  mounting procfs, workspaces, or user volumes. The real HVF commit/re-run test
+  verifies root-owned and `123:456` files plus `0755`, `0750`, `0644`, `0600`,
+  and `0711` modes.
+- macOS virtio-fs no longer manually closes the raw descriptor owned by the
+  DAX mapping `File`. The previous double-close raced with descriptor reuse and
+  could make GNU tar report `Cannot close: Bad file descriptor` for unrelated
+  files in a mounted source tree. Real HVF coverage repeatedly archives a
+  2,048-file read-only mount, and the original Node 24/GNU tar repository-copy
+  workflow has passed against `/Users/roylin/code/os`.
 - Foreground and interactive `run` cleanup now persists captured exit codes in
   the box record before marking it stopped, and `wait` prints that recorded code
   instead of always reporting success for stopped boxes.
@@ -280,13 +301,18 @@ Current notes:
 
 - Build documentation now describes an explicit Dockerfile subset instead of
   claiming full Dockerfile parity. The supported subset is `FROM` (including
-  `scratch`), shell-form `RUN`, shell-form `COPY`/`ADD`, `WORKDIR`, `ENV`,
+  `scratch`), shell/exec-form `RUN`, shell-form `COPY`/`ADD`, `WORKDIR`, `ENV`,
   `ENTRYPOINT`, `CMD`, `EXPOSE`, `LABEL`, `USER`, `ARG`, `SHELL`,
   `STOPSIGNAL`, `HEALTHCHECK`, `ONBUILD` metadata triggers, and `VOLUME`.
-- Unsupported Dockerfile flags and deprecated instructions now fail with
-  contextual errors rather than being ignored or approximated. Examples:
-  `RUN` exec form, `COPY`/`ADD` JSON form, `COPY --chown`, `ADD --chown`, and
-  `MAINTAINER` are rejected.
+- Unsupported Dockerfile flags now fail with contextual errors rather than
+  being ignored or approximated. Examples: `COPY`/`ADD` JSON form and
+  unsupported `RUN --mount` variants are rejected; warm-pool `RUN` supports
+  context/stage/image `type=bind`, target-only `type=tmpfs`, and persistent
+  `type=cache` mounts, including stage/image cache seeding, with explicit
+  limitations. `RUN --network=default` and `RUN --security=sandbox` are accepted
+  as no-op Docker defaults, while non-default per-RUN network/security modes
+  still fail explicitly. Deprecated `MAINTAINER` is accepted as a maintainer
+  label.
 - ONBUILD triggers inherited from a base image only run when they map to
   metadata-only instructions. Triggers that require build execution context,
   such as `RUN` or `COPY`, fail explicitly until full trigger execution is
@@ -296,9 +322,12 @@ Current notes:
   silently producing a single-platform or wrong-OS image. The default output
   platform is Linux with the host architecture, not the host OS.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
-  Linux uses isolated `chroot`; macOS `RUN` builds are moving to
-  BuildKit-in-A3S-VM. The MVP uses `a3s-box build --builder=buildkit-vm` and
-  imports BuildKit's OCI output back into the A3S image store by default, with
+  Linux uses isolated `chroot`; the built-in engine also has an isolated
+  warm-pool VM lease path via `--run-pool`, which mounts each mutable build
+  stage rootfs into a leased helper VM and executes shell/exec-form `RUN`
+  through the guest exec server. macOS auto `RUN` builds still use
+  BuildKit-in-A3S-VM by default unless `--run-pool` is selected. The BuildKit
+  VM backend imports OCI output back into the A3S image store by default, with
   `--push` / `--plain-http` for direct registry release output and targeted
   credential injection into the BuildKit VM. On Apple Silicon, `linux/amd64`
   builds are routed through BuildKit's Linux builder path and may use emulation,
@@ -317,9 +346,11 @@ Current notes:
   containers.
 - CLI build smoke coverage now includes a pure `FROM scratch` build that verifies
   `COPY`, image metadata, history, save/exported layer contents, and local image
-  removal without registry or VM access. An ignored Linux-only smoke harness
-  also covers `RUN` through the chroot path when a local Alpine OCI tar and root
-  privileges are available.
+  removal without registry or VM access. Ignored host smoke coverage now also
+  includes warm-pool `pool run`, `run --pool`, environment auto-routing, and
+  Dockerfile `RUN` through the warm-pool lease path. A separate ignored
+  Linux-only smoke harness covers `RUN` through the chroot path when a local
+  Alpine OCI tar and root privileges are available.
 - The real core lifecycle smoke harness can now preload an OCI image archive into
   its isolated `A3S_HOME` via `A3S_BOX_SMOKE_IMAGE_TAR` or
   `A3S_BOX_TEST_ALPINE_TAR`, so HVF/KVM validation can run offline with the same
@@ -543,6 +574,17 @@ Current notes:
   container rootfs snapshot and surfaced through `ContainerStatus`, while
   writable, SELinux relabel, non-private propagation, and device mounts fail
   explicitly until real runtime mount plumbing is added.
+- macOS box root filesystems now live on per-box case-sensitive APFS sparse
+  images before OCI layers are extracted. The provider remounts persistent
+  generations on restart and detaches/removes ephemeral images during teardown;
+  a real HVF regression verifies `/bin/sh` and `/BIN/SH` are distinct and that
+  writable `Foo`/`foo` files retain distinct contents and inodes across restart.
+- BuildKit-in-VM writes its full `buildctl` invocation to an owner-private
+  script in the already-mounted output directory and gives guest init only the
+  fixed `/bin/sh /out/a3s-buildkit-build.sh` argv. This avoids truncation or
+  loss in the libkrun `BOX_EXEC_ARG_*` transport. Real HVF coverage verifies
+  multiple `--build-arg` values, including spaces, and BuildKit failures retain
+  bounded progress/stderr plus the helper command status.
 
 ### Gate 5: Portable Networking
 
@@ -564,10 +606,19 @@ Current notes:
   macOS netproxy, so unsupported UDP/host-IP/range syntax cannot be silently
   treated as a TCP listener or forwarded to libkrun.
 - `a3s-box info` now reports the host platform, VM backend, control channel,
-  bridge-network backend, published-port support, and TEE availability. The
-  diagnostics make the macOS bridge-mode boundary explicit: netproxy supports
-  peer networking and published TCP ports, while outbound NAT remains
-  unsupported; Linux passt reports peer networking with outbound NAT.
+  bridge-network backend, published-port support, TEE availability, package
+  cache state, virtio-fs cache fallback, and reachable warm-pool daemon
+  aggregate counts. The diagnostics make the macOS bridge-mode boundary
+  explicit: netproxy supports peer networking and published TCP ports, while
+  outbound NAT remains unsupported; Linux passt reports peer networking with
+  outbound NAT.
+- The warm-pool daemon now has an abandoned-lease guardrail:
+  `pool start --lease-ttl <duration>` reclaims idle internal leases whose client
+  disappeared before release, while leaving active lease execs alone. The
+  default is `1h`; `0` disables lease reclamation.
+- Volume-bound build leases are treated as short-lived stage helpers and are
+  filled on demand (`min_idle=0`) instead of pre-warming a whole pool for each
+  unique stage rootfs mount.
 - The shim now routes macOS bridge-mode published ports through the netproxy
   path only, avoiding duplicate TSI port-map registration when a box combines
   `--network` with `-p`.
@@ -590,6 +641,13 @@ Current notes:
   allocation and peer `/etc/hosts` discovery across two macOS HVF boxes, plus
   pre-start `network connect`/`disconnect` persistence, force-removal state
   cleanup, and active hot-plug rejection.
+- macOS netproxy bridge peers now join a per-network Unix-datagram Ethernet
+  switch keyed by destination MAC. Unicast frames go directly to the matching
+  peer, broadcast/multicast frames are flooded while still reaching the local
+  gateway, and unknown unicast follows normal switch flooding. The switch path
+  is a short per-UID digest under `/private/tmp`, avoiding the macOS Unix-socket
+  limit for long A3S homes/network names. Real HVF coverage fetches an HTTP body
+  between two boxes both by peer name and by assigned IP.
 
 ### Gate 6: Confidential Computing
 
@@ -629,18 +687,21 @@ Current notes:
 
 1. Run `scripts/host-integration-smoke.sh --core --host` on both macOS HVF and
    Linux KVM hosts with the same offline Alpine OCI archive, then record the
-   exact host/image/test metadata in the release notes.
+   exact host/image/test metadata in the release notes. The `--host` suite now
+   includes warm-pool command smoke and Dockerfile `RUN` over the warm-pool
+   lease path.
 2. Run `sudo -E scripts/host-integration-smoke.sh --linux-run --no-pure` on a
    root-capable Linux host with a local Alpine OCI tar. The Linux chroot path
    now has root/shell/workdir preflight checks, but still needs real Linux
    execution validation in this branch.
-3. Run and harden the opt-in kubelet/crictl CRI smoke suite on a host with
+3. After the warm-pool build smoke passes on both HVF and KVM, decide whether
+   macOS `build --builder=auto` should keep defaulting to BuildKit-in-A3S-VM for
+   `RUN` or promote the warm-pool lease path when a daemon/socket is configured.
+   Keep `A3S_BOX_UNSAFE_HOST_RUN=1` as an explicit experiment-only escape hatch.
+4. Run and harden the opt-in kubelet/crictl CRI smoke suite on a host with
    `crictl`, image availability, and microVM support. Pure unit coverage now
    verifies one-container and multi-container CRI lifecycle paths through a fake
    ready VM and exec server, and `src/cri/tests/crictl_smoke.rs` provides the
    real CRI socket harness.
-4. Replace macOS host-side Dockerfile `RUN` execution with an isolated execution
-   path. It now fails by default and requires `A3S_BOX_UNSAFE_HOST_RUN=1` for
-   explicit unsafe local experiments.
 5. Add a Windows/WHPX command support matrix and make unsupported Windows
    commands hidden or explicitly documented.

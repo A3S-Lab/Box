@@ -1,0 +1,467 @@
+//! Guest-side rootfs tar creation.
+//!
+//! Tar headers must be generated from guest-visible Linux metadata. Reading the
+//! virtio-fs backing directory on macOS can expose different uid/gid/mode values.
+
+use std::collections::HashSet;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+#[cfg(target_os = "linux")]
+use a3s_box_core::rootfs_metadata::IMAGE_ROOTFS_METADATA_PATH;
+use a3s_box_core::rootfs_metadata::{
+    RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest, ROOTFS_METADATA_PATH,
+};
+use base64::Engine;
+
+/// Write a tar stream for `root`, excluding nested mount points such as procfs,
+/// sysfs, tmpfs, and user volumes.
+pub(crate) fn write_rootfs_archive(
+    root: &Path,
+    output: &mut impl Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let excluded_mounts = nested_mount_points(root)?;
+    let mut builder = tar::Builder::new(output);
+    builder.follow_symlinks(false);
+    append_tree(&mut builder, root, root, Path::new("."), &excluded_mounts)?;
+    builder.finish()?;
+    Ok(())
+}
+
+/// Persist a compact terminal metadata snapshot for a stopped persistent box.
+pub fn persist_rootfs_metadata(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let excluded_mounts = nested_mount_points(root)?;
+    let mut entries = Vec::new();
+    collect_metadata(root, root, Path::new("."), &excluded_mounts, &mut entries)?;
+    entries.sort_by(|left, right| left.path_base64.cmp(&right.path_base64));
+    let manifest = RootfsMetadataManifest::new(entries);
+    let destination = root.join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
+    let temporary = destination.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(&manifest)?;
+    {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(temporary, destination)?;
+    Ok(())
+}
+
+/// Replay rootless-host OCI ownership and the last persistent guest generation.
+/// This must run before procfs, workspace, or user volumes are mounted.
+#[cfg(target_os = "linux")]
+pub fn restore_rootfs_metadata(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Runtime may update generated files such as resolv.conf after the image
+    // rootfs cache is composed, so image replay validates type and symlink
+    // identity but not regular-file size. The terminal snapshot was captured
+    // after all container writes and remains strict.
+    apply_metadata_manifest(root, IMAGE_ROOTFS_METADATA_PATH, false)?;
+    apply_metadata_manifest(root, ROOTFS_METADATA_PATH, true)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn apply_metadata_manifest(
+    root: &Path,
+    manifest_path: &str,
+    strict_content: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashSet;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let source = root.join(manifest_path.trim_start_matches('/'));
+    let bytes = match std::fs::read(&source) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let manifest: RootfsMetadataManifest = serde_json::from_slice(&bytes)?;
+    manifest.validate()?;
+    let mut decoded = Vec::with_capacity(manifest.entries.len());
+    let mut unique = HashSet::with_capacity(manifest.entries.len());
+    for entry in manifest.entries {
+        if entry.uid > u32::MAX as u64 || entry.gid > u32::MAX as u64 {
+            return Err("rootfs metadata uid/gid exceeds Linux range".into());
+        }
+        let raw = base64::engine::general_purpose::STANDARD.decode(&entry.path_base64)?;
+        let relative = PathBuf::from(std::ffi::OsString::from_vec(raw));
+        let relative = safe_relative_path(&relative)?;
+        if relative == Path::new(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            || relative == Path::new(ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            || !unique.insert(relative.clone())
+        {
+            return Err("duplicate or reserved rootfs metadata path".into());
+        }
+        let target = resolve_without_symlink_parent(root, &relative)?;
+        let metadata = std::fs::symlink_metadata(&target)?;
+        let actual_kind = if metadata.file_type().is_dir() {
+            RootfsEntryKind::Directory
+        } else if metadata.file_type().is_file() {
+            RootfsEntryKind::Regular
+        } else if metadata.file_type().is_symlink() {
+            RootfsEntryKind::Symlink
+        } else {
+            return Err(format!("unsupported rootfs entry at {}", target.display()).into());
+        };
+        if actual_kind != entry.kind
+            || (strict_content
+                && actual_kind == RootfsEntryKind::Regular
+                && metadata.size() != entry.size)
+        {
+            return Err(format!("rootfs metadata mismatch at {}", target.display()).into());
+        }
+        if actual_kind == RootfsEntryKind::Symlink {
+            let expected = entry
+                .link_target_base64
+                .as_ref()
+                .ok_or("symlink metadata is missing its target")?;
+            let expected = base64::engine::general_purpose::STANDARD.decode(expected)?;
+            if std::fs::read_link(&target)?.as_os_str().as_bytes() != expected {
+                return Err(format!("rootfs symlink mismatch at {}", target.display()).into());
+            }
+        }
+        decoded.push((
+            entry,
+            target,
+            metadata.uid() as u64,
+            metadata.gid() as u64,
+            metadata.mode(),
+        ));
+    }
+
+    for (entry, target, current_uid, current_gid, current_mode) in &decoded {
+        if entry.uid == *current_uid && entry.gid == *current_gid {
+            continue;
+        }
+        if entry.kind != RootfsEntryKind::Symlink && current_mode & 0o200 == 0 {
+            std::fs::set_permissions(
+                target,
+                std::fs::Permissions::from_mode((current_mode & 0o7777) | 0o200),
+            )
+            .map_err(|error| {
+                format!(
+                    "failed to make {} writable for ownership replay: {error}",
+                    target.display()
+                )
+            })?;
+        }
+        let path = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+        if unsafe { libc::lchown(path.as_ptr(), entry.uid as u32, entry.gid as u32) } != 0 {
+            return Err(format!(
+                "failed to restore ownership at {} from {}:{} to {}:{}: {}",
+                target.display(),
+                current_uid,
+                current_gid,
+                entry.uid,
+                entry.gid,
+                std::io::Error::last_os_error()
+            )
+            .into());
+        }
+    }
+    decoded.sort_by_key(|(_, path, _, _, _)| std::cmp::Reverse(path.components().count()));
+    for (entry, target, _, _, _) in &decoded {
+        if entry.kind != RootfsEntryKind::Symlink {
+            let current_mode = std::fs::symlink_metadata(target)?.mode() & 0o7777;
+            if current_mode == entry.mode & 0o7777 {
+                continue;
+            }
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(entry.mode & 0o7777))
+                .map_err(|error| {
+                    format!(
+                        "failed to restore mode at {} to {:o}: {error}",
+                        target.display(),
+                        entry.mode & 0o7777
+                    )
+                })?;
+        }
+    }
+    std::fs::remove_file(source)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn safe_relative_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    use std::path::Component;
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => result.push(name),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("unsafe rootfs metadata path".into())
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_without_symlink_parent(
+    root: &Path,
+    relative: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let mut current = root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        if index + 1 < components.len()
+            && std::fs::symlink_metadata(&current)?
+                .file_type()
+                .is_symlink()
+        {
+            return Err(format!(
+                "symlink parent in rootfs metadata path: {}",
+                current.display()
+            )
+            .into());
+        }
+    }
+    Ok(current)
+}
+
+fn append_tree<W: Write>(
+    builder: &mut tar::Builder<W>,
+    root: &Path,
+    source: &Path,
+    archive_path: &Path,
+    excluded_mounts: &HashSet<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip(root, source, excluded_mounts) {
+        return Ok(());
+    }
+
+    let metadata = std::fs::symlink_metadata(source)?;
+    let file_type = metadata.file_type();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if file_type.is_socket() {
+            return Ok(());
+        }
+    }
+
+    if file_type.is_dir() {
+        builder.append_dir(archive_path, source)?;
+        let mut entries: Vec<_> = std::fs::read_dir(source)?.collect::<Result<_, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            append_tree(
+                builder,
+                root,
+                &entry.path(),
+                &archive_path.join(entry.file_name()),
+                excluded_mounts,
+            )?;
+        }
+    } else {
+        builder.append_path_with_name(source, archive_path)?;
+    }
+    Ok(())
+}
+
+fn collect_metadata(
+    root: &Path,
+    source: &Path,
+    archive_path: &Path,
+    excluded_mounts: &HashSet<PathBuf>,
+    entries: &mut Vec<RootfsMetadataEntry>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    if should_skip(root, source, excluded_mounts) {
+        return Ok(());
+    }
+    let metadata = std::fs::symlink_metadata(source)?;
+    let file_type = metadata.file_type();
+    let (kind, link_target_base64) = if file_type.is_dir() {
+        (RootfsEntryKind::Directory, None)
+    } else if file_type.is_file() {
+        (RootfsEntryKind::Regular, None)
+    } else if file_type.is_symlink() {
+        let target = std::fs::read_link(source)?;
+        (
+            RootfsEntryKind::Symlink,
+            Some(base64::engine::general_purpose::STANDARD.encode(target.as_os_str().as_bytes())),
+        )
+    } else {
+        return Ok(());
+    };
+    entries.push(RootfsMetadataEntry {
+        path_base64: base64::engine::general_purpose::STANDARD
+            .encode(archive_path.as_os_str().as_bytes()),
+        kind,
+        mode: metadata.mode(),
+        uid: metadata.uid() as u64,
+        gid: metadata.gid() as u64,
+        mtime: metadata.mtime().max(0) as u64,
+        size: metadata.size(),
+        link_target_base64,
+    });
+
+    if file_type.is_dir() {
+        let mut children: Vec<_> = std::fs::read_dir(source)?.collect::<Result<_, _>>()?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            collect_metadata(
+                root,
+                &child.path(),
+                &archive_path.join(child.file_name()),
+                excluded_mounts,
+                entries,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn should_skip(root: &Path, source: &Path, excluded_mounts: &HashSet<PathBuf>) -> bool {
+    if source != root && excluded_mounts.contains(source) {
+        return true;
+    }
+    let Ok(relative) = source.strip_prefix(root) else {
+        return true;
+    };
+    matches!(
+        relative.to_str(),
+        Some(".a3s_rootfs_metadata_v1.json")
+            | Some(".a3s_rootfs_metadata_v1.json.tmp")
+            | Some(".a3s_image_metadata_v1.json")
+            | Some(".a3s_image_metadata_v1.json.tmp")
+            | Some(".a3s_exit_code")
+            // Written by libkrun's pre-PID1 init on every boot, before
+            // guest-init can replay terminal metadata. It is runtime
+            // diagnostics, not persistent container filesystem state.
+            | Some("init.trace.log")
+    )
+}
+
+fn nested_mount_points(root: &Path) -> Result<HashSet<PathBuf>, std::io::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+        Ok(parse_nested_mount_points(root, &mountinfo))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        Ok(HashSet::new())
+    }
+}
+
+fn parse_nested_mount_points(root: &Path, mountinfo: &str) -> HashSet<PathBuf> {
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(4))
+        .map(decode_mountinfo_path)
+        .map(PathBuf::from)
+        .filter(|mount| mount != root && mount.starts_with(root))
+        .collect()
+}
+
+fn decode_mountinfo_path(path: &str) -> String {
+    path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_preserves_guest_visible_mode_uid_gid_and_symlink() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let executable = directory.path().join("executable");
+        std::fs::write(&executable, b"payload").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o751)).unwrap();
+        std::os::unix::fs::symlink("executable", directory.path().join("link")).unwrap();
+        let metadata = std::fs::metadata(&executable).unwrap();
+
+        let mut bytes = Vec::new();
+        write_rootfs_archive(directory.path(), &mut bytes).unwrap();
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut saw_executable = false;
+        let mut saw_link = false;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap();
+            let path = path.strip_prefix(".").unwrap_or(path.as_ref());
+            match path.to_string_lossy().as_ref() {
+                "executable" => {
+                    saw_executable = true;
+                    assert_eq!(entry.header().mode().unwrap() & 0o7777, 0o751);
+                    assert_eq!(entry.header().uid().unwrap(), metadata.uid() as u64);
+                    assert_eq!(entry.header().gid().unwrap(), metadata.gid() as u64);
+                }
+                "link" => {
+                    saw_link = true;
+                    assert_eq!(entry.link_name().unwrap().unwrap(), Path::new("executable"));
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_executable);
+        assert!(saw_link);
+    }
+
+    #[test]
+    fn mountinfo_parser_decodes_and_keeps_only_nested_mounts() {
+        let mounts = parse_nested_mount_points(
+            Path::new("/"),
+            "1 0 0:1 / / rw - rootfs rootfs rw\n\
+             2 1 0:2 / /proc rw - proc proc rw\n\
+             3 1 0:3 / /with\\040space rw - tmpfs tmpfs rw\n",
+        );
+
+        assert!(mounts.contains(Path::new("/proc")));
+        assert!(mounts.contains(Path::new("/with space")));
+        assert!(!mounts.contains(Path::new("/")));
+    }
+
+    #[test]
+    fn persisted_manifest_records_terminal_metadata_and_excludes_internal_files() {
+        use base64::Engine;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let executable = directory.path().join("probe");
+        std::fs::write(&executable, b"probe").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(directory.path().join(".a3s_exit_code"), b"0").unwrap();
+        std::fs::write(directory.path().join("init.trace.log"), b"runtime trace").unwrap();
+
+        persist_rootfs_metadata(directory.path()).unwrap();
+        let manifest_path = directory.path().join(".a3s_rootfs_metadata_v1.json");
+        let manifest: RootfsMetadataManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        manifest.validate().unwrap();
+        let probe_path = base64::engine::general_purpose::STANDARD
+            .encode(Path::new("./probe").as_os_str().as_bytes());
+        let probe = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path_base64 == probe_path)
+            .unwrap();
+        assert_eq!(probe.mode & 0o7777, 0o755);
+        assert!(!manifest.entries.iter().any(|entry| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&entry.path_base64)
+                .is_ok_and(|path| path.ends_with(b".a3s_exit_code"))
+        }));
+        assert!(!manifest.entries.iter().any(|entry| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&entry.path_base64)
+                .is_ok_and(|path| path.ends_with(b"init.trace.log"))
+        }));
+    }
+}

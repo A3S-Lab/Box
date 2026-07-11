@@ -14,6 +14,18 @@ pub trait RootfsProvider: Send + Sync {
     /// Returns the path to use as `InstanceSpec.rootfs_path`.
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf>;
 
+    /// Prepare an empty writable rootfs for an OCI cache miss.
+    fn prepare_empty(&self, box_dir: &Path) -> Result<PathBuf> {
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to create rootfs {}: {error}",
+                rootfs.display()
+            ))
+        })?;
+        Ok(rootfs)
+    }
+
     /// Cleanup after box stops.
     ///
     /// When `persistent` is true, the writable layer (overlay upper dir or copy
@@ -63,6 +75,185 @@ impl RootfsProvider for CopyProvider {
 
     fn name(&self) -> &'static str {
         "copy"
+    }
+}
+
+/// A copy provider backed by a case-sensitive APFS sparse image.
+///
+/// macOS commonly stores `~/.a3s` on case-insensitive APFS. Passing a normal
+/// host directory to libkrun as the guest root would then make Linux paths such
+/// as `/bin` and `/BIN` aliases. Each box therefore owns a sparse, dynamically
+/// allocated case-sensitive APFS image and exposes its mountpoint via virtiofs.
+#[cfg(target_os = "macos")]
+pub struct CaseSensitiveApfsProvider;
+
+#[cfg(target_os = "macos")]
+impl CaseSensitiveApfsProvider {
+    // v2 stores the Linux tree below a private directory inside the volume.
+    // APFS creates volume-management entries such as `.fseventsd` at the
+    // volume root; exposing that root to the guest both leaks host artifacts
+    // and can make recursive rootfs walks fail with EACCES.
+    const IMAGE_STEM: &'static str = "rootfs-apfs-v2";
+    const IMAGE_NAME: &'static str = "rootfs-apfs-v2.sparseimage";
+    const DATA_DIR: &'static str = ".a3s-rootfs";
+
+    fn clone_image(source: &Path, destination: &Path) -> Result<()> {
+        let output = std::process::Command::new("cp")
+            .arg("-c")
+            .arg(source)
+            .arg(destination)
+            .output()
+            .map_err(|error| {
+                BoxError::BuildError(format!("Failed to start APFS clone: {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(BoxError::BuildError(format!(
+                "Failed to clone cached APFS rootfs {}: {}",
+                source.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(())
+    }
+
+    fn mount(&self, box_dir: &Path) -> Result<PathBuf> {
+        use std::process::Command;
+
+        std::fs::create_dir_all(box_dir).map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to create box directory {}: {error}",
+                box_dir.display()
+            ))
+        })?;
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to create APFS mountpoint {}: {error}",
+                rootfs.display()
+            ))
+        })?;
+        if super::is_mountpoint(&rootfs) {
+            return Self::data_dir(&rootfs);
+        }
+
+        let image = box_dir.join(Self::IMAGE_NAME);
+        if !image.exists() {
+            let stem = box_dir.join(Self::IMAGE_STEM);
+            let output = Command::new("hdiutil")
+                .args([
+                    "create",
+                    "-quiet",
+                    "-size",
+                    "64g",
+                    "-type",
+                    "SPARSE",
+                    "-fs",
+                    "Case-sensitive APFS",
+                    "-volname",
+                    "A3SRootfs",
+                ])
+                .arg(&stem)
+                .output()
+                .map_err(|error| {
+                    BoxError::BuildError(format!("Failed to start hdiutil create: {error}"))
+                })?;
+            if !output.status.success() {
+                return Err(BoxError::BuildError(format!(
+                    "Failed to create case-sensitive APFS rootfs image: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+        }
+
+        let output = Command::new("hdiutil")
+            .args([
+                "attach",
+                "-quiet",
+                "-nobrowse",
+                "-owners",
+                "on",
+                "-mountpoint",
+            ])
+            .arg(&rootfs)
+            .arg(&image)
+            .output()
+            .map_err(|error| {
+                BoxError::BuildError(format!("Failed to start hdiutil attach: {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(BoxError::BuildError(format!(
+                "Failed to mount case-sensitive APFS rootfs image {}: {}",
+                image.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        if !super::is_mountpoint(&rootfs) {
+            return Err(BoxError::BuildError(format!(
+                "hdiutil did not mount the rootfs image at {}",
+                rootfs.display()
+            )));
+        }
+        Self::data_dir(&rootfs)
+    }
+
+    fn data_dir(mountpoint: &Path) -> Result<PathBuf> {
+        let data = mountpoint.join(Self::DATA_DIR);
+        std::fs::create_dir_all(&data).map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to create APFS rootfs data directory {}: {error}",
+                data.display()
+            ))
+        })?;
+        Ok(data)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl RootfsProvider for CaseSensitiveApfsProvider {
+    fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf> {
+        let image = box_dir.join(Self::IMAGE_NAME);
+        if cache_dir.is_file() && !image.exists() {
+            std::fs::create_dir_all(box_dir).map_err(BoxError::IoError)?;
+            Self::clone_image(cache_dir, &image)?;
+        }
+        let rootfs = self.mount(box_dir)?;
+        if cache_dir.is_file() {
+            return Ok(rootfs);
+        }
+        if std::fs::read_dir(&rootfs)
+            .map_err(|error| BoxError::BuildError(error.to_string()))?
+            .next()
+            .is_none()
+        {
+            crate::cache::layer_cache::copy_dir_recursive(cache_dir, &rootfs)?;
+        } else {
+            tracing::info!(path = %rootfs.display(), "Reusing persistent APFS rootfs");
+        }
+        Ok(rootfs)
+    }
+
+    fn prepare_empty(&self, box_dir: &Path) -> Result<PathBuf> {
+        self.mount(box_dir)
+    }
+
+    fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()> {
+        super::unmount_box_rootfs(&box_dir.join("rootfs"));
+        if !persistent {
+            let image = box_dir.join(Self::IMAGE_NAME);
+            if image.exists() {
+                std::fs::remove_file(&image).map_err(|error| {
+                    BoxError::BuildError(format!(
+                        "Failed to remove rootfs image {}: {error}",
+                        image.display()
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        "case-sensitive-apfs"
     }
 }
 
@@ -156,13 +347,22 @@ impl RootfsProvider for OverlayProvider {
 
 /// Auto-detect the best available rootfs provider for the current platform.
 pub fn default_provider() -> Box<dyn RootfsProvider> {
-    if super::overlay::is_overlay_supported() {
-        tracing::info!("Using overlayfs rootfs provider");
-        return Box::new(OverlayProvider);
+    #[cfg(target_os = "macos")]
+    {
+        tracing::info!("Using case-sensitive APFS rootfs provider");
+        Box::new(CaseSensitiveApfsProvider)
     }
 
-    tracing::info!("Overlayfs not available, using copy provider");
-    Box::new(CopyProvider)
+    #[cfg(not(target_os = "macos"))]
+    {
+        if super::overlay::is_overlay_supported() {
+            tracing::info!("Using overlayfs rootfs provider");
+            return Box::new(OverlayProvider);
+        }
+
+        tracing::info!("Overlayfs not available, using copy provider");
+        Box::new(CopyProvider)
+    }
 }
 
 #[cfg(test)]
@@ -316,6 +516,35 @@ mod tests {
         let provider = default_provider();
         // On any platform, we should get a provider
         assert!(!provider.name().is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn case_sensitive_apfs_provider_preserves_distinct_names() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let box_dir = tmp.path().join("box");
+        let provider = CaseSensitiveApfsProvider;
+        let rootfs = provider.prepare_empty(&box_dir).unwrap();
+        std::fs::write(rootfs.join("Foo"), "upper").unwrap();
+        std::fs::write(rootfs.join("foo"), "lower").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(rootfs.join("Foo")).unwrap(),
+            "upper"
+        );
+        assert_eq!(
+            std::fs::read_to_string(rootfs.join("foo")).unwrap(),
+            "lower"
+        );
+        assert_ne!(
+            std::fs::metadata(rootfs.join("Foo")).unwrap().ino(),
+            std::fs::metadata(rootfs.join("foo")).unwrap().ino()
+        );
+
+        provider.cleanup(&box_dir, false).unwrap();
+        assert!(!box_dir.join(CaseSensitiveApfsProvider::IMAGE_NAME).exists());
     }
 
     #[cfg(target_os = "linux")]

@@ -123,14 +123,13 @@ impl VmManager {
                     );
                     (exec, args, oci_config.env.clone())
                 }
-                None => (
-                    "/bin/sh".to_string(),
-                    vec![
-                        "-c".to_string(),
-                        "echo No command specified; exec /bin/sh".to_string(),
-                    ],
-                    vec![],
-                ),
+                None => {
+                    let (exec, args) = Self::resolve_config_entrypoint(
+                        &self.config.cmd,
+                        self.config.entrypoint_override.as_deref(),
+                    );
+                    (exec, args, vec![])
+                }
             };
             a3s_box_core::env::merge_env_pairs(&mut container_env, &self.config.extra_env);
 
@@ -371,14 +370,18 @@ impl VmManager {
                         env,
                     }
                 }
-                None => Entrypoint {
-                    executable: "/bin/sh".to_string(),
-                    args: vec![
-                        "-c".to_string(),
-                        "echo No command specified; exec /bin/sh".to_string(),
-                    ],
-                    env: self.config.extra_env.clone(),
-                },
+                None => {
+                    let (executable, args) = Self::resolve_config_entrypoint(
+                        &self.config.cmd,
+                        self.config.entrypoint_override.as_deref(),
+                    );
+
+                    Entrypoint {
+                        executable,
+                        args,
+                        env: self.config.extra_env.clone(),
+                    }
+                }
             }
         };
 
@@ -402,6 +405,12 @@ impl VmManager {
         entrypoint
             .env
             .push(("BOX_CRI_PORT_FWD".to_string(), "1".to_string()));
+
+        if self.config.persistent {
+            entrypoint
+                .env
+                .push(("BOX_PERSIST_ROOTFS_METADATA".to_string(), "1".to_string()));
+        }
 
         // Inject sidecar configuration so guest-init can launch the sidecar process
         if let Some(ref sidecar) = self.config.sidecar {
@@ -520,14 +529,41 @@ impl VmManager {
             (exec, args)
         } else {
             // Neither set: fall back to /bin/sh (universal across all Linux distros)
-            (
-                "/bin/sh".to_string(),
-                vec![
-                    "-c".to_string(),
-                    "echo No command specified; exec /bin/sh".to_string(),
-                ],
-            )
+            Self::default_entrypoint()
         }
+    }
+
+    /// Resolve an entrypoint from the box config alone.
+    ///
+    /// Snapshot restores can mount a prepared rootfs without an OCI config file,
+    /// but the CLI record still preserves the original ENTRYPOINT/CMD. Keep the
+    /// same Docker ordering here: entrypoint args first, then CMD.
+    fn resolve_config_entrypoint(
+        cmd: &[String],
+        entrypoint_override: Option<&[String]>,
+    ) -> (String, Vec<String>) {
+        if let Some(entrypoint) = entrypoint_override.filter(|entrypoint| !entrypoint.is_empty()) {
+            let exec = entrypoint[0].clone();
+            let mut args: Vec<String> = entrypoint.iter().skip(1).cloned().collect();
+            args.extend(cmd.iter().cloned());
+            (exec, args)
+        } else if !cmd.is_empty() {
+            let exec = cmd[0].clone();
+            let args: Vec<String> = cmd.iter().skip(1).cloned().collect();
+            (exec, args)
+        } else {
+            Self::default_entrypoint()
+        }
+    }
+
+    fn default_entrypoint() -> (String, Vec<String>) {
+        (
+            "/bin/sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "echo No command specified; exec /bin/sh".to_string(),
+            ],
+        )
     }
 
     fn guest_init_exec_path(rootfs_path: &Path) -> Option<&'static str> {
@@ -916,6 +952,20 @@ mod tests {
     }
 
     #[test]
+    fn test_persistent_box_requests_terminal_rootfs_metadata() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), Some(test_oci_config(None, None)), true);
+        let mut vm = test_vm_manager(BoxConfig {
+            persistent: true,
+            ..Default::default()
+        });
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(env_value(&spec, "BOX_PERSIST_ROOTFS_METADATA"), Some("1"));
+    }
+
+    #[test]
     fn test_run_path_plumbs_cpu_cgroup_limits_to_guest() {
         // The `run` boot path must hand the CPU cgroup limits to guest-init as
         // A3S_SEC_CPU_* (the same vars the CRI path emits and the guest consumes),
@@ -1228,6 +1278,60 @@ mod tests {
         fs::write(rootfs.join("sbin").join("init"), b"guest-init").unwrap();
 
         assert_eq!(VmManager::guest_init_exec_path(rootfs), Some("/sbin/init"));
+    }
+
+    #[test]
+    fn test_build_instance_spec_restored_rootfs_uses_saved_cmd_with_guest_init() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), None, true);
+        let mut vm = test_vm_manager(BoxConfig {
+            cmd: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 3600".to_string(),
+            ],
+            ..Default::default()
+        });
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(spec.entrypoint.executable, "/sbin/init");
+        assert_eq!(
+            env_value(&spec, "BOX_EXEC_EXEC").map(b64d).as_deref(),
+            Some("/bin/sh")
+        );
+        assert_eq!(env_value(&spec, "BOX_EXEC_ARGC"), Some("2"));
+        assert_eq!(
+            env_value(&spec, "BOX_EXEC_ARG_0").map(b64d).as_deref(),
+            Some("-c")
+        );
+        assert_eq!(
+            env_value(&spec, "BOX_EXEC_ARG_1").map(b64d).as_deref(),
+            Some("sleep 3600")
+        );
+        assert!(!spec
+            .entrypoint
+            .env
+            .iter()
+            .any(|(_, value)| value.contains("No command specified")));
+    }
+
+    #[test]
+    fn test_build_instance_spec_restored_rootfs_uses_saved_entrypoint_without_guest_init() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), None, false);
+        let mut vm = test_vm_manager(BoxConfig {
+            cmd: vec!["hello".to_string()],
+            entrypoint_override: Some(vec!["/bin/echo".to_string(), "prefix".to_string()]),
+            extra_env: vec![("FOO".to_string(), "bar".to_string())],
+            ..Default::default()
+        });
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(spec.entrypoint.executable, "/bin/echo");
+        assert_eq!(spec.entrypoint.args, vec!["prefix", "hello"]);
+        assert_eq!(env_value(&spec, "FOO"), Some("bar"));
     }
 
     #[test]

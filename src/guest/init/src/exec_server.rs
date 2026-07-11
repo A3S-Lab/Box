@@ -6,6 +6,8 @@
 
 use std::io::Read;
 use std::io::Write;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -59,6 +61,13 @@ const EXEC_CONTROL_SPAWN_MAIN: &[u8] = b"spawn-main:";
 const EXEC_SPAWN_MAIN_ACK: &[u8] = b"spawn-main-ack";
 #[cfg(target_os = "linux")]
 const EXEC_SPAWN_MAIN_NACK: &[u8] = b"spawn-main-nack:";
+/// Stream a guest-metadata-preserving tar of the root filesystem.
+#[cfg(target_os = "linux")]
+const EXEC_CONTROL_ARCHIVE_ROOTFS: &[u8] = b"archive-rootfs-v1";
+#[cfg(target_os = "linux")]
+const EXEC_CONTROL_ARCHIVE_ROOTFS_PAUSE: &[u8] = b"archive-rootfs-v1:pause";
+#[cfg(target_os = "linux")]
+const EXEC_ARCHIVE_ROOTFS_DONE: &[u8] = b"archive-rootfs-v1-done";
 
 /// Deliver `sig` to the main container process (best-effort).
 #[cfg(target_os = "linux")]
@@ -422,6 +431,18 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
             std::mem::forget(fd);
             return Ok(());
         }
+        if frame_type == FrameType::Control as u8
+            && (payload == EXEC_CONTROL_ARCHIVE_ROOTFS
+                || payload == EXEC_CONTROL_ARCHIVE_ROOTFS_PAUSE)
+        {
+            let pause = payload == EXEC_CONTROL_ARCHIVE_ROOTFS_PAUSE;
+            let result = stream_rootfs_archive(&mut stream, pause);
+            if let Err(error) = result {
+                send_error_frame(&mut stream, &format!("rootfs archive failed: {error}"))?;
+            }
+            std::mem::forget(fd);
+            return Ok(());
+        }
         send_error_frame(&mut stream, "Expected Data frame")?;
         std::mem::forget(fd);
         return Ok(());
@@ -474,6 +495,126 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
 
     std::mem::forget(fd);
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn stream_rootfs_archive(
+    stream: &mut impl Write,
+    pause: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _pause_guard = pause.then(PausedContainerTree::pause);
+    {
+        let mut writer = ArchiveFrameWriter::new(&mut *stream);
+        crate::rootfs_archive::write_rootfs_archive(Path::new("/"), &mut writer)?;
+        writer.finish()?;
+    }
+    write_frame(stream, FrameType::Control as u8, EXEC_ARCHIVE_ROOTFS_DONE)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct PausedContainerTree {
+    pids: Vec<i32>,
+}
+
+#[cfg(target_os = "linux")]
+impl PausedContainerTree {
+    fn pause() -> Self {
+        let root = container_pid();
+        let mut pids = Vec::new();
+        if root > 0 {
+            collect_process_tree(root, &mut pids);
+            // Stop descendants before their parent so no parent can immediately
+            // create more work after its children are frozen.
+            for pid in pids.iter().rev() {
+                unsafe {
+                    libc::kill(*pid, libc::SIGSTOP);
+                }
+            }
+        }
+        Self { pids }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PausedContainerTree {
+    fn drop(&mut self) {
+        for pid in &self.pids {
+            unsafe {
+                libc::kill(*pid, libc::SIGCONT);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn collect_process_tree(pid: i32, output: &mut Vec<i32>) {
+    if output.contains(&pid) {
+        return;
+    }
+    output.push(pid);
+    let children = format!("/proc/{pid}/task/{pid}/children");
+    let Ok(children) = std::fs::read_to_string(children) else {
+        return;
+    };
+    for child in children
+        .split_whitespace()
+        .filter_map(|value| value.parse::<i32>().ok())
+    {
+        collect_process_tree(child, output);
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct ArchiveFrameWriter<'a, W: Write> {
+    stream: &'a mut W,
+    buffer: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+impl<'a, W: Write> ArchiveFrameWriter<'a, W> {
+    const CHUNK_BYTES: usize = 64 * 1024;
+
+    fn new(stream: &'a mut W) -> Self {
+        Self {
+            stream,
+            buffer: Vec::with_capacity(Self::CHUNK_BYTES),
+        }
+    }
+
+    fn flush_frame(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        write_frame(self.stream, FrameType::Data as u8, &self.buffer)?;
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.flush_frame()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<W: Write> Write for ArchiveFrameWriter<'_, W> {
+    fn write(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
+        let total = bytes.len();
+        while !bytes.is_empty() {
+            let available = Self::CHUNK_BYTES - self.buffer.len();
+            let copied = available.min(bytes.len());
+            self.buffer.extend_from_slice(&bytes[..copied]);
+            bytes = &bytes[copied..];
+            if self.buffer.len() == Self::CHUNK_BYTES {
+                self.flush_frame()?;
+            }
+        }
+        Ok(total)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_frame()
+    }
 }
 
 /// Write a frame: [type:u8][length:u32 BE][payload].
