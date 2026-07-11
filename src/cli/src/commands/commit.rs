@@ -101,7 +101,7 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
 
     println!(
         "sha256:{}",
-        &stored
+        stored
             .digest
             .strip_prefix("sha256:")
             .unwrap_or(&stored.digest)

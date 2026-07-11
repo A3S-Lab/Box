@@ -491,7 +491,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
     println!(
         "Creating box {} ({})...",
         name,
-        &BoxRecord::make_short_id(&box_id)
+        BoxRecord::make_short_id(&box_id)
     );
 
     let image_name = args.common.image.clone();
