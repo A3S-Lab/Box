@@ -360,6 +360,57 @@ impl VmManager {
         self.exec_client.as_ref()
     }
 
+    #[cfg(unix)]
+    async fn connect_exec_client_for_request(socket_path: &Path) -> Result<ExecClient> {
+        const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+        let client = ExecClient::connect(socket_path).await?;
+        match tokio::time::timeout(ATTEMPT_TIMEOUT, client.heartbeat()).await {
+            Ok(Ok(true)) => Ok(client),
+            Ok(Ok(false)) => Err(BoxError::ExecError(format!(
+                "Exec client not connected: heartbeat failed at {}",
+                socket_path.display()
+            ))),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(BoxError::ExecError(format!(
+                "Exec client not connected: heartbeat timed out at {}",
+                socket_path.display()
+            ))),
+        }
+    }
+
+    /// Wait until the guest exec server can complete a heartbeat.
+    ///
+    /// Cold foreground boots may proceed after the short diagnostic readiness
+    /// cap so logs remain visible. A warm pool has a stronger contract: an idle
+    /// VM must actually be executable before it is published to callers.
+    #[cfg(unix)]
+    pub async fn wait_for_exec_available(&mut self, timeout: std::time::Duration) -> Result<()> {
+        let socket_path = self
+            .exec_socket_path
+            .clone()
+            .ok_or_else(|| BoxError::ExecError("Exec socket path is unavailable".to_string()))?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match Self::connect_exec_client_for_request(&socket_path).await {
+                Ok(client) => {
+                    self.exec_client = Some(client);
+                    return Ok(());
+                }
+                Err(error) if tokio::time::Instant::now() < deadline => {
+                    tracing::debug!(%error, "Waiting for pooled VM exec readiness");
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub async fn wait_for_exec_available(&mut self, _timeout: std::time::Duration) -> Result<()> {
+        Ok(())
+    }
+
     /// Attach this manager to an already-running shim process.
     ///
     /// This is useful for crash recovery or control-plane restart flows where
@@ -544,18 +595,44 @@ impl VmManager {
         spec_json: &[u8],
         timeout: std::time::Duration,
     ) -> Result<a3s_box_core::exec::ExecOutput> {
+        let log_dir = self.home_dir.join("boxes").join(&self.box_id).join("logs");
+        let console_out_path = log_dir.join("console.log");
+        let console_err_path = a3s_box_core::log::stderr_console_path(&console_out_path);
+        let console_out_start = std::fs::metadata(&console_out_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let console_err_start = std::fs::metadata(&console_err_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+
         let acked = {
-            let client = self
-                .exec_client
-                .as_ref()
-                .ok_or_else(|| BoxError::ExecError("Exec client not connected".to_string()))?;
+            let owned_client;
+            let client = if let Some(client) = self.exec_client.as_ref() {
+                client
+            } else {
+                let socket_path = self
+                    .exec_socket_path
+                    .as_deref()
+                    .ok_or_else(|| BoxError::ExecError("Exec client not connected".to_string()))?;
+                owned_client = Self::connect_exec_client_for_request(socket_path).await?;
+                &owned_client
+            };
             client.spawn_main(Some(spec_json)).await?
         };
-        if !acked {
-            return Err(BoxError::ExecError(
-                "spawn-main was not acknowledged by the guest".to_string(),
-            ));
-        }
+        let exit_wait_timeout = if acked {
+            timeout
+        } else {
+            // Very short deferred mains can exit and halt the VM before the
+            // guest's ACK frame makes it back to the host. Treat a missing ACK as
+            // provisional: if the VM exits promptly, the spawn succeeded and the
+            // real exit code/logs are authoritative; otherwise fail quickly
+            // instead of waiting the full command timeout for an IDLE VM.
+            tracing::debug!(
+                box_id = %self.box_id,
+                "spawn-main was not acknowledged; waiting briefly for main exit"
+            );
+            timeout.min(std::time::Duration::from_secs(2))
+        };
 
         // Wait for the main to exit — guest-init persists the code and halts the VM.
         let start = std::time::Instant::now();
@@ -563,40 +640,73 @@ impl VmManager {
             if let Some(code) = self.try_wait_exit().await? {
                 break code;
             }
-            if start.elapsed() >= timeout {
-                return Err(BoxError::ExecError(
-                    "deferred main did not exit within the timeout".to_string(),
-                ));
+            if start.elapsed() >= exit_wait_timeout {
+                let message = if acked {
+                    "deferred main did not exit within the timeout"
+                } else {
+                    "spawn-main was not acknowledged by the guest"
+                };
+                return Err(BoxError::ExecError(message.to_string()));
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
 
         // Let the shim's log processor finish draining console.log into the json
-        // file (it flushes as the VM halts): poll until container.json stops
-        // growing for one interval (bounded at 1s) instead of a fixed sleep —
-        // fast when the drain is already done, safe when it lags.
-        let json_path = self
-            .home_dir
-            .join("boxes")
-            .join(&self.box_id)
-            .join("logs")
-            .join("container.json");
+        // file (it flushes as the VM halts). A single short "stable length"
+        // sample is not enough here: deferred-main can persist its exit code
+        // before the final stdout/stderr bytes have reached the host tailer,
+        // especially with pre-warmed pools. Require a small quiet window before
+        // reading logs, bounded so no-output commands still return promptly.
+        let json_path = log_dir.join("container.json");
         let drain_start = std::time::Instant::now();
-        let mut last_len = u64::MAX;
+        let max_wait = std::time::Duration::from_secs(2);
+        let min_wait = std::time::Duration::from_millis(500);
+        let quiet_window = std::time::Duration::from_millis(200);
+        let mut last_len: Option<u64> = None;
+        let mut last_change = drain_start;
         loop {
             let len = std::fs::metadata(&json_path).map(|m| m.len()).unwrap_or(0);
-            if len == last_len || drain_start.elapsed() >= std::time::Duration::from_secs(1) {
+            if last_len != Some(len) {
+                last_len = Some(len);
+                last_change = std::time::Instant::now();
+            }
+            let elapsed = drain_start.elapsed();
+            if elapsed >= max_wait || (elapsed >= min_wait && last_change.elapsed() >= quiet_window)
+            {
                 break;
             }
-            last_len = len;
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let (stdout, stderr) = self.read_container_logs();
+        let (mut stdout, mut stderr) = self.read_container_logs();
+        if stdout.is_empty() {
+            stdout = Self::read_file_from_offset(&console_out_path, console_out_start);
+        }
+        if stderr.is_empty() {
+            stderr = Self::read_file_from_offset(&console_err_path, console_err_start);
+        }
         Ok(a3s_box_core::exec::ExecOutput {
             stdout,
             stderr,
             exit_code,
         })
+    }
+
+    fn read_file_from_offset(path: &Path, offset: u64) -> Vec<u8> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => return vec![],
+        };
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return vec![];
+        }
+
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() {
+            return vec![];
+        }
+        bytes
     }
 
     /// Read the box's json-file console logs, split into stdout/stderr by stream.
@@ -649,10 +759,17 @@ impl VmManager {
         }
         drop(state);
 
-        let client = self
-            .exec_client
-            .as_ref()
-            .ok_or_else(|| BoxError::ExecError("Exec client not connected".to_string()))?;
+        let owned_client;
+        let client = if let Some(client) = self.exec_client.as_ref() {
+            client
+        } else {
+            let socket_path = self
+                .exec_socket_path
+                .as_deref()
+                .ok_or_else(|| BoxError::ExecError("Exec client not connected".to_string()))?;
+            owned_client = Self::connect_exec_client_for_request(socket_path).await?;
+            &owned_client
+        };
 
         let exec_start = std::time::Instant::now();
         let result = client.exec_command(request).await;
@@ -795,6 +912,38 @@ impl VmManager {
                     .join(","),
             ));
 
+            spec.network = Some(net_config);
+        }
+
+        #[cfg(target_os = "macos")]
+        if spec.network.is_none()
+            && matches!(self.config.network, a3s_box_core::NetworkMode::Tsi)
+            && !self.config.port_map.is_empty()
+        {
+            let net_config = match self.setup_published_default_network() {
+                Ok(network) => network,
+                Err(error) => {
+                    self.cleanup_boot_failure().await;
+                    return Err(error);
+                }
+            };
+            let ip_cidr = format!("{}/{}", net_config.ip_address, net_config.prefix_len);
+            spec.entrypoint
+                .env
+                .push(("A3S_NET_IP".to_string(), ip_cidr));
+            spec.entrypoint.env.push((
+                "A3S_NET_GATEWAY".to_string(),
+                net_config.gateway.to_string(),
+            ));
+            spec.entrypoint.env.push((
+                "A3S_NET_DNS".to_string(),
+                net_config
+                    .dns_servers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
             spec.network = Some(net_config);
         }
 

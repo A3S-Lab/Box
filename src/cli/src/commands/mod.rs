@@ -236,6 +236,10 @@ pub(crate) fn resolve_box_rootfs(box_dir: &std::path::Path) -> Option<PathBuf> {
         return Some(merged);
     }
     let rootfs = box_dir.join("rootfs");
+    let apfs_data = rootfs.join(".a3s-rootfs");
+    if apfs_data.is_dir() {
+        return Some(apfs_data);
+    }
     if rootfs.is_dir() {
         return Some(rootfs);
     }

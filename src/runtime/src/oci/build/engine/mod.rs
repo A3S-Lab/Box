@@ -12,7 +12,7 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::platform::Platform;
 
 use super::cache::{hash_context_sources, BuildCache};
-use super::dockerfile::{Dockerfile, Instruction};
+use super::dockerfile::{Dockerfile, Instruction, RunBindMount, RunCacheMount};
 use super::dockerignore::DockerIgnore;
 use super::layer::{sha256_bytes, sha256_file, LayerInfo};
 use crate::oci::image::OciImageConfig;
@@ -29,7 +29,7 @@ mod tests;
 
 use handlers::{
     apply_base_config, execute_onbuild_trigger, handle_add, handle_copy, handle_run,
-    instruction_to_string,
+    handle_run_with_pool, instruction_to_string,
 };
 use stages::{global_arg_decls, resolve_stage_rootfs, split_into_stages};
 use utils::{compute_diff_id, expand_args, format_size, resolve_path};
@@ -57,6 +57,27 @@ pub struct BuildConfig {
     pub no_cache: bool,
     /// Prometheus metrics (optional).
     pub metrics: Option<crate::prom::RuntimeMetrics>,
+    /// Execute Dockerfile RUN instructions through a warm-pool daemon lease.
+    pub run_pool: Option<BuildRunPoolConfig>,
+}
+
+/// Configuration for executing Dockerfile RUN instructions in a warm-pool VM.
+#[derive(Debug, Clone)]
+pub struct BuildRunPoolConfig {
+    /// Pool daemon Unix socket.
+    pub socket: String,
+    /// Helper VM image. `None` uses the daemon's default image.
+    pub image: Option<String>,
+    /// Helper VM vCPU count for lazily-created pools.
+    pub vcpus: u32,
+    /// Helper VM memory in MiB for lazily-created pools.
+    pub memory_mb: u32,
+    /// Guest path where the stage rootfs is mounted.
+    pub guest_rootfs: String,
+    /// RUN exec timeout in nanoseconds.
+    pub timeout_ns: u64,
+    /// Persistent cache directory for `RUN --mount=type=cache`.
+    pub run_cache_dir: PathBuf,
 }
 
 /// Result of a successful build.
@@ -70,6 +91,235 @@ pub struct BuildResult {
     pub size: u64,
     /// Number of layers
     pub layer_count: usize,
+}
+
+#[cfg_attr(not(feature = "pool"), allow(dead_code))]
+struct BuildRunPoolSession {
+    guest_rootfs: String,
+    timeout_ns: u64,
+    run_cache_dir: PathBuf,
+    #[cfg(feature = "pool")]
+    lease: crate::pool::PoolLeaseClient,
+}
+
+impl BuildRunPoolSession {
+    async fn acquire(config: &BuildRunPoolConfig, rootfs_dir: &Path) -> Result<Self> {
+        #[cfg(feature = "pool")]
+        {
+            let rootfs_dir = rootfs_dir.canonicalize().map_err(|e| {
+                BoxError::BuildError(format!(
+                    "Failed to canonicalize build RUN rootfs {}: {}",
+                    rootfs_dir.display(),
+                    e
+                ))
+            })?;
+            let volume = format!("{}:{}:rw", rootfs_dir.display(), config.guest_rootfs);
+            let lease = crate::pool::PoolLeaseClient::acquire(crate::pool::PoolClientLease {
+                socket: config.socket.clone(),
+                image: config.image.clone(),
+                volumes: vec![volume],
+                vcpus: config.vcpus,
+                memory_mb: config.memory_mb,
+            })
+            .await
+            .map_err(|e| {
+                BoxError::BuildError(format!(
+                    "Failed to lease warm-pool VM for Dockerfile RUN: {}",
+                    e
+                ))
+            })?;
+            Ok(Self {
+                guest_rootfs: config.guest_rootfs.clone(),
+                timeout_ns: config.timeout_ns,
+                run_cache_dir: config.run_cache_dir.clone(),
+                lease,
+            })
+        }
+
+        #[cfg(not(feature = "pool"))]
+        {
+            let _ = (config, rootfs_dir);
+            Err(BoxError::BuildError(
+                "Dockerfile RUN warm-pool execution requires the runtime 'pool' feature"
+                    .to_string(),
+            ))
+        }
+    }
+
+    async fn release(self) -> Result<()> {
+        #[cfg(feature = "pool")]
+        {
+            self.lease.release().await.map_err(|e| {
+                BoxError::BuildError(format!(
+                    "Failed to release warm-pool Dockerfile RUN lease: {}",
+                    e
+                ))
+            })
+        }
+
+        #[cfg(not(feature = "pool"))]
+        {
+            Ok(())
+        }
+    }
+}
+
+fn run_bind_mount_input_hash(
+    context_dir: &Path,
+    completed_stages: &[(Option<String>, PathBuf)],
+    bind_mounts: &[RunBindMount],
+) -> Option<String> {
+    let mut input = String::new();
+
+    for mount in bind_mounts {
+        if has_parent_component(&mount.source) {
+            return None;
+        }
+
+        let source = if mount.source.is_empty() {
+            "."
+        } else {
+            mount.source.as_str()
+        };
+        let (origin, source_root) = match mount.from.as_deref() {
+            Some(from_ref) => (
+                format!("stage:{from_ref}"),
+                resolve_stage_rootfs(from_ref, completed_stages).ok()?,
+            ),
+            None => ("context".to_string(), context_dir),
+        };
+
+        let source_hash = hash_context_sources(source_root, &[source.to_string()])?;
+        input.push_str(&origin);
+        input.push('\0');
+        input.push_str(source);
+        input.push('\0');
+        input.push_str(&source_hash);
+        input.push('\0');
+
+        if mount.from.is_none() {
+            let dockerignore = context_dir.join(".dockerignore");
+            if let Ok(bytes) = std::fs::read(&dockerignore) {
+                input.push_str(".dockerignore");
+                input.push('\0');
+                input.push_str(&sha256_bytes(&bytes));
+                input.push('\0');
+            }
+        }
+    }
+
+    Some(sha256_bytes(input.as_bytes()))
+}
+
+fn run_cache_mount_input_hash(
+    completed_stages: &[(Option<String>, PathBuf)],
+    cache_mounts: &[RunCacheMount],
+) -> Option<String> {
+    let mut input = String::new();
+    let mut saw_seeded_cache = false;
+
+    for mount in cache_mounts {
+        let Some(from_ref) = mount.from.as_deref() else {
+            continue;
+        };
+        if has_parent_component(&mount.source) {
+            return None;
+        }
+
+        saw_seeded_cache = true;
+        let source = if mount.source.is_empty() {
+            "."
+        } else {
+            mount.source.as_str()
+        };
+        let source_root = resolve_stage_rootfs(from_ref, completed_stages).ok()?;
+        let source_hash = hash_context_sources(source_root, &[source.to_string()])?;
+        input.push_str("cache-seed:");
+        input.push_str(from_ref);
+        input.push('\0');
+        input.push_str(source);
+        input.push('\0');
+        input.push_str(&source_hash);
+        input.push('\0');
+    }
+
+    saw_seeded_cache.then(|| sha256_bytes(input.as_bytes()))
+}
+
+fn run_mount_input_hash(
+    context_dir: &Path,
+    completed_stages: &[(Option<String>, PathBuf)],
+    cache_mounts: &[RunCacheMount],
+    bind_mounts: &[RunBindMount],
+) -> Option<String> {
+    let bind_hash = if bind_mounts.is_empty() {
+        None
+    } else {
+        run_bind_mount_input_hash(context_dir, completed_stages, bind_mounts)
+    };
+    let cache_hash = run_cache_mount_input_hash(completed_stages, cache_mounts);
+
+    match (bind_hash, cache_hash) {
+        (None, None) => None,
+        (Some(hash), None) | (None, Some(hash)) => Some(hash),
+        (Some(bind_hash), Some(cache_hash)) => Some(sha256_bytes(
+            format!("bind\0{bind_hash}\0cache\0{cache_hash}").as_bytes(),
+        )),
+    }
+}
+
+fn has_parent_component(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+async fn resolve_run_mount_source_roots(
+    completed_stages: &[(Option<String>, PathBuf)],
+    bind_mounts: &[RunBindMount],
+    cache_mounts: &[RunCacheMount],
+    store: &Arc<ImageStore>,
+    build_dir: &Path,
+    external_from_rootfs: &mut HashMap<String, PathBuf>,
+) -> Result<Option<Vec<(Option<String>, PathBuf)>>> {
+    let mut roots: Option<Vec<(Option<String>, PathBuf)>> = None;
+    let mut external_refs = HashSet::new();
+
+    let mut from_refs: Vec<&str> = Vec::new();
+    from_refs.extend(bind_mounts.iter().filter_map(|mount| mount.from.as_deref()));
+    from_refs.extend(
+        cache_mounts
+            .iter()
+            .filter_map(|mount| mount.from.as_deref()),
+    );
+
+    for from_ref in from_refs {
+        if resolve_stage_rootfs(from_ref, completed_stages).is_ok()
+            || roots
+                .as_deref()
+                .is_some_and(|resolved| resolve_stage_rootfs(from_ref, resolved).is_ok())
+        {
+            continue;
+        }
+
+        if !external_refs.insert(from_ref.to_string()) {
+            continue;
+        }
+
+        let rootfs = resolve_external_from_rootfs(
+            from_ref,
+            "RUN bind mount",
+            store,
+            build_dir,
+            external_from_rootfs,
+        )
+        .await?;
+        roots
+            .get_or_insert_with(|| completed_stages.to_vec())
+            .push((Some(from_ref.to_string()), rootfs));
+    }
+
+    Ok(roots)
 }
 
 /// Mutable state accumulated during the build.
@@ -246,7 +496,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
     // Track completed stages: (alias, rootfs_path)
     let mut completed_stages: Vec<(Option<String>, PathBuf)> = Vec::new();
     // Cache external images already pulled+extracted for `COPY --from=<image>`
-    // (keyed by image ref) so multiple copies from one image pull once.
+    // and RUN mount `from=<image>` sources so repeated references pull once.
     let mut external_from_rootfs: HashMap<String, PathBuf> = HashMap::new();
 
     // Create temp directory for build workspace
@@ -283,6 +533,7 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         }
         let mut base_layers: Vec<LayerInfo> = Vec::new();
         let mut base_diff_ids: Vec<String> = Vec::new();
+        let mut run_pool_session: Option<BuildRunPoolSession> = None;
 
         // Layer-level build cache (best-effort; None disables caching).
         let cache = if config.no_cache {
@@ -298,6 +549,24 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         for instruction in &stage.instructions {
             global_step += 1;
             let step = global_step;
+            let run_mount_source_roots = if let Instruction::Run {
+                bind_mounts,
+                cache_mounts,
+                ..
+            } = instruction
+            {
+                resolve_run_mount_source_roots(
+                    &completed_stages,
+                    bind_mounts,
+                    cache_mounts,
+                    &store,
+                    build_dir.path(),
+                    &mut external_from_rootfs,
+                )
+                .await?
+            } else {
+                None
+            };
 
             // Advance the chain key BEFORE the match so a cache-hit `continue`
             // does not skip it. FROM resets the key (keyed on base content below);
@@ -351,6 +620,18 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                             .and_then(|rootfs| hash_context_sources(rootfs, src))
                     }
                     Instruction::Add { src, .. } => hash_context_sources(&config.context_dir, src),
+                    Instruction::Run {
+                        cache_mounts,
+                        bind_mounts,
+                        ..
+                    } => run_mount_input_hash(
+                        &config.context_dir,
+                        run_mount_source_roots
+                            .as_deref()
+                            .unwrap_or(&completed_stages),
+                        cache_mounts,
+                        bind_mounts,
+                    ),
                     _ => None,
                 };
                 chain_key = BuildCache::chain(&chain_key, &repr, input_hash.as_deref());
@@ -476,8 +757,9 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                             match resolve_stage_rootfs(from_ref, &completed_stages) {
                                 Ok(stage_rootfs) => stage_rootfs.to_path_buf(),
                                 Err(_) => {
-                                    resolve_external_image_rootfs(
+                                    resolve_external_from_rootfs(
                                         from_ref,
+                                        "COPY --from",
                                         &store,
                                         build_dir.path(),
                                         &mut external_from_rootfs,
@@ -608,6 +890,8 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                 Instruction::Run {
                     command,
                     cache_mounts,
+                    bind_mounts,
+                    tmpfs_mounts,
                 } => {
                     let created_by = instruction_to_string(instruction);
                     if try_reuse_cached_layer(
@@ -637,17 +921,55 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                     if !config.quiet {
                         println!("Step {}/{}: {}", step, total_instructions, created_by);
                     }
-                    let layer_opt = handle_run(
-                        command,
-                        cache_mounts,
-                        &rootfs_dir,
-                        &layers_dir,
-                        &state.workdir,
-                        &state.run_env(),
-                        &state.shell,
-                        state.layers.len() + base_layers.len(),
-                        config.quiet,
-                    )?;
+                    let layer_opt = if let Some(pool_config) = &config.run_pool {
+                        if run_pool_session.is_none() {
+                            run_pool_session =
+                                Some(BuildRunPoolSession::acquire(pool_config, &rootfs_dir).await?);
+                        }
+                        let session = run_pool_session
+                            .as_ref()
+                            .expect("run pool session was just initialized");
+                        handle_run_with_pool(
+                            command,
+                            cache_mounts,
+                            bind_mounts,
+                            tmpfs_mounts,
+                            &config.context_dir,
+                            run_mount_source_roots
+                                .as_deref()
+                                .unwrap_or(&completed_stages),
+                            &rootfs_dir,
+                            &layers_dir,
+                            &state.workdir,
+                            &state.run_env(),
+                            &state.shell,
+                            state.user.as_deref(),
+                            state.layers.len() + base_layers.len(),
+                            config.quiet,
+                            session,
+                            Some(&dockerignore),
+                        )
+                        .await?
+                    } else {
+                        handle_run(
+                            command,
+                            cache_mounts,
+                            bind_mounts,
+                            tmpfs_mounts,
+                            &config.context_dir,
+                            run_mount_source_roots
+                                .as_deref()
+                                .unwrap_or(&completed_stages),
+                            &rootfs_dir,
+                            &layers_dir,
+                            &state.workdir,
+                            &state.run_env(),
+                            &state.shell,
+                            state.layers.len() + base_layers.len(),
+                            config.quiet,
+                            Some(&dockerignore),
+                        )?
+                    };
                     if let Some(layer_info) = layer_opt {
                         let diff_id = compute_diff_id(&layer_info.path)?;
                         if let Some(c) = &cache {
@@ -887,6 +1209,10 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
             }
         }
 
+        if let Some(session) = run_pool_session.take() {
+            session.release().await?;
+        }
+
         // Store completed stage rootfs for COPY --from
         completed_stages.push((stage.alias.clone(), rootfs_dir.clone()));
 
@@ -1056,11 +1382,12 @@ async fn handle_from(
     Ok((base_layers, base_diff_ids, config))
 }
 
-/// Resolve `COPY --from=<image>` when `<image>` is not a build stage: pull the
-/// external image and extract it to a temp rootfs to copy from (Docker behavior).
-/// Memoized per build so several copies from one image pull only once.
-async fn resolve_external_image_rootfs(
+/// Resolve an external image source when `from=<image>` is not a build stage:
+/// pull the image and extract it to a temp rootfs (Docker behavior). Memoized
+/// per build so several copies or RUN bind mounts from one image pull only once.
+async fn resolve_external_from_rootfs(
     image_ref: &str,
+    operation: &str,
     store: &Arc<ImageStore>,
     build_dir: &Path,
     cache: &mut HashMap<String, PathBuf>,
@@ -1072,7 +1399,7 @@ async fn resolve_external_image_rootfs(
     let dir = build_dir.join(format!("copyfrom_{}", cache.len()));
     std::fs::create_dir_all(&dir).map_err(|e| {
         BoxError::BuildError(format!(
-            "Failed to create COPY --from image rootfs {}: {}",
+            "Failed to create {operation} image rootfs {}: {}",
             dir.display(),
             e
         ))
@@ -1081,7 +1408,7 @@ async fn resolve_external_image_rootfs(
     let puller = ImagePuller::new(store.clone(), RegistryAuth::from_env());
     let oci_image = puller.pull(image_ref).await.map_err(|e| {
         BoxError::BuildError(format!(
-            "COPY --from={}: not a build stage and could not be pulled as an image: {}",
+            "{operation} from={}: not a build stage and could not be pulled as an image: {}",
             image_ref, e
         ))
     })?;

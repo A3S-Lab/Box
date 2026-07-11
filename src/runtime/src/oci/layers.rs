@@ -3,7 +3,12 @@
 //! Handles extraction of OCI image layers (gzip, zstd, or uncompressed tar).
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::rootfs_metadata::{
+    RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH,
+};
+use base64::Engine;
 use flate2::read::GzDecoder;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -29,13 +34,25 @@ pub fn extract_layer(layer_path: &Path, target_dir: &Path) -> Result<()> {
     // Generous default; tune with A3S_BOX_MAX_LAYER_BYTES.
     let max_layer_bytes =
         super::limited_reader::cap_from_env("A3S_BOX_MAX_LAYER_BYTES", 16 * 1024 * 1024 * 1024);
-    extract_layer_with_cap(layer_path, target_dir, max_layer_bytes)
+    extract_layer_with_cap(layer_path, target_dir, max_layer_bytes, false)
+}
+
+/// Extract a layer and retain the Linux ownership encoded in its tar headers.
+///
+/// Rootless macOS extraction cannot apply arbitrary uid/gid values to APFS.
+/// The generated rootfs-private manifest is replayed by guest-init before any
+/// nested filesystems are mounted.
+pub(crate) fn extract_layer_with_metadata(layer_path: &Path, target_dir: &Path) -> Result<()> {
+    let max_layer_bytes =
+        super::limited_reader::cap_from_env("A3S_BOX_MAX_LAYER_BYTES", 16 * 1024 * 1024 * 1024);
+    extract_layer_with_cap(layer_path, target_dir, max_layer_bytes, true)
 }
 
 fn extract_layer_with_cap(
     layer_path: &Path,
     target_dir: &Path,
     max_layer_bytes: u64,
+    track_metadata: bool,
 ) -> Result<()> {
     // Validate layer exists
     if !layer_path.exists() {
@@ -121,6 +138,12 @@ fn extract_layer_with_cap(
         }
     }
 
+    let mut metadata = if track_metadata {
+        load_image_metadata(target_dir)?
+    } else {
+        BTreeMap::new()
+    };
+
     let entries = archive
         .entries()
         .map_err(|e| BoxError::OciImageError(format!("Failed to read layer entries: {e}")))?;
@@ -142,6 +165,16 @@ fn extract_layer_with_cap(
             continue;
         }
 
+        let normalized = normalize_layer_path(&path).ok_or_else(|| {
+            BoxError::OciImageError(format!("Invalid layer entry path: {}", path.display()))
+        })?;
+        if track_metadata && normalized == image_metadata_relative_path() {
+            return Err(BoxError::OciImageError(format!(
+                "OCI layer contains reserved internal path {}",
+                IMAGE_ROOTFS_METADATA_PATH
+            )));
+        }
+
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         if file_name == ".wh..wh..opq" {
@@ -161,10 +194,30 @@ fn extract_layer_with_cap(
                     tracing::warn!(parent = %parent.display(), "Skipping opaque whiteout: parent escapes the rootfs");
                 }
             }
+            if track_metadata {
+                let parent = normalize_layer_path(path.parent().unwrap_or_else(|| Path::new("")))
+                    .ok_or_else(|| {
+                    BoxError::OciImageError("Invalid opaque whiteout path".to_string())
+                })?;
+                remove_metadata_descendants(&mut metadata, &parent, false);
+            }
             continue;
         }
 
         if let Some(victim_name) = file_name.strip_prefix(".wh.") {
+            let victim = normalize_layer_path(
+                &path
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .join(victim_name),
+            )
+            .ok_or_else(|| BoxError::OciImageError("Invalid whiteout path".to_string()))?;
+            if track_metadata && victim == image_metadata_relative_path() {
+                return Err(BoxError::OciImageError(format!(
+                    "OCI layer whiteouts reserved internal path {}",
+                    IMAGE_ROOTFS_METADATA_PATH
+                )));
+            }
             // Whiteout marker: remove the named sibling from a lower layer. Resolve
             // the parent within the rootfs so a symlinked parent cannot redirect the
             // deletion to a host file outside the extraction target.
@@ -175,6 +228,9 @@ fn extract_layer_with_cap(
                     tracing::warn!(parent = %parent.display(), "Skipping whiteout: parent escapes the rootfs");
                 }
             }
+            if track_metadata {
+                remove_metadata_descendants(&mut metadata, &victim, true);
+            }
             continue;
         }
 
@@ -182,7 +238,12 @@ fn extract_layer_with_cap(
             prepare_symlink_destination(target_dir, &path)?;
         }
 
-        entry.unpack_in(target_dir).map_err(|e| {
+        let desired = if track_metadata {
+            Some(metadata_from_header(&entry, &normalized)?)
+        } else {
+            None
+        };
+        let unpacked = entry.unpack_in(target_dir).map_err(|e| {
             // Surface the underlying cause (e.g. the LimitedReader's size-cap
             // error) — tar's wrapper Display alone would just say "failed to
             // unpack <path>" and hide a decompression-bomb abort from the operator.
@@ -194,6 +255,18 @@ fn extract_layer_with_cap(
                 target_dir.display(),
             ))
         })?;
+        if track_metadata && unpacked {
+            if let Some(desired) = desired {
+                if desired.kind != RootfsEntryKind::Directory {
+                    remove_metadata_descendants(&mut metadata, &normalized, false);
+                }
+                metadata.insert(normalized, desired);
+            }
+        }
+    }
+
+    if track_metadata {
+        finalize_image_metadata(target_dir, &mut metadata)?;
     }
 
     tracing::debug!(
@@ -202,6 +275,296 @@ fn extract_layer_with_cap(
         "Extracted OCI layer"
     );
 
+    Ok(())
+}
+
+fn image_metadata_relative_path() -> PathBuf {
+    PathBuf::from(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+}
+
+fn normalize_layer_path(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => normalized.push(name),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+fn metadata_from_header<R: Read>(
+    entry: &tar::Entry<'_, R>,
+    path: &Path,
+) -> Result<RootfsMetadataEntry> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let entry_type = entry.header().entry_type();
+    let (kind, link_target_base64) = if entry_type.is_dir() {
+        (RootfsEntryKind::Directory, None)
+    } else if entry_type.is_symlink() {
+        let target = entry
+            .link_name()
+            .map_err(|error| BoxError::OciImageError(format!("Invalid symlink target: {error}")))?
+            .ok_or_else(|| BoxError::OciImageError("Missing symlink target".to_string()))?;
+        (
+            RootfsEntryKind::Symlink,
+            Some(base64::engine::general_purpose::STANDARD.encode(target.as_os_str().as_bytes())),
+        )
+    } else if entry_type.is_file() || entry_type.is_hard_link() {
+        (RootfsEntryKind::Regular, None)
+    } else {
+        return Err(BoxError::OciImageError(format!(
+            "Unsupported OCI layer entry type at {}",
+            path.display()
+        )));
+    };
+    let path_base64 = base64::engine::general_purpose::STANDARD
+        .encode(archive_metadata_path(path).as_os_str().as_bytes());
+    Ok(RootfsMetadataEntry {
+        path_base64,
+        kind,
+        mode: entry.header().mode().map_err(|error| {
+            BoxError::OciImageError(format!("Invalid mode at {}: {error}", path.display()))
+        })?,
+        uid: entry.header().uid().map_err(|error| {
+            BoxError::OciImageError(format!("Invalid uid at {}: {error}", path.display()))
+        })?,
+        gid: entry.header().gid().map_err(|error| {
+            BoxError::OciImageError(format!("Invalid gid at {}: {error}", path.display()))
+        })?,
+        mtime: entry.header().mtime().map_err(|error| {
+            BoxError::OciImageError(format!("Invalid mtime at {}: {error}", path.display()))
+        })?,
+        size: entry.header().size().map_err(|error| {
+            BoxError::OciImageError(format!("Invalid size at {}: {error}", path.display()))
+        })?,
+        link_target_base64,
+    })
+}
+
+fn archive_metadata_path(path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        Path::new(".").join(path)
+    }
+}
+
+fn remove_metadata_descendants(
+    metadata: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
+    path: &Path,
+    include_path: bool,
+) {
+    metadata.retain(|candidate, _| {
+        !(candidate.starts_with(path) && (include_path || candidate != path))
+    });
+}
+
+fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMetadataEntry>> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let path = target_dir.join(image_metadata_relative_path());
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => {
+            return Err(BoxError::OciImageError(format!(
+                "Failed to read image metadata {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let manifest: RootfsMetadataManifest = serde_json::from_slice(&bytes).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Invalid image metadata {}: {error}",
+            path.display()
+        ))
+    })?;
+    manifest.validate().map_err(BoxError::OciImageError)?;
+    let mut result = BTreeMap::new();
+    for entry in manifest.entries {
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&entry.path_base64)
+            .map_err(|error| BoxError::OciImageError(format!("Invalid metadata path: {error}")))?;
+        let archive_path = PathBuf::from(std::ffi::OsString::from_vec(raw));
+        let relative = normalize_layer_path(&archive_path)
+            .ok_or_else(|| BoxError::OciImageError("Unsafe path in image metadata".to_string()))?;
+        if relative == image_metadata_relative_path() || result.insert(relative, entry).is_some() {
+            return Err(BoxError::OciImageError(
+                "Duplicate or reserved path in image metadata".to_string(),
+            ));
+        }
+    }
+    Ok(result)
+}
+
+pub(crate) fn finalize_rootfs_metadata(target_dir: &Path) -> Result<()> {
+    let mut metadata = load_image_metadata(target_dir)?;
+    finalize_image_metadata(target_dir, &mut metadata)?;
+    prepare_rootless_metadata_replay(target_dir, &metadata)
+}
+
+fn prepare_rootless_metadata_replay(
+    target_dir: &Path,
+    metadata: &BTreeMap<PathBuf, RootfsMetadataEntry>,
+) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        if unsafe { libc::geteuid() } == 0 {
+            return Ok(());
+        }
+        // virtiofs stores synthetic uid/gid as filesystem metadata. A guest
+        // cannot update it on a 0444/0555 host-owned inode, so make only the
+        // owner's write bit temporarily available. Guest-init restores the
+        // exact manifest mode before launching any container process.
+        for (relative, entry) in metadata {
+            if entry.kind == RootfsEntryKind::Symlink || entry.mode & 0o200 != 0 {
+                continue;
+            }
+            let target = target_dir.join(relative);
+            let current = std::fs::symlink_metadata(&target).map_err(|error| {
+                BoxError::OciImageError(format!(
+                    "Failed to prepare metadata replay for {}: {error}",
+                    target.display()
+                ))
+            })?;
+            std::fs::set_permissions(
+                &target,
+                std::fs::Permissions::from_mode((current.mode() & 0o7777) | 0o200),
+            )
+            .map_err(|error| {
+                BoxError::OciImageError(format!(
+                    "Failed to prepare metadata replay for {}: {error}",
+                    target.display()
+                ))
+            })?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target_dir, metadata);
+    }
+    Ok(())
+}
+
+fn finalize_image_metadata(
+    target_dir: &Path,
+    metadata: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
+) -> Result<()> {
+    let mut final_entries = BTreeMap::new();
+    collect_final_metadata(
+        target_dir,
+        target_dir,
+        Path::new(""),
+        metadata,
+        &mut final_entries,
+    )?;
+    let manifest = RootfsMetadataManifest::new(final_entries.into_values().collect());
+    let destination = target_dir.join(image_metadata_relative_path());
+    let temporary = destination.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(&manifest).map_err(|error| {
+        BoxError::OciImageError(format!("Failed to encode image metadata: {error}"))
+    })?;
+    std::fs::write(&temporary, bytes).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Failed to write image metadata {}: {error}",
+            temporary.display()
+        ))
+    })?;
+    std::fs::rename(&temporary, &destination).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Failed to activate image metadata {}: {error}",
+            destination.display()
+        ))
+    })?;
+    *metadata = manifest
+        .entries
+        .into_iter()
+        .filter_map(|entry| decode_metadata_key(&entry).map(|key| (key, entry)))
+        .collect();
+    Ok(())
+}
+
+fn decode_metadata_key(entry: &RootfsMetadataEntry) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(&entry.path_base64)
+        .ok()?;
+    normalize_layer_path(Path::new(&std::ffi::OsString::from_vec(raw)))
+}
+
+fn collect_final_metadata(
+    root: &Path,
+    source: &Path,
+    relative: &Path,
+    desired: &BTreeMap<PathBuf, RootfsMetadataEntry>,
+    output: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
+) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    if relative == image_metadata_relative_path()
+        || relative == Path::new(".a3s_image_metadata_v1.json.tmp")
+    {
+        return Ok(());
+    }
+    let filesystem = std::fs::symlink_metadata(source).map_err(|error| {
+        BoxError::OciImageError(format!("Failed to inspect {}: {error}", source.display()))
+    })?;
+    let file_type = filesystem.file_type();
+    let (kind, link_target_base64) = if file_type.is_dir() {
+        (RootfsEntryKind::Directory, None)
+    } else if file_type.is_file() {
+        (RootfsEntryKind::Regular, None)
+    } else if file_type.is_symlink() {
+        let target = std::fs::read_link(source).map_err(|error| {
+            BoxError::OciImageError(format!("Failed to read {}: {error}", source.display()))
+        })?;
+        (
+            RootfsEntryKind::Symlink,
+            Some(base64::engine::general_purpose::STANDARD.encode(target.as_os_str().as_bytes())),
+        )
+    } else {
+        return Ok(());
+    };
+    let previous = desired.get(relative);
+    let entry = RootfsMetadataEntry {
+        path_base64: base64::engine::general_purpose::STANDARD
+            .encode(archive_metadata_path(relative).as_os_str().as_bytes()),
+        kind,
+        mode: filesystem.mode(),
+        uid: previous.map_or(0, |entry| entry.uid),
+        gid: previous.map_or(0, |entry| entry.gid),
+        mtime: filesystem.mtime().max(0) as u64,
+        size: filesystem.size(),
+        link_target_base64,
+    };
+    output.insert(relative.to_path_buf(), entry);
+    if file_type.is_dir() {
+        let mut children: Vec<_> = std::fs::read_dir(source)
+            .map_err(|error| {
+                BoxError::OciImageError(format!("Failed to read {}: {error}", source.display()))
+            })?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|error| BoxError::OciImageError(format!("Failed to read entry: {error}")))?;
+        children.sort_by_key(|entry| entry.file_name());
+        for child in children {
+            collect_final_metadata(
+                root,
+                &child.path(),
+                &relative.join(child.file_name()),
+                desired,
+                output,
+            )?;
+        }
+    }
+    let _ = root;
     Ok(())
 }
 
@@ -431,6 +794,51 @@ mod tests {
     }
 
     #[test]
+    fn tracked_metadata_preserves_header_ownership_and_whiteouts() {
+        let temp_dir = TempDir::new().unwrap();
+        let layer1 = temp_dir.path().join("metadata-1.tar.gz");
+        let layer2 = temp_dir.path().join("metadata-2.tar.gz");
+        let target = temp_dir.path().join("rootfs");
+        create_owned_test_layer(&layer1, "dir/owned", b"payload", 123, 456, 0o750);
+        create_test_layer(&layer2, &[("dir/.wh.owned", b"")]);
+
+        extract_layer_with_metadata(&layer1, &target).unwrap();
+        let manifest = read_image_manifest(&target);
+        let owned = manifest
+            .entries
+            .iter()
+            .find(|entry| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(&entry.path_base64)
+                    .is_ok_and(|raw| raw == b"./dir/owned")
+            })
+            .unwrap();
+        assert_eq!(
+            (owned.uid, owned.gid, owned.mode & 0o7777),
+            (123, 456, 0o750)
+        );
+
+        extract_layer_with_metadata(&layer2, &target).unwrap();
+        let manifest = read_image_manifest(&target);
+        assert!(!manifest.entries.iter().any(|entry| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&entry.path_base64)
+                .is_ok_and(|raw| raw.ends_with(b"dir/owned"))
+        }));
+    }
+
+    #[test]
+    fn tracked_metadata_rejects_reserved_image_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let layer = temp_dir.path().join("reserved.tar.gz");
+        let target = temp_dir.path().join("rootfs");
+        create_test_layer(&layer, &[(".a3s_image_metadata_v1.json", b"forged")]);
+
+        let error = extract_layer_with_metadata(&layer, &target).unwrap_err();
+        assert!(error.to_string().contains("reserved internal path"));
+    }
+
+    #[test]
     fn extract_layer_rejects_decompression_bomb_past_cap() {
         let temp_dir = TempDir::new().unwrap();
         let layer = temp_dir.path().join("bomb.tar.gz");
@@ -441,7 +849,7 @@ mod tests {
         create_test_layer(&layer, &[("big", &big)]);
 
         // A 4 KiB cap must abort the extraction...
-        let result = extract_layer_with_cap(&layer, &target, 4 * 1024);
+        let result = extract_layer_with_cap(&layer, &target, 4 * 1024, false);
         assert!(
             result.is_err(),
             "the cap must abort an oversized (bomb) layer, got: {result:?}"
@@ -463,7 +871,7 @@ mod tests {
         let target = temp_dir.path().join("out");
         create_test_layer(&layer, &[("file.txt", b"hello")]);
         // A generous cap must not regress a normal small layer.
-        extract_layer_with_cap(&layer, &target, 16 * 1024 * 1024).unwrap();
+        extract_layer_with_cap(&layer, &target, 16 * 1024 * 1024, false).unwrap();
         assert!(target.join("file.txt").exists());
     }
 
@@ -493,6 +901,37 @@ mod tests {
         }
 
         builder.finish().unwrap();
+    }
+
+    fn create_owned_test_layer(
+        path: &Path,
+        name: &str,
+        content: &[u8],
+        uid: u64,
+        gid: u64,
+        mode: u32,
+    ) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tar::Builder;
+
+        let file = File::create(path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(mode);
+        header.set_uid(uid);
+        header.set_gid(gid);
+        header.set_cksum();
+        builder.append_data(&mut header, name, content).unwrap();
+        builder.finish().unwrap();
+    }
+
+    fn read_image_manifest(target: &Path) -> RootfsMetadataManifest {
+        let bytes =
+            std::fs::read(target.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
     }
 
     fn write_test_tar<W: std::io::Write>(writer: W, files: &[(&str, &[u8])]) {

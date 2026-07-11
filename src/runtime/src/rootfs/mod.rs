@@ -18,6 +18,59 @@ pub use provider::{default_provider, CopyProvider, OverlayProvider, RootfsProvid
 
 use std::path::Path;
 
+/// A temporarily attached persistent rootfs.
+///
+/// Dropping this guard detaches only mounts created by
+/// [`attach_persistent_rootfs`]. An already mounted rootfs is left untouched.
+pub struct AttachedRootfs {
+    path: std::path::PathBuf,
+    detach_on_drop: bool,
+}
+
+impl AttachedRootfs {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for AttachedRootfs {
+    fn drop(&mut self) {
+        if self.detach_on_drop {
+            unmount_box_rootfs(&self.path);
+        }
+    }
+}
+
+/// Attach an existing platform-backed persistent rootfs for offline access.
+///
+/// Returns `None` when the box has no platform-specific backing image. This
+/// never creates a new image, so callers cannot accidentally commit an empty
+/// filesystem when a backing image is missing.
+pub fn attach_persistent_rootfs(
+    box_dir: &Path,
+) -> a3s_box_core::error::Result<Option<AttachedRootfs>> {
+    #[cfg(target_os = "macos")]
+    {
+        let image = box_dir.join("rootfs-apfs-v2.sparseimage");
+        if !image.is_file() {
+            return Ok(None);
+        }
+        let rootfs = box_dir.join("rootfs");
+        let was_mounted = is_mountpoint(&rootfs);
+        let path = provider::CaseSensitiveApfsProvider.prepare_empty(box_dir)?;
+        Ok(Some(AttachedRootfs {
+            path,
+            detach_on_drop: !was_mounted,
+        }))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = box_dir;
+        Ok(None)
+    }
+}
+
 /// Unmount a box's overlayfs `merged` view — best-effort and idempotent.
 ///
 /// Box teardown must release this mount BEFORE removing the box dir, or
@@ -37,7 +90,7 @@ pub fn unmount_box_overlay(merged: &Path) {
 }
 
 /// True if `path` is a mountpoint (its device id differs from its parent's).
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) fn is_mountpoint(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::metadata(path), std::fs::metadata(path.join(".."))) {
@@ -46,9 +99,48 @@ pub(crate) fn is_mountpoint(path: &Path) -> bool {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 pub(crate) fn is_mountpoint(_path: &Path) -> bool {
     false
+}
+
+/// Unmount a platform-specific writable rootfs mount.
+pub fn unmount_box_rootfs(rootfs: &Path) {
+    #[cfg(target_os = "macos")]
+    {
+        // The case-sensitive provider returns `<mount>/.a3s-rootfs`, keeping
+        // APFS-created volume metadata outside the Linux tree. Accept either
+        // that data path or the mountpoint itself at cleanup call sites.
+        let mountpoint = if rootfs.file_name().is_some_and(|name| name == ".a3s-rootfs") {
+            rootfs.parent().unwrap_or(rootfs)
+        } else {
+            rootfs
+        };
+        if !is_mountpoint(mountpoint) {
+            return;
+        }
+        match std::process::Command::new("hdiutil")
+            .arg("detach")
+            .arg("-quiet")
+            .arg(mountpoint)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => tracing::warn!(
+                path = %mountpoint.display(),
+                ?status,
+                "Failed to detach case-sensitive rootfs image"
+            ),
+            Err(error) => tracing::warn!(
+                path = %mountpoint.display(),
+                %error,
+                "Failed to run hdiutil detach"
+            ),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = rootfs;
 }
 
 #[cfg(test)]

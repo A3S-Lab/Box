@@ -99,6 +99,11 @@ async fn restart_one(
             return Err(format!("{name} was removed during restart").into());
         }
     }
+    let current = StateFile::load_default()?;
+    if let Some(record) = current.find_by_id(&box_id) {
+        crate::health::spawn_detached_health_checker(record)
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    }
     Ok(())
 }
 

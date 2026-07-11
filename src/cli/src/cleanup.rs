@@ -86,6 +86,7 @@ pub fn cleanup_stopped_box(record: &BoxRecord) {
     // Release the overlayfs mount so a stopped box never leaves a live mount
     // (and a later restart re-mounts cleanly instead of stacking).
     a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+    a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
     remove_host_cgroup(&record.id);
 }
@@ -150,6 +151,7 @@ pub fn cleanup_removed_box(record: &BoxRecord) {
         // Release the overlayfs mount FIRST: otherwise remove_dir_all deletes
         // into the live mount ("Stale file handle") and leaks it.
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
+        a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
         if let Err(err) = std::fs::remove_dir_all(&record.box_dir) {
             tracing::debug!(
                 path = %record.box_dir.display(),

@@ -72,26 +72,310 @@ mod tests {
         assert_eq!(
             result,
             Instruction::Run {
-                command: "apt-get update && apt-get install -y curl".to_string(),
+                command: RunCommand::Shell("apt-get update && apt-get install -y curl".to_string()),
                 cache_mounts: vec![],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
             }
         );
     }
 
     #[test]
+    fn test_parse_run_exec_form() {
+        let result = parsers::parse_run(r#"["/bin/sh", "-c", "echo exec > /out"]"#, 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Exec(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "echo exec > /out".to_string(),
+                ]),
+                cache_mounts: vec![],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_exec_form_empty_rejected() {
+        let err = parsers::parse_run("[]", 1).unwrap_err().to_string();
+        assert!(err.contains("requires at least one argument"));
+    }
+
+    #[test]
+    fn test_parse_run_default_network_and_security_options() {
+        let result =
+            parsers::parse_run("--network=default --security=sandbox echo hello", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("echo hello".to_string()),
+                cache_mounts: vec![],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_rejects_non_default_network_and_security_options() {
+        let err = parsers::parse_run("--network=none echo hello", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--network=none"));
+        assert!(err.contains("only --network=default"));
+
+        let err = parsers::parse_run("--security=insecure echo hello", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--security=insecure"));
+        assert!(err.contains("only --security=sandbox"));
+    }
+
+    #[test]
     fn test_parse_run_buildkit_cache_mount() {
+        let result = parsers::parse_run(
+            "--mount=type=cache,sharing=locked,target=/root/.cache pnpm install",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("pnpm install".to_string()),
+                cache_mounts: vec![RunCacheMount {
+                    raw: "--mount=type=cache,sharing=locked,target=/root/.cache".to_string(),
+                    id: None,
+                    from: None,
+                    source: ".".to_string(),
+                    sharing: RunCacheSharing::Locked,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    target: "/root/.cache".to_string(),
+                }],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_id() {
+        let result = parsers::parse_run(
+            "--mount=type=cache,id=pnpm,sharing=locked,target=/root/.cache pnpm install",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("pnpm install".to_string()),
+                cache_mounts: vec![RunCacheMount {
+                    raw: "--mount=type=cache,id=pnpm,sharing=locked,target=/root/.cache"
+                        .to_string(),
+                    id: Some("pnpm".to_string()),
+                    from: None,
+                    source: ".".to_string(),
+                    sharing: RunCacheSharing::Locked,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    target: "/root/.cache".to_string(),
+                }],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_sharing_locked() {
+        let result = parsers::parse_run(
+            "--mount=type=cache,id=apt,sharing=locked,target=/var/cache/apt apt-get update",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("apt-get update".to_string()),
+                cache_mounts: vec![RunCacheMount {
+                    raw: "--mount=type=cache,id=apt,sharing=locked,target=/var/cache/apt"
+                        .to_string(),
+                    id: Some("apt".to_string()),
+                    from: None,
+                    source: ".".to_string(),
+                    sharing: RunCacheSharing::Locked,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    target: "/var/cache/apt".to_string(),
+                }],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_mode_uid_gid() {
+        let result = parsers::parse_run(
+            "--mount=type=cache,id=apt,sharing=locked,mode=0750,uid=1000,gid=1001,target=/var/cache/apt apt-get update",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("apt-get update".to_string()),
+                cache_mounts: vec![RunCacheMount {
+                    raw: "--mount=type=cache,id=apt,sharing=locked,mode=0750,uid=1000,gid=1001,target=/var/cache/apt"
+                        .to_string(),
+                    id: Some("apt".to_string()),
+                    from: None,
+                    source: ".".to_string(),
+                    sharing: RunCacheSharing::Locked,
+                    mode: Some(0o750),
+                    uid: Some(1000),
+                    gid: Some(1001),
+                    target: "/var/cache/apt".to_string(),
+                }],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_rejects_invalid_mode() {
+        let err = parsers::parse_run(
+            "--mount=type=cache,sharing=locked,mode=0999,target=/root/.cache pnpm install",
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("invalid octal mode"));
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_from_source() {
+        let result = parsers::parse_run(
+            "--mount=type=cache,id=seeded,sharing=locked,from=builder,source=/seed,target=/root/.cache pnpm install",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("pnpm install".to_string()),
+                cache_mounts: vec![RunCacheMount {
+                    raw: "--mount=type=cache,id=seeded,sharing=locked,from=builder,source=/seed,target=/root/.cache"
+                        .to_string(),
+                    id: Some("seeded".to_string()),
+                    from: Some("builder".to_string()),
+                    source: "/seed".to_string(),
+                    sharing: RunCacheSharing::Locked,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    target: "/root/.cache".to_string(),
+                }],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_rejects_source_without_from() {
+        let err = parsers::parse_run(
+            "--mount=type=cache,sharing=locked,source=/seed,target=/root/.cache pnpm install",
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("source="));
+        assert!(err.contains("requires from="));
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_rejects_unknown_option() {
+        let err = parsers::parse_run(
+            "--mount=type=cache,sharing=locked,foo=bar,target=/root/.cache pnpm install",
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("foo="));
+        assert!(err.contains("not supported"));
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_sharing_shared() {
+        let result = parsers::parse_run(
+            "--mount=type=cache,sharing=shared,target=/root/.cache pnpm install",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("pnpm install".to_string()),
+                cache_mounts: vec![RunCacheMount {
+                    raw: "--mount=type=cache,sharing=shared,target=/root/.cache".to_string(),
+                    id: None,
+                    from: None,
+                    source: ".".to_string(),
+                    sharing: RunCacheSharing::Shared,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    target: "/root/.cache".to_string(),
+                }],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_omitted_sharing_defaults_to_shared() {
         let result =
             parsers::parse_run("--mount=type=cache,target=/root/.cache pnpm install", 1).unwrap();
         assert_eq!(
             result,
             Instruction::Run {
-                command: "pnpm install".to_string(),
+                command: RunCommand::Shell("pnpm install".to_string()),
                 cache_mounts: vec![RunCacheMount {
                     raw: "--mount=type=cache,target=/root/.cache".to_string(),
+                    id: None,
+                    from: None,
+                    source: ".".to_string(),
+                    sharing: RunCacheSharing::Shared,
+                    mode: None,
+                    uid: None,
+                    gid: None,
                     target: "/root/.cache".to_string(),
                 }],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
             }
         );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_cache_mount_rejects_private_sharing() {
+        let err = parsers::parse_run(
+            "--mount=type=cache,sharing=private,target=/root/.cache pnpm install",
+            1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("sharing='private'"));
+        assert!(err.contains("not supported yet"));
     }
 
     #[test]
@@ -99,15 +383,129 @@ mod tests {
         let err = parsers::parse_run("--mount=type=secret,id=npmrc npm install", 1)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("only type=cache is supported"));
+        assert!(err.contains("only type=cache, type=bind, and type=tmpfs are supported"));
     }
 
     #[test]
-    fn test_parse_run_exec_form_rejected() {
-        let err = parsers::parse_run(r#"["echo", "hello"]"#, 1)
+    fn test_parse_run_buildkit_bind_mount_defaults_to_context_root() {
+        let result = parsers::parse_run("--mount=type=bind,target=. go build ./...", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("go build ./...".to_string()),
+                cache_mounts: vec![],
+                bind_mounts: vec![RunBindMount {
+                    from: None,
+                    raw: "--mount=type=bind,target=.".to_string(),
+                    source: ".".to_string(),
+                    target: ".".to_string(),
+                    read_write: false,
+                }],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_bind_mount_source_and_rw() {
+        let result = parsers::parse_run(
+            "--mount=type=bind,source=src,target=/mnt,readwrite=true make",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("make".to_string()),
+                cache_mounts: vec![],
+                bind_mounts: vec![RunBindMount {
+                    from: None,
+                    raw: "--mount=type=bind,source=src,target=/mnt,readwrite=true".to_string(),
+                    source: "src".to_string(),
+                    target: "/mnt".to_string(),
+                    read_write: true,
+                }],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_bind_mount_from_stage() {
+        let result = parsers::parse_run(
+            "--mount=type=bind,from=builder,source=/src,target=/mnt make",
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("make".to_string()),
+                cache_mounts: vec![],
+                bind_mounts: vec![RunBindMount {
+                    from: Some("builder".to_string()),
+                    raw: "--mount=type=bind,from=builder,source=/src,target=/mnt".to_string(),
+                    source: "/src".to_string(),
+                    target: "/mnt".to_string(),
+                    read_write: false,
+                }],
+                tmpfs_mounts: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_tmpfs_mount() {
+        let result = parsers::parse_run("--mount=type=tmpfs,target=/tmp make test", 1).unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Shell("make test".to_string()),
+                cache_mounts: vec![],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![RunTmpfsMount {
+                    raw: "--mount=type=tmpfs,target=/tmp".to_string(),
+                    target: "/tmp".to_string(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_buildkit_tmpfs_mount_rejects_size() {
+        let err = parsers::parse_run("--mount=type=tmpfs,target=/tmp,size=64m make test", 1)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("RUN exec form is not supported yet"));
+        assert!(err.contains("size="));
+        assert!(err.contains("not supported yet"));
+    }
+
+    #[test]
+    fn test_parse_run_exec_form_with_cache_mount() {
+        let result = parsers::parse_run(
+            r#"--mount=type=cache,sharing=locked,target=/cache ["echo", "hello"]"#,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Instruction::Run {
+                command: RunCommand::Exec(vec!["echo".to_string(), "hello".to_string()]),
+                cache_mounts: vec![RunCacheMount {
+                    raw: "--mount=type=cache,sharing=locked,target=/cache".to_string(),
+                    id: None,
+                    from: None,
+                    source: ".".to_string(),
+                    sharing: RunCacheSharing::Locked,
+                    mode: None,
+                    uid: None,
+                    gid: None,
+                    target: "/cache".to_string(),
+                }],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
+            }
+        );
     }
 
     #[test]
@@ -580,7 +978,11 @@ CMD ["app.py"]
         let content = "FROM alpine:3.19\nRUN apk add --no-cache \\\n    curl \\\n    wget";
         let df = Dockerfile::parse(content).unwrap();
         assert_eq!(df.instructions.len(), 2);
-        if let Instruction::Run { command, .. } = &df.instructions[1] {
+        if let Instruction::Run {
+            command: RunCommand::Shell(command),
+            ..
+        } = &df.instructions[1]
+        {
             assert!(command.contains("curl"));
             assert!(command.contains("wget"));
         } else {
@@ -930,8 +1332,10 @@ CMD ["app.py"]
             result,
             Instruction::OnBuild {
                 instruction: Box::new(Instruction::Run {
-                    command: "echo hello".to_string(),
+                    command: RunCommand::Shell("echo hello".to_string()),
                     cache_mounts: vec![],
+                    bind_mounts: vec![],
+                    tmpfs_mounts: vec![],
                 }),
             }
         );
@@ -1112,8 +1516,10 @@ CMD ["app.py"]
         assert_eq!(
             instruction,
             Instruction::Run {
-                command: "echo ready".to_string(),
+                command: RunCommand::Shell("echo ready".to_string()),
                 cache_mounts: vec![],
+                bind_mounts: vec![],
+                tmpfs_mounts: vec![],
             }
         );
     }

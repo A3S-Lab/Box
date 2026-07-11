@@ -38,7 +38,7 @@ pub mod signing;
 pub mod store;
 
 #[cfg(feature = "build")]
-pub use build::{BuildConfig, BuildResult, Dockerfile, Instruction};
+pub use build::{BuildConfig, BuildResult, BuildRunPoolConfig, Dockerfile, Instruction};
 pub use credentials::CredentialStore;
 pub use image::{OciHealthCheck, OciImage, OciImageConfig};
 pub use layers::extract_layer;

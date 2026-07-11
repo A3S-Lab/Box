@@ -539,6 +539,7 @@ fn main() {
     // Run init process
     if let Err(e) = run_init() {
         error!("Init process failed: {}", e);
+        eprintln!("a3s-box guest init failed: {e}");
         process::exit(1);
     }
 
@@ -546,6 +547,11 @@ fn main() {
 }
 
 fn run_init() -> Result<(), Box<dyn std::error::Error>> {
+    // Restore Linux uid/gid/mode before mounting procfs, workspace, or user
+    // volumes so metadata replay can never mutate an attached host path.
+    #[cfg(target_os = "linux")]
+    a3s_box_guest_init::rootfs_archive::restore_rootfs_metadata(std::path::Path::new("/"))?;
+
     // Step 1: Mount essential filesystems
     mount_essential_filesystems()?;
 
@@ -815,6 +821,8 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 9: Wait for agent process (reap zombies, handle SIGTERM)
     wait_for_children(container_pid)?;
+
+    persist_terminal_rootfs_metadata();
 
     // Drain the stdio relays on the graceful-shutdown / no-children return paths
     // (the container-exit path flushes before its own process::exit).
@@ -1547,10 +1555,17 @@ fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std:
                 } else {
                     info!("Container process {} exited with status {}", pid, code);
                 }
+                persist_terminal_rootfs_metadata();
                 persist_exit_code(code);
                 // Flush the stdout/stderr relays so the container's last output
                 // reaches the console before this process::exit halts the VM.
                 flush_stdio_relays();
+                // The relay write has reached virtio-console, but libkrun exits
+                // the host shim as soon as PID 1 exits. Give the already-ready
+                // host tail threads one bounded poll interval to consume those
+                // bytes; without this handoff, short detached commands could
+                // leave a complete console.log and an empty container.json.
+                std::thread::sleep(std::time::Duration::from_millis(250));
                 process::exit(code);
             } else if reaper::is_managed(pid.as_raw()) {
                 // Owned by an exec/PTY handler, which reaps it for the real status.
@@ -1566,6 +1581,21 @@ fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std:
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+#[cfg(target_os = "linux")]
+fn persist_terminal_rootfs_metadata() {
+    if std::env::var("BOX_PERSIST_ROOTFS_METADATA").as_deref() != Ok("1") {
+        return;
+    }
+    if let Err(error) =
+        a3s_box_guest_init::rootfs_archive::persist_rootfs_metadata(std::path::Path::new("/"))
+    {
+        warn!(%error, "Failed to persist terminal rootfs metadata");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn persist_terminal_rootfs_metadata() {}
 
 /// Non-Linux development stub: just wait for the container process to exit.
 #[cfg(not(target_os = "linux"))]

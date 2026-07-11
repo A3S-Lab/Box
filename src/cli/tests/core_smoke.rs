@@ -494,6 +494,26 @@ impl CoreSmoke {
         panic!("timeout waiting for {name} to become {expected}\nlast inspect:\n{last}");
     }
 
+    fn wait_for_named_health(&self, name: &str, expected: &str) -> serde_json::Value {
+        let start = Instant::now();
+        let mut last = String::new();
+
+        while start.elapsed() < self.timeout {
+            let value = self.inspect_json(name);
+            last = value.to_string();
+            if json_string_field(&value, "health_status") == expected
+                && value
+                    .get("health_last_check")
+                    .is_some_and(|value| !value.is_null())
+            {
+                return value;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        panic!("timeout waiting for {name} health={expected}\nlast inspect:\n{last}");
+    }
+
     fn wait_for_named_restart(
         &self,
         monitor: &mut BackgroundCommand,
@@ -1104,6 +1124,91 @@ fn real_core_published_port_http_smoke() {
     smoke.ok(&["rm", &smoke.name]);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn real_core_tsi_published_redis_nonblocking_accept_and_exec() {
+    use std::io::{Read, Write};
+
+    let smoke = CoreSmoke::new();
+    let image =
+        std::env::var("A3S_BOX_REDIS_SMOKE_IMAGE").unwrap_or_else(|_| "redis:7-alpine".to_string());
+    let host_port = unused_tcp_port();
+    let publish = format!("{host_port}:6379");
+    let _cleanup = NamedBoxCleanup {
+        smoke: &smoke,
+        name: smoke.name.clone(),
+    };
+
+    smoke.ok(&["pull", &image]);
+    smoke.ok(&["run", "-d", "--name", &smoke.name, "-p", &publish, &image]);
+    smoke.wait_for_running();
+    smoke.wait_for_logs("Ready to accept connections");
+
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], host_port));
+    for connection in 1..=2 {
+        let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(5))
+            .unwrap_or_else(|error| panic!("connect Redis client {connection}: {error}"));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(b"*1\r\n$4\r\nPING\r\n").unwrap();
+        let mut pong = [0u8; 7];
+        stream
+            .read_exact(&mut pong)
+            .unwrap_or_else(|error| panic!("read Redis PONG for client {connection}: {error}"));
+        assert_eq!(&pong, b"+PONG\r\n");
+    }
+
+    let exec = smoke.ok(&[
+        "exec",
+        &smoke.name,
+        "--",
+        "/bin/sh",
+        "-c",
+        "echo EXEC_AFTER_PONG",
+    ]);
+    assert_contains(&exec, "EXEC_AFTER_PONG", "exec after Redis PONG");
+
+    smoke.ok(&["rm", "-f", &smoke.name]);
+}
+
+#[test]
+#[ignore]
+fn real_core_virtiofs_tar_closes_every_source_file_cleanly() {
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+    let source = tempfile::tempdir().expect("temporary virtiofs source");
+    for directory in 0..16 {
+        let root = source.path().join(format!("tree-{directory}"));
+        std::fs::create_dir_all(&root).expect("create source directory");
+        for file in 0..128 {
+            std::fs::write(
+                root.join(format!("file-{file}.txt")),
+                format!("virtiofs-close-{directory}-{file}\n"),
+            )
+            .expect("write source fixture");
+        }
+    }
+    let mount = format!("{}:/source:ro", source.path().display());
+
+    seed_smoke_image(&smoke, &image);
+    smoke.ok(&[
+        "run",
+        "--rm",
+        "--virtiofs-cache=none",
+        "-v",
+        &mount,
+        "-w",
+        "/source",
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "set -eu; for pass in 1 2 3 4 5; do tar -cf /dev/null .; done",
+    ]);
+}
+
 #[test]
 #[ignore]
 fn real_core_named_volume_persists_across_stop_start() {
@@ -1225,7 +1330,7 @@ fn real_core_bridge_network_hosts_and_endpoint_lifecycle() {
         "--",
         "/bin/sh",
         "-c",
-        "echo core-smoke-bridge-db-ready; sleep 3600",
+        "mkdir -p /www; printf core-smoke-bridge-peer-ok >/www/index.html; echo core-smoke-bridge-db-ready; exec httpd -f -p 8080 -h /www",
     ]);
     smoke.wait_for_named_running(&db_box);
     smoke.wait_for_named_logs(&db_box, "core-smoke-bridge-db-ready");
@@ -1255,6 +1360,22 @@ fn real_core_bridge_network_hosts_and_endpoint_lifecycle() {
     assert_contains(&inspect, &web_box, "network inspect");
     assert_contains(&inspect, "10.91.0.2", "network inspect");
     assert_contains(&inspect, "10.91.0.3", "network inspect");
+
+    let peer_http = smoke.ok(&[
+        "exec",
+        &web_box,
+        "--",
+        "/bin/sh",
+        "-c",
+        &format!(
+            "test \"$(wget -T 5 -qO- http://{db_box}:8080)\" = core-smoke-bridge-peer-ok; test \"$(wget -T 5 -qO- http://10.91.0.2:8080)\" = core-smoke-bridge-peer-ok; echo core-smoke-bridge-peer-tcp-ok"
+        ),
+    ]);
+    assert_contains(
+        &peer_http,
+        "core-smoke-bridge-peer-tcp-ok",
+        "bridge peer TCP by name and IP",
+    );
 
     smoke.ok(&["stop", &web_box]);
     smoke.ok(&["rm", &web_box]);
@@ -1518,6 +1639,68 @@ fn real_core_filesystem_image_snapshot_commands() {
     smoke.ok(&["rm", &smoke.name]);
 }
 
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn real_core_commit_preserves_guest_ownership_and_modes_after_stop() {
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+    let committed_image = format!("{}-metadata:latest", smoke.name);
+    let _box_cleanup = NamedBoxCleanup {
+        smoke: &smoke,
+        name: smoke.name.clone(),
+    };
+    let _image_cleanup = ImageCleanup {
+        smoke: &smoke,
+        reference: committed_image.clone(),
+    };
+    seed_smoke_image(&smoke, &image);
+
+    smoke.ok(&[
+        "run",
+        "--name",
+        &smoke.name,
+        "--persistent",
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "cp /bin/busybox /tmp/root-exec; chmod 0755 /tmp/root-exec; \
+         cp /bin/busybox /tmp/user-exec; chown 123:456 /tmp/user-exec; chmod 0750 /tmp/user-exec; \
+         printf config >/tmp/config; chmod 0644 /tmp/config; \
+         printf secret >/tmp/secret; chmod 0600 /tmp/secret; \
+         mkdir /tmp/mode-dir; chmod 0711 /tmp/mode-dir; \
+         ln -s root-exec /tmp/root-link",
+    ]);
+    smoke.wait_for_named_status(&smoke.name, "stopped");
+
+    smoke.ok(&["commit", &smoke.name, &committed_image]);
+    let output = smoke.ok(&[
+        "run",
+        "--rm",
+        &committed_image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "stat -c '%u:%g:%a' /tmp/root-exec /tmp/user-exec /tmp/config /tmp/secret /tmp/mode-dir; \
+         test -x /tmp/root-exec; test \"$(readlink /tmp/root-link)\" = root-exec",
+    ]);
+
+    let lines: Vec<_> = output
+        .lines()
+        .filter(|line| {
+            line.matches(':').count() == 2
+                && line
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || character == ':')
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        ["0:0:755", "123:456:750", "0:0:644", "0:0:600", "0:0:711"]
+    );
+}
+
 #[test]
 #[ignore]
 fn real_core_snapshot_cow_isolation_and_rm_guard() {
@@ -1708,6 +1891,43 @@ fn real_core_restart_policy_monitor_recovers_dead_box() {
 
     smoke.ok(&["stop", &smoke.name]);
     smoke.ok(&["rm", &smoke.name]);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn real_core_detached_health_worker_survives_run_cli_exit() {
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+    seed_smoke_image(&smoke, &image);
+    let _cleanup = NamedBoxCleanup {
+        smoke: &smoke,
+        name: smoke.name.clone(),
+    };
+
+    smoke.ok(&[
+        "run",
+        "--detach",
+        "--name",
+        &smoke.name,
+        "--health-cmd",
+        "true",
+        "--health-interval",
+        "1s",
+        "--health-timeout",
+        "1s",
+        "--health-retries",
+        "2",
+        &image,
+        "--",
+        "sh",
+        "-c",
+        "sleep 300",
+    ]);
+
+    let healthy = smoke.wait_for_named_health(&smoke.name, "healthy");
+    assert_eq!(json_string_field(&healthy, "health_status"), "healthy");
+    assert_eq!(json_u64_field(&healthy, "health_retries"), 0);
 }
 
 #[test]
@@ -2102,4 +2322,159 @@ fn real_core_interactive_pty_commands() {
 
     smoke.ok(&["stop", &smoke.name]);
     smoke.ok(&["rm", &smoke.name]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn real_core_rootfs_is_case_sensitive_and_persists_across_restart() {
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+    seed_smoke_image(&smoke, &image);
+    let _cleanup = NamedBoxCleanup {
+        smoke: &smoke,
+        name: smoke.name.clone(),
+    };
+
+    let script = r#"set -eu
+test -e /bin/sh
+test ! -e /BIN/SH
+if [ -e /case/Foo ]; then
+  test "$(cat /case/Foo)" = upper
+  test "$(cat /case/foo)" = lower
+  test "$(stat -c %i /case/Foo)" != "$(stat -c %i /case/foo)"
+  echo CASE_SENSITIVE_PERSISTED
+else
+  mkdir /case
+  printf upper >/case/Foo
+  printf lower >/case/foo
+  test "$(stat -c %i /case/Foo)" != "$(stat -c %i /case/foo)"
+  echo CASE_SENSITIVE_CREATED
+fi"#;
+
+    smoke.ok(&[
+        "run",
+        "-d",
+        "--name",
+        &smoke.name,
+        "--entrypoint",
+        "/bin/sh",
+        &image,
+        "--",
+        "-c",
+        script,
+    ]);
+    let first = smoke.wait_for_named_logs(&smoke.name, "CASE_SENSITIVE_CREATED");
+    assert_contains(&first, "CASE_SENSITIVE_CREATED", "first case-sensitive run");
+    smoke.wait_for_named_status(&smoke.name, "dead");
+
+    smoke.ok(&["start", &smoke.name]);
+    let second = smoke.wait_for_named_logs(&smoke.name, "CASE_SENSITIVE_PERSISTED");
+    assert_contains(
+        &second,
+        "CASE_SENSITIVE_PERSISTED",
+        "persistent case-sensitive restart",
+    );
+
+    smoke.ok(&["rm", &smoke.name]);
+    let boxes_dir = smoke.home_path().join("boxes");
+    assert!(
+        std::fs::read_dir(&boxes_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true),
+        "removed box left its APFS rootfs directory behind"
+    );
+
+    let cached = smoke.ok(&[
+        "run",
+        "--rm",
+        "--entrypoint",
+        "/bin/sh",
+        &image,
+        "--",
+        "-c",
+        script,
+    ]);
+    assert_contains(
+        &cached,
+        "CASE_SENSITIVE_CREATED",
+        "case-sensitive cached rootfs clone",
+    );
+    assert!(
+        smoke
+            .home_path()
+            .join("cache/rootfs-apfs")
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false),
+        "macOS run did not persist a case-sensitive APFS rootfs cache image"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn real_core_buildkit_vm_preserves_multiple_build_args_with_spaces() {
+    let smoke = CoreSmoke::new();
+    let base = smoke_image();
+    let tag = format!("{}-build-args:latest", smoke.name);
+    let context = smoke.home_path().join("buildkit-context");
+    std::fs::create_dir_all(&context).unwrap();
+    std::fs::write(
+        context.join("Dockerfile"),
+        format!(
+            "FROM {base} AS chosen\nARG FIRST=default\nARG SECOND=none\nRUN printf '%s|%s' \"$FIRST\" \"$SECOND\" >/ok\n\nFROM {base} AS default\nRUN printf wrong >/ok\n"
+        ),
+    )
+    .unwrap();
+    let context_arg = context.to_string_lossy().to_string();
+
+    smoke.ok(&[
+        "build",
+        "--builder",
+        "buildkit-vm",
+        "--platform",
+        "linux/arm64",
+        "--build-arg",
+        "FIRST=two words",
+        "--build-arg",
+        "SECOND=custom",
+        "--target",
+        "chosen",
+        "-f",
+        "Dockerfile",
+        "-t",
+        &tag,
+        &context_arg,
+    ]);
+    let result = smoke.ok(&["run", "--rm", "--entrypoint", "/bin/cat", &tag, "--", "/ok"]);
+    assert_contains(&result, "two words|custom", "BuildKit build args");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn real_core_buildkit_vm_executes_amd64_run_on_arm64_host() {
+    let smoke = CoreSmoke::new();
+    let base = smoke_image();
+    let tag = format!("{}-amd64-run:latest", smoke.name);
+    let context = smoke.home_path().join("buildkit-amd64-context");
+    std::fs::create_dir_all(&context).unwrap();
+    std::fs::write(
+        context.join("Dockerfile"),
+        format!("FROM {base}\nRUN test \"$(uname -m)\" = x86_64 && printf x86_64 >/arch\n"),
+    )
+    .unwrap();
+    let context_arg = context.to_string_lossy().to_string();
+
+    smoke.ok(&[
+        "build",
+        "--platform",
+        "linux/amd64",
+        "-f",
+        "Dockerfile",
+        "-t",
+        &tag,
+        &context_arg,
+    ]);
 }

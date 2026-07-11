@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use base64::Engine;
 use clap::Args;
 use sha2::{Digest, Sha256};
 
@@ -41,15 +42,24 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
     let state = StateFile::load_default()?;
     let record = resolve::resolve(&state, &args.name)?;
 
-    let rootfs_dir = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
-        format!(
-            "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/). \
-             For overlay-backed boxes the filesystem is only available while the box exists; \
-             commit a running box.",
-            args.name,
-            record.box_dir.display()
-        )
-    })?;
+    let attached_rootfs = if record.status == "running" {
+        None
+    } else {
+        a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?
+    };
+    let rootfs_dir = attached_rootfs
+        .as_ref()
+        .map(|rootfs| rootfs.path().to_path_buf())
+        .or_else(|| super::resolve_box_rootfs(&record.box_dir))
+        .ok_or_else(|| {
+            format!(
+                "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/). \
+                 For overlay-backed boxes the filesystem is only available while the box exists; \
+                 commit a running box.",
+                args.name,
+                record.box_dir.display()
+            )
+        })?;
 
     let reference = args.repository.unwrap_or_else(|| {
         format!(
@@ -63,16 +73,20 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
     // Create a temporary directory for the OCI image layout
     let tmp = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
     let image_dir = tmp.path();
+    let rootfs_tar = image_dir.join("rootfs.tar");
+
+    capture_rootfs_tar(record, &rootfs_dir, &rootfs_tar, args.pause).await?;
 
     // Build OCI image layout
-    build_oci_image(
+    build_oci_image_from_tar(
         image_dir,
-        &rootfs_dir,
+        &rootfs_tar,
         &reference,
         &args.message,
         &args.author,
         &args.change,
     )?;
+    std::fs::remove_file(&rootfs_tar)?;
 
     // Compute image digest from manifest
     let manifest_bytes = std::fs::read(image_dir.join("manifest.json")).or_else(|_| {
@@ -96,6 +110,163 @@ pub async fn execute(args: CommitArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+async fn capture_rootfs_tar(
+    record: &crate::state::BoxRecord,
+    rootfs_dir: &Path,
+    output: &Path,
+    pause: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if record.status == "running" && record.exec_socket_path.exists() {
+        let client = a3s_box_runtime::ExecClient::connect(&record.exec_socket_path).await?;
+        let mut file = tokio::fs::File::create(output).await?;
+        let written = client.archive_rootfs(&mut file, pause).await?;
+        if written == 0 {
+            return Err("Guest rootfs archive was empty".into());
+        }
+        file.sync_all().await?;
+        return Ok(());
+    }
+
+    let metadata_path = rootfs_dir
+        .join(a3s_box_core::rootfs_metadata::ROOTFS_METADATA_PATH.trim_start_matches('/'));
+    let bytes = std::fs::read(&metadata_path).map_err(|error| {
+        format!(
+            "Guest rootfs metadata is unavailable at {}: {error}. Start the box with this A3S Box version and stop it cleanly before committing.",
+            metadata_path.display()
+        )
+    })?;
+    let manifest: a3s_box_core::rootfs_metadata::RootfsMetadataManifest =
+        serde_json::from_slice(&bytes)?;
+    manifest
+        .validate()
+        .map_err(|error| format!("Invalid guest rootfs metadata: {error}"))?;
+    create_tar_from_guest_metadata(rootfs_dir, &manifest, output)
+}
+
+#[cfg(unix)]
+fn create_tar_from_guest_metadata(
+    rootfs_dir: &Path,
+    manifest: &a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
+    output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use a3s_box_core::rootfs_metadata::RootfsEntryKind;
+    use std::collections::{HashMap, HashSet};
+    use std::ffi::OsString;
+    use std::io::Cursor;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut decoded = Vec::with_capacity(manifest.entries.len());
+    let mut paths = HashSet::with_capacity(manifest.entries.len());
+    for entry in &manifest.entries {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&entry.path_base64)
+            .map_err(|error| format!("Invalid rootfs metadata path: {error}"))?;
+        let path = std::path::PathBuf::from(OsString::from_vec(bytes));
+        validate_archive_path(&path)?;
+        if !paths.insert(path.clone()) {
+            return Err(format!("Duplicate rootfs metadata path: {}", path.display()).into());
+        }
+        decoded.push((path, entry));
+    }
+    decoded.sort_by(|left, right| left.0.as_os_str().cmp(right.0.as_os_str()));
+
+    let file = std::fs::File::create(output)?;
+    let mut builder = tar::Builder::new(file);
+    let mut hardlinks = HashMap::<(u64, u64), std::path::PathBuf>::new();
+    for (path, entry) in decoded {
+        let source = rootfs_dir.join(&path);
+        let host_metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+            format!(
+                "Rootfs changed after terminal metadata capture at {}: {error}",
+                source.display()
+            )
+        })?;
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(entry.mode & 0o7777);
+        header.set_uid(entry.uid);
+        header.set_gid(entry.gid);
+        header.set_mtime(entry.mtime);
+
+        match entry.kind {
+            RootfsEntryKind::Directory => {
+                if !host_metadata.file_type().is_dir() {
+                    return Err(format!("Rootfs entry changed type: {}", path.display()).into());
+                }
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_cksum();
+                builder.append_data(&mut header, &path, Cursor::new([]))?;
+            }
+            RootfsEntryKind::Regular => {
+                if !host_metadata.file_type().is_file() || host_metadata.len() != entry.size {
+                    return Err(
+                        format!("Rootfs entry changed after capture: {}", path.display()).into(),
+                    );
+                }
+                let inode = (host_metadata.dev(), host_metadata.ino());
+                if host_metadata.nlink() > 1 {
+                    if let Some(first_path) = hardlinks.get(&inode) {
+                        header.set_entry_type(tar::EntryType::Link);
+                        header.set_size(0);
+                        header.set_link_name(first_path)?;
+                        header.set_cksum();
+                        builder.append_data(&mut header, &path, Cursor::new([]))?;
+                        continue;
+                    }
+                    hardlinks.insert(inode, path.clone());
+                }
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(entry.size);
+                header.set_cksum();
+                let file = std::fs::File::open(&source)?;
+                builder.append_data(&mut header, &path, file)?;
+            }
+            RootfsEntryKind::Symlink => {
+                if !host_metadata.file_type().is_symlink() {
+                    return Err(format!("Rootfs entry changed type: {}", path.display()).into());
+                }
+                let target = entry
+                    .link_target_base64
+                    .as_ref()
+                    .ok_or_else(|| format!("Missing symlink target: {}", path.display()))?;
+                let target = base64::engine::general_purpose::STANDARD.decode(target)?;
+                let target = std::path::PathBuf::from(OsString::from_vec(target));
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                header.set_cksum();
+                builder.append_link(&mut header, &path, target)?;
+            }
+        }
+    }
+    builder.finish()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_tar_from_guest_metadata(
+    _rootfs_dir: &Path,
+    _manifest: &a3s_box_core::rootfs_metadata::RootfsMetadataManifest,
+    _output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("Stopped-box guest metadata commit is not supported on this host".into())
+}
+
+fn validate_archive_path(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err("Rootfs metadata contains an absolute or empty path".into());
+    }
+    if path.components().any(|component| {
+        !matches!(
+            component,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    }) {
+        return Err(format!("Unsafe rootfs metadata path: {}", path.display()).into());
+    }
+    Ok(())
+}
+
 /// Find the manifest blob in the OCI layout.
 fn find_manifest_blob(image_dir: &Path) -> Result<Vec<u8>, std::io::Error> {
     let index_path = image_dir.join("index.json");
@@ -116,9 +287,32 @@ fn find_manifest_blob(image_dir: &Path) -> Result<Vec<u8>, std::io::Error> {
 }
 
 /// Build a minimal OCI image layout from a rootfs directory.
+#[cfg(test)]
 fn build_oci_image(
     output_dir: &Path,
     rootfs_dir: &Path,
+    _reference: &str,
+    message: &Option<String>,
+    author: &Option<String>,
+    changes: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tar_path = output_dir.join("rootfs.host.tar");
+    {
+        let file = std::fs::File::create(&tar_path)?;
+        let mut builder = tar::Builder::new(file);
+        builder.follow_symlinks(false);
+        builder.append_dir_all(".", rootfs_dir)?;
+        builder.finish()?;
+    }
+    let result =
+        build_oci_image_from_tar(output_dir, &tar_path, _reference, message, author, changes);
+    let _ = std::fs::remove_file(tar_path);
+    result
+}
+
+fn build_oci_image_from_tar(
+    output_dir: &Path,
+    rootfs_tar: &Path,
     _reference: &str,
     message: &Option<String>,
     author: &Option<String>,
@@ -134,15 +328,10 @@ fn build_oci_image(
     let layer_path = blobs_dir.join("layer.tmp");
     {
         let file = std::fs::File::create(&layer_path)?;
-        let encoder = GzEncoder::new(file, Compression::default());
-        let mut builder = tar::Builder::new(encoder);
-        builder.follow_symlinks(false);
-        builder
-            .append_dir_all(".", rootfs_dir)
-            .map_err(|e| format!("Failed to archive rootfs: {e}"))?;
-        builder
-            .finish()
-            .map_err(|e| format!("Failed to finalize layer: {e}"))?;
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        let mut input = std::fs::File::open(rootfs_tar)?;
+        std::io::copy(&mut input, &mut encoder)?;
+        encoder.finish()?;
     }
 
     // Hash the layer
@@ -153,7 +342,7 @@ fn build_oci_image(
     std::fs::rename(&layer_path, &layer_blob)?;
 
     // Compute diff_id (sha256 of uncompressed tar)
-    let diff_id = compute_diff_id(rootfs_dir)?;
+    let diff_id = compute_file_sha256(rootfs_tar)?;
 
     // 2. Create image config
     let mut config_obj = serde_json::json!({
@@ -228,7 +417,23 @@ fn build_oci_image(
     Ok(())
 }
 
+fn compute_file_sha256(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// Compute the diff_id (sha256 of uncompressed tar) for a directory.
+#[cfg(test)]
 fn compute_diff_id(rootfs_dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let mut hasher = Sha256::new();
     let buf = Vec::new();
@@ -376,6 +581,117 @@ mod tests {
         let id = compute_diff_id(dir.path()).unwrap();
         assert!(!id.is_empty());
         assert_eq!(id.len(), 64); // sha256 hex
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_guest_metadata_overrides_host_uid_gid_and_mode_in_tar() {
+        use a3s_box_core::rootfs_metadata::{
+            RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+        };
+        use std::os::unix::ffi::OsStrExt;
+
+        let rootfs = tempfile::TempDir::new().unwrap();
+        let file = rootfs.path().join("probe");
+        std::fs::write(&file, b"payload").unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(Path::new("probe").as_os_str().as_bytes());
+        let manifest = RootfsMetadataManifest::new(vec![RootfsMetadataEntry {
+            path_base64: encoded,
+            kind: RootfsEntryKind::Regular,
+            mode: 0o100755,
+            uid: 0,
+            gid: 0,
+            mtime: 123,
+            size: 7,
+            link_target_base64: None,
+        }]);
+        let output = rootfs.path().join("rootfs.tar");
+
+        create_tar_from_guest_metadata(rootfs.path(), &manifest, &output).unwrap();
+
+        let mut archive = tar::Archive::new(std::fs::File::open(output).unwrap());
+        let entry = archive.entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.path().unwrap(), Path::new("probe"));
+        assert_eq!(entry.header().mode().unwrap() & 0o7777, 0o755);
+        assert_eq!(entry.header().uid().unwrap(), 0);
+        assert_eq!(entry.header().gid().unwrap(), 0);
+        assert_eq!(entry.header().mtime().unwrap(), 123);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_guest_metadata_preserves_hardlinks_without_duplicate_payloads() {
+        use a3s_box_core::rootfs_metadata::{
+            RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+        };
+        use std::os::unix::ffi::OsStrExt;
+
+        let rootfs = tempfile::TempDir::new().unwrap();
+        std::fs::write(rootfs.path().join("busybox"), b"payload").unwrap();
+        std::fs::hard_link(rootfs.path().join("busybox"), rootfs.path().join("sh")).unwrap();
+        let entries = ["busybox", "sh"]
+            .into_iter()
+            .map(|path| RootfsMetadataEntry {
+                path_base64: base64::engine::general_purpose::STANDARD
+                    .encode(Path::new(path).as_os_str().as_bytes()),
+                kind: RootfsEntryKind::Regular,
+                mode: 0o100755,
+                uid: 0,
+                gid: 0,
+                mtime: 123,
+                size: 7,
+                link_target_base64: None,
+            })
+            .collect();
+        let output = rootfs.path().join("rootfs.tar");
+
+        create_tar_from_guest_metadata(
+            rootfs.path(),
+            &RootfsMetadataManifest::new(entries),
+            &output,
+        )
+        .unwrap();
+
+        let mut archive = tar::Archive::new(std::fs::File::open(output).unwrap());
+        let mut entries = archive.entries().unwrap();
+        let first = entries.next().unwrap().unwrap();
+        assert_eq!(first.header().entry_type(), tar::EntryType::Regular);
+        drop(first);
+        let second = entries.next().unwrap().unwrap();
+        assert_eq!(second.header().entry_type(), tar::EntryType::Link);
+        assert_eq!(second.link_name().unwrap().unwrap(), Path::new("busybox"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_guest_metadata_rejects_parent_traversal() {
+        use a3s_box_core::rootfs_metadata::{
+            RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+        };
+        use std::os::unix::ffi::OsStrExt;
+
+        let rootfs = tempfile::TempDir::new().unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(Path::new("../escape").as_os_str().as_bytes());
+        let manifest = RootfsMetadataManifest::new(vec![RootfsMetadataEntry {
+            path_base64: encoded,
+            kind: RootfsEntryKind::Regular,
+            mode: 0o100600,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            size: 0,
+            link_target_base64: None,
+        }]);
+
+        let error = create_tar_from_guest_metadata(
+            rootfs.path(),
+            &manifest,
+            &rootfs.path().join("rootfs.tar"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Unsafe rootfs metadata path"));
     }
 
     #[test]

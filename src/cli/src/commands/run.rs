@@ -12,8 +12,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::common::{self, CommonBoxArgs};
+use super::pool::{
+    PoolAutoStartConfig, DEFAULT_AUTOSTART_POOL_MAX, DEFAULT_AUTOSTART_POOL_SIZE, DEFAULT_SOCKET,
+};
 use crate::output::parse_memory;
 use crate::state::{generate_name, BoxRecord, StateFile};
+use a3s_box_runtime::pool::PoolClientRun;
 
 const PNPM_CACHE_VOLUME_SPEC: &str = "a3s-cache-pnpm:/a3s-cache/pnpm";
 const PNPM_CONFIG_STORE_ENV: &str = "PNPM_CONFIG_STORE_DIR";
@@ -35,6 +39,7 @@ const NPM_PREFER_OFFLINE_ENV: &str = "npm_config_prefer_offline";
 const NPM_PREFER_OFFLINE_VALUE: &str = "true";
 const COREPACK_DOWNLOAD_PROMPT_ENV: &str = "COREPACK_ENABLE_DOWNLOAD_PROMPT";
 const COREPACK_DOWNLOAD_PROMPT_VALUE: &str = "0";
+const RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_RUN_POOL_SOCKET";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum PackageCache {
@@ -70,6 +75,25 @@ pub struct RunArgs {
     /// Automatically remove the box when it stops
     #[arg(long)]
     pub rm: bool,
+
+    /// Run the command through the warm-pool daemon instead of cold-starting a box.
+    ///
+    /// Pool mode is currently for foreground one-shot commands (`--rm`) and
+    /// supports image/user/workdir/env/volumes/resources/package-cache/timeout.
+    #[arg(long)]
+    pub pool: bool,
+
+    /// Unix socket of the warm-pool daemon used by `--pool`.
+    #[arg(long = "pool-socket", default_value = DEFAULT_SOCKET)]
+    pub pool_socket: String,
+
+    /// Start a warm-pool daemon on --pool-socket when one is not already running.
+    #[arg(long = "pool-autostart")]
+    pub pool_autostart: bool,
+
+    /// Force exec mode against a deferred pool daemon.
+    #[arg(long = "pool-exec")]
+    pub pool_exec: bool,
 
     /// Mount a persistent package-manager cache (pnpm or npm)
     #[arg(long = "package-cache", value_enum)]
@@ -132,7 +156,19 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     validate_run_mode(&args, std::io::stdin().is_terminal())
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    let ctx = setup_and_boot(&args).await?;
+    let env_pool_socket = std::env::var(RUN_POOL_SOCKET_ENV).ok();
+    if let Some(pool_socket) = selected_pool_socket(&args, env_pool_socket.as_deref()) {
+        if args.pool_autostart {
+            super::pool::ensure_pool_daemon_running(&pool_autostart_config_for_run(
+                &args,
+                &pool_socket,
+            )?)
+            .await?;
+        }
+        return execute_pool_run(&args, &pool_socket).await;
+    }
+
+    let mut ctx = setup_and_boot(&args).await?;
     crate::audit::record(
         a3s_box_core::audit::AuditAction::BoxStart,
         a3s_box_core::audit::AuditOutcome::Success,
@@ -140,9 +176,19 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         &format!("started box from image {}", args.common.image),
     );
     if args.detach {
+        crate::health::spawn_detached_health_checker(&ctx.record)
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
         println!("{}", ctx.box_id);
         return Ok(());
     }
+
+    ctx.health_checker = ctx.record.health_check.as_ref().map(|health_check| {
+        crate::health::spawn_health_checker(
+            ctx.box_id.clone(),
+            ctx.exec_socket_path.clone(),
+            health_check.clone(),
+        )
+    });
 
     if args.tty {
         return run_tty(ctx, &args).await;
@@ -170,7 +216,177 @@ fn validate_run_mode(args: &RunArgs, stdin_is_terminal: bool) -> Result<(), &'st
     if args.tty && !stdin_is_terminal {
         return Err("The -t flag requires a terminal (stdin is not a TTY)");
     }
+    if args.pool || args.pool_autostart {
+        validate_pool_run_mode(args)?;
+    }
     Ok(())
+}
+
+fn validate_pool_run_mode(args: &RunArgs) -> Result<(), &'static str> {
+    match pool_run_mode_error(args) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn pool_run_mode_error(args: &RunArgs) -> Option<&'static str> {
+    if !args.rm {
+        return Some("--pool currently requires --rm");
+    }
+    if args.detach {
+        return Some("Cannot use --pool with -d (detach)");
+    }
+    if args.tty {
+        return Some("Cannot use --pool with -t (tty)");
+    }
+    if args.interactive {
+        return Some("Cannot use --pool with --interactive");
+    }
+    if args.cmd.is_empty() {
+        return Some("--pool currently requires an explicit command");
+    }
+    if has_unsupported_pool_common_options(&args.common)
+        || args.log_driver != "json-file"
+        || !args.log_opts.is_empty()
+        || args.tee
+        || args.tee_simulate
+        || args.tee_workload_id.is_some()
+        || args.sidecar.is_some()
+    {
+        return Some("--pool currently supports only image, --rm, command, --user, --workdir, --env, --env-file, --volume, --cpus, --memory, --timeout, and --package-cache");
+    }
+    None
+}
+
+fn selected_pool_socket(args: &RunArgs, env_socket: Option<&str>) -> Option<String> {
+    if args.pool || args.pool_autostart {
+        return Some(args.pool_socket.clone());
+    }
+    let socket = env_socket
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if pool_run_mode_error(args).is_none() {
+        Some(socket.to_string())
+    } else {
+        None
+    }
+}
+
+fn pool_autostart_config_for_run(
+    args: &RunArgs,
+    socket: &str,
+) -> Result<PoolAutoStartConfig, Box<dyn std::error::Error>> {
+    let memory_mb =
+        parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
+    let prewarm_image = if args.common.volumes.is_empty()
+        && args.package_cache.is_empty()
+        && args.common.cpus == 2
+        && memory_mb == 512
+    {
+        Some(args.common.image.clone())
+    } else {
+        None
+    };
+
+    Ok(PoolAutoStartConfig {
+        socket: socket.to_string(),
+        image: prewarm_image,
+        size: DEFAULT_AUTOSTART_POOL_SIZE,
+        max: DEFAULT_AUTOSTART_POOL_MAX,
+    })
+}
+
+fn has_unsupported_pool_common_options(common: &CommonBoxArgs) -> bool {
+    common.name.is_some()
+        || !common.publish.is_empty()
+        || !common.dns.is_empty()
+        || common.entrypoint.is_some()
+        || common.hostname.is_some()
+        || common.restart != "no"
+        || !common.labels.is_empty()
+        || !common.tmpfs.is_empty()
+        || common.virtiofs_cache.is_some()
+        || common.network.is_some()
+        || common.health_cmd.is_some()
+        || common.health_interval != 30
+        || common.health_timeout != 5
+        || common.health_retries != 3
+        || common.health_start_period != 0
+        || common.pids_limit.is_some()
+        || common.cpuset_cpus.is_some()
+        || !common.ulimits.is_empty()
+        || common.cpu_shares.is_some()
+        || common.cpu_quota.is_some()
+        || common.cpu_period.is_some()
+        || common.memory_reservation.is_some()
+        || common.memory_swap.is_some()
+        || !common.add_host.is_empty()
+        || common.platform.is_some()
+        || common.init
+        || common.read_only
+        || !common.cap_add.is_empty()
+        || !common.cap_drop.is_empty()
+        || !common.security_opt.is_empty()
+        || common.privileged
+        || !common.device.is_empty()
+        || common.gpus.is_some()
+        || common.shm_size.is_some()
+        || common.stop_signal.is_some()
+        || common.stop_timeout.is_some()
+        || common.no_healthcheck
+        || common.oom_kill_disable
+        || common.oom_score_adj.is_some()
+        || common.persistent
+}
+
+async fn execute_pool_run(args: &RunArgs, socket: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+
+    let output =
+        a3s_box_runtime::pool::client::run_client(build_pool_client_run(args, socket)?).await?;
+
+    std::io::stdout().write_all(&output.stdout)?;
+    std::io::stderr().write_all(&output.stderr)?;
+    if output.exit_code != 0 {
+        std::process::exit(output.exit_code);
+    }
+    Ok(())
+}
+
+fn build_pool_client_run(
+    args: &RunArgs,
+    socket: &str,
+) -> Result<PoolClientRun, Box<dyn std::error::Error>> {
+    common::validate_runtime_options(&args.common)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+    let memory_mb =
+        parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
+    let mut env = common::build_env_map(&args.common)?;
+    let mut volume_specs = args.common.volumes.clone();
+    apply_package_caches(&args.package_cache, &mut volume_specs, &mut env);
+    let (resolved_volumes, _) = resolve_volumes(&volume_specs)?;
+    let mut env_entries: Vec<String> = env
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    env_entries.sort();
+
+    Ok(PoolClientRun {
+        socket: socket.to_string(),
+        image: Some(args.common.image.clone()),
+        user: common::normalize_user_option(args.common.user.as_deref())
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+        workdir: args.common.workdir.clone(),
+        rootfs: None,
+        env: env_entries,
+        volumes: resolved_volumes,
+        vcpus: args.common.cpus,
+        memory_mb,
+        exec: args.pool_exec,
+        timeout_ns: args.timeout.map(|secs| secs.saturating_mul(1_000_000_000)),
+        cmd: args.cmd.clone(),
+    })
 }
 
 // ============================================================================
@@ -428,11 +644,18 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         return Err(error.into());
     }
 
-    if let Err(error) = super::diff::create_box_baseline_snapshot(&box_dir) {
-        tracing::warn!(
+    if should_create_diff_baseline(args) {
+        if let Err(error) = super::diff::create_box_baseline_snapshot(&box_dir) {
+            tracing::warn!(
+                box_id = %box_id,
+                error = %error,
+                "Failed to create rootfs diff baseline snapshot"
+            );
+        }
+    } else {
+        tracing::debug!(
             box_id = %box_id,
-            error = %error,
-            "Failed to create rootfs diff baseline snapshot"
+            "Skipping rootfs diff baseline snapshot for foreground --rm box"
         );
     }
 
@@ -454,10 +677,6 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
     // container.json has a home.)
     let _ = &log_dir;
 
-    let health_checker = health_check.as_ref().map(|hc| {
-        crate::health::spawn_health_checker(box_id.clone(), exec_socket_path.clone(), hc.clone())
-    });
-
     Ok(RunContext {
         vm,
         box_id,
@@ -468,7 +687,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         pty_socket_path,
         volume_names,
         anonymous_volumes,
-        health_checker,
+        health_checker: None,
         stop_signal,
         stop_timeout_ms,
     })
@@ -556,6 +775,10 @@ fn build_box_config(
         persistent: args.common.persistent || !args.rm,
         ..Default::default()
     })
+}
+
+fn should_create_diff_baseline(args: &RunArgs) -> bool {
+    !args.rm || args.detach
 }
 
 /// Initial process used only to keep the guest init alive for `run -it`.
@@ -1278,6 +1501,10 @@ mod tests {
             tty: false,
             timeout: None,
             rm: false,
+            pool: false,
+            pool_socket: DEFAULT_SOCKET.to_string(),
+            pool_autostart: false,
+            pool_exec: false,
             package_cache: vec![],
             cmd: vec![],
             log_driver: "json-file".to_string(),
@@ -1288,6 +1515,38 @@ mod tests {
             sidecar: None,
             sidecar_vsock_port: 4092,
         }
+    }
+
+    fn default_pool_run_args() -> RunArgs {
+        let mut args = default_run_args();
+        args.pool = true;
+        args.rm = true;
+        args.cmd = vec!["echo".to_string(), "hello".to_string()];
+        args
+    }
+
+    #[test]
+    fn test_foreground_auto_remove_skips_diff_baseline() {
+        let mut args = default_run_args();
+        args.rm = true;
+
+        assert!(!should_create_diff_baseline(&args));
+    }
+
+    #[test]
+    fn test_detached_auto_remove_keeps_diff_baseline_while_running() {
+        let mut args = default_run_args();
+        args.rm = true;
+        args.detach = true;
+
+        assert!(should_create_diff_baseline(&args));
+    }
+
+    #[test]
+    fn test_persistent_run_keeps_diff_baseline() {
+        let args = default_run_args();
+
+        assert!(should_create_diff_baseline(&args));
     }
 
     #[test]
@@ -1415,6 +1674,160 @@ mod tests {
         let err = validate_run_mode(&args, true).unwrap_err();
         assert!(err.contains("--timeout"));
         assert!(err.contains("tty"));
+    }
+
+    #[test]
+    fn test_validate_pool_run_mode_requires_auto_remove_and_command() {
+        let mut args = default_pool_run_args();
+        args.rm = false;
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("requires --rm"));
+
+        let mut args = default_pool_run_args();
+        args.cmd = vec![];
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("explicit command"));
+    }
+
+    #[test]
+    fn test_validate_pool_run_mode_rejects_unsupported_modes() {
+        let mut args = default_pool_run_args();
+        args.detach = true;
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("--pool"));
+        assert!(err.contains("detach"));
+
+        let mut args = default_pool_run_args();
+        args.interactive = true;
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("--interactive"));
+
+        let mut args = default_pool_run_args();
+        args.common.publish = vec!["8080:80".to_string()];
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("currently supports only"));
+
+        let mut args = default_pool_run_args();
+        args.common.name = Some("named-pool-run".to_string());
+        let err = validate_run_mode(&args, true).unwrap_err();
+        assert!(err.contains("currently supports only"));
+    }
+
+    #[test]
+    fn test_validate_pool_run_mode_allows_timeout() {
+        let mut args = default_pool_run_args();
+        args.timeout = Some(30);
+
+        assert!(validate_run_mode(&args, true).is_ok());
+    }
+
+    #[test]
+    fn test_selected_pool_socket_prefers_explicit_pool_socket() {
+        let mut args = default_pool_run_args();
+        args.pool_socket = "/tmp/explicit.sock".to_string();
+
+        assert_eq!(
+            selected_pool_socket(&args, Some("/tmp/env.sock")).as_deref(),
+            Some("/tmp/explicit.sock")
+        );
+    }
+
+    #[test]
+    fn test_selected_pool_socket_uses_env_for_compatible_foreground_run() {
+        let mut args = default_run_args();
+        args.rm = true;
+        args.cmd = vec!["bash".to_string(), "-lc".to_string(), "echo ok".to_string()];
+        args.package_cache = vec![PackageCache::Pnpm];
+        args.common.volumes = vec!["/host/work:/workspace:rw".to_string()];
+        args.common.workdir = Some("/workspace".to_string());
+
+        assert_eq!(
+            selected_pool_socket(&args, Some(" /tmp/runtime.sock ")).as_deref(),
+            Some("/tmp/runtime.sock")
+        );
+    }
+
+    #[test]
+    fn test_selected_pool_socket_ignores_env_for_incompatible_run() {
+        let mut args = default_run_args();
+        args.rm = true;
+        args.detach = true;
+        args.cmd = vec!["echo".to_string(), "ok".to_string()];
+
+        assert!(selected_pool_socket(&args, Some("/tmp/runtime.sock")).is_none());
+
+        let mut named = default_run_args();
+        named.rm = true;
+        named.common.name = Some("named-run".to_string());
+        named.cmd = vec!["echo".to_string(), "ok".to_string()];
+        assert!(selected_pool_socket(&named, Some("/tmp/runtime.sock")).is_none());
+        assert!(selected_pool_socket(&args, Some("")).is_none());
+    }
+
+    #[test]
+    fn test_selected_pool_socket_uses_autostart_flag() {
+        let mut args = default_pool_run_args();
+        args.pool = false;
+        args.pool_autostart = true;
+        args.pool_socket = "/tmp/autostart.sock".to_string();
+
+        assert_eq!(
+            selected_pool_socket(&args, None).as_deref(),
+            Some("/tmp/autostart.sock")
+        );
+    }
+
+    #[test]
+    fn test_pool_autostart_config_prewarms_simple_run() {
+        let args = default_pool_run_args();
+        let config = pool_autostart_config_for_run(&args, "/tmp/pool.sock").unwrap();
+
+        assert_eq!(config.socket, "/tmp/pool.sock");
+        assert_eq!(config.image.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn test_pool_autostart_config_skips_prewarm_for_volume_shape() {
+        let mut args = default_pool_run_args();
+        args.common.volumes = vec!["/host:/work:ro".to_string()];
+        let config = pool_autostart_config_for_run(&args, "/tmp/pool.sock").unwrap();
+
+        assert!(config.image.is_none());
+    }
+
+    #[test]
+    fn test_build_pool_client_run_plumbs_supported_options() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env_file = tmp.path().join("env.list");
+        std::fs::write(&env_file, "B=file\nC=file\n").unwrap();
+        let bind = format!("{}:/workspace:ro", tmp.path().display());
+
+        let mut args = default_pool_run_args();
+        args.common.image = "node:24-bookworm".to_string();
+        args.common.cpus = 4;
+        args.common.memory = "2g".to_string();
+        args.common.volumes = vec![bind.clone()];
+        args.common.env = vec!["A=cli".to_string(), "B=cli".to_string()];
+        args.common.env_file = vec![env_file.display().to_string()];
+        args.common.user = Some("root".to_string());
+        args.common.workdir = Some("/workspace".to_string());
+        args.pool_socket = "/tmp/a3s-box-test-pool.sock".to_string();
+        args.pool_exec = true;
+        args.timeout = Some(45);
+
+        let req = build_pool_client_run(&args, &args.pool_socket).unwrap();
+
+        assert_eq!(req.socket, "/tmp/a3s-box-test-pool.sock");
+        assert_eq!(req.image.as_deref(), Some("node:24-bookworm"));
+        assert_eq!(req.user.as_deref(), Some("0"));
+        assert_eq!(req.workdir.as_deref(), Some("/workspace"));
+        assert_eq!(req.volumes, vec![bind]);
+        assert_eq!(req.vcpus, 4);
+        assert_eq!(req.memory_mb, 2048);
+        assert!(req.exec);
+        assert_eq!(req.timeout_ns, Some(45_000_000_000));
+        assert_eq!(req.cmd, vec!["echo", "hello"]);
+        assert_eq!(req.env, vec!["A=cli", "B=cli", "C=file"]);
     }
 
     #[test]

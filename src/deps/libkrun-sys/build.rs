@@ -16,23 +16,23 @@ use std::process::{Command, Stdio};
 // macOS: Download prebuilt kernel.c, compile locally to .dylib
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const LIBKRUNFW_PREBUILT_URL: &str =
-    "https://github.com/boxlite-ai/libkrunfw/releases/download/v5.1.0/libkrunfw-prebuilt-aarch64.tgz";
+    "https://github.com/boxlite-ai/libkrunfw/releases/download/v5.3.0/libkrunfw-prebuilt-aarch64.tgz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const LIBKRUNFW_SHA256: &str = "2b2801d2e414140d8d0a30d7e30a011077b7586eabbbecdca42aea804b59de8b";
+const LIBKRUNFW_SHA256: &str = "12b9401d7735d1682450e4d025273c5016ec2237dcbfb76b2f0a152be6e606d6";
 
 // Linux x86_64: Download pre-compiled .so directly (no build needed)
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const LIBKRUNFW_SO_URL: &str =
-    "https://github.com/boxlite-ai/libkrunfw/releases/download/v5.1.0/libkrunfw-x86_64.tgz";
+    "https://github.com/boxlite-ai/libkrunfw/releases/download/v5.3.0/libkrunfw-x86_64.tgz";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const LIBKRUNFW_SHA256: &str = "faca64a3581ce281498b8ae7eccc6bd0da99b167984f9ee39c47754531d4b37d";
+const LIBKRUNFW_SHA256: &str = "0a7bb64a35a273b8501801dd69b75736a8c676aa21aa62fb5642842cda9dc91d";
 
 // Linux aarch64: Download pre-compiled .so directly (no build needed)
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const LIBKRUNFW_SO_URL: &str =
-    "https://github.com/boxlite-ai/libkrunfw/releases/download/v5.1.0/libkrunfw-aarch64.tgz";
+    "https://github.com/boxlite-ai/libkrunfw/releases/download/v5.3.0/libkrunfw-aarch64.tgz";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const LIBKRUNFW_SHA256: &str = "e254bc3fb07b32e26a258d9958967b2f22eb6c3136cfedf358c332308b6d35ea";
+const LIBKRUNFW_SHA256: &str = "8b5b9211da5445d9301dafb2201431f4392ab96455512bce63a5cfbd33c49839";
 
 // libkrun build features (NET=1 BLK=1 enables network and block device support)
 // Note: TEE support (krun_set_tee_config_file) is loaded via dlsym at runtime
@@ -56,6 +56,8 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/libkrun");
     // Re-evaluate the system-vs-vendored decision when the toggle changes.
     println!("cargo:rerun-if-env-changed=A3S_BUILD_LIBKRUN");
+    println!("cargo:rerun-if-env-changed=A3S_USE_SYSTEM_LIBKRUN");
+    println!("cargo:rerun-if-env-changed=A3S_LIBKRUNFW_DYLIB");
 
     // Check for stub mode (for CI linting without building)
     // Set A3S_DEPS_STUB=1 to skip building and emit stub link directives
@@ -74,8 +76,18 @@ fn main() {
 
     #[cfg(not(target_os = "windows"))]
     {
+        // The vendored macOS libkrun carries required TSI flow-control and
+        // reverse-proxy fixes newer than the 1.17.0 library shipped by older
+        // A3S Box formulae. Silently preferring that system dylib produces TCP
+        // listeners that accept connections but never move application data.
+        // Keep system linking as an explicit developer escape hatch only.
+        #[cfg(target_os = "macos")]
+        let force_vendored = env::var("A3S_USE_SYSTEM_LIBKRUN").is_err();
+        #[cfg(not(target_os = "macos"))]
+        let force_vendored = false;
+
         // Try to find system-installed libkrun first (unless A3S_BUILD_LIBKRUN is set)
-        if env::var("A3S_BUILD_LIBKRUN").is_err() {
+        if env::var("A3S_BUILD_LIBKRUN").is_err() && !force_vendored {
             if let Ok(lib_dir) = find_system_libkrun() {
                 println!(
                     "cargo:warning=Using system-installed libkrun from {}",
@@ -368,6 +380,15 @@ fn make_command(
     cmd.stderr(Stdio::inherit());
     cmd.args(["-j", &num_cpus::get().to_string()])
         .arg("MAKEFLAGS=")
+        // libkrun's Makefile invokes a nested Cargo build. Do not leak the
+        // outer workspace's clippy wrapper or lint flags into that independent
+        // vendored workspace: `cargo clippy -- -D warnings` must lint A3S code,
+        // not turn upstream warnings into a build-script failure.
+        .env_remove("RUSTC_WRAPPER")
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CLIPPY_ARGS")
         .env("PREFIX", install_dir)
         .current_dir(source_dir);
 
@@ -409,10 +430,68 @@ fn configure_linking(libkrun_dir: &Path, libkrunfw_dir: &Path) {
             "cargo:rustc-link-arg=-Wl,-rpath,{}",
             libkrunfw_dir.display()
         );
+        stage_macos_runtime_libraries(libkrun_dir, libkrunfw_dir);
     }
 
     println!("cargo:LIBKRUN_A3S_DEP={}", libkrun_dir.display());
     println!("cargo:LIBKRUNFW_A3S_DEP={}", libkrunfw_dir.display());
+}
+
+#[cfg(target_os = "macos")]
+fn stage_macos_runtime_libraries(libkrun_dir: &Path, libkrunfw_dir: &Path) {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is required"));
+    let target_root = target_root_from_out_dir(&out_dir)
+        .expect("failed to derive Cargo target root from OUT_DIR");
+    let runtime_dir = target_root.join("lib");
+    fs::create_dir_all(&runtime_dir).unwrap_or_else(|error| {
+        panic!(
+            "failed to create runtime library directory {}: {error}",
+            runtime_dir.display()
+        )
+    });
+
+    for source_dir in [libkrun_dir, libkrunfw_dir] {
+        for entry in fs::read_dir(source_dir)
+            .unwrap_or_else(|error| panic!("failed to inspect {}: {error}", source_dir.display()))
+        {
+            let entry = entry.expect("failed to inspect runtime library entry");
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.ends_with(".dylib")
+                || !(name.starts_with("libkrun.") || name.starts_with("libkrunfw."))
+            {
+                continue;
+            }
+            let resolved = path.canonicalize().unwrap_or_else(|error| {
+                panic!(
+                    "failed to resolve runtime library {}: {error}",
+                    path.display()
+                )
+            });
+            let destination = runtime_dir.join(name);
+            let temporary = runtime_dir.join(format!(".{name}.tmp-{}", std::process::id()));
+            fs::copy(&resolved, &temporary).unwrap_or_else(|error| {
+                panic!(
+                    "failed to stage runtime library {} at {}: {error}",
+                    resolved.display(),
+                    temporary.display()
+                )
+            });
+            fs::rename(&temporary, &destination).unwrap_or_else(|error| {
+                panic!(
+                    "failed to activate runtime library {} at {}: {error}",
+                    temporary.display(),
+                    destination.display()
+                )
+            });
+        }
+    }
+    println!(
+        "cargo:warning=Staged macOS runtime libraries in {}",
+        runtime_dir.display()
+    );
 }
 
 /// Downloads a file from URL to the specified path.
@@ -663,11 +742,17 @@ fn fix_macos_libs(lib_dir: &Path, lib_prefix: &str) -> Result<(), String> {
 /// Downloads and extracts the prebuilt libkrunfw tarball (macOS).
 #[cfg(target_os = "macos")]
 fn download_libkrunfw_prebuilt(out_dir: &Path) -> PathBuf {
-    let tarball_path = out_dir.join("libkrunfw-prebuilt.tar.gz");
+    let tarball_path = out_dir.join(format!(
+        "libkrunfw-prebuilt-{}.tar.gz",
+        &LIBKRUNFW_SHA256[..12]
+    ));
     let extract_dir = out_dir.join("libkrunfw-src");
     let src_dir = extract_dir.join("libkrunfw");
+    let marker = extract_dir.join(".source-sha256");
 
-    if src_dir.join("kernel.c").exists() {
+    if src_dir.join("kernel.c").exists()
+        && fs::read_to_string(&marker).is_ok_and(|value| value == LIBKRUNFW_SHA256)
+    {
         println!("cargo:warning=Using cached libkrunfw source");
         return src_dir;
     }
@@ -685,6 +770,8 @@ fn download_libkrunfw_prebuilt(out_dir: &Path) -> PathBuf {
     }
     extract_tarball(&tarball_path, &extract_dir)
         .unwrap_or_else(|e| panic!("Failed to extract libkrunfw: {}", e));
+    fs::write(&marker, LIBKRUNFW_SHA256)
+        .unwrap_or_else(|e| panic!("Failed to record libkrunfw source digest: {}", e));
 
     println!("cargo:warning=Extracted libkrunfw to {}", src_dir.display());
     src_dir
@@ -706,11 +793,22 @@ fn build() {
     let libkrun_install = out_dir.join("libkrun");
     let libkrunfw_lib = libkrunfw_install.join(LIB_DIR);
     let libkrun_lib = libkrun_install.join(LIB_DIR);
+    let firmware_marker = out_dir.join("libkrunfw-src/.source-sha256");
+    let firmware_current =
+        fs::read_to_string(&firmware_marker).is_ok_and(|value| value == LIBKRUNFW_SHA256);
 
     // Skip build if outputs already exist (incremental build optimization)
-    if has_library(&libkrunfw_lib, "libkrunfw") && has_library(&libkrun_lib, "libkrun") {
+    if env::var("A3S_BUILD_LIBKRUN").is_err()
+        && firmware_current
+        && has_library(&libkrunfw_lib, "libkrunfw")
+        && has_library(&libkrun_lib, "libkrun")
+    {
         configure_linking(&libkrun_lib, &libkrunfw_lib);
         return;
+    }
+    if !firmware_current {
+        let _ = fs::remove_dir_all(&libkrunfw_install);
+        let _ = fs::remove_dir_all(&libkrun_install);
     }
 
     println!("cargo:warning=Building libkrun-sys for macOS (using prebuilt libkrunfw)");
@@ -723,16 +821,34 @@ fn build() {
     // Setup LIBCLANG_PATH for bindgen if needed
     setup_libclang_path();
 
-    // 1. Download and extract prebuilt libkrunfw
-    let libkrunfw_src = download_libkrunfw_prebuilt(&out_dir);
-
-    // 2. Build libkrunfw from prebuilt source (fast, just compiles kernel.c)
-    build_with_make(
-        &libkrunfw_src,
-        &libkrunfw_install,
-        "libkrunfw",
-        HashMap::new(),
-    );
+    // 1-2. Use an explicitly built patched firmware when supplied; otherwise
+    // build the checksum-verified upstream prebuilt source bundle. The override
+    // is path-only and opt-in so release builds cannot silently consume ambient
+    // firmware. `firmware/build-patched-darwin-arm64.sh` produces this artifact.
+    if let Ok(override_path) = env::var("A3S_LIBKRUNFW_DYLIB") {
+        let override_path = PathBuf::from(override_path);
+        if !override_path.is_file() {
+            panic!(
+                "A3S_LIBKRUNFW_DYLIB is not a file: {}",
+                override_path.display()
+            );
+        }
+        fs::create_dir_all(&libkrunfw_lib).expect("create libkrunfw override directory");
+        fs::copy(&override_path, libkrunfw_lib.join("libkrunfw.5.dylib"))
+            .unwrap_or_else(|error| panic!("Failed to stage patched libkrunfw: {error}"));
+        println!(
+            "cargo:warning=Using explicit patched libkrunfw from {}",
+            override_path.display()
+        );
+    } else {
+        let libkrunfw_src = download_libkrunfw_prebuilt(&out_dir);
+        build_with_make(
+            &libkrunfw_src,
+            &libkrunfw_install,
+            "libkrunfw",
+            HashMap::new(),
+        );
+    }
 
     // 3. Build libkrun from vendored source
     build_with_make(
@@ -797,16 +913,24 @@ fn fix_linux_libs(lib_dir: &Path, lib_prefix: &str) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn download_libkrunfw_so(install_dir: &Path) {
     let lib_dir = install_dir.join(LIB_DIR);
+    let marker = install_dir.join(".source-sha256");
 
-    if has_library(&lib_dir, "libkrunfw") {
+    if has_library(&lib_dir, "libkrunfw")
+        && fs::read_to_string(&marker).is_ok_and(|value| value == LIBKRUNFW_SHA256)
+    {
         println!("cargo:warning=Using cached libkrunfw.so");
         return;
+    }
+
+    if lib_dir.exists() {
+        fs::remove_dir_all(&lib_dir)
+            .unwrap_or_else(|e| panic!("Failed to remove stale libkrunfw cache: {}", e));
     }
 
     fs::create_dir_all(install_dir)
         .unwrap_or_else(|e| panic!("Failed to create install dir: {}", e));
 
-    let tarball_path = install_dir.join("libkrunfw.tgz");
+    let tarball_path = install_dir.join(format!("libkrunfw-{}.tgz", &LIBKRUNFW_SHA256[..12]));
 
     if !tarball_path.exists() {
         download_file(LIBKRUNFW_SO_URL, &tarball_path)
@@ -818,6 +942,8 @@ fn download_libkrunfw_so(install_dir: &Path) {
 
     extract_tarball(&tarball_path, install_dir)
         .unwrap_or_else(|e| panic!("Failed to extract libkrunfw: {}", e));
+    fs::write(&marker, LIBKRUNFW_SHA256)
+        .unwrap_or_else(|e| panic!("Failed to record libkrunfw source digest: {}", e));
 
     println!(
         "cargo:warning=Extracted libkrunfw.so to {}",
@@ -916,11 +1042,20 @@ fn build() {
     let libkrun_install = out_dir.join("libkrun");
     let libkrunfw_lib_dir = libkrunfw_install.join(LIB_DIR);
     let libkrun_lib_dir = libkrun_install.join(LIB_DIR);
+    let firmware_current = fs::read_to_string(libkrunfw_install.join(".source-sha256"))
+        .is_ok_and(|value| value == LIBKRUNFW_SHA256);
 
     // Skip build if outputs already exist (incremental build optimization)
-    if has_library(&libkrunfw_lib_dir, "libkrunfw") && has_library(&libkrun_lib_dir, "libkrun") {
+    if env::var("A3S_BUILD_LIBKRUN").is_err()
+        && firmware_current
+        && has_library(&libkrunfw_lib_dir, "libkrunfw")
+        && has_library(&libkrun_lib_dir, "libkrun")
+    {
         configure_linking(&libkrun_lib_dir, &libkrunfw_lib_dir);
         return;
+    }
+    if !firmware_current {
+        let _ = fs::remove_dir_all(&libkrun_install);
     }
 
     println!("cargo:warning=Building libkrun-sys for Linux (using prebuilt libkrunfw)");

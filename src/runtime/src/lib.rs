@@ -107,7 +107,7 @@ pub use volume::VolumeStore;
 // ── Feature-gated re-exports ──
 
 #[cfg(feature = "build")]
-pub use oci::{BuildConfig, Dockerfile, Instruction};
+pub use oci::{BuildConfig, BuildRunPoolConfig, Dockerfile, Instruction};
 
 #[cfg(feature = "compose")]
 pub use compose::{ComposeProject, HealthCheckSpec};

@@ -115,6 +115,13 @@ pub async fn execute(args: ComposeArgs) -> Result<(), Box<dyn std::error::Error>
 fn load_compose_file(
     explicit_path: Option<&std::path::Path>,
 ) -> Result<(PathBuf, ComposeConfig), Box<dyn std::error::Error>> {
+    load_compose_file_with_environment(explicit_path, std::env::vars())
+}
+
+fn load_compose_file_with_environment(
+    explicit_path: Option<&std::path::Path>,
+    shell_environment: impl IntoIterator<Item = (String, String)>,
+) -> Result<(PathBuf, ComposeConfig), Box<dyn std::error::Error>> {
     let path = if let Some(p) = explicit_path {
         if !p.exists() {
             return Err(format!("Compose file not found: {}", p.display()).into());
@@ -138,6 +145,31 @@ fn load_compose_file(
     let yaml = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
+    let mut environment = HashMap::new();
+    let environment_path = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(".env");
+    match std::fs::read_to_string(&environment_path) {
+        Ok(contents) => {
+            for (key, value) in a3s_box_core::env::parse_env_file_content(&contents) {
+                environment.insert(key, value);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Failed to read Compose environment file {}: {}",
+                environment_path.display(),
+                error
+            )
+            .into());
+        }
+    }
+    environment.extend(shell_environment);
+
+    let yaml = a3s_box_core::compose::interpolate_compose_yaml(&yaml, &environment)
+        .map_err(|e| format!("Failed to interpolate {}: {}", path.display(), e))?;
     let config = ComposeConfig::from_yaml_str(&yaml)
         .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
 
@@ -584,7 +616,7 @@ async fn execute_up(
         // Atomic append under the state lock (load-fresh + push + save): a plain
         // state.add() saved a snapshot loaded before concurrent health/sibling
         // writes, clobbering them (the lost-registration → orphan-VM race).
-        if let Err(error) = StateFile::add_record(record) {
+        if let Err(error) = StateFile::add_record(record.clone()) {
             let rollback_services = rollback_with_current(&started_services, service_box);
             return rollback_compose_up(&mut state, &rollback_services, &created_networks, error)
                 .await;
@@ -596,13 +628,19 @@ async fn execute_up(
         }
         started_services.push(service_box);
 
-        // Spawn health checker if configured
-        if let Some(ref hc) = health_check {
-            crate::health::spawn_health_checker(
-                box_id.clone(),
-                exec_socket_path.clone(),
-                hc.clone(),
-            );
+        // Compose returns after startup, so health ownership must outlive this
+        // CLI process. A generation-fenced worker updates the same state record.
+        if health_check.is_some() {
+            if let Err(error) = crate::health::spawn_detached_health_checker(&record) {
+                let rollback_services = started_services.clone();
+                return rollback_compose_up(
+                    &mut state,
+                    &rollback_services,
+                    &created_networks,
+                    error,
+                )
+                .await;
+            }
         }
 
         // Ensure the log dir exists; the shim runs the log processor (default
@@ -1207,6 +1245,72 @@ mod tests {
         let result = load_compose_file(Some(std::path::Path::new("/nonexistent/compose.yaml")));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_load_compose_file_interpolates_dotenv_and_shell_before_validation() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let compose_path = directory.path().join("compose.yaml");
+        std::fs::write(
+            &compose_path,
+            r#"
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    environment:
+      DASH_EMPTY: ${EMPTY-default}
+      COLON_DASH_EMPTY: ${EMPTY:-default}
+      PLUS_EMPTY: ${EMPTY+replacement}
+      COLON_PLUS_EMPTY: ${EMPTY:+replacement}
+      DOTENV_ONLY: ${DOTENV_ONLY}
+      SHELL_WINS: ${SHELL_WINS}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join(".env"),
+            "REDIS_PORT=6379\nEMPTY=\nDOTENV_ONLY=dotenv\nSHELL_WINS=dotenv\n",
+        )
+        .unwrap();
+        let shell = HashMap::from([
+            ("REDIS_PORT".to_string(), "16379".to_string()),
+            ("SHELL_WINS".to_string(), "shell".to_string()),
+        ]);
+
+        let (_, config) = load_compose_file_with_environment(Some(&compose_path), shell).unwrap();
+        let service = &config.services["redis"];
+        assert_eq!(service.ports, vec!["16379:6379"]);
+        let environment: HashMap<_, _> = service.environment.to_pairs().into_iter().collect();
+        assert_eq!(environment["DASH_EMPTY"], "");
+        assert_eq!(environment["COLON_DASH_EMPTY"], "default");
+        assert_eq!(environment["PLUS_EMPTY"], "replacement");
+        assert_eq!(environment["COLON_PLUS_EMPTY"], "");
+        assert_eq!(environment["DOTENV_ONLY"], "dotenv");
+        assert_eq!(environment["SHELL_WINS"], "shell");
+
+        a3s_box_runtime::ComposeProject::with_base_dir("test", config, directory.path())
+            .expect("interpolation must run before port validation");
+    }
+
+    #[test]
+    fn test_load_compose_file_reports_unreadable_dotenv() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let compose_path = directory.path().join("compose.yaml");
+        std::fs::write(&compose_path, "services: {}\n").unwrap();
+        std::fs::create_dir(directory.path().join(".env")).unwrap();
+
+        let error = load_compose_file_with_environment(
+            Some(&compose_path),
+            HashMap::<String, String>::new(),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Failed to read Compose environment file"));
+        assert!(error.to_string().contains(".env"));
     }
 
     #[test]

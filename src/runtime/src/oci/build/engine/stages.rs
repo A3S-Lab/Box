@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use a3s_box_core::error::{BoxError, Result};
 
 use super::super::dockerfile::Instruction;
+#[cfg(test)]
+use super::super::dockerfile::RunCommand;
 
 /// A build stage: a FROM instruction followed by its body instructions.
 pub(super) struct BuildStage {
@@ -115,8 +117,10 @@ mod tests {
 
     fn make_run(cmd: &str) -> Instruction {
         Instruction::Run {
-            command: cmd.to_string(),
+            command: RunCommand::Shell(cmd.to_string()),
             cache_mounts: vec![],
+            bind_mounts: vec![],
+            tmpfs_mounts: vec![],
         }
     }
 

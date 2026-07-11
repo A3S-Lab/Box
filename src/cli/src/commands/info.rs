@@ -2,6 +2,7 @@
 
 use clap::Args;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::state::BoxRecord;
 use crate::state::StateFile;
@@ -11,6 +12,11 @@ use super::images_dir;
 
 const PNPM_CACHE_VOLUME_NAME: &str = "a3s-cache-pnpm";
 const NPM_CACHE_VOLUME_NAME: &str = "a3s-cache-npm";
+const PACKAGE_CACHE_SIZE_ENV: &str = "A3S_BOX_INFO_CACHE_SIZE";
+const PACKAGE_CACHE_SIZE_BUDGET: Duration = Duration::from_millis(500);
+const DEFAULT_POOL_SOCKET: &str = "/tmp/a3s-box-pool.sock";
+const RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_RUN_POOL_SOCKET";
+const BUILD_RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_BUILD_RUN_POOL_SOCKET";
 
 #[derive(Args)]
 pub struct InfoArgs;
@@ -70,6 +76,7 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     }
     print_package_cache_info();
     print_host_mount_info();
+    print_warm_pool_info().await;
 
     Ok(())
 }
@@ -122,16 +129,43 @@ fn print_package_cache_info() {
 fn print_named_package_cache(store: &a3s_box_runtime::VolumeStore, label: &str, volume_name: &str) {
     match store.get(volume_name) {
         Ok(Some(volume)) => {
-            let size = directory_size(Path::new(&volume.mount_point)).unwrap_or(0);
-            println!(
-                "Package cache ({label}): {} at {}",
-                crate::output::format_bytes(size),
-                volume.mount_point
-            );
+            if !scan_package_cache_size_enabled() {
+                println!(
+                    "Package cache ({label}): created at {} (size scan skipped; set {PACKAGE_CACHE_SIZE_ENV}=1 to enable)",
+                    volume.mount_point
+                );
+                return;
+            }
+
+            match directory_size_bounded(Path::new(&volume.mount_point), PACKAGE_CACHE_SIZE_BUDGET)
+            {
+                Ok(DirectorySize::Complete(size)) => {
+                    println!(
+                        "Package cache ({label}): {} at {}",
+                        crate::output::format_bytes(size),
+                        volume.mount_point
+                    );
+                }
+                Ok(DirectorySize::TimedOut(partial)) => {
+                    println!(
+                        "Package cache ({label}): at least {} at {} (size scan timed out after {}ms)",
+                        crate::output::format_bytes(partial),
+                        volume.mount_point,
+                        PACKAGE_CACHE_SIZE_BUDGET.as_millis()
+                    );
+                }
+                Err(error) => println!("Package cache ({label}): unavailable ({error})"),
+            }
         }
         Ok(None) => println!("Package cache ({label}): not created"),
         Err(error) => println!("Package cache ({label}): unavailable ({error})"),
     }
+}
+
+fn scan_package_cache_size_enabled() -> bool {
+    std::env::var(PACKAGE_CACHE_SIZE_ENV)
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn print_host_mount_info() {
@@ -142,25 +176,135 @@ fn print_host_mount_info() {
     println!("VirtioFS cache mode: {cache_mode}");
 }
 
+#[cfg(not(windows))]
+async fn print_warm_pool_info() {
+    let sockets = warm_pool_info_sockets();
+    for socket in &sockets {
+        match a3s_box_runtime::pool::client::status_client(socket).await {
+            Ok(status) => {
+                print_warm_pool_status(socket, &status.images);
+                return;
+            }
+            Err(_) => continue,
+        }
+    }
+
+    println!(
+        "Warm pool daemon: not running (checked {})",
+        sockets.join(", ")
+    );
+}
+
+#[cfg(windows)]
+async fn print_warm_pool_info() {
+    println!("Warm pool daemon: unsupported on Windows");
+}
+
+#[cfg(not(windows))]
+fn warm_pool_info_sockets() -> Vec<String> {
+    warm_pool_info_sockets_from(
+        std::env::var(RUN_POOL_SOCKET_ENV).ok().as_deref(),
+        std::env::var(BUILD_RUN_POOL_SOCKET_ENV).ok().as_deref(),
+        DEFAULT_POOL_SOCKET,
+    )
+}
+
+#[cfg(not(windows))]
+fn warm_pool_info_sockets_from(
+    run_socket: Option<&str>,
+    build_socket: Option<&str>,
+    default_socket: &str,
+) -> Vec<String> {
+    let mut sockets = Vec::new();
+    for socket in [run_socket, build_socket, Some(default_socket)]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+    {
+        if !socket.is_empty() && !sockets.iter().any(|existing| existing == socket) {
+            sockets.push(socket.to_string());
+        }
+    }
+    sockets
+}
+
+#[cfg(not(windows))]
+fn print_warm_pool_status(socket: &str, images: &[a3s_box_runtime::pool::PoolImageStat]) {
+    if images.is_empty() {
+        println!("Warm pool daemon: running at {socket} (no warm pools yet)");
+        return;
+    }
+
+    let max: usize = images.iter().map(|image| image.max).sum();
+    let idle: usize = images.iter().map(|image| image.idle).sum();
+    let active: usize = images.iter().map(|image| image.active).sum();
+    let leased: usize = images.iter().map(|image| image.leased).sum();
+    println!(
+        "Warm pool daemon: running at {socket} ({} pools, max {}, {} idle, {} active, {} leased)",
+        images.len(),
+        max,
+        idle,
+        active,
+        leased
+    );
+}
+
+#[cfg(test)]
 fn directory_size(path: &Path) -> std::io::Result<u64> {
+    match directory_size_inner(path, None)? {
+        DirectorySize::Complete(size) | DirectorySize::TimedOut(size) => Ok(size),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectorySize {
+    Complete(u64),
+    TimedOut(u64),
+}
+
+fn directory_size_bounded(path: &Path, budget: Duration) -> std::io::Result<DirectorySize> {
+    let deadline = Instant::now()
+        .checked_add(budget)
+        .unwrap_or_else(Instant::now);
+    directory_size_inner(path, Some(deadline))
+}
+
+fn directory_size_inner(path: &Path, deadline: Option<Instant>) -> std::io::Result<DirectorySize> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Ok(DirectorySize::TimedOut(0));
+    }
+
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DirectorySize::Complete(0));
+        }
         Err(error) => return Err(error),
     };
     if metadata.is_file() {
-        return Ok(metadata.len());
+        return Ok(DirectorySize::Complete(metadata.len()));
     }
     if !metadata.is_dir() {
-        return Ok(0);
+        return Ok(DirectorySize::Complete(0));
     }
 
     let mut total = 0_u64;
     for entry in std::fs::read_dir(path)? {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(DirectorySize::TimedOut(total));
+        }
+
         let entry = entry?;
-        total = total.saturating_add(directory_size(&entry.path())?);
+        match directory_size_inner(&entry.path(), deadline)? {
+            DirectorySize::Complete(size) => {
+                total = total.saturating_add(size);
+            }
+            DirectorySize::TimedOut(size) => {
+                return Ok(DirectorySize::TimedOut(total.saturating_add(size)));
+            }
+        }
     }
-    Ok(total)
+    Ok(DirectorySize::Complete(total))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,5 +383,41 @@ mod tests {
 
         assert_eq!(directory_size(tmp.path()).unwrap(), 6);
         assert_eq!(directory_size(&tmp.path().join("missing")).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_directory_size_bounded_reports_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("one"), b"1234").unwrap();
+
+        assert_eq!(
+            directory_size_bounded(tmp.path(), Duration::ZERO).unwrap(),
+            DirectorySize::TimedOut(0)
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_warm_pool_info_sockets_prefers_env_and_deduplicates() {
+        assert_eq!(
+            warm_pool_info_sockets_from(
+                Some(" /tmp/runtime.sock "),
+                Some("/tmp/build.sock"),
+                DEFAULT_POOL_SOCKET,
+            ),
+            vec![
+                "/tmp/runtime.sock".to_string(),
+                "/tmp/build.sock".to_string(),
+                DEFAULT_POOL_SOCKET.to_string(),
+            ]
+        );
+        assert_eq!(
+            warm_pool_info_sockets_from(
+                Some(" /tmp/runtime.sock "),
+                Some("/tmp/runtime.sock"),
+                "/tmp/runtime.sock",
+            ),
+            vec!["/tmp/runtime.sock".to_string()]
+        );
     }
 }

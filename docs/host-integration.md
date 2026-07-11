@@ -10,7 +10,7 @@ root.
 | --- | --- | --- |
 | Stub baseline | macOS or Linux with Rust, C compiler, and protoc | `scripts/host-integration-smoke.sh` |
 | Core MicroVM smoke | macOS Apple Silicon/HVF or Linux KVM, libkrun, Linux guest init, runnable image | `scripts/host-integration-smoke.sh --core` |
-| Host command matrix | Same as core smoke; optional registry credentials for push coverage | `scripts/host-integration-smoke.sh --host` |
+| Host command and warm-pool smoke | Same as core smoke; optional registry credentials for push coverage | `scripts/host-integration-smoke.sh --host` |
 | Linux Dockerfile `RUN` | Linux, root, chroot-capable filesystem, local Alpine OCI archive | `sudo -E scripts/host-integration-smoke.sh --linux-run --no-pure` |
 | CRI smoke | macOS or Linux MicroVM host, `crictl`, CRI images | `scripts/host-integration-smoke.sh --cri` |
 | Host soak | Same as the selected host-backed suites; enough time to expose leaks and lost updates | `scripts/host-integration-smoke.sh --no-pure --core --host --soak` |
@@ -128,6 +128,61 @@ credential store, Docker config or helpers, then `REGISTRY_USERNAME` /
 `REGISTRY_PASSWORD`. Only the target registry auth is written to a temporary
 Docker config and mounted into the BuildKit VM.
 
+The built-in build engine also has an isolated VM path for Dockerfile `RUN`:
+start a warm-pool daemon, then pass `--run-pool` (or set
+`A3S_BOX_BUILD_RUN_POOL_SOCKET`). The build stage rootfs is mounted into a
+leased pool VM and each shell/exec-form `RUN` executes through the guest exec
+server with the current Dockerfile `WORKDIR`, `ENV`, and `USER`:
+
+```bash
+a3s-box pool start --image alpine:latest --size 1 --socket /tmp/a3s-build-pool.sock
+a3s-box build --builder=host --run-pool --run-pool-socket /tmp/a3s-build-pool.sock \
+  -t a3s/web:v1 .
+
+# Or let the build command start the helper daemon explicitly.
+a3s-box build --builder=host --run-pool-autostart \
+  --run-pool-image alpine:latest \
+  -t a3s/web:v1 .
+```
+
+`RUN --mount=type=cache` is available on this path as a persistent overlay:
+writes under the cache target are visible to matching `RUN` commands keyed by
+`id=` (or by `target=` when `id` is omitted) but are restored before layer
+diffing, so cache contents are not committed to the image. Docker/BuildKit's
+default omitted `sharing=shared` and explicit `sharing=shared` are accepted, as
+is `sharing=locked`; because the warm-pool overlay hydrates and publishes cache
+directories around each RUN, access to the same cache key is serialized across
+builds to avoid writeback races. Successful RUNs publish cache writes; failed
+RUNs restore the rootfs without publishing partial cache contents. New cache
+directories can be seeded from `from=<stage-or-image>,source=<dir>`; an existing
+cache is not re-seeded. Cache-root `mode=`, `uid=`, and `gid=` are applied when
+present. `sharing=private` remains unsupported.
+Set
+`A3S_BOX_BUILD_RUN_CACHE_DIR` to override the default
+`~/.a3s/buildcache/run-cache` location.
+
+The build rootfs volume is part of the pool key. Because that path is unique to
+one build stage and is destroyed after the stage completes, the daemon fills
+volume-bound build leases on demand (`min_idle=0`) instead of pre-warming a full
+idle pool for every temporary stage rootfs.
+
+`RUN --mount=type=bind` is also available for build-context sources, previous
+build stages, and external images on the warm-pool path. Omitted `source=`
+mounts the context root, relative `target=` paths resolve from the current
+Dockerfile `WORKDIR`, `.dockerignore` is honored for context sources, stage/image
+sources ignore `.dockerignore`, and writes under the bind target are discarded
+before layer diffing.
+
+`RUN --mount=type=tmpfs` creates an empty temporary target for the duration of a
+RUN, restores any original target contents afterwards, and discards tmpfs writes
+before layer diffing. Relative `target=` paths resolve from `WORKDIR`. The
+Docker/BuildKit `size=` option is rejected until the warm-pool overlay can
+enforce it honestly.
+
+`RUN --network=default` and `RUN --security=sandbox` are accepted as Docker's
+default no-op values. Non-default per-RUN network/security modes are rejected
+until the warm-pool exec path can enforce them.
+
 The unsafe host execution path is only for local experiments and requires
 `A3S_BOX_UNSAFE_HOST_RUN=1`; it is not part of the product smoke matrix.
 
@@ -137,7 +192,7 @@ For package-manager-heavy monorepo checks, prefer an explicit cache profile
 instead of a raw host mount:
 
 ```bash
-a3s-box run --rm --cpus 4 --memory 8g \
+a3s-box run --rm --timeout 120 --cpus 4 --memory 8g \
   --package-cache pnpm \
   --virtiofs-cache=always \
   -v "$PWD:/workspace" \
@@ -155,6 +210,41 @@ For npm-only checks, use `--package-cache npm` to keep the npm cache in
 through the host workspace mount. `--virtiofs-cache=always` is intended for
 release verification jobs where the host checkout is stable for the duration of
 the run; omit it or use `none` when host-side edits must be visible immediately.
+
+For repeated short checks, run a warm-pool daemon with the same image, resource
+shape, and workspace mount, then either pass `--pool` explicitly or export
+`A3S_BOX_RUN_POOL_SOCKET` so compatible foreground `run --rm` commands use the
+daemon automatically:
+
+```bash
+a3s-box pool start --image node:24-bookworm --size 2 --max 4 \
+  --socket /tmp/a3s-node-pool.sock
+
+export A3S_BOX_RUN_POOL_SOCKET=/tmp/a3s-node-pool.sock
+a3s-box run --rm --cpus 4 --memory 8g \
+  --package-cache pnpm \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  node:24-bookworm -- \
+  sh -lc 'corepack enable && pnpm --version'
+
+a3s-box pool stop --socket /tmp/a3s-node-pool.sock
+```
+
+For an explicit one-command local loop, `a3s-box run --pool-autostart --rm ...`
+starts a daemon on `--pool-socket` if none is already running. Foreground
+`--timeout` is passed through to the warm-pool exec request.
+
+`pool status` reports idle sandboxes, active checked-out sandboxes, and active
+leases for each pool key. During `build --run-pool`, a nonzero leased count means
+a Dockerfile stage currently holds a helper VM. `a3s-box info` performs the same
+best-effort daemon probe against the configured run/build pool sockets and the
+default socket, then prints aggregate max/idle/active/leased counts when a daemon
+is reachable. `pool start --lease-ttl <duration>` is the abandoned-lease
+guardrail for daemon-backed build leases; it reclaims only idle leases, never a
+lease with an exec currently running. The default is `1h`; use `0` to disable it
+for long manual debugging sessions.
+
 For cold package stores, registry downloads and project-level supply-chain
 policy checks can still dominate the first run. Prime the named cache volume
 before a release window when the monorepo depends on thousands of packages.

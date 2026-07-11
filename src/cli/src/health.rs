@@ -1,7 +1,8 @@
 //! Health check executor for running containers.
 //!
-//! Spawns a background task that periodically runs the user-defined health
-//! check command via the exec socket and updates the box state accordingly.
+//! Runs user-defined health checks through the exec socket and updates box
+//! state. Foreground commands use a Tokio task; detached boxes use a
+//! generation-fenced child process so scheduling survives the creating CLI.
 //!
 //! Follows Docker health check semantics:
 //! - Wait `start_period_secs` before the first check
@@ -10,7 +11,7 @@
 //! - After `retries` consecutive failures → status becomes "unhealthy"
 //! - Socket disappearing → box has stopped; checker exits
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(any(not(windows), test))]
 use crate::state::BoxRecord;
@@ -21,8 +22,8 @@ use crate::state::StateFile;
 /// Spawn a background health checker task for a running box.
 ///
 /// Returns a `JoinHandle` that the caller can abort when the box stops.
-/// In detached/daemon scenarios the handle may be dropped; the task will
-/// self-terminate once the exec socket disappears.
+/// Foreground callers abort the handle during cleanup. Detached callers must
+/// use [`spawn_detached_health_checker`] instead.
 pub fn spawn_health_checker(
     box_id: String,
     exec_socket_path: PathBuf,
@@ -31,7 +32,7 @@ pub fn spawn_health_checker(
     #[cfg(not(windows))]
     {
         tokio::spawn(async move {
-            run_health_loop(box_id, exec_socket_path, health_check).await;
+            run_health_loop(box_id, exec_socket_path, health_check, None).await;
         })
     }
     #[cfg(windows)]
@@ -42,8 +43,165 @@ pub fn spawn_health_checker(
     }
 }
 
+/// Start a process-owned health checker for a detached box.
+///
+/// A Tokio task owned by `run -d`, `compose up`, or `start` disappears when that
+/// short-lived CLI exits. The child process uses a generation-specific lock so
+/// duplicate launch attempts collapse to one worker, while a restarted box can
+/// immediately acquire a new generation lock.
 #[cfg(not(windows))]
-async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCheck) {
+pub(crate) fn spawn_detached_health_checker(record: &BoxRecord) -> Result<(), String> {
+    if record.health_check.is_none() {
+        return Ok(());
+    }
+    let generation = health_generation(record)
+        .ok_or_else(|| format!("box '{}' has no health-check generation", record.name))?;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to locate a3s-box for health checker: {error}"))?;
+    let arguments = detached_health_worker_args(&record.id, generation);
+
+    std::process::Command::new(executable)
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "failed to start detached health checker for '{}': {error}",
+                record.name
+            )
+        })
+}
+
+#[cfg(any(not(windows), test))]
+fn detached_health_worker_args(box_id: &str, generation: i64) -> Vec<String> {
+    vec![
+        "monitor".to_string(),
+        "--health-worker".to_string(),
+        box_id.to_string(),
+        "--health-generation".to_string(),
+        generation.to_string(),
+    ]
+}
+
+#[cfg(windows)]
+pub(crate) fn spawn_detached_health_checker(_record: &BoxRecord) -> Result<(), String> {
+    Ok(())
+}
+
+/// Run the hidden process-owned health worker for one box generation.
+#[cfg(not(windows))]
+pub(crate) async fn run_detached_health_worker(
+    box_id: String,
+    generation: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(_lock) = HealthWorkerLock::try_acquire(&box_id, generation)? else {
+        return Ok(());
+    };
+
+    let state = StateFile::load_default()?;
+    let Some(record) = state.find_by_id(&box_id) else {
+        return Ok(());
+    };
+    if health_generation(record) != Some(generation) || record.status != "running" {
+        return Ok(());
+    }
+    let Some(health_check) = record.health_check.clone() else {
+        return Ok(());
+    };
+
+    run_health_loop(
+        box_id,
+        record.exec_socket_path.clone(),
+        health_check,
+        Some(generation),
+    )
+    .await;
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) async fn run_detached_health_worker(
+    _box_id: String,
+    _generation: i64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+struct HealthWorkerLock {
+    _file: std::fs::File,
+}
+
+#[cfg(not(windows))]
+impl HealthWorkerLock {
+    fn try_acquire(box_id: &str, generation: i64) -> std::io::Result<Option<Self>> {
+        Self::try_acquire_path(&health_worker_lock_path(box_id, generation))
+    }
+
+    fn try_acquire_path(path: &Path) -> std::io::Result<Option<Self>> {
+        use std::os::fd::AsRawFd;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Ok(Some(Self { _file: file }));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn health_worker_lock_path(box_id: &str, generation: i64) -> PathBuf {
+    a3s_box_core::dirs_home()
+        .join("locks")
+        .join(format!("{box_id}.{generation}.health.lock"))
+}
+
+#[cfg(any(not(windows), test))]
+fn health_generation(record: &BoxRecord) -> Option<i64> {
+    record
+        .started_at
+        .and_then(|started_at| started_at.timestamp_nanos_opt())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn detached_health_worker_active(record: &BoxRecord) -> bool {
+    let Some(generation) = health_generation(record) else {
+        return false;
+    };
+    match HealthWorkerLock::try_acquire(&record.id, generation) {
+        Ok(Some(lock)) => {
+            drop(lock);
+            false
+        }
+        Ok(None) => true,
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(windows))]
+async fn run_health_loop(
+    box_id: String,
+    exec_socket_path: PathBuf,
+    hc: HealthCheck,
+    expected_generation: Option<i64>,
+) {
     use std::time::Duration;
 
     // Honour start_period before the first probe
@@ -57,8 +215,7 @@ async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCh
     loop {
         tokio::time::sleep(interval).await;
 
-        // Box stopped — exec socket is gone
-        if !exec_socket_path.exists() {
+        if !health_worker_is_current(&box_id, expected_generation) {
             break;
         }
 
@@ -73,6 +230,9 @@ async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCh
             if record.status != "running" {
                 return Ok(false); // box stopped
             }
+            if expected_generation.is_some() && health_generation(record) != expected_generation {
+                return Ok(false); // box restarted; a new generation owns probes
+            }
             apply_probe_result(record, healthy, chrono::Utc::now());
             Ok(true)
         });
@@ -82,6 +242,19 @@ async fn run_health_loop(box_id: String, exec_socket_path: PathBuf, hc: HealthCh
             Err(_) => continue,
         }
     }
+}
+
+#[cfg(not(windows))]
+fn health_worker_is_current(box_id: &str, expected_generation: Option<i64>) -> bool {
+    let Ok(state) = StateFile::load_default() else {
+        return true;
+    };
+    state.find_by_id(box_id).is_some_and(|record| {
+        record.status == "running"
+            && expected_generation
+                .map(|generation| health_generation(record) == Some(generation))
+                .unwrap_or(true)
+    })
 }
 
 #[cfg(not(windows))]
@@ -290,5 +463,33 @@ mod tests {
         apply_probe_result(&mut record, true, now);
         assert_eq!(record.health_status, "none");
         assert!(record.health_last_check.is_none());
+    }
+
+    #[test]
+    fn test_detached_worker_args_bind_box_generation() {
+        assert_eq!(
+            detached_health_worker_args("box-id", 1234),
+            vec![
+                "monitor",
+                "--health-worker",
+                "box-id",
+                "--health-generation",
+                "1234",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_health_worker_lock_allows_one_owner_per_generation() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("worker.lock");
+
+        let first = HealthWorkerLock::try_acquire_path(&path)
+            .unwrap()
+            .expect("first worker should own the generation");
+        assert!(HealthWorkerLock::try_acquire_path(&path).unwrap().is_none());
+        drop(first);
+        assert!(HealthWorkerLock::try_acquire_path(&path).unwrap().is_some());
     }
 }

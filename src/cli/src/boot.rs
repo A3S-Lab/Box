@@ -360,17 +360,6 @@ pub async fn boot_from_record(
     let stop_signal =
         common::effective_stop_signal(record.stop_signal.as_deref(), image_stop_signal.as_deref());
 
-    // Spawn health checker if configured (self-terminates when box stops)
-    if let Some(ref hc) = health_check {
-        crate::health::spawn_health_checker(
-            record.id.clone(),
-            exec_socket_path
-                .clone()
-                .unwrap_or_else(|| record.exec_socket_path.clone()),
-            hc.clone(),
-        );
-    }
-
     Ok(BootResult {
         pid,
         exec_socket_path,

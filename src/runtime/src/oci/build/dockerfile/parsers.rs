@@ -3,7 +3,10 @@
 use a3s_box_core::error::{BoxError, Result};
 
 use super::utils::{parse_duration_secs, parse_json_array, shell_split, unquote};
-use super::{split_first_word, Instruction, RunCacheMount};
+use super::{
+    split_first_word, Instruction, RunBindMount, RunCacheMount, RunCacheSharing, RunCommand,
+    RunTmpfsMount,
+};
 
 pub(super) fn parse_from(rest: &str, line_num: usize) -> Result<Instruction> {
     if rest.is_empty() {
@@ -32,32 +35,73 @@ pub(super) fn parse_run(rest: &str, line_num: usize) -> Result<Instruction> {
         )));
     }
 
-    if rest.starts_with('[') {
-        return Err(BoxError::BuildError(format!(
-            "Line {}: RUN exec form is not supported yet; use shell form",
-            line_num
-        )));
-    }
-
-    let (cache_mounts, command) = parse_run_options(rest, line_num)?;
+    let options = parse_run_options(rest, line_num)?;
+    let command = options.command;
+    let command = if command.starts_with('[') {
+        let exec = parse_json_array(command, line_num)?;
+        if exec.is_empty() {
+            return Err(BoxError::BuildError(format!(
+                "Line {}: RUN exec form requires at least one argument",
+                line_num
+            )));
+        }
+        RunCommand::Exec(exec)
+    } else {
+        RunCommand::Shell(command.to_string())
+    };
 
     Ok(Instruction::Run {
-        command: command.to_string(),
-        cache_mounts,
+        command,
+        cache_mounts: options.cache_mounts,
+        bind_mounts: options.bind_mounts,
+        tmpfs_mounts: options.tmpfs_mounts,
     })
 }
 
-fn parse_run_options(rest: &str, line_num: usize) -> Result<(Vec<RunCacheMount>, &str)> {
+struct RunOptions<'a> {
+    cache_mounts: Vec<RunCacheMount>,
+    bind_mounts: Vec<RunBindMount>,
+    tmpfs_mounts: Vec<RunTmpfsMount>,
+    command: &'a str,
+}
+
+fn parse_run_options(rest: &str, line_num: usize) -> Result<RunOptions<'_>> {
     let mut remaining = rest.trim_start();
     let mut cache_mounts = Vec::new();
+    let mut bind_mounts = Vec::new();
+    let mut tmpfs_mounts = Vec::new();
 
     while remaining.starts_with("--") {
         let (flag, tail) = split_first_word(remaining);
         if let Some(spec) = flag.strip_prefix("--mount=") {
-            cache_mounts.push(parse_run_cache_mount(flag, spec, line_num)?);
+            match run_mount_type(flag, spec, line_num)? {
+                "cache" => cache_mounts.push(parse_run_cache_mount(flag, spec, line_num)?),
+                "bind" => bind_mounts.push(parse_run_bind_mount(flag, spec, line_num)?),
+                "tmpfs" => tmpfs_mounts.push(parse_run_tmpfs_mount(flag, spec, line_num)?),
+                other => {
+                    return Err(BoxError::BuildError(format!(
+                        "Line {}: RUN mount '{}' is not supported yet; only type=cache, type=bind, and type=tmpfs are supported (got type={})",
+                        line_num, flag, other
+                    )));
+                }
+            }
+        } else if let Some(network) = flag.strip_prefix("--network=") {
+            if network != "default" {
+                return Err(BoxError::BuildError(format!(
+                    "Line {}: RUN option '--network={}' is not supported yet by the warm-pool build path; only --network=default is supported",
+                    line_num, network
+                )));
+            }
+        } else if let Some(security) = flag.strip_prefix("--security=") {
+            if security != "sandbox" {
+                return Err(BoxError::BuildError(format!(
+                    "Line {}: RUN option '--security={}' is not supported yet by the warm-pool build path; only --security=sandbox is supported",
+                    line_num, security
+                )));
+            }
         } else {
             return Err(BoxError::BuildError(format!(
-                "Line {}: RUN option '{}' is not supported yet; only BuildKit cache mounts (--mount=type=cache,...) are supported",
+                "Line {}: RUN option '{}' is not supported yet; only BuildKit cache/bind/tmpfs mounts plus --network=default and --security=sandbox are supported",
                 line_num, flag
             )));
         }
@@ -71,11 +115,38 @@ fn parse_run_options(rest: &str, line_num: usize) -> Result<(Vec<RunCacheMount>,
         )));
     }
 
-    Ok((cache_mounts, remaining))
+    Ok(RunOptions {
+        cache_mounts,
+        bind_mounts,
+        tmpfs_mounts,
+        command: remaining,
+    })
+}
+
+fn run_mount_type<'a>(raw: &str, spec: &'a str, line_num: usize) -> Result<&'a str> {
+    for part in spec.split(',') {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        if key == "type" {
+            return Ok(value);
+        }
+    }
+    Err(BoxError::BuildError(format!(
+        "Line {}: RUN mount '{}' requires type=cache, type=bind, or type=tmpfs",
+        line_num, raw
+    )))
 }
 
 fn parse_run_cache_mount(raw: &str, spec: &str, line_num: usize) -> Result<RunCacheMount> {
     let mut mount_type = None;
+    let mut id = None;
+    let mut from = None;
+    let mut source = None;
+    let mut sharing = None;
+    let mut mode = None;
+    let mut uid = None;
+    let mut gid = None;
     let mut target = None;
 
     for part in spec.split(',') {
@@ -87,8 +158,35 @@ fn parse_run_cache_mount(raw: &str, spec: &str, line_num: usize) -> Result<RunCa
         })?;
         match key {
             "type" => mount_type = Some(value),
+            "id" => id = Some(value),
+            "from" => from = Some(value),
+            "source" | "src" => source = Some(value),
+            "mode" => mode = Some(parse_run_cache_mount_mode(value, raw, line_num)?),
+            "uid" => uid = Some(parse_run_cache_mount_id("uid", value, raw, line_num)?),
+            "gid" => gid = Some(parse_run_cache_mount_id("gid", value, raw, line_num)?),
+            "sharing" => match value {
+                "shared" => sharing = Some(RunCacheSharing::Shared),
+                "locked" => sharing = Some(RunCacheSharing::Locked),
+                "private" => {
+                    return Err(BoxError::BuildError(format!(
+                        "Line {}: RUN cache mount sharing='private' is not supported yet by the warm-pool build path",
+                        line_num
+                    )));
+                }
+                _ => {
+                    return Err(BoxError::BuildError(format!(
+                        "Line {}: Invalid RUN cache mount sharing value '{}'",
+                        line_num, value
+                    )));
+                }
+            },
             "target" | "dst" | "destination" => target = Some(value),
-            _ => {}
+            _ => {
+                return Err(BoxError::BuildError(format!(
+                    "Line {}: RUN cache mount option '{}=' is not supported",
+                    line_num, key
+                )));
+            }
         }
     }
 
@@ -106,6 +204,16 @@ fn parse_run_cache_mount(raw: &str, spec: &str, line_num: usize) -> Result<RunCa
         )));
     };
 
+    let sharing = sharing.unwrap_or(RunCacheSharing::Shared);
+
+    let from = from.filter(|from| !from.is_empty()).map(str::to_string);
+    if source.is_some() && from.is_none() {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN cache mount source= requires from=<stage-or-image>",
+            line_num
+        )));
+    }
+
     if !target.starts_with('/') {
         return Err(BoxError::BuildError(format!(
             "Line {}: RUN cache mount target '{}' must be absolute",
@@ -115,7 +223,163 @@ fn parse_run_cache_mount(raw: &str, spec: &str, line_num: usize) -> Result<RunCa
 
     Ok(RunCacheMount {
         raw: raw.to_string(),
+        id: id.filter(|id| !id.is_empty()).map(str::to_string),
+        from,
+        source: source.unwrap_or(".").to_string(),
+        sharing,
+        mode,
+        uid,
+        gid,
         target: target.to_string(),
+    })
+}
+
+fn parse_run_bind_mount(raw: &str, spec: &str, line_num: usize) -> Result<RunBindMount> {
+    let mut mount_type = None;
+    let mut from = None;
+    let mut source = None;
+    let mut target = None;
+    let mut read_write = false;
+
+    for part in spec.split(',') {
+        if let Some((key, value)) = part.split_once('=') {
+            match key {
+                "type" => mount_type = Some(value),
+                "from" => from = Some(value),
+                "source" | "src" => source = Some(value),
+                "target" | "dst" | "destination" => target = Some(value),
+                "rw" | "readwrite" => {
+                    read_write = parse_bool_mount_flag(key, value, raw, line_num)?;
+                }
+                _ => {
+                    return Err(BoxError::BuildError(format!(
+                        "Line {}: RUN bind mount option '{}=' is not supported",
+                        line_num, key
+                    )));
+                }
+            }
+        } else {
+            match part {
+                "rw" | "readwrite" => read_write = true,
+                _ => {
+                    return Err(BoxError::BuildError(format!(
+                        "Line {}: RUN bind mount option '{}' is not supported",
+                        line_num, part
+                    )));
+                }
+            }
+        }
+    }
+
+    if mount_type != Some("bind") {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN bind mount '{}' has invalid type",
+            line_num, raw
+        )));
+    }
+
+    let Some(target) = target.filter(|target| !target.is_empty()) else {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN bind mount '{}' requires a target= path",
+            line_num, raw
+        )));
+    };
+
+    Ok(RunBindMount {
+        raw: raw.to_string(),
+        from: from.filter(|from| !from.is_empty()).map(str::to_string),
+        source: source.unwrap_or(".").to_string(),
+        target: target.to_string(),
+        read_write,
+    })
+}
+
+fn parse_run_tmpfs_mount(raw: &str, spec: &str, line_num: usize) -> Result<RunTmpfsMount> {
+    let mut mount_type = None;
+    let mut target = None;
+
+    for part in spec.split(',') {
+        let (key, value) = part.split_once('=').ok_or_else(|| {
+            BoxError::BuildError(format!(
+                "Line {}: Invalid RUN tmpfs mount option '{}'",
+                line_num, raw
+            ))
+        })?;
+        match key {
+            "type" => mount_type = Some(value),
+            "target" | "dst" | "destination" => target = Some(value),
+            "size" => {
+                return Err(BoxError::BuildError(format!(
+                    "Line {}: RUN tmpfs mount option 'size=' is not supported yet by the warm-pool build path",
+                    line_num
+                )));
+            }
+            _ => {
+                return Err(BoxError::BuildError(format!(
+                    "Line {}: RUN tmpfs mount option '{}=' is not supported",
+                    line_num, key
+                )));
+            }
+        }
+    }
+
+    if mount_type != Some("tmpfs") {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN tmpfs mount '{}' has invalid type",
+            line_num, raw
+        )));
+    }
+
+    let Some(target) = target.filter(|target| !target.is_empty()) else {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN tmpfs mount '{}' requires a target= path",
+            line_num, raw
+        )));
+    };
+
+    Ok(RunTmpfsMount {
+        raw: raw.to_string(),
+        target: target.to_string(),
+    })
+}
+
+fn parse_bool_mount_flag(key: &str, value: &str, raw: &str, line_num: usize) -> Result<bool> {
+    match value {
+        "1" | "true" | "True" | "TRUE" => Ok(true),
+        "0" | "false" | "False" | "FALSE" => Ok(false),
+        _ => Err(BoxError::BuildError(format!(
+            "Line {}: RUN mount '{}' has invalid boolean {}='{}'",
+            line_num, raw, key, value
+        ))),
+    }
+}
+
+fn parse_run_cache_mount_mode(value: &str, raw: &str, line_num: usize) -> Result<u32> {
+    let value = value
+        .strip_prefix("0o")
+        .or_else(|| value.strip_prefix("0O"))
+        .unwrap_or(value);
+    let mode = u32::from_str_radix(value, 8).map_err(|_| {
+        BoxError::BuildError(format!(
+            "Line {}: RUN cache mount '{}' has invalid octal mode '{}'",
+            line_num, raw, value
+        ))
+    })?;
+    if mode > 0o7777 {
+        return Err(BoxError::BuildError(format!(
+            "Line {}: RUN cache mount '{}' mode '{}' exceeds 07777",
+            line_num, raw, value
+        )));
+    }
+    Ok(mode)
+}
+
+fn parse_run_cache_mount_id(key: &str, value: &str, raw: &str, line_num: usize) -> Result<u32> {
+    value.parse::<u32>().map_err(|_| {
+        BoxError::BuildError(format!(
+            "Line {}: RUN cache mount '{}' has invalid {} '{}'",
+            line_num, raw, key, value
+        ))
     })
 }
 

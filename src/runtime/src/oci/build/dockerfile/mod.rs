@@ -2,7 +2,7 @@
 //!
 //! Parses a Dockerfile into a sequence of build instructions.
 //! Supports line continuations (`\`), comments, and both shell and JSON
-//! (exec) forms for CMD/ENTRYPOINT.
+//! (exec) forms for RUN/CMD/ENTRYPOINT.
 
 use a3s_box_core::error::{BoxError, Result};
 
@@ -18,10 +18,12 @@ pub enum Instruction {
         image: String,
         alias: Option<String>,
     },
-    /// `RUN [--mount=type=cache,...] <command>` (shell form)
+    /// `RUN [--mount=type=cache|bind|tmpfs,...] <command>` (shell or exec form)
     Run {
-        command: String,
+        command: RunCommand,
         cache_mounts: Vec<RunCacheMount>,
+        bind_mounts: Vec<RunBindMount>,
+        tmpfs_mounts: Vec<RunTmpfsMount>,
     },
     /// `COPY [--from=<stage>] [--chown=user[:group]] <src>... <dst>`
     Copy {
@@ -75,11 +77,65 @@ pub enum Instruction {
     Volume { paths: Vec<String> },
 }
 
+/// Dockerfile RUN command form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunCommand {
+    /// Shell form: `RUN echo hello`.
+    Shell(String),
+    /// Exec form: `RUN ["echo", "hello"]`.
+    Exec(Vec<String>),
+}
+
 /// Supported subset of Docker BuildKit `RUN --mount=...`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunCacheMount {
     pub raw: String,
+    pub id: Option<String>,
+    /// Optional source stage/image used to seed a new cache directory.
+    pub from: Option<String>,
+    /// Source path inside `from`; defaults to root.
+    pub source: String,
+    pub sharing: RunCacheSharing,
+    /// Optional mode for the cache mount root, parsed as octal.
+    pub mode: Option<u32>,
+    /// Optional owner uid for the cache mount root.
+    pub uid: Option<u32>,
+    /// Optional owner gid for the cache mount root.
+    pub gid: Option<u32>,
     pub target: String,
+}
+
+/// Supported subset of Docker BuildKit `RUN --mount=type=bind`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunBindMount {
+    pub raw: String,
+    /// Optional source stage/index. `None` means the build context.
+    pub from: Option<String>,
+    /// Source path inside the build context or source stage. Defaults to root.
+    pub source: String,
+    /// Target path inside the build rootfs; relative targets resolve from WORKDIR.
+    pub target: String,
+    /// `rw`/`readwrite` allows writes during RUN. Like BuildKit, writes are
+    /// discarded after the RUN and are not committed into the image layer.
+    pub read_write: bool,
+}
+
+/// Supported subset of Docker BuildKit `RUN --mount=type=tmpfs`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunTmpfsMount {
+    pub raw: String,
+    /// Target path inside the build rootfs; relative targets resolve from WORKDIR.
+    pub target: String,
+}
+
+/// Supported cache sharing behavior for `RUN --mount=type=cache`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunCacheSharing {
+    /// Docker/BuildKit default. The warm-pool overlay persists the shared cache
+    /// but serializes hydrate/publish for one key to avoid writeback races.
+    Shared,
+    /// Serialize writers for the same cache key.
+    Locked,
 }
 
 /// Parsed Dockerfile: a list of instructions in order.

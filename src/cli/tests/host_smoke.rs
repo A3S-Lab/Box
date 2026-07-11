@@ -516,7 +516,7 @@ fn test_real_pool_warm_run() {
     let start = std::time::Instant::now();
     while !sock_path.exists() {
         if start.elapsed() > Duration::from_secs(120) {
-            let _ = daemon.kill();
+            cli.interrupt_background(&mut daemon);
             panic!("pool daemon never created its socket");
         }
         if let Ok(Some(status)) = daemon.try_wait() {
@@ -539,6 +539,41 @@ fn test_real_pool_warm_run() {
     ]);
     assert!(ok, "pool run failed.\nstdout:\n{out}\nstderr:\n{err}");
     assert!(out.contains("pool-e2e-ok"), "unexpected output: {out:?}");
+
+    // Docker-like entrypoint: `run --pool --rm` should hit the same daemon.
+    let run_pool_out = cli.ok(&[
+        "run",
+        "--pool",
+        "--pool-socket",
+        socket.as_str(),
+        "--rm",
+        image.as_str(),
+        "--",
+        "echo",
+        "run-pool-e2e-ok",
+    ]);
+    assert!(
+        run_pool_out.contains("run-pool-e2e-ok"),
+        "unexpected run --pool output: {run_pool_out:?}"
+    );
+
+    // Env auto-route: compatible foreground `run --rm` uses the daemon without
+    // changing the CLI shape users already script.
+    let env_pool_out = cli.ok_with_env(
+        &[
+            "run",
+            "--rm",
+            image.as_str(),
+            "--",
+            "echo",
+            "env-pool-e2e-ok",
+        ],
+        &[("A3S_BOX_RUN_POOL_SOCKET", socket.as_str())],
+    );
+    assert!(
+        env_pool_out.contains("env-pool-e2e-ok"),
+        "unexpected env auto-routed run output: {env_pool_out:?}"
+    );
 
     // Concurrent runs — the daemon serves them concurrently.
     std::thread::scope(|s| {
@@ -597,7 +632,113 @@ fn test_real_pool_warm_run() {
         "status should list both warmed images:\n{status}"
     );
 
-    let _ = daemon.kill();
+    cli.interrupt_background(&mut daemon);
+}
+
+/// Dockerfile RUN over the warm-pool lease path: one build stage keeps a pooled
+/// helper VM, shell-form and exec-form RUN mutate the mounted rootfs, and cache
+/// mounts persist across RUN commands without committing cache contents.
+#[test]
+#[ignore]
+fn test_real_build_run_pool_smoke() {
+    let cli = CliTest::new();
+    let image = host_smoke_image();
+    seed_runnable_alpine_image(&cli, &image);
+    let built_image = format!("coverage-run-pool:{}", unique_tag("build"));
+    let socket = cli
+        .home_path()
+        .join("build-pool.sock")
+        .to_str()
+        .expect("utf8 socket path")
+        .to_string();
+
+    let mut daemon = cli.spawn_background(&[
+        "pool",
+        "start",
+        "--image",
+        image.as_str(),
+        "--size",
+        "1",
+        "--max",
+        "2",
+        "--socket",
+        socket.as_str(),
+    ]);
+
+    let sock_path = cli.home_path().join("build-pool.sock");
+    let start = std::time::Instant::now();
+    while !sock_path.exists() {
+        if start.elapsed() > Duration::from_secs(120) {
+            cli.interrupt_background(&mut daemon);
+            panic!("build pool daemon never created its socket");
+        }
+        if let Ok(Some(status)) = daemon.try_wait() {
+            panic!("build pool daemon exited early: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    std::thread::sleep(Duration::from_secs(5));
+
+    let build_dir = cli.home_path().join("run-pool-build");
+    std::fs::create_dir_all(&build_dir).expect("create build --run-pool context");
+    std::fs::write(
+        build_dir.join("Dockerfile"),
+        format!(
+            r#"FROM {image}
+WORKDIR /work
+RUN printf 'shell-ok\n' > /shell.txt
+RUN ["/bin/sh", "-c", "printf 'exec-ok\n' > exec.txt"]
+RUN --mount=type=cache,id=warm-smoke,sharing=locked,mode=0750,target=/root/.cache printf 'cache-only\n' > /root/.cache/cache.txt
+RUN --mount=type=cache,id=warm-smoke,sharing=locked,target=/root/.cache cat /root/.cache/cache.txt > /cache-result.txt
+"#
+        ),
+    )
+    .expect("write build --run-pool Dockerfile");
+
+    let build_dir_arg = build_dir.to_string_lossy().to_string();
+    let run_cache_dir = cli.home_path().join("run-cache");
+    let run_cache_arg = run_cache_dir.to_string_lossy().to_string();
+    cli.ok(&[
+        "build",
+        "--run-pool",
+        "--run-pool-socket",
+        socket.as_str(),
+        "--run-cache-dir",
+        &run_cache_arg,
+        "--tag",
+        &built_image,
+        "--quiet",
+        &build_dir_arg,
+    ]);
+
+    let status = cli.ok(&["pool", "status", "--socket", socket.as_str()]);
+    assert!(
+        status.contains("LEASED"),
+        "pool status should expose lease columns:\n{status}"
+    );
+
+    let image_tar = cli.home_path().join("run-pool-build.tar");
+    let image_tar_arg = image_tar.to_string_lossy().to_string();
+    cli.ok(&["save", &built_image, "--output", &image_tar_arg]);
+    assert_eq!(
+        read_file_from_saved_oci_tar(&image_tar, "/shell.txt").as_deref(),
+        Some("shell-ok\n")
+    );
+    assert_eq!(
+        read_file_from_saved_oci_tar(&image_tar, "/work/exec.txt").as_deref(),
+        Some("exec-ok\n")
+    );
+    assert_eq!(
+        read_file_from_saved_oci_tar(&image_tar, "/cache-result.txt").as_deref(),
+        Some("cache-only\n")
+    );
+    assert!(
+        read_file_from_saved_oci_tar(&image_tar, "/root/.cache/cache.txt").is_none(),
+        "RUN cache mount contents must not be committed to the final image"
+    );
+
+    cli.ok(&["rmi", "--force", &built_image]);
+    cli.ok(&["pool", "stop", "--socket", socket.as_str()]);
     let _ = daemon.wait();
 }
 
@@ -636,7 +777,7 @@ fn test_real_pool_deferred_main() {
     let start = std::time::Instant::now();
     while !sock_path.exists() {
         if start.elapsed() > Duration::from_secs(120) {
-            let _ = daemon.kill();
+            cli.interrupt_background(&mut daemon);
             panic!("deferred pool daemon never created its socket");
         }
         if let Ok(Some(status)) = daemon.try_wait() {
@@ -677,6 +818,5 @@ fn test_real_pool_deferred_main() {
     ]);
     assert!(!ok2, "expected a non-zero exit from the deferred main");
 
-    let _ = daemon.kill();
-    let _ = daemon.wait();
+    cli.interrupt_background(&mut daemon);
 }

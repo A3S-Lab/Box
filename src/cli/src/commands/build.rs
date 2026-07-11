@@ -12,6 +12,10 @@ use clap::{Args, ValueEnum};
 #[path = "build_buildkit_vm.rs"]
 mod buildkit_vm;
 
+const BUILD_RUN_POOL_SOCKET_ENV: &str = "A3S_BOX_BUILD_RUN_POOL_SOCKET";
+const BUILD_RUN_CACHE_DIR_ENV: &str = "A3S_BOX_BUILD_RUN_CACHE_DIR";
+const DEFAULT_BUILD_RUN_POOL_GUEST_ROOTFS: &str = "/run/a3s/build-rootfs";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum BuildBackend {
     /// Use the default backend for the host and Dockerfile.
@@ -85,6 +89,40 @@ pub struct BuildArgs {
     /// Use plain HTTP when pushing from the BuildKit VM to a trusted registry.
     #[arg(long, alias = "insecure")]
     pub plain_http: bool,
+
+    /// Execute Dockerfile RUN instructions through the warm-pool daemon.
+    #[arg(long = "run-pool")]
+    pub run_pool: bool,
+
+    /// Warm-pool daemon socket for Dockerfile RUN execution.
+    #[arg(long = "run-pool-socket", value_name = "PATH")]
+    pub run_pool_socket: Option<String>,
+
+    /// Start the Dockerfile RUN warm-pool daemon when one is not already running.
+    ///
+    /// Requires --run-pool-image so build leases use an explicit helper VM image.
+    #[arg(long = "run-pool-autostart")]
+    pub run_pool_autostart: bool,
+
+    /// Helper VM image for Dockerfile RUN pool leases; omitted uses daemon default.
+    #[arg(long = "run-pool-image", value_name = "IMAGE")]
+    pub run_pool_image: Option<String>,
+
+    /// CPUs for lazily-created Dockerfile RUN pool helper VMs.
+    #[arg(long = "run-pool-cpus", default_value_t = 2)]
+    pub run_pool_cpus: u32,
+
+    /// Memory for lazily-created Dockerfile RUN pool helper VMs.
+    #[arg(long = "run-pool-memory", default_value = "512m")]
+    pub run_pool_memory: String,
+
+    /// Timeout for each Dockerfile RUN command when using --run-pool.
+    #[arg(long = "run-pool-timeout", default_value = "1h", value_parser = crate::output::parse_duration_secs)]
+    pub run_pool_timeout: u64,
+
+    /// Persistent cache directory for Dockerfile RUN --mount=type=cache with --run-pool.
+    #[arg(long = "run-cache-dir", value_name = "PATH")]
+    pub run_cache_dir: Option<String>,
 }
 
 pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -107,7 +145,22 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     let platforms = parse_platforms(args.platform.as_deref())?;
 
-    let use_buildkit_vm = should_use_buildkit_vm(args.builder, &dockerfile_path)?;
+    let run_pool = resolve_run_pool_config(&args)?;
+    if run_pool.is_some() && args.builder == BuildBackend::BuildkitVm {
+        return Err("--run-pool cannot be combined with --builder=buildkit-vm".into());
+    }
+    if args.run_pool_autostart {
+        if let Some(config) = &run_pool {
+            super::pool::ensure_pool_daemon_running(&pool_autostart_config_for_build(config)?)
+                .await?;
+        }
+    }
+
+    let use_buildkit_vm = if run_pool.is_some() {
+        false
+    } else {
+        should_use_buildkit_vm(args.builder, &dockerfile_path)?
+    };
     if args.push && !use_buildkit_vm {
         return Err("--push is currently supported only with --builder=buildkit-vm".into());
     }
@@ -153,6 +206,7 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
         target: args.target.clone(),
         no_cache: args.no_cache,
         metrics: None,
+        run_pool,
     };
 
     let result = a3s_box_runtime::oci::build::engine::build(config, store).await?;
@@ -162,6 +216,75 @@ pub async fn execute(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     Ok(())
+}
+
+fn resolve_run_pool_config(
+    args: &BuildArgs,
+) -> Result<Option<a3s_box_runtime::BuildRunPoolConfig>, Box<dyn std::error::Error>> {
+    let env_socket = std::env::var(BUILD_RUN_POOL_SOCKET_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let env_cache_dir = std::env::var(BUILD_RUN_CACHE_DIR_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let enabled = args.run_pool
+        || args.run_pool_autostart
+        || args.run_pool_socket.is_some()
+        || env_socket.is_some()
+        || args.run_cache_dir.is_some()
+        || env_cache_dir.is_some();
+    if !enabled {
+        return Ok(None);
+    }
+
+    if args.run_pool_timeout == 0 {
+        return Err("--run-pool-timeout must be greater than 0".into());
+    }
+
+    let socket = args
+        .run_pool_socket
+        .clone()
+        .or(env_socket)
+        .unwrap_or_else(|| super::pool::DEFAULT_SOCKET.to_string());
+    let memory_mb = crate::output::parse_memory(&args.run_pool_memory)
+        .map_err(|e| format!("Invalid --run-pool-memory: {e}"))?;
+    if args.run_pool_autostart && args.run_pool_image.is_none() {
+        return Err(
+            "--run-pool-autostart requires --run-pool-image so the helper VM image is explicit"
+                .into(),
+        );
+    }
+    let run_cache_dir = args
+        .run_cache_dir
+        .clone()
+        .or(env_cache_dir)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            a3s_box_core::dirs_home()
+                .join("buildcache")
+                .join("run-cache")
+        });
+
+    Ok(Some(a3s_box_runtime::BuildRunPoolConfig {
+        socket,
+        image: args.run_pool_image.clone(),
+        vcpus: args.run_pool_cpus,
+        memory_mb,
+        guest_rootfs: DEFAULT_BUILD_RUN_POOL_GUEST_ROOTFS.to_string(),
+        timeout_ns: args.run_pool_timeout.saturating_mul(1_000_000_000),
+        run_cache_dir,
+    }))
+}
+
+fn pool_autostart_config_for_build(
+    config: &a3s_box_runtime::BuildRunPoolConfig,
+) -> Result<super::pool::PoolAutoStartConfig, Box<dyn std::error::Error>> {
+    Ok(super::pool::PoolAutoStartConfig {
+        socket: config.socket.clone(),
+        image: None,
+        size: super::pool::DEFAULT_AUTOSTART_POOL_SIZE,
+        max: super::pool::DEFAULT_AUTOSTART_POOL_MAX,
+    })
 }
 
 fn should_use_buildkit_vm(
@@ -274,6 +397,55 @@ fn resolve_build_file(
 mod tests {
     use super::*;
 
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn build_args() -> BuildArgs {
+        BuildArgs {
+            path: ".".to_string(),
+            tag: None,
+            file: None,
+            build_arg: vec![],
+            quiet: false,
+            platform: None,
+            target: None,
+            no_cache: false,
+            builder: BuildBackend::Auto,
+            buildkit_image: None,
+            buildkit_cpus: None,
+            buildkit_memory: None,
+            push: false,
+            plain_http: false,
+            run_pool: false,
+            run_pool_socket: None,
+            run_pool_autostart: false,
+            run_pool_image: None,
+            run_pool_cpus: 2,
+            run_pool_memory: "512m".to_string(),
+            run_pool_timeout: 3600,
+            run_cache_dir: None,
+        }
+    }
+
     #[test]
     fn test_parse_build_args_valid() {
         let args = vec!["VERSION=1.0".to_string(), "DEBUG=true".to_string()];
@@ -312,6 +484,87 @@ mod tests {
 
         assert!(should_use_buildkit_vm(BuildBackend::BuildkitVm, &dockerfile).unwrap());
         assert!(!should_use_buildkit_vm(BuildBackend::Host, &dockerfile).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_run_pool_config_explicit_socket() {
+        let mut args = build_args();
+        args.run_pool = true;
+        args.run_pool_socket = Some("/tmp/a3s-build-pool.sock".to_string());
+        args.run_pool_image = Some("alpine:latest".to_string());
+        args.run_pool_cpus = 4;
+        args.run_pool_memory = "1g".to_string();
+        args.run_pool_timeout = 90;
+        args.run_cache_dir = Some("/tmp/a3s-run-cache".to_string());
+
+        let config = resolve_run_pool_config(&args).unwrap().unwrap();
+
+        assert_eq!(config.socket, "/tmp/a3s-build-pool.sock");
+        assert_eq!(config.image.as_deref(), Some("alpine:latest"));
+        assert_eq!(config.vcpus, 4);
+        assert_eq!(config.memory_mb, 1024);
+        assert_eq!(config.guest_rootfs, DEFAULT_BUILD_RUN_POOL_GUEST_ROOTFS);
+        assert_eq!(config.timeout_ns, 90_000_000_000);
+        assert_eq!(config.run_cache_dir, PathBuf::from("/tmp/a3s-run-cache"));
+    }
+
+    #[test]
+    fn test_resolve_run_pool_config_rejects_zero_timeout() {
+        let mut args = build_args();
+        args.run_pool = true;
+        args.run_pool_timeout = 0;
+
+        let err = resolve_run_pool_config(&args).unwrap_err().to_string();
+
+        assert!(err.contains("--run-pool-timeout"));
+    }
+
+    #[test]
+    fn test_resolve_run_pool_config_autostart_requires_image() {
+        let mut args = build_args();
+        args.run_pool_autostart = true;
+
+        let err = resolve_run_pool_config(&args).unwrap_err().to_string();
+
+        assert!(err.contains("--run-pool-autostart"));
+        assert!(err.contains("--run-pool-image"));
+    }
+
+    #[test]
+    fn test_pool_autostart_config_for_build_starts_lazy_helper_daemon() {
+        let mut args = build_args();
+        args.run_pool = true;
+        args.run_pool_autostart = true;
+        args.run_pool_socket = Some("/tmp/a3s-build-pool.sock".to_string());
+        args.run_pool_image = Some("alpine:latest".to_string());
+
+        let config = resolve_run_pool_config(&args).unwrap().unwrap();
+        let autostart = pool_autostart_config_for_build(&config).unwrap();
+
+        assert_eq!(config.image.as_deref(), Some("alpine:latest"));
+        assert_eq!(autostart.socket, "/tmp/a3s-build-pool.sock");
+        assert!(autostart.image.is_none());
+        assert_eq!(
+            autostart.size,
+            crate::commands::pool::DEFAULT_AUTOSTART_POOL_SIZE
+        );
+        assert_eq!(
+            autostart.max,
+            crate::commands::pool::DEFAULT_AUTOSTART_POOL_MAX
+        );
+    }
+
+    #[test]
+    fn test_resolve_run_pool_config_env_cache_dir_enables_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join("run-cache");
+        let _guard = EnvGuard::set(BUILD_RUN_CACHE_DIR_ENV, cache_dir.as_os_str());
+        let args = build_args();
+
+        let config = resolve_run_pool_config(&args).unwrap().unwrap();
+
+        assert_eq!(config.socket, crate::commands::pool::DEFAULT_SOCKET);
+        assert_eq!(config.run_cache_dir, cache_dir);
     }
 
     #[test]

@@ -1,0 +1,82 @@
+From: A3S Box maintainers
+Subject: [PATCH] tsi: probe local vsock before nonblocking host accept
+
+TSI currently sends TSI_ACCEPT to the host before calling the underlying
+vsock accept operation. For a nonblocking listener, the first accepted
+connection consumes the host pending count, but the conventional second
+accept used to drain an edge-triggered accept queue can block waiting for a
+host control response. Event-driven servers such as Redis then never service
+the already accepted client.
+
+Probe the local vsock accept queue first for O_NONBLOCK. Return EAGAIN without
+contacting the host when it is empty. When a connection is present, retain the
+host request to consume the corresponding pending-accept count. Blocking
+accept keeps the existing ordering.
+
+--- a/net/tsi/af_tsi.c
++++ b/net/tsi/af_tsi.c
+@@ -493,8 +493,29 @@ static int tsi_accept_vsock(struct tsi_sock *tsk, struct socket **newsock,
+ 	struct socket *nsock;
+ 	struct tsi_accept_req ta_req;
+ 	struct tsi_accept_rsp ta_rsp;
++	bool accepted_locally = false;
+ 	int err;
+ 
++	nsock = sock_alloc();
++	if (!nsock)
++		return -ENOMEM;
++	nsock->type = socket->type;
++	nsock->ops = socket->ops;
++
++	/*
++	 * Do not ask the host whether an O_NONBLOCK accept queue is empty.
++	 * The local vsock queue already has the authoritative readiness state,
++	 * and the host control round trip may block the guest event loop.
++	 */
++	if (arg->flags & O_NONBLOCK) {
++		err = socket->ops->accept(socket, nsock, arg);
++		if (err < 0) {
++			sock_release(nsock);
++			return err;
++		}
++		accepted_locally = true;
++	}
++
+ 	ta_req.svm_port = tsk->svm_port;
+ 	ta_req.flags = arg->flags;
+@@ -506,6 +527,7 @@ static int tsi_accept_vsock(struct tsi_sock *tsk, struct socket **newsock,
+ 				  sizeof(struct tsi_accept_req));
+ 	if (err < 0) {
+ 		pr_debug("%s: error sending accept request\n", __func__);
++		sock_release(nsock);
+ 		return err;
+ 	}
+ 
+@@ -514,6 +536,7 @@ static int tsi_accept_vsock(struct tsi_sock *tsk, struct socket **newsock,
+ 				  sizeof(struct tsi_accept_rsp));
+ 	if (err < 0) {
+ 		pr_debug("%s: error receiving accept response\n", __func__);
++		sock_release(nsock);
+ 		return err;
+ 	}
+@@ -521,17 +544,12 @@ static int tsi_accept_vsock(struct tsi_sock *tsk, struct socket **newsock,
+ 	pr_debug("%s: response result: %d\n", __func__, ta_rsp.result);
+ 
+ 	if (ta_rsp.result != 0) {
++		sock_release(nsock);
+ 		return ta_rsp.result;
+ 	}
+ 
+-	nsock = sock_alloc();
+-	if (!nsock)
+-		return -ENOMEM;
+-
+-	nsock->type = socket->type;
+-	nsock->ops = socket->ops;
+-
+-	err = socket->ops->accept(socket, nsock, arg);
++	if (!accepted_locally)
++		err = socket->ops->accept(socket, nsock, arg);
+ 
+ 	if (err < 0) {
+ 		pr_debug("%s: vsock accept failed: %d\n", __func__, err);

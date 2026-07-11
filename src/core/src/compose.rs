@@ -6,6 +6,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+mod interpolation;
+
+pub use interpolation::{interpolate_compose_yaml, ComposeInterpolationError};
+
 /// Top-level compose file configuration.
 ///
 /// Compatible with a subset of docker-compose v3 syntax:

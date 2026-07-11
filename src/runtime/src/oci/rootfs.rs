@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::path::{Component, Path};
 
 use super::image::OciImage;
-use super::layers::extract_layer;
+use super::layers::{extract_layer_with_metadata, finalize_rootfs_metadata};
 
 /// Builder for creating a guest rootfs from an OCI image.
 ///
@@ -95,6 +95,7 @@ impl OciRootfsBuilder {
         }
 
         self.create_essential_files()?;
+        finalize_rootfs_metadata(&self.rootfs_path)?;
 
         tracing::info!("OCI rootfs built successfully");
         Ok(())
@@ -150,7 +151,7 @@ impl OciRootfsBuilder {
         );
 
         for layer_path in image.layer_paths() {
-            extract_layer(layer_path, &self.rootfs_path)?;
+            extract_layer_with_metadata(layer_path, &self.rootfs_path)?;
         }
 
         Ok(())

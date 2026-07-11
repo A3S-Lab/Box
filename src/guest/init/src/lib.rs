@@ -15,6 +15,8 @@ pub mod network;
 pub mod port_forward;
 pub mod pty_server;
 pub mod reaper;
+#[cfg(any(target_os = "linux", test))]
+pub mod rootfs_archive;
 pub mod user;
 
 pub use namespace::{spawn_isolated, NamespaceConfig, NamespaceError};

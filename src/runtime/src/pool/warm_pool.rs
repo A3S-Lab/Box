@@ -484,6 +484,8 @@ impl WarmPool {
                     cfg.snapshot_sock = None;
                     let mut vm = VmManager::new(cfg, event_emitter.clone());
                     vm.boot().await?;
+                    vm.wait_for_exec_available(std::time::Duration::from_secs(120))
+                        .await?;
                     return Ok(vm);
                 }
                 Err(error) => {
@@ -493,6 +495,8 @@ impl WarmPool {
         }
         let mut vm = VmManager::new(box_config.clone(), event_emitter.clone());
         vm.boot().await?;
+        vm.wait_for_exec_available(std::time::Duration::from_secs(120))
+            .await?;
         Ok(vm)
     }
 

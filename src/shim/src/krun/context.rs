@@ -288,6 +288,7 @@ impl KrunContext {
     /// # Arguments
     /// * `port_map` - Slice of "host_port:guest_port" strings (e.g., ["8080:80", "3000:3000"])
     #[cfg(not(target_os = "windows"))]
+    #[allow(dead_code)]
     pub unsafe fn set_port_map(&self, port_map: &[String]) -> Result<()> {
         tracing::debug!(port_map = ?port_map, "Setting TSI port mappings");
         let entries: Vec<CString> = port_map

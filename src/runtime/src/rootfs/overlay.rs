@@ -192,6 +192,7 @@ pub(crate) fn is_overlay_supported() -> bool {
 ///
 /// Always returns `false` on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 pub(crate) fn is_overlay_supported() -> bool {
     false
 }
