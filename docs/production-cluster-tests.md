@@ -200,6 +200,28 @@ baseline/after counts.
 
 ## Phase 4: Soak Profiles
 
+### macOS single-host fault soak
+
+The production cluster profiles below require Linux/KVM and Kubernetes. A
+separate runner exercises the local CLI runtime on Apple Silicon/HVF without
+claiming Linux, CRI, or RuntimeClass coverage:
+
+```bash
+ulimit -n 8192
+caffeinate -dimsu scripts/macos-fault-soak.sh \
+  --duration 259200 \
+  --sample-interval 300 \
+  --fault-interval 900 \
+  --output "target/a3s-box-macos-fault-soak/$(date -u +%Y%m%dT%H%M%SZ)"
+```
+
+Run `--preflight-only` first. The runner rejects unsupported hosts, low file
+descriptor limits, less than 100 GiB of free disk, or disk usage above 80
+percent. It uses an evidence-local `A3S_HOME`, targets faults only at its unique
+box-name prefix, alternates shim and CLI process termination, asserts that state
+remains readable, and requires final shim and box-directory counts to return to
+zero. Its result proves only the macOS/HVF single-host product surface.
+
 Use three profiles. Do not skip the shorter profiles; they are the guardrails
 that keep a 72-hour run from wasting a production window.
 
