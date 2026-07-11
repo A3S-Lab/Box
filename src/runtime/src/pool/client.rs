@@ -347,6 +347,13 @@ async fn lease_client(req: &PoolClientLease) -> Result<PoolLeaseResponse> {
     Ok(resp)
 }
 
+#[cfg(windows)]
+async fn lease_client(_req: &PoolClientLease) -> Result<PoolLeaseResponse> {
+    Err(BoxError::PoolError(
+        "warm-pool leases are not supported on Windows".to_string(),
+    ))
+}
+
 #[cfg(not(windows))]
 async fn lease_exec_client(socket: &str, req: PoolLeaseExecRequest) -> Result<PoolClientOutput> {
     use tokio::net::UnixStream;
@@ -364,6 +371,13 @@ async fn lease_exec_client(socket: &str, req: PoolLeaseExecRequest) -> Result<Po
         stderr: resp.stderr,
         exit_code: resp.exit_code,
     })
+}
+
+#[cfg(windows)]
+async fn lease_exec_client(_socket: &str, _req: PoolLeaseExecRequest) -> Result<PoolClientOutput> {
+    Err(BoxError::PoolError(
+        "warm-pool leases are not supported on Windows".to_string(),
+    ))
 }
 
 #[cfg(not(windows))]
@@ -385,6 +399,13 @@ async fn release_client(socket: &str, lease_id: &str) -> Result<()> {
         return Err(BoxError::PoolError(error));
     }
     Ok(())
+}
+
+#[cfg(windows)]
+async fn release_client(_socket: &str, _lease_id: &str) -> Result<()> {
+    Err(BoxError::PoolError(
+        "warm-pool leases are not supported on Windows".to_string(),
+    ))
 }
 
 #[cfg(not(windows))]

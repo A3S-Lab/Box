@@ -300,8 +300,6 @@ fn metadata_from_header<R: Read>(
     entry: &tar::Entry<'_, R>,
     path: &Path,
 ) -> Result<RootfsMetadataEntry> {
-    use std::os::unix::ffi::OsStrExt;
-
     let entry_type = entry.header().entry_type();
     let (kind, link_target_base64) = if entry_type.is_dir() {
         (RootfsEntryKind::Directory, None)
@@ -312,7 +310,10 @@ fn metadata_from_header<R: Read>(
             .ok_or_else(|| BoxError::OciImageError("Missing symlink target".to_string()))?;
         (
             RootfsEntryKind::Symlink,
-            Some(base64::engine::general_purpose::STANDARD.encode(target.as_os_str().as_bytes())),
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .encode(target.as_os_str().as_encoded_bytes()),
+            ),
         )
     } else if entry_type.is_file() || entry_type.is_hard_link() {
         (RootfsEntryKind::Regular, None)
@@ -323,7 +324,7 @@ fn metadata_from_header<R: Read>(
         )));
     };
     let path_base64 = base64::engine::general_purpose::STANDARD
-        .encode(archive_metadata_path(path).as_os_str().as_bytes());
+        .encode(archive_metadata_path(path).as_os_str().as_encoded_bytes());
     Ok(RootfsMetadataEntry {
         path_base64,
         kind,
@@ -365,8 +366,6 @@ fn remove_metadata_descendants(
 }
 
 fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMetadataEntry>> {
-    use std::os::unix::ffi::OsStringExt;
-
     let path = target_dir.join(image_metadata_relative_path());
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -390,7 +389,7 @@ fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMeta
         let raw = base64::engine::general_purpose::STANDARD
             .decode(&entry.path_base64)
             .map_err(|error| BoxError::OciImageError(format!("Invalid metadata path: {error}")))?;
-        let archive_path = PathBuf::from(std::ffi::OsString::from_vec(raw));
+        let archive_path = PathBuf::from(os_string_from_encoded_bytes(raw));
         let relative = normalize_layer_path(&archive_path)
             .ok_or_else(|| BoxError::OciImageError("Unsafe path in image metadata".to_string()))?;
         if relative == image_metadata_relative_path() || result.insert(relative, entry).is_some() {
@@ -492,11 +491,17 @@ fn finalize_image_metadata(
 }
 
 fn decode_metadata_key(entry: &RootfsMetadataEntry) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
     let raw = base64::engine::general_purpose::STANDARD
         .decode(&entry.path_base64)
         .ok()?;
-    normalize_layer_path(Path::new(&std::ffi::OsString::from_vec(raw)))
+    normalize_layer_path(Path::new(&os_string_from_encoded_bytes(raw)))
+}
+
+fn os_string_from_encoded_bytes(raw: Vec<u8>) -> std::ffi::OsString {
+    // Every metadata manifest is produced and consumed on the same host. The
+    // bytes therefore use this platform's `OsStr` encoding and can be restored
+    // losslessly, including non-UTF-8 Unix paths and Windows WTF-8 paths.
+    unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(raw) }
 }
 
 fn collect_final_metadata(
@@ -506,9 +511,6 @@ fn collect_final_metadata(
     desired: &BTreeMap<PathBuf, RootfsMetadataEntry>,
     output: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
 ) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
-
     if relative == image_metadata_relative_path()
         || relative == Path::new(".a3s_image_metadata_v1.json.tmp")
     {
@@ -528,21 +530,46 @@ fn collect_final_metadata(
         })?;
         (
             RootfsEntryKind::Symlink,
-            Some(base64::engine::general_purpose::STANDARD.encode(target.as_os_str().as_bytes())),
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .encode(target.as_os_str().as_encoded_bytes()),
+            ),
         )
     } else {
         return Ok(());
     };
     let previous = desired.get(relative);
+    #[cfg(unix)]
+    let (mode, mtime, size) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            filesystem.mode(),
+            filesystem.mtime().max(0) as u64,
+            filesystem.size(),
+        )
+    };
+    #[cfg(not(unix))]
+    let (mode, mtime, size) = previous
+        .map(|entry| (entry.mode, entry.mtime, entry.size))
+        .unwrap_or_else(|| {
+            (
+                if file_type.is_dir() { 0o755 } else { 0o644 },
+                0,
+                filesystem.len(),
+            )
+        });
     let entry = RootfsMetadataEntry {
-        path_base64: base64::engine::general_purpose::STANDARD
-            .encode(archive_metadata_path(relative).as_os_str().as_bytes()),
+        path_base64: base64::engine::general_purpose::STANDARD.encode(
+            archive_metadata_path(relative)
+                .as_os_str()
+                .as_encoded_bytes(),
+        ),
         kind,
-        mode: filesystem.mode(),
+        mode,
         uid: previous.map_or(0, |entry| entry.uid),
         gid: previous.map_or(0, |entry| entry.gid),
-        mtime: filesystem.mtime().max(0) as u64,
-        size: filesystem.size(),
+        mtime,
+        size,
         link_target_base64,
     };
     output.insert(relative.to_path_buf(), entry);
