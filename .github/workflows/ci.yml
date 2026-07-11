@@ -18,7 +18,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -30,7 +30,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -54,7 +54,7 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -86,7 +86,7 @@ jobs:
             os: macos-14
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
 
@@ -123,7 +123,7 @@ jobs:
     needs: [fmt, clippy, test]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -173,7 +173,7 @@ jobs:
     env:
       A3S_REGISTRY_MIRRORS: ${{ vars.KVM_CI_REGISTRY_MIRRORS || 'docker.io=docker.m.daocloud.io' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
       # The self-hosted runner already has a working rustup/cargo. Using
