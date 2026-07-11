@@ -139,7 +139,7 @@ jobs:
           cd src
           cargo build --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: windows-whpx
           path: |
