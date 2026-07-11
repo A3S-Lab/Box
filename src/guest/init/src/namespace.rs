@@ -282,7 +282,7 @@ fn child_process(
     // entrypoint is "docker-entrypoint.sh".
     let resolved_command = resolve_command_path(command, env);
     if let Some(command_path) = &resolved_command {
-        let metadata = std::fs::metadata(&command_path).ok();
+        let metadata = std::fs::metadata(command_path).ok();
         tracing::debug!(
             path = %command_path.display(),
             size = metadata.as_ref().map(|m| m.len()).unwrap_or(0),
