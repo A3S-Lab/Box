@@ -20,7 +20,7 @@ jobs:
     name: Build Windows krun.dll
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -101,7 +101,7 @@ jobs:
           Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"
           echo "ASSET=$DIR.zip" >> $env:GITHUB_ENV
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: windows-dll
           path: ${{ env.ASSET }}
@@ -112,7 +112,7 @@ jobs:
     needs: build-windows-dll
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -138,9 +138,9 @@ jobs:
     needs: [build-windows-dll, publish-crate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: windows-dll
           path: artifacts

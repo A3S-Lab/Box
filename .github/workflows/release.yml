@@ -20,7 +20,7 @@ jobs:
     env:
       A3S_DEPS_STUB: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -62,7 +62,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Init submodules
         run: |
@@ -163,7 +163,7 @@ jobs:
           tar czf "${DIR}.tar.gz" "$DIR"
           echo "ASSET=${DIR}.tar.gz" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.target }}
           path: ${{ env.ASSET }}
@@ -174,7 +174,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -197,7 +197,7 @@ jobs:
     env:
       A3S_DEPS_STUB: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@stable
@@ -279,7 +279,7 @@ jobs:
           done
 
       - name: Checkout homebrew-tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: A3S-Lab/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
