@@ -541,7 +541,10 @@ exec /bin/sleep 30
     #[cfg(unix)]
     fn wait_for_file(path: &std::path::Path) {
         for _ in 0..250 {
-            if path.exists() {
+            // Shell redirection creates the file before `printf` writes its
+            // contents. Waiting for existence alone makes the test race with
+            // the fake shim and intermittently observe an empty value in CI.
+            if path.metadata().is_ok_and(|metadata| metadata.len() > 0) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -602,6 +605,8 @@ exec /bin/sleep 30
 
         let mut handler = controller.start(&spec).await.unwrap();
         wait_for_file(&args_file);
+        wait_for_file(&restore_file);
+        wait_for_file(&temp.path().join("logs").join("shim.stderr.log"));
 
         assert!(socket_dir.exists());
         let args = std::fs::read_to_string(&args_file).unwrap();
