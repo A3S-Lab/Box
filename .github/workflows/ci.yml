@@ -86,10 +86,30 @@ jobs:
       - name: Verify pinned contracts and SDK exports
         run: cd src && cargo run -p a3s-box-compat --bin a3s-box-e2b-contract -- verify
 
+  # ── Pinned official E2B client wire compatibility gate ────────
+  e2b-official-clients:
+    name: E2B Official Clients
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          version: '0.11.8'
+          enable-cache: false
+      - name: Verify official client lifecycle requests
+        run: python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify
+
   # ── Build check (compile only, no artifacts) ────────────────────
   build-check:
     name: Build Check (${{ matrix.target }})
-    needs: [fmt, clippy, test, e2b-contract]
+    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients]
     strategy:
       matrix:
         include:
@@ -135,7 +155,7 @@ jobs:
   # ── Windows native WHPX build check ────────────────────────────
   build-windows:
     name: Build Windows WHPX
-    needs: [fmt, clippy, test, e2b-contract]
+    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -177,7 +197,7 @@ jobs:
   # Until both are done this job is SKIPPED (inert) and never blocks a PR.
   integration-kvm:
     name: Integration (real microVM, KVM)
-    needs: [fmt, clippy, test, e2b-contract]
+    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients]
     if: vars.KVM_CI == 'true'
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 75

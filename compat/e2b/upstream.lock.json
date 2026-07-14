@@ -30,6 +30,46 @@
       }
     }
   },
+  "artifacts": [
+    {
+      "id": "python-code-interpreter-wheel",
+      "source": "code-interpreter",
+      "language": "python",
+      "package": "e2b-code-interpreter",
+      "version": "2.8.1",
+      "url": "https://files.pythonhosted.org/packages/df/47/c9acfeb0a63925d5b2e782b496be1287665bb649eee48d947fc46b9bdeee/e2b_code_interpreter-2.8.1-py3-none-any.whl",
+      "sha256": "sha256:8449ff1abb507e4c28134c9cbc4e59f76c09fadceab879c8c4031399b31a126a"
+    },
+    {
+      "id": "python-e2b-wheel",
+      "source": "e2b",
+      "language": "python",
+      "package": "e2b",
+      "version": "2.32.0",
+      "url": "https://files.pythonhosted.org/packages/74/70/e8fb37a38eaa9eae74b7cf47e0a533fc05bd1801fe1438e835760ae93085/e2b-2.32.0-py3-none-any.whl",
+      "sha256": "sha256:0f1971f8e287aa717ad3e44c2cbe26753da97acf34da24225b07675a07c57300"
+    },
+    {
+      "id": "typescript-code-interpreter-tarball",
+      "source": "code-interpreter",
+      "language": "typescript",
+      "package": "@e2b/code-interpreter",
+      "version": "2.6.1",
+      "url": "https://registry.npmjs.org/@e2b/code-interpreter/-/code-interpreter-2.6.1.tgz",
+      "sha256": "sha256:df9350312e46f6f6c4f62004da528fd15176078b3027b4507f7358a6eab0fe57",
+      "integrity": "sha512-5sKJaw2w/XZNHq7NpcNm8cpGu3IHlwLjavRd6V5BsVQyyl+5zGnSWE+EvA6W1VHDbPXiSdm6pN8cREWAifdrJw=="
+    },
+    {
+      "id": "typescript-e2b-tarball",
+      "source": "e2b",
+      "language": "typescript",
+      "package": "e2b",
+      "version": "2.33.0",
+      "url": "https://registry.npmjs.org/e2b/-/e2b-2.33.0.tgz",
+      "sha256": "sha256:53581eae5f11efb4b1020b64c05d7e8fc46fe3e14b5172322b5feb35c262e579",
+      "integrity": "sha512-n6W0nsJMetz8m30sLPMYfliPTW0VpuaDTUOjB0ZdYZ87li4zyX0UQqeQ5S/YPvq8EX9zEYcy3SijBxn1FGFlkQ=="
+    }
+  ],
   "files": [
     {
       "local_path": "spec/code-interpreter/LICENSE",

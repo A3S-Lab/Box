@@ -15,6 +15,10 @@ source paths, SHA-256 digests, and the control-plane tags selected by the pinned
 official SDK codegen. The vendored schemas and public export entry points retain
 their upstream licenses below `spec/`.
 
+The same lock records the published Python wheels and npm tarballs used by
+black-box fixtures. Fixture runners download those exact artifacts and verify
+both SHA-256 and, for npm, the published integrity value before installing.
+
 The first tuple pins:
 
 - Python `e2b` 2.32.0 and TypeScript `e2b` 2.33.0;

@@ -7,6 +7,7 @@ pub(crate) struct SourceLock {
     pub schema_version: u32,
     pub compatibility: CompatibilityLock,
     pub sources: BTreeMap<String, UpstreamSource>,
+    pub artifacts: Vec<ClientArtifact>,
     pub files: Vec<LockedFile>,
 }
 
@@ -30,6 +31,18 @@ pub(crate) struct LockedFile {
     pub source: String,
     pub source_path: String,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClientArtifact {
+    pub id: String,
+    pub source: String,
+    pub language: String,
+    pub package: String,
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
+    pub integrity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -188,5 +201,6 @@ pub(crate) struct CompatibilityManifest {
     pub mcp_schema_digest: String,
     pub contract_inventory_digest: String,
     pub public_export_inventory_digest: String,
+    pub client_artifact_digests: BTreeMap<String, String>,
     pub a3s_compat_version: String,
 }
