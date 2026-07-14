@@ -511,7 +511,7 @@ fn test_reconcile_marks_dead_pid() {
         // Manually set to running with an impossible PID
         record.status = "running".to_string();
         record.pid = Some(4294967); // Very unlikely to be a real process
-        sf.records.push(record);
+        sf.records_mut().push(record);
         sf.save().unwrap();
     }
 
@@ -547,7 +547,7 @@ fn test_reconcile_reads_exit_code_from_each_rootfs_layout() {
             record.status = "running".to_string();
             record.pid = Some(4294967); // dead pid -> reconcile marks it dead
             record.box_dir = box_dir;
-            sf.records.push(record);
+            sf.records_mut().push(record);
             sf.save().unwrap();
         }
 
@@ -578,7 +578,7 @@ fn test_reconcile_running_without_pid() {
         let mut record = sample_record("no-pid-id", "no_pid_box", "created");
         record.status = "running".to_string();
         record.pid = None; // Running but no PID
-        sf.records.push(record);
+        sf.records_mut().push(record);
         sf.save().unwrap();
     }
 
@@ -605,7 +605,7 @@ fn test_reconcile_dead_running_box_removes_external_socket_dir() {
         record.pid = None;
         record.box_dir = box_dir.clone();
         record.exec_socket_path = external_socket_dir.join("exec.sock");
-        sf.records.push(record);
+        sf.records_mut().push(record);
         sf.save().unwrap();
     }
 
@@ -634,7 +634,7 @@ fn test_reconcile_paused_without_pid_removes_external_socket_dir() {
         record.pid = None;
         record.box_dir = box_dir.clone();
         record.exec_socket_path = external_socket_dir.join("exec.sock");
-        sf.records.push(record);
+        sf.records_mut().push(record);
         sf.save().unwrap();
     }
 
@@ -666,7 +666,7 @@ fn test_concurrent_reconcile_load_tears_down_once_no_panic() {
         record.auto_remove = true;
         record.box_dir = box_dir.clone();
         record.exec_socket_path = box_dir.join("sockets").join("exec.sock");
-        sf.records.push(record);
+        sf.records_mut().push(record);
         sf.save().unwrap();
     }
 
@@ -702,7 +702,7 @@ fn test_reconcile_auto_removes_dead_running_box() {
         record.auto_remove = true;
         record.box_dir = box_dir.clone();
         record.exec_socket_path = box_dir.join("sockets").join("exec.sock");
-        sf.records.push(record);
+        sf.records_mut().push(record);
         sf.save().unwrap();
     }
 

@@ -2,13 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
+use a3s_box_runtime::BoxStateStore;
+
 use super::BoxRecord;
 use crate::state::policy::{is_record_pid_live, should_restart};
 
 /// Persistent state file backed by JSON.
 pub struct StateFile {
-    path: PathBuf,
-    pub(super) records: Vec<BoxRecord>,
+    store: BoxStateStore,
 }
 
 /// In-memory result of a reconcile pass: which records changed, and which dead
@@ -26,33 +27,18 @@ struct ReconcileOutcome {
 impl StateFile {
     /// Load state from disk. Creates an empty state if the file doesn't exist.
     pub fn load(path: &Path) -> Result<Self, std::io::Error> {
-        if path.exists() {
-            let data = std::fs::read_to_string(path)?;
-            let records = Self::parse_or_quarantine(path, &data);
-            let mut sf = Self {
-                path: path.to_path_buf(),
-                records,
-            };
-            // Reconcile in memory so the caller sees accurate live/dead status.
-            let outcome = sf.reconcile();
-            // Persist the change + run teardown under the state lock. Writing /
-            // tearing-down directly from this (often unlocked) read path was a
-            // lost-update + double-teardown race; flush_reconcile re-loads fresh
-            // under the lock so a concurrent run/monitor write is never clobbered.
-            if outcome.changed {
-                let _ = Self::flush_reconcile(path);
-            }
-            Ok(sf)
-        } else {
-            // Ensure parent directory exists
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            Ok(Self {
-                path: path.to_path_buf(),
-                records: Vec::new(),
-            })
+        let mut state = Self {
+            store: BoxStateStore::load_or_quarantine(path)?,
+        };
+        // Reconcile in memory so the caller sees accurate live/dead status.
+        let outcome = state.reconcile();
+        // Persist the change + run teardown under the runtime-owned state
+        // transaction. A fresh locked read prevents lost updates and duplicate
+        // teardown when several readers observe the same dead execution.
+        if outcome.changed {
+            let _ = Self::flush_reconcile(path);
         }
+        Ok(state)
     }
 
     /// Load from the default path (~/.a3s/boxes.json).
@@ -61,90 +47,14 @@ impl StateFile {
         Self::load(&home.join("boxes.json"))
     }
 
-    /// Load the default state WITHOUT the reconcile sweep (PID-liveness checks +
-    /// cleanup over every record). The append hot path (box registration) only adds
-    /// a record, so reconciling every *other* box under the global lock is pure
-    /// overhead — and under a high-concurrency fork burst it makes registration
-    /// O(N²) serialized syscalls. Reconcile still runs on every `list`/status load
-    /// and in the monitor, so liveness/exit-code/restart handling is not lost.
-    fn load_default_raw() -> Result<Self, std::io::Error> {
-        let home = a3s_box_core::dirs_home();
-        let path = home.join("boxes.json");
-        if path.exists() {
-            let data = std::fs::read_to_string(&path)?;
-            let records = Self::parse_or_quarantine(&path, &data);
-            Ok(Self { path, records })
-        } else {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            Ok(Self {
-                path,
-                records: Vec::new(),
-            })
-        }
-    }
-
-    /// Parse box records from an existing state file's contents.
-    ///
-    /// On a parse failure the corrupt file is NOT silently discarded. Discarding
-    /// it would let the next `write_to_disk` overwrite `boxes.json` with `[]`,
-    /// orphaning every running VM/overlay with no error and no recoverable
-    /// record. Instead the corrupt file is quarantined to a timestamped sibling
-    /// (`boxes.json.corrupt-<unix-secs>`) and a loud warning is emitted, so the
-    /// data is preserved for recovery (restore it, then `a3s-box ps` re-reconciles;
-    /// otherwise repair manually) while the process starts from a clean empty
-    /// state rather than crashing.
-    fn parse_or_quarantine(path: &Path, data: &str) -> Vec<BoxRecord> {
-        match serde_json::from_str::<Vec<BoxRecord>>(data) {
-            Ok(records) => records,
-            Err(err) => {
-                let preserved = Self::quarantine_corrupt_file(path)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<backup failed>".to_string());
-                eprintln!(
-                    "a3s-box: WARNING: state file {} is corrupt ({err}); preserved a \
-                     copy at {preserved} and started from empty state. Running boxes are \
-                     no longer tracked — their records are in the preserved copy; repair \
-                     and restore it, then `a3s-box ps` re-reconciles. Otherwise remove any \
-                     leaked VMs/overlays manually.",
-                    path.display(),
-                );
-                Vec::new()
-            }
-        }
-    }
-
-    /// Move a corrupt state file aside to a timestamped sibling so it is not
-    /// overwritten by the next save. Falls back to a copy if rename fails
-    /// (e.g. cross-device). Returns the backup path on success.
-    fn quarantine_corrupt_file(path: &Path) -> Option<PathBuf> {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let backup = path.with_extension(format!("json.corrupt-{secs}"));
-        if std::fs::rename(path, &backup).is_ok() {
-            return Some(backup);
-        }
-        match std::fs::copy(path, &backup) {
-            Ok(_) => Some(backup),
-            Err(_) => None,
-        }
-    }
-
     /// Load the default state **read-only**: no reconcile sweep, no PID-liveness
-    /// cleanup, no write-back, and — unlike [`load_default_raw`] — **no
-    /// quarantine** of a corrupt file. For consumers that only need a snapshot
-    /// of the records (e.g. metrics scraping) and must not cause side effects.
+    /// cleanup, no write-back, and no quarantine of a corrupt file. For
+    /// consumers that only need a snapshot of the records (e.g. metrics
+    /// scraping) and must not cause side effects.
     ///
-    /// `load_default_raw` quarantines a corrupt `boxes.json` by renaming it,
-    /// which mutates the filesystem and bypasses the cross-process state lock —
-    /// wrong for a lock-free, per-scrape reader. Here a corrupt file is surfaced
-    /// as an `Err` (no quarantine — a real writer does that under the lock) so the
-    /// caller can distinguish it from an empty/absent file: swallowing the parse
-    /// error to an empty snapshot made `/metrics` report a falsely-healthy
-    /// all-zeros result for a truncated state file instead of an error.
+    /// A corrupt file is surfaced as an `Err` so the caller can distinguish it
+    /// from an empty/absent file. Swallowing the parse error would make
+    /// `/metrics` report a falsely healthy all-zero snapshot.
     pub(crate) fn load_readonly() -> Result<Self, std::io::Error> {
         let home = a3s_box_core::dirs_home();
         Self::load_readonly_from(home.join("boxes.json"))
@@ -152,32 +62,14 @@ impl StateFile {
 
     /// Inner [`load_readonly`] over an explicit path (testable).
     pub(crate) fn load_readonly_from(path: PathBuf) -> Result<Self, std::io::Error> {
-        let records = if path.exists() {
-            let data = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&data)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-        } else {
-            Vec::new()
-        };
-        Ok(Self { path, records })
+        Ok(Self {
+            store: BoxStateStore::load_readonly(path)?,
+        })
     }
 
     /// Save state to disk atomically under the cross-process state lock.
     pub fn save(&self) -> Result<(), std::io::Error> {
-        let _lock = super::lock::StateLock::acquire_for_state_path(&self.path)?;
-        self.write_to_disk()
-    }
-
-    /// Atomic write (tmp + rename) WITHOUT taking the state lock. Callers that
-    /// already hold the lock (`save`, `modify`, and `reconcile` which runs
-    /// inside `load`) use this to avoid re-locking (`flock` is not reentrant).
-    fn write_to_disk(&self) -> Result<(), std::io::Error> {
-        let data = serde_json::to_string_pretty(&self.records).map_err(std::io::Error::other)?;
-        let tmp_path = self.path.with_extension("json.tmp");
-        // Durable atomic write (fsync tmp before rename + fsync parent dir): a
-        // hard crash must not leave a truncated boxes.json that then parses-fail
-        // and quarantines the WHOLE box inventory, orphaning every running VM.
-        a3s_box_core::fs_atomic::write_durable(&tmp_path, &self.path, data.as_bytes())
+        self.store.save()
     }
 
     /// Atomically apply `f` to the on-disk state under the exclusive
@@ -193,15 +85,21 @@ impl StateFile {
     where
         E: From<std::io::Error>,
     {
-        let _lock = super::lock::StateLock::acquire()?;
-        // Load WITHOUT the reconcile sweep: `modify` is a generic locked RMW for
-        // the caller's `f`, and reconcile now persists + tears down under its own
-        // lock (`flush_reconcile`) — running it here would deadlock (flock is not
-        // reentrant) once reconcile takes the lock.
-        let mut sf = Self::load_default_raw()?;
-        let out = f(&mut sf)?;
-        sf.write_to_disk()?;
-        Ok(out)
+        let path = a3s_box_core::dirs_home().join("boxes.json");
+        BoxStateStore::modify_or_quarantine(&path, |store| Self::with_runtime_store(store, f))
+    }
+
+    fn with_runtime_store<R, E>(
+        store: &mut BoxStateStore,
+        f: impl FnOnce(&mut StateFile) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let placeholder = BoxStateStore::from_records(store.path().to_path_buf(), Vec::new());
+        let mut state = Self {
+            store: std::mem::replace(store, placeholder),
+        };
+        let output = f(&mut state);
+        *store = state.store;
+        output
     }
 
     /// Append a record atomically under the state lock (load fresh → push →
@@ -210,35 +108,32 @@ impl StateFile {
     /// appending a box must not pay an O(N) PID-liveness/cleanup pass over every
     /// other box (the high-concurrency fork bottleneck).
     pub fn add_record(record: BoxRecord) -> Result<(), std::io::Error> {
-        let _lock = super::lock::StateLock::acquire()?;
-        let mut sf = Self::load_default_raw()?;
-        sf.records.push(record);
-        sf.write_to_disk()
+        let path = a3s_box_core::dirs_home().join("boxes.json");
+        BoxStateStore::modify_or_quarantine(&path, |store| {
+            store.records_mut().push(record);
+            Ok::<(), std::io::Error>(())
+        })
     }
 
     /// Remove a record by id atomically under the state lock. Returns whether a
     /// record was removed.
     pub fn remove_record(id: &str) -> Result<bool, std::io::Error> {
-        Self::modify(|sf| {
-            let before = sf.records.len();
-            sf.records.retain(|r| r.id != id);
-            Ok::<bool, std::io::Error>(sf.records.len() < before)
-        })
+        Self::modify(|sf| Ok::<bool, std::io::Error>(sf.store.remove_by_id(id)))
     }
 
     /// Remove a record by id atomically under the state lock and return it.
     pub(crate) fn take_record(id: &str) -> Result<Option<BoxRecord>, std::io::Error> {
         Self::modify(|sf| {
-            let Some(index) = sf.records.iter().position(|record| record.id == id) else {
+            let Some(index) = sf.store.records().iter().position(|record| record.id == id) else {
                 return Ok(None);
             };
-            Ok::<Option<BoxRecord>, std::io::Error>(Some(sf.records.remove(index)))
+            Ok::<Option<BoxRecord>, std::io::Error>(Some(sf.store.records_mut().remove(index)))
         })
     }
 
     /// Add a record and persist.
     pub fn add(&mut self, record: BoxRecord) -> Result<(), std::io::Error> {
-        self.records.push(record);
+        self.store.records_mut().push(record);
         self.save()
     }
 
@@ -248,14 +143,12 @@ impl StateFile {
     /// [`remove_record`](Self::remove_record); this keeps their in-memory view
     /// consistent without a second `save` that would clobber concurrent writers.
     pub(crate) fn forget(&mut self, id: &str) {
-        self.records.retain(|r| r.id != id);
+        self.store.remove_by_id(id);
     }
 
     /// Remove a record by ID and persist.
     pub fn remove(&mut self, id: &str) -> Result<bool, std::io::Error> {
-        let len_before = self.records.len();
-        self.records.retain(|r| r.id != id);
-        if self.records.len() < len_before {
+        if self.store.remove_by_id(id) {
             self.save()?;
             Ok(true)
         } else {
@@ -265,42 +158,37 @@ impl StateFile {
 
     /// Find a record by exact ID.
     pub fn find_by_id(&self, id: &str) -> Option<&BoxRecord> {
-        self.records.iter().find(|r| r.id == id)
+        self.store.find_by_id(id)
     }
 
     /// Find a mutable record by exact ID.
     pub fn find_by_id_mut(&mut self, id: &str) -> Option<&mut BoxRecord> {
-        self.records.iter_mut().find(|r| r.id == id)
+        self.store.find_by_id_mut(id)
     }
 
     /// Find a record by exact name.
     pub fn find_by_name(&self, name: &str) -> Option<&BoxRecord> {
-        self.records.iter().find(|r| r.name == name)
+        self.store.find_by_name(name)
     }
 
     /// Find records matching an ID prefix (must be unique).
     pub fn find_by_id_prefix(&self, prefix: &str) -> Vec<&BoxRecord> {
-        self.records
-            .iter()
-            .filter(|r| r.id.starts_with(prefix) || r.short_id.starts_with(prefix))
-            .collect()
+        self.store.find_by_id_prefix(prefix)
     }
 
     /// List records, optionally filtering to running-only.
     pub fn list(&self, all: bool) -> Vec<&BoxRecord> {
-        if all {
-            self.records.iter().collect()
-        } else {
-            self.records
-                .iter()
-                .filter(|r| r.status == "running")
-                .collect()
-        }
+        self.store.list(all)
     }
 
     /// All records (for iteration).
     pub fn records(&self) -> &[BoxRecord] {
-        &self.records
+        self.store.records()
+    }
+
+    #[cfg(test)]
+    pub(super) fn records_mut(&mut self) -> &mut Vec<BoxRecord> {
+        self.store.records_mut()
     }
 
     /// Reconcile IN MEMORY: check PID liveness for active boxes, mark dead ones,
@@ -317,7 +205,7 @@ impl StateFile {
         let mut auto_remove_records = Vec::new();
         let mut stopped_resource_records = Vec::new();
 
-        for record in &mut self.records {
+        for record in self.store.records_mut() {
             if !matches!(record.status.as_str(), "running" | "paused") {
                 continue;
             }
@@ -352,7 +240,8 @@ impl StateFile {
         }
 
         if !auto_remove_records.is_empty() {
-            self.records
+            self.store
+                .records_mut()
                 .retain(|record| !auto_remove_records.iter().any(|r| r.id == record.id));
             changed = true;
         }
@@ -371,37 +260,30 @@ impl StateFile {
     /// so a concurrent writer is never clobbered and two readers cannot tear down
     /// the same box twice (the second's fresh re-load sees the box already gone).
     fn flush_reconcile(path: &Path) -> std::io::Result<()> {
-        let _lock = super::lock::StateLock::acquire_for_state_path(path)?;
-        let records = if path.exists() {
-            let data = std::fs::read_to_string(path)?;
-            Self::parse_or_quarantine(path, &data)
-        } else {
-            Vec::new()
-        };
-        let mut sf = Self {
-            path: path.to_path_buf(),
-            records,
-        };
-        let outcome = sf.reconcile();
-        if outcome.changed {
-            for record in &outcome.stopped {
-                crate::cleanup::cleanup_stopped_box(record)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-            }
-            for record in &outcome.removed {
-                crate::cleanup::cleanup_removed_box(record)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-            }
-            sf.write_to_disk()?;
-        }
-        Ok(())
+        BoxStateStore::modify_or_quarantine(path, |store| {
+            Self::with_runtime_store(store, |state| {
+                let outcome = state.reconcile();
+                if outcome.changed {
+                    for record in &outcome.stopped {
+                        crate::cleanup::cleanup_stopped_box(record)
+                            .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    }
+                    for record in &outcome.removed {
+                        crate::cleanup::cleanup_removed_box(record)
+                            .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    }
+                }
+                Ok::<(), std::io::Error>(())
+            })
+        })
     }
 
     /// Get box IDs that are pending restart (dead boxes with active restart policy).
     ///
     /// This can be called after load to check if any boxes need restarting.
     pub fn pending_restarts(&self) -> Vec<String> {
-        self.records
+        self.store
+            .records()
             .iter()
             .filter(|r| r.status == "dead" && should_restart(r))
             .map(|r| r.id.clone())
@@ -410,7 +292,8 @@ impl StateFile {
 
     /// Find all records matching a label key-value pair.
     pub fn find_by_label(&self, key: &str, value: &str) -> Vec<&BoxRecord> {
-        self.records
+        self.store
+            .records()
             .iter()
             .filter(|r| r.labels.get(key).is_some_and(|v| v == value))
             .collect()
