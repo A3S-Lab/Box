@@ -6,4 +6,4 @@
 {"body":null,"client":"python-async","headers":{"user-agent":"e2b-python-sdk/2.32.0","x-api-key":"e2b_a1b2c3"},"method":"DELETE","path":"/sandboxes/missing-sandbox","query":[]}
 {"body":{"timeout":300},"client":"python-async","headers":{"content-type":"application/json","user-agent":"e2b-python-sdk/2.32.0","x-api-key":"e2b_a1b2c3"},"method":"POST","path":"/sandboxes/missing-sandbox/connect","query":[]}
 {"body":{"allow_internet_access":true,"autoPause":false,"autoResume":{"enabled":false},"envVars":{},"metadata":{},"secure":true,"templateID":"code-interpreter-v1","timeout":300},"client":"python-async","headers":{"content-type":"application/json","user-agent":"e2b-python-sdk/2.32.0","x-api-key":"e2b_a1b2c3"},"method":"POST","path":"/sandboxes","query":[]}
-{"body":null,"client":"python-async","headers":{"user-agent":"e2b-python-sdk/2.32.0","x-api-key":"e2b_a1b2c3"},"method":"DELETE","path":"/sandboxes/fixture-sandbox","query":[]}
+{"body":null,"client":"python-async","headers":{"user-agent":"e2b-python-sdk/2.32.0","x-api-key":"e2b_a1b2c3"},"method":"DELETE","path":"/sandboxes/fixture-interpreter","query":[]}

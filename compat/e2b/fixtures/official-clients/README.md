@@ -3,7 +3,7 @@
 These fixtures execute the published, unmodified Python sync, Python async,
 TypeScript, and Code Interpreter packages pinned by `upstream.lock.json`.
 Their create, connect, list, timeout, kill, and not-found flows run against a
-deterministic recording server.
+deterministic recording server and the Rust lifecycle router.
 
 The runner downloads the exact wheel and npm tarball URLs from the source lock,
 verifies SHA-256 and npm integrity before installation, and records only stable
@@ -17,6 +17,17 @@ Run with Python 3.10 or newer, Node.js 20 or newer, npm, and internet access:
 ```bash
 python3 compat/e2b/fixtures/official-clients/run_fixtures.py generate
 python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify
+```
+
+The repository CI builds the Rust fixture server and makes the live router run
+mandatory:
+
+```bash
+cd src
+cargo build -p a3s-box-compat --bin a3s-box-e2b-fixture-server
+cd ..
+python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify \
+  --rust-server-bin src/target/debug/a3s-box-e2b-fixture-server
 ```
 
 The runner uses `uv` when it is available on `PATH`, then falls back to the

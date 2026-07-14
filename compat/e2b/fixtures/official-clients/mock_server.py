@@ -15,16 +15,17 @@ from typing import Any, ClassVar
 
 
 SANDBOX_ID = "fixture-sandbox"
+INTERPRETER_SANDBOX_ID = "fixture-interpreter"
 MISSING_SANDBOX_ID = "missing-sandbox"
 
 
-def sandbox_response() -> dict[str, Any]:
+def sandbox_response(sandbox_id: str) -> dict[str, Any]:
     return {
         "clientID": "fixture-client",
         "domain": "fixture.invalid",
         "envdAccessToken": "fixture-envd-token",
         "envdVersion": "0.1.3",
-        "sandboxID": SANDBOX_ID,
+        "sandboxID": sandbox_id,
         "templateID": "fixture-template",
         "trafficAccessToken": "fixture-traffic-token",
     }
@@ -53,6 +54,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
     capture_path: ClassVar[Path]
     client_name: ClassVar[str]
     capture_lock: ClassVar[threading.Lock] = threading.Lock()
+    create_count: ClassVar[int] = 0
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         self._handle()
@@ -73,14 +75,24 @@ class FixtureHandler(BaseHTTPRequestHandler):
 
         path = parsed.path
         if self.command == "POST" and path == "/sandboxes":
-            self._json(HTTPStatus.CREATED, sandbox_response())
+            with self.capture_lock:
+                self.__class__.create_count += 1
+                sandbox_id = (
+                    SANDBOX_ID
+                    if self.create_count == 1
+                    else INTERPRETER_SANDBOX_ID
+                )
+            self._json(HTTPStatus.CREATED, sandbox_response(sandbox_id))
         elif self.command == "POST" and path == f"/sandboxes/{SANDBOX_ID}/connect":
-            self._json(HTTPStatus.OK, sandbox_response())
+            self._json(HTTPStatus.OK, sandbox_response(SANDBOX_ID))
         elif self.command == "GET" and path == "/v2/sandboxes":
             self._json(HTTPStatus.OK, [listed_sandbox()])
         elif self.command == "POST" and path == f"/sandboxes/{SANDBOX_ID}/timeout":
             self._empty(HTTPStatus.NO_CONTENT)
-        elif self.command == "DELETE" and path == f"/sandboxes/{SANDBOX_ID}":
+        elif self.command == "DELETE" and path in {
+            f"/sandboxes/{SANDBOX_ID}",
+            f"/sandboxes/{INTERPRETER_SANDBOX_ID}",
+        }:
             self._empty(HTTPStatus.NO_CONTENT)
         elif MISSING_SANDBOX_ID in path:
             self._json(

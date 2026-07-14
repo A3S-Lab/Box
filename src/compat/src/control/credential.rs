@@ -143,3 +143,8 @@ pub type TokenIssuerResult<T> = std::result::Result<T, TokenIssuerError>;
 pub trait TokenIssuer: Send + Sync {
     async fn issue(&self, scope: TokenScope) -> TokenIssuerResult<IssuedToken>;
 }
+
+#[async_trait]
+pub trait TokenResolver: Send + Sync {
+    async fn resolve(&self, stored: &StoredToken) -> TokenIssuerResult<SecretToken>;
+}

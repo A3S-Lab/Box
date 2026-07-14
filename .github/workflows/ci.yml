@@ -103,8 +103,13 @@ jobs:
         with:
           version: '0.11.8'
           enable-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Rust lifecycle fixture server
+        run: cd src && cargo build -p a3s-box-compat --bin a3s-box-e2b-fixture-server
       - name: Verify official client lifecycle requests
-        run: python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify
+        run: >-
+          python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify
+          --rust-server-bin src/target/debug/a3s-box-e2b-fixture-server
 
   # ── Build check (compile only, no artifacts) ────────────────────
   build-check:

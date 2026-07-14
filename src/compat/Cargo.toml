@@ -11,6 +11,7 @@ description = "Protocol compatibility service and contract fixtures for A3S Box"
 a3s-box-core = { version = "3.0", path = "../core" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+axum = { workspace = true }
 chrono = { workspace = true }
 hex = { workspace = true }
 prost = { workspace = true }
@@ -21,10 +22,17 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+hyper = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 
 [[bin]]
 name = "a3s-box-e2b-contract"
 path = "src/main.rs"
+
+[[bin]]
+name = "a3s-box-e2b-fixture-server"
+path = "src/bin/a3s-box-e2b-fixture-server.rs"
