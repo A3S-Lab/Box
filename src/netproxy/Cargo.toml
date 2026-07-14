@@ -25,6 +25,22 @@ smoltcp = { version = "0.11", default-features = false, features = [
     "alloc",
 ] }
 
+[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
+# The implementation is shipped only on macOS, but its Unix datagram, packet,
+# and proxy state tests also run on Linux CI and production validation hosts.
+a3s-box-core = { version = "3.0", path = "../core" }
+libc = { workspace = true }
+tracing = { workspace = true }
+smoltcp = { version = "0.11", default-features = false, features = [
+    "medium-ethernet",
+    "proto-ipv4",
+    "socket-tcp",
+    "socket-udp",
+    "log",
+    "std",
+    "alloc",
+] }
+
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }

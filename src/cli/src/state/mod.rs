@@ -29,6 +29,9 @@ pub struct BoxRecord {
     pub name: String,
     /// OCI image reference
     pub image: String,
+    /// Requested execution isolation. Old records default to MicroVM.
+    #[serde(default)]
+    pub isolation: a3s_box_core::ExecutionIsolation,
     /// "created" | "running" | "stopped" | "dead"
     pub status: String,
     /// Shim process PID (set when running)

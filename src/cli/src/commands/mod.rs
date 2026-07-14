@@ -270,6 +270,16 @@ pub(crate) async fn tail_file_stream_positioned(
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+    // Foreground `run` supplies a position tracker so it can wait until the
+    // terminal has consumed the final console bytes. Poll that latency-sensitive
+    // path promptly; long-lived `logs -f` / `attach` tails retain the lower-rate
+    // idle polling cadence.
+    let eof_poll = if position.is_some() {
+        tokio::time::Duration::from_millis(20)
+    } else {
+        tokio::time::Duration::from_millis(200)
+    };
+
     // Wait for file to exist
     loop {
         if path.exists() {
@@ -301,7 +311,7 @@ pub(crate) async fn tail_file_stream_positioned(
                         }
                     }
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(eof_poll).await;
             }
             Ok(n) => {
                 pos += n as u64;
@@ -383,5 +393,60 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Monitor(args) => monitor::execute(args).await,
         Command::Pool(args) => pool::execute(args).await,
         Command::Shell(args) => shell::execute(args).await,
+    }
+}
+
+#[cfg(test)]
+mod isolation_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn run_accepts_explicit_sandbox_isolation() {
+        let cli =
+            Cli::try_parse_from(["a3s-box", "run", "--isolation", "sandbox", "alpine:latest"])
+                .unwrap();
+
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(args.common.isolation, Some(common::IsolationArg::Sandbox));
+    }
+
+    #[test]
+    fn run_omission_preserves_microvm_default() {
+        let cli = Cli::try_parse_from(["a3s-box", "run", "alpine:latest"]).unwrap();
+
+        let Command::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(
+            common::execution_isolation(&args.common),
+            a3s_box_core::ExecutionIsolation::Microvm
+        );
+    }
+
+    #[test]
+    fn cli_rejects_explicit_microvm_spelling() {
+        let error =
+            Cli::try_parse_from(["a3s-box", "run", "--isolation", "microvm", "alpine:latest"])
+                .err()
+                .expect("explicit microvm spelling must be rejected");
+
+        assert!(error.to_string().contains("invalid value 'microvm'"));
+    }
+
+    #[test]
+    fn compose_up_accepts_sandbox_isolation() {
+        let cli =
+            Cli::try_parse_from(["a3s-box", "compose", "up", "--isolation", "sandbox"]).unwrap();
+
+        let Command::Compose(args) = cli.command else {
+            panic!("expected compose command");
+        };
+        let compose::ComposeCommand::Up(args) = args.command else {
+            panic!("expected compose up command");
+        };
+        assert_eq!(args.isolation, Some(common::IsolationArg::Sandbox));
     }
 }

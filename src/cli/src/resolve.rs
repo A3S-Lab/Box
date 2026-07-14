@@ -83,6 +83,7 @@ mod tests {
             short_id,
             name: name.to_string(),
             image: "test:latest".to_string(),
+            isolation: Default::default(),
             status: "created".to_string(),
             pid: None,
             pid_start_time: None,

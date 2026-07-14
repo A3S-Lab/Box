@@ -11,6 +11,7 @@ pub mod env;
 pub mod error;
 pub mod event;
 pub mod exec;
+pub mod execution;
 pub mod fs_atomic;
 pub mod log;
 pub mod network;
@@ -31,13 +32,17 @@ pub mod workload;
 // Re-export commonly used types
 pub use audit::{AuditAction, AuditConfig, AuditEvent, AuditOutcome};
 pub use compose::ComposeConfig;
-pub use config::{BoxConfig, ResourceConfig, ResourceLimits};
+pub use config::{BoxConfig, ExecutionIsolation, ResourceConfig, ResourceLimits};
 pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
 pub use exec::{ExecChunk, ExecEvent, ExecExit, ExecMetrics, StreamType};
 pub use exec::{ExecOutput, ExecRequest};
 pub use exec::{FileOp, FileRequest, FileResponse};
 pub use exec::{EXEC_VSOCK_PORT, PORT_FWD_VSOCK_PORT};
+pub use execution::{
+    resolve_execution, validate_sandbox_compatibility, ExecutionBackend, IsolationClass,
+    ResolvedExecutionPlan,
+};
 pub use network::{IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode, NetworkPolicy};
 pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};
 pub use platform::{

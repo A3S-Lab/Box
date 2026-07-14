@@ -21,6 +21,36 @@
     }
 
     #[test]
+    fn old_state_defaults_to_microvm_and_sandbox_state_is_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_for(&dir);
+        let old_record = box_record("old-id", "old", "created");
+        let mut old_json = serde_json::to_value(old_record).unwrap();
+        old_json.as_object_mut().unwrap().remove("isolation");
+        let mut sandbox_record = box_record("sandbox-id", "sandbox", "created");
+        sandbox_record.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        std::fs::create_dir_all(&client.paths().home).unwrap();
+        std::fs::write(
+            &client.paths().boxes_file,
+            serde_json::to_vec_pretty(&serde_json::json!([
+                old_json,
+                serde_json::to_value(sandbox_record).unwrap()
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            client.get_box("old").unwrap().unwrap().isolation,
+            a3s_box_core::ExecutionIsolation::Microvm
+        );
+        assert_eq!(
+            client.get_box("sandbox").unwrap().unwrap().isolation,
+            a3s_box_core::ExecutionIsolation::Sandbox
+        );
+    }
+
+    #[test]
     fn collects_runtime_diagnostics_without_spawning_cli() {
         let dir = tempfile::tempdir().unwrap();
         let client = client_for(&dir);
@@ -359,4 +389,3 @@
         assert!(client.get_box_stats("api").unwrap().is_none());
         assert!(client.list_box_stats().unwrap().is_empty());
     }
-

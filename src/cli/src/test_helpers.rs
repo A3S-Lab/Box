@@ -15,6 +15,7 @@ pub mod fixtures {
             short_id,
             name: name.to_string(),
             image: "alpine:latest".to_string(),
+            isolation: Default::default(),
             status: status.to_string(),
             pid,
             pid_start_time: None,

@@ -26,6 +26,7 @@ pub mod oci;
 pub mod prom;
 pub mod resize;
 pub mod rootfs;
+pub mod sandbox;
 pub mod snapshot;
 mod store_io;
 #[cfg(unix)]

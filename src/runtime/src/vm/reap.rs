@@ -1,4 +1,4 @@
-//! Crash-recovery reaping of orphaned sandbox microVMs.
+//! Crash-recovery reaping of orphaned box runtimes.
 //!
 //! A clean shutdown destroys each VM via its in-memory handle (overlay
 //! unmount + box-dir removal). After a crash (`SIGKILL`, OOM, power loss) the
@@ -26,6 +26,15 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
     let box_dir = home_dir.join("boxes").join(box_id);
     if !box_dir.exists() {
         return;
+    }
+
+    match reap_orphaned_crun(home_dir, &box_dir, box_id) {
+        SandboxReap::NotPresent | SandboxReap::Cleaned => {}
+        SandboxReap::Failed => {
+            // A live shared-kernel process may still be using the rootfs. Never
+            // unmount or delete it after an unverified/failed runtime cleanup.
+            return;
+        }
     }
 
     let killed = kill_orphaned_shim(box_id);
@@ -67,6 +76,148 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
     if !killed.is_empty() {
         tracing::info!(box_id = %box_id, "Reaped orphaned sandbox microVM after CRI restart");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Deserialize)]
+struct SandboxRuntimeRecord {
+    schema: String,
+    container_id: String,
+    runtime_path: std::path::PathBuf,
+    runtime_root: std::path::PathBuf,
+    bundle_dir: std::path::PathBuf,
+    init_pid: u32,
+}
+
+#[cfg(target_os = "linux")]
+enum SandboxReap {
+    NotPresent,
+    Cleaned,
+    Failed,
+}
+
+/// Reconcile a durable `crun` record before touching its rootfs. All paths and
+/// the runtime artifact are revalidated; persisted PIDs are diagnostic only
+/// and are never signalled directly because PID reuse would make that unsafe.
+#[cfg(target_os = "linux")]
+fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxReap {
+    use std::process::Command;
+
+    let record_path = box_dir.join("sandbox/runtime.json");
+    let bytes = match std::fs::read(&record_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return SandboxReap::NotPresent;
+        }
+        Err(error) => {
+            tracing::error!(
+                box_id,
+                path = %record_path.display(),
+                %error,
+                "Failed to read Sandbox runtime record during crash recovery"
+            );
+            return SandboxReap::Failed;
+        }
+    };
+    let record: SandboxRuntimeRecord = match serde_json::from_slice(&bytes) {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::error!(
+                box_id,
+                path = %record_path.display(),
+                %error,
+                "Invalid Sandbox runtime record during crash recovery"
+            );
+            return SandboxReap::Failed;
+        }
+    };
+    let expected_runtime_root = home_dir.join("run/crun").join(box_id);
+    let expected_bundle = box_dir.join("sandbox/bundle");
+    if record.schema != "a3s.box.sandbox-runtime.v1"
+        || record.container_id != box_id
+        || record.runtime_root != expected_runtime_root
+        || record.bundle_dir != expected_bundle
+        || record.init_pid == 0
+    {
+        tracing::error!(
+            box_id,
+            "Sandbox runtime record failed path or identity validation"
+        );
+        return SandboxReap::Failed;
+    }
+
+    let capabilities = crate::sandbox::probe_sandbox_capabilities(Some(&record.runtime_path));
+    let Some(runtime) = capabilities.runtime else {
+        tracing::error!(
+            box_id,
+            failures = ?capabilities.failures,
+            "Cannot verify the recorded Sandbox runtime during crash recovery"
+        );
+        return SandboxReap::Failed;
+    };
+    let state = match crate::sandbox::handler::CrunHandler::query_state_at(
+        &runtime.path,
+        &record.runtime_root,
+        box_id,
+    ) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(box_id, %error, "Failed to query orphaned Sandbox state");
+            return SandboxReap::Failed;
+        }
+    };
+    if state.is_some_and(|state| state.status != "stopped") {
+        let output = Command::new(&runtime.path)
+            .arg("--root")
+            .arg(&record.runtime_root)
+            .arg("kill")
+            .arg(box_id)
+            .arg(libc::SIGKILL.to_string())
+            .env("LC_ALL", "C")
+            .output();
+        if let Err(error) = output {
+            tracing::error!(box_id, %error, "Failed to signal orphaned Sandbox");
+            return SandboxReap::Failed;
+        }
+    }
+
+    let output = Command::new(&runtime.path)
+        .arg("--root")
+        .arg(&record.runtime_root)
+        .arg("delete")
+        .arg("--force")
+        .arg(box_id)
+        .env("LC_ALL", "C")
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            match crate::sandbox::handler::CrunHandler::query_state_at(
+                &runtime.path,
+                &record.runtime_root,
+                box_id,
+            ) {
+                Ok(None) => {}
+                _ => {
+                    tracing::error!(
+                        box_id,
+                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                        "Failed to delete orphaned Sandbox runtime state"
+                    );
+                    return SandboxReap::Failed;
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(box_id, %error, "Failed to start Sandbox cleanup command");
+            return SandboxReap::Failed;
+        }
+    }
+
+    let _ = std::fs::remove_file(&record_path);
+    let _ = std::fs::remove_dir_all(&record.runtime_root);
+    tracing::info!(box_id, "Reaped orphaned crun Sandbox after runtime restart");
+    SandboxReap::Cleaned
 }
 
 /// Poll until every pid in `pids` has exited, or `timeout` elapses.

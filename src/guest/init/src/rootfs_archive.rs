@@ -51,12 +51,31 @@ pub fn persist_rootfs_metadata(root: &Path) -> Result<(), Box<dyn std::error::Er
 /// This must run before procfs, workspace, or user volumes are mounted.
 #[cfg(target_os = "linux")]
 pub fn restore_rootfs_metadata(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    restore_rootfs_metadata_excluding(root, &HashSet::new())
+}
+
+/// Replay rootfs metadata after an OCI runtime has installed procfs, tmpfs,
+/// and user bind mounts. Entries at or below a live nested mount are skipped so
+/// replay can never chmod/chown an attached host path.
+#[cfg(target_os = "linux")]
+pub fn restore_rootfs_metadata_around_mounts(
+    root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let excluded_mounts = nested_mount_points(root)?;
+    restore_rootfs_metadata_excluding(root, &excluded_mounts)
+}
+
+#[cfg(target_os = "linux")]
+fn restore_rootfs_metadata_excluding(
+    root: &Path,
+    excluded_mounts: &HashSet<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Runtime may update generated files such as resolv.conf after the image
     // rootfs cache is composed, so image replay validates type and symlink
     // identity but not regular-file size. The terminal snapshot was captured
     // after all container writes and remains strict.
-    apply_metadata_manifest(root, IMAGE_ROOTFS_METADATA_PATH, false)?;
-    apply_metadata_manifest(root, ROOTFS_METADATA_PATH, true)?;
+    apply_metadata_manifest(root, IMAGE_ROOTFS_METADATA_PATH, false, excluded_mounts)?;
+    apply_metadata_manifest(root, ROOTFS_METADATA_PATH, true, excluded_mounts)?;
     Ok(())
 }
 
@@ -65,8 +84,8 @@ fn apply_metadata_manifest(
     root: &Path,
     manifest_path: &str,
     strict_content: bool,
+    excluded_mounts: &HashSet<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::collections::HashSet;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -92,6 +111,13 @@ fn apply_metadata_manifest(
             || !unique.insert(relative.clone())
         {
             return Err("duplicate or reserved rootfs metadata path".into());
+        }
+        let unresolved_target = root.join(&relative);
+        if excluded_mounts
+            .iter()
+            .any(|mount| unresolved_target == *mount || unresolved_target.starts_with(mount))
+        {
+            continue;
         }
         let target = resolve_without_symlink_parent(root, &relative)?;
         let metadata = std::fs::symlink_metadata(&target)?;
@@ -177,7 +203,14 @@ fn apply_metadata_manifest(
                 })?;
         }
     }
-    std::fs::remove_file(source)?;
+    match std::fs::remove_file(source) {
+        Ok(()) => {}
+        // A host-prepared read-only OCI rootfs has already passed every type,
+        // ownership, mode, size, and symlink check above. Keeping the internal
+        // manifest is safe when the mount itself prevents its removal.
+        Err(error) if error.raw_os_error() == Some(libc::EROFS) => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 

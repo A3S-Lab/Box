@@ -34,10 +34,11 @@ coverage. Not yet wired: a typed pool API (`Request::SpawnMain`) beyond the CLI.
 The pool MVP (PR #18) runs a command in a warm VM via the **exec stream**, so its
 output comes back over the exec protocol, **not** the json-file `logs`. P2 gives a
 pooled sandbox **full `box` semantics** — the command becomes the VM's real
-**container main**, so its exit code flows through the normal `<box>/upper/.a3s_exit_code`
-path and its stdout/stderr land in `<box>/logs/container.json` exactly like a
-normal `box run`. The VM still skips cold boot (it was pre-warmed), but now behaves
-like a first-class box.
+**container main**, so its exit code flows through the writable rootfs's
+`.a3s_exit_code` file and its stdout/stderr land in `<box>/logs/container.json`
+exactly like a normal `box run`. The host resolves that file through the active
+overlay, copy, or APFS-backed rootfs layout. The VM still skips cold boot (it was
+pre-warmed), but now behaves like a first-class box.
 
 ## 2. Verdict & the two crux realizations
 
@@ -92,13 +93,13 @@ companion.
   spawn closes the fork/registration race) → `set_container_pid(pid)` **while still
   MANAGED** → drop the guard. The `is_managed` branch covers the pre-publish window;
   the `pid == container_pid` branch then reaps it, persists `/.a3s_exit_code`
-  (overlay upper), and `process::exit(code)` halts the VM. The handler replies
+  (in the active writable rootfs), and `process::exit(code)` halts the VM. The handler replies
   `spawn-main-ack` only **after** a successful spawn+publish (so a fork failure is
   reported, not lost).
 - **Pool integration (#18)** — add `Request::SpawnMain` to `pool.rs`; the daemon
   sends spawn-main instead of `vm.exec_command`, waits for VM exit (the existing
-  teardown owns lifecycle), and reads exit code from `<box>/upper/.a3s_exit_code`
-  and logs from `<box>/logs/container.json`. `Request::Run` stays for back-compat.
+  teardown owns lifecycle), and reads the provider-specific persisted exit code
+  plus logs from `<box>/logs/container.json`. `Request::Run` stays for back-compat.
 
 ## 4. Risk-ranked blockers (with mitigations)
 

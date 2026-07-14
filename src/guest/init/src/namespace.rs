@@ -222,7 +222,9 @@ fn child_process(
 ) -> Result<(), NamespaceError> {
     // Create new namespaces
     let flags = config.to_clone_flags();
-    unshare(flags).map_err(NamespaceError::UnshareFailed)?;
+    if !flags.is_empty() {
+        unshare(flags).map_err(NamespaceError::UnshareFailed)?;
+    }
 
     tracing::debug!("Namespaces created: {:?}", config);
 
@@ -446,6 +448,15 @@ fn apply_security_before_exec(
     } else {
         config.cap_drop.clone()
     };
+    let cap_keep =
+        if !privileged && std::env::var("A3S_BOOTSTRAP_MODE").as_deref() == Ok("host-sandbox") {
+            Some(sandbox_workload_capability_keep(
+                &config.cap_add,
+                &config.cap_drop,
+            ))
+        } else {
+            None
+        };
 
     // Build the seccomp BPF filter BEFORE fork. Building allocates, which is
     // not async-signal-safe in the post-fork child (malloc may deadlock on
@@ -485,7 +496,9 @@ fn apply_security_before_exec(
             }
 
             // 3. Drop capabilities (while still root, before the uid switch).
-            if should_drop_caps(&cap_drop) {
+            if let Some(cap_keep) = &cap_keep {
+                restrict_capabilities_to_keep(cap_keep)?;
+            } else if should_drop_caps(&cap_drop) {
                 drop_capabilities(&cap_drop)?;
             }
 
@@ -524,6 +537,55 @@ fn apply_security_before_exec(
     }
 
     Ok(())
+}
+
+/// Resolve the exact workload capability set used by HostSandbox main, exec,
+/// and PTY processes. Bootstrap-only capabilities such as `NET_ADMIN` are not
+/// inherited by user code.
+pub(crate) fn sandbox_workload_capability_keep_from_env() -> Vec<String> {
+    let config = a3s_box_core::security::SecurityConfig::from_env_vars();
+    sandbox_workload_capability_keep(&config.cap_add, &config.cap_drop)
+}
+
+fn sandbox_workload_capability_keep(cap_add: &[String], cap_drop: &[String]) -> Vec<String> {
+    let mut capabilities: std::collections::BTreeSet<String> = [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "FSETID",
+        "KILL",
+        "NET_BIND_SERVICE",
+        "SETGID",
+        "SETPCAP",
+        "SETUID",
+        "SYS_CHROOT",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect();
+
+    for capability in cap_add {
+        capabilities.insert(normalize_capability_name(capability));
+    }
+    if cap_drop
+        .iter()
+        .any(|capability| normalize_capability_name(capability) == "ALL")
+    {
+        capabilities.clear();
+    } else {
+        for capability in cap_drop {
+            capabilities.remove(&normalize_capability_name(capability));
+        }
+    }
+    capabilities.into_iter().collect()
+}
+
+fn normalize_capability_name(value: &str) -> String {
+    let normalized = value.trim().to_ascii_uppercase();
+    normalized
+        .strip_prefix("CAP_")
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 /// Check if we should drop capabilities.
@@ -1243,6 +1305,25 @@ mod tests {
     fn test_should_drop_caps_nonempty() {
         assert!(should_drop_caps(&["ALL".to_string()]));
         assert!(should_drop_caps(&["NET_RAW".to_string()]));
+    }
+
+    #[test]
+    fn sandbox_workload_capabilities_exclude_bootstrap_only_caps() {
+        let keep = sandbox_workload_capability_keep(&[], &[]);
+        assert!(keep.iter().any(|capability| capability == "CHOWN"));
+        assert!(!keep.iter().any(|capability| capability == "NET_ADMIN"));
+        assert!(!keep.iter().any(|capability| capability == "NET_RAW"));
+    }
+
+    #[test]
+    fn sandbox_workload_capabilities_apply_add_and_drop_exactly() {
+        let keep = sandbox_workload_capability_keep(
+            &["cap_mknod".to_string()],
+            &["CAP_CHOWN".to_string()],
+        );
+        assert!(keep.iter().any(|capability| capability == "MKNOD"));
+        assert!(!keep.iter().any(|capability| capability == "CHOWN"));
+        assert!(sandbox_workload_capability_keep(&[], &["ALL".to_string()]).is_empty());
     }
 
     // --- BPF filter tests ---

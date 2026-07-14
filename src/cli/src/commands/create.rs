@@ -53,6 +53,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
             .as_ref()
             .and_then(|config| config.stop_signal.as_deref()),
     );
+    let isolation = common::execution_isolation(&args.common);
     let name = args.common.name.unwrap_or_else(generate_name);
 
     // Parse --shm-size
@@ -110,6 +111,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         short_id: short_id.clone(),
         name: name.clone(),
         image: args.common.image.clone(),
+        isolation,
         status: "created".to_string(),
         pid: None,
         pid_start_time: None,

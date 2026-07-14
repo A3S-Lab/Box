@@ -481,6 +481,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         tee,
     )
     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    a3s_box_core::resolve_execution(&config)?;
 
     let emitter = EventEmitter::new(256);
     let mut vm = VmManager::new(config, emitter);
@@ -567,6 +568,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         short_id: BoxRecord::make_short_id(&box_id),
         name: name.clone(),
         image: args.common.image.clone(),
+        isolation: common::execution_isolation(&args.common),
         status: "running".to_string(),
         pid,
         pid_start_time: pid.and_then(crate::process::pid_start_time),
@@ -733,6 +735,7 @@ fn build_box_config(
     };
 
     Ok(BoxConfig {
+        isolation: common::execution_isolation(&args.common),
         image: args.common.image.clone(),
         resources: ResourceConfig {
             vcpus: args.common.cpus,
@@ -948,8 +951,10 @@ const FOREGROUND_SIGTERM: i32 = libc::SIGTERM;
 const FOREGROUND_SIGTERM: i32 = 15;
 
 const FOREGROUND_LOG_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const FOREGROUND_LOG_DRAIN_QUIET: std::time::Duration = std::time::Duration::from_millis(300);
-const FOREGROUND_LOG_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const FOREGROUND_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+const FOREGROUND_HEALTH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+const FOREGROUND_LOG_DRAIN_QUIET: std::time::Duration = std::time::Duration::from_millis(50);
+const FOREGROUND_LOG_DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
 impl ForegroundStopReason {
     fn stopped_by_user(self) -> bool {
@@ -1011,6 +1016,17 @@ async fn run_foreground(
     let timeout_at = args
         .timeout
         .map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
+    // Process exit is latency-sensitive for short foreground commands, while a
+    // VM health check is comparatively expensive and only needs the existing
+    // 500 ms cadence. Keeping independent timers avoids adding a fixed half
+    // second to every no-op without polling health more aggressively.
+    let mut exit_poll = tokio::time::interval(FOREGROUND_EXIT_POLL);
+    exit_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut health_poll = tokio::time::interval_at(
+        tokio::time::Instant::now() + FOREGROUND_HEALTH_POLL,
+        FOREGROUND_HEALTH_POLL,
+    );
+    health_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let stop_reason = loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -1025,13 +1041,20 @@ async fn run_foreground(
                 println!("\nStopping box {} after --timeout expired...", name);
                 break ForegroundStopReason::TimedOut;
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+            _ = exit_poll.tick() => {
                 if ctx.vm.try_wait_exit().await?.is_some() {
                     break ForegroundStopReason::ProcessExited;
                 }
                 if ctx.vm.has_exited().await {
+                    // The shim can exit between the reap attempt above and the
+                    // liveness check. Reap once more after observing exit; the
+                    // provider-specific persisted guest status is refreshed
+                    // after the final log drain below.
+                    let _ = ctx.vm.try_wait_exit().await?;
                     break ForegroundStopReason::ProcessExited;
                 }
+            }
+            _ = health_poll.tick() => {
                 if !ctx.vm.health_check().await.unwrap_or(false) {
                     break ForegroundStopReason::VmUnhealthy;
                 }
@@ -1042,6 +1065,14 @@ async fn run_foreground(
     wait_for_foreground_log_drain(&[(&console_log, &stdout_pos), (&console_err, &stderr_pos)])
         .await;
     log_handle.abort();
+
+    if stop_reason == ForegroundStopReason::ProcessExited {
+        // guest-init syncs the authoritative container exit code into the
+        // writable rootfs before halt. Refresh after draining the final console
+        // bytes so a fast shim exit cannot leave the foreground CLI with its
+        // process-level fallback status.
+        let _ = ctx.vm.try_wait_exit().await?;
+    }
 
     let exit_code = foreground_exit_code(stop_reason, ctx.vm.exit_code());
     archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
@@ -1447,6 +1478,7 @@ mod tests {
         RunArgs {
             common: common::CommonBoxArgs {
                 image: "test".to_string(),
+                isolation: None,
                 name: None,
                 cpus: 2,
                 memory: "512m".to_string(),
@@ -2206,6 +2238,14 @@ mod tests {
         assert!(!ForegroundStopReason::ProcessExited.stopped_by_user());
         assert!(!ForegroundStopReason::VmUnhealthy.stopped_by_user());
         assert!(!ForegroundStopReason::TimedOut.stopped_by_user());
+    }
+
+    #[test]
+    fn test_foreground_poll_cadence_avoids_fixed_startup_delay() {
+        assert!(FOREGROUND_EXIT_POLL <= std::time::Duration::from_millis(20));
+        assert!(FOREGROUND_EXIT_POLL < FOREGROUND_HEALTH_POLL);
+        assert!(FOREGROUND_LOG_DRAIN_QUIET <= std::time::Duration::from_millis(50));
+        assert!(FOREGROUND_LOG_DRAIN_POLL < FOREGROUND_LOG_DRAIN_QUIET);
     }
 
     #[test]
