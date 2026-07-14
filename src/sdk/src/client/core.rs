@@ -706,6 +706,7 @@ impl A3sBoxClient {
             name: box_name,
             image: metadata.image.clone(),
             isolation: Default::default(),
+            managed_execution: None,
             status: "created".to_string(),
             pid: None,
             pid_start_time: None,

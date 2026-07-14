@@ -112,6 +112,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         name: name.clone(),
         image: args.common.image.clone(),
         isolation,
+        managed_execution: None,
         status: "created".to_string(),
         pid: None,
         pid_start_time: None,

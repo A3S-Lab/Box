@@ -750,6 +750,10 @@ facade. The runtime now also owns strict and recovery-compatible reads, the
 cross-process advisory lock, durable atomic writes, and synchronous
 read-modify-write transactions. The Rust SDK uses that store directly; the CLI
 keeps only its process reconciliation and resource-cleanup policy wrapper.
+Managed records also have an optional typed recovery envelope containing the
+operation ID, runtime generation, full creation request, and resolved execution
+plan. Legacy CLI records omit it, while the runtime manager will persist it
+before launch to make create retries and restart reconciliation deterministic.
 Slice 4 remains incomplete until the real `ExecutionManager` owns
 create/start/run for both callers.
 

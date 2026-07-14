@@ -569,6 +569,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         name: name.clone(),
         image: args.common.image.clone(),
         isolation: common::execution_isolation(&args.common),
+        managed_execution: None,
         status: "running".to_string(),
         pid,
         pid_start_time: pid.and_then(crate::process::pid_start_time),
