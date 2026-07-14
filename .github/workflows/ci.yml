@@ -71,10 +71,25 @@ jobs:
           workspaces: src
       - run: cd src && cargo test --workspace --lib
 
+  # ── Pinned E2B protocol and SDK surface drift gate ────────────
+  e2b-contract:
+    name: E2B Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+      - name: Verify pinned contracts and SDK exports
+        run: cd src && cargo run -p a3s-box-compat --bin a3s-box-e2b-contract -- verify
+
   # ── Build check (compile only, no artifacts) ────────────────────
   build-check:
     name: Build Check (${{ matrix.target }})
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, e2b-contract]
     strategy:
       matrix:
         include:
@@ -120,7 +135,7 @@ jobs:
   # ── Windows native WHPX build check ────────────────────────────
   build-windows:
     name: Build Windows WHPX
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, e2b-contract]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -162,7 +177,7 @@ jobs:
   # Until both are done this job is SKIPPED (inert) and never blocks a PR.
   integration-kvm:
     name: Integration (real microVM, KVM)
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, e2b-contract]
     if: vars.KVM_CI == 'true'
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 75

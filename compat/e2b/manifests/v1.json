@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "compatibility_id": "e2b-2026-07-14",
+  "status": "contract-fixture",
+  "full_compatibility": false,
+  "e2b_git_commit": "423a1b73025ce871d9b9bfe338396c6b316be845",
+  "code_interpreter_git_commit": "5aeca43fe3fae2df260b1fb17c71fed5b5dac852",
+  "python_e2b_version": "2.32.0",
+  "typescript_e2b_version": "2.33.0",
+  "python_code_interpreter_version": "2.8.1",
+  "typescript_code_interpreter_version": "2.6.1",
+  "control_openapi_digest": "sha256:cea884caee4391153e2056fb1fe9acf691e4887cd990c3a0419a639a8e8a0aac",
+  "envd_openapi_digest": "sha256:0e0b41036eb8a99de8e37d16d30b9fbad2fb32024bfb500d4b6681d253240caf",
+  "volume_content_openapi_digest": "sha256:73e7829e9e5c06acd878d0929d20622e217d22f900a79c3d024b5f834d892933",
+  "process_descriptor_digest": "sha256:95d48ccdafd24a7bb80b9129ce71558f6c4863368fddf6f484ca5e856a26990d",
+  "filesystem_descriptor_digest": "sha256:d32a8691bbca78d6059468c35468121ff204968384ebe3d87fafc205626023d4",
+  "mcp_schema_digest": "sha256:82457dc19eb9c7ae29ed66034ac9d763e92f5fa48f9398910d0e1dbf8b06e70e",
+  "contract_inventory_digest": "sha256:0e7d4fb24ef4cf2508400533c58ee02c10ea5dfbe53439b7b61d49045de2e173",
+  "public_export_inventory_digest": "sha256:82eb129a6f9d888b7d0eda2aa0d767d258974d0f07f68d122acee45d2fdb1e2b",
+  "a3s_compat_version": "0.1.0-preview.1"
+}

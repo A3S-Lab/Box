@@ -1,0 +1,23 @@
+[package]
+name = "a3s-box-compat"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Protocol compatibility service and contract fixtures for A3S Box"
+
+[dependencies]
+anyhow = { workspace = true }
+hex = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+
+[[bin]]
+name = "a3s-box-e2b-contract"
+path = "src/main.rs"

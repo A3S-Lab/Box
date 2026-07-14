@@ -1,6 +1,10 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Proposed**
+Status: **Phase 1 in progress**
+
+Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
+The pinned contract manifest intentionally reports `full_compatibility=false`;
+the release-level compatibility claim remains gated by every phase below.
 
 Scope: protocol compatibility, Python and TypeScript SDKs, and the service
 boundary required to provide a remote code-execution environment on A3S Box.

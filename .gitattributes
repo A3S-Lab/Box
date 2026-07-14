@@ -1,1 +1,2 @@
 *.patch -whitespace
+compat/e2b/spec/** -whitespace

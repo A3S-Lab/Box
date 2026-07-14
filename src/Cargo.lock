@@ -35,6 +35,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "a3s-box-compat"
+version = "3.0.9"
+dependencies = [
+ "anyhow",
+ "hex",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "a3s-box-core"
 version = "3.0.9"
 dependencies = [

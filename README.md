@@ -300,6 +300,21 @@ base.dispose();
 
 The former MicroVM workload-execution SDK (`ExecutionRegistry`/`VmExecutor`, for embedding Box into higher-level runtimes such as a3s-lambda) is now the **`a3s-box-lambda`** crate.
 
+### E2B protocol and Python/TypeScript SDK compatibility
+
+E2B compatibility is under active development and is not yet a released
+compatibility claim. The first implementation gate pins the official control,
+envd, volume-content, Process, Filesystem, MCP, Python, TypeScript, and Code
+Interpreter contracts under [`compat/e2b/`](compat/e2b/README.md). CI regenerates
+their endpoint, field, error, descriptor, and public-export inventories and
+rejects unreviewed protocol drift.
+
+The server, native Python/TypeScript packages, and unchanged-official-client
+black-box suites follow the phased design in
+[`docs/e2b-compatible-sdk-design.md`](docs/e2b-compatible-sdk-design.md). Until
+that complete matrix passes, generated manifests explicitly report
+`full_compatibility=false`.
+
 ## Warm pool and snapshot-fork
 
 A **warm pool** keeps a set of sandboxes pre-booted and serves them over a Unix
@@ -687,6 +702,7 @@ Crates:
 | Crate | Purpose |
 | --- | --- |
 | `core` | Shared config, errors, events, port/network/volume/PTY/DNS/workload types |
+| `compat` | Pinned external protocol inventories and compatibility service |
 | `runtime` | VM lifecycle, image store, rootfs preparation, Compose, networking, TEE clients |
 | `cli` | `a3s-box` command line |
 | `shim` | libkrun bridge subprocess |
@@ -702,6 +718,7 @@ Run checks from `crates/box/src`, not the monorepo root.
 ```bash
 cd crates/box/src
 cargo fmt --all
+cargo run -p a3s-box-compat --bin a3s-box-e2b-contract -- verify
 cargo test -p a3s-box-runtime --lib --quiet
 cargo test -p a3s-box-cli --test command_coverage --quiet
 cargo test -p a3s-box-cli --test host_smoke --quiet
