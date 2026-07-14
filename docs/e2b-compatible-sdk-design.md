@@ -1,6 +1,6 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 complete; Phase 2 architecture selected**
+Status: **Phase 1 complete; Phase 2 in progress (slices 1 and 2 complete)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -726,9 +726,10 @@ Phase 2 is delivered as small, immediately merged changes:
 1. **Complete:** add lifecycle domain types, transition tests, repository and
    execution interfaces, and deterministic clock/token fakes. No network
    listener.
-2. Add the HTTP lifecycle router and run the checked-in official Python sync,
-   Python async, and TypeScript fixtures against the Rust service with a fake
-   execution manager.
+2. **Complete:** add the owner-scoped HTTP lifecycle router and run the
+   checked-in official Python sync, Python async, TypeScript, and Code
+   Interpreter fixtures against the Rust service with a fake execution
+   manager.
 3. Add SQLite migrations, compare-and-swap repository operations, expiry
    reaping, restart reconciliation, and corruption/restart tests.
 4. Extract canonical A3S state and the runtime `ExecutionManager`; switch CLI
@@ -743,6 +744,13 @@ Each slice must pass its focused tests and repository CI before merge. The
 Phase 2 gate remains closed until slice 5 proves real create/connect/list/
 timeout/kill behavior; passing the fake adapter in slice 2 is protocol evidence
 only.
+
+Slice 2 evidence includes exact recorder drift checks plus live requests from
+the pinned, unmodified clients to the Rust router. The live gate was also run
+on an A3S OS host before merge. It covers authentication, owner isolation,
+create, connect, get, list filtering, timeout replacement, kill, not-found
+mapping, and Code Interpreter creation. It does not change the manifest's
+`full_compatibility=false` value.
 
 ## Delivery phases and gates
 

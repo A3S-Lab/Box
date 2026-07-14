@@ -309,6 +309,13 @@ Interpreter contracts under [`compat/e2b/`](compat/e2b/README.md). CI regenerate
 their endpoint, field, error, descriptor, and public-export inventories and
 rejects unreviewed protocol drift.
 
+The Phase 2 preview now includes an owner-scoped Rust lifecycle router for
+create, connect, get, list, timeout, and kill. CI runs the pinned official
+Python sync/async, TypeScript, and Code Interpreter clients against that router
+through an in-memory repository and fake execution manager. This is protocol
+evidence only; durable persistence and real `--isolation sandbox` execution
+remain later Phase 2 gates.
+
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in
 [`docs/e2b-compatible-sdk-design.md`](docs/e2b-compatible-sdk-design.md). Until
