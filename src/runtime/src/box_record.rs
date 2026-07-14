@@ -34,6 +34,10 @@ pub struct BoxRecord {
     #[serde(default)]
     pub managed_execution: Option<ManagedExecutionMetadata>,
     /// Persisted lifecycle state.
+    ///
+    /// Legacy records use `created`, `running`, `paused`, `stopped`, and
+    /// `dead`. Managed executions additionally use the durable transition
+    /// states defined by [`ManagedExecutionState`].
     pub status: String,
     /// Shim process PID while the execution is active.
     pub pid: Option<u32>,
@@ -190,7 +194,24 @@ impl BoxRecord {
 
     /// Whether the persisted lifecycle state represents an active execution.
     pub fn is_active(&self) -> bool {
+        if self.managed_execution.is_some() {
+            return self
+                .managed_state()
+                .is_ok_and(|state| state.is_some_and(ManagedExecutionState::keeps_resources));
+        }
         matches!(self.status.as_str(), "running" | "paused")
+    }
+
+    /// Parse the lifecycle state of a managed execution.
+    ///
+    /// Legacy records return `None`. Unknown managed states fail closed so a
+    /// runtime service cannot operate on a record written by incompatible
+    /// code.
+    pub fn managed_state(&self) -> a3s_box_core::Result<Option<ManagedExecutionState>> {
+        if self.managed_execution.is_none() {
+            return Ok(None);
+        }
+        ManagedExecutionState::from_status(&self.status).map(Some)
     }
 
     /// Render a concise lifecycle status with health, exit, and restart annotations.
@@ -212,6 +233,74 @@ impl BoxRecord {
         } else {
             format!("{} ({})", self.status, annotations.join(", "))
         }
+    }
+}
+
+/// Durable lifecycle state for an execution owned by `ExecutionManager`.
+///
+/// Transitional states are persisted before backend side effects. This lets
+/// a restarted manager distinguish work that was never claimed from work that
+/// may already have reached the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedExecutionState {
+    Creating,
+    Running,
+    Pausing,
+    Paused,
+    Resuming,
+    Killing,
+    Stopped,
+    Failed,
+}
+
+impl ManagedExecutionState {
+    /// Canonical value written to [`BoxRecord::status`].
+    pub const fn as_status(self) -> &'static str {
+        match self {
+            Self::Creating => "creating",
+            Self::Running => "running",
+            Self::Pausing => "pausing",
+            Self::Paused => "paused",
+            Self::Resuming => "resuming",
+            Self::Killing => "killing",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Parse a persisted managed lifecycle state.
+    pub fn from_status(status: &str) -> a3s_box_core::Result<Self> {
+        match status {
+            // Accept the legacy pre-start and terminal spellings so records
+            // created during the state-schema migration remain recoverable.
+            "created" | "creating" => Ok(Self::Creating),
+            "running" => Ok(Self::Running),
+            "pausing" => Ok(Self::Pausing),
+            "paused" => Ok(Self::Paused),
+            "resuming" => Ok(Self::Resuming),
+            "killing" => Ok(Self::Killing),
+            "stopped" => Ok(Self::Stopped),
+            "dead" | "failed" => Ok(Self::Failed),
+            other => Err(a3s_box_core::BoxError::StateError(format!(
+                "unknown managed execution state: {other}"
+            ))),
+        }
+    }
+
+    /// Whether host resources may still belong to this execution.
+    pub const fn keeps_resources(self) -> bool {
+        !matches!(self, Self::Stopped | Self::Failed)
+    }
+
+    /// Whether no further lifecycle operation can revive this execution.
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Stopped | Self::Failed)
+    }
+}
+
+impl std::fmt::Display for ManagedExecutionState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_status())
     }
 }
 
@@ -373,6 +462,11 @@ mod tests {
 
         let record: BoxRecord = serde_json::from_value(value).unwrap();
         let encoded = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            record.managed_state().unwrap(),
+            Some(ManagedExecutionState::Creating)
+        );
+        assert!(record.is_active());
         let managed = record.managed_execution.unwrap();
 
         assert_eq!(managed.operation_id.as_str(), "create-op-1");

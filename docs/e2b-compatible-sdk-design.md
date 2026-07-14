@@ -754,6 +754,12 @@ Managed records also have an optional typed recovery envelope containing the
 operation ID, runtime generation, full creation request, and resolved execution
 plan. Legacy CLI records omit it, while the runtime manager will persist it
 before launch to make create retries and restart reconciliation deterministic.
+The runtime now also owns a strict managed-execution store. It atomically
+reserves creation operations, returns an existing record only when the full
+creation intent matches, persists transitional lifecycle claims, rejects stale
+state or generation comparisons, and advances the generation exactly once when
+pause or resume completes. These file transactions are the local lifecycle
+source of truth; backend calls remain outside the state lock.
 Slice 4 remains incomplete until the real `ExecutionManager` owns
 create/start/run for both callers.
 
