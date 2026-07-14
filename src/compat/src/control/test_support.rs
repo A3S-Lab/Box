@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
     ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionState, ExecutionStatus, KillOutcome, NetworkMode, OperationId,
-    ReconcileOutcome, ResourceConfig,
+    ExecutionManagerResult, ExecutionReservation, ExecutionState, ExecutionStatus, KillOutcome,
+    NetworkMode, OperationId, ReconcileOutcome, ResourceConfig,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
@@ -180,17 +180,40 @@ impl RecordingExecutionManager {
     pub fn fail_create(&self) {
         self.fail_create.store(true, Ordering::Relaxed);
     }
+
+    fn reservation(execution: &TestExecution) -> ExecutionReservation {
+        ExecutionReservation {
+            execution_id: execution.lease.execution_id.clone(),
+            generation: execution.lease.generation,
+            plan: execution.lease.plan.clone(),
+            resources: execution.lease.resources.clone(),
+            created_at: execution.lease.started_at,
+        }
+    }
 }
 
 #[async_trait]
 impl ExecutionManager for RecordingExecutionManager {
-    async fn create_and_start(
+    async fn create(
         &self,
         request: CreateExecutionRequest,
         operation_id: &OperationId,
-    ) -> ExecutionManagerResult<ExecutionLease> {
+    ) -> ExecutionManagerResult<ExecutionReservation> {
         if self.fail_create.load(Ordering::Relaxed) {
             return Err(ExecutionManagerError::Unavailable("test failure".into()));
+        }
+        if let Some(execution_id) = self
+            .operations
+            .lock()
+            .unwrap()
+            .get(operation_id.as_str())
+            .cloned()
+        {
+            let executions = self.executions.lock().unwrap();
+            let execution = executions.get(&execution_id).ok_or_else(|| {
+                ExecutionManagerError::Internal("missing test execution".to_string())
+            })?;
+            return Ok(Self::reservation(execution));
         }
         self.requests.lock().unwrap().push(request.clone());
         let plan = resolve_execution(&request.config)
@@ -211,10 +234,44 @@ impl ExecutionManager for RecordingExecutionManager {
             execution_id.to_string(),
             TestExecution {
                 lease: lease.clone(),
-                state: ExecutionState::Running,
+                state: ExecutionState::Created,
             },
         );
-        Ok(lease)
+        Ok(ExecutionReservation {
+            execution_id,
+            generation: lease.generation,
+            plan: lease.plan,
+            resources: lease.resources,
+            created_at: lease.started_at,
+        })
+    }
+
+    async fn start(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let mut executions = self.executions.lock().unwrap();
+        let execution = executions
+            .get_mut(execution_id.as_str())
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        if execution.lease.generation != generation {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "stale test start".to_string(),
+            });
+        }
+        match execution.state {
+            ExecutionState::Created => execution.state = ExecutionState::Running,
+            ExecutionState::Running => {}
+            state => {
+                return Err(ExecutionManagerError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!("cannot start test execution in state {state:?}"),
+                });
+            }
+        }
+        Ok(execution.lease.clone())
     }
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus> {
@@ -318,6 +375,7 @@ impl ExecutionManager for RecordingExecutionManager {
             .get(&execution_id)
             .ok_or_else(|| ExecutionManagerError::Internal("missing test execution".to_string()))?;
         Ok(match execution.state {
+            ExecutionState::Created => ReconcileOutcome::Created(Self::reservation(execution)),
             ExecutionState::Creating => ReconcileOutcome::Creating,
             ExecutionState::Running | ExecutionState::Paused => {
                 ReconcileOutcome::Ready(execution.lease.clone())

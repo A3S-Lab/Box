@@ -222,7 +222,7 @@ async fn reserve_starting(
     manager
         .transition(
             &record,
-            ManagedExecutionState::Creating,
+            ManagedExecutionState::Created,
             ManagedExecutionState::Starting,
             RuntimeUpdate::None,
         )
@@ -260,6 +260,121 @@ async fn create_persists_trusted_identity_and_returns_running_lease() {
         .starts_with(directory.path().join("home/boxes")));
     assert_eq!(record.pid, Some(4242));
     assert_eq!(record.anonymous_volumes, vec!["anonymous-1"]);
+}
+
+#[tokio::test]
+async fn create_reserves_without_start_and_start_is_generation_fenced() {
+    let (_directory, manager, backend) = harness();
+    let operation_id = operation("operation-1");
+    let create_request = request("sandbox-1");
+
+    let reservation = manager
+        .create(create_request.clone(), &operation_id)
+        .await
+        .unwrap();
+    let retry = manager.create(create_request, &operation_id).await.unwrap();
+    let status = manager.inspect(&reservation.execution_id).await.unwrap();
+    let record = persisted(&manager, &reservation.execution_id);
+
+    assert_eq!(retry.execution_id, reservation.execution_id);
+    assert_eq!(status.state, ExecutionState::Created);
+    assert_eq!(record.status, "created");
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Created)
+    );
+    assert!(!record.is_active());
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+
+    let stale = manager
+        .start(
+            &reservation.execution_id,
+            ExecutionGeneration::new(2).unwrap(),
+        )
+        .await;
+    assert!(matches!(stale, Err(ExecutionManagerError::Conflict { .. })));
+
+    let lease = manager
+        .start(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap();
+    let repeated = manager
+        .start(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap();
+
+    assert_eq!(lease.execution_id, reservation.execution_id);
+    assert_eq!(repeated.execution_id, reservation.execution_id);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        manager
+            .inspect(&reservation.execution_id)
+            .await
+            .unwrap()
+            .state,
+        ExecutionState::Running
+    );
+}
+
+#[tokio::test]
+async fn reconciliation_reports_created_reservation_without_starting_it() {
+    let (_directory, manager, backend) = harness();
+    let operation_id = operation("operation-1");
+    let reservation = manager
+        .create(request("sandbox-1"), &operation_id)
+        .await
+        .unwrap();
+
+    let outcome = manager.reconcile(&operation_id).await.unwrap();
+
+    let ReconcileOutcome::Created(recovered) = outcome else {
+        panic!("expected created reconciliation");
+    };
+    assert_eq!(recovered.execution_id, reservation.execution_id);
+    assert_eq!(recovered.generation, reservation.generation);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn legacy_creating_reservation_remains_recoverable_after_upgrade() {
+    let (_directory, manager, backend) = harness();
+    let operation_id = operation("operation-1");
+    let reservation = manager
+        .create(request("sandbox-1"), &operation_id)
+        .await
+        .unwrap();
+    let created = persisted(&manager, &reservation.execution_id);
+    let starting = manager
+        .transition(
+            &created,
+            ManagedExecutionState::Created,
+            ManagedExecutionState::Starting,
+            RuntimeUpdate::None,
+        )
+        .await
+        .unwrap();
+    manager
+        .transition(
+            &starting,
+            ManagedExecutionState::Starting,
+            ManagedExecutionState::Creating,
+            RuntimeUpdate::None,
+        )
+        .await
+        .unwrap();
+
+    let outcome = manager.reconcile(&operation_id).await.unwrap();
+    let ReconcileOutcome::Created(recovered) = outcome else {
+        panic!("expected legacy creating reservation to reconcile as created");
+    };
+    assert_eq!(recovered.execution_id, reservation.execution_id);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+
+    manager
+        .start(&recovered.execution_id, recovered.generation)
+        .await
+        .unwrap();
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

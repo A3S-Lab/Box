@@ -19,8 +19,8 @@ pub use credential::CredentialProvider;
 pub use event::EventBus;
 pub use execution::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
-    ExecutionManagerError, ExecutionManagerResult, ExecutionState, ExecutionStatus, KillOutcome,
-    OperationId, ReconcileOutcome,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionState,
+    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome,
 };
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};

@@ -6,8 +6,8 @@ use std::path::Path;
 use a3s_box_core::log::LogConfig;
 use a3s_box_core::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease,
-    ExecutionManagerError, ExecutionManagerResult, ExecutionState, ExecutionStatus, NetworkMode,
-    OperationId,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionState,
+    ExecutionStatus, NetworkMode, OperationId,
 };
 use chrono::{DateTime, Utc};
 
@@ -45,7 +45,7 @@ pub(crate) fn build_managed_record(
         image: config.image.clone(),
         isolation: config.isolation,
         managed_execution: Some(metadata),
-        status: ManagedExecutionState::Creating.as_status().to_string(),
+        status: ManagedExecutionState::Created.as_status().to_string(),
         pid: None,
         pid_start_time: None,
         cpus: config.resources.vcpus,
@@ -117,6 +117,20 @@ pub(crate) fn clear_live_runtime(record: &mut BoxRecord, exit_code: Option<i32>)
     record.exit_code = exit_code;
     record.health_status = "none".to_string();
     record.health_retries = 0;
+}
+
+pub(crate) fn reservation_from_record(
+    record: &BoxRecord,
+) -> ExecutionManagerResult<ExecutionReservation> {
+    let execution_id = execution_id(record)?;
+    let metadata = metadata(record, &execution_id)?;
+    Ok(ExecutionReservation {
+        execution_id,
+        generation: metadata.generation,
+        plan: metadata.plan.clone(),
+        resources: metadata.request.config.resources.clone(),
+        created_at: record.created_at,
+    })
 }
 
 pub(crate) fn lease_from_record(record: &BoxRecord) -> ExecutionManagerResult<ExecutionLease> {

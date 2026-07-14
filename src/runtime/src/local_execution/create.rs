@@ -11,7 +11,9 @@ impl LocalExecutionManager {
         record: BoxRecord,
     ) -> ExecutionManagerResult<ExecutionLease> {
         match managed_state(&record)? {
-            ManagedExecutionState::Creating => self.claim_and_start(record).await,
+            state @ (ManagedExecutionState::Creating | ManagedExecutionState::Created) => {
+                self.claim_and_start(record, state).await
+            }
             ManagedExecutionState::Starting => {
                 let execution_id = execution_id(&record)?;
                 match self.backend.inspect(&record).await {
@@ -33,6 +35,11 @@ impl LocalExecutionManager {
                             ExecutionState::Creating => Err(ExecutionManagerError::Unavailable(
                                 format!("execution {execution_id} is still starting"),
                             )),
+                            ExecutionState::Created => {
+                                Err(ExecutionManagerError::Internal(format!(
+                                    "backend reported created state while starting {execution_id}"
+                                )))
+                            }
                             ExecutionState::Stopped | ExecutionState::Failed => {
                                 self.transition(
                                     &record,
@@ -60,9 +67,7 @@ impl LocalExecutionManager {
                     Err(error) => Err(error),
                 }
             }
-            ManagedExecutionState::Running | ManagedExecutionState::Paused => {
-                lease_from_record(&record)
-            }
+            ManagedExecutionState::Running => lease_from_record(&record),
             state => Err(ExecutionManagerError::Conflict {
                 execution_id: execution_id(&record)?,
                 message: format!("creation operation is {state}"),
@@ -73,11 +78,12 @@ impl LocalExecutionManager {
     pub(super) async fn claim_and_start(
         &self,
         record: BoxRecord,
+        expected_state: ManagedExecutionState,
     ) -> ExecutionManagerResult<ExecutionLease> {
         let claimed = match self
             .transition(
                 &record,
-                ManagedExecutionState::Creating,
+                expected_state,
                 ManagedExecutionState::Starting,
                 RuntimeUpdate::None,
             )
@@ -118,8 +124,12 @@ impl LocalExecutionManager {
         record: BoxRecord,
     ) -> ExecutionManagerResult<ExecutionLease> {
         match managed_state(&record)? {
-            ManagedExecutionState::Running | ManagedExecutionState::Paused => {
-                lease_from_record(&record)
+            ManagedExecutionState::Running => lease_from_record(&record),
+            ManagedExecutionState::Creating | ManagedExecutionState::Created => {
+                Err(ExecutionManagerError::Unavailable(format!(
+                    "execution {} startup claim was released; retry the request",
+                    execution_id(&record)?
+                )))
             }
             ManagedExecutionState::Starting => {
                 let id = execution_id(&record)?;
@@ -183,7 +193,9 @@ impl LocalExecutionManager {
                             .await;
                         Err(start_error)
                     }
-                    ExecutionState::Creating | ExecutionState::Paused => Err(start_error),
+                    ExecutionState::Created | ExecutionState::Creating | ExecutionState::Paused => {
+                        Err(start_error)
+                    }
                 }
             }
             Err(ExecutionManagerError::NotFound(_)) => {

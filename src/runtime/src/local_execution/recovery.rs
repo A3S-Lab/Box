@@ -13,7 +13,9 @@ impl LocalExecutionManager {
     ) -> ExecutionManagerResult<(BoxRecord, ExecutionState)> {
         let internal = managed_state(&record)?;
         match internal {
-            ManagedExecutionState::Creating => return Ok((record, ExecutionState::Creating)),
+            ManagedExecutionState::Creating | ManagedExecutionState::Created => {
+                return Ok((record, ExecutionState::Created));
+            }
             ManagedExecutionState::Stopped => return Ok((record, ExecutionState::Stopped)),
             ManagedExecutionState::Failed => return Ok((record, ExecutionState::Failed)),
             _ => {}
@@ -138,7 +140,7 @@ impl LocalExecutionManager {
                     self.transition(
                         &record,
                         ManagedExecutionState::Starting,
-                        ManagedExecutionState::Creating,
+                        ManagedExecutionState::Created,
                         RuntimeUpdate::None,
                     )
                     .await?
@@ -175,7 +177,7 @@ impl LocalExecutionManager {
         } else {
             record
         };
-        self.claim_and_start(record)
+        self.claim_and_start(record, ManagedExecutionState::Created)
             .await
             .map(ReconcileOutcome::Ready)
     }

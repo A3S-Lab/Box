@@ -61,10 +61,10 @@ pub use tee::{detect_tee, is_tee_available, TeeCapability, TeeType};
 pub use traits::{
     AuditSink, CacheBackend, CacheEntry, CacheStats, CreateExecutionRequest, CredentialProvider,
     EventBus, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
-    ExecutionManagerError, ExecutionManagerResult, ExecutionState, ExecutionStatus, ImageRegistry,
-    ImageStoreBackend, KillOutcome, MetricsCollector, NetworkStoreBackend, NoopMetrics,
-    OperationId, PulledImage, ReconcileOutcome, SnapshotStoreBackend, StoredImage,
-    VolumeStoreBackend,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionState,
+    ExecutionStatus, ImageRegistry, ImageStoreBackend, KillOutcome, MetricsCollector,
+    NetworkStoreBackend, NoopMetrics, OperationId, PulledImage, ReconcileOutcome,
+    SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
 };
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmHandler,

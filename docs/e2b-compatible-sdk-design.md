@@ -21,7 +21,7 @@ unversioned claim.
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, reaping, and startup reconciliation | Wire the repository and supervisor into the production service process and exercise restart and host-reboot recovery end to end |
-| Runtime lifecycle | Canonical managed-execution store, backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; an A3S OS smoke test proves real `crun` create, inspect, manager restart recovery, explicit pause rejection, kill, and cleanup without MicroVM fallback | Migrate CLI create/start/run and the Rust SDK to the same manager and add caller parity tests |
+| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; an A3S OS smoke test proves reservation-only create, restart reconciliation, real `crun` start, explicit pause rejection, kill, and cleanup without MicroVM fallback | Migrate CLI create/start/run and the Rust SDK to the same manager and add caller parity tests |
 | Credentials and routing | Injected verifier, token, cursor, and template interfaces isolate protocol logic from infrastructure | Add production credential hashing, token encryption and rotation, generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
@@ -638,6 +638,8 @@ CLI or the public compatibility API:
 
 ```text
 ExecutionManager
+  create(request, operation_id)           -> ExecutionReservation
+  start(execution_id, generation)         -> ExecutionLease
   create_and_start(request, operation_id) -> ExecutionLease
   inspect(execution_id)                   -> ExecutionStatus
   pause(execution_id, generation, policy) -> ExecutionLease
@@ -646,10 +648,13 @@ ExecutionManager
   reconcile(operation_id)                 -> ReconcileOutcome
 ```
 
-`operation_id` makes create retryable after a service crash. `generation`
-prevents a delayed kill or route request from reaching a replacement
-execution. Runtime-specific handles, process IDs, socket paths, OCI bundle
-paths, and shim command lines never cross this interface.
+`create_and_start` is the default composition of `create` followed by `start`.
+The durable `created` state lets CLI/SDK callers create without booting and
+lets startup reconciliation distinguish a reservation from an in-flight
+backend start. `operation_id` makes create retryable after a service crash.
+`generation` prevents a delayed start, kill, or route request from reaching a
+replacement execution. Runtime-specific handles, process IDs, socket paths,
+OCI bundle paths, and shim command lines never cross this interface.
 
 ### Compatibility service modules
 
@@ -704,7 +709,11 @@ transaction: insert creating record
   plan digest, encrypted tokens, expiry, metadata
               |
               v
-ExecutionManager.create_and_start(operation_id)
+ExecutionManager.create(operation_id)
+  persist a generation-fenced created reservation
+              |
+              v
+ExecutionManager.start(execution_id, generation)
               |
               v
 transaction: compare generation and publish running + route lease
@@ -780,22 +789,26 @@ and advances the generation exactly once when pause or resume completes.
 Backend calls remain outside the state lock.
 
 `LocalExecutionManager` implements the backend-neutral lifecycle contract over
-that store and an injectable runtime backend. It persists a `starting` claim
-before launch, keeps pause policy with the corresponding transitional record,
-performs state-file work on Tokio blocking workers, and resolves ambiguous
-backend errors from runtime observations before publishing a result. Startup
-reconciliation can therefore distinguish an unstarted claim from a runtime
-that became ready before its durable `running` publication.
+that store and an injectable runtime backend. `create` persists a stable
+`created` reservation without backend side effects, `start` fences the caller
+by generation and persists a `starting` claim before launch, and
+`create_and_start` composes those operations for the compatibility service.
+It keeps pause policy with the corresponding transitional record, performs
+state-file work on Tokio blocking workers, and resolves ambiguous backend
+errors from runtime observations before publishing a result. Startup
+reconciliation can therefore distinguish an unstarted reservation from a
+runtime that became ready before its durable `running` publication.
 
 The production VM/Sandbox backend is also complete for this slice. It owns live
 runtime handles, reconstructs MicroVM processes with PID identity fencing,
 reconstructs Sandbox executions from validated durable `crun` evidence,
 rejects unsupported Sandbox pause/resume without falling back to MicroVM, and
-owns terminal cleanup. The opt-in A3S OS smoke harness has proven real Sandbox
-create, inspect, manager reconstruction, pause rollback, kill, and removal of
-the Box directory, runtime root, and sockets. Deterministic image-pull failure
-injection also proves that a failed start does not create those runtime
-resources.
+owns terminal cleanup. The opt-in A3S OS smoke harness has proven that Sandbox
+`create` persists a `created` reservation without allocating a Box directory,
+runtime root, or sockets; manager reconstruction reconciles the same unstarted
+reservation; and explicit `start` launches through `crun`. It also proves pause
+rollback, kill, and terminal cleanup. Deterministic image-pull failure injection
+proves that a failed start does not create those runtime resources.
 
 Slice 4 remains incomplete until CLI create/start/run and the Rust SDK call the
 same manager with behavior parity tests. The existing Rust SDK uses the
