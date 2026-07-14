@@ -270,6 +270,16 @@ pub(crate) async fn tail_file_stream_positioned(
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+    // Foreground `run` supplies a position tracker so it can wait until the
+    // terminal has consumed the final console bytes. Poll that latency-sensitive
+    // path promptly; long-lived `logs -f` / `attach` tails retain the lower-rate
+    // idle polling cadence.
+    let eof_poll = if position.is_some() {
+        tokio::time::Duration::from_millis(20)
+    } else {
+        tokio::time::Duration::from_millis(200)
+    };
+
     // Wait for file to exist
     loop {
         if path.exists() {
@@ -301,7 +311,7 @@ pub(crate) async fn tail_file_stream_positioned(
                         }
                     }
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                tokio::time::sleep(eof_poll).await;
             }
             Ok(n) => {
                 pos += n as u64;

@@ -210,6 +210,23 @@ jobs:
           unset A3S_DEPS_STUB
           cd src
           cargo test --release -p a3s-box-cli --test core_smoke -- --ignored --nocapture --test-threads=1
+      # Keep the cached foreground no-op inside a bounded production envelope.
+      # Docker is intentionally unavailable on this runner; the original
+      # macOS/HVF Docker ratio remains a separate hardware-specific comparison.
+      - name: Foreground latency — cached no-op p50 regression gate
+        env:
+          A3S_BOX: ${{ github.workspace }}/src/target/release/a3s-box
+          IMAGE: ${{ vars.KVM_CI_AGENT_IMAGE || 'docker.m.daocloud.io/library/alpine:latest' }}
+          FOREGROUND_RUNS: "10"
+          FOREGROUND_WARMUPS: "1"
+          FOREGROUND_DOCKER: "0"
+          # Default includes headroom for normal runner noise; dedicated
+          # runners can tighten it with the repository variable.
+          FOREGROUND_MAX_P50_MS: ${{ vars.KVM_CI_FOREGROUND_MAX_P50_MS || '3200' }}
+        run: |
+          unset A3S_DEPS_STUB
+          chmod +x bench/bench.sh
+          bench/bench.sh foreground
       - name: CRI crictl smoke — full pod/container lifecycle
         env:
           A3S_BOX_CRI_SMOKE: "1"

@@ -40,6 +40,7 @@ variable*:
 | `KVM_CI` | `true` | **Required.** Activates the `integration-kvm` job. |
 | `KVM_CI_AGENT_IMAGE` | e.g. `docker.m.daocloud.io/library/alpine:latest` | Sandbox agent image for the CRI smoke (optional; sane default). |
 | `KVM_CI_REGISTRY_MIRRORS` | e.g. `registry.k8s.io=k8s.m.daocloud.io,gcr.io=gcr.m.daocloud.io` | Registry mirrors for restricted-egress hosts (optional). |
+| `KVM_CI_FOREGROUND_MAX_P50_MS` | e.g. `3200` | Maximum cached foreground no-op p50 in milliseconds (optional; defaults to `3200`). Tighten only after calibrating the dedicated runner. |
 
 Once `KVM_CI=true` and a runner with the `kvm` label is online, every push to
 `main`, every PR, every `v*` tag, and manual `workflow_dispatch` runs the real
@@ -51,13 +52,17 @@ microVM gate after the cheap `fmt`/`clippy`/`test` jobs pass.
 2. Builds the real binaries (`unset A3S_DEPS_STUB`) — `a3s-box`, `a3s-box-cri`,
    `a3s-box-shim`, plus the static musl `a3s-box-guest-init`.
 3. `core_smoke` — boots a real microVM and execs over virtio-fs.
-4. `crictl_smoke` (`A3S_BOX_CRI_SMOKE=1`) — the full CRI pod/container lifecycle
+4. **Foreground latency gate** (`bench/bench.sh foreground`) — warms the cached
+   agent image once, records 10 real KVM no-op runs, and fails when p50 exceeds
+   `KVM_CI_FOREGROUND_MAX_P50_MS`. Docker comparison is intentionally disabled
+   on this runner; the macOS/HVF ratio remains a separate hardware check.
+5. `crictl_smoke` (`A3S_BOX_CRI_SMOKE=1`) — the full CRI pod/container lifecycle
    (`RunPodSandbox → CreateContainer → StartContainer → exec → Stop → Remove`)
    driven by real `crictl`.
-5. **Leak assertion** (`bench/bench.sh leak`) — runs `CHURN` create/run/remove
+6. **Leak assertion** (`bench/bench.sh leak`) — runs `CHURN` create/run/remove
    cycles and asserts orphan shims, overlay mounts, and box dirs all return to
    baseline. A resource-leak regression fails the gate.
-6. **Race assertion** (`bench/bench.sh race`) — boots `RACE` detached boxes
+7. **Race assertion** (`bench/bench.sh race`) — boots `RACE` detached boxes
    concurrently and asserts `boxes.json` still parses and every successful
    launch persisted. This is the only check that exercises the cross-process
    advisory lock (`flock` on `boxes.json.lock`) across separate processes — the

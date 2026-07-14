@@ -4,11 +4,11 @@
 # Makes the perf claims (cold boot, snapshot-fork, warm-pool acquire) and the
 # leak-free claim INDEPENDENTLY REPRODUCIBLE: it drives the real `a3s-box` CLI
 # end-to-end and reports wall-clock latencies + a hard leak assertion, instead
-# of quoting numbers from prose. Run it on a Linux host with /dev/kvm (the only
-# place real microVMs boot).
+# of quoting numbers from prose. Most modes target Linux with /dev/kvm; the
+# foreground comparison also runs on macOS with HVF.
 #
 # Usage:
-#   bench/bench.sh [all|cold|warm|fork|leak|race|pnpm]   (default: all)
+#   bench/bench.sh [all|cold|foreground|warm|fork|leak|race|pnpm]   (default: all)
 # Env:
 #   A3S_BOX   path to the a3s-box binary           (default: a3s-box on PATH)
 #   IMAGE     OCI image to benchmark                (default: alpine:latest)
@@ -16,6 +16,11 @@
 #   POOL_SIZE warm-pool / fork fill size            (default: 16)
 #   CHURN     create/run/remove cycles for the leak test (default: 30)
 #   RACE      concurrent `run -d` processes for the cross-process race (default: 8)
+#   FOREGROUND_RUNS samples for the cached foreground no-op benchmark (default: RUNS)
+#   FOREGROUND_WARMUPS warm-up runs per runtime before sampling (default: 1)
+#   FOREGROUND_DOCKER 1 compares Docker when available, 0 skips it (default: 1)
+#   FOREGROUND_MAX_P50_MS optional a3s-box p50 gate; 0 only reports (default: 0)
+#   FOREGROUND_MAX_DOCKER_RATIO optional p50 ratio gate; 0 only reports (default: 0)
 #   PNPM_PROJECT project dir with package.json + pnpm-lock.yaml (required for pnpm mode)
 #   PNPM_IMAGE   Node image for pnpm mode             (default: node:22-alpine)
 #   PNPM_VERSION pnpm version for corepack prepare    (default: 10.30.3)
@@ -36,6 +41,11 @@ RUNS="${RUNS:-20}"
 POOL_SIZE="${POOL_SIZE:-16}"
 CHURN="${CHURN:-30}"
 RACE="${RACE:-8}"
+FOREGROUND_RUNS="${FOREGROUND_RUNS:-$RUNS}"
+FOREGROUND_WARMUPS="${FOREGROUND_WARMUPS:-1}"
+FOREGROUND_DOCKER="${FOREGROUND_DOCKER:-1}"
+FOREGROUND_MAX_P50_MS="${FOREGROUND_MAX_P50_MS:-0}"
+FOREGROUND_MAX_DOCKER_RATIO="${FOREGROUND_MAX_DOCKER_RATIO:-0}"
 PNPM_PROJECT="${PNPM_PROJECT:-}"
 PNPM_IMAGE="${PNPM_IMAGE:-node:22-alpine}"
 PNPM_VERSION="${PNPM_VERSION:-10.30.3}"
@@ -63,20 +73,24 @@ now_ms() {
 
 # Percentile of a space-separated list of integers. $1=list $2=pct(0-100)
 pct() {
-  local nums; nums=$(printf '%s\n' $1 | sort -n)
-  local count; count=$(printf '%s\n' $nums | wc -l | tr -d ' ')
+  local nums; nums=$(printf '%s\n' "$1" | tr ' ' '\n' | awk 'NF' | sort -n)
+  local count; count=$(printf '%s\n' "$nums" | awk 'NF { count++ } END { print count + 0 }')
   [ "$count" -eq 0 ] && { echo 0; return; }
   local idx=$(( (count * $2 + 99) / 100 ))
   [ "$idx" -lt 1 ] && idx=1
-  printf '%s\n' $nums | sed -n "${idx}p"
+  printf '%s\n' "$nums" | sed -n "${idx}p"
 }
 
 ratio() {
   awk -v a="$1" -v b="$2" 'BEGIN { if (b <= 0) print "n/a"; else printf "%.2fx", a / b }'
 }
 
-require_kvm() {
-  if [ ! -e /dev/kvm ]; then
+mean_ms() {
+  printf '%s\n' "$1" | tr ' ' '\n' | awk 'NF { total += $1; count++ } END { if (count == 0) print 0; else printf "%.1f", total / count }'
+}
+
+require_runtime() {
+  if [ "$(uname -s)" = "Linux" ] && [ ! -e /dev/kvm ]; then
     echo "WARNING: /dev/kvm not present — boot benchmarks measure a degraded/failed path." >&2
   fi
   command -v "$A3S_BOX" >/dev/null 2>&1 || { echo "ERROR: a3s-box not found ($A3S_BOX)"; exit 2; }
@@ -89,8 +103,7 @@ shim_count() {
   echo "${count:-0}"
 }
 mount_count() { mount 2>/dev/null | awk '/\/\.a3s\/boxes|\/a3s\/boxes/ { n++ } END { print n + 0 }'; }
-boxdir_count() { ls -1 "${HOME}/.a3s/boxes" 2>/dev/null | wc -l | tr -d ' '; }
-fd_count() { ls -1 "/proc/$$/fd" 2>/dev/null | wc -l | tr -d ' '; }
+boxdir_count() { find "${HOME}/.a3s/boxes" -mindepth 1 -maxdepth 1 -print 2>/dev/null | awk 'END { print NR + 0 }'; }
 
 bench_cold() {
   echo "## Cold boot ($RUNS runs, $IMAGE)"
@@ -102,6 +115,99 @@ bench_cold() {
     e=$(now_ms); samples="$samples $(( e - s ))"
   done
   echo "  p50=$(pct "$samples" 50)ms  p90=$(pct "$samples" 90)ms  min=$(pct "$samples" 1)ms"
+}
+
+# Reproduce the latency-sensitive foreground path from issue #33 with an
+# explicit warm-up and exact samples. Docker comparison is optional so this
+# also runs on a KVM/HVF host where Docker is intentionally unavailable.
+bench_foreground() {
+  echo "## Cached foreground no-op ($FOREGROUND_RUNS runs, $FOREGROUND_WARMUPS warm-up, $IMAGE)"
+  local a3s_log="/tmp/a3s-bench-foreground-a3s-$$.log"
+  local docker_log="/tmp/a3s-bench-foreground-docker-$$.log"
+  local i s e status samples=""
+
+  "$A3S_BOX" pull "$IMAGE" >/dev/null 2>&1 || true
+  for i in $(seq 1 "$FOREGROUND_WARMUPS"); do
+    if ! "$A3S_BOX" run --rm --no-stdin --timeout 180 "$IMAGE" -- true >"$a3s_log" 2>&1; then
+      echo "  FAIL: a3s-box warm-up $i failed" >&2
+      tail -80 "$a3s_log" >&2
+      rm -f "$a3s_log" "$docker_log"
+      return 1
+    fi
+  done
+  for i in $(seq 1 "$FOREGROUND_RUNS"); do
+    s=$(now_ms)
+    "$A3S_BOX" run --rm --no-stdin --timeout 180 "$IMAGE" -- true >"$a3s_log" 2>&1
+    status=$?
+    e=$(now_ms)
+    if [ "$status" -ne 0 ]; then
+      echo "  FAIL: a3s-box sample $i failed" >&2
+      tail -80 "$a3s_log" >&2
+      rm -f "$a3s_log" "$docker_log"
+      return "$status"
+    fi
+    samples="$samples $(( e - s ))"
+  done
+
+  local a3s_p50 a3s_p95
+  a3s_p50=$(pct "$samples" 50)
+  a3s_p95=$(pct "$samples" 95)
+  echo "  a3s-box samples (ms):$samples"
+  echo "  a3s-box: mean=$(mean_ms "$samples")ms p50=${a3s_p50}ms p95=${a3s_p95}ms min=$(pct "$samples" 1)ms"
+
+  if [ "$FOREGROUND_MAX_P50_MS" != "0" ] && [ "$a3s_p50" -gt "$FOREGROUND_MAX_P50_MS" ]; then
+    echo "  FAIL: a3s-box p50 exceeds FOREGROUND_MAX_P50_MS=$FOREGROUND_MAX_P50_MS" >&2
+    rm -f "$a3s_log" "$docker_log"
+    return 1
+  fi
+
+  if [ "$FOREGROUND_DOCKER" = "1" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    docker pull "$IMAGE" >/dev/null 2>&1 || true
+    for i in $(seq 1 "$FOREGROUND_WARMUPS"); do
+      if ! docker run --rm "$IMAGE" true >"$docker_log" 2>&1; then
+        echo "  FAIL: Docker warm-up $i failed" >&2
+        tail -80 "$docker_log" >&2
+        rm -f "$a3s_log" "$docker_log"
+        return 1
+      fi
+    done
+
+    local docker_samples=""
+    for i in $(seq 1 "$FOREGROUND_RUNS"); do
+      s=$(now_ms)
+      docker run --rm "$IMAGE" true >"$docker_log" 2>&1
+      status=$?
+      e=$(now_ms)
+      if [ "$status" -ne 0 ]; then
+        echo "  FAIL: Docker sample $i failed" >&2
+        tail -80 "$docker_log" >&2
+        rm -f "$a3s_log" "$docker_log"
+        return "$status"
+      fi
+      docker_samples="$docker_samples $(( e - s ))"
+    done
+
+    local docker_p50 docker_p95
+    docker_p50=$(pct "$docker_samples" 50)
+    docker_p95=$(pct "$docker_samples" 95)
+    echo "  Docker samples (ms):$docker_samples"
+    echo "  Docker:  mean=$(mean_ms "$docker_samples")ms p50=${docker_p50}ms p95=${docker_p95}ms min=$(pct "$docker_samples" 1)ms"
+    echo "  a3s-box/Docker p50 ratio: $(ratio "$a3s_p50" "$docker_p50")"
+
+    if [ "$FOREGROUND_MAX_DOCKER_RATIO" != "0" ] && awk \
+      -v a="$a3s_p50" \
+      -v d="$docker_p50" \
+      -v limit="$FOREGROUND_MAX_DOCKER_RATIO" \
+      'BEGIN { exit !(d > 0 && a / d > limit) }'; then
+      echo "  FAIL: p50 ratio exceeds FOREGROUND_MAX_DOCKER_RATIO=$FOREGROUND_MAX_DOCKER_RATIO" >&2
+      rm -f "$a3s_log" "$docker_log"
+      return 1
+    fi
+  elif [ "$FOREGROUND_DOCKER" = "1" ]; then
+    echo "  Docker comparison: skipped (docker CLI or daemon unavailable)"
+  fi
+
+  rm -f "$a3s_log" "$docker_log"
 }
 
 bench_warm() {
@@ -399,11 +505,12 @@ bench_pnpm() {
   fi
 }
 
-require_kvm
+require_runtime
 echo "# a3s-box benchmark — $(uname -sm), image=$IMAGE"
 rc=0
 case "$MODE" in
   cold) bench_cold ;;
+  foreground) bench_foreground || rc=$? ;;
   warm) bench_warm ;;
   fork) bench_fork ;;
   leak) bench_leak || rc=$? ;;
@@ -411,11 +518,12 @@ case "$MODE" in
   pnpm) bench_pnpm || rc=$? ;;
   all)
     bench_cold
+    bench_foreground || rc=$?
     bench_warm
     bench_fork
     bench_leak || rc=$?
     bench_race || rc=$?
     ;;
-  *) echo "unknown mode: $MODE (use all|cold|warm|fork|leak|race|pnpm)"; exit 2 ;;
+  *) echo "unknown mode: $MODE (use all|cold|foreground|warm|fork|leak|race|pnpm)"; exit 2 ;;
 esac
 exit "$rc"

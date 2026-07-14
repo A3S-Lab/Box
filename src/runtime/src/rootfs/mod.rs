@@ -18,6 +18,28 @@ pub use provider::{default_provider, CopyProvider, OverlayProvider, RootfsProvid
 
 use std::path::Path;
 
+/// Read the exit code persisted by guest-init from the active writable rootfs.
+///
+/// Rootfs providers expose `/.a3s_exit_code` at different host paths: the
+/// overlay upper directory on Linux, the copied rootfs fallback, or the private
+/// data directory inside the case-sensitive APFS mount on macOS.
+pub fn read_persisted_exit_code(box_dir: &Path) -> Option<i32> {
+    let candidates = [
+        box_dir.join("upper").join(".a3s_exit_code"),
+        box_dir
+            .join("rootfs")
+            .join(".a3s-rootfs")
+            .join(".a3s_exit_code"),
+        box_dir.join("rootfs").join(".a3s_exit_code"),
+    ];
+
+    candidates.into_iter().find_map(|path| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| contents.trim().parse::<i32>().ok())
+    })
+}
+
 /// A temporarily attached persistent rootfs.
 ///
 /// Dropping this guard detaches only mounts created by
@@ -146,6 +168,33 @@ pub fn unmount_box_rootfs(rootfs: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_exit_code_supports_each_rootfs_provider_layout() {
+        for (relative, expected) in [
+            ("upper/.a3s_exit_code", 17),
+            ("rootfs/.a3s_exit_code", 23),
+            ("rootfs/.a3s-rootfs/.a3s_exit_code", 29),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("{expected}\n")).unwrap();
+
+            assert_eq!(read_persisted_exit_code(temp.path()), Some(expected));
+        }
+    }
+
+    #[test]
+    fn persisted_exit_code_ignores_missing_or_invalid_files() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(read_persisted_exit_code(temp.path()), None);
+
+        let path = temp.path().join("rootfs/.a3s_exit_code");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "not-an-exit-code").unwrap();
+        assert_eq!(read_persisted_exit_code(temp.path()), None);
+    }
 
     #[test]
     fn missing_path_is_not_mountpoint() {

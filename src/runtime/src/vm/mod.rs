@@ -532,15 +532,7 @@ impl VmManager {
     }
 
     fn persisted_exit_code(&self) -> Option<i32> {
-        std::fs::read_to_string(
-            self.home_dir
-                .join("boxes")
-                .join(&self.box_id)
-                .join("upper")
-                .join(".a3s_exit_code"),
-        )
-        .ok()
-        .and_then(|contents| contents.trim().parse::<i32>().ok())
+        crate::rootfs::read_persisted_exit_code(&self.home_dir.join("boxes").join(&self.box_id))
     }
 
     /// Poll the owned VM process for natural exit without sending a signal.

@@ -9,14 +9,16 @@ their own hardware instead of trusting a number in a doc.
 
 ## Requirements
 
-A Linux host with **`/dev/kvm`** (real microVMs only boot there) and `a3s-box`
-on `PATH` (or set `A3S_BOX`). The boot benchmarks are meaningless without KVM.
+Most modes require a Linux host with **`/dev/kvm`** and `a3s-box` on `PATH`
+(or set `A3S_BOX`). The `foreground` comparison also supports macOS/HVF, which
+is the environment used by the original foreground-latency regression report.
 
 ## Usage
 
 ```bash
-bench/bench.sh            # all four benchmarks
+bench/bench.sh            # default Linux/KVM suite, including foreground latency
 bench/bench.sh cold       # cold-boot latency only
+bench/bench.sh foreground # cached foreground no-op, optionally versus Docker
 bench/bench.sh warm       # warm-pool acquire latency
 bench/bench.sh fork       # snapshot-fork pool fill (cold-fill vs CoW restore)
 bench/bench.sh leak       # churn + leak assertion (exit != 0 on leak)
@@ -31,6 +33,11 @@ Tunables (env):
 | `A3S_BOX` | `a3s-box` | binary under test |
 | `IMAGE` | `alpine:latest` | OCI image to benchmark |
 | `RUNS` | `20` | samples per latency benchmark |
+| `FOREGROUND_RUNS` | `RUNS` | recorded cached foreground no-op samples per runtime |
+| `FOREGROUND_WARMUPS` | `1` | warm-up runs per runtime before foreground sampling |
+| `FOREGROUND_DOCKER` | `1` | compare Docker when its CLI and daemon are available |
+| `FOREGROUND_MAX_P50_MS` | `0` | optional absolute a3s-box p50 gate; `0` reports without gating |
+| `FOREGROUND_MAX_DOCKER_RATIO` | `0` | optional p50 ratio gate; `0` reports without gating |
 | `POOL_SIZE` | `16` | warm-pool / fork fill size |
 | `CHURN` | `30` | create/run/remove cycles for the leak test |
 | `PNPM_PROJECT` | unset | project directory with `package.json` and `pnpm-lock.yaml` for `pnpm` mode |
@@ -49,6 +56,11 @@ Tunables (env):
 
 - **cold** — `run --rm IMAGE -- true` wall-clock, reported as p50 / p90 / min
   over `RUNS` samples.
+- **foreground** — the latency-sensitive `run --rm --no-stdin --timeout 180
+  IMAGE -- true` path with an explicit warm-up, exact samples, mean, p50, p95,
+  and minimum. When Docker is available, the harness runs the matching cached
+  Docker no-op and reports the p50 ratio. Set `FOREGROUND_MAX_DOCKER_RATIO` only
+  on a stable dedicated runner when the comparison should be a hard gate.
 - **warm** — `pool start` then `pool run` acquire latency (p50 / p90 / min).
 - **fork** — `pool start --size N` fill time **without** vs **with**
   `--snapshot-fork`, as total + amortized-per-VM, so the CoW speedup is a
@@ -87,10 +99,11 @@ only the benchmark-owned `a3s-bench-pnpm-store` volume.
 
 ## Wiring into CI
 
-The leak assertion's non-zero exit makes it a natural gate on the self-hosted
-KVM runner (see [`../docs/ci-kvm-runner.md`](../docs/ci-kvm-runner.md)): add a
-`bench/bench.sh leak` step to the `integration-kvm` job to catch a resource leak
-regression automatically, instead of relying on a manual churn run.
+The self-hosted KVM job runs the foreground benchmark with an absolute p50 gate
+and the leak assertion with its resource-count gate (see
+[`../docs/ci-kvm-runner.md`](../docs/ci-kvm-runner.md)). Keep absolute latency
+limits on a stable dedicated runner; use the Docker ratio gate for manual
+macOS/HVF comparisons on the host class from issue #33.
 
 ## Updating the published numbers
 
