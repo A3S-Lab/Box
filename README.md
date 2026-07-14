@@ -394,7 +394,7 @@ A3S Box has three network modes:
 | Mode | What it does | Current boundary |
 | --- | --- | --- |
 | TSI default | Guest socket operations are proxied through the host. Use this for simple outbound access. On macOS, publishing a TCP port automatically selects an isolated netproxy-backed interface so application bytes and guest loopback remain reliable while the CLI/network-mode contract stays unchanged. | Plain TSI boxes have no user-defined peer network and no in-guest loopback. Use a bridge network for peer discovery; publishing a port on macOS activates the isolated compatibility data path automatically. |
-| Bridge | Creates a real guest network interface for user-defined networks and peer discovery. | Linux uses `passt` with outbound NAT. macOS uses built-in `netproxy` for peer networking and published TCP ports; macOS bridge outbound NAT is unsupported. |
+| Bridge | Creates a real guest network interface for user-defined networks and peer discovery. | Linux uses `passt` with outbound NAT. macOS uses built-in `netproxy` for peer networking, published TCP ports, DNS forwarding, and outbound TCP connections through the host stack. Non-DNS outbound UDP and ICMP are not proxied on macOS. |
 | None | No network. | Useful for intentionally isolated workloads. |
 
 ```bash
@@ -691,7 +691,7 @@ Crates:
 | `cli` | `a3s-box` command line |
 | `shim` | libkrun bridge subprocess |
 | `guest/init` | guest PID 1 and guest services |
-| `netproxy` | macOS user-space bridge proxy and published TCP forwarding |
+| `netproxy` | macOS user-space bridge, DNS, inbound TCP, and outbound TCP proxy |
 | `cri` | experimental CRI server |
 | `sdk` | Rust execution registry abstractions for Box workloads |
 

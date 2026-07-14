@@ -229,6 +229,9 @@ impl PlatformCapabilities {
             named_pipes: cfg!(windows),
             netproxy: cfg!(target_os = "macos"),
             bridge_network_backend: current_bridge_network_backend(),
+            // Linux passt provides full outbound NAT. The macOS netproxy
+            // deliberately exposes only DNS and TCP host proxying, so it must
+            // not advertise full NAT (which would also imply UDP and ICMP).
             bridge_outbound_nat: cfg!(target_os = "linux"),
             published_ports: cfg!(unix) || cfg!(windows),
             tee_attestation: cfg!(unix),
@@ -259,7 +262,7 @@ impl PlatformCapabilities {
                 "passt (peer networking and outbound NAT supported)".to_string()
             }
             BridgeNetworkBackend::Netproxy => {
-                "netproxy (peer networking supported; outbound NAT unsupported)".to_string()
+                "netproxy (peer networking and outbound TCP proxying supported)".to_string()
             }
             BridgeNetworkBackend::Unsupported => "unsupported".to_string(),
         }
@@ -488,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bridge_networking_summary_documents_nat_boundary() {
+    fn test_bridge_networking_summary_documents_outbound_support() {
         let mut capabilities = PlatformCapabilities::current();
         capabilities.bridge_network_backend = BridgeNetworkBackend::Netproxy;
         capabilities.bridge_outbound_nat = false;
@@ -496,6 +499,7 @@ mod tests {
         let summary = capabilities.bridge_networking_summary();
 
         assert!(summary.contains("netproxy"));
-        assert!(summary.contains("outbound NAT unsupported"));
+        assert!(summary.contains("outbound TCP proxying supported"));
+        assert!(!capabilities.bridge_outbound_nat);
     }
 }

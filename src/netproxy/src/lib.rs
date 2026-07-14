@@ -1,4 +1,4 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", all(test, unix)))]
 
 //! Pure-Rust userspace network proxy for libkrun on macOS.
 //!
@@ -9,26 +9,38 @@
 //! - **DNS**: UDP/53 queries forwarded to the host's configured DNS servers.
 //! - **Inbound TCP port-forwarding**: `host_port → guest_ip:guest_port` pairs
 //!   parsed from the box's `port_map` config (e.g. `"8088:80"`).
-//!
-//! General outbound NAT (VM → internet) is not provided by bridge mode yet.
+//! - **Outbound TCP proxying**: guest connections addressed through the gateway
+//!   are terminated by smoltcp and connected through the host TCP stack.
 
-use std::collections::VecDeque;
+mod device;
+mod manager;
+#[cfg(test)]
+mod tests;
+
+use std::collections::{HashSet, VecDeque};
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
-use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::os::unix::net::UnixDatagram;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    mpsc::{self, Receiver, TryRecvError},
     Arc,
 };
 use std::time::Duration;
 
-use a3s_box_core::error::{BoxError, Result};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
+use smoltcp::wire::{
+    EthernetFrame, EthernetProtocol, IpAddress, IpCidr, IpEndpoint, IpProtocol, Ipv4Address,
+    Ipv4Packet, TcpPacket,
+};
+
+use device::{BridgePort, NetStats, UnixgramDevice, GATEWAY_MAC};
+use manager::write_stats_file;
+
+pub use manager::{spawn_inherited_netproxy, InheritedNetProxyConfig, NetProxyManager};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -49,284 +61,16 @@ fn to_smoltcp_ipv4(ip: Ipv4Addr) -> Ipv4Address {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// MAC address we assign to the virtual gateway interface.
-const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
-/// Maximum Ethernet frame size (header + MTU).
-const MAX_FRAME: usize = 1514;
 /// Ephemeral port range start for outbound TCP connections from the gateway.
 const EPHEMERAL_BASE: u16 = 49152;
+/// Bound per-box memory and host resources consumed by transparent TCP flows.
+const MAX_OUTBOUND_CONNECTIONS: usize = 256;
+/// Do not let a host-side connect stall the guest indefinitely.
+const OUTBOUND_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Idle TCP state is eventually reclaimed even if one endpoint disappears.
+const TCP_IDLE_TIMEOUT: smoltcp::time::Duration = smoltcp::time::Duration::from_secs(300);
 /// How often the proxy refreshes its stats file.
 const STATS_WRITE_INTERVAL: Duration = Duration::from_secs(1);
-
-#[derive(Default)]
-struct NetStats {
-    rx_bytes: AtomicU64,
-    tx_bytes: AtomicU64,
-    rx_packets: AtomicU64,
-    tx_packets: AtomicU64,
-}
-
-struct NetStatsSnapshot {
-    rx_bytes: u64,
-    tx_bytes: u64,
-    rx_packets: u64,
-    tx_packets: u64,
-}
-
-impl NetStats {
-    fn record_rx(&self, bytes: usize) {
-        self.rx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-        self.rx_packets.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn record_tx(&self, bytes: usize) {
-        self.tx_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-        self.tx_packets.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn snapshot(&self) -> NetStatsSnapshot {
-        NetStatsSnapshot {
-            rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
-            tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
-            rx_packets: self.rx_packets.load(Ordering::Relaxed),
-            tx_packets: self.tx_packets.load(Ordering::Relaxed),
-        }
-    }
-}
-
-// ── smoltcp phy::Device ───────────────────────────────────────────────────────
-
-/// smoltcp physical-layer device backed by a connected Unix datagram socket.
-///
-/// Frames from the VM arrive via `recv()` and are queued in `rx_queue`.
-/// smoltcp reads them through `receive()`. Frames smoltcp wants to transmit
-/// are sent directly to the peer via `transmit()` / `TxToken::consume()`.
-///
-/// The socket MUST be connected to the peer (via `UnixDatagram::connect`) before
-/// use so that `send()` works without a destination address. On macOS, using
-/// `send_to()` on a socket whose peer has called `connect()` to us causes
-/// ECONNRESET / EDESTADDRREQ in the peer's receive path.
-struct UnixgramDevice {
-    socket: UnixDatagram,
-    bridge: Option<BridgePort>,
-    rx_queue: VecDeque<Vec<u8>>,
-    stats: Arc<NetStats>,
-}
-
-impl UnixgramDevice {
-    /// Drain the socket into `rx_queue` (non-blocking, batch up to 64 frames).
-    fn drain(&mut self) {
-        if let Some(bridge) = &self.bridge {
-            bridge.drain_to_guest(&self.socket, &self.stats);
-        }
-        let mut buf = vec![0u8; MAX_FRAME];
-        for _ in 0..64 {
-            match self.socket.recv(&mut buf) {
-                Ok(n) => {
-                    tracing::trace!(
-                        bytes = n,
-                        "NetProxy received ethernet frame from guest/libkrun"
-                    );
-                    self.stats.record_tx(n);
-                    let frame = &buf[..n];
-                    let deliver_locally = self
-                        .bridge
-                        .as_ref()
-                        .map(|bridge| bridge.forward_from_guest(frame))
-                        .unwrap_or(true);
-                    if deliver_locally {
-                        self.rx_queue.push_back(frame.to_vec());
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) => {
-                    tracing::warn!(error = %e, "NetProxy: recv from libkrun failed");
-                    break;
-                }
-            }
-        }
-    }
-}
-
-struct BridgePort {
-    socket: UnixDatagram,
-    directory: PathBuf,
-    own_path: PathBuf,
-}
-
-impl BridgePort {
-    fn bind(directory: &Path, own_mac: [u8; 6]) -> io::Result<Self> {
-        std::fs::create_dir_all(directory)?;
-        let own_path = directory.join(mac_socket_name(own_mac));
-        match std::fs::remove_file(&own_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let socket = UnixDatagram::bind(&own_path)?;
-        socket.set_nonblocking(true)?;
-        Ok(Self {
-            socket,
-            directory: directory.to_path_buf(),
-            own_path,
-        })
-    }
-
-    /// Forward one guest frame. Returns whether the local gateway must also
-    /// receive it (broadcast/multicast or non-peer traffic).
-    fn forward_from_guest(&self, frame: &[u8]) -> bool {
-        let Some(destination) = ethernet_destination(frame) else {
-            return true;
-        };
-        if destination == GATEWAY_MAC.0 {
-            return true;
-        }
-        if is_group_mac(destination) {
-            self.flood(frame);
-            return true;
-        }
-
-        let peer = self.directory.join(mac_socket_name(destination));
-        if peer != self.own_path && peer.exists() {
-            if let Err(error) = self.socket.send_to(frame, &peer) {
-                tracing::debug!(%error, peer = %peer.display(), "Bridge peer send failed");
-            }
-            return false;
-        }
-
-        // Unknown unicast uses normal switch flooding while still allowing the
-        // local gateway stack to inspect traffic addressed outside this switch.
-        self.flood(frame);
-        true
-    }
-
-    fn flood(&self, frame: &[u8]) {
-        let Ok(entries) = std::fs::read_dir(&self.directory) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path == self.own_path || path.extension().and_then(|v| v.to_str()) != Some("sock") {
-                continue;
-            }
-            let _ = self.socket.send_to(frame, path);
-        }
-    }
-
-    fn drain_to_guest(&self, guest: &UnixDatagram, stats: &NetStats) {
-        let mut buf = [0u8; MAX_FRAME];
-        for _ in 0..64 {
-            match self.socket.recv(&mut buf) {
-                Ok(size) => {
-                    if guest.send(&buf[..size]).is_ok() {
-                        stats.record_rx(size);
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) => {
-                    tracing::debug!(%error, "Bridge peer receive failed");
-                    break;
-                }
-            }
-        }
-    }
-}
-
-impl Drop for BridgePort {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.own_path);
-    }
-}
-
-fn ethernet_destination(frame: &[u8]) -> Option<[u8; 6]> {
-    frame.get(..6)?.try_into().ok()
-}
-
-fn is_group_mac(mac: [u8; 6]) -> bool {
-    mac[0] & 1 == 1
-}
-
-fn mac_socket_name(mac: [u8; 6]) -> String {
-    format!(
-        "{:02x}-{:02x}-{:02x}-{:02x}-{:02x}-{:02x}.sock",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-    )
-}
-
-/// Owned received frame — consumed by smoltcp's interface layer.
-struct OwnedRxToken(Vec<u8>);
-
-impl smoltcp::phy::RxToken for OwnedRxToken {
-    fn consume<R, F>(mut self, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        f(&mut self.0)
-    }
-}
-
-/// Transmit token — smoltcp writes a frame into `buf`, which we then send.
-///
-/// The socket must already be connected to the peer so `send()` works without
-/// an explicit destination address.
-struct TxToken {
-    socket: UnixDatagram,
-    stats: Arc<NetStats>,
-}
-
-impl smoltcp::phy::TxToken for TxToken {
-    fn consume<R, F>(self, len: usize, f: F) -> R
-    where
-        F: FnOnce(&mut [u8]) -> R,
-    {
-        let mut buf = vec![0u8; len];
-        let result = f(&mut buf);
-        tracing::trace!(
-            bytes = len,
-            "NetProxy sending ethernet frame to guest/libkrun"
-        );
-        if let Err(e) = self.socket.send(&buf) {
-            tracing::warn!(error = %e, len, "NetProxy: send to libkrun failed");
-        } else {
-            self.stats.record_rx(len);
-        }
-        result
-    }
-}
-
-impl smoltcp::phy::Device for UnixgramDevice {
-    type RxToken<'a>
-        = OwnedRxToken
-    where
-        Self: 'a;
-    type TxToken<'a>
-        = TxToken
-    where
-        Self: 'a;
-
-    fn receive(&mut self, _ts: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let frame = self.rx_queue.pop_front()?;
-        let tx = TxToken {
-            socket: self.socket.try_clone().ok()?,
-            stats: Arc::clone(&self.stats),
-        };
-        Some((OwnedRxToken(frame), tx))
-    }
-
-    fn transmit(&mut self, _ts: Instant) -> Option<Self::TxToken<'_>> {
-        Some(TxToken {
-            socket: self.socket.try_clone().ok()?,
-            stats: Arc::clone(&self.stats),
-        })
-    }
-
-    fn capabilities(&self) -> smoltcp::phy::DeviceCapabilities {
-        let mut caps = smoltcp::phy::DeviceCapabilities::default();
-        caps.medium = smoltcp::phy::Medium::Ethernet;
-        caps.max_transmission_unit = MAX_FRAME;
-        caps
-    }
-}
 
 // ── Port-forward state ────────────────────────────────────────────────────────
 
@@ -335,16 +79,67 @@ struct PortForward {
     listener: TcpListener,
     guest_ip: Ipv4Addr,
     guest_port: u16,
-    /// TCP handshake in progress: (smoltcp handle, host TcpStream).
-    pending: Vec<(smoltcp::iface::SocketHandle, TcpStream)>,
+    /// TCP handshake in progress from the gateway to the guest.
+    pending: Vec<PendingGuestConnection>,
     /// Fully established connections ready for data proxying.
-    active: Vec<(smoltcp::iface::SocketHandle, TcpStream)>,
+    active: Vec<TcpProxyConnection>,
+}
+
+struct PendingGuestConnection {
+    handle: smoltcp::iface::SocketHandle,
+    host_stream: TcpStream,
+    started_at: std::time::Instant,
+}
+
+struct TcpProxyConnection {
+    handle: smoltcp::iface::SocketHandle,
+    host_stream: TcpStream,
+    host_read_closed: bool,
+    guest_read_closed: bool,
+    /// An abort raised after the most recent interface poll must survive until
+    /// the next poll so smoltcp can emit its reset packet.
+    abort_pending: bool,
+}
+
+impl TcpProxyConnection {
+    fn new(handle: smoltcp::iface::SocketHandle, host_stream: TcpStream) -> Self {
+        Self {
+            handle,
+            host_stream,
+            host_read_closed: false,
+            guest_read_closed: false,
+            abort_pending: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct OutboundFlow {
+    guest_ip: Ipv4Addr,
+    guest_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+}
+
+struct PendingOutboundConnection {
+    flow: OutboundFlow,
+    handle: smoltcp::iface::SocketHandle,
+    connect_result: Receiver<io::Result<TcpStream>>,
+    host_stream: Option<TcpStream>,
+    started_at: std::time::Instant,
+    failed: bool,
+}
+
+struct ActiveOutboundConnection {
+    flow: OutboundFlow,
+    proxy: TcpProxyConnection,
 }
 
 // ── Proxy engine ──────────────────────────────────────────────────────────────
 
 struct ProxyEngineConfig {
     socket: UnixDatagram,
+    guest_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
     prefix_len: u8,
     dns_servers: Vec<Ipv4Addr>,
@@ -359,9 +154,13 @@ struct ProxyEngine {
     device: UnixgramDevice,
     iface: Interface,
     sockets: SocketSet<'static>,
-    dns_handle: smoltcp::iface::SocketHandle,
-    dns_servers: Vec<Ipv4Addr>,
+    dns_sockets: Vec<(smoltcp::iface::SocketHandle, Ipv4Addr)>,
+    guest_ip: Ipv4Addr,
+    gateway_ip: Ipv4Addr,
     port_forwards: Vec<PortForward>,
+    pending_outbound: Vec<PendingOutboundConnection>,
+    active_outbound: Vec<ActiveOutboundConnection>,
+    outbound_connectors: Arc<AtomicUsize>,
     next_ephemeral: u16,
     shutdown: Arc<AtomicBool>,
     stats: Arc<NetStats>,
@@ -373,6 +172,7 @@ impl ProxyEngine {
     fn new(config: ProxyEngineConfig) -> Self {
         let ProxyEngineConfig {
             socket,
+            guest_ip,
             gateway_ip,
             prefix_len,
             dns_servers,
@@ -397,23 +197,50 @@ impl ProxyEngine {
             let cidr = IpCidr::new(IpAddress::Ipv4(to_smoltcp_ipv4(gateway_ip)), prefix_len);
             addrs.push(cidr).ok();
         });
+        // The guest keeps the real destination IP in its packets and uses the
+        // gateway only as the Ethernet next hop. AnyIP plus a default route via
+        // our own gateway address lets smoltcp terminate those transparent TCP
+        // connections while preserving their original destination endpoints.
+        iface.set_any_ip(true);
+        let _ = iface
+            .routes_mut()
+            .add_default_ipv4_route(to_smoltcp_ipv4(gateway_ip));
 
         let mut sockets = SocketSet::new(vec![]);
 
-        // DNS socket: listens on UDP/53 on the gateway IP.
-        let dns_rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 8192]);
-        let dns_tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 8192]);
-        let mut dns_socket = udp::Socket::new(dns_rx, dns_tx);
-        dns_socket.bind(53).ok();
-        let dns_handle = sockets.add(dns_socket);
+        // The guest's resolv.conf contains the configured upstream addresses
+        // (for example 8.8.8.8), not the gateway address. Bind one AnyIP UDP
+        // socket per upstream so replies preserve the queried source IP; a
+        // wildcard :53 socket would reply from gateway_ip and resolvers would
+        // reject the mismatched response.
+        let dns_sockets = dns_servers
+            .iter()
+            .copied()
+            .filter_map(|server| {
+                let dns_rx =
+                    udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 8192]);
+                let dns_tx =
+                    udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0u8; 8192]);
+                let mut dns_socket = udp::Socket::new(dns_rx, dns_tx);
+                let endpoint = IpEndpoint::new(IpAddress::Ipv4(to_smoltcp_ipv4(server)), 53);
+                dns_socket
+                    .bind(endpoint)
+                    .ok()
+                    .map(|_| (sockets.add(dns_socket), server))
+            })
+            .collect();
 
         Self {
             device,
             iface,
             sockets,
-            dns_handle,
-            dns_servers,
+            dns_sockets,
+            guest_ip,
+            gateway_ip,
             port_forwards,
+            pending_outbound: Vec::new(),
+            active_outbound: Vec::new(),
+            outbound_connectors: Arc::new(AtomicUsize::new(0)),
             next_ephemeral: EPHEMERAL_BASE,
             shutdown,
             stats,
@@ -434,28 +261,39 @@ impl ProxyEngine {
             // 1. Drain UnixGram socket into rx_queue.
             self.device.drain();
 
-            // 2. Accept new host connections on port-forward listeners.
-            self.accept_connections(now);
+            // 2. Accept published-port clients and discover new guest outbound
+            // TCP flows before smoltcp consumes their SYN packets.
+            self.accept_connections();
+            self.accept_outbound_flows();
 
-            // 3. Poll smoltcp (processes ARP, TCP, UDP frames).
+            // 3. Collect non-blocking host connect results. Failed established
+            // flows are aborted before the interface poll so the reset is sent.
+            self.poll_outbound_connectors();
+
+            // 4. Poll smoltcp (processes ARP, TCP, UDP frames).
             self.iface.poll(now, &mut self.device, &mut self.sockets);
 
-            // 4. Promote pending TCP connections to active once established.
-            self.promote_established();
+            // Connections aborted after the previous poll have now had one
+            // dispatch opportunity and can release their socket handles.
+            self.finish_aborted_connections();
 
-            // 5. Proxy data for active TCP connections.
+            // 5. Promote pending TCP connections to active once established.
+            self.promote_established();
+            self.promote_outbound_established();
+
+            // 6. Proxy data for active TCP connections.
             self.proxy_data();
 
-            // 6. Forward DNS queries to real DNS servers.
+            // 7. Forward DNS queries to real DNS servers.
             self.forward_dns();
 
-            // 7. Remove closed connections and release their smoltcp sockets.
+            // 8. Remove closed connections and release their smoltcp sockets.
             self.cleanup();
 
-            // 8. Publish resource counters for `a3s-box stats`.
+            // 9. Publish resource counters for `a3s-box stats`.
             self.maybe_write_stats_snapshot();
 
-            // 9. Sleep until the next smoltcp event or at most 5 ms.
+            // 10. Sleep until the next smoltcp event or at most 5 ms.
             let delay = self
                 .iface
                 .poll_delay(now, &self.sockets)
@@ -484,7 +322,7 @@ impl ProxyEngine {
 
     // ── Accept new host connections ───────────────────────────────────────────
 
-    fn accept_connections(&mut self, now: Instant) {
+    fn accept_connections(&mut self) {
         // First pass: accept connections, collect (forward_index, stream, guest_ip, guest_port).
         // We can't call open_guest_tcp while mutably borrowing port_forwards.
         let mut new_conns: Vec<(usize, TcpStream, Ipv4Addr, u16)> = Vec::new();
@@ -507,8 +345,12 @@ impl ProxyEngine {
 
         // Second pass: open smoltcp TCP sockets and push to pending.
         for (i, stream, guest_ip, guest_port) in new_conns {
-            let handle = self.open_guest_tcp(guest_ip, guest_port, now);
-            self.port_forwards[i].pending.push((handle, stream));
+            let handle = self.open_guest_tcp(guest_ip, guest_port);
+            self.port_forwards[i].pending.push(PendingGuestConnection {
+                handle,
+                host_stream: stream,
+                started_at: std::time::Instant::now(),
+            });
             tracing::debug!(
                 guest = %guest_ip,
                 port = guest_port,
@@ -523,7 +365,6 @@ impl ProxyEngine {
         &mut self,
         guest_ip: Ipv4Addr,
         guest_port: u16,
-        _now: Instant,
     ) -> smoltcp::iface::SocketHandle {
         let rx = tcp::SocketBuffer::new(vec![0u8; 65536]);
         let tx = tcp::SocketBuffer::new(vec![0u8; 65536]);
@@ -540,8 +381,121 @@ impl ProxyEngine {
             .connect(self.iface.context(), remote, local_port)
             .ok();
         socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(30)));
+        socket.set_timeout(Some(TCP_IDLE_TIMEOUT));
 
         self.sockets.add(socket)
+    }
+
+    // ── Discover guest outbound TCP connections ──────────────────────────────
+
+    fn accept_outbound_flows(&mut self) {
+        let queued_flows: HashSet<_> = self
+            .device
+            .rx_queue
+            .iter()
+            .filter_map(|frame| outbound_syn_flow(frame, self.guest_ip, self.gateway_ip))
+            .collect();
+
+        for flow in queued_flows {
+            if self.outbound_flow_exists(flow) {
+                continue;
+            }
+            if self.pending_outbound.len() + self.active_outbound.len() >= MAX_OUTBOUND_CONNECTIONS
+                || self.outbound_connectors.load(Ordering::Relaxed) >= MAX_OUTBOUND_CONNECTIONS
+            {
+                tracing::warn!(
+                    limit = MAX_OUTBOUND_CONNECTIONS,
+                    "NetProxy outbound connection limit reached"
+                );
+                continue;
+            }
+
+            let connect_result = match spawn_outbound_connect(
+                flow,
+                Arc::clone(&self.outbound_connectors),
+            ) {
+                Ok(receiver) => receiver,
+                Err(error) => {
+                    tracing::warn!(%error, ?flow, "NetProxy failed to spawn outbound connector");
+                    continue;
+                }
+            };
+
+            let rx = tcp::SocketBuffer::new(vec![0u8; 65536]);
+            let tx = tcp::SocketBuffer::new(vec![0u8; 65536]);
+            let mut socket = tcp::Socket::new(rx, tx);
+            let endpoint = IpEndpoint::new(
+                IpAddress::Ipv4(to_smoltcp_ipv4(flow.remote_ip)),
+                flow.remote_port,
+            );
+            if let Err(error) = socket.listen(endpoint) {
+                tracing::warn!(?error, ?flow, "NetProxy failed to listen for outbound flow");
+                continue;
+            }
+            socket.set_keep_alive(Some(smoltcp::time::Duration::from_secs(30)));
+            socket.set_timeout(Some(TCP_IDLE_TIMEOUT));
+            let handle = self.sockets.add(socket);
+
+            self.pending_outbound.push(PendingOutboundConnection {
+                flow,
+                handle,
+                connect_result,
+                host_stream: None,
+                started_at: std::time::Instant::now(),
+                failed: false,
+            });
+            tracing::debug!(
+                ?flow,
+                ?handle,
+                "NetProxy discovered guest outbound TCP flow"
+            );
+        }
+    }
+
+    fn outbound_flow_exists(&self, flow: OutboundFlow) -> bool {
+        self.pending_outbound
+            .iter()
+            .any(|pending| pending.flow == flow)
+            || self
+                .active_outbound
+                .iter()
+                .any(|active| active.flow == flow)
+    }
+
+    /// Collect host connect results without blocking the netproxy packet loop.
+    /// This runs before `iface.poll`, so an aborted smoltcp socket gets a chance
+    /// to emit its reset before cleanup removes it.
+    fn poll_outbound_connectors(&mut self) {
+        for pending in &mut self.pending_outbound {
+            if pending.failed || pending.host_stream.is_some() {
+                continue;
+            }
+
+            match pending.connect_result.try_recv() {
+                Ok(Ok(stream)) => {
+                    pending.host_stream = Some(stream);
+                    tracing::debug!(flow = ?pending.flow, "NetProxy host TCP connection established");
+                }
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, flow = ?pending.flow, "NetProxy host TCP connection failed");
+                    self.sockets.get_mut::<tcp::Socket>(pending.handle).abort();
+                    pending.failed = true;
+                }
+                Err(TryRecvError::Empty) => {
+                    if pending.started_at.elapsed()
+                        > OUTBOUND_CONNECT_TIMEOUT + Duration::from_secs(1)
+                    {
+                        tracing::debug!(flow = ?pending.flow, "NetProxy host TCP connection timed out");
+                        self.sockets.get_mut::<tcp::Socket>(pending.handle).abort();
+                        pending.failed = true;
+                    }
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.sockets.get_mut::<tcp::Socket>(pending.handle).abort();
+                    pending.failed = true;
+                }
+            }
+        }
     }
 
     // ── Promote pending → active ──────────────────────────────────────────────
@@ -549,26 +503,94 @@ impl ProxyEngine {
     fn promote_established(&mut self) {
         for pf in &mut self.port_forwards {
             let mut still_pending = Vec::new();
-            for (handle, stream) in pf.pending.drain(..) {
-                let socket = self.sockets.get::<tcp::Socket>(handle);
+            let mut to_remove = Vec::new();
+            for pending in pf.pending.drain(..) {
+                let socket = self.sockets.get::<tcp::Socket>(pending.handle);
                 use smoltcp::socket::tcp::State;
                 match socket.state() {
                     State::Established => {
-                        tracing::debug!(handle = ?handle, "NetProxy guest TCP connection established");
-                        pf.active.push((handle, stream));
+                        tracing::debug!(handle = ?pending.handle, "NetProxy guest TCP connection established");
+                        pf.active
+                            .push(TcpProxyConnection::new(pending.handle, pending.host_stream));
                     }
-                    State::Closed | State::TimeWait | State::CloseWait => {
-                        tracing::debug!(handle = ?handle, state = ?socket.state(), "NetProxy guest TCP connection closed before establishment");
-                        // Connection failed; close host side
-                        drop(stream);
-                        self.sockets.remove(handle);
+                    State::Closed | State::TimeWait => {
+                        tracing::debug!(handle = ?pending.handle, state = ?socket.state(), "NetProxy guest TCP connection closed before establishment");
+                        to_remove.push(pending.handle);
+                    }
+                    _ if pending.started_at.elapsed() > OUTBOUND_CONNECT_TIMEOUT => {
+                        tracing::debug!(handle = ?pending.handle, "NetProxy guest TCP connection timed out");
+                        to_remove.push(pending.handle);
                     }
                     _ => {
-                        still_pending.push((handle, stream));
+                        still_pending.push(pending);
                     }
                 }
             }
             pf.pending = still_pending;
+            for handle in to_remove {
+                self.sockets.remove(handle);
+            }
+        }
+    }
+
+    fn promote_outbound_established(&mut self) {
+        use smoltcp::socket::tcp::State;
+
+        let mut still_pending = Vec::new();
+        let mut to_remove = Vec::new();
+        for mut pending in self.pending_outbound.drain(..) {
+            let state = self.sockets.get::<tcp::Socket>(pending.handle).state();
+            if pending.failed || matches!(state, State::Closed | State::TimeWait) {
+                to_remove.push(pending.handle);
+                continue;
+            }
+
+            if matches!(state, State::Established | State::CloseWait) {
+                if let Some(stream) = pending.host_stream.take() {
+                    tracing::debug!(flow = ?pending.flow, handle = ?pending.handle, "NetProxy outbound TCP proxy active");
+                    self.active_outbound.push(ActiveOutboundConnection {
+                        flow: pending.flow,
+                        proxy: TcpProxyConnection::new(pending.handle, stream),
+                    });
+                    continue;
+                }
+            }
+
+            still_pending.push(pending);
+        }
+        self.pending_outbound = still_pending;
+        for handle in to_remove {
+            self.sockets.remove(handle);
+        }
+    }
+
+    fn finish_aborted_connections(&mut self) {
+        for pf in &mut self.port_forwards {
+            let mut to_remove = Vec::new();
+            pf.active.retain(|connection| {
+                if connection.abort_pending {
+                    to_remove.push(connection.handle);
+                    false
+                } else {
+                    true
+                }
+            });
+            for handle in to_remove {
+                self.sockets.remove(handle);
+            }
+        }
+
+        let mut to_remove = Vec::new();
+        self.active_outbound.retain(|connection| {
+            if connection.proxy.abort_pending {
+                to_remove.push(connection.proxy.handle);
+                false
+            } else {
+                true
+            }
+        });
+        for handle in to_remove {
+            self.sockets.remove(handle);
         }
     }
 
@@ -576,60 +598,29 @@ impl ProxyEngine {
 
     fn proxy_data(&mut self) {
         for pf in &mut self.port_forwards {
-            for (handle, host_stream) in &mut pf.active {
-                let socket = self.sockets.get_mut::<tcp::Socket>(*handle);
-
-                // smoltcp → host (data received from guest)
-                if socket.can_recv() {
-                    socket
-                        .recv(|data| {
-                            tracing::trace!(handle = ?*handle, bytes = data.len(), "NetProxy forwarding guest -> host bytes");
-                            let _ = host_stream.write_all(data);
-                            (data.len(), ())
-                        })
-                        .ok();
-                }
-
-                // host → smoltcp (data from host curl/client)
-                if socket.can_send() {
-                    let mut buf = [0u8; 8192];
-                    match host_stream.read(&mut buf) {
-                        Ok(0) => {
-                            tracing::debug!(handle = ?*handle, "NetProxy host side closed connection");
-                            socket.close();
-                        }
-                        Ok(n) => {
-                            tracing::trace!(handle = ?*handle, bytes = n, "NetProxy forwarding host -> guest bytes");
-                            socket.send_slice(&buf[..n]).ok();
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                        Err(_) => {
-                            socket.close();
-                        }
-                    }
-                }
+            for connection in &mut pf.active {
+                proxy_tcp_connection(&mut self.sockets, connection);
             }
+        }
+        for connection in &mut self.active_outbound {
+            proxy_tcp_connection(&mut self.sockets, &mut connection.proxy);
         }
     }
 
     // ── DNS forwarding ────────────────────────────────────────────────────────
 
     fn forward_dns(&mut self) {
-        let dns_server = match self.dns_servers.first() {
-            Some(s) => *s,
-            None => return,
-        };
-
-        let socket = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
-        if !socket.can_recv() {
+        let next_query = self.dns_sockets.iter().find_map(|(handle, server)| {
+            let socket = self.sockets.get_mut::<udp::Socket>(*handle);
+            if !socket.can_recv() {
+                return None;
+            }
+            let (query, source) = socket.recv().ok()?;
+            Some((*handle, *server, query.to_vec(), source))
+        });
+        let Some((handle, dns_server, query, source)) = next_query else {
             return;
-        }
-        let (query, src_endpoint) = match socket.recv() {
-            Ok(r) => r,
-            Err(_) => return,
         };
-        let query = query.to_vec();
-        let src = src_endpoint;
 
         // Forward query to the real DNS server via a host UDP socket.
         match UdpSocket::bind("0.0.0.0:0") {
@@ -639,8 +630,8 @@ impl ProxyEngine {
                 if udp.send_to(&query, dest).is_ok() {
                     let mut resp = vec![0u8; 4096];
                     if let Ok((n, _)) = udp.recv_from(&mut resp) {
-                        let socket = self.sockets.get_mut::<udp::Socket>(self.dns_handle);
-                        socket.send_slice(&resp[..n], src).ok();
+                        let socket = self.sockets.get_mut::<udp::Socket>(handle);
+                        socket.send_slice(&resp[..n], source).ok();
                     }
                 }
             }
@@ -657,554 +648,206 @@ impl ProxyEngine {
         for pf in &mut self.port_forwards {
             // Collect handles that need to be removed first, then remove outside retain.
             let mut to_remove = Vec::new();
-            pf.active.retain(|(handle, _stream)| {
-                let state = self.sockets.get::<tcp::Socket>(*handle).state();
-                match state {
-                    State::Closed | State::TimeWait | State::CloseWait => {
-                        to_remove.push(*handle);
-                        false
-                    }
-                    _ => true,
+            pf.active.retain(|connection| {
+                let state = self.sockets.get::<tcp::Socket>(connection.handle).state();
+                if matches!(state, State::Closed | State::TimeWait) && !connection.abort_pending {
+                    to_remove.push(connection.handle);
+                    false
+                } else {
+                    true
                 }
             });
-            for h in to_remove {
-                self.sockets.remove(h);
+            for handle in to_remove {
+                self.sockets.remove(handle);
             }
         }
-    }
-}
 
-// ── NetProxyManager lifecycle ─────────────────────────────────────────────────
-
-/// Manages the lifecycle of the pure-Rust vfkit network proxy thread.
-///
-/// Drop calls `stop()` automatically.
-pub struct NetProxyManager {
-    socket_path: PathBuf,
-    stats_path: PathBuf,
-    net_socket_fd: Option<RawFd>,
-    net_proxy_fd: Option<RawFd>,
-}
-
-impl NetProxyManager {
-    /// Create a new manager. Socket will be placed at
-    /// `~/.a3s/boxes/<box_id>/sockets/net.sock`.
-    pub fn new(box_dir: &Path) -> Self {
-        let socket_dir = box_dir.join("sockets");
-        Self {
-            socket_path: socket_dir.join("net.sock"),
-            stats_path: socket_dir.join("net.stats.json"),
-            net_socket_fd: None,
-            net_proxy_fd: None,
-        }
-    }
-
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
-    }
-
-    pub fn stats_path(&self) -> &Path {
-        &self.stats_path
-    }
-
-    pub fn net_socket_fd(&self) -> Option<RawFd> {
-        self.net_socket_fd
-    }
-
-    pub fn net_proxy_fd(&self) -> Option<RawFd> {
-        self.net_proxy_fd
-    }
-
-    /// Create socketpair for NetProxy.
-    ///
-    /// Unlike the name suggests, this does NOT spawn a thread. Thread spawning
-    /// happens in `spawn_inherited_netproxy()` called from the shim.
-    pub fn spawn(
-        &mut self,
-        _ip: Ipv4Addr,
-        _gateway: Ipv4Addr,
-        _prefix_len: u8,
-        _dns_servers: &[Ipv4Addr],
-        _port_map: &[String],
-    ) -> Result<()> {
-        let (proxy_socket, krun_fd) = socketpair_unixgram()?;
-        self.net_socket_fd = Some(krun_fd);
-        self.net_proxy_fd = Some(proxy_socket.into_raw_fd());
-        Ok(())
-    }
-
-    pub fn stop(&mut self) {
-        if let Some(fd) = self.net_socket_fd.take() {
-            unsafe {
-                libc::close(fd);
+        let mut to_remove = Vec::new();
+        self.active_outbound.retain(|connection| {
+            let state = self
+                .sockets
+                .get::<tcp::Socket>(connection.proxy.handle)
+                .state();
+            if matches!(state, State::Closed | State::TimeWait) && !connection.proxy.abort_pending {
+                to_remove.push(connection.proxy.handle);
+                false
+            } else {
+                true
             }
+        });
+        for handle in to_remove {
+            self.sockets.remove(handle);
         }
-        if let Some(fd) = self.net_proxy_fd.take() {
-            unsafe {
-                libc::close(fd);
-            }
-        }
-        std::fs::remove_file(&self.socket_path).ok();
-        std::fs::remove_file(&self.stats_path).ok();
-    }
-
-    pub fn is_running(&mut self) -> bool {
-        self.net_socket_fd.is_some() || self.net_proxy_fd.is_some()
     }
 }
 
-impl Drop for NetProxyManager {
-    fn drop(&mut self) {
-        self.stop();
+/// Extract the original four-tuple from a guest TCP SYN routed through the
+/// gateway. Peer-to-peer bridge frames use the peer MAC and are deliberately
+/// excluded so the local Ethernet switch keeps owning those connections.
+fn outbound_syn_flow(
+    frame: &[u8],
+    expected_guest_ip: Ipv4Addr,
+    gateway_ip: Ipv4Addr,
+) -> Option<OutboundFlow> {
+    let ethernet = EthernetFrame::new_checked(frame).ok()?;
+    if ethernet.dst_addr() != GATEWAY_MAC || ethernet.ethertype() != EthernetProtocol::Ipv4 {
+        return None;
     }
-}
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+    let ipv4 = Ipv4Packet::new_checked(ethernet.payload()).ok()?;
+    if ipv4.next_header() != IpProtocol::Tcp {
+        return None;
+    }
+    let guest_ip = Ipv4Addr::from(ipv4.src_addr().0);
+    let remote_ip = Ipv4Addr::from(ipv4.dst_addr().0);
+    if guest_ip != expected_guest_ip
+        || remote_ip == gateway_ip
+        || remote_ip.is_unspecified()
+        || remote_ip.is_multicast()
+        || remote_ip == Ipv4Addr::BROADCAST
+    {
+        return None;
+    }
 
-pub struct InheritedNetProxyConfig<'a> {
-    pub guest_ip: Ipv4Addr,
-    pub gateway: Ipv4Addr,
-    pub prefix_len: u8,
-    pub dns_servers: &'a [Ipv4Addr],
-    pub port_map: &'a [String],
-    pub stats_path: Option<PathBuf>,
-    pub bridge_socket_dir: Option<PathBuf>,
-    pub own_mac: [u8; 6],
-}
+    let tcp = TcpPacket::new_checked(ipv4.payload()).ok()?;
+    if !tcp.syn() || tcp.ack() || tcp.src_port() == 0 || tcp.dst_port() == 0 {
+        return None;
+    }
 
-pub fn spawn_inherited_netproxy(fd: RawFd, config: InheritedNetProxyConfig<'_>) -> Result<()> {
-    let InheritedNetProxyConfig {
+    Some(OutboundFlow {
         guest_ip,
-        gateway,
-        prefix_len,
-        dns_servers,
-        port_map,
-        stats_path,
-        bridge_socket_dir,
-        own_mac,
-    } = config;
-    let socket = unsafe { UnixDatagram::from_raw_fd(fd) };
-    let port_forwards = parse_port_forwards(port_map, guest_ip)
-        .map_err(|e| BoxError::NetworkError(format!("invalid port_map: {}", e)))?;
-    let dns_servers = dns_servers.to_vec();
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let stats = Arc::new(NetStats::default());
-    let bridge = bridge_socket_dir
-        .as_deref()
-        .map(|directory| BridgePort::bind(directory, own_mac))
-        .transpose()
-        .map_err(|error| {
-            BoxError::NetworkError(format!("failed to join bridge Ethernet switch: {error}"))
-        })?;
+        guest_port: tcp.src_port(),
+        remote_ip,
+        remote_port: tcp.dst_port(),
+    })
+}
 
-    std::thread::Builder::new()
-        .name("a3s-netproxy".to_string())
+fn spawn_outbound_connect(
+    flow: OutboundFlow,
+    connector_count: Arc<AtomicUsize>,
+) -> io::Result<Receiver<io::Result<TcpStream>>> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    connector_count.fetch_add(1, Ordering::Relaxed);
+    let thread_count = Arc::clone(&connector_count);
+    let spawn = std::thread::Builder::new()
+        .name("a3s-netproxy-connect".to_string())
         .spawn(move || {
-            tracing::info!(fd, gateway = %gateway, guest_ip = %guest_ip, stats = ?stats_path, "NetProxy thread started");
-            if let Err(e) = socket.set_nonblocking(true) {
-                tracing::error!(error = %e, "NetProxy: set_nonblocking failed");
-                return;
+            let address = SocketAddr::V4(SocketAddrV4::new(flow.remote_ip, flow.remote_port));
+            let result =
+                TcpStream::connect_timeout(&address, OUTBOUND_CONNECT_TIMEOUT).and_then(|stream| {
+                    stream.set_nonblocking(true)?;
+                    let _ = stream.set_nodelay(true);
+                    Ok(stream)
+                });
+            let _ = sender.send(result);
+            thread_count.fetch_sub(1, Ordering::Relaxed);
+        });
+
+    match spawn {
+        Ok(_) => Ok(receiver),
+        Err(error) => {
+            connector_count.fetch_sub(1, Ordering::Relaxed);
+            Err(error)
+        }
+    }
+}
+
+/// Move as much data as each non-blocking endpoint can currently accept.
+/// Consuming only the byte count returned by `write` and reading directly into
+/// smoltcp's available transmit slice prevents partial writes from dropping
+/// bytes under backpressure.
+fn proxy_tcp_connection(sockets: &mut SocketSet<'static>, connection: &mut TcpProxyConnection) {
+    let handle = connection.handle;
+    let socket = sockets.get_mut::<tcp::Socket>(handle);
+
+    let mut guest_to_host_bytes = 0usize;
+    let mut host_write_error = None;
+    if socket.can_recv() {
+        let _ = socket.recv(|data| match connection.host_stream.write(data) {
+            Ok(0) if !data.is_empty() => {
+                host_write_error = Some(io::Error::from(io::ErrorKind::WriteZero));
+                (0, ())
             }
-
-            let mut engine = ProxyEngine::new(ProxyEngineConfig {
-                socket,
-                gateway_ip: gateway,
-                prefix_len,
-                dns_servers,
-                port_forwards,
-                shutdown,
-                stats,
-                stats_path,
-                bridge,
-            });
-            engine.run();
-            tracing::info!("NetProxy thread exiting");
-        })
-        .map_err(|e| BoxError::NetworkError(format!("failed to spawn netproxy thread: {}", e)))?;
-
-    Ok(())
-}
-
-fn socketpair_unixgram() -> Result<(UnixDatagram, RawFd)> {
-    let mut fds = [-1; 2];
-    let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(BoxError::NetworkError(format!(
-            "failed to create unix datagram socketpair: {}",
-            io::Error::last_os_error()
-        )));
-    }
-
-    let proxy_socket = unsafe { UnixDatagram::from_raw_fd(fds[0]) };
-    Ok((proxy_socket, fds[1]))
-}
-
-fn write_stats_file(path: &Path, stats: NetStatsSnapshot) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let updated_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let body = format!(
-        "{{\"schema\":\"a3s-box.netproxy.stats.v1\",\"rx_bytes\":{},\"tx_bytes\":{},\"rx_packets\":{},\"tx_packets\":{},\"updated_at_ms\":{}}}\n",
-        stats.rx_bytes, stats.tx_bytes, stats.rx_packets, stats.tx_packets, updated_at_ms
-    );
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(tmp, path)
-}
-
-/// Parse `["8088:80", "443:443"]` into `Vec<PortForward>`.
-///
-/// Each rule maps `host_port → guest_ip:guest_port`. Guest IP is always the
-/// IPAM-assigned `guest_ip`.
-fn parse_port_forwards(
-    port_map: &[String],
-    guest_ip: Ipv4Addr,
-) -> std::result::Result<Vec<PortForward>, String> {
-    let mut forwards = Vec::new();
-    for entry in port_map {
-        let mapping = a3s_box_core::parse_port_mapping(entry)?;
-        let host_port = mapping.host_port;
-        let guest_port = mapping.guest_port;
-
-        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, host_port))
-            .map_err(|e| format!("cannot bind 0.0.0.0:{}: {}", host_port, e))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| format!("set_nonblocking on listener: {}", e))?;
-
-        tracing::info!(
-            host_port,
-            guest_port,
-            guest_ip = %guest_ip,
-            "Port-forward listener ready"
-        );
-        forwards.push(PortForward {
-            listener,
-            guest_ip,
-            guest_port,
-            pending: Vec::new(),
-            active: Vec::new(),
+            Ok(written) => {
+                guest_to_host_bytes = written;
+                (written, ())
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                (0, ())
+            }
+            Err(error) => {
+                host_write_error = Some(error);
+                (0, ())
+            }
         });
     }
-    Ok(forwards)
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn port_is_bindable(port: u16) -> bool {
-        TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).is_ok()
-    }
-
-    fn ports_are_bindable(ports: &[u16]) -> bool {
-        ports.iter().copied().all(port_is_bindable)
-    }
-
-    #[test]
-    fn test_smoltcp_now_returns_reasonable_value() {
-        let now = smoltcp_now();
-        // Should return microseconds since epoch
-        assert!(now.micros() > 0);
-    }
-
-    #[test]
-    fn test_to_smoltcp_ipv4_conversion() {
-        let ip = Ipv4Addr::new(10, 88, 0, 1);
-        let smol_ip = to_smoltcp_ipv4(ip);
-        assert_eq!(smol_ip.as_bytes(), &[10, 88, 0, 1]);
-    }
-
-    #[test]
-    fn test_to_smoltcp_ipv4_loopback() {
-        let ip = Ipv4Addr::new(127, 0, 0, 1);
-        let smol_ip = to_smoltcp_ipv4(ip);
-        assert_eq!(smol_ip.as_bytes(), &[127, 0, 0, 1]);
-    }
-
-    fn ethernet_frame(destination: [u8; 6], source: [u8; 6]) -> Vec<u8> {
-        let mut frame = vec![0u8; 64];
-        frame[..6].copy_from_slice(&destination);
-        frame[6..12].copy_from_slice(&source);
-        frame[12..14].copy_from_slice(&[0x08, 0x00]);
-        frame[14..].fill(0x5a);
-        frame
-    }
-
-    #[test]
-    fn bridge_port_unicasts_frame_to_matching_peer_mac() {
-        let dir = tempfile::tempdir().unwrap();
-        let mac_a = [0x02, 0x42, 10, 88, 0, 2];
-        let mac_b = [0x02, 0x42, 10, 88, 0, 3];
-        let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
-        let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
-        let (guest_b, proxy_b) = UnixDatagram::pair().unwrap();
-        guest_b.set_nonblocking(true).unwrap();
-        let frame = ethernet_frame(mac_b, mac_a);
-
-        assert!(!bridge_a.forward_from_guest(&frame));
-        bridge_b.drain_to_guest(&proxy_b, &NetStats::default());
-
-        let mut received = [0u8; MAX_FRAME];
-        let size = guest_b.recv(&mut received).unwrap();
-        assert_eq!(&received[..size], frame.as_slice());
-    }
-
-    #[test]
-    fn bridge_port_floods_broadcast_and_keeps_gateway_delivery() {
-        let dir = tempfile::tempdir().unwrap();
-        let mac_a = [0x02, 0x42, 10, 88, 0, 2];
-        let mac_b = [0x02, 0x42, 10, 88, 0, 3];
-        let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
-        let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
-        let (guest_b, proxy_b) = UnixDatagram::pair().unwrap();
-        guest_b.set_nonblocking(true).unwrap();
-        let frame = ethernet_frame([0xff; 6], mac_a);
-
-        assert!(bridge_a.forward_from_guest(&frame));
-        bridge_b.drain_to_guest(&proxy_b, &NetStats::default());
-
-        let mut received = [0u8; MAX_FRAME];
-        let size = guest_b.recv(&mut received).unwrap();
-        assert_eq!(&received[..size], frame.as_slice());
-    }
-
-    #[test]
-    fn test_net_stats_records_bytes_and_packets() {
-        let stats = NetStats::default();
-
-        stats.record_rx(64);
-        stats.record_rx(128);
-        stats.record_tx(512);
-
-        let snapshot = stats.snapshot();
-        assert_eq!(snapshot.rx_bytes, 192);
-        assert_eq!(snapshot.rx_packets, 2);
-        assert_eq!(snapshot.tx_bytes, 512);
-        assert_eq!(snapshot.tx_packets, 1);
-    }
-
-    #[test]
-    fn test_parse_port_forwards_empty_rules() {
-        let guest = Ipv4Addr::new(10, 89, 0, 2);
-        let fwds = parse_port_forwards(&[], guest).unwrap();
-        assert!(fwds.is_empty());
-    }
-
-    #[test]
-    fn test_parse_port_forwards_rejects_udp_suffix() {
-        let guest = Ipv4Addr::new(10, 89, 0, 2);
-        let rules = vec!["19990:80/udp".to_string()];
-        let error = match parse_port_forwards(&rules, guest) {
-            Ok(_) => panic!("UDP port mapping unexpectedly succeeded"),
-            Err(error) => error,
-        };
-
-        assert!(error.contains("only TCP is supported"));
-    }
-
-    #[test]
-    fn test_parse_port_forwards_multiple_rules() {
-        let guest = Ipv4Addr::new(10, 89, 0, 2);
-        if !ports_are_bindable(&[19991, 19992, 19993]) {
-            eprintln!("skipping test: one or more host ports are not bindable");
-            return;
-        }
-        let rules = vec![
-            "19991:80".to_string(),
-            "19992:443".to_string(),
-            "19993:8080".to_string(),
-        ];
-        let fwds = parse_port_forwards(&rules, guest).unwrap();
-        assert_eq!(fwds.len(), 3);
-        assert_eq!(fwds[0].guest_port, 80);
-        assert_eq!(fwds[1].guest_port, 443);
-        assert_eq!(fwds[2].guest_port, 8080);
-    }
-
-    #[test]
-    fn test_parse_port_forwards_empty_string() {
-        let guest = Ipv4Addr::new(10, 89, 0, 2);
-        // Empty entry should fail parsing
-        let rules = vec!["".to_string()];
-        let result = parse_port_forwards(&rules, guest);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_netproxy_manager_new() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = NetProxyManager::new(dir.path());
-        assert_eq!(
-            mgr.socket_path(),
-            dir.path().join("sockets").join("net.sock")
+    if guest_to_host_bytes > 0 {
+        tracing::trace!(
+            ?handle,
+            bytes = guest_to_host_bytes,
+            "NetProxy forwarded guest -> host bytes"
         );
-        assert_eq!(
-            mgr.stats_path(),
-            dir.path().join("sockets").join("net.stats.json")
+    }
+    if let Some(error) = host_write_error {
+        tracing::debug!(%error, ?handle, "NetProxy host write failed");
+        let _ = connection.host_stream.shutdown(Shutdown::Both);
+        socket.abort();
+        connection.abort_pending = true;
+        return;
+    }
+
+    if !connection.guest_read_closed && !socket.may_recv() {
+        let _ = connection.host_stream.shutdown(Shutdown::Write);
+        connection.guest_read_closed = true;
+    }
+
+    let mut host_to_guest_bytes = 0usize;
+    let mut host_eof = false;
+    let mut host_read_error = None;
+    if !connection.host_read_closed && socket.can_send() {
+        let _ = socket.send(|buffer| match connection.host_stream.read(buffer) {
+            Ok(0) => {
+                host_eof = true;
+                (0, ())
+            }
+            Ok(read) => {
+                host_to_guest_bytes = read;
+                (read, ())
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                (0, ())
+            }
+            Err(error) => {
+                host_read_error = Some(error);
+                (0, ())
+            }
+        });
+    }
+    if host_to_guest_bytes > 0 {
+        tracing::trace!(
+            ?handle,
+            bytes = host_to_guest_bytes,
+            "NetProxy forwarded host -> guest bytes"
         );
-        assert_eq!(mgr.net_socket_fd(), None);
     }
-
-    #[test]
-    fn test_netproxy_manager_not_running_initially() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut mgr = NetProxyManager::new(dir.path());
-        assert!(!mgr.is_running());
+    if let Some(error) = host_read_error {
+        tracing::debug!(%error, ?handle, "NetProxy host read failed");
+        let _ = connection.host_stream.shutdown(Shutdown::Both);
+        socket.abort();
+        connection.abort_pending = true;
+    } else if host_eof {
+        tracing::debug!(?handle, "NetProxy host side closed its write half");
+        connection.host_read_closed = true;
+        socket.close();
     }
-
-    #[test]
-    fn test_netproxy_manager_stop_when_not_started() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut mgr = NetProxyManager::new(dir.path());
-        mgr.stop(); // must not panic
-        assert!(!mgr.is_running());
-    }
-
-    #[test]
-    fn test_netproxy_manager_spawn_creates_socketpair_fds_and_stop_closes_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut mgr = NetProxyManager::new(dir.path());
-
-        mgr.spawn(
-            Ipv4Addr::new(10, 89, 0, 2),
-            Ipv4Addr::new(10, 89, 0, 1),
-            24,
-            &[Ipv4Addr::new(8, 8, 8, 8)],
-            &[],
-        )
-        .unwrap();
-
-        assert!(mgr.is_running());
-        assert!(mgr.net_socket_fd().is_some());
-        assert!(mgr.net_proxy_fd().is_some());
-
-        mgr.stop();
-        assert!(!mgr.is_running());
-        assert!(mgr.net_socket_fd().is_none());
-        assert!(mgr.net_proxy_fd().is_none());
-    }
-
-    #[test]
-    fn test_netproxy_manager_drop_cleans_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("sockets").join("net.sock");
-        std::fs::create_dir_all(dir.path().join("sockets")).unwrap();
-        std::fs::write(&socket_path, "fake").unwrap();
-        {
-            let _mgr = NetProxyManager::new(dir.path());
-            // Drop triggers cleanup
-        }
-        assert!(!socket_path.exists());
-    }
-
-    #[test]
-    fn test_write_stats_file_writes_json_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sockets").join("net.stats.json");
-
-        write_stats_file(
-            &path,
-            NetStatsSnapshot {
-                rx_bytes: 1024,
-                tx_bytes: 2048,
-                rx_packets: 3,
-                tx_packets: 4,
-            },
-        )
-        .unwrap();
-
-        let json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(json["schema"], "a3s-box.netproxy.stats.v1");
-        assert_eq!(json["rx_bytes"], 1024);
-        assert_eq!(json["tx_bytes"], 2048);
-        assert_eq!(json["rx_packets"], 3);
-        assert_eq!(json["tx_packets"], 4);
-    }
-
-    #[test]
-    fn test_write_stats_file_overwrites_existing_file_and_removes_temp() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("net.stats.json");
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&path, "old").unwrap();
-        std::fs::write(&tmp, "stale temp").unwrap();
-
-        write_stats_file(
-            &path,
-            NetStatsSnapshot {
-                rx_bytes: 1,
-                tx_bytes: 2,
-                rx_packets: 3,
-                tx_packets: 4,
-            },
-        )
-        .unwrap();
-
-        let json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(json["rx_bytes"], 1);
-        assert_eq!(json["tx_bytes"], 2);
-        assert!(!tmp.exists());
-    }
-
-    #[test]
-    fn test_parse_port_forwards_valid() {
-        let guest = Ipv4Addr::new(10, 89, 0, 2);
-        if !ports_are_bindable(&[19988, 19443]) {
-            eprintln!("skipping test: one or more host ports are not bindable");
-            return;
-        }
-        // Use a random high port to avoid conflicts
-        let rules = vec!["19988:80".to_string(), "19443:443".to_string()];
-        let fwds = parse_port_forwards(&rules, guest).unwrap();
-        assert_eq!(fwds.len(), 2);
-        assert_eq!(fwds[0].guest_port, 80);
-        assert_eq!(fwds[1].guest_port, 443);
-    }
-
-    #[test]
-    fn test_parse_port_forwards_with_protocol_suffix() {
-        let guest = Ipv4Addr::new(10, 89, 0, 2);
-        if !port_is_bindable(19989) {
-            eprintln!("skipping test: host port 19989 is not bindable");
-            return;
-        }
-        let rules = vec!["19989:80/tcp".to_string()];
-        let fwds = parse_port_forwards(&rules, guest).unwrap();
-        assert_eq!(fwds[0].guest_port, 80);
-    }
-
-    #[test]
-    fn test_parse_port_forwards_invalid_format() {
-        let guest = Ipv4Addr::new(10, 89, 0, 2);
-        assert!(parse_port_forwards(&["notaport".to_string()], guest).is_err());
-        assert!(parse_port_forwards(&["abc:80".to_string()], guest).is_err());
-        assert!(parse_port_forwards(&["80:xyz".to_string()], guest).is_err());
-    }
-
-    #[test]
-    fn test_parse_port_forwards_reports_bind_conflict() {
-        let guest = Ipv4Addr::new(10, 89, 0, 2);
-        let held = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-        let port = held.local_addr().unwrap().port();
-
-        let error = match parse_port_forwards(&[format!("{port}:80")], guest) {
-            Ok(_) => panic!("port-forward bind conflict should return an error"),
-            Err(error) => error,
-        };
-
-        assert!(error.contains(&format!("cannot bind 0.0.0.0:{port}")));
-    }
-
-    // Note: test_netproxy_manager_spawn_binds_and_releases_host_ports was removed
-    // because spawn() no longer spawns a thread or binds ports. Port binding
-    // now happens in spawn_inherited_netproxy() called from the shim.
 }
