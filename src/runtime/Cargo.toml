@@ -11,6 +11,11 @@ description = "MicroVM runtime engine — VM lifecycle, OCI images, attestation,
 name = "a3s_box_runtime"
 path = "src/lib.rs"
 
+[[example]]
+name = "managed-sandbox-smoke"
+path = "examples/managed_sandbox_smoke.rs"
+required-features = ["vm"]
+
 [features]
 default = ["vm", "pool", "scale", "compose", "operator", "build"]
 vm = []
