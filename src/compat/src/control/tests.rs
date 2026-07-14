@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
-use std::sync::Mutex;
 
 use a3s_box_core::{
     resolve_execution, BoxConfig, ExecutionGeneration, ExecutionId, ExecutionLease,
@@ -31,6 +30,7 @@ fn creating_record(id: &str) -> SandboxRecord {
     SandboxRecord::creating(NewSandboxRecord {
         sandbox_id: SandboxId::new(id).unwrap(),
         operation_id: OperationId::new(format!("operation-{id}")).unwrap(),
+        owner_id: "fixture-client".to_string(),
         template_id: "code-interpreter-v1".to_string(),
         plan,
         resources: config.resources,
@@ -43,6 +43,8 @@ fn creating_record(id: &str) -> SandboxRecord {
         expires_at: instant(0) + Duration::seconds(300),
         metadata: BTreeMap::from([("team".to_string(), "fixture".to_string())]),
         envd_version: "0.1.3".to_string(),
+        secure: true,
+        allow_internet_access: Some(false),
         credentials: SandboxCredentials {
             envd: stored_token(10),
             traffic: stored_token(20),
@@ -140,97 +142,9 @@ fn killed_record_is_terminal() {
     ));
 }
 
-#[derive(Default)]
-struct MemoryRepository {
-    records: Mutex<BTreeMap<SandboxId, SandboxRecord>>,
-}
-
-#[async_trait]
-impl SandboxRepository for MemoryRepository {
-    async fn insert(&self, record: SandboxRecord) -> RepositoryResult<()> {
-        let mut records = self.records.lock().unwrap();
-        if records.contains_key(record.sandbox_id()) {
-            return Err(RepositoryError::Duplicate(record.sandbox_id().clone()));
-        }
-        records.insert(record.sandbox_id().clone(), record);
-        Ok(())
-    }
-
-    async fn get(&self, sandbox_id: &SandboxId) -> RepositoryResult<Option<SandboxRecord>> {
-        Ok(self.records.lock().unwrap().get(sandbox_id).cloned())
-    }
-
-    async fn list(&self, filter: &SandboxListFilter) -> RepositoryResult<SandboxPage> {
-        let records = self.records.lock().unwrap();
-        let mut matching = records
-            .values()
-            .filter(|record| {
-                filter.states.is_empty()
-                    || record
-                        .public_state()
-                        .is_some_and(|state| filter.states.contains(&state))
-            })
-            .filter(|record| {
-                filter
-                    .metadata
-                    .iter()
-                    .all(|(key, value)| record.metadata().get(key) == Some(value))
-            })
-            .filter(|record| {
-                filter.after.as_ref().is_none_or(|cursor| {
-                    (record.created_at(), record.sandbox_id())
-                        > (cursor.created_at, &cursor.sandbox_id)
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        matching.sort_by(|left, right| {
-            (left.created_at(), left.sandbox_id()).cmp(&(right.created_at(), right.sandbox_id()))
-        });
-        let limit = filter.limit.get() as usize;
-        let has_more = matching.len() > limit;
-        matching.truncate(limit);
-        let next = has_more.then(|| {
-            let last = matching.last().unwrap();
-            SandboxCursor {
-                created_at: last.created_at(),
-                sandbox_id: last.sandbox_id().clone(),
-            }
-        });
-        Ok(SandboxPage {
-            records: matching,
-            next,
-        })
-    }
-
-    async fn compare_and_swap(
-        &self,
-        sandbox_id: &SandboxId,
-        expected: SandboxGeneration,
-        replacement: SandboxRecord,
-    ) -> RepositoryResult<CompareAndSwapResult> {
-        if replacement.sandbox_id() != sandbox_id || replacement.generation() <= expected {
-            return Err(RepositoryError::Corrupt(
-                "invalid compare-and-swap replacement".to_string(),
-            ));
-        }
-        let mut records = self.records.lock().unwrap();
-        let Some(current) = records.get(sandbox_id) else {
-            return Ok(CompareAndSwapResult::NotFound);
-        };
-        if current.generation() != expected {
-            return Ok(CompareAndSwapResult::Conflict {
-                actual_generation: current.generation(),
-            });
-        }
-        records.insert(sandbox_id.clone(), replacement);
-        Ok(CompareAndSwapResult::Updated)
-    }
-}
-
 #[tokio::test]
 async fn repository_compare_and_swap_rejects_stale_generation() {
-    let repository = MemoryRepository::default();
+    let repository = MemorySandboxRepository::default();
     let mut original = creating_record("sandbox-1");
     repository.insert(original.clone()).await.unwrap();
     let stale_generation = original.generation();
@@ -262,7 +176,7 @@ async fn repository_compare_and_swap_rejects_stale_generation() {
 
 #[tokio::test]
 async fn repository_list_port_preserves_cursor_and_filters() {
-    let repository = MemoryRepository::default();
+    let repository = MemorySandboxRepository::default();
     for id in ["sandbox-1", "sandbox-2"] {
         let mut record = creating_record(id);
         record.mark_running(execution_lease(&record, 1)).unwrap();
@@ -270,6 +184,7 @@ async fn repository_list_port_preserves_cursor_and_filters() {
     }
     let first = repository
         .list(&SandboxListFilter {
+            owner_id: "fixture-client".to_string(),
             metadata: BTreeMap::from([("team".to_string(), "fixture".to_string())]),
             states: BTreeSet::from([PublicSandboxState::Running]),
             limit: NonZeroU32::new(1).unwrap(),
@@ -282,6 +197,7 @@ async fn repository_list_port_preserves_cursor_and_filters() {
 
     let second = repository
         .list(&SandboxListFilter {
+            owner_id: "fixture-client".to_string(),
             metadata: BTreeMap::new(),
             states: BTreeSet::new(),
             limit: NonZeroU32::new(1).unwrap(),

@@ -139,6 +139,7 @@ pub enum LifecycleFailure {
 pub struct NewSandboxRecord {
     pub sandbox_id: SandboxId,
     pub operation_id: OperationId,
+    pub owner_id: String,
     pub template_id: String,
     pub plan: ResolvedExecutionPlan,
     pub resources: ResourceConfig,
@@ -147,6 +148,8 @@ pub struct NewSandboxRecord {
     pub expires_at: DateTime<Utc>,
     pub metadata: BTreeMap<String, String>,
     pub envd_version: String,
+    pub secure: bool,
+    pub allow_internet_access: Option<bool>,
     pub credentials: SandboxCredentials,
 }
 
@@ -154,6 +157,7 @@ pub struct NewSandboxRecord {
 pub struct SandboxRecord {
     sandbox_id: SandboxId,
     operation_id: OperationId,
+    owner_id: String,
     execution_id: Option<ExecutionId>,
     execution_generation: Option<ExecutionGeneration>,
     generation: SandboxGeneration,
@@ -167,15 +171,20 @@ pub struct SandboxRecord {
     expires_at: DateTime<Utc>,
     metadata: BTreeMap<String, String>,
     envd_version: String,
+    secure: bool,
+    allow_internet_access: Option<bool>,
     credentials: SandboxCredentials,
     failure: Option<LifecycleFailure>,
 }
 
 impl SandboxRecord {
     pub fn creating(new: NewSandboxRecord) -> Result<Self, LifecycleError> {
-        if new.template_id.trim().is_empty() || new.envd_version.trim().is_empty() {
+        if new.owner_id.trim().is_empty()
+            || new.template_id.trim().is_empty()
+            || new.envd_version.trim().is_empty()
+        {
             return Err(LifecycleError::InvalidIdentity(
-                "template ID and envd version cannot be empty".to_string(),
+                "owner ID, template ID, and envd version cannot be empty".to_string(),
             ));
         }
         if new.expires_at < new.created_at {
@@ -184,6 +193,7 @@ impl SandboxRecord {
         Ok(Self {
             sandbox_id: new.sandbox_id,
             operation_id: new.operation_id,
+            owner_id: new.owner_id,
             execution_id: None,
             execution_generation: None,
             generation: SandboxGeneration::INITIAL,
@@ -197,6 +207,8 @@ impl SandboxRecord {
             expires_at: new.expires_at,
             metadata: new.metadata,
             envd_version: new.envd_version,
+            secure: new.secure,
+            allow_internet_access: new.allow_internet_access,
             credentials: new.credentials,
             failure: None,
         })
@@ -208,6 +220,10 @@ impl SandboxRecord {
 
     pub fn operation_id(&self) -> &OperationId {
         &self.operation_id
+    }
+
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
     }
 
     pub fn execution_id(&self) -> Option<&ExecutionId> {
@@ -260,6 +276,14 @@ impl SandboxRecord {
 
     pub fn envd_version(&self) -> &str {
         &self.envd_version
+    }
+
+    pub const fn secure(&self) -> bool {
+        self.secure
+    }
+
+    pub const fn allow_internet_access(&self) -> Option<bool> {
+        self.allow_internet_access
     }
 
     pub fn credentials(&self) -> &SandboxCredentials {

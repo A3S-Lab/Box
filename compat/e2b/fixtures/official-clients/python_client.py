@@ -20,6 +20,7 @@ from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 API_KEY = "e2b_a1b2c3"
 SANDBOX_ID = "fixture-sandbox"
+INTERPRETER_SANDBOX_ID = "fixture-interpreter"
 MISSING_SANDBOX_ID = "missing-sandbox"
 
 
@@ -71,6 +72,7 @@ def run_sync(api_url: str) -> None:
         raise AssertionError("missing sandbox connect must raise SandboxNotFoundException")
 
     interpreter = CodeInterpreter.create(**connection(api_url))
+    assert interpreter.sandbox_id == INTERPRETER_SANDBOX_ID
     assert interpreter.kill()
 
 
@@ -105,6 +107,7 @@ async def run_async(api_url: str) -> None:
         raise AssertionError("missing sandbox connect must raise SandboxNotFoundException")
 
     interpreter = await AsyncCodeInterpreter.create(**connection(api_url))
+    assert interpreter.sandbox_id == INTERPRETER_SANDBOX_ID
     assert await interpreter.kill()
 
 

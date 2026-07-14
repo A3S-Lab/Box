@@ -54,4 +54,5 @@ await assert.rejects(
 )
 
 const interpreter = await CodeInterpreter.create(connection)
+assert.equal(interpreter.sandboxId, 'fixture-interpreter')
 assert.equal(await interpreter.kill(), true)

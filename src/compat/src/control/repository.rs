@@ -15,6 +15,7 @@ pub struct SandboxCursor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxListFilter {
+    pub owner_id: String,
     pub metadata: BTreeMap<String, String>,
     pub states: BTreeSet<PublicSandboxState>,
     pub limit: NonZeroU32,

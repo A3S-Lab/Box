@@ -235,6 +235,31 @@ def run_client(
         )
 
 
+def run_rust_client(
+    label: str,
+    command: list[str],
+    temp: Path,
+    server_bin: Path,
+) -> None:
+    port_file = temp / f"{label}-rust.port"
+    server = subprocess.Popen(
+        [str(server_bin), "--port-file", str(port_file)],
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not port_file.exists():
+            if server.poll() is not None:
+                raise RuntimeError(f"Rust fixture server exited before {label} started")
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Rust fixture server did not start for {label}")
+            time.sleep(0.02)
+        api_url = f"http://127.0.0.1:{port_file.read_text(encoding='utf-8')}"
+        subprocess.run([*command, api_url], check=True)
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["generate", "verify"], nargs="?", default="verify")
@@ -247,6 +272,11 @@ def main() -> None:
         "--artifact-cache",
         type=Path,
         help="reuse verified SDK artifacts from this directory",
+    )
+    parser.add_argument(
+        "--rust-server-bin",
+        type=Path,
+        help="also run every official client against this Rust fixture server",
     )
     args = parser.parse_args()
     artifacts = load_artifacts()
@@ -281,6 +311,28 @@ def main() -> None:
             temp,
             update,
         )
+        if args.rust_server_bin:
+            server_bin = args.rust_server_bin.resolve()
+            if not server_bin.is_file():
+                raise FileNotFoundError(f"Rust fixture server not found: {server_bin}")
+            run_rust_client(
+                "python-sync",
+                [str(python), str(FIXTURE_DIR / "python_client.py"), "sync"],
+                temp,
+                server_bin,
+            )
+            run_rust_client(
+                "python-async",
+                [str(python), str(FIXTURE_DIR / "python_client.py"), "async"],
+                temp,
+                server_bin,
+            )
+            run_rust_client(
+                "typescript",
+                ["node", str(typescript_client)],
+                temp,
+                server_bin,
+            )
 
 
 if __name__ == "__main__":

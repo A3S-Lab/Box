@@ -41,8 +41,10 @@ dependencies = [
  "a3s-box-core",
  "anyhow",
  "async-trait",
+ "axum",
  "chrono",
  "hex",
+ "hyper 0.14.32",
  "prost",
  "prost-types",
  "serde",
@@ -52,6 +54,8 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tower 0.4.13",
+ "url",
 ]
 
 [[package]]
@@ -476,7 +480,11 @@ dependencies = [
  "pin-project-lite",
  "rustversion",
  "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper 0.1.2",
+ "tokio",
  "tower 0.4.13",
  "tower-layer",
  "tower-service",
@@ -3156,6 +3164,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

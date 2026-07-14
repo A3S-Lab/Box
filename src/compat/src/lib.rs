@@ -8,5 +8,6 @@ mod openapi;
 mod proto;
 
 pub mod control;
+pub mod http;
 
 pub use fixture::{generate_fixture, verify_fixture, FixturePaths};
