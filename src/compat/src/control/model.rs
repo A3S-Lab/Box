@@ -306,6 +306,10 @@ impl SandboxRecord {
         matches!(self.state, LifecycleState::Killed | LifecycleState::Failed)
     }
 
+    pub(crate) fn validate_persisted(&self) -> Result<(), LifecycleError> {
+        super::validation::validate_persisted_record(self)
+    }
+
     pub fn mark_running(
         &mut self,
         lease: ExecutionLease,
@@ -434,4 +438,6 @@ pub enum LifecycleError {
     ExecutionIdentityMismatch,
     #[error("sandbox has no runtime execution to resume")]
     MissingExecution,
+    #[error("invalid persisted sandbox state: {0}")]
+    InvalidPersistedState(String),
 }

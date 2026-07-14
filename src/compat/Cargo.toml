@@ -23,6 +23,7 @@ sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-rusqlite = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
