@@ -1,6 +1,6 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 in progress**
+Status: **Phase 1 complete; Phase 2 architecture selected**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -577,9 +577,175 @@ runtime crates must not depend on generated public API server code. SDK
 packages must not invoke `crun`, libkrun, local state files, or private runtime
 sockets.
 
+## Phase 2 implementation architecture
+
+Phase 2 is a single-host control-plane preview. It proves the complete
+create/connect/get/list/timeout/kill path against a real A3S OS runtime before
+introducing multi-host scheduling. The public protocol and internal interfaces
+must not assume that the single-host limit is part of the upstream contract.
+
+### Dependency direction
+
+The current CLI owns the only complete `create` and `start` orchestration path,
+while the Rust SDK intentionally omits those operations. The compatibility
+service must not work around that gap by spawning `a3s-box`, importing CLI
+modules, or editing `boxes.json`. Phase 2 first establishes this dependency
+direction:
+
+```text
+a3s-box-core
+  typed execution request + resolved execution plan
+          ^
+          |
+a3s-box-runtime
+  canonical state store + ExecutionManager implementation
+          ^
+          |
+  +-------+------------------+
+  |                          |
+a3s-box CLI / Rust SDK   a3s-box-compat
+  local adapters          remote protocol adapter
+```
+
+The runtime lifecycle facade owns image resolution, rootfs preparation,
+network and volume attachment, backend capability checks, shim launch, state
+registration, and cleanup. The CLI becomes one caller of that facade. This
+removes the current duplicate SDK state model instead of adding a third model
+inside the compatibility service.
+
+The backend-neutral runtime interface is deliberately smaller than either the
+CLI or the public compatibility API:
+
+```text
+ExecutionManager
+  create_and_start(request, operation_id) -> ExecutionLease
+  inspect(execution_id)                   -> ExecutionStatus
+  resume(execution_id, generation)        -> ExecutionLease
+  kill(execution_id, generation)          -> KillOutcome
+  reconcile(operation_id)                 -> ReconcileOutcome
+```
+
+`operation_id` makes create retryable after a service crash. `generation`
+prevents a delayed kill or route request from reaching a replacement
+execution. Runtime-specific handles, process IDs, socket paths, OCI bundle
+paths, and shim command lines never cross this interface.
+
+### Compatibility service modules
+
+The existing contract generator remains in `src/compat`. Runtime service code
+is added by concern rather than mixed into schema parsing:
+
+```text
+src/compat/src/
+  control/
+    model.rs          # lifecycle records and public/internal state mapping
+    repository.rs     # transactional persistence interface
+    service.rs        # create/connect/list/timeout/kill use cases
+  http/
+    auth.rs           # credential extraction and verification
+    error.rs          # exact upstream error mapping
+    lifecycle.rs      # lifecycle route handlers and DTO conversion
+    router.rs         # route assembly and request limits
+  execution/
+    adapter.rs        # ExecutionManager adapter only
+  routing/
+    lease.rs          # generation-fenced sandbox route leases
+    parser.rs         # wildcard host and explicit-header validation
+  bin/
+    a3s-box-e2b.rs    # HCL config, migrations, listeners, reconciliation
+```
+
+No handler accesses the database or runtime directly. Handlers authenticate,
+parse the pinned wire DTO, call the control service, and map its result. The
+control service depends on repository, clock, token, and execution interfaces,
+so lifecycle semantics can be tested without booting a VM or OCI sandbox.
+
+### Durable lifecycle transaction
+
+The initial durable repository is SQLite in WAL mode through an asynchronous
+driver. Its location is explicit in HCL and it owns versioned migrations. A
+database transaction is never held across an image pull, sandbox boot, or shim
+call.
+
+Create follows a recoverable sequence:
+
+```text
+authenticate and resolve template policy
+              |
+              v
+transaction: insert creating record
+  external ID, operation ID, generation, requested policy,
+  plan digest, encrypted tokens, expiry, metadata
+              |
+              v
+ExecutionManager.create_and_start(operation_id)
+              |
+              v
+transaction: compare generation and publish running + route lease
+```
+
+If the service stops after the runtime call, startup reconciliation finds the
+`creating` record and resolves the same `operation_id`; it does not start a
+second sandbox. A failed create is moved to a terminal internal state and its
+partial runtime resources are cleaned before the external ID can be reused.
+
+Kill first compares and advances the generation to `killing`, revokes route
+leases, calls the idempotent runtime kill, and then records `killed`. Timeout
+updates replace `expires_at` from the current clock. A reaper claims an expired
+record with the same generation-fenced transition used by an API kill, so a
+concurrent connect or timeout extension cannot kill the renewed sandbox.
+
+Connect never creates a missing sandbox. For a running sandbox it only extends
+the TTL and returns HTTP 200. For a paused sandbox it performs the explicit
+resume transition and returns HTTP 201. The Sandbox template policy does not
+silently switch to MicroVM when a resume capability is unavailable.
+
+### Identity, credentials, and routing
+
+External sandbox IDs and A3S execution IDs are different identifiers. Only the
+control repository owns their mapping. The runtime receives the external ID as
+an untrusted label, not as a filesystem path or host process selector.
+
+Account API keys are stored as salted hashes. Envd and traffic tokens must be
+returned by create/connect, so their ciphertext and hash are stored separately
+with a key version. Authentication compares hashes in constant time and never
+logs raw headers. The first server fixture uses an injected verifier; the
+production binary refuses to start without a configured credential and token
+encryption provider.
+
+Each published route lease contains the external sandbox ID, internal
+execution ID, generation, port scope, expiry, and token scope. The wildcard
+host parser is a pure validated component. It accepts neither arbitrary
+hostnames nor a sandbox ID recovered by string splitting after routing has
+begun.
+
+### Incremental merge gates
+
+Phase 2 is delivered as small, immediately merged changes:
+
+1. Add lifecycle domain types, transition tests, repository and execution
+   interfaces, and deterministic clock/token fakes. No network listener.
+2. Add the HTTP lifecycle router and run the checked-in official Python sync,
+   Python async, and TypeScript fixtures against the Rust service with a fake
+   execution manager.
+3. Add SQLite migrations, compare-and-swap repository operations, expiry
+   reaping, restart reconciliation, and corruption/restart tests.
+4. Extract canonical A3S state and the runtime `ExecutionManager`; switch CLI
+   create/start/run and the Rust SDK to the same implementation with behavior
+   parity tests.
+5. Add the production HCL-configured service binary, runtime adapter, and
+   generation-fenced route leases. Pull the merge commit on an A3S OS server
+   and run the unmodified official clients against real
+   `--isolation sandbox` executions.
+
+Each slice must pass its focused tests and repository CI before merge. The
+Phase 2 gate remains closed until slice 5 proves real create/connect/list/
+timeout/kill behavior; passing the fake adapter in slice 2 is protocol evidence
+only.
+
 ## Delivery phases and gates
 
-### Phase 1: contract fixture
+### Phase 1: contract fixture (complete)
 
 - Vendor the pinned public OpenAPI and Protobuf descriptors.
 - Vendor the volume-content and MCP schemas as well.
@@ -590,7 +756,7 @@ sockets.
 Gate: CI can detect any field, status, header, or method drift before server
 implementation begins.
 
-### Phase 2: lifecycle and routing
+### Phase 2: lifecycle and routing (in progress)
 
 - Implement authentication, create/connect/get/list/kill/timeout, pagination,
   durable mappings, wildcard routing, and traffic tokens.
