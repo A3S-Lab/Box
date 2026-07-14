@@ -63,6 +63,8 @@ pub use box_record::{
     ManagedExecutionState,
 };
 pub use box_state::BoxStateStore;
+#[cfg(feature = "vm")]
+pub use local_execution::VmLocalExecutionBackend;
 pub use local_execution::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionManager, LocalExecutionObservation,
 };

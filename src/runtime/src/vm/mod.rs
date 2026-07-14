@@ -7,6 +7,8 @@ pub mod reap;
 mod sandbox;
 mod spec;
 
+pub(crate) use layout::runtime_socket_dir;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -454,6 +456,29 @@ impl VmManager {
         self.exec_socket_path = Some(exec_socket_path);
         self.pty_socket_path = pty_socket_path;
         self.port_forward_socket_path = Some(port_forward_socket_path);
+        *self.handler.write().await = Some(Box::new(handler));
+        *self.state.write().await = BoxState::Ready;
+        Ok(())
+    }
+
+    /// Attach this manager to an already-running Windows shim process.
+    #[cfg(windows)]
+    pub async fn attach_running_process(
+        &mut self,
+        pid: u32,
+        exec_socket_path: PathBuf,
+        pty_socket_path: Option<PathBuf>,
+    ) -> Result<()> {
+        let handler = crate::vmm::ShimHandler::from_pid(pid, self.box_id.clone());
+        if !handler.is_running() {
+            return Err(BoxError::StateError(format!(
+                "Cannot attach to non-running VM process {pid}"
+            )));
+        }
+
+        self.exec_socket_path = Some(exec_socket_path);
+        self.pty_socket_path = pty_socket_path;
+        self.port_forward_socket_path = None;
         *self.handler.write().await = Some(Box::new(handler));
         *self.state.write().await = BoxState::Ready;
         Ok(())

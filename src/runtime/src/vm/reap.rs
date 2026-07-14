@@ -31,7 +31,7 @@ pub fn cleanup_recorded_sandbox_runtime(box_dir: &Path, box_id: &str) -> a3s_box
 }
 
 #[cfg(target_os = "linux")]
-fn cleanup_recorded_sandbox_runtime_in(
+pub(crate) fn cleanup_recorded_sandbox_runtime_in(
     home_dir: &Path,
     box_dir: &Path,
     box_id: &str,
@@ -103,7 +103,7 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct SandboxRuntimeRecord {
     schema: String,
     container_id: String,
@@ -111,6 +111,72 @@ struct SandboxRuntimeRecord {
     runtime_root: std::path::PathBuf,
     bundle_dir: std::path::PathBuf,
     init_pid: u32,
+}
+
+/// Validated durable evidence for one live or stopped Sandbox generation.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub(crate) struct RecordedSandboxRuntime {
+    pub(crate) runtime_path: std::path::PathBuf,
+    pub(crate) runtime_root: std::path::PathBuf,
+    pub(crate) bundle_dir: std::path::PathBuf,
+    pub(crate) init_pid: u32,
+}
+
+/// Load and validate the runtime-owned Sandbox record for one internal box ID.
+///
+/// Every persisted path is checked against the expected internal layout and
+/// the recorded runtime binary is re-certified before callers may execute it.
+#[cfg(target_os = "linux")]
+pub(crate) fn load_recorded_sandbox_runtime(
+    home_dir: &Path,
+    box_dir: &Path,
+    box_id: &str,
+) -> a3s_box_core::Result<Option<RecordedSandboxRuntime>> {
+    let expected_box_dir = home_dir.join("boxes").join(box_id);
+    if box_dir != expected_box_dir {
+        return Err(a3s_box_core::BoxError::StateError(format!(
+            "Sandbox runtime record has an unexpected host directory for {box_id}"
+        )));
+    }
+    let record_path = box_dir.join("sandbox/runtime.json");
+    let bytes = match std::fs::read(&record_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(a3s_box_core::BoxError::IoError(error)),
+    };
+    let record: SandboxRuntimeRecord = serde_json::from_slice(&bytes).map_err(|error| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Invalid Sandbox runtime record at {}: {error}",
+            record_path.display()
+        ))
+    })?;
+    let expected_runtime_root = home_dir.join("run/crun").join(box_id);
+    let expected_bundle = box_dir.join("sandbox/bundle");
+    if record.schema != "a3s.box.sandbox-runtime.v1"
+        || record.container_id != box_id
+        || record.runtime_root != expected_runtime_root
+        || record.bundle_dir != expected_bundle
+        || record.init_pid == 0
+    {
+        return Err(a3s_box_core::BoxError::StateError(format!(
+            "Sandbox runtime record failed path or identity validation for {box_id}"
+        )));
+    }
+
+    let capabilities = crate::sandbox::probe_sandbox_capabilities(Some(&record.runtime_path));
+    let runtime = capabilities.runtime.ok_or_else(|| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Cannot verify the recorded Sandbox runtime for {box_id}: {:?}",
+            capabilities.failures
+        ))
+    })?;
+    Ok(Some(RecordedSandboxRuntime {
+        runtime_path: runtime.path,
+        runtime_root: record.runtime_root,
+        bundle_dir: record.bundle_dir,
+        init_pid: record.init_pid,
+    }))
 }
 
 #[cfg(target_os = "linux")]
@@ -128,59 +194,16 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
     use std::process::Command;
 
     let record_path = box_dir.join("sandbox/runtime.json");
-    let bytes = match std::fs::read(&record_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return SandboxReap::NotPresent;
-        }
+    let record = match load_recorded_sandbox_runtime(home_dir, box_dir, box_id) {
+        Ok(Some(record)) => record,
+        Ok(None) => return SandboxReap::NotPresent,
         Err(error) => {
-            tracing::error!(
-                box_id,
-                path = %record_path.display(),
-                %error,
-                "Failed to read Sandbox runtime record during crash recovery"
-            );
+            tracing::error!(box_id, %error, "Invalid Sandbox runtime record during crash recovery");
             return SandboxReap::Failed;
         }
-    };
-    let record: SandboxRuntimeRecord = match serde_json::from_slice(&bytes) {
-        Ok(record) => record,
-        Err(error) => {
-            tracing::error!(
-                box_id,
-                path = %record_path.display(),
-                %error,
-                "Invalid Sandbox runtime record during crash recovery"
-            );
-            return SandboxReap::Failed;
-        }
-    };
-    let expected_runtime_root = home_dir.join("run/crun").join(box_id);
-    let expected_bundle = box_dir.join("sandbox/bundle");
-    if record.schema != "a3s.box.sandbox-runtime.v1"
-        || record.container_id != box_id
-        || record.runtime_root != expected_runtime_root
-        || record.bundle_dir != expected_bundle
-        || record.init_pid == 0
-    {
-        tracing::error!(
-            box_id,
-            "Sandbox runtime record failed path or identity validation"
-        );
-        return SandboxReap::Failed;
-    }
-
-    let capabilities = crate::sandbox::probe_sandbox_capabilities(Some(&record.runtime_path));
-    let Some(runtime) = capabilities.runtime else {
-        tracing::error!(
-            box_id,
-            failures = ?capabilities.failures,
-            "Cannot verify the recorded Sandbox runtime during crash recovery"
-        );
-        return SandboxReap::Failed;
     };
     let state = match crate::sandbox::handler::CrunHandler::query_state_at(
-        &runtime.path,
+        &record.runtime_path,
         &record.runtime_root,
         box_id,
     ) {
@@ -191,7 +214,7 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
         }
     };
     if state.is_some_and(|state| state.status != "stopped") {
-        let output = Command::new(&runtime.path)
+        let output = Command::new(&record.runtime_path)
             .arg("--root")
             .arg(&record.runtime_root)
             .arg("kill")
@@ -205,7 +228,7 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
         }
     }
 
-    let output = Command::new(&runtime.path)
+    let output = Command::new(&record.runtime_path)
         .arg("--root")
         .arg(&record.runtime_root)
         .arg("delete")
@@ -217,7 +240,7 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
         Ok(output) if output.status.success() => {}
         Ok(output) => {
             match crate::sandbox::handler::CrunHandler::query_state_at(
-                &runtime.path,
+                &record.runtime_path,
                 &record.runtime_root,
                 box_id,
             ) {
@@ -277,6 +300,15 @@ pub fn cleanup_recorded_sandbox_runtime(
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn cleanup_recorded_sandbox_runtime_in(
+    _home_dir: &std::path::Path,
+    _box_dir: &std::path::Path,
+    _box_id: &str,
+) -> a3s_box_core::Result<()> {
+    Ok(())
+}
+
 #[cfg(all(test, not(target_os = "linux")))]
 mod tests {
     use super::*;
@@ -326,6 +358,29 @@ fn kill_orphaned_shim(box_id: &str) -> Vec<i32> {
 mod tests {
     use super::*;
 
+    fn write_runtime_record(
+        home_dir: &Path,
+        box_dir: &Path,
+        box_id: &str,
+        mutate: impl FnOnce(&mut SandboxRuntimeRecord),
+    ) {
+        let mut record = SandboxRuntimeRecord {
+            schema: "a3s.box.sandbox-runtime.v1".to_string(),
+            container_id: box_id.to_string(),
+            runtime_path: Path::new("/definitely/missing/certified-crun").to_path_buf(),
+            runtime_root: home_dir.join("run/crun").join(box_id),
+            bundle_dir: box_dir.join("sandbox/bundle"),
+            init_pid: 42,
+        };
+        mutate(&mut record);
+        std::fs::create_dir_all(box_dir.join("sandbox")).unwrap();
+        std::fs::write(
+            box_dir.join("sandbox/runtime.json"),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_reap_removes_box_dir() {
         // A box dir with no live shim / mount (e.g. left by a crash) is removed.
@@ -357,5 +412,33 @@ mod tests {
         cleanup_recorded_sandbox_runtime_in(home.path(), &box_dir, box_id).unwrap();
 
         assert!(box_dir.exists());
+    }
+
+    #[test]
+    fn recorded_sandbox_runtime_rejects_an_unexpected_box_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let box_id = "recorded-sandbox-unexpected-directory";
+        let box_dir = home.path().join("external").join(box_id);
+        write_runtime_record(home.path(), &box_dir, box_id, |_| {});
+
+        let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
+
+        assert!(error.to_string().contains("unexpected host directory"));
+    }
+
+    #[test]
+    fn recorded_sandbox_runtime_rejects_invalid_paths_before_certification() {
+        let home = tempfile::tempdir().unwrap();
+        let box_id = "recorded-sandbox-invalid-paths";
+        let box_dir = home.path().join("boxes").join(box_id);
+        write_runtime_record(home.path(), &box_dir, box_id, |record| {
+            record.runtime_root = home.path().join("run/crun/another-box");
+        });
+
+        let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("path or identity validation"));
+        assert!(!message.contains("Cannot verify the recorded Sandbox runtime"));
     }
 }

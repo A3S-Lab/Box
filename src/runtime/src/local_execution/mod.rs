@@ -8,6 +8,10 @@ mod record;
 mod recovery;
 mod store;
 mod support;
+#[cfg(feature = "vm")]
+mod vm_backend;
+#[cfg(feature = "vm")]
+mod vm_process;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +19,8 @@ use std::sync::Arc;
 pub use backend::{LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation};
 use record::{build_managed_record, status_from_record};
 use store::RuntimeUpdate;
+#[cfg(feature = "vm")]
+pub use vm_backend::VmLocalExecutionBackend;
 
 use crate::{BoxRecord, ManagedExecutionOperation, ManagedExecutionState, ManagedExecutionStore};
 
@@ -41,6 +47,16 @@ impl LocalExecutionManager {
 
     pub fn state_path(&self) -> &std::path::Path {
         self.store.path()
+    }
+
+    #[cfg(feature = "vm")]
+    pub fn with_vm_backend(state_path: impl Into<PathBuf>, home_dir: impl Into<PathBuf>) -> Self {
+        let home_dir = home_dir.into();
+        Self::new(
+            state_path,
+            home_dir.clone(),
+            Arc::new(VmLocalExecutionBackend::new(home_dir)),
+        )
     }
 }
 
