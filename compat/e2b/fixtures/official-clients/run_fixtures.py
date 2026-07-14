@@ -66,7 +66,9 @@ def prepare_python(
         wheels.append(str(wheel))
 
     env = os.environ.copy()
-    env["PIP_INDEX_URL"] = "https://pypi.org/simple"
+    env.setdefault("PIP_INDEX_URL", "https://pypi.org/simple")
+    env.setdefault("PIP_DEFAULT_TIMEOUT", "60")
+    env.setdefault("PIP_RETRIES", "5")
     uv = shutil.which("uv")
     if uv:
         subprocess.run(

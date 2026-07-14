@@ -28,6 +28,9 @@ python3 compat/e2b/fixtures/official-clients/run_fixtures.py \
   --pip-bootstrap-wheel /path/to/pip.whl verify
 ```
 
+`PIP_INDEX_URL`, `PIP_DEFAULT_TIMEOUT`, and `PIP_RETRIES` are honored when set.
+The defaults are PyPI, 60 seconds, and five retries.
+
 Generated JSON Lines files are compatibility evidence, not server
 implementations. The Rust control plane must satisfy them without adding A3S
 fields to upstream requests or responses.
