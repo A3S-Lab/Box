@@ -38,7 +38,10 @@ dependencies = [
 name = "a3s-box-compat"
 version = "3.0.9"
 dependencies = [
+ "a3s-box-core",
  "anyhow",
+ "async-trait",
+ "chrono",
  "hex",
  "prost",
  "prost-types",
@@ -47,6 +50,8 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

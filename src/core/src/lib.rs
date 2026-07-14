@@ -59,9 +59,12 @@ pub use snapshot::{SnapshotConfig, SnapshotMetadata};
 pub use tee::ATTEST_VSOCK_PORT;
 pub use tee::{detect_tee, is_tee_available, TeeCapability, TeeType};
 pub use traits::{
-    AuditSink, CacheBackend, CacheEntry, CacheStats, CredentialProvider, EventBus, ImageRegistry,
-    ImageStoreBackend, MetricsCollector, NetworkStoreBackend, NoopMetrics, PulledImage,
-    SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
+    AuditSink, CacheBackend, CacheEntry, CacheStats, CreateExecutionRequest, CredentialProvider,
+    EventBus, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionState, ExecutionStatus, ImageRegistry,
+    ImageStoreBackend, KillOutcome, MetricsCollector, NetworkStoreBackend, NoopMetrics,
+    OperationId, PulledImage, ReconcileOutcome, SnapshotStoreBackend, StoredImage,
+    VolumeStoreBackend,
 };
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmHandler,

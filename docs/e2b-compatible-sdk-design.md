@@ -723,8 +723,9 @@ begun.
 
 Phase 2 is delivered as small, immediately merged changes:
 
-1. Add lifecycle domain types, transition tests, repository and execution
-   interfaces, and deterministic clock/token fakes. No network listener.
+1. **Complete:** add lifecycle domain types, transition tests, repository and
+   execution interfaces, and deterministic clock/token fakes. No network
+   listener.
 2. Add the HTTP lifecycle router and run the checked-in official Python sync,
    Python async, and TypeScript fixtures against the Rust service with a fake
    execution manager.
