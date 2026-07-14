@@ -10,6 +10,27 @@ use a3s_box_core::error::{BoxError, Result};
 
 use super::{BoxLayout, VmManager};
 
+pub(crate) fn runtime_socket_dir(home_dir: &Path, box_id: &str) -> PathBuf {
+    #[cfg(all(unix, target_os = "macos"))]
+    {
+        let _ = home_dir;
+        PathBuf::from("/private/tmp")
+            .join("a3s-box-sockets")
+            .join(box_id)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = home_dir;
+        PathBuf::from("/tmp").join("a3s-box-sockets").join(box_id)
+    }
+
+    #[cfg(not(unix))]
+    {
+        home_dir.join("boxes").join(box_id).join("sockets")
+    }
+}
+
 impl VmManager {
     pub(crate) async fn prepare_layout(&self) -> Result<BoxLayout> {
         // Create box-specific directories
@@ -297,29 +318,7 @@ impl VmManager {
     }
 
     pub(crate) fn socket_dir(&self) -> PathBuf {
-        #[cfg(all(unix, target_os = "macos"))]
-        {
-            // Use the canonical short temp path so macOS HVF runs can bind
-            // Unix sockets without relying on the /tmp symlink.
-            PathBuf::from("/private/tmp")
-                .join("a3s-box-sockets")
-                .join(&self.box_id)
-        }
-
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            PathBuf::from("/tmp")
-                .join("a3s-box-sockets")
-                .join(&self.box_id)
-        }
-
-        #[cfg(not(unix))]
-        {
-            self.home_dir
-                .join("boxes")
-                .join(&self.box_id)
-                .join("sockets")
-        }
+        runtime_socket_dir(&self.home_dir, &self.box_id)
     }
 
     /// Try to get a cached rootfs and copy it to the target path.

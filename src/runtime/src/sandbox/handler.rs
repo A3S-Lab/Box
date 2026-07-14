@@ -66,6 +66,29 @@ impl CrunHandler {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_recorded_runtime(
+        runtime_path: PathBuf,
+        runtime_root: PathBuf,
+        container_id: String,
+        init_pid: u32,
+        bundle_dir: PathBuf,
+        runtime_record: PathBuf,
+    ) -> Self {
+        Self {
+            runtime_path,
+            runtime_root,
+            container_id,
+            init_pid,
+            process: None,
+            metrics_sys: Mutex::new(System::new()),
+            exit_code: None,
+            bundle_dir,
+            runtime_record,
+            cleaned: false,
+        }
+    }
+
     pub(crate) fn query_state_at(
         runtime_path: &Path,
         runtime_root: &Path,
@@ -344,6 +367,33 @@ fn remove_dir_if_exists(path: &Path) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_runtime_handler_attaches_without_owning_a_wrapper_process() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_path = PathBuf::from("/bin/true");
+        let runtime_root = temporary.path().join("runtime");
+        let bundle_dir = temporary.path().join("bundle");
+        let runtime_record = temporary.path().join("runtime.json");
+
+        let handler = CrunHandler::from_recorded_runtime(
+            runtime_path.clone(),
+            runtime_root.clone(),
+            "recorded-test".to_string(),
+            42,
+            bundle_dir.clone(),
+            runtime_record.clone(),
+        );
+
+        assert_eq!(handler.runtime_path, runtime_path);
+        assert_eq!(handler.runtime_root, runtime_root);
+        assert_eq!(handler.container_id, "recorded-test");
+        assert_eq!(handler.pid(), 42);
+        assert!(handler.process.is_none());
+        assert_eq!(handler.bundle_dir, bundle_dir);
+        assert_eq!(handler.runtime_record, runtime_record);
+        assert!(!handler.cleaned);
+    }
 
     #[test]
     fn dropping_handler_detaches_from_live_runtime_process() {
