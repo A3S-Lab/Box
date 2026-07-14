@@ -12,6 +12,8 @@ use sysinfo::{Pid, System};
 /// Provides lifecycle operations (stop, metrics, status) for a VM identified by PID.
 pub struct ShimHandler {
     pid: u32,
+    /// Stable host-process identity captured when the handler is created.
+    pid_start_time: Option<u64>,
     box_id: String,
     /// Child process handle for proper lifecycle management.
     /// When we spawn the process, we keep the Child to properly wait() on stop.
@@ -33,6 +35,7 @@ impl ShimHandler {
         let pid = process.id();
         Self {
             pid,
+            pid_start_time: crate::process::pid_start_time(pid),
             box_id,
             process: Some(process),
             metrics_sys: Mutex::new(System::new()),
@@ -47,6 +50,7 @@ impl ShimHandler {
     pub fn from_pid(pid: u32, box_id: String) -> Self {
         Self {
             pid,
+            pid_start_time: crate::process::pid_start_time(pid),
             box_id,
             process: None,
             metrics_sys: Mutex::new(System::new()),
@@ -69,6 +73,16 @@ impl VmHandler for ShimHandler {
     fn stop(&mut self, signal: i32, timeout_ms: u64) -> Result<()> {
         // Graceful shutdown: send configured signal first, wait, then SIGKILL if needed.
         // This gives libkrun time to flush its virtio-blk buffers to disk.
+
+        // `try_wait_exit` may already have reaped an owned child. Never signal
+        // that old numeric PID after it becomes eligible for reuse.
+        if self.exit_code.is_some() {
+            self.process.take();
+            return Ok(());
+        }
+        if !self.is_running() {
+            return Ok(());
+        }
 
         if let Some(mut process) = self.process.take() {
             // Step 1: Send configured stop signal for graceful shutdown
@@ -131,13 +145,15 @@ impl VmHandler for ShimHandler {
                 }
                 if result < 0 {
                     // Error - process may not be our child (common in attached mode)
-                    let exists = unsafe { libc::kill(self.pid as i32, 0) } == 0;
-                    if !exists {
+                    if !self.is_running() {
                         return Ok(()); // Already dead
                     }
                 }
 
                 if start.elapsed().as_millis() > timeout_ms as u128 {
+                    if !self.is_running() {
+                        return Ok(());
+                    }
                     tracing::warn!(
                         pid = self.pid,
                         timeout_ms,
@@ -207,6 +223,10 @@ impl VmHandler for ShimHandler {
     }
 
     fn metrics(&self) -> VmMetrics {
+        if !self.is_running() {
+            return VmMetrics::default();
+        }
+
         let pid = Pid::from_u32(self.pid);
 
         // Use the shared System instance for stateful CPU tracking
@@ -235,16 +255,12 @@ impl VmHandler for ShimHandler {
 
     #[cfg(unix)]
     fn is_running(&self) -> bool {
-        // Check if process exists by sending signal 0
-        unsafe { libc::kill(self.pid as i32, 0) == 0 }
+        crate::process::is_process_alive_with_identity(self.pid, self.pid_start_time)
     }
 
     #[cfg(windows)]
     fn is_running(&self) -> bool {
-        // Use sysinfo to check if process exists
-        let mut sys = System::new();
-        sys.refresh_process(Pid::from_u32(self.pid));
-        sys.process(Pid::from_u32(self.pid)).is_some()
+        crate::process::is_process_alive_with_identity(self.pid, self.pid_start_time)
     }
 
     fn exit_code(&self) -> Option<i32> {
@@ -302,6 +318,27 @@ mod tests {
         assert_eq!(handler.pid(), 12345);
         assert_eq!(handler.box_id(), "box-abc");
         assert_eq!(handler.exit_code(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attached_handler_rejects_a_reused_pid_identity() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let mut handler = ShimHandler::from_pid(child.id(), "box-stale-pid".to_string());
+        handler.pid_start_time = Some(u64::MAX);
+
+        assert!(!handler.is_running());
+        let metrics = handler.metrics();
+        assert!(metrics.cpu_percent.is_none());
+        assert!(metrics.memory_bytes.is_none());
+        handler.stop(libc::SIGTERM, 0).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
