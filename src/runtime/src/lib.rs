@@ -23,6 +23,7 @@ pub mod fs;
 pub mod grpc;
 pub mod host_check;
 pub mod log;
+pub mod managed_execution_store;
 pub mod network;
 pub mod oci;
 pub mod prom;
@@ -55,8 +56,12 @@ pub mod scale;
 pub use audit::{read_audit_log, AuditLog, AuditQuery};
 
 // Canonical local execution metadata
-pub use box_record::{BoxRecord, HealthCheck, ManagedExecutionMetadata};
+pub use box_record::{BoxRecord, HealthCheck, ManagedExecutionMetadata, ManagedExecutionState};
 pub use box_state::BoxStateStore;
+pub use managed_execution_store::{
+    ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,
+    ManagedExecutionStoreResult,
+};
 
 // gRPC clients
 #[cfg(unix)]

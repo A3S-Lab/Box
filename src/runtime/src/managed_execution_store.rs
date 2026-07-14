@@ -1,0 +1,544 @@
+//! Durable generation-fenced transitions for managed local executions.
+
+use std::path::{Path, PathBuf};
+
+use a3s_box_core::{ExecutionGeneration, ExecutionId, OperationId};
+use thiserror::Error;
+
+use crate::{BoxRecord, BoxStateStore, ManagedExecutionState};
+
+/// Strict durable repository used by the local `ExecutionManager`.
+#[derive(Debug, Clone)]
+pub struct ManagedExecutionStore {
+    path: PathBuf,
+}
+
+/// Result of reserving an idempotent create operation.
+#[derive(Debug, Clone)]
+pub enum ManagedExecutionReservation {
+    /// The creation intent was inserted by this call.
+    Reserved(BoxRecord),
+    /// The operation already existed with the same creation intent.
+    Existing(BoxRecord),
+}
+
+impl ManagedExecutionReservation {
+    pub const fn is_new(&self) -> bool {
+        matches!(self, Self::Reserved(_))
+    }
+
+    pub fn record(&self) -> &BoxRecord {
+        match self {
+            Self::Reserved(record) | Self::Existing(record) => record,
+        }
+    }
+
+    pub fn into_record(self) -> BoxRecord {
+        match self {
+            Self::Reserved(record) | Self::Existing(record) => record,
+        }
+    }
+}
+
+/// Fail-closed errors from managed lifecycle persistence.
+#[derive(Debug, Error)]
+pub enum ManagedExecutionStoreError {
+    #[error("managed execution state I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("managed execution not found: {0}")]
+    NotFound(ExecutionId),
+    #[error("execution record is not managed: {0}")]
+    Unmanaged(ExecutionId),
+    #[error("managed execution conflict for {execution_id}: {message}")]
+    Conflict {
+        execution_id: ExecutionId,
+        message: String,
+    },
+    #[error("invalid managed execution record: {0}")]
+    InvalidRecord(String),
+    #[error("invalid managed execution transition for {execution_id}: {from} -> {to}")]
+    InvalidTransition {
+        execution_id: ExecutionId,
+        from: ManagedExecutionState,
+        to: ManagedExecutionState,
+    },
+}
+
+pub type ManagedExecutionStoreResult<T> = std::result::Result<T, ManagedExecutionStoreError>;
+
+impl ManagedExecutionStore {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Return one managed record without mutating or reconciling state.
+    pub fn get(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> ManagedExecutionStoreResult<Option<BoxRecord>> {
+        let store = BoxStateStore::load_readonly(&self.path)?;
+        let Some(record) = store.find_by_id(execution_id.as_str()).cloned() else {
+            return Ok(None);
+        };
+        if record.managed_execution.is_none() {
+            return Err(ManagedExecutionStoreError::Unmanaged(execution_id.clone()));
+        }
+        Ok(Some(record))
+    }
+
+    /// Return the record reserved by an idempotent creation operation.
+    pub fn get_by_operation_id(
+        &self,
+        operation_id: &OperationId,
+    ) -> ManagedExecutionStoreResult<Option<BoxRecord>> {
+        let store = BoxStateStore::load_readonly(&self.path)?;
+        Ok(store.find_by_operation_id(operation_id).cloned())
+    }
+
+    /// Atomically reserve one creation operation before backend side effects.
+    ///
+    /// Retrying the same operation with the same full request returns the
+    /// existing record. Reusing an operation ID for different creation intent
+    /// fails without changing durable state.
+    pub fn reserve(
+        &self,
+        mut record: BoxRecord,
+    ) -> ManagedExecutionStoreResult<ManagedExecutionReservation> {
+        let execution_id = validate_new_record(&record)?;
+        record.status = ManagedExecutionState::Creating.as_status().to_string();
+        let incoming_metadata = record
+            .managed_execution
+            .as_ref()
+            .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?
+            .clone();
+
+        BoxStateStore::transact(&self.path, move |store| {
+            if let Some(existing) = store
+                .find_by_operation_id(&incoming_metadata.operation_id)
+                .cloned()
+            {
+                let existing_id = ExecutionId::new(existing.id.clone()).map_err(|error| {
+                    ManagedExecutionStoreError::InvalidRecord(error.to_string())
+                })?;
+                let existing_metadata = existing
+                    .managed_execution
+                    .as_ref()
+                    .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(existing_id.clone()))?;
+                if !same_creation_intent(existing_metadata, &incoming_metadata)? {
+                    return Err(ManagedExecutionStoreError::Conflict {
+                        execution_id: existing_id,
+                        message: format!(
+                            "operation {} was already reserved with different creation intent",
+                            incoming_metadata.operation_id
+                        ),
+                    });
+                }
+                return Ok(ManagedExecutionReservation::Existing(existing));
+            }
+
+            if store.find_by_id(execution_id.as_str()).is_some() {
+                return Err(ManagedExecutionStoreError::Conflict {
+                    execution_id,
+                    message: "execution ID is already present".to_string(),
+                });
+            }
+
+            store.records_mut().push(record.clone());
+            Ok(ManagedExecutionReservation::Reserved(record))
+        })
+    }
+
+    /// Atomically compare generation and state, then persist one legal edge.
+    ///
+    /// Completing pause and resume advances the runtime generation exactly
+    /// once. Claim, rollback, terminal, and kill transitions retain the current
+    /// generation.
+    pub fn transition(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+        expected_state: ManagedExecutionState,
+        next_state: ManagedExecutionState,
+    ) -> ManagedExecutionStoreResult<BoxRecord> {
+        let execution_id = execution_id.clone();
+        BoxStateStore::transact(&self.path, move |store| {
+            let record = store
+                .find_by_id_mut(execution_id.as_str())
+                .ok_or_else(|| ManagedExecutionStoreError::NotFound(execution_id.clone()))?;
+            let actual_state = record
+                .managed_state()
+                .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            let metadata = record
+                .managed_execution
+                .as_ref()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+
+            if metadata.generation != expected_generation || actual_state != expected_state {
+                return Err(ManagedExecutionStoreError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!(
+                        "expected {expected_state} generation {}, found {actual_state} generation {}",
+                        expected_generation.get(),
+                        metadata.generation.get()
+                    ),
+                });
+            }
+
+            let next_generation = transition_generation(
+                &execution_id,
+                expected_state,
+                next_state,
+                expected_generation,
+            )?;
+            record.status = next_state.as_status().to_string();
+            record
+                .managed_execution
+                .as_mut()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?
+                .generation = next_generation;
+            Ok(record.clone())
+        })
+    }
+}
+
+fn validate_new_record(record: &BoxRecord) -> ManagedExecutionStoreResult<ExecutionId> {
+    let execution_id = ExecutionId::new(record.id.clone())
+        .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?;
+    let metadata = record
+        .managed_execution
+        .as_ref()
+        .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+    metadata
+        .validate()
+        .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?;
+    let state = record
+        .managed_state()
+        .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?
+        .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+    if state != ManagedExecutionState::Creating {
+        return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+            "new execution {execution_id} must be creating, found {state}"
+        )));
+    }
+    if metadata.generation != ExecutionGeneration::INITIAL {
+        return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+            "new execution {execution_id} must start at generation {}",
+            ExecutionGeneration::INITIAL.get()
+        )));
+    }
+    Ok(execution_id)
+}
+
+fn same_creation_intent(
+    left: &crate::ManagedExecutionMetadata,
+    right: &crate::ManagedExecutionMetadata,
+) -> ManagedExecutionStoreResult<bool> {
+    let left_request = serde_json::to_value(&left.request)
+        .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?;
+    let right_request = serde_json::to_value(&right.request)
+        .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?;
+    Ok(left_request == right_request && left.plan == right.plan)
+}
+
+fn transition_generation(
+    execution_id: &ExecutionId,
+    from: ManagedExecutionState,
+    to: ManagedExecutionState,
+    current: ExecutionGeneration,
+) -> ManagedExecutionStoreResult<ExecutionGeneration> {
+    use ManagedExecutionState::{
+        Creating, Failed, Killing, Paused, Pausing, Resuming, Running, Stopped,
+    };
+
+    let legal = matches!(
+        (from, to),
+        (Creating, Running | Killing | Stopped | Failed)
+            | (Running, Pausing | Killing | Stopped | Failed)
+            | (Pausing, Paused | Running | Killing | Stopped | Failed)
+            | (Paused, Resuming | Killing | Stopped | Failed)
+            | (Resuming, Running | Paused | Killing | Stopped | Failed)
+            | (Killing, Stopped | Failed)
+    );
+    if !legal {
+        return Err(ManagedExecutionStoreError::InvalidTransition {
+            execution_id: execution_id.clone(),
+            from,
+            to,
+        });
+    }
+
+    if matches!((from, to), (Pausing, Paused) | (Resuming, Running)) {
+        let value = current.get().checked_add(1).ok_or_else(|| {
+            ManagedExecutionStoreError::InvalidRecord(format!(
+                "execution {execution_id} generation is exhausted"
+            ))
+        })?;
+        return ExecutionGeneration::new(value)
+            .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()));
+    }
+    Ok(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use a3s_box_core::{CreateExecutionRequest, ExecutionIsolation};
+
+    use super::*;
+    use crate::ManagedExecutionMetadata;
+
+    fn managed_record(id: &str, operation: &str) -> BoxRecord {
+        let mut record: BoxRecord = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "short_id": BoxRecord::make_short_id(id),
+            "name": format!("box-{id}"),
+            "image": "alpine:latest",
+            "isolation": "sandbox",
+            "status": "creating",
+            "pid": null,
+            "cpus": 1,
+            "memory_mb": 128,
+            "volumes": [],
+            "env": {},
+            "cmd": ["sh"],
+            "box_dir": format!("/tmp/{id}"),
+            "console_log": format!("/tmp/{id}/console.log"),
+            "created_at": "2026-07-14T12:00:00Z",
+            "started_at": null,
+            "auto_remove": false
+        }))
+        .unwrap();
+        let config = a3s_box_core::BoxConfig {
+            image: "alpine:latest".to_string(),
+            isolation: ExecutionIsolation::Sandbox,
+            ..Default::default()
+        };
+        record.managed_execution = Some(
+            ManagedExecutionMetadata::new(
+                OperationId::new(operation).unwrap(),
+                ExecutionGeneration::INITIAL,
+                CreateExecutionRequest {
+                    external_sandbox_id: "sandbox-1".to_string(),
+                    config,
+                    labels: Default::default(),
+                },
+            )
+            .unwrap(),
+        );
+        record
+    }
+
+    #[test]
+    fn reservation_is_idempotent_for_the_same_full_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ManagedExecutionStore::new(directory.path().join("boxes.json"));
+
+        let first = store.reserve(managed_record("execution-1", "operation-1"));
+        let retry = store.reserve(managed_record("execution-2", "operation-1"));
+
+        assert!(first.unwrap().is_new());
+        let retry = retry.unwrap();
+        assert!(!retry.is_new());
+        assert_eq!(retry.record().id, "execution-1");
+        assert_eq!(
+            BoxStateStore::load(store.path()).unwrap().records().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn reservation_rejects_operation_reuse_with_different_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ManagedExecutionStore::new(directory.path().join("boxes.json"));
+        store
+            .reserve(managed_record("execution-1", "operation-1"))
+            .unwrap();
+        let mut conflicting = managed_record("execution-2", "operation-1");
+        conflicting
+            .managed_execution
+            .as_mut()
+            .unwrap()
+            .request
+            .external_sandbox_id = "sandbox-2".to_string();
+
+        let error = store.reserve(conflicting).unwrap_err();
+
+        assert!(matches!(error, ManagedExecutionStoreError::Conflict { .. }));
+        assert_eq!(
+            BoxStateStore::load(store.path()).unwrap().records().len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_completion_advance_generation_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ManagedExecutionStore::new(directory.path().join("boxes.json"));
+        let id = ExecutionId::new("execution-1").unwrap();
+        store
+            .reserve(managed_record(id.as_str(), "operation-1"))
+            .unwrap();
+
+        let running = store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Creating,
+                ManagedExecutionState::Running,
+            )
+            .unwrap();
+        assert_eq!(
+            running.managed_execution.unwrap().generation,
+            ExecutionGeneration::INITIAL
+        );
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Running,
+                ManagedExecutionState::Pausing,
+            )
+            .unwrap();
+        let paused = store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Pausing,
+                ManagedExecutionState::Paused,
+            )
+            .unwrap();
+        let generation_two = ExecutionGeneration::new(2).unwrap();
+        assert_eq!(paused.managed_execution.unwrap().generation, generation_two);
+        store
+            .transition(
+                &id,
+                generation_two,
+                ManagedExecutionState::Paused,
+                ManagedExecutionState::Resuming,
+            )
+            .unwrap();
+        let resumed = store
+            .transition(
+                &id,
+                generation_two,
+                ManagedExecutionState::Resuming,
+                ManagedExecutionState::Running,
+            )
+            .unwrap();
+        assert_eq!(
+            resumed.managed_execution.unwrap().generation,
+            ExecutionGeneration::new(3).unwrap()
+        );
+    }
+
+    #[test]
+    fn stale_generation_and_invalid_edges_do_not_change_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ManagedExecutionStore::new(directory.path().join("boxes.json"));
+        let id = ExecutionId::new("execution-1").unwrap();
+        store
+            .reserve(managed_record(id.as_str(), "operation-1"))
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Creating,
+                ManagedExecutionState::Running,
+            )
+            .unwrap();
+
+        let stale = store.transition(
+            &id,
+            ExecutionGeneration::new(2).unwrap(),
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Pausing,
+        );
+        let invalid = store.transition(
+            &id,
+            ExecutionGeneration::INITIAL,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Paused,
+        );
+
+        assert!(matches!(
+            stale,
+            Err(ManagedExecutionStoreError::Conflict { .. })
+        ));
+        assert!(matches!(
+            invalid,
+            Err(ManagedExecutionStoreError::InvalidTransition { .. })
+        ));
+        let persisted = store.get(&id).unwrap().unwrap();
+        assert_eq!(
+            persisted.managed_state().unwrap(),
+            Some(ManagedExecutionState::Running)
+        );
+        assert_eq!(
+            persisted.managed_execution.unwrap().generation,
+            ExecutionGeneration::INITIAL
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_claims_have_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(ManagedExecutionStore::new(
+            directory.path().join("boxes.json"),
+        ));
+        let id = ExecutionId::new("execution-1").unwrap();
+        store
+            .reserve(managed_record(id.as_str(), "operation-1"))
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Creating,
+                ManagedExecutionState::Running,
+            )
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let id = id.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.transition(
+                        &id,
+                        ExecutionGeneration::INITIAL,
+                        ManagedExecutionState::Running,
+                        ManagedExecutionState::Pausing,
+                    )
+                })
+            })
+            .collect();
+        barrier.wait();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(ManagedExecutionStoreError::Conflict { .. })))
+                .count(),
+            1
+        );
+        assert_eq!(
+            store.get(&id).unwrap().unwrap().managed_state().unwrap(),
+            Some(ManagedExecutionState::Pausing)
+        );
+    }
+}

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::file_lock::FileLock;
 use crate::store_io::quarantine_label;
 use crate::BoxRecord;
-use a3s_box_core::OperationId;
+use a3s_box_core::{ExecutionId, OperationId};
 
 /// Durable collection of local box execution records.
 ///
@@ -66,6 +66,17 @@ impl BoxStateStore {
         path: &Path,
         f: impl FnOnce(&mut Self) -> std::io::Result<R>,
     ) -> std::io::Result<R> {
+        Self::modify_with_policy(path, CorruptionPolicy::ReturnError, f)
+    }
+
+    /// Apply a strict atomic transaction with a caller-defined error type.
+    ///
+    /// This is equivalent to [`Self::modify`] but lets a domain repository
+    /// return typed conflicts while still converting state I/O errors.
+    pub fn transact<R, E>(path: &Path, f: impl FnOnce(&mut Self) -> Result<R, E>) -> Result<R, E>
+    where
+        E: From<std::io::Error>,
+    {
         Self::modify_with_policy(path, CorruptionPolicy::ReturnError, f)
     }
 
@@ -235,6 +246,11 @@ fn validate_managed_records(records: &[BoxRecord]) -> Result<(), String> {
         };
         metadata
             .validate()
+            .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
+        ExecutionId::new(record.id.clone())
+            .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
+        record
+            .managed_state()
             .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
         if !operation_ids.insert(metadata.operation_id.clone()) {
             return Err(format!(
@@ -460,6 +476,22 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn strict_load_rejects_unknown_managed_lifecycle_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boxes.json");
+        let mut record = managed_record("managed", OperationId::new("operation-1").unwrap());
+        record.status = "future-state".to_string();
+        std::fs::write(&path, serde_json::to_vec(&vec![record]).unwrap()).unwrap();
+
+        let error = BoxStateStore::load(&path).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("unknown managed execution state"));
     }
 
     #[cfg(unix)]
