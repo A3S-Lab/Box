@@ -27,6 +27,7 @@ fn record(home_dir: &Path, isolation: ExecutionIsolation) -> BoxRecord {
             external_sandbox_id: "external-untrusted-label".to_string(),
             config,
             labels: BTreeMap::new(),
+            policy: Default::default(),
         },
         chrono::Utc::now(),
     )

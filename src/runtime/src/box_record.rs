@@ -12,6 +12,8 @@ use a3s_box_core::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use a3s_box_core::ExecutionHealthCheck as HealthCheck;
+
 /// Metadata record for a single local box execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxRecord {
@@ -313,25 +315,6 @@ impl std::fmt::Display for ManagedExecutionState {
     }
 }
 
-/// Health-check configuration persisted with a box record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthCheck {
-    /// Command executed by the health check.
-    pub cmd: Vec<String>,
-    /// Interval between checks in seconds.
-    #[serde(default = "default_health_interval")]
-    pub interval_secs: u64,
-    /// Per-check timeout in seconds.
-    #[serde(default = "default_health_timeout")]
-    pub timeout_secs: u64,
-    /// Consecutive failures before the execution is unhealthy.
-    #[serde(default = "default_health_retries")]
-    pub retries: u32,
-    /// Grace period after startup in seconds.
-    #[serde(default)]
-    pub start_period_secs: u64,
-}
-
 /// Durable lifecycle metadata for an execution owned by [`ExecutionManager`].
 ///
 /// [`ExecutionManager`]: a3s_box_core::ExecutionManager
@@ -444,18 +427,6 @@ fn default_health_status() -> String {
     "none".to_string()
 }
 
-fn default_health_interval() -> u64 {
-    30
-}
-
-fn default_health_timeout() -> u64 {
-    5
-}
-
-fn default_health_retries() -> u32 {
-    3
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,6 +485,7 @@ mod tests {
                 external_sandbox_id: "sandbox-1".to_string(),
                 config,
                 labels: Default::default(),
+                policy: Default::default(),
             },
         )
         .unwrap();
@@ -553,6 +525,7 @@ mod tests {
                 external_sandbox_id: "sandbox-1".to_string(),
                 config,
                 labels: Default::default(),
+                policy: Default::default(),
             },
         )
         .unwrap();

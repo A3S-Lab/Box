@@ -309,6 +309,7 @@ mod tests {
                     external_sandbox_id: format!("sandbox-{id}"),
                     config,
                     labels: Default::default(),
+                    policy: Default::default(),
                 },
             )
             .unwrap(),

@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionIsolation,
-    ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionState, KillOutcome,
-    NetworkMode, OperationId, ReconcileOutcome,
+    BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId,
+    ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionManagerResult,
+    ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionState, KillOutcome, NetworkMode,
+    OperationId, ReconcileOutcome,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -191,6 +192,7 @@ fn request(external_id: &str) -> CreateExecutionRequest {
             ..Default::default()
         },
         labels,
+        policy: Default::default(),
     }
 }
 
@@ -314,6 +316,86 @@ async fn create_reserves_without_start_and_start_is_generation_fenced() {
             .state,
         ExecutionState::Running
     );
+}
+
+#[tokio::test]
+async fn create_preserves_complete_caller_record_policy() {
+    let (_directory, manager, backend) = harness();
+    let mut create_request = request("sandbox-1");
+    create_request.policy = ExecutionRecordPolicy {
+        name: Some("sdk-worker".to_string()),
+        auto_remove: true,
+        restart_policy: ExecutionRestartPolicy::OnFailure,
+        max_restart_count: 4,
+        health_check: Some(ExecutionHealthCheck {
+            cmd: vec!["test".to_string(), "-f".to_string(), "/ready".to_string()],
+            interval_secs: 11,
+            timeout_secs: 3,
+            retries: 7,
+            start_period_secs: 5,
+        }),
+        healthcheck_disabled: false,
+        log_config: a3s_box_core::log::LogConfig {
+            driver: a3s_box_core::log::LogDriver::None,
+            options: HashMap::from([("tag".to_string(), "worker".to_string())]),
+        },
+        volume_names: vec!["workspace".to_string()],
+        platform: Some("linux/arm64".to_string()),
+        init: true,
+        devices: vec!["/dev/fuse:/dev/fuse".to_string()],
+        gpus: Some("all".to_string()),
+        shm_size: Some(64 * 1024 * 1024),
+        stop_signal: Some("SIGINT".to_string()),
+        stop_timeout: Some(12),
+        oom_kill_disable: true,
+        oom_score_adj: Some(100),
+    };
+
+    let reservation = manager
+        .create(create_request.clone(), &operation("operation-policy"))
+        .await
+        .unwrap();
+    let record = persisted(&manager, &reservation.execution_id);
+
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+    assert_eq!(record.name, "sdk-worker");
+    assert!(record.auto_remove);
+    assert_eq!(record.restart_policy, "on-failure");
+    assert_eq!(record.max_restart_count, 4);
+    assert_eq!(record.health_check, create_request.policy.health_check);
+    assert_eq!(record.log_config, create_request.policy.log_config);
+    assert_eq!(record.volume_names, vec!["workspace"]);
+    assert_eq!(record.platform.as_deref(), Some("linux/arm64"));
+    assert!(record.init);
+    assert_eq!(record.devices, vec!["/dev/fuse:/dev/fuse"]);
+    assert_eq!(record.gpus.as_deref(), Some("all"));
+    assert_eq!(record.shm_size, Some(64 * 1024 * 1024));
+    assert_eq!(record.stop_signal.as_deref(), Some("SIGINT"));
+    assert_eq!(record.stop_timeout, Some(12));
+    assert!(record.oom_kill_disable);
+    assert_eq!(record.oom_score_adj, Some(100));
+    assert_eq!(
+        record.managed_execution.as_ref().unwrap().request.policy,
+        create_request.policy
+    );
+}
+
+#[tokio::test]
+async fn repeated_create_rejects_caller_policy_drift() {
+    let (_directory, manager, backend) = harness();
+    let operation_id = operation("operation-policy-drift");
+    let create_request = request("sandbox-1");
+    manager
+        .create(create_request.clone(), &operation_id)
+        .await
+        .unwrap();
+    let mut drifted = create_request;
+    drifted.policy.stop_timeout = Some(30);
+
+    let error = manager.create(drifted, &operation_id).await.unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

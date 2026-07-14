@@ -614,7 +614,7 @@ modules, or editing `boxes.json`. Phase 2 completes this dependency direction:
 
 ```text
 a3s-box-core
-  typed execution request + resolved execution plan
+  typed execution request + caller record policy + resolved execution plan
           ^
           |
 a3s-box-runtime
@@ -655,6 +655,17 @@ backend start. `operation_id` makes create retryable after a service crash.
 `generation` prevents a delayed start, kill, or route request from reaching a
 replacement execution. Runtime-specific handles, process IDs, socket paths,
 OCI bundle paths, and shim command lines never cross this interface.
+
+`CreateExecutionRequest` keeps backend launch requirements in `BoxConfig` and
+keeps caller-owned lifecycle and local resource metadata in a typed
+`ExecutionRecordPolicy`. The policy includes the user-visible name, automatic
+removal and restart behavior, health and log configuration, named-volume
+identity, stop behavior, and host-facing inspection fields. It is part of the
+durable creation intent rather than an encoded label. Consequently, retrying
+one operation ID with policy drift fails as a conflict, while records written
+before the policy field was added deserialize to explicit safe defaults. A
+single runtime mapper projects the request and policy into `BoxRecord`; CLI,
+SDK, and compatibility adapters must not construct a parallel record shape.
 
 ### Compatibility service modules
 

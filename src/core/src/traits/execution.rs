@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::config::{BoxConfig, ResourceConfig};
 use crate::execution::ResolvedExecutionPlan;
+use crate::log::LogConfig;
 
 /// Stable identifier assigned to one runtime execution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -128,6 +129,148 @@ impl From<ExecutionGeneration> for u64 {
     }
 }
 
+/// Restart behavior persisted with a local execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionRestartPolicy {
+    /// Never restart automatically.
+    #[default]
+    No,
+    /// Restart after every exit.
+    Always,
+    /// Restart only after an unsuccessful exit.
+    OnFailure,
+    /// Restart unless a user explicitly stopped the execution.
+    UnlessStopped,
+}
+
+impl ExecutionRestartPolicy {
+    /// Canonical value stored in the backwards-compatible local record.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::No => "no",
+            Self::Always => "always",
+            Self::OnFailure => "on-failure",
+            Self::UnlessStopped => "unless-stopped",
+        }
+    }
+}
+
+/// Health-check behavior persisted with a local execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionHealthCheck {
+    /// Command executed by the health check.
+    pub cmd: Vec<String>,
+    /// Interval between checks in seconds.
+    #[serde(default = "default_health_interval")]
+    pub interval_secs: u64,
+    /// Per-check timeout in seconds.
+    #[serde(default = "default_health_timeout")]
+    pub timeout_secs: u64,
+    /// Consecutive failures before the execution is unhealthy.
+    #[serde(default = "default_health_retries")]
+    pub retries: u32,
+    /// Grace period after startup in seconds.
+    #[serde(default)]
+    pub start_period_secs: u64,
+}
+
+/// Caller-owned policy projected into the canonical local execution record.
+///
+/// The complete value is persisted with the creation request so retries cannot
+/// silently reuse an execution with different lifecycle or local resource
+/// policy. Runtime launch requirements remain in [`BoxConfig`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionRecordPolicy {
+    /// User-visible local name. `None` lets the runtime assign a safe name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Remove the execution automatically after it stops.
+    #[serde(default)]
+    pub auto_remove: bool,
+    /// Automatic restart behavior.
+    #[serde(default)]
+    pub restart_policy: ExecutionRestartPolicy,
+    /// Maximum automatic restart count, where zero means unlimited.
+    #[serde(default)]
+    pub max_restart_count: u32,
+    /// Effective caller or cached-image health check.
+    #[serde(default)]
+    pub health_check: Option<ExecutionHealthCheck>,
+    /// Prevent a later image-defined health check from being enabled.
+    #[serde(default)]
+    pub healthcheck_disabled: bool,
+    /// Runtime log driver policy.
+    #[serde(default)]
+    pub log_config: LogConfig,
+    /// Named volumes represented by the resolved mounts in [`BoxConfig`].
+    #[serde(default)]
+    pub volume_names: Vec<String>,
+    /// Requested OCI platform retained for inspection and image selection.
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Whether the caller requested an init process.
+    #[serde(default)]
+    pub init: bool,
+    /// Requested host device mappings.
+    #[serde(default)]
+    pub devices: Vec<String>,
+    /// Requested GPU selection.
+    #[serde(default)]
+    pub gpus: Option<String>,
+    /// Shared-memory size in bytes.
+    #[serde(default)]
+    pub shm_size: Option<u64>,
+    /// Signal used for graceful stop.
+    #[serde(default)]
+    pub stop_signal: Option<String>,
+    /// Graceful stop timeout in seconds.
+    #[serde(default)]
+    pub stop_timeout: Option<u64>,
+    /// Whether the caller requested OOM-killer suppression.
+    #[serde(default)]
+    pub oom_kill_disable: bool,
+    /// Requested host OOM score adjustment.
+    #[serde(default)]
+    pub oom_score_adj: Option<i32>,
+}
+
+impl Default for ExecutionRecordPolicy {
+    fn default() -> Self {
+        Self {
+            name: None,
+            auto_remove: false,
+            restart_policy: ExecutionRestartPolicy::No,
+            max_restart_count: 0,
+            health_check: None,
+            healthcheck_disabled: false,
+            log_config: LogConfig::default(),
+            volume_names: Vec::new(),
+            platform: None,
+            init: false,
+            devices: Vec::new(),
+            gpus: None,
+            shm_size: None,
+            stop_signal: None,
+            stop_timeout: None,
+            oom_kill_disable: false,
+            oom_score_adj: None,
+        }
+    }
+}
+
+fn default_health_interval() -> u64 {
+    30
+}
+
+fn default_health_timeout() -> u64 {
+    5
+}
+
+fn default_health_retries() -> u32 {
+    3
+}
+
 /// A fully resolved request submitted to the runtime lifecycle facade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateExecutionRequest {
@@ -137,6 +280,9 @@ pub struct CreateExecutionRequest {
     pub config: BoxConfig,
     /// Labels persisted with the internal execution.
     pub labels: BTreeMap<String, String>,
+    /// Caller-owned lifecycle and local record policy.
+    #[serde(default)]
+    pub policy: ExecutionRecordPolicy,
 }
 
 /// Durable evidence returned after an execution is created but not started.
@@ -314,5 +460,33 @@ mod tests {
     fn identifier_deserialization_preserves_invariants() {
         assert!(serde_json::from_str::<ExecutionId>("\"\"").is_err());
         assert!(serde_json::from_str::<OperationId>("\" \"").is_err());
+    }
+
+    #[test]
+    fn legacy_creation_requests_default_record_policy() {
+        let request: CreateExecutionRequest = serde_json::from_value(serde_json::json!({
+            "external_sandbox_id": "sandbox-1",
+            "config": BoxConfig::default(),
+            "labels": {"purpose": "compatibility"}
+        }))
+        .unwrap();
+
+        assert_eq!(request.policy, ExecutionRecordPolicy::default());
+        assert_eq!(request.policy.restart_policy, ExecutionRestartPolicy::No);
+    }
+
+    #[test]
+    fn restart_policy_has_stable_record_values() {
+        assert_eq!(ExecutionRestartPolicy::No.as_str(), "no");
+        assert_eq!(ExecutionRestartPolicy::Always.as_str(), "always");
+        assert_eq!(ExecutionRestartPolicy::OnFailure.as_str(), "on-failure");
+        assert_eq!(
+            ExecutionRestartPolicy::UnlessStopped.as_str(),
+            "unless-stopped"
+        );
+        assert_eq!(
+            serde_json::to_value(ExecutionRestartPolicy::OnFailure).unwrap(),
+            "on-failure"
+        );
     }
 }

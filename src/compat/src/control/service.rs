@@ -163,6 +163,7 @@ impl ControlService {
             external_sandbox_id: record.sandbox_id().to_string(),
             config,
             labels: request.metadata,
+            policy: Default::default(),
         };
         let lease = match self
             .executions

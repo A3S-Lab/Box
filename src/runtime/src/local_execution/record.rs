@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use a3s_box_core::log::LogConfig;
 use a3s_box_core::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease,
     ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionState,
@@ -25,6 +24,7 @@ pub(crate) fn build_managed_record(
         ManagedExecutionMetadata::new(operation_id, ExecutionGeneration::INITIAL, request.clone())
             .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))?;
     let config = &request.config;
+    let policy = &request.policy;
     let short_id = BoxRecord::make_short_id(execution_id.as_str());
     let box_dir = home_dir.join("boxes").join(execution_id.as_str());
     let network_name = match &config.network {
@@ -41,7 +41,10 @@ pub(crate) fn build_managed_record(
     Ok(BoxRecord {
         id: execution_id.to_string(),
         short_id: short_id.clone(),
-        name: format!("managed-{short_id}"),
+        name: policy
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("managed-{short_id}")),
         image: config.image.clone(),
         isolation: config.isolation,
         managed_execution: Some(metadata),
@@ -60,44 +63,44 @@ pub(crate) fn build_managed_record(
         console_log: box_dir.join("logs/console.log"),
         created_at: now,
         started_at: None,
-        auto_remove: false,
+        auto_remove: policy.auto_remove,
         hostname: config.hostname.clone(),
         user: config.user.clone(),
         workdir: config.workdir.clone(),
-        restart_policy: "no".to_string(),
+        restart_policy: policy.restart_policy.as_str().to_string(),
         port_map: config.port_map.clone(),
         labels,
         stopped_by_user: false,
         restart_count: 0,
-        max_restart_count: 0,
+        max_restart_count: policy.max_restart_count,
         exit_code: None,
-        health_check: None,
-        healthcheck_disabled: false,
+        health_check: policy.health_check.clone(),
+        healthcheck_disabled: policy.healthcheck_disabled,
         health_status: "none".to_string(),
         health_retries: 0,
         health_last_check: None,
         network_mode: config.network.clone(),
         network_name,
-        volume_names: Vec::new(),
+        volume_names: policy.volume_names.clone(),
         tmpfs: config.tmpfs.clone(),
         anonymous_volumes: Vec::new(),
         resource_limits: config.resource_limits.clone(),
-        log_config: LogConfig::default(),
+        log_config: policy.log_config.clone(),
         add_host: config.add_hosts.clone(),
-        platform: None,
-        init: false,
+        platform: policy.platform.clone(),
+        init: policy.init,
         read_only: config.read_only,
         cap_add: config.cap_add.clone(),
         cap_drop: config.cap_drop.clone(),
         security_opt: config.security_opt.clone(),
         privileged: config.privileged,
-        devices: Vec::new(),
-        gpus: None,
-        shm_size: None,
-        stop_signal: None,
-        stop_timeout: None,
-        oom_kill_disable: false,
-        oom_score_adj: None,
+        devices: policy.devices.clone(),
+        gpus: policy.gpus.clone(),
+        shm_size: policy.shm_size,
+        stop_signal: policy.stop_signal.clone(),
+        stop_timeout: policy.stop_timeout,
+        oom_kill_disable: policy.oom_kill_disable,
+        oom_score_adj: policy.oom_score_adj,
     })
 }
 
