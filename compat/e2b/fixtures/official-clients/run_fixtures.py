@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import http.client
 import json
 import os
 import shutil
@@ -23,6 +24,8 @@ FIXTURE_DIR = Path(__file__).resolve().parent
 COMPAT_ROOT = FIXTURE_DIR.parent.parent
 SOURCE_LOCK = COMPAT_ROOT / "upstream.lock.json"
 EXPECTED_REQUESTS = 9
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_TIMEOUT_SECONDS = 120
 
 
 def load_artifacts() -> dict[str, dict[str, Any]]:
@@ -30,9 +33,18 @@ def load_artifacts() -> dict[str, dict[str, Any]]:
     return {artifact["id"]: artifact for artifact in lock["artifacts"]}
 
 
-def download_artifact(artifact: dict[str, Any], destination: Path) -> None:
-    with urllib.request.urlopen(artifact["url"], timeout=60) as response:
-        payload = response.read()
+def download_artifact(
+    artifact: dict[str, Any],
+    destination: Path,
+    artifact_cache: Path | None,
+) -> None:
+    cache_path = None
+    if artifact_cache:
+        cache_path = artifact_cache.resolve() / Path(artifact["url"]).name
+    if cache_path and cache_path.is_file():
+        payload = cache_path.read_bytes()
+    else:
+        payload = download_url(artifact["url"])
     actual_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
     if actual_sha256 != artifact["sha256"]:
         raise RuntimeError(
@@ -49,20 +61,41 @@ def download_artifact(artifact: dict[str, Any], destination: Path) -> None:
                 f"artifact {artifact['id']} npm integrity mismatch: "
                 f"expected {integrity}, got {actual_integrity}"
             )
+    if cache_path and not cache_path.exists():
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(payload)
     destination.write_bytes(payload)
+
+
+def download_url(url: str) -> bytes:
+    last_error: Exception | None = None
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(
+                url, timeout=DOWNLOAD_TIMEOUT_SECONDS
+            ) as response:
+                return response.read()
+        except (OSError, http.client.HTTPException) as error:
+            last_error = error
+            if attempt < DOWNLOAD_ATTEMPTS:
+                time.sleep(attempt)
+    raise RuntimeError(
+        f"download failed after {DOWNLOAD_ATTEMPTS} attempts: {url}"
+    ) from last_error
 
 
 def prepare_python(
     temp: Path,
     artifacts: dict[str, dict[str, Any]],
     pip_bootstrap_wheel: Path | None,
+    artifact_cache: Path | None,
 ) -> Path:
     environment = temp / "python"
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     wheels = []
     for artifact_id in ["python-e2b-wheel", "python-code-interpreter-wheel"]:
         wheel = temp / Path(artifacts[artifact_id]["url"]).name
-        download_artifact(artifacts[artifact_id], wheel)
+        download_artifact(artifacts[artifact_id], wheel, artifact_cache)
         wheels.append(str(wheel))
 
     env = os.environ.copy()
@@ -117,7 +150,11 @@ def prepare_python(
     return python
 
 
-def prepare_typescript(temp: Path, artifacts: dict[str, dict[str, Any]]) -> Path:
+def prepare_typescript(
+    temp: Path,
+    artifacts: dict[str, dict[str, Any]],
+    artifact_cache: Path | None,
+) -> Path:
     environment = temp / "typescript"
     environment.mkdir()
     tarballs = []
@@ -126,7 +163,7 @@ def prepare_typescript(temp: Path, artifacts: dict[str, dict[str, Any]]) -> Path
         "typescript-code-interpreter-tarball",
     ]:
         tarball = temp / Path(artifacts[artifact_id]["url"]).name
-        download_artifact(artifacts[artifact_id], tarball)
+        download_artifact(artifacts[artifact_id], tarball, artifact_cache)
         tarballs.append(str(tarball))
     subprocess.run(
         [
@@ -206,12 +243,22 @@ def main() -> None:
         type=Path,
         help="use this pip wheel when uv and ensurepip are unavailable",
     )
+    parser.add_argument(
+        "--artifact-cache",
+        type=Path,
+        help="reuse verified SDK artifacts from this directory",
+    )
     args = parser.parse_args()
     artifacts = load_artifacts()
     with tempfile.TemporaryDirectory(prefix="a3s-e2b-official-clients-") as directory:
         temp = Path(directory)
-        python = prepare_python(temp, artifacts, args.pip_bootstrap_wheel)
-        typescript_client = prepare_typescript(temp, artifacts)
+        python = prepare_python(
+            temp,
+            artifacts,
+            args.pip_bootstrap_wheel,
+            args.artifact_cache,
+        )
+        typescript_client = prepare_typescript(temp, artifacts, args.artifact_cache)
         update = args.mode == "generate"
         run_client(
             args.mode,

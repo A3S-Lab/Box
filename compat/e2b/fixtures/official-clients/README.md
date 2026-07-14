@@ -31,6 +31,11 @@ python3 compat/e2b/fixtures/official-clients/run_fixtures.py \
 `PIP_INDEX_URL`, `PIP_DEFAULT_TIMEOUT`, and `PIP_RETRIES` are honored when set.
 The defaults are PyPI, 60 seconds, and five retries.
 
+Use `--artifact-cache /path/to/cache` to reuse downloaded SDK wheels and npm
+tarballs. Every cached artifact is checked against the SHA-256 and npm
+integrity values in `upstream.lock.json` before use. Direct downloads use a
+120-second timeout and retry up to three times.
+
 Generated JSON Lines files are compatibility evidence, not server
 implementations. The Rust control plane must satisfy them without adding A3S
 fields to upstream requests or responses.
