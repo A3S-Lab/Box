@@ -309,12 +309,21 @@ Interpreter contracts under [`compat/e2b/`](compat/e2b/README.md). CI regenerate
 their endpoint, field, error, descriptor, and public-export inventories and
 rejects unreviewed protocol drift.
 
-The Phase 2 preview now includes an owner-scoped Rust lifecycle router for
-create, connect, get, list, timeout, and kill. CI runs the pinned official
-Python sync/async, TypeScript, and Code Interpreter clients against that router
-through an in-memory repository and fake execution manager. This is protocol
-evidence only; durable persistence and real `--isolation sandbox` execution
-remain later Phase 2 gates.
+The Phase 2 preview includes an owner-scoped Rust lifecycle router for create,
+connect, get, list, timeout, and kill; a SQLite WAL repository with
+generation-fenced transitions and restart reconciliation; and a canonical
+runtime `ExecutionManager` with a production VM/Sandbox backend. CI runs the
+pinned official Python sync/async, TypeScript, and Code Interpreter clients
+against the router through an in-memory repository and fake execution manager.
+Separately, an A3S OS smoke harness proves real `--isolation sandbox` create,
+inspect, manager restart recovery, explicit pause rejection, kill, and cleanup
+through certified `crun`, without MicroVM fallback.
+
+Those protocol and runtime tests are not yet one end-to-end service path. CLI
+create/start/run and the Rust SDK still need migration to the canonical manager,
+and the production HCL service, encrypted credentials, generation-fenced route
+leases, wildcard TLS gateway, envd data plane, and real official-client Sandbox
+suite remain open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

@@ -1,6 +1,7 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 3 complete)**
+Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 3 complete;
+slice 4 runtime path proven, caller migration pending)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -12,6 +13,24 @@ boundary required to provide a remote code-execution environment on A3S Box.
 Target: the public E2B SDK contract as observed on 2026-07-14. Compatibility is
 pinned by upstream commit and generated protocol descriptors, not by an
 unversioned claim.
+
+## Current implementation evidence and remaining gates
+
+| Area | Implemented evidence | Remaining gate |
+| --- | --- | --- |
+| Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
+| Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
+| Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, reaping, and startup reconciliation | Wire the repository and supervisor into the production service process and exercise restart and host-reboot recovery end to end |
+| Runtime lifecycle | Canonical managed-execution store, backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; an A3S OS smoke test proves real `crun` create, inspect, manager restart recovery, explicit pause rejection, kill, and cleanup without MicroVM fallback | Migrate CLI create/start/run and the Rust SDK to the same manager and add caller parity tests |
+| Credentials and routing | Injected verifier, token, cursor, and template interfaces isolate protocol logic from infrastructure | Add production credential hashing, token encryption and rotation, generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
+| Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
+
+The lifecycle fixture and the managed Sandbox smoke validate opposite sides of
+the architecture. They have not yet been composed into one production path:
+the fixture uses an in-memory repository and fake execution manager, while the
+runtime smoke calls `LocalExecutionManager` directly without the compatibility
+HTTP service or data-plane gateway. Neither result alone is an end-to-end
+compatibility claim, so `full_compatibility=false` remains mandatory.
 
 ## Executive decision
 
@@ -586,11 +605,12 @@ must not assume that the single-host limit is part of the upstream contract.
 
 ### Dependency direction
 
-The current CLI owns the only complete `create` and `start` orchestration path,
-while the Rust SDK intentionally omits those operations. The compatibility
-service must not work around that gap by spawning `a3s-box`, importing CLI
-modules, or editing `boxes.json`. Phase 2 first establishes this dependency
-direction:
+The runtime now owns a canonical managed-execution store, a backend-neutral
+`LocalExecutionManager`, and a production VM/Sandbox backend. The current CLI
+still owns a separate complete `create` and `start` orchestration path, while
+the Rust SDK intentionally omits those operations. The compatibility service
+must not work around that caller gap by spawning `a3s-box`, importing CLI
+modules, or editing `boxes.json`. Phase 2 completes this dependency direction:
 
 ```text
 a3s-box-core
@@ -598,7 +618,7 @@ a3s-box-core
           ^
           |
 a3s-box-runtime
-  canonical state store + ExecutionManager implementation
+  canonical state store + ExecutionManager + production backend
           ^
           |
   +-------+------------------+
@@ -609,9 +629,9 @@ a3s-box CLI / Rust SDK   a3s-box-compat
 
 The runtime lifecycle facade owns image resolution, rootfs preparation,
 network and volume attachment, backend capability checks, shim launch, state
-registration, and cleanup. The CLI becomes one caller of that facade. This
-removes the current duplicate SDK state model instead of adding a third model
-inside the compatibility service.
+registration, and cleanup. The CLI and Rust SDK become callers of that facade.
+This removes the current duplicate SDK state model instead of adding a third
+model inside the compatibility service.
 
 The backend-neutral runtime interface is deliberately smaller than either the
 CLI or the public compatibility API:
@@ -639,27 +659,32 @@ is added by concern rather than mixed into schema parsing:
 ```text
 src/compat/src/
   control/
+    credential.rs     # injected credential and token interfaces
     model.rs          # lifecycle records and public/internal state mapping
     repository.rs     # transactional persistence interface
     service.rs        # create/connect/list/timeout/kill use cases
+    sqlite/           # WAL repository and versioned migrations
+    supervisor.rs     # expiry reaping and startup reconciliation
   http/
     auth.rs           # credential extraction and verification
     error.rs          # exact upstream error mapping
     lifecycle.rs      # lifecycle route handlers and DTO conversion
     router.rs         # route assembly and request limits
-  execution/
-    adapter.rs        # ExecutionManager adapter only
-  routing/
+  routing/            # planned production data-plane boundary
     lease.rs          # generation-fenced sandbox route leases
     parser.rs         # wildcard host and explicit-header validation
   bin/
-    a3s-box-e2b.rs    # HCL config, migrations, listeners, reconciliation
+    a3s-box-e2b-fixture-server.rs # deterministic protocol fixture
+    a3s-box-e2b.rs                # planned production composition root
 ```
 
 No handler accesses the database or runtime directly. Handlers authenticate,
 parse the pinned wire DTO, call the control service, and map its result. The
 control service depends on repository, clock, token, and execution interfaces,
 so lifecycle semantics can be tested without booting a VM or OCI sandbox.
+The production composition root injects `LocalExecutionManager` directly
+behind `ExecutionManager`; a compatibility-owned runtime wrapper is not added
+unless protocol translation eventually requires one.
 
 ### Durable lifecycle transaction
 
@@ -734,47 +759,55 @@ Phase 2 is delivered as small, immediately merged changes:
 3. **Complete:** add SQLite WAL migrations, strict compare-and-swap repository
    operations, atomic generation-fenced expiry claims, restart recovery,
    startup reconciliation, and corruption/crash/concurrency tests.
-4. Extract canonical A3S state and the runtime `ExecutionManager`; switch CLI
-   create/start/run and the Rust SDK to the same implementation with behavior
-   parity tests.
-5. Add the production HCL-configured service binary, runtime adapter, and
-   generation-fenced route leases. Pull the merge commit on an A3S OS server
-   and run the unmodified official clients against real
-   `--isolation sandbox` executions.
+4. **Partially complete:** extract canonical A3S state and the runtime
+   `ExecutionManager`; add the production backend and prove its real Sandbox
+   lifecycle; switch CLI create/start/run and the Rust SDK to the same
+   implementation with behavior parity tests.
+5. Add the production HCL-configured service binary, credential and token
+   providers, generation-fenced route leases, and TLS data-plane gateway. Pull
+   each merge commit on an A3S OS server and run the unmodified official clients
+   against real `--isolation sandbox` executions.
 
-Slice 4 has started by moving the persisted execution record into
-`a3s-box-runtime` as the canonical schema shared by the CLI and Rust SDK. This
-prevents either client from dropping fields it does not model while the
-durable state store and lifecycle orchestration are moved behind the runtime
-facade. The runtime now also owns strict and recovery-compatible reads, the
-cross-process advisory lock, durable atomic writes, and synchronous
-read-modify-write transactions. The Rust SDK uses that store directly; the CLI
-keeps only its process reconciliation and resource-cleanup policy wrapper.
-Managed records also have an optional typed recovery envelope containing the
-operation ID, runtime generation, full creation request, and resolved execution
-plan. Legacy CLI records omit it, while the runtime manager will persist it
-before launch to make create retries and restart reconciliation deterministic.
-The runtime now also owns a strict managed-execution store. It atomically
-reserves creation operations, returns an existing record only when the full
-creation intent matches, persists transitional lifecycle claims, rejects stale
-state or generation comparisons, and advances the generation exactly once when
-pause or resume completes. These file transactions are the local lifecycle
-source of truth; backend calls remain outside the state lock.
-`LocalExecutionManager` now implements the backend-neutral lifecycle contract
-over that store and an injectable runtime backend. It persists a `starting`
-claim before launch, keeps pause policy with the corresponding transitional
-record, performs state-file work on Tokio blocking workers, and resolves
-ambiguous backend errors from runtime observations before publishing a result.
-Startup reconciliation can therefore distinguish an unstarted claim from a
-runtime that became ready before its durable `running` publication. The
-production `VmManager` backend is still a separate remaining gate.
-Slice 4 remains incomplete until the real `ExecutionManager` owns
-create/start/run for both callers.
+The runtime foundation of slice 4 is complete. The persisted execution record
+is the canonical schema shared by the CLI and Rust SDK, preventing either
+client from dropping fields it does not model. Runtime-owned strict and
+recovery-compatible reads, a cross-process advisory lock, durable atomic
+writes, and synchronous read-modify-write transactions protect that state. The
+managed-execution store reserves creation operations atomically, returns an
+existing record only when the full creation intent matches, persists
+transitional lifecycle claims, rejects stale state or generation comparisons,
+and advances the generation exactly once when pause or resume completes.
+Backend calls remain outside the state lock.
+
+`LocalExecutionManager` implements the backend-neutral lifecycle contract over
+that store and an injectable runtime backend. It persists a `starting` claim
+before launch, keeps pause policy with the corresponding transitional record,
+performs state-file work on Tokio blocking workers, and resolves ambiguous
+backend errors from runtime observations before publishing a result. Startup
+reconciliation can therefore distinguish an unstarted claim from a runtime
+that became ready before its durable `running` publication.
+
+The production VM/Sandbox backend is also complete for this slice. It owns live
+runtime handles, reconstructs MicroVM processes with PID identity fencing,
+reconstructs Sandbox executions from validated durable `crun` evidence,
+rejects unsupported Sandbox pause/resume without falling back to MicroVM, and
+owns terminal cleanup. The opt-in A3S OS smoke harness has proven real Sandbox
+create, inspect, manager reconstruction, pause rollback, kill, and removal of
+the Box directory, runtime root, and sockets. Deterministic image-pull failure
+injection also proves that a failed start does not create those runtime
+resources.
+
+Slice 4 remains incomplete until CLI create/start/run and the Rust SDK call the
+same manager with behavior parity tests. The existing Rust SDK uses the
+canonical record store for management operations but still has a separate
+local lifecycle model and does not expose create/start/run.
 
 Each slice must pass its focused tests and repository CI before merge. The
-Phase 2 gate remains closed until slice 5 proves real create/connect/list/
-timeout/kill behavior; passing the fake adapter in slice 2 is protocol evidence
-only.
+Phase 2 gate remains closed until slice 5 composes the durable repository,
+production execution manager, credentials, routing, and real
+create/connect/list/timeout/kill behavior. Passing the fake manager in slice 2
+and passing the direct runtime smoke in slice 4 are complementary evidence, not
+the missing end-to-end proof.
 
 Slice 2 evidence includes exact recorder drift checks plus live requests from
 the pinned, unmodified clients to the Rust router. The live gate was also run
