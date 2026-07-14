@@ -559,7 +559,7 @@ fn probe_cgroup_v2() -> CgroupV2Evidence {
         (Some(mountpoint), Some(relative)) => safe_join_cgroup(mountpoint, relative),
         _ => None,
     };
-    let controllers = current_path
+    let controllers: Vec<String> = current_path
         .as_ref()
         .and_then(|path| read_trimmed(path.join("cgroup.controllers")))
         .map(|line| line.split_whitespace().map(ToString::to_string).collect())
