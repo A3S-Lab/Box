@@ -133,6 +133,7 @@
         let mut record = box_record("12121212-1212-4121-8121-121212121212", "api", "running");
         record.pid = Some(pid);
         record.pid_start_time = pid_start_time(pid);
+        record.virtiofs_cache = Some("always".to_string());
         write_boxes(&client, &[record]);
 
         let paused = client.pause_box("api").unwrap();
@@ -146,6 +147,11 @@
         let running = client.unpause_box("api").unwrap();
         assert_eq!(running.status, "running");
         assert_eq!(client.get_box("api").unwrap().unwrap().status, "running");
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&client.paths().boxes_file).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted[0]["virtiofs_cache"], "always");
 
         let _ = child.kill();
         let _ = child.wait();

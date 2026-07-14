@@ -15,6 +15,7 @@
 
 // -- Core modules (always compiled) --
 pub mod audit;
+pub mod box_record;
 pub mod cache;
 pub(crate) mod file_lock;
 pub mod fs;
@@ -51,6 +52,9 @@ pub mod scale;
 
 // Audit
 pub use audit::{read_audit_log, AuditLog, AuditQuery};
+
+// Canonical local execution metadata
+pub use box_record::{BoxRecord, HealthCheck};
 
 // gRPC clients
 #[cfg(unix)]

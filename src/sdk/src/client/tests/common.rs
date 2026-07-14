@@ -116,6 +116,7 @@
             cpus: 2,
             memory_mb: 512,
             volumes: vec![],
+            virtiofs_cache: None,
             env: HashMap::new(),
             cmd: vec!["sh".to_string()],
             entrypoint: None,
