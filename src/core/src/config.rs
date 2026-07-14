@@ -2,6 +2,27 @@ use crate::network::NetworkMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Execution isolation selected for a box.
+///
+/// MicroVM remains the implicit default. Host sandbox execution must always be
+/// selected explicitly by the caller and never acts as an automatic fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionIsolation {
+    /// Hardware-backed MicroVM isolation.
+    #[default]
+    Microvm,
+    /// Shared-kernel OCI sandbox isolation.
+    Sandbox,
+}
+
+impl ExecutionIsolation {
+    /// Whether this request selects the shared-kernel sandbox backend.
+    pub fn is_sandbox(self) -> bool {
+        matches!(self, Self::Sandbox)
+    }
+}
+
 /// TEE (Trusted Execution Environment) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -260,6 +281,10 @@ pub struct ResourceLimits {
 /// Box configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoxConfig {
+    /// Execution isolation. MicroVM is the backwards-compatible default.
+    #[serde(default)]
+    pub isolation: ExecutionIsolation,
+
     /// OCI image reference (e.g., "nginx:alpine", "ghcr.io/org/app:latest")
     #[serde(default)]
     pub image: String,
@@ -439,6 +464,7 @@ pub struct BoxConfig {
 impl Default for BoxConfig {
     fn default() -> Self {
         Self {
+            isolation: ExecutionIsolation::default(),
             image: String::new(),
             // Empty path signals the runtime to create a per-box workspace
             // under ~/.a3s/boxes/<box_id>/workspace/ at boot time.

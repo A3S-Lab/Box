@@ -276,6 +276,27 @@ pub struct ExecListener(std::os::fd::OwnedFd);
 #[cfg(not(target_os = "linux"))]
 pub struct ExecListener;
 
+/// Adopt the host-side Unix listener passed through the OCI runtime.
+///
+/// The descriptor must refer to an already-bound, listening AF_UNIX stream
+/// socket. It is validated and marked `CLOEXEC` before the workload is forked.
+pub fn adopt_inherited_exec_listener(
+    fd: std::os::fd::RawFd,
+) -> Result<ExecListener, Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(ExecListener(crate::listener::adopt_unix_listener(
+            fd, "exec",
+        )?))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = fd;
+        Err("inherited exec listeners require Linux".into())
+    }
+}
+
 /// Bind + listen the exec vsock socket (port 4089). Pure socket syscalls, safe
 /// to call on the main thread before the container fork.
 pub fn bind_exec_server() -> Result<ExecListener, Box<dyn std::error::Error>> {
@@ -1021,6 +1042,10 @@ fn build_command(
                 .map(|name| name.trim().to_string())
                 .filter(|name| !name.is_empty())
                 .collect()
+        })
+        .or_else(|| {
+            (std::env::var("A3S_BOOTSTRAP_MODE").as_deref() == Ok("host-sandbox"))
+                .then(crate::namespace::sandbox_workload_capability_keep_from_env)
         });
     // CRI no_new_privs: A3S_SEC_NO_NEW_PRIVS=1 sets PR_SET_NO_NEW_PRIVS in the
     // child before exec, so a setuid/file-capability binary cannot raise privs.

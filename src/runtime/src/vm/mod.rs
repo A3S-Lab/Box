@@ -4,6 +4,7 @@ mod layout;
 mod network;
 mod ready;
 pub mod reap;
+mod sandbox;
 mod spec;
 
 use std::path::{Path, PathBuf};
@@ -17,6 +18,7 @@ use a3s_box_core::config::BoxConfig;
 use a3s_box_core::config::TeeConfig;
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::{BoxEvent, EventEmitter};
+use a3s_box_core::execution::{ExecutionBackend, ResolvedExecutionPlan};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::Instrument;
@@ -143,6 +145,9 @@ pub struct VmManager {
     /// the log processor for the box's lifetime (set by the CLI via
     /// [`VmManager::set_log_config`]).
     pub(crate) log_config: a3s_box_core::log::LogConfig,
+
+    /// Backend-neutral resolution captured before any boot side effects.
+    pub(crate) resolved_execution_plan: Option<ResolvedExecutionPlan>,
 }
 
 impl VmManager {
@@ -175,6 +180,7 @@ impl VmManager {
             shim_exit_code: None,
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
+            resolved_execution_plan: None,
         }
     }
 
@@ -206,6 +212,7 @@ impl VmManager {
             shim_exit_code: None,
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
+            resolved_execution_plan: None,
         }
     }
 
@@ -341,6 +348,7 @@ impl VmManager {
             shim_exit_code: None,
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
+            resolved_execution_plan: None,
         }
     }
 
@@ -520,6 +528,11 @@ impl VmManager {
     /// Get the OCI image config resolved during boot.
     pub fn image_config(&self) -> Option<&crate::oci::OciImageConfig> {
         self.image_config.as_ref()
+    }
+
+    /// Return the immutable execution resolution captured for this boot.
+    pub fn resolved_execution_plan(&self) -> Option<&ResolvedExecutionPlan> {
+        self.resolved_execution_plan.as_ref()
     }
 
     /// Get the exit code of the container, if it has exited.
@@ -813,6 +826,15 @@ impl VmManager {
             if *state != BoxState::Created {
                 return Err(BoxError::StateError("VM already booted".to_string()));
             }
+        }
+
+        let execution_plan = a3s_box_core::resolve_execution(&self.config)?;
+        self.resolved_execution_plan = Some(execution_plan.clone());
+        if execution_plan.backend == ExecutionBackend::Crun {
+            let boot_start = std::time::Instant::now();
+            return self
+                .boot_sandbox(execution_plan, &boot_span, boot_start)
+                .await;
         }
 
         let boot_start = std::time::Instant::now();
@@ -1229,6 +1251,17 @@ impl VmManager {
         }
         drop(state);
 
+        if self
+            .resolved_execution_plan
+            .as_ref()
+            .is_some_and(|plan| plan.backend == ExecutionBackend::Crun)
+            || self.config.isolation.is_sandbox()
+        {
+            return Err(BoxError::StateError(
+                "Pause is not supported by the Sandbox backend yet".to_string(),
+            ));
+        }
+
         if let Some(pid) = self.pid().await {
             // Safety: sending SIGSTOP to pause the process
             let ret = unsafe { libc::kill(pid as i32, libc::SIGSTOP) };
@@ -1253,6 +1286,16 @@ impl VmManager {
     /// Can be called on a paused VM to resume execution.
     #[cfg(unix)]
     pub async fn resume(&self) -> Result<()> {
+        if self
+            .resolved_execution_plan
+            .as_ref()
+            .is_some_and(|plan| plan.backend == ExecutionBackend::Crun)
+            || self.config.isolation.is_sandbox()
+        {
+            return Err(BoxError::StateError(
+                "Resume is not supported by the Sandbox backend yet".to_string(),
+            ));
+        }
         if let Some(pid) = self.pid().await {
             // Safety: sending SIGCONT to resume the process
             let ret = unsafe { libc::kill(pid as i32, libc::SIGCONT) };
@@ -1362,6 +1405,16 @@ impl VmManager {
         &self,
         update: &crate::resize::ResourceUpdate,
     ) -> Result<crate::resize::ResizeResult> {
+        if self
+            .resolved_execution_plan
+            .as_ref()
+            .is_some_and(|plan| plan.backend == ExecutionBackend::Crun)
+            || self.config.isolation.is_sandbox()
+        {
+            return Err(BoxError::StateError(
+                "Live resource updates are not supported by the Sandbox backend yet".to_string(),
+            ));
+        }
         // Reject Tier 1 changes upfront
         crate::resize::validate_update(update)?;
 

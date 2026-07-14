@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use a3s_box_core::config::ResourceLimits;
+use a3s_box_core::config::{ExecutionIsolation, ResourceLimits};
 use a3s_box_runtime::oci::{OciHealthCheck, OciImageConfig};
 use clap::{Args, ValueEnum};
 
@@ -32,11 +32,33 @@ impl VirtiofsCacheMode {
     }
 }
 
+/// Explicit isolation choices exposed by the CLI.
+///
+/// MicroVM is selected by omitting `--isolation`; only the opt-in sandbox
+/// value is accepted explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum IsolationArg {
+    Sandbox,
+}
+
+/// Resolve the optional CLI selector without exposing an explicit MicroVM
+/// spelling. Omitting the option preserves the historical MicroVM default.
+pub(crate) fn resolve_isolation(value: Option<IsolationArg>) -> ExecutionIsolation {
+    match value {
+        Some(IsolationArg::Sandbox) => ExecutionIsolation::Sandbox,
+        None => ExecutionIsolation::Microvm,
+    }
+}
+
 /// Common arguments shared between `run` and `create` commands.
 #[derive(Args)]
 pub struct CommonBoxArgs {
     /// OCI image reference
     pub image: String,
+
+    /// Use the shared-kernel sandbox backend (omit for MicroVM isolation)
+    #[arg(long, value_enum)]
+    pub isolation: Option<IsolationArg>,
 
     /// Assign a name to the box
     #[arg(long)]
@@ -455,7 +477,35 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
         &common.cap_drop,
         common.privileged,
     );
-    security.validate()
+    security.validate()?;
+
+    if execution_isolation(common).is_sandbox() {
+        let network = match common.network.as_ref() {
+            Some(network) => a3s_box_core::NetworkMode::Bridge {
+                network: network.clone(),
+            },
+            None => a3s_box_core::NetworkMode::Tsi,
+        };
+        let compatibility_config = a3s_box_core::BoxConfig {
+            isolation: a3s_box_core::ExecutionIsolation::Sandbox,
+            port_map: common.publish.clone(),
+            network,
+            cap_add: common.cap_add.clone(),
+            cap_drop: common.cap_drop.clone(),
+            security_opt: common.security_opt.clone(),
+            privileged: common.privileged,
+            ..Default::default()
+        };
+        a3s_box_core::validate_sandbox_compatibility(&compatibility_config)
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Resolve the CLI's opt-in selector to the persisted execution isolation.
+pub(crate) fn execution_isolation(common: &CommonBoxArgs) -> ExecutionIsolation {
+    resolve_isolation(common.isolation)
 }
 
 /// Normalize a user option into the runtime-supported numeric format.
@@ -855,6 +905,7 @@ mod tests {
     fn default_common_args() -> CommonBoxArgs {
         CommonBoxArgs {
             image: "test".to_string(),
+            isolation: None,
             name: None,
             cpus: 2,
             memory: "512m".to_string(),

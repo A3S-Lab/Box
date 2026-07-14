@@ -163,6 +163,16 @@ cargo run --example nginx_test --target x86_64-pc-windows-msvc
 
 ## Building from Source
 
+### Linux and macOS
+
+The build script compiles the vendored libkrun automatically when a compatible
+system or cached library is unavailable. Because libkrun invokes Cargo from
+inside the outer Cargo build, the nested process uses a target-local Cargo home
+next to the build outputs. That location is deliberately not configurable:
+Cargo does not reliably expose the outer `CARGO_HOME` to build scripts, so an
+override could accidentally reuse the package-cache lock and restore the
+deadlock this isolation prevents.
+
 ### Windows
 
 ```powershell

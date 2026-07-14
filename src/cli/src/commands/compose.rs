@@ -64,6 +64,10 @@ pub struct ComposeUpArgs {
     /// Timeout in seconds to wait for healthy dependencies (default: 120)
     #[arg(long, default_value = "120")]
     pub timeout: u64,
+
+    /// Use the shared-kernel sandbox backend (omit for MicroVM isolation)
+    #[arg(long, value_enum)]
+    pub isolation: Option<common::IsolationArg>,
 }
 
 #[derive(Args)]
@@ -209,12 +213,21 @@ async fn execute_up(
     compose_path: PathBuf,
     up_args: ComposeUpArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let isolation = common::resolve_isolation(up_args.isolation);
     let base_dir = compose_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     validate_compose_restart_policies(&config)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let project = ComposeProject::with_base_dir(project_name, config, base_dir)?;
+    if isolation.is_sandbox() {
+        let default_network = project.default_network_name();
+        for service_name in &project.service_order {
+            let mut config = project.build_box_config(service_name, Some(&default_network))?;
+            config.isolation = isolation;
+            a3s_box_core::resolve_execution(&config)?;
+        }
+    }
     let mut state = StateFile::load_default()?;
 
     // Check for already-active services
@@ -369,6 +382,7 @@ async fn execute_up(
                 .await;
             }
         };
+        box_config.isolation = isolation;
         let (resolved_volumes, volume_names) = match resolve_service_volumes(&box_config.volumes) {
             Ok(volumes) => volumes,
             Err(error) => {
@@ -387,6 +401,7 @@ async fn execute_up(
         let record_hostname = box_config.hostname.clone();
         let record_add_hosts = box_config.add_hosts.clone();
         let network_mode = box_config.network.clone();
+        let record_isolation = box_config.isolation;
         let network_name = match &network_mode {
             a3s_box_core::NetworkMode::Bridge { network } => Some(network.clone()),
             _ => None,
@@ -535,6 +550,7 @@ async fn execute_up(
             short_id: BoxRecord::make_short_id(&box_id),
             name: box_name,
             image,
+            isolation: record_isolation,
             status: "running".to_string(),
             pid,
             pid_start_time: pid.and_then(crate::process::pid_start_time),

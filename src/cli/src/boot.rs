@@ -310,6 +310,7 @@ pub async fn boot_from_record(
 ) -> Result<BootResult, Box<dyn std::error::Error>> {
     let config =
         config_from_record(record).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    a3s_box_core::resolve_execution(&config)?;
     let emitter = EventEmitter::new(256);
     let mut vm = VmManager::with_box_id(config, emitter, record.id.clone());
 
@@ -391,6 +392,7 @@ fn config_from_record(record: &BoxRecord) -> Result<BoxConfig, String> {
         .map_err(|e| format!("Invalid persisted add-host entry: {e}"))?;
 
     Ok(BoxConfig {
+        isolation: record.isolation,
         image: record.image.clone(),
         resources: ResourceConfig {
             vcpus: record.cpus,
@@ -437,6 +439,7 @@ mod tests {
             short_id,
             name: "test_box".to_string(),
             image: "alpine:latest".to_string(),
+            isolation: Default::default(),
             status: "stopped".to_string(),
             pid: None,
             pid_start_time: None,
@@ -505,6 +508,21 @@ mod tests {
         let record = sample_record();
         let config = config_from_record(&record).unwrap();
         assert_eq!(config.image, "alpine:latest");
+    }
+
+    #[test]
+    fn test_config_from_record_preserves_sandbox_isolation() {
+        let mut record = sample_record();
+        record.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        record.port_map.clear();
+
+        let config = config_from_record(&record).unwrap();
+
+        assert_eq!(config.isolation, a3s_box_core::ExecutionIsolation::Sandbox);
+        assert_eq!(
+            a3s_box_core::resolve_execution(&config).unwrap().backend,
+            a3s_box_core::ExecutionBackend::Crun
+        );
     }
 
     #[test]

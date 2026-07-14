@@ -481,6 +481,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         tee,
     )
     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    a3s_box_core::resolve_execution(&config)?;
 
     let emitter = EventEmitter::new(256);
     let mut vm = VmManager::new(config, emitter);
@@ -567,6 +568,7 @@ async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error
         short_id: BoxRecord::make_short_id(&box_id),
         name: name.clone(),
         image: args.common.image.clone(),
+        isolation: common::execution_isolation(&args.common),
         status: "running".to_string(),
         pid,
         pid_start_time: pid.and_then(crate::process::pid_start_time),
@@ -733,6 +735,7 @@ fn build_box_config(
     };
 
     Ok(BoxConfig {
+        isolation: common::execution_isolation(&args.common),
         image: args.common.image.clone(),
         resources: ResourceConfig {
             vcpus: args.common.cpus,
@@ -1475,6 +1478,7 @@ mod tests {
         RunArgs {
             common: common::CommonBoxArgs {
                 image: "test".to_string(),
+                isolation: None,
                 name: None,
                 cpus: 2,
                 memory: "512m".to_string(),

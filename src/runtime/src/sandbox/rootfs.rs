@@ -1,0 +1,609 @@
+//! Host-side rootfs ownership preparation for user-namespace execution.
+
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
+#[cfg(any(target_os = "linux", test))]
+use std::path::Component;
+use std::path::{Path, PathBuf};
+
+use a3s_box_core::error::{BoxError, Result};
+#[cfg(any(target_os = "linux", test))]
+use a3s_box_core::rootfs_metadata::{RootfsEntryKind, RootfsMetadataEntry};
+use a3s_box_core::rootfs_metadata::{
+    RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
+};
+#[cfg(any(target_os = "linux", test))]
+use base64::Engine;
+
+use super::capability::{IdMapping, SandboxIdMappingPlan};
+
+/// Container IDs discovered in the authoritative rootfs metadata manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootfsIdentityRequirements {
+    pub maximum_uid: u32,
+    pub maximum_gid: u32,
+    pub manifest_path: PathBuf,
+}
+
+/// Host IDs representing container root for one mapping plan.
+pub fn mapped_root_ids(plan: &SandboxIdMappingPlan) -> Result<(u32, u32)> {
+    Ok((
+        map_container_id(&plan.uid_mappings, 0, "UID")?,
+        map_container_id(&plan.gid_mappings, 0, "GID")?,
+    ))
+}
+
+/// Make an A3S-owned workspace or anonymous volume accessible as container
+/// root without ever changing an arbitrary caller-provided host tree.
+#[cfg(target_os = "linux")]
+pub fn prepare_managed_mount_source(path: &Path, plan: &SandboxIdMappingPlan) -> Result<()> {
+    ensure_no_nested_mounts(path)?;
+    let (root_uid, root_gid) = mapped_root_ids(plan)?;
+    prepare_managed_tree(path, plan, root_uid, root_gid)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn prepare_managed_mount_source(_path: &Path, _plan: &SandboxIdMappingPlan) -> Result<()> {
+    Err(BoxError::ConfigError(
+        "Sandbox mount ownership preparation requires Linux".to_string(),
+    ))
+}
+
+/// Verify that an external bind source's root is usable by the mapped root
+/// identity. The runtime refuses to chown external host data implicitly.
+#[cfg(unix)]
+pub fn validate_external_mount_access(
+    path: &Path,
+    plan: &SandboxIdMappingPlan,
+    read_only: bool,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let (uid, gid) = mapped_root_ids(plan)?;
+    let metadata = std::fs::metadata(path).map_err(BoxError::IoError)?;
+    let mode = metadata.mode();
+    let permission_bits = if metadata.uid() == uid {
+        (mode >> 6) & 0o7
+    } else if metadata.gid() == gid {
+        (mode >> 3) & 0o7
+    } else {
+        mode & 0o7
+    };
+    let required = if metadata.is_dir() {
+        if read_only {
+            0o5
+        } else {
+            0o7
+        }
+    } else if read_only {
+        0o4
+    } else {
+        0o6
+    };
+    if permission_bits & required != required {
+        return Err(BoxError::ConfigError(format!(
+            "External Sandbox mount {} is not {} by mapped container root {uid}:{gid}; adjust host ownership/permissions or use an A3S-managed volume",
+            path.display(),
+            if read_only { "readable" } else { "writable" }
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn validate_external_mount_access(
+    _path: &Path,
+    _plan: &SandboxIdMappingPlan,
+    _read_only: bool,
+) -> Result<()> {
+    Err(BoxError::ConfigError(
+        "Sandbox bind mount validation requires Linux".to_string(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+struct DecodedEntry {
+    metadata: RootfsMetadataEntry,
+    relative: PathBuf,
+    target: PathBuf,
+}
+
+/// Read the terminal persistent manifest when present, otherwise the immutable
+/// image manifest. The mapping plan must cover every ID before `crun` starts.
+pub fn inspect_rootfs_identity_requirements(root: &Path) -> Result<RootfsIdentityRequirements> {
+    let (manifest_path, manifest) = load_authoritative_manifest(root)?;
+    let mut maximum_uid = 0u32;
+    let mut maximum_gid = 0u32;
+    for entry in manifest.entries {
+        let uid = u32::try_from(entry.uid).map_err(|_| {
+            BoxError::OciImageError("rootfs metadata UID exceeds the Linux range".to_string())
+        })?;
+        let gid = u32::try_from(entry.gid).map_err(|_| {
+            BoxError::OciImageError("rootfs metadata GID exceeds the Linux range".to_string())
+        })?;
+        maximum_uid = maximum_uid.max(uid);
+        maximum_gid = maximum_gid.max(gid);
+    }
+    Ok(RootfsIdentityRequirements {
+        maximum_uid,
+        maximum_gid,
+        manifest_path,
+    })
+}
+
+/// Prepare one per-box rootfs for the exact user-namespace mapping.
+///
+/// A root-run service can translate OCI container ownership to subordinate
+/// host IDs directly. A non-root service leaves ownership replay to PID 1 from
+/// inside the user namespace. Read-only rootfs is rejected for the latter until
+/// an idmapped-mount path can guarantee replay before the read-only transition.
+#[cfg(target_os = "linux")]
+pub fn prepare_rootfs_ownership(
+    root: &Path,
+    plan: &SandboxIdMappingPlan,
+    effective_uid: u32,
+    read_only: bool,
+) -> Result<()> {
+    if effective_uid != 0 {
+        if read_only {
+            return Err(BoxError::ConfigError(
+                "Sandbox read-only rootfs requires a root-run service until idmapped rootfs preparation is available"
+                    .to_string(),
+            ));
+        }
+        return Ok(());
+    }
+
+    ensure_no_nested_mounts(root)?;
+    let (_, manifest) = load_authoritative_manifest(root)?;
+    let entries = decode_and_validate_entries(root, manifest)?;
+    let authoritative_paths: HashSet<PathBuf> =
+        entries.iter().map(|entry| entry.relative.clone()).collect();
+
+    for entry in &entries {
+        let uid = map_container_id(
+            &plan.uid_mappings,
+            u32::try_from(entry.metadata.uid).map_err(|_| {
+                BoxError::OciImageError("rootfs metadata UID exceeds the Linux range".to_string())
+            })?,
+            "UID",
+        )?;
+        let gid = map_container_id(
+            &plan.gid_mappings,
+            u32::try_from(entry.metadata.gid).map_err(|_| {
+                BoxError::OciImageError("rootfs metadata GID exceeds the Linux range".to_string())
+            })?,
+            "GID",
+        )?;
+        lchown_if_needed(&entry.target, uid, gid)?;
+    }
+
+    // Files written by the runtime after manifest generation (DNS, hostname,
+    // env staging, refreshed init, and the manifests themselves) are not all
+    // represented in the selected generation. Walk without following symlinks:
+    // already-mapped IDs are left untouched, while raw OCI IDs are translated.
+    shift_unlisted_entries(root, root, &authoritative_paths, plan)?;
+
+    // chown clears setuid/setgid bits on regular files. Restore exact manifest
+    // modes deepest-first after every ownership change.
+    let mut modes: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.metadata.kind != RootfsEntryKind::Symlink)
+        .collect();
+    modes.sort_by_key(|entry| std::cmp::Reverse(entry.relative.components().count()));
+    for entry in modes {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &entry.target,
+            std::fs::Permissions::from_mode(entry.metadata.mode & 0o7777),
+        )
+        .map_err(|error| BoxError::BoxBootError {
+            message: format!(
+                "Failed to restore Sandbox rootfs mode at {}: {error}",
+                entry.target.display()
+            ),
+            hint: None,
+        })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn prepare_rootfs_ownership(
+    _root: &Path,
+    _plan: &SandboxIdMappingPlan,
+    _effective_uid: u32,
+    _read_only: bool,
+) -> Result<()> {
+    Err(BoxError::ConfigError(
+        "Sandbox rootfs ownership preparation requires Linux".to_string(),
+    ))
+}
+
+fn load_authoritative_manifest(root: &Path) -> Result<(PathBuf, RootfsMetadataManifest)> {
+    let terminal = root.join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
+    let image = root.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'));
+    let path = if terminal.exists() { terminal } else { image };
+    let bytes = std::fs::read(&path).map_err(|error| BoxError::BoxBootError {
+        message: format!(
+            "Sandbox rootfs metadata is unavailable at {}: {error}",
+            path.display()
+        ),
+        hint: Some("Rebuild the per-box rootfs from its OCI image".to_string()),
+    })?;
+    let manifest: RootfsMetadataManifest = serde_json::from_slice(&bytes).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Invalid Sandbox rootfs metadata {}: {error}",
+            path.display()
+        ))
+    })?;
+    manifest.validate().map_err(BoxError::OciImageError)?;
+    Ok((path, manifest))
+}
+
+#[cfg(target_os = "linux")]
+fn decode_and_validate_entries(
+    root: &Path,
+    manifest: RootfsMetadataManifest,
+) -> Result<Vec<DecodedEntry>> {
+    let mut decoded = Vec::with_capacity(manifest.entries.len());
+    let mut unique = HashSet::with_capacity(manifest.entries.len());
+    for metadata in manifest.entries {
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&metadata.path_base64)
+            .map_err(|error| {
+                BoxError::OciImageError(format!("Invalid rootfs metadata path: {error}"))
+            })?;
+        // Manifests are produced and consumed on the same host, so the encoded
+        // platform path bytes can be reconstructed losslessly.
+        let encoded = unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(raw) };
+        let relative = safe_relative_path(Path::new(&encoded))?;
+        if relative == Path::new(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            || relative == Path::new(ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            || !unique.insert(relative.clone())
+        {
+            return Err(BoxError::OciImageError(
+                "Duplicate or reserved Sandbox rootfs metadata path".to_string(),
+            ));
+        }
+        let target = resolve_without_symlink_parent(root, &relative)?;
+        let filesystem =
+            std::fs::symlink_metadata(&target).map_err(|error| BoxError::BoxBootError {
+                message: format!(
+                    "Sandbox rootfs metadata target {} is unavailable: {error}",
+                    target.display()
+                ),
+                hint: None,
+            })?;
+        let actual_kind = if filesystem.file_type().is_dir() {
+            RootfsEntryKind::Directory
+        } else if filesystem.file_type().is_file() {
+            RootfsEntryKind::Regular
+        } else if filesystem.file_type().is_symlink() {
+            RootfsEntryKind::Symlink
+        } else {
+            return Err(BoxError::OciImageError(format!(
+                "Unsupported rootfs entry at {}",
+                target.display()
+            )));
+        };
+        if actual_kind != metadata.kind {
+            return Err(BoxError::OciImageError(format!(
+                "Sandbox rootfs metadata type mismatch at {}",
+                target.display()
+            )));
+        }
+        if actual_kind == RootfsEntryKind::Symlink {
+            let expected = metadata.link_target_base64.as_ref().ok_or_else(|| {
+                BoxError::OciImageError("Symlink metadata is missing its target".to_string())
+            })?;
+            let expected = base64::engine::general_purpose::STANDARD
+                .decode(expected)
+                .map_err(|error| {
+                    BoxError::OciImageError(format!("Invalid symlink target metadata: {error}"))
+                })?;
+            if std::fs::read_link(&target)
+                .map_err(BoxError::IoError)?
+                .as_os_str()
+                .as_encoded_bytes()
+                != expected
+            {
+                return Err(BoxError::OciImageError(format!(
+                    "Sandbox rootfs symlink mismatch at {}",
+                    target.display()
+                )));
+            }
+        }
+        decoded.push(DecodedEntry {
+            metadata,
+            relative,
+            target,
+        });
+    }
+    Ok(decoded)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn safe_relative_path(path: &Path) -> Result<PathBuf> {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(name) => result.push(name),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(BoxError::OciImageError(
+                    "Unsafe Sandbox rootfs metadata path".to_string(),
+                ))
+            }
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_without_symlink_parent(root: &Path, relative: &Path) -> Result<PathBuf> {
+    let mut current = root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        if index + 1 < components.len()
+            && std::fs::symlink_metadata(&current)
+                .map_err(BoxError::IoError)?
+                .file_type()
+                .is_symlink()
+        {
+            return Err(BoxError::OciImageError(format!(
+                "Symlink parent in Sandbox rootfs metadata path: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(target_os = "linux")]
+fn shift_unlisted_entries(
+    root: &Path,
+    source: &Path,
+    authoritative: &HashSet<PathBuf>,
+    plan: &SandboxIdMappingPlan,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let relative = source
+        .strip_prefix(root)
+        .map_err(|_| BoxError::OciImageError("Sandbox rootfs walk escaped its root".to_string()))?;
+    let metadata = std::fs::symlink_metadata(source).map_err(BoxError::IoError)?;
+    if !authoritative.contains(relative) {
+        let uid = map_current_or_container_id(&plan.uid_mappings, metadata.uid(), "UID")?;
+        let gid = map_current_or_container_id(&plan.gid_mappings, metadata.gid(), "GID")?;
+        lchown_if_needed(source, uid, gid)?;
+    }
+    if metadata.file_type().is_dir() {
+        for child in std::fs::read_dir(source).map_err(BoxError::IoError)? {
+            shift_unlisted_entries(
+                root,
+                &child.map_err(BoxError::IoError)?.path(),
+                authoritative,
+                plan,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_managed_tree(
+    path: &Path,
+    plan: &SandboxIdMappingPlan,
+    root_uid: u32,
+    root_gid: u32,
+) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+    let uid = if id_is_mapped(&plan.uid_mappings, metadata.uid()) {
+        metadata.uid()
+    } else {
+        root_uid
+    };
+    let gid = if id_is_mapped(&plan.gid_mappings, metadata.gid()) {
+        metadata.gid()
+    } else {
+        root_gid
+    };
+    let mode = metadata.mode() & 0o7777;
+    lchown_if_needed(path, uid, gid)?;
+    if !metadata.file_type().is_symlink() {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .map_err(BoxError::IoError)?;
+    }
+    if metadata.file_type().is_dir() {
+        for child in std::fs::read_dir(path).map_err(BoxError::IoError)? {
+            prepare_managed_tree(
+                &child.map_err(BoxError::IoError)?.path(),
+                plan,
+                root_uid,
+                root_gid,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn id_is_mapped(mappings: &[IdMapping], id: u32) -> bool {
+    mappings.iter().any(|mapping| {
+        mapping
+            .host_id
+            .checked_add(mapping.size)
+            .is_some_and(|end| mapping.host_id <= id && id < end)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_no_nested_mounts(root: &Path) -> Result<()> {
+    let root = root.canonicalize().map_err(BoxError::IoError)?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").map_err(BoxError::IoError)?;
+    for mount in mountinfo
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(4))
+        .map(decode_mountinfo_path)
+        .map(PathBuf::from)
+    {
+        if mount != root && mount.starts_with(&root) {
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "Refusing Sandbox ownership preparation across nested mount {} under {}",
+                    mount.display(),
+                    root.display()
+                ),
+                hint: Some("Reconcile the stale mount before restarting the Sandbox".to_string()),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_path(value: &str) -> String {
+    value
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
+#[cfg(target_os = "linux")]
+fn map_current_or_container_id(mappings: &[IdMapping], id: u32, kind: &str) -> Result<u32> {
+    if mappings.iter().any(|mapping| {
+        mapping
+            .host_id
+            .checked_add(mapping.size)
+            .is_some_and(|end| mapping.host_id <= id && id < end)
+    }) {
+        return Ok(id);
+    }
+    map_container_id(mappings, id, kind)
+}
+
+fn map_container_id(mappings: &[IdMapping], id: u32, kind: &str) -> Result<u32> {
+    for mapping in mappings {
+        let Some(end) = mapping.container_id.checked_add(mapping.size) else {
+            continue;
+        };
+        if mapping.container_id <= id && id < end {
+            return mapping
+                .host_id
+                .checked_add(id - mapping.container_id)
+                .ok_or_else(|| {
+                    BoxError::ConfigError(format!("Sandbox {kind} mapping overflows u32"))
+                });
+        }
+    }
+    Err(BoxError::ConfigError(format!(
+        "Sandbox {kind} mappings do not cover container ID {id}"
+    )))
+}
+
+#[cfg(target_os = "linux")]
+fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    let current = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+    if current.uid() == uid && current.gid() == gid {
+        return Ok(());
+    }
+    let path_bytes = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        BoxError::OciImageError(format!(
+            "NUL byte in Sandbox rootfs path {}",
+            path.display()
+        ))
+    })?;
+    if unsafe { libc::lchown(path_bytes.as_ptr(), uid, gid) } != 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "Failed to map Sandbox rootfs ownership at {} to {uid}:{gid}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use a3s_box_core::rootfs_metadata::ROOTFS_METADATA_SCHEMA;
+
+    #[test]
+    fn mapping_translation_is_complete_and_exact() {
+        let mappings = vec![
+            IdMapping {
+                container_id: 0,
+                host_id: 100_000,
+                size: 10,
+            },
+            IdMapping {
+                container_id: 10,
+                host_id: 200_000,
+                size: 6,
+            },
+        ];
+        assert_eq!(map_container_id(&mappings, 0, "UID").unwrap(), 100_000);
+        assert_eq!(map_container_id(&mappings, 12, "UID").unwrap(), 200_002);
+        assert!(map_container_id(&mappings, 16, "UID").is_err());
+    }
+
+    #[test]
+    fn terminal_manifest_takes_precedence_for_identity_planning() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = |uid, gid| RootfsMetadataManifest {
+            schema: ROOTFS_METADATA_SCHEMA.to_string(),
+            entries: vec![RootfsMetadataEntry {
+                path_base64: base64::engine::general_purpose::STANDARD.encode("."),
+                kind: RootfsEntryKind::Directory,
+                mode: 0o755,
+                uid,
+                gid,
+                mtime: 0,
+                size: 0,
+                link_target_base64: None,
+            }],
+        };
+        std::fs::write(
+            directory
+                .path()
+                .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&manifest(1, 2)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&manifest(42, 43)).unwrap(),
+        )
+        .unwrap();
+
+        let requirements = inspect_rootfs_identity_requirements(directory.path()).unwrap();
+        assert_eq!(requirements.maximum_uid, 42);
+        assert_eq!(requirements.maximum_gid, 43);
+        assert!(requirements
+            .manifest_path
+            .ends_with(".a3s_rootfs_metadata_v1.json"));
+    }
+
+    #[test]
+    fn unsafe_manifest_path_is_rejected() {
+        assert!(safe_relative_path(Path::new("../escape")).is_err());
+        assert!(safe_relative_path(Path::new("/host")).is_err());
+    }
+}

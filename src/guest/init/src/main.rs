@@ -18,6 +18,31 @@ use tracing::{error, info, warn};
 /// Global flag set by the SIGTERM handler to request graceful shutdown.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// Bootstrap environment selected by the host execution backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootstrapMode {
+    Microvm,
+    HostSandbox,
+}
+
+impl BootstrapMode {
+    fn from_value(value: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None | Some("microvm") => Ok(Self::Microvm),
+            Some("host-sandbox") => Ok(Self::HostSandbox),
+            Some(value) => Err(format!("unsupported A3S_BOOTSTRAP_MODE {value:?}").into()),
+        }
+    }
+
+    fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::from_value(std::env::var("A3S_BOOTSTRAP_MODE").ok().as_deref())
+    }
+
+    fn is_host_sandbox(self) -> bool {
+        matches!(self, Self::HostSandbox)
+    }
+}
+
 /// Relay threads forwarding the main process's stdout/stderr pipes to the console.
 /// Drained at container exit so the tail of the output reaches the console (and
 /// thus `logs` / the foreground terminal) before the VM halts.
@@ -468,11 +493,13 @@ static KMSG_FD: std::sync::OnceLock<Option<std::os::unix::io::RawFd>> = std::syn
 /// `logs` must show only that, not runtime internals (init/exec/pty chatter).
 /// A `<7>` (debug) priority prefix keeps these lines below the guest kernel's
 /// console loglevel (4), so they never echo back to the console. Falls back to
-/// stdout when `/dev/kmsg` is unavailable (e.g. non-Linux), preserving the old
-/// behavior rather than dropping logs.
+/// stderr when `/dev/kmsg` is unavailable. The OCI Sandbox controller keeps
+/// runtime stderr separate from container stdout, so bootstrap diagnostics can
+/// never contaminate command output returned to SDK clients.
 enum InitLogWriter {
     Kmsg(std::os::unix::io::RawFd),
-    Stdout(std::io::Stdout),
+    Inherited(std::os::unix::io::RawFd),
+    Stderr(std::io::Stderr),
 }
 
 impl std::io::Write for InitLogWriter {
@@ -492,23 +519,65 @@ impl std::io::Write for InitLogWriter {
                 }
                 Ok(buf.len())
             }
-            InitLogWriter::Stdout(out) => out.write(buf),
+            InitLogWriter::Inherited(fd) => write_inherited_log(*fd, buf),
+            InitLogWriter::Stderr(out) => out.write(buf),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
-            InitLogWriter::Kmsg(_) => Ok(()),
-            InitLogWriter::Stdout(out) => out.flush(),
+            InitLogWriter::Kmsg(_) | InitLogWriter::Inherited(_) => Ok(()),
+            InitLogWriter::Stderr(out) => out.flush(),
         }
     }
 }
 
 fn make_init_log_writer() -> InitLogWriter {
+    if let Some(fd) = inherited_init_log_fd() {
+        return InitLogWriter::Inherited(fd);
+    }
     match KMSG_FD.get().copied().flatten() {
         Some(fd) => InitLogWriter::Kmsg(fd),
-        None => InitLogWriter::Stdout(std::io::stdout()),
+        None => InitLogWriter::Stderr(std::io::stderr()),
     }
+}
+
+fn inherited_init_log_fd() -> Option<std::os::unix::io::RawFd> {
+    let value = std::env::var("A3S_INIT_LOG_FD").ok()?;
+    let fd = value.parse::<std::os::unix::io::RawFd>().ok()?;
+    if fd < 3 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return None;
+    }
+    // The descriptor belongs to guest-init but must not leak into main, exec,
+    // or PTY workloads.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
+        return None;
+    }
+    Some(fd)
+}
+
+fn write_inherited_log(fd: std::os::unix::io::RawFd, mut bytes: &[u8]) -> std::io::Result<usize> {
+    let original_len = bytes.len();
+    while !bytes.is_empty() {
+        let written =
+            unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+        if written < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "inherited init log descriptor returned a zero-length write",
+            ));
+        }
+        bytes = &bytes[written as usize..];
+    }
+    Ok(original_len)
 }
 
 fn main() {
@@ -547,30 +616,32 @@ fn main() {
 }
 
 fn run_init() -> Result<(), Box<dyn std::error::Error>> {
+    let bootstrap_mode = BootstrapMode::from_env()?;
+    info!(?bootstrap_mode, "Selected guest-init bootstrap mode");
+
     // Restore Linux uid/gid/mode before mounting procfs, workspace, or user
     // volumes so metadata replay can never mutate an attached host path.
     #[cfg(target_os = "linux")]
-    a3s_box_guest_init::rootfs_archive::restore_rootfs_metadata(std::path::Path::new("/"))?;
+    if bootstrap_mode.is_host_sandbox() {
+        a3s_box_guest_init::rootfs_archive::restore_rootfs_metadata_around_mounts(
+            std::path::Path::new("/"),
+        )?;
+    } else {
+        a3s_box_guest_init::rootfs_archive::restore_rootfs_metadata(std::path::Path::new("/"))?;
+    }
 
-    // Step 1: Mount essential filesystems
-    mount_essential_filesystems()?;
+    if !bootstrap_mode.is_host_sandbox() {
+        // The MicroVM backend owns its in-guest filesystem setup. The OCI
+        // backend has already installed all of these mounts before PID 1 runs.
+        mount_essential_filesystems()?;
+        mount_virtio_fs_shares()?;
+        mount_devpts()?;
+        mount_tmpfs_volumes()?;
 
-    // Step 2: Mount virtio-fs shares
-    mount_virtio_fs_shares()?;
-
-    // Step 2.25: Mount devpts after the final rootfs is active so PTY
-    // allocation inside exec/attach sessions can open /dev/ptmx.
-    mount_devpts()?;
-
-    // Step 2.5: Mount tmpfs volumes
-    mount_tmpfs_volumes()?;
-
-    // Step 2.55: Make the unified cgroup hierarchy visible even when no A3S
-    // resource limit requested a per-container cgroup. Nested runtimes such as
-    // BuildKit/runc expect /sys/fs/cgroup to exist before they spawn build
-    // containers; failures are best-effort and logged by the cgroup module.
-    #[cfg(target_os = "linux")]
-    let _ = a3s_box_guest_init::cgroup::ensure_cgroup2_ready();
+        // Make the unified hierarchy visible for nested runtimes in a VM.
+        #[cfg(target_os = "linux")]
+        let _ = a3s_box_guest_init::cgroup::ensure_cgroup2_ready();
+    }
 
     // Step 2.6: Bind the exec (vsock 4089) and PTY (vsock 4090) listening sockets
     // NOW, before the slower network bring-up and container spawn below. These are
@@ -581,19 +652,41 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     // refused while network setup and the container spawn finish — closing the
     // exec/PTY startup race of issue #3. CLOEXEC on the fds keeps the forked
     // container from inheriting the listeners.
-    let exec_listener = exec_server::bind_exec_server()?;
-    let pty_listener = pty_server::bind_pty_server()?;
+    let (exec_listener, pty_listener) = if bootstrap_mode.is_host_sandbox() {
+        let exec_fd = inherited_listener_fd("A3S_EXEC_LISTENER_FD")?;
+        let pty_fd = inherited_listener_fd("A3S_PTY_LISTENER_FD")?;
+        if exec_fd == pty_fd {
+            return Err("Sandbox exec and PTY listeners must use distinct descriptors".into());
+        }
+        (
+            exec_server::adopt_inherited_exec_listener(exec_fd)?,
+            pty_server::adopt_inherited_pty_listener(pty_fd)?,
+        )
+    } else {
+        (
+            exec_server::bind_exec_server()?,
+            pty_server::bind_pty_server()?,
+        )
+    };
 
     // Step 3: Configure guest network (if passt mode is active).
     // Network setup may write /etc/resolv.conf — must run before read-only remount.
-    network::configure_guest_network()?;
+    if bootstrap_mode.is_host_sandbox() {
+        network::configure_sandbox_loopback()?;
+    } else {
+        network::configure_guest_network()?;
+    }
 
     // Step 3.25: Apply hostname while the rootfs is still writable.
-    host_config::apply_from_env()?;
+    if !bootstrap_mode.is_host_sandbox() {
+        host_config::apply_from_env()?;
+    }
 
     // Step 3.5: Remount rootfs read-only if BOX_READONLY=1.
     // All writes to / (mount point creation, resolv.conf) must complete first.
-    remount_rootfs_readonly()?;
+    if !bootstrap_mode.is_host_sandbox() {
+        remount_rootfs_readonly()?;
+    }
 
     // Step 4: Register SIGTERM handler before spawning any children
     register_sigterm_handler()?;
@@ -625,13 +718,15 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     // The sidecar runs before the main container so it is ready to intercept
     // traffic when the agent starts. It is not waited on — it runs for the
     // lifetime of the VM and is reaped by the zombie-reaper loop.
-    if let Some(sidecar) = SidecarConfig::from_env() {
-        info!(
-            image = %sidecar.image,
-            vsock_port = sidecar.vsock_port,
-            "Launching sidecar process"
-        );
-        launch_sidecar(&sidecar)?;
+    if !bootstrap_mode.is_host_sandbox() {
+        if let Some(sidecar) = SidecarConfig::from_env() {
+            info!(
+                image = %sidecar.image,
+                vsock_port = sidecar.vsock_port,
+                "Launching sidecar process"
+            );
+            launch_sidecar(&sidecar)?;
+        }
     }
 
     // Step 7: Launch container entrypoint
@@ -685,27 +780,31 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     // (--memory-reservation) / swap cap (--memory-swap) DO have to be applied
     // in-guest, mirrored from the same A3S_SEC_* env vars.
     #[cfg(target_os = "linux")]
-    let container_cgroup = a3s_box_guest_init::cgroup::ContainerCgroup::create(
-        None,
-        std::env::var("A3S_SEC_MEM_LOW")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok()),
-        std::env::var("A3S_SEC_MEM_SWAP")
-            .ok()
-            .and_then(|value| value.parse::<i64>().ok()),
-        std::env::var("A3S_SEC_CPU_QUOTA")
-            .ok()
-            .and_then(|value| value.parse::<i64>().ok()),
-        std::env::var("A3S_SEC_CPU_PERIOD")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok()),
-        std::env::var("A3S_SEC_CPU_SHARES")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok()),
-        std::env::var("A3S_SEC_PIDS_LIMIT")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok()),
-    );
+    let container_cgroup = if bootstrap_mode.is_host_sandbox() {
+        None
+    } else {
+        a3s_box_guest_init::cgroup::ContainerCgroup::create(
+            None,
+            std::env::var("A3S_SEC_MEM_LOW")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+            std::env::var("A3S_SEC_MEM_SWAP")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok()),
+            std::env::var("A3S_SEC_CPU_QUOTA")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok()),
+            std::env::var("A3S_SEC_CPU_PERIOD")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+            std::env::var("A3S_SEC_CPU_SHARES")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+            std::env::var("A3S_SEC_PIDS_LIMIT")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+        )
+    };
     #[cfg(target_os = "linux")]
     let cgroup_procs = container_cgroup.as_ref().map(|cgroup| cgroup.procs_path());
     #[cfg(not(target_os = "linux"))]
@@ -796,11 +895,13 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Step 8.25: Start Windows host-port forward control client when enabled.
-    std::thread::spawn(|| {
-        if let Err(e) = port_forward::run_port_forward_client() {
-            error!("Port-forward client failed: {}", e);
-        }
-    });
+    if !bootstrap_mode.is_host_sandbox() {
+        std::thread::spawn(|| {
+            if let Err(e) = port_forward::run_port_forward_client() {
+                error!("Port-forward client failed: {}", e);
+            }
+        });
+    }
 
     // Step 8.5: Start the PTY server accept loop on the socket bound in Step 2.6.
     std::thread::spawn(move || {
@@ -811,7 +912,7 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
 
     // Step 8.6: Start attestation server in background thread (TEE environments only)
     // Only start if TEE simulation is enabled or real SEV-SNP hardware is present.
-    if is_tee_environment() {
+    if !bootstrap_mode.is_host_sandbox() && is_tee_environment() {
         std::thread::spawn(|| {
             if let Err(e) = attest_server::run_attest_server() {
                 error!("Attestation server failed: {}", e);
@@ -829,6 +930,17 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     flush_stdio_relays();
 
     Ok(())
+}
+
+fn inherited_listener_fd(name: &str) -> Result<std::os::fd::RawFd, Box<dyn std::error::Error>> {
+    let raw = std::env::var(name).map_err(|_| format!("missing required {name}"))?;
+    let fd = raw
+        .parse::<std::os::fd::RawFd>()
+        .map_err(|_| format!("invalid {name} value {raw:?}"))?;
+    if !(3..=1024).contains(&fd) {
+        return Err(format!("{name} must be a descriptor between 3 and 1024").into());
+    }
+    Ok(fd)
 }
 
 fn expose_container_env_to_exec(config: &ExecConfig) {
@@ -1625,12 +1737,12 @@ fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-/// Persist the container's exit code to the overlay rootfs so the host can read
+/// Persist the container's exit code to the writable rootfs so the host can read
 /// it after the VM halts. libkrun's `start_enter` takes over and `exit()`s the
-/// shim process, so the host cannot `waitpid` the VM for a detached `run -d`; the
-/// CLI state reconcile instead reads `<box_dir>/upper/.a3s_exit_code`, which is
-/// this file surfaced through the overlay upperdir. Best-effort, with `sync_all`
-/// so the write reaches the host before PID 1 exits and the VM halts.
+/// shim process, so the host cannot rely on its process status for a detached
+/// `run -d`; the runtime resolves this file through the active overlay, copy, or
+/// APFS-backed rootfs layout. Best-effort, with `sync_all` so the write reaches
+/// the host before PID 1 exits and the VM halts.
 fn persist_exit_code(code: i32) {
     use std::io::Write;
     if let Ok(mut file) = std::fs::File::create("/.a3s_exit_code") {
@@ -1715,6 +1827,19 @@ fn graceful_shutdown(timeout_ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_mode_is_explicit_and_fail_closed() {
+        assert_eq!(
+            BootstrapMode::from_value(None).unwrap(),
+            BootstrapMode::Microvm
+        );
+        assert_eq!(
+            BootstrapMode::from_value(Some("host-sandbox")).unwrap(),
+            BootstrapMode::HostSandbox
+        );
+        assert!(BootstrapMode::from_value(Some("sandbox-ish")).is_err());
+    }
 
     fn set_sidecar_env(image: &str, vsock_port: u32, env: &[(&str, &str)]) {
         std::env::set_var("BOX_SIDECAR_IMAGE", image);

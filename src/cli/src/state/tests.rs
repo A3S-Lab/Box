@@ -15,6 +15,7 @@ fn sample_record(id: &str, name: &str, status: &str) -> BoxRecord {
         short_id,
         name: name.to_string(),
         image: "alpine:latest".to_string(),
+        isolation: Default::default(),
         status: status.to_string(),
         pid: if status == "running" {
             Some(99999)
@@ -521,33 +522,46 @@ fn test_reconcile_marks_dead_pid() {
 }
 
 #[test]
-fn test_reconcile_reads_exit_code_from_upper() {
-    let tmp = TempDir::new().unwrap();
-    let path = test_state_path(&tmp);
+fn test_reconcile_reads_exit_code_from_each_rootfs_layout() {
+    // guest-init persists the container exit code into the active writable
+    // rootfs. The host path differs for overlay, copy fallback, and the private
+    // data directory inside the macOS APFS-backed rootfs.
+    for (relative_path, expected) in [
+        ("upper/.a3s_exit_code", 41),
+        ("rootfs/.a3s_exit_code", 42),
+        ("rootfs/.a3s-rootfs/.a3s_exit_code", 43),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let path = test_state_path(&tmp);
+        let box_dir = tmp.path().join("boxes").join("exitcode-id");
+        let exit_code_path = box_dir.join(relative_path);
+        std::fs::create_dir_all(exit_code_path.parent().unwrap()).unwrap();
+        std::fs::write(&exit_code_path, expected.to_string()).unwrap();
 
-    // guest-init persists the container exit code into the overlay upperdir
-    // (<box_dir>/upper/.a3s_exit_code) since libkrun's start_enter takeover
-    // prevents the host from waitpid-ing a detached VM.
-    let box_dir = tmp.path().join("boxes").join("exitcode-id");
-    std::fs::create_dir_all(box_dir.join("upper")).unwrap();
-    std::fs::write(box_dir.join("upper").join(".a3s_exit_code"), "42").unwrap();
+        {
+            let mut sf = StateFile::load(&path).unwrap();
+            let mut record = sample_record("exitcode-id", "exitcode_box", "created");
+            record.status = "running".to_string();
+            record.pid = Some(4294967); // dead pid -> reconcile marks it dead
+            record.box_dir = box_dir;
+            sf.records.push(record);
+            sf.save().unwrap();
+        }
 
-    {
-        let mut sf = StateFile::load(&path).unwrap();
-        let mut record = sample_record("exitcode-id", "exitcode_box", "created");
-        record.status = "running".to_string();
-        record.pid = Some(4294967); // dead pid -> reconcile marks it dead
-        record.box_dir = box_dir.clone();
-        sf.records.push(record);
-        sf.save().unwrap();
-    }
-
-    // Reconcile on reload marks it dead AND captures the persisted exit code.
-    {
+        // Reconcile on reload marks it dead and captures the authoritative
+        // provider-specific exit code for inspect/wait consumers.
         let sf = StateFile::load(&path).unwrap();
         let record = sf.find_by_id("exitcode-id").unwrap();
-        assert_eq!(record.status, "dead");
-        assert_eq!(record.exit_code, Some(42));
+        assert_eq!(record.status, "dead", "layout: {relative_path}");
+        assert_eq!(record.exit_code, Some(expected), "layout: {relative_path}");
+
+        // The reconcile flush must persist the captured value so a later
+        // inspect/wait process sees the same result after the rootfs is gone.
+        drop(sf);
+        let persisted = StateFile::load(&path).unwrap();
+        let record = persisted.find_by_id("exitcode-id").unwrap();
+        assert_eq!(record.status, "dead", "layout: {relative_path}");
+        assert_eq!(record.exit_code, Some(expected), "layout: {relative_path}");
     }
 }
 
@@ -1048,6 +1062,7 @@ fn test_box_record_backward_compat_no_health() {
     val.as_object_mut().unwrap().remove("restart_count");
     val.as_object_mut().unwrap().remove("max_restart_count");
     val.as_object_mut().unwrap().remove("exit_code");
+    val.as_object_mut().unwrap().remove("isolation");
 
     let parsed: BoxRecord = serde_json::from_value(val).unwrap();
     assert!(parsed.health_check.is_none());
@@ -1058,6 +1073,18 @@ fn test_box_record_backward_compat_no_health() {
     assert_eq!(parsed.restart_count, 0);
     assert_eq!(parsed.max_restart_count, 0);
     assert!(parsed.exit_code.is_none());
+    assert_eq!(parsed.isolation, a3s_box_core::ExecutionIsolation::Microvm);
+}
+
+#[test]
+fn test_box_record_round_trips_sandbox_isolation() {
+    let mut record = sample_record("sandbox-id", "sandbox", "created");
+    record.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+
+    let json = serde_json::to_string(&record).unwrap();
+    let parsed: BoxRecord = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.isolation, a3s_box_core::ExecutionIsolation::Sandbox);
 }
 
 // --- Restart policy validation tests ---

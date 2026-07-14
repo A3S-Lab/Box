@@ -25,6 +25,27 @@ pub struct PtyListener(std::os::fd::OwnedFd);
 #[cfg(not(target_os = "linux"))]
 pub struct PtyListener;
 
+/// Adopt the host-side Unix listener passed through the OCI runtime.
+///
+/// The descriptor must refer to an already-bound, listening AF_UNIX stream
+/// socket. It is validated and marked `CLOEXEC` before the workload is forked.
+pub fn adopt_inherited_pty_listener(
+    fd: std::os::fd::RawFd,
+) -> Result<PtyListener, Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(PtyListener(crate::listener::adopt_unix_listener(
+            fd, "PTY",
+        )?))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = fd;
+        Err("inherited PTY listeners require Linux".into())
+    }
+}
+
 /// Bind + listen the PTY vsock socket (port 4090). Pure socket syscalls, safe to
 /// call on the main thread before the container fork.
 pub fn bind_pty_server() -> Result<PtyListener, Box<dyn std::error::Error>> {
@@ -201,6 +222,10 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
                 .map(|name| name.trim().to_string())
                 .filter(|name| !name.is_empty())
                 .collect()
+        })
+        .or_else(|| {
+            (std::env::var("A3S_BOOTSTRAP_MODE").as_deref() == Ok("host-sandbox"))
+                .then(crate::namespace::sandbox_workload_capability_keep_from_env)
         });
     let sec_no_new_privs = request
         .env

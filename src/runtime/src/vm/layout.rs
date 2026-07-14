@@ -912,6 +912,7 @@ mod tests {
             shim_exit_code: None,
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
+            resolved_execution_plan: None,
         }
     }
 

@@ -112,6 +112,25 @@ pub fn configure_guest_network() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Bring up only loopback for an OCI host Sandbox.
+///
+/// The OCI runtime already created the isolated network namespace. Sandbox
+/// mode deliberately ignores MicroVM passt environment variables and exposes
+/// no egress interface in its first release.
+#[cfg(target_os = "linux")]
+pub fn configure_sandbox_loopback() -> Result<(), Box<dyn std::error::Error>> {
+    info!("Bringing up Sandbox loopback interface");
+    set_interface_up("lo")?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn configure_sandbox_loopback() -> Result<(), Box<dyn std::error::Error>> {
+    Err(Box::new(NetError::CommandFailed(
+        "Sandbox loopback setup requires Linux".to_string(),
+    )))
+}
+
 /// Configure network interfaces using ip commands via /proc/sys/net.
 ///
 /// We use direct syscalls via libc/nix instead of shelling out to `ip`,

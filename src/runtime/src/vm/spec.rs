@@ -90,6 +90,14 @@ impl VmManager {
                         );
                     }
                     Err(e) => {
+                        if self.config.isolation.is_sandbox() {
+                            return Err(BoxError::BoxBootError {
+                                message: format!(
+                                    "Failed to create required Sandbox anonymous volume for {vol_path}: {e}"
+                                ),
+                                hint: None,
+                            });
+                        }
                         tracing::warn!(
                             path = vol_path,
                             error = %e,

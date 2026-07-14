@@ -1,6 +1,8 @@
 // Allow unused code - these are used conditionally based on platform and build mode
 #![allow(dead_code)]
 
+mod build_support;
+
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -54,6 +56,7 @@ const LIB_DIR: &str = "lib";
 fn main() {
     // Rebuild if vendored sources change
     println!("cargo:rerun-if-changed=vendor/libkrun");
+    println!("cargo:rerun-if-env-changed=A3S_DEPS_STUB");
     // Re-evaluate the system-vs-vendored decision when the toggle changes.
     println!("cargo:rerun-if-env-changed=A3S_BUILD_LIBKRUN");
     println!("cargo:rerun-if-env-changed=A3S_USE_SYSTEM_LIBKRUN");
@@ -375,6 +378,15 @@ fn make_command(
     install_dir: &Path,
     extra_env: &HashMap<String, String>,
 ) -> Command {
+    let cargo_home = build_support::nested_cargo_home(install_dir);
+    fs::create_dir_all(&cargo_home).unwrap_or_else(|error| {
+        panic!(
+            "Failed to create nested libkrun Cargo home {}: {}",
+            cargo_home.display(),
+            error
+        )
+    });
+
     let mut cmd = Command::new("make");
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
@@ -389,6 +401,14 @@ fn make_command(
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CLIPPY_ARGS")
+        // The outer Cargo holds a shared lock in its package cache throughout
+        // this build script. libkrun's Makefile launches Cargo again, and that
+        // process can wait forever when it tries to upgrade the same cache to
+        // an exclusive mutation lock. An isolated Cargo home gives the nested
+        // process an independent lock domain. Also keep an outer target-dir
+        // override from moving artifacts away from paths expected by Make.
+        .env("CARGO_HOME", cargo_home)
+        .env_remove("CARGO_TARGET_DIR")
         .env("PREFIX", install_dir)
         .current_dir(source_dir);
 

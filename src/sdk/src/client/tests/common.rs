@@ -105,6 +105,7 @@
             short_id: BoxRecord::make_short_id(id),
             name: name.to_string(),
             image: "alpine:latest".to_string(),
+            isolation: Default::default(),
             status: status.to_string(),
             pid: if matches!(status, "running" | "paused") {
                 Some(std::process::id())
