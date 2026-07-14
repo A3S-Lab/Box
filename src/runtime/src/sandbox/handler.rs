@@ -10,6 +10,10 @@ use a3s_box_core::vmm::{VmHandler, VmMetrics};
 use serde::Deserialize;
 use sysinfo::{Pid, System};
 
+// `crun kill` accepts Linux signal numbers even though this module must also
+// type-check on hosts where libc does not expose POSIX signal constants.
+const SIGKILL_NUMBER: i32 = 9;
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct CrunState {
     pub status: String,
@@ -236,14 +240,14 @@ impl VmHandler for CrunHandler {
                         timeout_ms,
                         "Sandbox did not stop gracefully; sending SIGKILL"
                     );
-                    if let Err(error) = self.signal_container(libc::SIGKILL) {
+                    if let Err(error) = self.signal_container(SIGKILL_NUMBER) {
                         first_error.get_or_insert(error);
                     }
                     let _ = self.wait_for_exit(2_000);
                 }
                 Err(error) => {
                     first_error.get_or_insert(error);
-                    let _ = self.signal_container(libc::SIGKILL);
+                    let _ = self.signal_container(SIGKILL_NUMBER);
                 }
             }
         }
@@ -311,7 +315,7 @@ impl Drop for CrunHandler {
             return;
         }
         if self.query_state().ok().flatten().is_some() {
-            let _ = self.signal_container(libc::SIGKILL);
+            let _ = self.signal_container(SIGKILL_NUMBER);
         }
         if let Err(error) = self.delete_runtime_state() {
             tracing::warn!(
