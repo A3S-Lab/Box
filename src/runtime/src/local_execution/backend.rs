@@ -61,7 +61,10 @@ impl LocalExecutionObservation {
                     ))
                 })?;
             }
-            ExecutionState::Creating | ExecutionState::Stopped | ExecutionState::Failed => {}
+            ExecutionState::Created
+            | ExecutionState::Creating
+            | ExecutionState::Stopped
+            | ExecutionState::Failed => {}
         }
         if let Some(handle) = &self.handle {
             handle.validate(execution_id)?;

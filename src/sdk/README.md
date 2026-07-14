@@ -84,12 +84,13 @@ The client reads the shared `boxes.json` state format through an SDK-local model
 so it does not depend on the CLI crate. Image, volume, network, snapshot, build,
 registry, exec, PTY, and attestation operations use `a3s-box-runtime` directly.
 
-Container lifecycle orchestration for `run`, `create`, `start`, and `restart`
-still needs stable runtime facades before it can be exposed as default SDK API.
-Pause, unpause, Unix stop, and box removal are already exposed directly because
-they can be implemented with PID identity checks, runtime guest-control sockets,
-host process signals, cleanup, and locked state updates. The default SDK does
-not shell out for lifecycle commands.
+The runtime now provides generation-fenced `create`, `start`, and
+`create_and_start` operations over the canonical managed-execution store.
+Container lifecycle orchestration is not exposed by this SDK yet: the SDK
+adapter and the CLI-specific record-policy mapping still need behavior-parity
+coverage before becoming default APIs. Pause, unpause, Unix stop, and box
+removal remain available through the existing direct management surface. The
+default SDK does not shell out for lifecycle commands.
 
 ## Maintenance Calls
 

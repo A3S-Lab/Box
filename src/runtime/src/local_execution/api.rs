@@ -1,7 +1,7 @@
 use a3s_box_core::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
-    ExecutionManagerError, ExecutionManagerResult, ExecutionState, ExecutionStatus, KillOutcome,
-    OperationId, ReconcileOutcome,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionState,
+    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome,
 };
 use async_trait::async_trait;
 
@@ -13,11 +13,11 @@ use super::{
 
 #[async_trait]
 impl ExecutionManager for LocalExecutionManager {
-    async fn create_and_start(
+    async fn create(
         &self,
         request: CreateExecutionRequest,
         operation_id: &OperationId,
-    ) -> ExecutionManagerResult<ExecutionLease> {
+    ) -> ExecutionManagerResult<ExecutionReservation> {
         let execution_id = ExecutionId::new(uuid::Uuid::new_v4().to_string())?;
         let record = build_managed_record(
             &self.home_dir,
@@ -27,7 +27,20 @@ impl ExecutionManager for LocalExecutionManager {
             chrono::Utc::now(),
         )?;
         let reservation = self.reserve(record).await?;
-        self.ensure_started(reservation.into_record()).await
+        super::record::reservation_from_record(reservation.record())
+    }
+
+    async fn start(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let record = self
+            .get(execution_id)
+            .await?
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        require_generation(&record, execution_id, expected_generation)?;
+        self.ensure_started(record).await
     }
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus> {
@@ -124,9 +137,10 @@ impl ExecutionManager for LocalExecutionManager {
             return Ok(ReconcileOutcome::Absent);
         };
         match managed_state(&record)? {
-            ManagedExecutionState::Creating | ManagedExecutionState::Starting => {
-                self.recover_start(record).await
-            }
+            ManagedExecutionState::Creating | ManagedExecutionState::Created => Ok(
+                ReconcileOutcome::Created(super::record::reservation_from_record(&record)?),
+            ),
+            ManagedExecutionState::Starting => self.recover_start(record).await,
             ManagedExecutionState::Pausing => {
                 let (record, state) = self.observe_record(record).await?;
                 if managed_state(&record)? == ManagedExecutionState::Pausing

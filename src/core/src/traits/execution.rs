@@ -139,6 +139,16 @@ pub struct CreateExecutionRequest {
     pub labels: BTreeMap<String, String>,
 }
 
+/// Durable evidence returned after an execution is created but not started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionReservation {
+    pub execution_id: ExecutionId,
+    pub generation: ExecutionGeneration,
+    pub plan: ResolvedExecutionPlan,
+    pub resources: ResourceConfig,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Evidence returned when a runtime execution is ready.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionLease {
@@ -153,6 +163,7 @@ pub struct ExecutionLease {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionState {
+    Created,
     Creating,
     Running,
     Paused,
@@ -180,6 +191,7 @@ pub enum KillOutcome {
 #[derive(Debug, Clone)]
 pub enum ReconcileOutcome {
     Absent,
+    Created(ExecutionReservation),
     Creating,
     Ready(ExecutionLease),
     Failed,
@@ -208,12 +220,41 @@ pub type ExecutionManagerResult<T> = std::result::Result<T, ExecutionManagerErro
 /// Backend-neutral lifecycle facade shared by the CLI, SDK, and remote service.
 #[async_trait]
 pub trait ExecutionManager: Send + Sync {
+    /// Persist exactly one unstarted execution reservation for `operation_id`.
+    async fn create(
+        &self,
+        _request: CreateExecutionRequest,
+        _operation_id: &OperationId,
+    ) -> ExecutionManagerResult<ExecutionReservation> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not support staged create".to_string(),
+        ))
+    }
+
+    /// Start one created execution after fencing stale callers by generation.
+    async fn start(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not support staged start".to_string(),
+        ))
+    }
+
     /// Create and start exactly one execution for `operation_id`.
+    ///
+    /// Retrying after a crash reuses the durable reservation and continues its
+    /// start instead of allocating a second execution.
     async fn create_and_start(
         &self,
         request: CreateExecutionRequest,
         operation_id: &OperationId,
-    ) -> ExecutionManagerResult<ExecutionLease>;
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let reservation = self.create(request, operation_id).await?;
+        self.start(&reservation.execution_id, reservation.generation)
+            .await
+    }
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus>;
 

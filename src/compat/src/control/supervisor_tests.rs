@@ -81,6 +81,60 @@ async fn start_runtime(
         .unwrap()
 }
 
+async fn create_runtime(
+    manager: &RecordingExecutionManager,
+    record: &SandboxRecord,
+    config: BoxConfig,
+) -> a3s_box_core::ExecutionReservation {
+    manager
+        .create(
+            CreateExecutionRequest {
+                external_sandbox_id: record.sandbox_id().to_string(),
+                config,
+                labels: BTreeMap::new(),
+            },
+            record.operation_id(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn assert_created_reservation_drift_is_rejected(
+    sandbox_id: &str,
+    record: SandboxRecord,
+    runtime_config: BoxConfig,
+    expected_failure: &str,
+) {
+    let repository = Arc::new(MemorySandboxRepository::default());
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock(instant(20)));
+    let executions = Arc::new(RecordingExecutionManager::new(clock.clone()));
+    repository.insert(record.clone()).await.unwrap();
+    let reservation = create_runtime(&executions, &record, runtime_config).await;
+
+    let report = supervisor(repository, executions.clone(), clock)
+        .reconcile_startup(NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(report.examined, 1, "{sandbox_id}");
+    assert_eq!(report.completed, 0, "{sandbox_id}");
+    assert_eq!(report.failures.len(), 1, "{sandbox_id}");
+    assert!(
+        report.failures[0].message.contains(expected_failure),
+        "unexpected reconciliation failure for {sandbox_id}: {}",
+        report.failures[0].message
+    );
+    assert_eq!(
+        executions
+            .inspect(&reservation.execution_id)
+            .await
+            .unwrap()
+            .state,
+        ExecutionState::Created,
+        "reconciliation must reject drift before starting {sandbox_id}"
+    );
+}
+
 fn supervisor(
     repository: Arc<dyn SandboxRepository>,
     executions: Arc<RecordingExecutionManager>,
@@ -175,6 +229,64 @@ async fn startup_recovers_create_committed_only_in_runtime() {
 }
 
 #[tokio::test]
+async fn startup_starts_a_durable_runtime_reservation_before_publishing_running() {
+    let repository = Arc::new(MemorySandboxRepository::default());
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock(instant(20)));
+    let executions = Arc::new(RecordingExecutionManager::new(clock.clone()));
+    let (record, config) = creating_record("sandbox-1", OnTimeoutAction::Kill);
+    repository.insert(record.clone()).await.unwrap();
+    let reservation = create_runtime(&executions, &record, config).await;
+
+    let report = supervisor(repository.clone(), executions.clone(), clock)
+        .reconcile_startup(NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(report.examined, 1);
+    assert_eq!(report.completed, 1);
+    assert!(report.failures.is_empty());
+    let recovered = repository.get(record.sandbox_id()).await.unwrap().unwrap();
+    assert_eq!(recovered.state(), LifecycleState::Running);
+    assert_eq!(recovered.execution_id(), Some(&reservation.execution_id));
+    assert_eq!(
+        executions
+            .inspect(&reservation.execution_id)
+            .await
+            .unwrap()
+            .state,
+        ExecutionState::Running
+    );
+}
+
+#[tokio::test]
+async fn startup_rejects_created_plan_drift_before_starting_the_runtime() {
+    let (record, mut runtime_config) = creating_record("plan-drift", OnTimeoutAction::Kill);
+    runtime_config.isolation = ExecutionIsolation::Microvm;
+
+    assert_created_reservation_drift_is_rejected(
+        "plan-drift",
+        record,
+        runtime_config,
+        "reservation plan differs",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn startup_rejects_created_resource_drift_before_starting_the_runtime() {
+    let (record, mut runtime_config) = creating_record("resource-drift", OnTimeoutAction::Kill);
+    runtime_config.resources.memory_mb += 1;
+
+    assert_created_reservation_drift_is_rejected(
+        "resource-drift",
+        record,
+        runtime_config,
+        "reservation resources differ",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn startup_marks_an_absent_incomplete_runtime_as_failed() {
     let repository = Arc::new(MemorySandboxRepository::default());
     let clock: Arc<dyn Clock> = Arc::new(FixedClock(instant(20)));
@@ -233,6 +345,42 @@ async fn startup_kills_a_runtime_created_after_its_record_was_claimed() {
     );
     assert_eq!(
         executions.inspect(&lease.execution_id).await.unwrap().state,
+        ExecutionState::Stopped
+    );
+}
+
+#[tokio::test]
+async fn startup_kills_a_created_reservation_without_starting_it() {
+    let repository = Arc::new(MemorySandboxRepository::default());
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock(instant(20)));
+    let executions = Arc::new(RecordingExecutionManager::new(clock.clone()));
+    let (mut record, config) = creating_record("sandbox-1", OnTimeoutAction::Kill);
+    let reservation = create_runtime(&executions, &record, config).await;
+    record.begin_kill().unwrap();
+    repository.insert(record.clone()).await.unwrap();
+
+    let report = supervisor(repository.clone(), executions.clone(), clock)
+        .reconcile_startup(NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(report.completed, 1);
+    assert!(report.failures.is_empty());
+    assert_eq!(
+        repository
+            .get(record.sandbox_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        LifecycleState::Killed
+    );
+    assert_eq!(
+        executions
+            .inspect(&reservation.execution_id)
+            .await
+            .unwrap()
+            .state,
         ExecutionState::Stopped
     );
 }

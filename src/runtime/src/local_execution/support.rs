@@ -3,7 +3,7 @@ use a3s_box_core::{
     ExecutionState, ReconcileOutcome,
 };
 
-use super::record::lease_from_record;
+use super::record::{lease_from_record, reservation_from_record};
 use super::{
     BoxRecord, LocalExecutionHandle, LocalExecutionObservation, ManagedExecutionOperation,
     ManagedExecutionState,
@@ -99,6 +99,7 @@ pub(super) fn outcome_from_record(
     state: ExecutionState,
 ) -> ExecutionManagerResult<ReconcileOutcome> {
     match state {
+        ExecutionState::Created => Ok(ReconcileOutcome::Created(reservation_from_record(&record)?)),
         ExecutionState::Creating => Ok(ReconcileOutcome::Creating),
         ExecutionState::Running | ExecutionState::Paused => {
             Ok(ReconcileOutcome::Ready(lease_from_record(&record)?))

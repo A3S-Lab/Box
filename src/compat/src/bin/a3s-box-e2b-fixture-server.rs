@@ -17,8 +17,8 @@ use a3s_box_compat::http::{
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
     ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionState, ExecutionStatus, KillOutcome, OperationId,
-    ReconcileOutcome, ResourceConfig,
+    ExecutionManagerResult, ExecutionReservation, ExecutionState, ExecutionStatus, KillOutcome,
+    OperationId, ReconcileOutcome, ResourceConfig,
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -255,20 +255,30 @@ impl FixtureExecutionManager {
             ExecutionManagerError::Unavailable("fixture execution lock poisoned".into())
         })
     }
+
+    fn reservation(execution: &FixtureExecution) -> ExecutionReservation {
+        ExecutionReservation {
+            execution_id: execution.lease.execution_id.clone(),
+            generation: execution.lease.generation,
+            plan: execution.lease.plan.clone(),
+            resources: execution.lease.resources.clone(),
+            created_at: execution.lease.started_at,
+        }
+    }
 }
 
 #[async_trait]
 impl ExecutionManager for FixtureExecutionManager {
-    async fn create_and_start(
+    async fn create(
         &self,
         request: CreateExecutionRequest,
         operation_id: &OperationId,
-    ) -> ExecutionManagerResult<ExecutionLease> {
+    ) -> ExecutionManagerResult<ExecutionReservation> {
         if let Some(execution_id) = self.operations()?.get(operation_id.as_str()).cloned() {
             return self
                 .executions()?
                 .get(&execution_id)
-                .map(|execution| execution.lease.clone())
+                .map(Self::reservation)
                 .ok_or_else(|| {
                     ExecutionManagerError::Internal(
                         "fixture operation references a missing execution".into(),
@@ -290,12 +300,46 @@ impl ExecutionManager for FixtureExecutionManager {
             execution_id.to_string(),
             FixtureExecution {
                 lease: lease.clone(),
-                state: ExecutionState::Running,
+                state: ExecutionState::Created,
             },
         );
         self.operations()?
             .insert(operation_id.as_str().to_string(), execution_id.to_string());
-        Ok(lease)
+        Ok(ExecutionReservation {
+            execution_id,
+            generation: lease.generation,
+            plan: lease.plan,
+            resources: lease.resources,
+            created_at: lease.started_at,
+        })
+    }
+
+    async fn start(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let mut executions = self.executions()?;
+        let execution = executions
+            .get_mut(execution_id.as_str())
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        if execution.lease.generation != generation {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "stale fixture start".to_string(),
+            });
+        }
+        match execution.state {
+            ExecutionState::Created => execution.state = ExecutionState::Running,
+            ExecutionState::Running => {}
+            state => {
+                return Err(ExecutionManagerError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!("cannot start fixture execution in state {state:?}"),
+                });
+            }
+        }
+        Ok(execution.lease.clone())
     }
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus> {
@@ -394,6 +438,7 @@ impl ExecutionManager for FixtureExecutionManager {
             )
         })?;
         Ok(match execution.state {
+            ExecutionState::Created => ReconcileOutcome::Created(Self::reservation(execution)),
             ExecutionState::Creating => ReconcileOutcome::Creating,
             ExecutionState::Running | ExecutionState::Paused => {
                 ReconcileOutcome::Ready(execution.lease.clone())

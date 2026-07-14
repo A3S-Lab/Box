@@ -246,6 +246,7 @@ impl BoxRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedExecutionState {
     Creating,
+    Created,
     Starting,
     Running,
     Pausing,
@@ -261,6 +262,7 @@ impl ManagedExecutionState {
     pub const fn as_status(self) -> &'static str {
         match self {
             Self::Creating => "creating",
+            Self::Created => "created",
             Self::Starting => "starting",
             Self::Running => "running",
             Self::Pausing => "pausing",
@@ -275,9 +277,8 @@ impl ManagedExecutionState {
     /// Parse a persisted managed lifecycle state.
     pub fn from_status(status: &str) -> a3s_box_core::Result<Self> {
         match status {
-            // Accept the legacy pre-start and terminal spellings so records
-            // created during the state-schema migration remain recoverable.
-            "created" | "creating" => Ok(Self::Creating),
+            "creating" => Ok(Self::Creating),
+            "created" => Ok(Self::Created),
             "starting" => Ok(Self::Starting),
             "running" => Ok(Self::Running),
             "pausing" => Ok(Self::Pausing),
@@ -294,7 +295,10 @@ impl ManagedExecutionState {
 
     /// Whether host resources may still belong to this execution.
     pub const fn keeps_resources(self) -> bool {
-        !matches!(self, Self::Stopped | Self::Failed)
+        !matches!(
+            self,
+            Self::Creating | Self::Created | Self::Stopped | Self::Failed
+        )
     }
 
     /// Whether no further lifecycle operation can revive this execution.
@@ -415,6 +419,7 @@ fn validate_pending_operation(
             Some(ManagedExecutionOperation::Kill)
         ) | (
             ManagedExecutionState::Creating
+                | ManagedExecutionState::Created
                 | ManagedExecutionState::Running
                 | ManagedExecutionState::Paused
                 | ManagedExecutionState::Stopped
@@ -519,9 +524,9 @@ mod tests {
         let encoded = serde_json::to_value(&record).unwrap();
         assert_eq!(
             record.managed_state().unwrap(),
-            Some(ManagedExecutionState::Creating)
+            Some(ManagedExecutionState::Created)
         );
-        assert!(record.is_active());
+        assert!(!record.is_active());
         let managed = record.managed_execution.unwrap();
 
         assert_eq!(managed.operation_id.as_str(), "create-op-1");

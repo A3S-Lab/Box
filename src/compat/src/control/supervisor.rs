@@ -2,7 +2,8 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use a3s_box_core::{
-    ExecutionLease, ExecutionManager, ExecutionManagerError, ExecutionState, ReconcileOutcome,
+    ExecutionLease, ExecutionManager, ExecutionManagerError, ExecutionReservation, ExecutionState,
+    ReconcileOutcome,
 };
 use thiserror::Error;
 
@@ -140,6 +141,9 @@ impl LifecycleSupervisor {
             ReconcileOutcome::Absent | ReconcileOutcome::Failed => {
                 self.finish_missing(record).await
             }
+            ReconcileOutcome::Created(reservation) => {
+                self.reconcile_created(record, reservation).await
+            }
             ReconcileOutcome::Creating => match record.state() {
                 LifecycleState::Creating | LifecycleState::Killing => {
                     Ok(MaintenanceDisposition::Deferred)
@@ -149,6 +153,42 @@ impl LifecycleSupervisor {
                 ))),
             },
             ReconcileOutcome::Ready(lease) => self.reconcile_ready(record, lease).await,
+        }
+    }
+
+    async fn reconcile_created(
+        &self,
+        record: SandboxRecord,
+        reservation: ExecutionReservation,
+    ) -> MaintenanceItemResult<MaintenanceDisposition> {
+        ensure_created_reservation(&record, &reservation)?;
+        match record.state() {
+            LifecycleState::Creating => {
+                let lease = self
+                    .executions
+                    .start(&reservation.execution_id, reservation.generation)
+                    .await?;
+                if lease.execution_id != reservation.execution_id
+                    || lease.generation != reservation.generation
+                    || lease.plan != reservation.plan
+                    || !same_resources(&lease.resources, &reservation.resources)
+                {
+                    return Err(MaintenanceItemError::Inconsistent(
+                        "created reservation and started execution disagree".to_string(),
+                    ));
+                }
+                self.publish_running(record, lease).await
+            }
+            LifecycleState::Killing => {
+                self.finish_kill_with_target(
+                    record,
+                    Some((reservation.execution_id, reservation.generation)),
+                )
+                .await
+            }
+            state => Err(MaintenanceItemError::Inconsistent(format!(
+                "persisted state {state:?} disagrees with a created runtime reservation"
+            ))),
         }
     }
 
@@ -172,6 +212,9 @@ impl LifecycleSupervisor {
         }
 
         match status.state {
+            ExecutionState::Created => Err(MaintenanceItemError::Inconsistent(
+                "ready reconciliation inspected a created execution".to_string(),
+            )),
             ExecutionState::Creating => match record.state() {
                 LifecycleState::Creating | LifecycleState::Killing => {
                     Ok(MaintenanceDisposition::Deferred)
@@ -366,6 +409,44 @@ impl LifecycleSupervisor {
             },
         )
     }
+}
+
+fn ensure_created_reservation(
+    record: &SandboxRecord,
+    reservation: &ExecutionReservation,
+) -> MaintenanceItemResult<()> {
+    if record.plan() != &reservation.plan {
+        return Err(MaintenanceItemError::Inconsistent(
+            "created reservation plan differs from persisted sandbox".to_string(),
+        ));
+    }
+    if !same_resources(record.resources(), &reservation.resources) {
+        return Err(MaintenanceItemError::Inconsistent(
+            "created reservation resources differ from persisted sandbox".to_string(),
+        ));
+    }
+    match (record.execution_id(), record.execution_generation()) {
+        (None, None) => Ok(()),
+        (Some(execution_id), Some(generation))
+            if execution_id == &reservation.execution_id
+                && generation == reservation.generation =>
+        {
+            Ok(())
+        }
+        _ => Err(MaintenanceItemError::Inconsistent(
+            "created reservation differs from persisted execution mapping".to_string(),
+        )),
+    }
+}
+
+fn same_resources(
+    left: &a3s_box_core::ResourceConfig,
+    right: &a3s_box_core::ResourceConfig,
+) -> bool {
+    left.vcpus == right.vcpus
+        && left.memory_mb == right.memory_mb
+        && left.disk_mb == right.disk_mb
+        && left.timeout == right.timeout
 }
 
 impl LifecycleMaintenanceReport {

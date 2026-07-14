@@ -29,7 +29,7 @@ mod linux {
     use a3s_box_core::{
         BoxConfig, CreateExecutionRequest, ExecutionBackend, ExecutionId, ExecutionIsolation,
         ExecutionManager, ExecutionManagerError, ExecutionState, IsolationClass, KillOutcome,
-        NetworkMode, OperationId,
+        NetworkMode, OperationId, ReconcileOutcome, ResourceConfig,
     };
     use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionStore};
 
@@ -108,38 +108,75 @@ mod linux {
         };
 
         let manager = LocalExecutionManager::with_vm_backend(state_path, home_dir);
-        let lease = manager.create_and_start(request, operation_id).await?;
+        let reservation = manager.create(request, operation_id).await?;
         require(
-            lease.plan.backend == ExecutionBackend::Crun
-                && lease.plan.isolation_class == IsolationClass::SharedKernel,
+            reservation.plan.backend == ExecutionBackend::Crun
+                && reservation.plan.isolation_class == IsolationClass::SharedKernel,
             "Sandbox request did not resolve exclusively to the crun shared-kernel backend",
         )?;
-        let execution_id = lease.execution_id.clone();
+        let execution_id = reservation.execution_id.clone();
         let status = manager.inspect(&execution_id).await?;
         require(
-            status.state == ExecutionState::Running,
-            "new managed Sandbox is not running",
+            status.state == ExecutionState::Created,
+            "new managed Sandbox reservation is not created",
+        )?;
+        require(
+            status.generation == reservation.generation && status.plan == reservation.plan,
+            "created Sandbox inspection disagrees with its reservation",
         )?;
 
         let box_dir = home_dir.join("boxes").join(execution_id.as_str());
-        validate_runtime_record(home_dir, &box_dir, &execution_id)?;
+        validate_runtime_absent(home_dir, &execution_id)?;
         println!(
-            "created execution={} backend=crun state=running",
+            "created execution={} backend=crun state=created",
             execution_id
         );
 
         drop(manager);
-        let recovered = LocalExecutionManager::with_vm_backend(state_path, home_dir);
-        let recovered_status = recovered.inspect(&execution_id).await?;
+        let restarted = LocalExecutionManager::with_vm_backend(state_path, home_dir);
+        let recovered_reservation = match restarted.reconcile(operation_id).await? {
+            ReconcileOutcome::Created(reservation) => reservation,
+            _ => {
+                return Err(failure(
+                    "restarted manager did not recover a created reservation",
+                ))
+            }
+        };
         require(
-            recovered_status.state == ExecutionState::Running,
-            "restarted manager did not recover the running Sandbox",
+            recovered_reservation.execution_id == reservation.execution_id
+                && recovered_reservation.generation == reservation.generation
+                && recovered_reservation.plan == reservation.plan
+                && same_resources(&recovered_reservation.resources, &reservation.resources),
+            "recovered Sandbox reservation differs from the durable reservation",
+        )?;
+        let recovered_status = restarted.inspect(&execution_id).await?;
+        require(
+            recovered_status.state == ExecutionState::Created,
+            "restarted manager did not preserve the created Sandbox state",
+        )?;
+        validate_runtime_absent(home_dir, &execution_id)?;
+        println!("recovered execution={} state=created", execution_id);
+
+        let lease = restarted
+            .start(&execution_id, recovered_reservation.generation)
+            .await?;
+        require(
+            lease.execution_id == reservation.execution_id
+                && lease.generation == reservation.generation
+                && lease.plan == reservation.plan
+                && same_resources(&lease.resources, &reservation.resources),
+            "started Sandbox lease differs from its reservation",
+        )?;
+        let running_status = restarted.inspect(&execution_id).await?;
+        require(
+            running_status.state == ExecutionState::Running,
+            "started managed Sandbox is not running",
         )?;
         validate_runtime_record(home_dir, &box_dir, &execution_id)?;
-        println!("recovered execution={} state=running", execution_id);
+        println!("started execution={} state=running", execution_id);
 
-        let pause_error = match recovered
-            .pause(&execution_id, recovered_status.generation, true)
+        let pause_error = match restarted
+            .pause(&execution_id, running_status.generation, true)
             .await
         {
             Ok(_) => return Err(failure("Sandbox pause unexpectedly succeeded")),
@@ -149,22 +186,22 @@ mod linux {
             matches!(pause_error, ExecutionManagerError::Conflict { .. }),
             "Sandbox pause did not return a conflict",
         )?;
-        let rolled_back = recovered.inspect(&execution_id).await?;
+        let rolled_back = restarted.inspect(&execution_id).await?;
         require(
             rolled_back.state == ExecutionState::Running
-                && rolled_back.generation == recovered_status.generation,
+                && rolled_back.generation == running_status.generation,
             "failed Sandbox pause did not roll back to the running generation",
         )?;
         println!("pause-rejected execution={} state=running", execution_id);
 
-        let outcome = recovered
+        let outcome = restarted
             .kill(&execution_id, rolled_back.generation)
             .await?;
         require(
             outcome == KillOutcome::Killed,
             "managed Sandbox kill did not own runtime cleanup",
         )?;
-        let stopped = recovered.inspect(&execution_id).await?;
+        let stopped = restarted.inspect(&execution_id).await?;
         require(
             stopped.state == ExecutionState::Stopped,
             "managed Sandbox did not persist a stopped state",
@@ -185,6 +222,36 @@ mod linux {
         )?;
         println!("killed execution={} state=stopped cleanup=ok", execution_id);
         Ok(())
+    }
+
+    fn validate_runtime_absent(
+        home_dir: &Path,
+        execution_id: &ExecutionId,
+    ) -> Result<(), AnyError> {
+        require(
+            !home_dir.join("boxes").join(execution_id.as_str()).exists(),
+            "created Sandbox unexpectedly allocated a box directory",
+        )?;
+        require(
+            !home_dir
+                .join("run/crun")
+                .join(execution_id.as_str())
+                .exists(),
+            "created Sandbox unexpectedly allocated a crun state directory",
+        )?;
+        require(
+            !Path::new("/tmp/a3s-box-sockets")
+                .join(execution_id.as_str())
+                .exists(),
+            "created Sandbox unexpectedly allocated a socket directory",
+        )
+    }
+
+    fn same_resources(left: &ResourceConfig, right: &ResourceConfig) -> bool {
+        left.vcpus == right.vcpus
+            && left.memory_mb == right.memory_mb
+            && left.disk_mb == right.disk_mb
+            && left.timeout == right.timeout
     }
 
     fn validate_runtime_record(

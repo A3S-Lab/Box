@@ -109,7 +109,7 @@ impl ManagedExecutionStore {
         mut record: BoxRecord,
     ) -> ManagedExecutionStoreResult<ManagedExecutionReservation> {
         let execution_id = validate_new_record(&record)?;
-        record.status = ManagedExecutionState::Creating.as_status().to_string();
+        record.status = ManagedExecutionState::Created.as_status().to_string();
         let incoming_metadata = record
             .managed_execution
             .as_ref()
@@ -251,6 +251,7 @@ impl ManagedExecutionStore {
                 ManagedExecutionState::Resuming => Some(ManagedExecutionOperation::Resume),
                 ManagedExecutionState::Killing => Some(ManagedExecutionOperation::Kill),
                 ManagedExecutionState::Creating
+                | ManagedExecutionState::Created
                 | ManagedExecutionState::Running
                 | ManagedExecutionState::Paused
                 | ManagedExecutionState::Stopped
@@ -275,9 +276,9 @@ fn validate_new_record(record: &BoxRecord) -> ManagedExecutionStoreResult<Execut
         .managed_state()
         .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?
         .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
-    if state != ManagedExecutionState::Creating {
+    if state != ManagedExecutionState::Created {
         return Err(ManagedExecutionStoreError::InvalidRecord(format!(
-            "new execution {execution_id} must be creating, found {state}"
+            "new execution {execution_id} must be created, found {state}"
         )));
     }
     if metadata.generation != ExecutionGeneration::INITIAL {
@@ -307,13 +308,17 @@ fn transition_generation(
     current: ExecutionGeneration,
 ) -> ManagedExecutionStoreResult<ExecutionGeneration> {
     use ManagedExecutionState::{
-        Creating, Failed, Killing, Paused, Pausing, Resuming, Running, Starting, Stopped,
+        Created, Creating, Failed, Killing, Paused, Pausing, Resuming, Running, Starting, Stopped,
     };
 
     let legal = matches!(
         (from, to),
-        (Creating, Starting | Killing | Stopped | Failed)
-            | (Starting, Creating | Running | Killing | Stopped | Failed)
+        (Creating, Created | Starting | Killing | Stopped | Failed)
+            | (Created, Starting | Killing | Stopped | Failed)
+            | (
+                Starting,
+                Created | Creating | Running | Killing | Stopped | Failed
+            )
             | (Running, Pausing | Killing | Stopped | Failed)
             | (Pausing, Paused | Running | Killing | Stopped | Failed)
             | (Paused, Resuming | Killing | Stopped | Failed)
@@ -356,7 +361,7 @@ mod tests {
             "name": format!("box-{id}"),
             "image": "alpine:latest",
             "isolation": "sandbox",
-            "status": "creating",
+            "status": "created",
             "pid": null,
             "cpus": 1,
             "memory_mb": 128,
@@ -445,7 +450,7 @@ mod tests {
             .transition(
                 &id,
                 ExecutionGeneration::INITIAL,
-                ManagedExecutionState::Creating,
+                ManagedExecutionState::Created,
                 ManagedExecutionState::Starting,
             )
             .unwrap();
@@ -513,7 +518,7 @@ mod tests {
             .transition(
                 &id,
                 ExecutionGeneration::INITIAL,
-                ManagedExecutionState::Creating,
+                ManagedExecutionState::Created,
                 ManagedExecutionState::Starting,
             )
             .unwrap();
@@ -573,7 +578,7 @@ mod tests {
             .transition(
                 &id,
                 ExecutionGeneration::INITIAL,
-                ManagedExecutionState::Creating,
+                ManagedExecutionState::Created,
                 ManagedExecutionState::Starting,
             )
             .unwrap();

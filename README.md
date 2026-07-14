@@ -315,9 +315,10 @@ generation-fenced transitions and restart reconciliation; and a canonical
 runtime `ExecutionManager` with a production VM/Sandbox backend. CI runs the
 pinned official Python sync/async, TypeScript, and Code Interpreter clients
 against the router through an in-memory repository and fake execution manager.
-Separately, an A3S OS smoke harness proves real `--isolation sandbox` create,
-inspect, manager restart recovery, explicit pause rejection, kill, and cleanup
-through certified `crun`, without MicroVM fallback.
+Separately, an A3S OS smoke harness proves that `--isolation sandbox` create
+persists a recoverable `created` reservation without allocating backend
+resources, then starts through certified `crun`, rejects pause explicitly, and
+owns kill and cleanup without MicroVM fallback.
 
 Those protocol and runtime tests are not yet one end-to-end service path. CLI
 create/start/run and the Rust SDK still need migration to the canonical manager,
