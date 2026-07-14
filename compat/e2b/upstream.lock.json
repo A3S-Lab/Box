@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "compatibility": {
+    "id": "e2b-2026-07-14",
+    "version": "0.1.0-preview.1",
+    "control_plane_tags": [
+      "auth",
+      "sandboxes",
+      "snapshots",
+      "tags",
+      "templates",
+      "volumes"
+    ]
+  },
+  "sources": {
+    "code-interpreter": {
+      "repository": "https://github.com/e2b-dev/code-interpreter",
+      "commit": "5aeca43fe3fae2df260b1fb17c71fed5b5dac852",
+      "packages": {
+        "python": "2.8.1",
+        "typescript": "2.6.1"
+      }
+    },
+    "e2b": {
+      "repository": "https://github.com/e2b-dev/e2b",
+      "commit": "423a1b73025ce871d9b9bfe338396c6b316be845",
+      "packages": {
+        "python": "2.32.0",
+        "typescript": "2.33.0"
+      }
+    }
+  },
+  "files": [
+    {
+      "local_path": "spec/code-interpreter/LICENSE",
+      "source": "code-interpreter",
+      "source_path": "LICENSE",
+      "sha256": "sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "local_path": "spec/code-interpreter/public-exports/python-init.py",
+      "source": "code-interpreter",
+      "source_path": "python/e2b_code_interpreter/__init__.py",
+      "sha256": "sha256:340d49fe2ceb40c352204d7dbfaa7c940d346914e983aed4e41d59010bbd39da"
+    },
+    {
+      "local_path": "spec/code-interpreter/public-exports/typescript-index.ts",
+      "source": "code-interpreter",
+      "source_path": "js/src/index.ts",
+      "sha256": "sha256:0bf39f20b44f8a618196d82e8a26d6b6309e05b9055b17c26b1317754e814c1f"
+    },
+    {
+      "local_path": "spec/e2b/LICENSE",
+      "source": "e2b",
+      "source_path": "LICENSE",
+      "sha256": "sha256:b4ef1bf811cb4095229fb86b574199e467c78f0ac4078cf8be62189e1fbd0818"
+    },
+    {
+      "local_path": "spec/e2b/envd/envd.yaml",
+      "source": "e2b",
+      "source_path": "spec/envd/envd.yaml",
+      "sha256": "sha256:0e0b41036eb8a99de8e37d16d30b9fbad2fb32024bfb500d4b6681d253240caf"
+    },
+    {
+      "local_path": "spec/e2b/envd/filesystem/filesystem.proto",
+      "source": "e2b",
+      "source_path": "spec/envd/filesystem/filesystem.proto",
+      "sha256": "sha256:9669e25b5ce244df6b543fdfbaa9e5855d04b43d914d4ce032a98ab3b5714dcf"
+    },
+    {
+      "local_path": "spec/e2b/envd/process/process.proto",
+      "source": "e2b",
+      "source_path": "spec/envd/process/process.proto",
+      "sha256": "sha256:481fb7dab1bbafc78b84d26d06f14fa3d4314bdbffa4cd9ef9cbab586ee17402"
+    },
+    {
+      "local_path": "spec/e2b/mcp-server.json",
+      "source": "e2b",
+      "source_path": "spec/mcp-server.json",
+      "sha256": "sha256:82457dc19eb9c7ae29ed66034ac9d763e92f5fa48f9398910d0e1dbf8b06e70e"
+    },
+    {
+      "local_path": "spec/e2b/openapi-volumecontent.yml",
+      "source": "e2b",
+      "source_path": "spec/openapi-volumecontent.yml",
+      "sha256": "sha256:73e7829e9e5c06acd878d0929d20622e217d22f900a79c3d024b5f834d892933"
+    },
+    {
+      "local_path": "spec/e2b/openapi.yml",
+      "source": "e2b",
+      "source_path": "spec/openapi.yml",
+      "sha256": "sha256:cea884caee4391153e2056fb1fe9acf691e4887cd990c3a0419a639a8e8a0aac"
+    },
+    {
+      "local_path": "spec/e2b/public-exports/python-init.py",
+      "source": "e2b",
+      "source_path": "packages/python-sdk/e2b/__init__.py",
+      "sha256": "sha256:72dc3e2bbcf4f2079390b438afe4e336078aac8414a38aec12a2194ad813c091"
+    },
+    {
+      "local_path": "spec/e2b/public-exports/typescript-index.ts",
+      "source": "e2b",
+      "source_path": "packages/js-sdk/src/index.ts",
+      "sha256": "sha256:dd033b55ee158884a52c1cc3a6d878546a6d1db5dce9e2625b8bc5f088ca7199"
+    },
+    {
+      "local_path": "spec/e2b/public-exports/typescript-template-index.ts",
+      "source": "e2b",
+      "source_path": "packages/js-sdk/src/template/index.ts",
+      "sha256": "sha256:dba54f66606659642937d3f60b6d96c3accbdc51d0005004ce598cd8ce80ef30"
+    }
+  ]
+}
