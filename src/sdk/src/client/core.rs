@@ -712,6 +712,7 @@ impl A3sBoxClient {
             cpus: metadata.vcpus,
             memory_mb: metadata.memory_mb,
             volumes: metadata.volumes.clone(),
+            virtiofs_cache: None,
             env: metadata.env.clone(),
             cmd: metadata.cmd.clone(),
             entrypoint: metadata.entrypoint.clone(),
