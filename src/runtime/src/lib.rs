@@ -22,6 +22,7 @@ pub(crate) mod file_lock;
 pub mod fs;
 pub mod grpc;
 pub mod host_check;
+pub mod local_execution;
 pub mod log;
 pub mod managed_execution_store;
 pub mod network;
@@ -56,8 +57,14 @@ pub mod scale;
 pub use audit::{read_audit_log, AuditLog, AuditQuery};
 
 // Canonical local execution metadata
-pub use box_record::{BoxRecord, HealthCheck, ManagedExecutionMetadata, ManagedExecutionState};
+pub use box_record::{
+    BoxRecord, HealthCheck, ManagedExecutionMetadata, ManagedExecutionOperation,
+    ManagedExecutionState,
+};
 pub use box_state::BoxStateStore;
+pub use local_execution::{
+    LocalExecutionBackend, LocalExecutionHandle, LocalExecutionManager, LocalExecutionObservation,
+};
 pub use managed_execution_store::{
     ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,
     ManagedExecutionStoreResult,
