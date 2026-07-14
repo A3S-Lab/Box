@@ -30,6 +30,32 @@ fn running_record(
     second: u32,
     metadata: BTreeMap<String, String>,
 ) -> SandboxRecord {
+    running_record_with_action(
+        sandbox_id,
+        owner_id,
+        second,
+        metadata,
+        OnTimeoutAction::Kill,
+    )
+}
+
+fn running_record_with_action(
+    sandbox_id: &str,
+    owner_id: &str,
+    second: u32,
+    metadata: BTreeMap<String, String>,
+    on_timeout: OnTimeoutAction,
+) -> SandboxRecord {
+    running_record_at(sandbox_id, owner_id, instant(second), metadata, on_timeout)
+}
+
+fn running_record_at(
+    sandbox_id: &str,
+    owner_id: &str,
+    created_at: DateTime<Utc>,
+    metadata: BTreeMap<String, String>,
+    on_timeout: OnTimeoutAction,
+) -> SandboxRecord {
     let config = BoxConfig {
         isolation: ExecutionIsolation::Sandbox,
         ..BoxConfig::default()
@@ -42,12 +68,12 @@ fn running_record(
         plan: resolve_execution(&config).unwrap(),
         resources: config.resources,
         lifecycle: LifecyclePolicy {
-            on_timeout: OnTimeoutAction::Kill,
+            on_timeout,
             auto_resume: false,
             keep_memory_on_pause: false,
         },
-        created_at: instant(second),
-        expires_at: instant(second) + Duration::seconds(300),
+        created_at,
+        expires_at: created_at + Duration::seconds(300),
         metadata,
         envd_version: "0.1.3".to_string(),
         secure: true,
@@ -64,7 +90,7 @@ fn running_record(
             generation: ExecutionGeneration::INITIAL,
             plan: record.plan().clone(),
             resources: record.resources().clone(),
-            started_at: instant(second) + Duration::seconds(1),
+            started_at: created_at + Duration::seconds(1),
         })
         .unwrap();
     record
@@ -77,7 +103,7 @@ async fn opens_in_wal_mode_and_applies_exact_migration_history() {
         .await
         .unwrap();
 
-    let (journal_mode, migrations, strict) = repository
+    let (journal_mode, migrations, strict, created_index, expiry_index) = repository
         .call(|connection| {
             let journal_mode = connection
                 .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
@@ -97,14 +123,96 @@ async fn opens_in_wal_mode_and_applies_exact_migration_history() {
                     |row| row.get::<_, i64>(0),
                 )
                 .map_err(|error| unavailable("read strict table status", error))?;
-            Ok((journal_mode, migrations, strict))
+            let created_index = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master \
+                     WHERE type = 'index' \
+                       AND name = 'sandbox_records_owner_state_created'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| unavailable("read creation index definition", error))?;
+            let expiry_index = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master \
+                     WHERE type = 'index' AND name = 'sandbox_records_expiry'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| unavailable("read expiry index definition", error))?;
+            Ok((
+                journal_mode,
+                migrations,
+                strict,
+                created_index,
+                expiry_index,
+            ))
         })
         .await
         .unwrap();
 
     assert_eq!(journal_mode, "wal");
-    assert_eq!(migrations, "1:lifecycle_records");
+    assert_eq!(migrations, "1:lifecycle_records,2:temporal_indexes");
     assert_eq!(strict, 1);
+    assert!(created_index.contains("julianday(created_at)"));
+    assert!(expiry_index.contains("julianday(expires_at)"));
+}
+
+#[tokio::test]
+async fn upgrades_a_version_one_repository_without_rewriting_records() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("control.db");
+    let repository = SqliteSandboxRepository::open(&path).await.unwrap();
+    let record = running_record("sandbox-1", "owner-1", 0, BTreeMap::new());
+    repository.insert(record.clone()).await.unwrap();
+    repository
+        .call(|connection| {
+            connection
+                .execute_batch(
+                    "DROP INDEX sandbox_records_owner_state_created; \
+                     DROP INDEX sandbox_records_expiry; \
+                     DROP INDEX sandbox_records_reconcilable; \
+                     CREATE INDEX sandbox_records_owner_state_created \
+                         ON sandbox_records(\
+                             owner_id, state, created_at, sandbox_id\
+                         ); \
+                     CREATE INDEX sandbox_records_expiry \
+                         ON sandbox_records(state, expires_at, sandbox_id); \
+                     DELETE FROM compatibility_schema_migrations WHERE version = 2;",
+                )
+                .map_err(|error| unavailable("downgrade migration fixture", error))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    drop(repository);
+
+    let repository = SqliteSandboxRepository::open(&path).await.unwrap();
+    assert!(repository.get(record.sandbox_id()).await.unwrap().is_some());
+    let (migrations, expiry_index) = repository
+        .call(|connection| {
+            let migrations = connection
+                .query_row(
+                    "SELECT group_concat(version || ':' || name, ',') \
+                     FROM compatibility_schema_migrations",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| unavailable("read upgraded migration history", error))?;
+            let expiry_index = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master \
+                     WHERE type = 'index' AND name = 'sandbox_records_expiry'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|error| unavailable("read upgraded expiry index", error))?;
+            Ok((migrations, expiry_index))
+        })
+        .await
+        .unwrap();
+    assert_eq!(migrations, "1:lifecycle_records,2:temporal_indexes");
+    assert!(expiry_index.contains("julianday(expires_at)"));
 }
 
 #[tokio::test]
@@ -182,6 +290,138 @@ async fn concurrent_cas_allows_exactly_one_writer() {
 }
 
 #[tokio::test]
+async fn claims_expired_records_by_action_in_one_transaction() {
+    let directory = tempdir().unwrap();
+    let repository = SqliteSandboxRepository::open(directory.path().join("control.db"))
+        .await
+        .unwrap();
+
+    let mut kill = running_record("kill", "owner-1", 0, BTreeMap::new());
+    kill.replace_expiry(instant(10)).unwrap();
+    repository.insert(kill).await.unwrap();
+
+    let mut pause = running_record_with_action(
+        "pause",
+        "owner-1",
+        0,
+        BTreeMap::new(),
+        OnTimeoutAction::Pause,
+    );
+    pause.replace_expiry(instant(10)).unwrap();
+    repository.insert(pause).await.unwrap();
+
+    let mut already_paused = running_record_with_action(
+        "already-paused",
+        "owner-1",
+        0,
+        BTreeMap::new(),
+        OnTimeoutAction::Pause,
+    );
+    already_paused.begin_pause().unwrap();
+    already_paused
+        .mark_paused(ExecutionLease {
+            execution_id: already_paused.execution_id().unwrap().clone(),
+            generation: ExecutionGeneration::new(2).unwrap(),
+            plan: already_paused.plan().clone(),
+            resources: already_paused.resources().clone(),
+            started_at: already_paused.started_at().unwrap(),
+        })
+        .unwrap();
+    already_paused.replace_expiry(instant(10)).unwrap();
+    repository.insert(already_paused).await.unwrap();
+
+    let mut renewed = running_record("renewed", "owner-1", 0, BTreeMap::new());
+    renewed.replace_expiry(instant(30)).unwrap();
+    repository.insert(renewed).await.unwrap();
+
+    let claimed = repository
+        .claim_expired(instant(20), NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap();
+    let states = claimed
+        .iter()
+        .map(|record| (record.sandbox_id().as_str(), record.state()))
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(states.len(), 2);
+    assert_eq!(states["kill"], crate::control::LifecycleState::Killing);
+    assert_eq!(states["pause"], crate::control::LifecycleState::Pausing);
+    assert_eq!(
+        repository
+            .get(&SandboxId::new("already-paused").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        crate::control::LifecycleState::Paused
+    );
+    assert_eq!(
+        repository
+            .get(&SandboxId::new("renewed").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        crate::control::LifecycleState::Running
+    );
+}
+
+#[tokio::test]
+async fn expiry_claim_compares_fractional_rfc3339_values_chronologically() {
+    let directory = tempdir().unwrap();
+    let repository = SqliteSandboxRepository::open(directory.path().join("control.db"))
+        .await
+        .unwrap();
+    let mut record = running_record("sandbox-1", "owner-1", 0, BTreeMap::new());
+    record.replace_expiry(instant(10)).unwrap();
+    repository.insert(record).await.unwrap();
+
+    let claimed = repository
+        .claim_expired(
+            instant(10) + Duration::milliseconds(1),
+            NonZeroU32::new(1).unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].state(), crate::control::LifecycleState::Killing);
+}
+
+#[tokio::test]
+async fn timeout_replacement_and_expiry_claim_have_one_winner() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("control.db");
+    let reaper = SqliteSandboxRepository::open(&path).await.unwrap();
+    let api = SqliteSandboxRepository::open(&path).await.unwrap();
+    let mut record = running_record("sandbox-1", "owner-1", 0, BTreeMap::new());
+    record.replace_expiry(instant(10)).unwrap();
+    reaper.insert(record.clone()).await.unwrap();
+
+    let expected = record.generation();
+    let mut renewed = record.clone();
+    renewed.replace_expiry(instant(40)).unwrap();
+    let claim = reaper.claim_expired(instant(20), NonZeroU32::new(1).unwrap());
+    let replace = api.compare_and_swap(record.sandbox_id(), expected, renewed);
+    let (claimed, replaced) = tokio::join!(claim, replace);
+    let claimed = claimed.unwrap();
+    let replaced = replaced.unwrap();
+
+    assert!(matches!(
+        (claimed.len(), replaced),
+        (1, CompareAndSwapResult::Conflict { .. }) | (0, CompareAndSwapResult::Updated)
+    ));
+    let persisted = reaper.get(record.sandbox_id()).await.unwrap().unwrap();
+    if claimed.is_empty() {
+        assert_eq!(persisted.state(), crate::control::LifecycleState::Running);
+        assert_eq!(persisted.expires_at(), instant(40));
+    } else {
+        assert_eq!(persisted.state(), crate::control::LifecycleState::Killing);
+        assert_eq!(persisted.expires_at(), instant(10));
+    }
+}
+
+#[tokio::test]
 async fn list_preserves_owner_metadata_state_and_cursor_boundaries() {
     let directory = tempdir().unwrap();
     let repository = SqliteSandboxRepository::open(directory.path().join("control.db"))
@@ -241,6 +481,54 @@ async fn list_preserves_owner_metadata_state_and_cursor_boundaries() {
         .unwrap();
     assert_eq!(second.records[0].sandbox_id().as_str(), "sandbox-2");
     assert!(second.next.is_none());
+}
+
+#[tokio::test]
+async fn list_orders_fractional_rfc3339_timestamps_chronologically() {
+    let directory = tempdir().unwrap();
+    let repository = SqliteSandboxRepository::open(directory.path().join("control.db"))
+        .await
+        .unwrap();
+    let early = running_record_at(
+        "z-early",
+        "owner-1",
+        instant(0),
+        BTreeMap::new(),
+        OnTimeoutAction::Kill,
+    );
+    let late = running_record_at(
+        "a-late",
+        "owner-1",
+        instant(0) + Duration::milliseconds(1),
+        BTreeMap::new(),
+        OnTimeoutAction::Kill,
+    );
+    repository.insert(late).await.unwrap();
+    repository.insert(early).await.unwrap();
+
+    let first = repository
+        .list(&SandboxListFilter {
+            owner_id: "owner-1".to_string(),
+            metadata: BTreeMap::new(),
+            states: BTreeSet::new(),
+            limit: NonZeroU32::new(1).unwrap(),
+            after: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.records[0].sandbox_id().as_str(), "z-early");
+
+    let second = repository
+        .list(&SandboxListFilter {
+            owner_id: "owner-1".to_string(),
+            metadata: BTreeMap::new(),
+            states: BTreeSet::new(),
+            limit: NonZeroU32::new(1).unwrap(),
+            after: first.next.as_ref().cloned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.records[0].sandbox_id().as_str(), "a-late");
 }
 
 #[tokio::test]

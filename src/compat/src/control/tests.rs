@@ -22,6 +22,10 @@ fn stored_token(marker: u8) -> StoredToken {
 }
 
 fn creating_record(id: &str) -> SandboxRecord {
+    creating_record_with_timeout_action(id, OnTimeoutAction::Kill)
+}
+
+fn creating_record_with_timeout_action(id: &str, on_timeout: OnTimeoutAction) -> SandboxRecord {
     let config = BoxConfig {
         isolation: a3s_box_core::ExecutionIsolation::Sandbox,
         ..BoxConfig::default()
@@ -35,7 +39,7 @@ fn creating_record(id: &str) -> SandboxRecord {
         plan,
         resources: config.resources,
         lifecycle: LifecyclePolicy {
-            on_timeout: OnTimeoutAction::Kill,
+            on_timeout,
             auto_resume: false,
             keep_memory_on_pause: false,
         },
@@ -51,6 +55,97 @@ fn creating_record(id: &str) -> SandboxRecord {
         },
     })
     .unwrap()
+}
+
+#[tokio::test]
+async fn memory_repository_claims_only_actionable_expired_records() {
+    let repository = MemorySandboxRepository::default();
+
+    let mut kill = creating_record("kill");
+    kill.mark_running(execution_lease(&kill, 1)).unwrap();
+    kill.replace_expiry(instant(10)).unwrap();
+    repository.insert(kill).await.unwrap();
+
+    let mut pause = creating_record_with_timeout_action("pause", OnTimeoutAction::Pause);
+    pause.mark_running(execution_lease(&pause, 1)).unwrap();
+    pause.replace_expiry(instant(10)).unwrap();
+    repository.insert(pause).await.unwrap();
+
+    let mut already_paused =
+        creating_record_with_timeout_action("already-paused", OnTimeoutAction::Pause);
+    already_paused
+        .mark_running(execution_lease(&already_paused, 1))
+        .unwrap();
+    already_paused.begin_pause().unwrap();
+    already_paused
+        .mark_paused(execution_lease(&already_paused, 2))
+        .unwrap();
+    already_paused.replace_expiry(instant(10)).unwrap();
+    repository.insert(already_paused).await.unwrap();
+
+    let mut renewed = creating_record("renewed");
+    renewed.mark_running(execution_lease(&renewed, 1)).unwrap();
+    renewed.replace_expiry(instant(30)).unwrap();
+    repository.insert(renewed).await.unwrap();
+
+    let claimed = repository
+        .claim_expired(instant(20), NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap();
+    let states = claimed
+        .iter()
+        .map(|record| (record.sandbox_id().as_str(), record.state()))
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(states.len(), 2);
+    assert_eq!(states["kill"], LifecycleState::Killing);
+    assert_eq!(states["pause"], LifecycleState::Pausing);
+    assert_eq!(
+        repository
+            .get(&SandboxId::new("already-paused").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        LifecycleState::Paused
+    );
+    assert_eq!(
+        repository
+            .get(&SandboxId::new("renewed").unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        LifecycleState::Running
+    );
+}
+
+#[tokio::test]
+async fn memory_repository_pages_reconcilable_records() {
+    let repository = MemorySandboxRepository::default();
+    for id in ["sandbox-1", "sandbox-2", "sandbox-3"] {
+        repository.insert(creating_record(id)).await.unwrap();
+    }
+    let mut terminal = creating_record("terminal");
+    terminal
+        .mark_failed(LifecycleFailure::RuntimeFailed)
+        .unwrap();
+    repository.insert(terminal).await.unwrap();
+
+    let first = repository
+        .list_reconcilable(None, NonZeroU32::new(2).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(first.records.len(), 2);
+    assert!(first.next.is_some());
+
+    let second = repository
+        .list_reconcilable(first.next.as_ref(), NonZeroU32::new(2).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(second.records.len(), 1);
+    assert_eq!(second.records[0].sandbox_id().as_str(), "sandbox-3");
+    assert!(second.next.is_none());
 }
 
 fn execution_lease(record: &SandboxRecord, generation: u64) -> ExecutionLease {
@@ -80,14 +175,37 @@ fn lifecycle_transitions_are_generation_fenced() {
         .replace_expiry(instant(0) + Duration::seconds(600))
         .unwrap();
     record.begin_pause().unwrap();
-    record.mark_paused().unwrap();
+    record.mark_paused(execution_lease(&record, 2)).unwrap();
     assert_eq!(record.public_state(), Some(PublicSandboxState::Paused));
     record.begin_resume().unwrap();
-    record.mark_running(execution_lease(&record, 2)).unwrap();
+    record.mark_running(execution_lease(&record, 3)).unwrap();
 
     assert_eq!(record.generation(), SandboxGeneration::new(7).unwrap());
     assert_eq!(record.started_at(), started_at);
-    assert_eq!(record.execution_generation().unwrap().get(), 2);
+    assert_eq!(record.execution_generation().unwrap().get(), 3);
+}
+
+#[test]
+fn pause_and_resume_reject_stale_execution_generations() {
+    let mut record = creating_record("sandbox-1");
+    record.mark_running(execution_lease(&record, 1)).unwrap();
+    record.begin_pause().unwrap();
+
+    assert_eq!(
+        record.mark_paused(execution_lease(&record, 1)).unwrap_err(),
+        LifecycleError::ExecutionGenerationMismatch
+    );
+    assert_eq!(record.state(), LifecycleState::Pausing);
+
+    record.mark_paused(execution_lease(&record, 2)).unwrap();
+    record.begin_resume().unwrap();
+    assert_eq!(
+        record
+            .mark_running(execution_lease(&record, 2))
+            .unwrap_err(),
+        LifecycleError::ExecutionGenerationMismatch
+    );
+    assert_eq!(record.state(), LifecycleState::Resuming);
 }
 
 #[test]
@@ -267,6 +385,15 @@ impl a3s_box_core::ExecutionManager for ObjectSafeExecutionManager {
         })
     }
 
+    async fn pause(
+        &self,
+        execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _keep_memory: bool,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        Err(ExecutionManagerError::NotFound(execution_id.clone()))
+    }
+
     async fn resume(
         &self,
         execution_id: &ExecutionId,
@@ -300,4 +427,10 @@ async fn execution_manager_port_is_object_safe() {
         manager.inspect(&execution_id).await.unwrap().state,
         ExecutionState::Running
     );
+    assert!(matches!(
+        manager
+            .pause(&execution_id, ExecutionGeneration::INITIAL, true)
+            .await,
+        Err(ExecutionManagerError::NotFound(_))
+    ));
 }

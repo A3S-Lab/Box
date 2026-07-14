@@ -5,6 +5,7 @@ mod ports;
 mod repository;
 mod service;
 mod sqlite;
+mod supervisor;
 mod validation;
 
 pub use credential::{
@@ -30,12 +31,19 @@ pub use service::{
     ControlServiceResult, CreateSandboxRequest, SandboxConnection,
 };
 pub use sqlite::SqliteSandboxRepository;
+pub use supervisor::{
+    LifecycleMaintenanceFailure, LifecycleMaintenanceReport, LifecycleSupervisor,
+    LifecycleSupervisorDependencies, LifecycleSupervisorError, LifecycleSupervisorResult,
+};
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod service_tests;
+
+#[cfg(test)]
+mod supervisor_tests;
 
 #[cfg(test)]
 pub(crate) mod test_support;

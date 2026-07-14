@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::time::Duration;
 
@@ -7,13 +8,15 @@ use tokio_rusqlite::rusqlite::{params, OptionalExtension, TransactionBehavior};
 use tokio_rusqlite::Connection;
 
 use super::{
-    CompareAndSwapResult, RepositoryError, RepositoryResult, SandboxGeneration, SandboxId,
-    SandboxListFilter, SandboxPage, SandboxRecord, SandboxRepository,
+    CompareAndSwapResult, OnTimeoutAction, RepositoryError, RepositoryResult, SandboxCursor,
+    SandboxGeneration, SandboxId, SandboxListFilter, SandboxPage, SandboxRecord, SandboxRepository,
 };
 
-const LATEST_SCHEMA_VERSION: i64 = 1;
 const INITIAL_MIGRATION_NAME: &str = "lifecycle_records";
 const INITIAL_MIGRATION: &str = include_str!("../../../migrations/0001_lifecycle_records.sql");
+const TEMPORAL_INDEX_MIGRATION_NAME: &str = "temporal_indexes";
+const TEMPORAL_INDEX_MIGRATION: &str =
+    include_str!("../../../migrations/0002_temporal_indexes.sql");
 
 #[derive(Clone)]
 pub struct SqliteSandboxRepository {
@@ -82,8 +85,24 @@ impl SqliteSandboxRepository {
             drop(statement);
 
             match applied.as_slice() {
-                [] => apply_initial_migration(connection)?,
-                [(1, name)] if name == INITIAL_MIGRATION_NAME => {}
+                [] => {
+                    apply_migration(connection, 1, INITIAL_MIGRATION_NAME, INITIAL_MIGRATION)?;
+                    apply_migration(
+                        connection,
+                        2,
+                        TEMPORAL_INDEX_MIGRATION_NAME,
+                        TEMPORAL_INDEX_MIGRATION,
+                    )?;
+                }
+                [(1, name)] if name == INITIAL_MIGRATION_NAME => apply_migration(
+                    connection,
+                    2,
+                    TEMPORAL_INDEX_MIGRATION_NAME,
+                    TEMPORAL_INDEX_MIGRATION,
+                )?,
+                [(1, first), (2, second)]
+                    if first == INITIAL_MIGRATION_NAME
+                        && second == TEMPORAL_INDEX_MIGRATION_NAME => {}
                 _ => {
                     return Err(RepositoryError::Corrupt(format!(
                         "unsupported SQLite migration history: {applied:?}"
@@ -189,10 +208,13 @@ impl SandboxRepository for SqliteSandboxRepository {
                            AND state IN ('running', 'paused') \
                            AND (\
                                ?2 IS NULL \
-                               OR created_at > ?2 \
-                               OR (created_at = ?2 AND sandbox_id > ?3)\
+                               OR julianday(created_at) > julianday(?2) \
+                               OR (\
+                                   julianday(created_at) = julianday(?2) \
+                                   AND sandbox_id > ?3\
+                               )\
                            ) \
-                         ORDER BY created_at, sandbox_id",
+                         ORDER BY julianday(created_at), sandbox_id",
                     )
                     .map_err(|error| unavailable("prepare SQLite lifecycle list", error))?;
                 let records = statement
@@ -236,6 +258,148 @@ impl SandboxRepository for SqliteSandboxRepository {
             records: matching,
             next,
         })
+    }
+
+    async fn list_reconcilable(
+        &self,
+        after: Option<&SandboxCursor>,
+        limit: NonZeroU32,
+    ) -> RepositoryResult<SandboxPage> {
+        let after_created_at = after.map(|cursor| {
+            cursor
+                .created_at
+                .to_rfc3339_opts(SecondsFormat::AutoSi, true)
+        });
+        let after_sandbox_id = after.map(|cursor| cursor.sandbox_id.to_string());
+        let query_limit = i64::from(limit.get()) + 1;
+        let records = self
+            .call(move |connection| {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT record_json FROM sandbox_records \
+                         WHERE state IN (\
+                             'creating', 'running', 'pausing', 'paused',\
+                             'resuming', 'killing'\
+                         ) \
+                           AND (\
+                               ?1 IS NULL \
+                               OR julianday(created_at) > julianday(?1) \
+                               OR (\
+                                   julianday(created_at) = julianday(?1) \
+                                   AND sandbox_id > ?2\
+                               )\
+                           ) \
+                         ORDER BY julianday(created_at), sandbox_id \
+                         LIMIT ?3",
+                    )
+                    .map_err(|error| unavailable("prepare SQLite reconciliation scan", error))?;
+                let records = statement
+                    .query_map(
+                        params![after_created_at, after_sandbox_id, query_limit],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|error| unavailable("query SQLite reconciliation records", error))?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|error| unavailable("read SQLite reconciliation records", error))?;
+                Ok(records)
+            })
+            .await?;
+
+        let mut records = records
+            .iter()
+            .map(|record| deserialize_record(record))
+            .collect::<RepositoryResult<Vec<_>>>()?;
+        let limit = limit.get() as usize;
+        let has_more = records.len() > limit;
+        records.truncate(limit);
+        let next = has_more
+            .then(|| records.last())
+            .flatten()
+            .map(|last| SandboxCursor {
+                created_at: last.created_at(),
+                sandbox_id: last.sandbox_id().clone(),
+            });
+        Ok(SandboxPage { records, next })
+    }
+
+    async fn claim_expired(
+        &self,
+        deadline: chrono::DateTime<chrono::Utc>,
+        limit: NonZeroU32,
+    ) -> RepositoryResult<Vec<SandboxRecord>> {
+        let deadline = deadline.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+        let limit = i64::from(limit.get());
+        self.call(move |connection| {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| unavailable("begin SQLite expiry claim", error))?;
+            let mut statement = transaction
+                .prepare(
+                    "SELECT record_json FROM sandbox_records \
+                     WHERE julianday(expires_at) <= julianday(?1) \
+                       AND (\
+                           state = 'running' \
+                           OR (\
+                               state = 'paused' \
+                               AND json_extract(\
+                                   record_json,\
+                                   '$.lifecycle.on_timeout'\
+                               ) = 'kill'\
+                           )\
+                       ) \
+                     ORDER BY julianday(expires_at), sandbox_id \
+                     LIMIT ?2",
+                )
+                .map_err(|error| unavailable("prepare SQLite expiry claim", error))?;
+            let selected = statement
+                .query_map(params![deadline, limit], |row| row.get::<_, String>(0))
+                .map_err(|error| unavailable("query SQLite expired records", error))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|error| unavailable("read SQLite expired records", error))?;
+            drop(statement);
+
+            let mut claimed = Vec::with_capacity(selected.len());
+            for serialized in selected {
+                let mut record = deserialize_record(&serialized)?;
+                let expected_generation =
+                    i64::try_from(record.generation().get()).map_err(|_| {
+                        RepositoryError::Corrupt(
+                            "SQLite expiry generation exceeds signed 64-bit range".into(),
+                        )
+                    })?;
+                match record.lifecycle().on_timeout {
+                    OnTimeoutAction::Kill => record.begin_kill(),
+                    OnTimeoutAction::Pause => record.begin_pause(),
+                }
+                .map_err(|error| {
+                    RepositoryError::Corrupt(format!(
+                        "cannot claim expired SQLite record {}: {error}",
+                        record.sandbox_id()
+                    ))
+                })?;
+                validate_record(&record)?;
+                let sandbox_id = record.sandbox_id().to_string();
+                let replacement = serialize_record(&record)?;
+                let updated = transaction
+                    .execute(
+                        "UPDATE sandbox_records SET record_json = ?1 \
+                         WHERE sandbox_id = ?2 AND generation = ?3",
+                        params![replacement, sandbox_id, expected_generation],
+                    )
+                    .map_err(|error| unavailable("persist SQLite expiry claim", error))?;
+                if updated != 1 {
+                    return Err(RepositoryError::Corrupt(format!(
+                        "expired SQLite record changed inside claim transaction: {sandbox_id}"
+                    )));
+                }
+                claimed.push(record);
+            }
+            transaction
+                .commit()
+                .map_err(|error| unavailable("commit SQLite expiry claim", error))?;
+            Ok(claimed)
+        })
+        .await
     }
 
     async fn compare_and_swap(
@@ -297,20 +461,23 @@ impl SandboxRepository for SqliteSandboxRepository {
     }
 }
 
-fn apply_initial_migration(
+fn apply_migration(
     connection: &mut tokio_rusqlite::rusqlite::Connection,
+    version: i64,
+    name: &str,
+    migration: &str,
 ) -> RepositoryResult<()> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| unavailable("begin SQLite migration", error))?;
-    transaction
-        .execute_batch(INITIAL_MIGRATION)
-        .map_err(|error| RepositoryError::Corrupt(format!("apply SQLite migration 1: {error}")))?;
+    transaction.execute_batch(migration).map_err(|error| {
+        RepositoryError::Corrupt(format!("apply SQLite migration {version}: {error}"))
+    })?;
     transaction
         .execute(
             "INSERT INTO compatibility_schema_migrations(version, name, applied_at) \
              VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-            params![LATEST_SCHEMA_VERSION, INITIAL_MIGRATION_NAME],
+            params![version, name],
         )
         .map_err(|error| unavailable("record SQLite migration", error))?;
     transaction
