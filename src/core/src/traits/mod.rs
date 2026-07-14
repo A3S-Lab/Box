@@ -18,9 +18,10 @@ pub use cache::{CacheBackend, CacheEntry, CacheStats};
 pub use credential::CredentialProvider;
 pub use event::EventBus;
 pub use execution::{
-    CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
-    ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionState,
-    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome,
+    CreateExecutionRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
+    ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionRecordPolicy,
+    ExecutionReservation, ExecutionRestartPolicy, ExecutionState, ExecutionStatus, KillOutcome,
+    OperationId, ReconcileOutcome,
 };
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};

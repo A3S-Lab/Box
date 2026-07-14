@@ -388,6 +388,7 @@ mod tests {
                     external_sandbox_id: "sandbox-1".to_string(),
                     config,
                     labels: Default::default(),
+                    policy: Default::default(),
                 },
             )
             .unwrap(),

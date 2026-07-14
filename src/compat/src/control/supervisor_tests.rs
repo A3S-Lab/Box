@@ -74,6 +74,7 @@ async fn start_runtime(
                 external_sandbox_id: record.sandbox_id().to_string(),
                 config,
                 labels: BTreeMap::new(),
+                policy: Default::default(),
             },
             record.operation_id(),
         )
@@ -92,6 +93,7 @@ async fn create_runtime(
                 external_sandbox_id: record.sandbox_id().to_string(),
                 config,
                 labels: BTreeMap::new(),
+                policy: Default::default(),
             },
             record.operation_id(),
         )

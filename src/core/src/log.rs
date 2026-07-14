@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Logging driver type.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LogDriver {
     /// Docker-compatible JSON lines format (default).
@@ -48,7 +48,7 @@ impl std::str::FromStr for LogDriver {
 }
 
 /// Logging configuration for a box.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogConfig {
     pub driver: LogDriver,
     #[serde(default)]

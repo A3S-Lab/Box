@@ -105,6 +105,7 @@ mod linux {
                 ..Default::default()
             },
             labels: BTreeMap::from([("purpose".to_string(), "managed-sandbox-smoke".to_string())]),
+            policy: Default::default(),
         };
 
         let manager = LocalExecutionManager::with_vm_backend(state_path, home_dir);

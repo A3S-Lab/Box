@@ -315,6 +315,11 @@ generation-fenced transitions and restart reconciliation; and a canonical
 runtime `ExecutionManager` with a production VM/Sandbox backend. CI runs the
 pinned official Python sync/async, TypeScript, and Code Interpreter clients
 against the router through an in-memory repository and fake execution manager.
+Managed creation requests also persist a typed caller policy for names,
+restart and health behavior, logging, stop behavior, and local resource
+metadata. An idempotent retry therefore cannot silently reuse a reservation
+with different policy, and the canonical record mapper does not replace caller
+choices with runtime defaults.
 Separately, an A3S OS smoke harness proves that `--isolation sandbox` create
 persists a recoverable `created` reservation without allocating backend
 resources, then starts through certified `crun`, rejects pause explicitly, and
