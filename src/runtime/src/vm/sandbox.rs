@@ -174,7 +174,9 @@ impl VmManager {
 
         if let Err(error) = async {
             self.wait_for_vm_running().await?;
-            self.wait_for_exec_ready(&layout.exec_socket_path).await
+            #[cfg(unix)]
+            self.wait_for_exec_ready(&layout.exec_socket_path).await?;
+            Ok(())
         }
         .await
         {
