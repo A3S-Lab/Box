@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::file_lock::FileLock;
 use crate::store_io::quarantine_label;
 use crate::BoxRecord;
+use a3s_box_core::OperationId;
 
 /// Durable collection of local box execution records.
 ///
@@ -113,7 +114,13 @@ impl BoxStateStore {
         }
 
         let data = std::fs::read_to_string(path)?;
-        match serde_json::from_str::<Vec<BoxRecord>>(&data) {
+        let parsed = serde_json::from_str::<Vec<BoxRecord>>(&data)
+            .map_err(|error| error.to_string())
+            .and_then(|records| {
+                validate_managed_records(&records)?;
+                Ok(records)
+            });
+        match parsed {
             Ok(records) => Ok(Self::from_records(path.to_path_buf(), records)),
             Err(error) if corruption_policy == CorruptionPolicy::ReturnError => {
                 Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
@@ -133,6 +140,8 @@ impl BoxStateStore {
     }
 
     fn write_unlocked(&self) -> std::io::Result<()> {
+        validate_managed_records(&self.records)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -178,6 +187,29 @@ impl BoxStateStore {
         self.records.iter().find(|record| record.name == name)
     }
 
+    /// Find a managed execution by its idempotent creation operation.
+    pub fn find_by_operation_id(&self, operation_id: &OperationId) -> Option<&BoxRecord> {
+        self.records.iter().find(|record| {
+            record
+                .managed_execution
+                .as_ref()
+                .is_some_and(|metadata| &metadata.operation_id == operation_id)
+        })
+    }
+
+    /// Find a mutable managed execution by its idempotent creation operation.
+    pub fn find_by_operation_id_mut(
+        &mut self,
+        operation_id: &OperationId,
+    ) -> Option<&mut BoxRecord> {
+        self.records.iter_mut().find(|record| {
+            record
+                .managed_execution
+                .as_ref()
+                .is_some_and(|metadata| &metadata.operation_id == operation_id)
+        })
+    }
+
     /// Find records matching a full-ID or short-ID prefix.
     pub fn find_by_id_prefix(&self, prefix: &str) -> Vec<&BoxRecord> {
         self.records
@@ -193,6 +225,25 @@ impl BoxStateStore {
             .filter(|record| all || record.status == "running")
             .collect()
     }
+}
+
+fn validate_managed_records(records: &[BoxRecord]) -> Result<(), String> {
+    let mut operation_ids = std::collections::HashSet::new();
+    for record in records {
+        let Some(metadata) = &record.managed_execution else {
+            continue;
+        };
+        metadata
+            .validate()
+            .map_err(|error| format!("invalid managed execution {}: {error}", record.id))?;
+        if !operation_ids.insert(metadata.operation_id.clone()) {
+            return Err(format!(
+                "duplicate managed operation ID: {}",
+                metadata.operation_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -225,6 +276,28 @@ mod tests {
             "auto_remove": false
         }))
         .unwrap()
+    }
+
+    fn managed_record(id: &str, operation_id: OperationId) -> BoxRecord {
+        let mut record = record(id);
+        let config = a3s_box_core::BoxConfig {
+            image: "alpine:latest".to_string(),
+            isolation: a3s_box_core::ExecutionIsolation::Sandbox,
+            ..Default::default()
+        };
+        record.managed_execution = Some(
+            crate::ManagedExecutionMetadata::new(
+                operation_id,
+                a3s_box_core::ExecutionGeneration::INITIAL,
+                a3s_box_core::CreateExecutionRequest {
+                    external_sandbox_id: format!("sandbox-{id}"),
+                    config,
+                    labels: Default::default(),
+                },
+            )
+            .unwrap(),
+        );
+        record
     }
 
     #[test]
@@ -308,6 +381,85 @@ mod tests {
             persisted.records()[0].virtiofs_cache.as_deref(),
             Some("always")
         );
+    }
+
+    #[test]
+    fn operation_lookup_ignores_legacy_records_and_finds_managed_intent() {
+        let operation_id = OperationId::new("operation-1").unwrap();
+        let managed = managed_record("managed", operation_id.clone());
+        let mut store =
+            BoxStateStore::from_records("/tmp/boxes.json", vec![record("legacy"), managed]);
+
+        assert_eq!(
+            store.find_by_operation_id(&operation_id).unwrap().id,
+            "managed"
+        );
+        store
+            .find_by_operation_id_mut(&operation_id)
+            .unwrap()
+            .status = "running".to_string();
+        assert_eq!(store.find_by_id("managed").unwrap().status, "running");
+        assert!(store
+            .find_by_operation_id(&OperationId::new("missing").unwrap())
+            .is_none());
+    }
+
+    #[test]
+    fn strict_load_rejects_duplicate_managed_operation_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boxes.json");
+        let operation_id = OperationId::new("operation-1").unwrap();
+        let records = vec![
+            managed_record("first", operation_id.clone()),
+            managed_record("second", operation_id),
+        ];
+        std::fs::write(&path, serde_json::to_vec(&records).unwrap()).unwrap();
+
+        let error = BoxStateStore::load(&path).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("duplicate managed operation ID"));
+    }
+
+    #[test]
+    fn transaction_rejects_duplicate_operation_without_changing_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boxes.json");
+        let operation_id = OperationId::new("operation-1").unwrap();
+        BoxStateStore::from_records(
+            path.clone(),
+            vec![managed_record("first", operation_id.clone())],
+        )
+        .save()
+        .unwrap();
+
+        let error = BoxStateStore::modify(&path, |store| {
+            store
+                .records_mut()
+                .push(managed_record("second", operation_id));
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let persisted = BoxStateStore::load(&path).unwrap();
+        assert_eq!(persisted.records().len(), 1);
+        assert_eq!(persisted.records()[0].id, "first");
+    }
+
+    #[test]
+    fn strict_load_rejects_managed_plan_drift() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boxes.json");
+        let mut record = managed_record("managed", OperationId::new("operation-1").unwrap());
+        record.managed_execution.as_mut().unwrap().plan =
+            a3s_box_core::resolve_execution(&a3s_box_core::BoxConfig::default()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&vec![record]).unwrap()).unwrap();
+
+        let error = BoxStateStore::load(&path).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("does not match"));
     }
 
     #[cfg(unix)]

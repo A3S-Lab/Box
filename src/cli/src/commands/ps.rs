@@ -200,6 +200,7 @@ mod tests {
             name: name.to_string(),
             image: "alpine:latest".to_string(),
             isolation: Default::default(),
+            managed_execution: None,
             status: status.to_string(),
             pid: None,
             pid_start_time: None,

@@ -55,7 +55,7 @@ pub mod scale;
 pub use audit::{read_audit_log, AuditLog, AuditQuery};
 
 // Canonical local execution metadata
-pub use box_record::{BoxRecord, HealthCheck};
+pub use box_record::{BoxRecord, HealthCheck, ManagedExecutionMetadata};
 pub use box_state::BoxStateStore;
 
 // gRPC clients

@@ -551,6 +551,7 @@ async fn execute_up(
             name: box_name,
             image,
             isolation: record_isolation,
+            managed_execution: None,
             status: "running".to_string(),
             pid,
             pid_start_time: pid.and_then(crate::process::pid_start_time),

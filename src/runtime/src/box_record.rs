@@ -5,7 +5,10 @@ use std::path::PathBuf;
 
 use a3s_box_core::config::ResourceLimits;
 use a3s_box_core::log::LogConfig;
-use a3s_box_core::{ExecutionIsolation, NetworkMode};
+use a3s_box_core::{
+    CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, NetworkMode, OperationId,
+    ResolvedExecutionPlan,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +26,13 @@ pub struct BoxRecord {
     /// Requested execution isolation. Records written before this field default to MicroVM.
     #[serde(default)]
     pub isolation: ExecutionIsolation,
+    /// Runtime lifecycle identity and recoverable creation intent.
+    ///
+    /// Legacy CLI-created records omit this field. Managed executions persist
+    /// it before launch so an operation can be reconciled after a service
+    /// restart without creating a second execution.
+    #[serde(default)]
+    pub managed_execution: Option<ManagedExecutionMetadata>,
     /// Persisted lifecycle state.
     pub status: String,
     /// Shim process PID while the execution is active.
@@ -224,6 +234,59 @@ pub struct HealthCheck {
     pub start_period_secs: u64,
 }
 
+/// Durable lifecycle metadata for an execution owned by [`ExecutionManager`].
+///
+/// [`ExecutionManager`]: a3s_box_core::ExecutionManager
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedExecutionMetadata {
+    /// Idempotency key of the create operation.
+    pub operation_id: OperationId,
+    /// Runtime generation used to reject stale lifecycle requests.
+    pub generation: ExecutionGeneration,
+    /// Full creation intent required to recover an interrupted launch.
+    pub request: CreateExecutionRequest,
+    /// Backend resolution validated before any launch side effects.
+    pub plan: ResolvedExecutionPlan,
+}
+
+impl ManagedExecutionMetadata {
+    /// Build validated recovery metadata from one creation request.
+    pub fn new(
+        operation_id: OperationId,
+        generation: ExecutionGeneration,
+        request: CreateExecutionRequest,
+    ) -> a3s_box_core::Result<Self> {
+        if request.external_sandbox_id.trim().is_empty() {
+            return Err(a3s_box_core::BoxError::ConfigError(
+                "external sandbox ID cannot be empty".to_string(),
+            ));
+        }
+        let plan = a3s_box_core::resolve_execution(&request.config)?;
+        Ok(Self {
+            operation_id,
+            generation,
+            request,
+            plan,
+        })
+    }
+
+    /// Validate deserialized metadata before it participates in reconciliation.
+    pub fn validate(&self) -> a3s_box_core::Result<()> {
+        if self.request.external_sandbox_id.trim().is_empty() {
+            return Err(a3s_box_core::BoxError::StateError(
+                "managed execution has an empty external sandbox ID".to_string(),
+            ));
+        }
+        let resolved = a3s_box_core::resolve_execution(&self.request.config)?;
+        if resolved != self.plan {
+            return Err(a3s_box_core::BoxError::StateError(
+                "managed execution plan does not match its persisted creation request".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn default_restart_policy() -> String {
     "no".to_string()
 }
@@ -276,6 +339,7 @@ mod tests {
         let record: BoxRecord = serde_json::from_value(value).unwrap();
 
         assert_eq!(record.isolation, ExecutionIsolation::Microvm);
+        assert!(record.managed_execution.is_none());
         assert_eq!(record.virtiofs_cache.as_deref(), Some("always"));
         assert_eq!(record.restart_policy, "no");
         assert_eq!(record.health_status, "none");
@@ -283,5 +347,64 @@ mod tests {
             serde_json::to_value(record).unwrap()["virtiofs_cache"],
             "always"
         );
+    }
+
+    #[test]
+    fn managed_execution_metadata_round_trips_recovery_intent() {
+        let mut config = a3s_box_core::BoxConfig {
+            image: "alpine:latest".to_string(),
+            isolation: ExecutionIsolation::Sandbox,
+            ..Default::default()
+        };
+        config.resources.vcpus = 1;
+        config.resources.memory_mb = 128;
+        let metadata = ManagedExecutionMetadata::new(
+            OperationId::new("create-op-1").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "sandbox-1".to_string(),
+                config,
+                labels: Default::default(),
+            },
+        )
+        .unwrap();
+        let mut value = minimal_record();
+        value["managed_execution"] = serde_json::to_value(metadata).unwrap();
+
+        let record: BoxRecord = serde_json::from_value(value).unwrap();
+        let encoded = serde_json::to_value(&record).unwrap();
+        let managed = record.managed_execution.unwrap();
+
+        assert_eq!(managed.operation_id.as_str(), "create-op-1");
+        assert_eq!(managed.generation, ExecutionGeneration::INITIAL);
+        assert_eq!(managed.request.external_sandbox_id, "sandbox-1");
+        assert_eq!(
+            managed.request.config.isolation,
+            ExecutionIsolation::Sandbox
+        );
+        assert_eq!(encoded["managed_execution"]["generation"], 1);
+    }
+
+    #[test]
+    fn managed_execution_validation_rejects_plan_drift() {
+        let config = a3s_box_core::BoxConfig {
+            image: "alpine:latest".to_string(),
+            isolation: ExecutionIsolation::Sandbox,
+            ..Default::default()
+        };
+        let mut metadata = ManagedExecutionMetadata::new(
+            OperationId::new("create-op-1").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "sandbox-1".to_string(),
+                config,
+                labels: Default::default(),
+            },
+        )
+        .unwrap();
+        metadata.plan =
+            a3s_box_core::resolve_execution(&a3s_box_core::BoxConfig::default()).unwrap();
+
+        assert!(metadata.validate().is_err());
     }
 }
