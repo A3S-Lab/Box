@@ -553,8 +553,8 @@ fn probe_seccomp_and_privileges(snapshot: &mut SandboxCapabilitySnapshot) {
 fn probe_cgroup_v2() -> CgroupV2Evidence {
     let mountpoint = read_trimmed("/proc/self/mountinfo")
         .and_then(|contents| parse_cgroup2_mountpoint(&contents));
-    let relative =
-        read_trimmed("/proc/self/cgroup").and_then(|contents| parse_current_cgroup_path(&contents));
+    let relative = read_trimmed("/proc/self/cgroup")
+        .and_then(|contents| parse_current_cgroup_path(&contents).map(ToString::to_string));
     let current_path = match (&mountpoint, &relative) {
         (Some(mountpoint), Some(relative)) => safe_join_cgroup(mountpoint, relative),
         _ => None,
