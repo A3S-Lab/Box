@@ -4,6 +4,8 @@ mod model;
 mod ports;
 mod repository;
 mod service;
+mod sqlite;
+mod validation;
 
 pub use credential::{
     IssuedToken, SandboxCredentials, SecretToken, StoredToken, TokenIssuer, TokenIssuerError,
@@ -27,6 +29,7 @@ pub use service::{
     ConnectionDisposition, ControlService, ControlServiceDependencies, ControlServiceError,
     ControlServiceResult, CreateSandboxRequest, SandboxConnection,
 };
+pub use sqlite::SqliteSandboxRepository;
 
 #[cfg(test)]
 mod tests;
