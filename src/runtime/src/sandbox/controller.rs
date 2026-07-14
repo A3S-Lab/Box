@@ -71,6 +71,32 @@ impl CrunController {
 
     /// Refuse to overwrite a live runtime generation with the same ID.
     pub fn require_absent(&self, runtime_root: &Path, container_id: &str) -> Result<()> {
+        match std::fs::symlink_metadata(runtime_root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(BoxError::BoxBootError {
+                    message: format!(
+                        "Failed to inspect Sandbox runtime root {}: {error}",
+                        runtime_root.display()
+                    ),
+                    hint: None,
+                })
+            }
+            Ok(metadata) if !metadata.file_type().is_dir() => {
+                return Err(BoxError::BoxBootError {
+                    message: format!(
+                        "Sandbox runtime root is not a directory: {}",
+                        runtime_root.display()
+                    ),
+                    hint: None,
+                })
+            }
+            Ok(_) => {}
+        }
+
+        // `crun state --root <missing>` materializes the root even when the
+        // container is absent. The metadata gate above keeps this safety probe
+        // side-effect free before image pulls and bundle preparation begin.
         match CrunHandler::query_state_at(&self.runtime.path, runtime_root, container_id)? {
             Some(state) if state.status == "stopped" => {
                 let output = Command::new(&self.runtime.path)
@@ -433,6 +459,47 @@ fn cleanup_failed_start(runtime_path: &Path, launch: &SandboxLaunchSpec) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    fn controller_with_runtime(path: PathBuf) -> CrunController {
+        CrunController::new(CertifiedCrun {
+            path,
+            version: "1.28".to_string(),
+            sha256: "test-digest".to_string(),
+            features: vec!["+CAP".to_string(), "+SECCOMP".to_string()],
+        })
+    }
+
+    #[test]
+    fn absent_runtime_root_is_not_materialized_by_state_probe() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_root = temporary.path().join("missing-runtime-root");
+        let controller = controller_with_runtime(temporary.path().join("must-not-run"));
+
+        controller
+            .require_absent(&runtime_root, "internal-execution-id")
+            .unwrap();
+
+        assert!(!runtime_root.exists());
+    }
+
+    #[test]
+    fn runtime_root_symlink_is_rejected_before_executing_crun() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("target");
+        let runtime_root = temporary.path().join("runtime-root");
+        std::fs::create_dir(&target).unwrap();
+        symlink(&target, &runtime_root).unwrap();
+        let controller = controller_with_runtime(temporary.path().join("must-not-run"));
+
+        let error = controller
+            .require_absent(&runtime_root, "internal-execution-id")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not a directory"));
+        assert!(target.read_dir().unwrap().next().is_none());
+    }
 
     #[test]
     fn startup_log_excerpt_is_bounded_and_keeps_the_tail() {
