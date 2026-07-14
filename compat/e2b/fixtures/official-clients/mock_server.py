@@ -94,14 +94,43 @@ class FixtureHandler(BaseHTTPRequestHandler):
             )
 
     def _read_body(self) -> Any:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length == 0:
+        transfer_encoding = self.headers.get("Transfer-Encoding", "")
+        if "chunked" in transfer_encoding.lower():
+            raw = self._read_chunked_body()
+        else:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b""
+        if not raw:
             return None
-        raw = self.rfile.read(length)
         content_type = self.headers.get("Content-Type", "")
         if "json" in content_type:
             return json.loads(raw)
         return raw.decode("utf-8")
+
+    def _read_chunked_body(self) -> bytes:
+        body = bytearray()
+        while True:
+            size_line = self.rfile.readline()
+            if not size_line:
+                raise EOFError("request ended before the next chunk size")
+            size_text = size_line.split(b";", 1)[0].strip()
+            try:
+                size = int(size_text, 16)
+            except ValueError as error:
+                raise ValueError(f"invalid HTTP chunk size: {size_text!r}") from error
+            if size == 0:
+                while True:
+                    trailer = self.rfile.readline()
+                    if trailer in (b"\r\n", b"\n"):
+                        return bytes(body)
+                    if not trailer:
+                        raise EOFError("request ended inside chunk trailers")
+            chunk = self.rfile.read(size)
+            if len(chunk) != size:
+                raise EOFError(f"request chunk ended after {len(chunk)} of {size} bytes")
+            if self.rfile.read(2) != b"\r\n":
+                raise ValueError("request chunk is missing its CRLF terminator")
+            body.extend(chunk)
 
     def _capture(self, parsed: urllib.parse.SplitResult, body: Any) -> None:
         selected_headers = {}
