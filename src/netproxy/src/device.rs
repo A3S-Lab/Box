@@ -4,7 +4,7 @@ use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex, MutexGuard,
 };
 
 use smoltcp::time::Instant;
@@ -15,6 +15,10 @@ pub(super) const GATEWAY_MAC: EthernetAddress =
     EthernetAddress([0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
 /// Maximum Ethernet frame size (header + MTU).
 pub(super) const MAX_FRAME: usize = 1514;
+/// Bound userspace buffering while the libkrun datagram endpoint catches up.
+const MAX_PENDING_TX_FRAMES: usize = 256;
+/// Keep each non-blocking socket pass finite so network and VM work stay fair.
+const IO_BURST_FRAMES: usize = 64;
 
 #[derive(Default)]
 pub(super) struct NetStats {
@@ -69,16 +73,40 @@ pub(super) struct UnixgramDevice {
     pub(super) bridge: Option<BridgePort>,
     pub(super) rx_queue: VecDeque<Vec<u8>>,
     pub(super) stats: Arc<NetStats>,
+    pending_tx: Arc<Mutex<VecDeque<Vec<u8>>>>,
 }
 
 impl UnixgramDevice {
+    pub(super) fn new(
+        socket: UnixDatagram,
+        bridge: Option<BridgePort>,
+        stats: Arc<NetStats>,
+    ) -> Self {
+        Self {
+            socket,
+            bridge,
+            rx_queue: VecDeque::new(),
+            stats,
+            pending_tx: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
     /// Drain the socket into `rx_queue` (non-blocking, batch up to 64 frames).
     pub(super) fn drain(&mut self) {
+        self.flush_pending_tx();
+
         if let Some(bridge) = &self.bridge {
-            bridge.drain_to_guest(&self.socket, &self.stats);
+            let available = MAX_PENDING_TX_FRAMES.saturating_sub(self.pending_tx_len());
+            let mut frames = Vec::new();
+            bridge.drain_frames(&mut frames, available.min(IO_BURST_FRAMES));
+            for frame in frames {
+                send_or_queue(&self.socket, &self.stats, &self.pending_tx, frame);
+            }
         }
+
+        let available = MAX_PENDING_TX_FRAMES.saturating_sub(self.rx_queue.len());
         let mut buf = vec![0u8; MAX_FRAME];
-        for _ in 0..64 {
+        for _ in 0..available.min(IO_BURST_FRAMES) {
             match self.socket.recv(&mut buf) {
                 Ok(n) => {
                     tracing::trace!(
@@ -103,6 +131,35 @@ impl UnixgramDevice {
                 }
             }
         }
+    }
+
+    fn flush_pending_tx(&self) {
+        let mut pending = lock_queue(&self.pending_tx);
+        for _ in 0..IO_BURST_FRAMES {
+            let Some(frame) = pending.front() else {
+                break;
+            };
+            let len = frame.len();
+            match self.socket.send(frame) {
+                Ok(sent) if sent == len => {
+                    pending.pop_front();
+                    self.stats.record_rx(len);
+                }
+                Ok(sent) => {
+                    tracing::warn!(sent, len, "NetProxy: partial datagram send to libkrun");
+                    pending.pop_front();
+                }
+                Err(error) if is_tx_backpressure(&error) => break,
+                Err(error) => {
+                    tracing::warn!(%error, len, "NetProxy: queued send to libkrun failed");
+                    pending.pop_front();
+                }
+            }
+        }
+    }
+
+    pub(super) fn pending_tx_len(&self) -> usize {
+        lock_queue(&self.pending_tx).len()
     }
 }
 
@@ -171,14 +228,12 @@ impl BridgePort {
         }
     }
 
-    pub(super) fn drain_to_guest(&self, guest: &UnixDatagram, stats: &NetStats) {
+    pub(super) fn drain_frames(&self, frames: &mut Vec<Vec<u8>>, limit: usize) {
         let mut buf = [0u8; MAX_FRAME];
-        for _ in 0..64 {
+        for _ in 0..limit {
             match self.socket.recv(&mut buf) {
                 Ok(size) => {
-                    if guest.send(&buf[..size]).is_ok() {
-                        stats.record_rx(size);
-                    }
+                    frames.push(buf[..size].to_vec());
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => {
@@ -230,6 +285,7 @@ impl smoltcp::phy::RxToken for OwnedRxToken {
 pub(super) struct TxToken {
     socket: UnixDatagram,
     stats: Arc<NetStats>,
+    pending_tx: Arc<Mutex<VecDeque<Vec<u8>>>>,
 }
 
 impl smoltcp::phy::TxToken for TxToken {
@@ -243,13 +299,62 @@ impl smoltcp::phy::TxToken for TxToken {
             bytes = len,
             "NetProxy sending ethernet frame to guest/libkrun"
         );
-        if let Err(e) = self.socket.send(&buf) {
-            tracing::warn!(error = %e, len, "NetProxy: send to libkrun failed");
-        } else {
-            self.stats.record_rx(len);
-        }
+        send_or_queue(&self.socket, &self.stats, &self.pending_tx, buf);
         result
     }
+}
+
+fn send_or_queue(
+    socket: &UnixDatagram,
+    stats: &NetStats,
+    pending_tx: &Mutex<VecDeque<Vec<u8>>>,
+    frame: Vec<u8>,
+) {
+    let len = frame.len();
+    let mut pending = lock_queue(pending_tx);
+    if !pending.is_empty() {
+        enqueue_pending(&mut pending, frame);
+        return;
+    }
+
+    match socket.send(&frame) {
+        Ok(sent) if sent == len => stats.record_rx(len),
+        Ok(sent) => {
+            tracing::warn!(sent, len, "NetProxy: partial datagram send to libkrun");
+        }
+        Err(error) if is_tx_backpressure(&error) => {
+            enqueue_pending(&mut pending, frame);
+        }
+        Err(error) => {
+            tracing::warn!(%error, len, "NetProxy: send to libkrun failed");
+        }
+    }
+}
+
+fn enqueue_pending(pending: &mut VecDeque<Vec<u8>>, frame: Vec<u8>) {
+    if pending.len() < MAX_PENDING_TX_FRAMES {
+        pending.push_back(frame);
+    } else {
+        // Device::receive and Device::transmit stop issuing tokens before this
+        // bound is reached. Reaching it means that invariant was violated.
+        tracing::error!(
+            limit = MAX_PENDING_TX_FRAMES,
+            "NetProxy transmit queue invariant violated; dropping frame"
+        );
+    }
+}
+
+fn lock_queue(queue: &Mutex<VecDeque<Vec<u8>>>) -> MutexGuard<'_, VecDeque<Vec<u8>>> {
+    queue
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(super) fn is_tx_backpressure(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    ) || error.raw_os_error() == Some(libc::ENOBUFS)
 }
 
 impl smoltcp::phy::Device for UnixgramDevice {
@@ -263,18 +368,27 @@ impl smoltcp::phy::Device for UnixgramDevice {
         Self: 'a;
 
     fn receive(&mut self, _ts: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        if self.pending_tx_len() >= MAX_PENDING_TX_FRAMES {
+            return None;
+        }
         let frame = self.rx_queue.pop_front()?;
         let tx = TxToken {
             socket: self.socket.try_clone().ok()?,
             stats: Arc::clone(&self.stats),
+            pending_tx: Arc::clone(&self.pending_tx),
         };
         Some((OwnedRxToken(frame), tx))
     }
 
     fn transmit(&mut self, _ts: Instant) -> Option<Self::TxToken<'_>> {
+        self.flush_pending_tx();
+        if self.pending_tx_len() != 0 {
+            return None;
+        }
         Some(TxToken {
             socket: self.socket.try_clone().ok()?,
             stats: Arc::clone(&self.stats),
+            pending_tx: Arc::clone(&self.pending_tx),
         })
     }
 

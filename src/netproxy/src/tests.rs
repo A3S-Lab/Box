@@ -1,7 +1,6 @@
-use super::device::{NetStatsSnapshot, MAX_FRAME};
+use super::device::{is_tx_backpressure, NetStatsSnapshot, MAX_FRAME};
 use super::manager::{parse_port_forwards, write_stats_file};
 use super::*;
-use std::collections::VecDeque;
 
 use smoltcp::wire::EthernetAddress;
 
@@ -21,12 +20,7 @@ fn test_guest_and_proxy(dns_servers: Vec<Ipv4Addr>) -> (TestGuest, ProxyEngine) 
     proxy_socket.set_nonblocking(true).unwrap();
 
     let stats = Arc::new(NetStats::default());
-    let mut guest_device = UnixgramDevice {
-        socket: guest_socket,
-        bridge: None,
-        rx_queue: VecDeque::new(),
-        stats: Arc::clone(&stats),
-    };
+    let mut guest_device = UnixgramDevice::new(guest_socket, None, Arc::clone(&stats));
     let mut guest_iface = Interface::new(
         Config::new(TEST_GUEST_MAC.into()),
         &mut guest_device,
@@ -394,16 +388,13 @@ fn bridge_port_unicasts_frame_to_matching_peer_mac() {
     let mac_b = [0x02, 0x42, 10, 88, 0, 3];
     let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
     let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
-    let (guest_b, proxy_b) = UnixDatagram::pair().unwrap();
-    guest_b.set_nonblocking(true).unwrap();
     let frame = ethernet_frame(mac_b, mac_a);
 
     assert!(!bridge_a.forward_from_guest(&frame));
-    bridge_b.drain_to_guest(&proxy_b, &NetStats::default());
+    let mut received = Vec::new();
+    bridge_b.drain_frames(&mut received, 1);
 
-    let mut received = [0u8; MAX_FRAME];
-    let size = guest_b.recv(&mut received).unwrap();
-    assert_eq!(&received[..size], frame.as_slice());
+    assert_eq!(received, vec![frame]);
 }
 
 #[test]
@@ -413,16 +404,53 @@ fn bridge_port_floods_broadcast_and_keeps_gateway_delivery() {
     let mac_b = [0x02, 0x42, 10, 88, 0, 3];
     let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
     let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
-    let (guest_b, proxy_b) = UnixDatagram::pair().unwrap();
-    guest_b.set_nonblocking(true).unwrap();
     let frame = ethernet_frame([0xff; 6], mac_a);
 
     assert!(bridge_a.forward_from_guest(&frame));
-    bridge_b.drain_to_guest(&proxy_b, &NetStats::default());
+    let mut received = Vec::new();
+    bridge_b.drain_frames(&mut received, 1);
 
-    let mut received = [0u8; MAX_FRAME];
-    let size = guest_b.recv(&mut received).unwrap();
-    assert_eq!(&received[..size], frame.as_slice());
+    assert_eq!(received, vec![frame]);
+}
+
+#[test]
+fn unixgram_device_retries_frame_after_socket_backpressure() {
+    use smoltcp::phy::{Device as _, TxToken as _};
+
+    let (sender, receiver) = UnixDatagram::pair().unwrap();
+    sender.set_nonblocking(true).unwrap();
+    receiver.set_nonblocking(true).unwrap();
+    let stats = Arc::new(NetStats::default());
+    let mut device = UnixgramDevice::new(sender, None, Arc::clone(&stats));
+    let filler = vec![0x5a; MAX_FRAME];
+    let mut filled = 0;
+
+    loop {
+        match device.socket.send(&filler) {
+            Ok(_) => filled += 1,
+            Err(error) if is_tx_backpressure(&error) => break,
+            Err(error) => panic!("failed to fill Unix datagram buffer: {error}"),
+        }
+    }
+    assert!(filled > 0);
+
+    let marker = vec![0xa5; MAX_FRAME];
+    let token = device.transmit(smoltcp_now()).unwrap();
+    token.consume(marker.len(), |buffer| buffer.copy_from_slice(&marker));
+    assert_eq!(device.pending_tx_len(), 1);
+    assert!(device.transmit(smoltcp_now()).is_none());
+
+    let mut buffer = vec![0u8; MAX_FRAME];
+    while receiver.recv(&mut buffer).is_ok() {}
+
+    device.drain();
+    assert_eq!(device.pending_tx_len(), 0);
+    let size = receiver.recv(&mut buffer).unwrap();
+    assert_eq!(&buffer[..size], marker.as_slice());
+
+    let snapshot = stats.snapshot();
+    assert_eq!(snapshot.rx_packets, 1);
+    assert_eq!(snapshot.rx_bytes, marker.len() as u64);
 }
 
 #[test]

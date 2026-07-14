@@ -17,7 +17,7 @@ mod manager;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, UdpSocket};
 use std::os::unix::net::UnixDatagram;
@@ -183,12 +183,7 @@ impl ProxyEngine {
             bridge,
         } = config;
 
-        let mut device = UnixgramDevice {
-            socket,
-            bridge,
-            rx_queue: VecDeque::new(),
-            stats: Arc::clone(&stats),
-        };
+        let mut device = UnixgramDevice::new(socket, bridge, Arc::clone(&stats));
 
         // Configure smoltcp interface as the gateway.
         let config = Config::new(GATEWAY_MAC.into());
