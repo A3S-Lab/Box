@@ -7,4 +7,6 @@ mod model;
 mod openapi;
 mod proto;
 
+pub mod control;
+
 pub use fixture::{generate_fixture, verify_fixture, FixturePaths};

@@ -8,6 +8,7 @@ pub mod audit;
 pub mod cache;
 pub mod credential;
 pub mod event;
+pub mod execution;
 pub mod metrics;
 pub mod registry;
 pub mod store;
@@ -16,6 +17,11 @@ pub use audit::AuditSink;
 pub use cache::{CacheBackend, CacheEntry, CacheStats};
 pub use credential::CredentialProvider;
 pub use event::EventBus;
+pub use execution::{
+    CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionState, ExecutionStatus, KillOutcome,
+    OperationId, ReconcileOutcome,
+};
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};
 pub use store::{
