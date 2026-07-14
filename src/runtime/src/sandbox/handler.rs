@@ -66,7 +66,7 @@ impl CrunHandler {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "vm"))]
     pub(crate) fn from_recorded_runtime(
         runtime_path: PathBuf,
         runtime_root: PathBuf,
@@ -368,6 +368,7 @@ fn remove_dir_if_exists(path: &Path) {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "vm")]
     #[test]
     fn recorded_runtime_handler_attaches_without_owning_a_wrapper_process() {
         let temporary = tempfile::tempdir().unwrap();
