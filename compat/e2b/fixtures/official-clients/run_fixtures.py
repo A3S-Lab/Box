@@ -54,20 +54,41 @@ def download_artifact(artifact: dict[str, Any], destination: Path) -> None:
 
 def prepare_python(temp: Path, artifacts: dict[str, dict[str, Any]]) -> Path:
     environment = temp / "python"
-    venv.EnvBuilder(with_pip=True).create(environment)
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     wheels = []
     for artifact_id in ["python-e2b-wheel", "python-code-interpreter-wheel"]:
         wheel = temp / Path(artifacts[artifact_id]["url"]).name
         download_artifact(artifacts[artifact_id], wheel)
         wheels.append(str(wheel))
+
     env = os.environ.copy()
     env["PIP_INDEX_URL"] = "https://pypi.org/simple"
-    subprocess.run(
-        [str(python), "-m", "pip", "install", "--disable-pip-version-check", *wheels],
-        check=True,
-        env=env,
-    )
+    uv = shutil.which("uv")
+    if uv:
+        subprocess.run(
+            [uv, "venv", "--python", sys.executable, str(environment)],
+            check=True,
+            env=env,
+        )
+        subprocess.run(
+            [uv, "pip", "install", "--python", str(python), *wheels],
+            check=True,
+            env=env,
+        )
+    else:
+        venv.EnvBuilder(with_pip=True).create(environment)
+        subprocess.run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                *wheels,
+            ],
+            check=True,
+            env=env,
+        )
     return python
 
 
