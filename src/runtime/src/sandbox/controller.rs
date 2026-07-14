@@ -3,6 +3,8 @@
 #[cfg(target_os = "linux")]
 use std::fs::File;
 use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "linux")]
@@ -30,6 +32,8 @@ const INIT_LOG_FD: i32 = 5;
 const PRESERVED_FD_COUNT: usize = 3;
 #[cfg(target_os = "linux")]
 const START_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
+const START_FAILURE_LOG_LIMIT_BYTES: u64 = 4 * 1024;
 
 /// Files and sockets required to launch a generated OCI bundle.
 pub struct SandboxLaunchSpec {
@@ -178,14 +182,13 @@ impl CrunController {
                 }
             };
             if let Some(status) = child_status {
+                let diagnostics = start_failure_diagnostics(&launch);
                 cleanup_failed_start(&self.runtime.path, &launch);
                 return Err(BoxError::BoxBootError {
-                    message: format!("crun run exited before the Sandbox was running: {status}"),
-                    hint: Some(format!(
-                        "Inspect {} and {}",
-                        launch.stderr_path.display(),
-                        launch.init_log_path.display()
-                    )),
+                    message: format!(
+                        "crun run exited before the Sandbox was running: {status}{diagnostics}"
+                    ),
+                    hint: None,
                 });
             }
             let runtime_state = match CrunHandler::query_state_at(
@@ -206,21 +209,24 @@ impl CrunController {
                     break pid;
                 }
                 if status == "stopped" {
+                    let diagnostics = start_failure_diagnostics(&launch);
                     cleanup_failed_start(&self.runtime.path, &launch);
                     return Err(BoxError::BoxBootError {
-                        message: "Sandbox stopped during OCI startup".to_string(),
-                        hint: Some(format!("Inspect {}", launch.stderr_path.display())),
+                        message: format!("Sandbox stopped during OCI startup{diagnostics}"),
+                        hint: None,
                     });
                 }
             }
             if Instant::now() >= deadline {
+                let diagnostics = start_failure_diagnostics(&launch);
                 cleanup_failed_start(&self.runtime.path, &launch);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(BoxError::BoxBootError {
-                    message: "Timed out waiting for the Sandbox OCI state to become running"
-                        .to_string(),
-                    hint: Some(format!("Inspect {}", launch.stderr_path.display())),
+                    message: format!(
+                        "Timed out waiting for the Sandbox OCI state to become running{diagnostics}"
+                    ),
+                    hint: None,
                 });
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -372,6 +378,45 @@ fn duplicate_for_inheritance(fd: i32) -> Result<std::os::fd::OwnedFd> {
 }
 
 #[cfg(target_os = "linux")]
+fn start_failure_diagnostics(launch: &SandboxLaunchSpec) -> String {
+    let diagnostics = [
+        ("crun stderr", &launch.stderr_path),
+        ("guest-init log", &launch.init_log_path),
+    ]
+    .into_iter()
+    .filter_map(|(label, path)| {
+        read_log_tail(path, START_FAILURE_LOG_LIMIT_BYTES)
+            .map(|excerpt| format!("{label}: {excerpt}"))
+    })
+    .collect::<Vec<_>>();
+
+    if diagnostics.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", diagnostics.join("; "))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_log_tail(path: &Path, limit: u64) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let offset = length.saturating_sub(limit);
+    file.seek(SeekFrom::Start(offset)).ok()?;
+
+    let mut bytes = Vec::with_capacity((length - offset) as usize);
+    file.take(limit).read_to_end(&mut bytes).ok()?;
+    let excerpt = String::from_utf8_lossy(&bytes).trim().to_string();
+    if excerpt.is_empty() {
+        None
+    } else if offset > 0 {
+        Some(format!("...{excerpt}"))
+    } else {
+        Some(excerpt)
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn cleanup_failed_start(runtime_path: &Path, launch: &SandboxLaunchSpec) {
     let _ = Command::new(runtime_path)
         .arg("--root")
@@ -383,4 +428,23 @@ fn cleanup_failed_start(runtime_path: &Path, launch: &SandboxLaunchSpec) {
         .output();
     let _ = std::fs::remove_file(&launch.runtime_record);
     let _ = std::fs::remove_dir_all(&launch.runtime_root);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_log_excerpt_is_bounded_and_keeps_the_tail() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("crun.stderr.log");
+        let mut contents = "x".repeat(START_FAILURE_LOG_LIMIT_BYTES as usize + 512);
+        contents.push_str("\nseccomp unknown architecture `NATIVE`\n");
+        std::fs::write(&path, contents).unwrap();
+
+        let excerpt = read_log_tail(&path, START_FAILURE_LOG_LIMIT_BYTES).unwrap();
+        assert!(excerpt.starts_with("..."));
+        assert!(excerpt.contains("seccomp unknown architecture `NATIVE`"));
+        assert!(excerpt.len() <= START_FAILURE_LOG_LIMIT_BYTES as usize + 3);
+    }
 }

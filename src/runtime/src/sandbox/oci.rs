@@ -675,10 +675,20 @@ fn compile_seccomp() -> Result<oci_spec::runtime::LinuxSeccomp> {
     LinuxSeccompBuilder::default()
         .default_action(LinuxSeccompAction::ScmpActErrno)
         .default_errno_ret(LINUX_EPERM)
-        .architectures(vec![Arch::ScmpArchNative])
+        .architectures(vec![certified_seccomp_architecture()?])
         .syscalls(vec![allowed, clone, clone3])
         .build()
         .map_err(oci_error)
+}
+
+fn certified_seccomp_architecture() -> Result<Arch> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok(Arch::ScmpArchX86_64),
+        "aarch64" => Ok(Arch::ScmpArchAarch64),
+        architecture => Err(BoxError::ConfigError(format!(
+            "Sandbox seccomp is not certified for architecture {architecture}"
+        ))),
+    }
 }
 
 fn validate_id_mapping_plan(plan: &SandboxIdMappingPlan) -> Result<()> {
@@ -1237,6 +1247,15 @@ mod tests {
         assert_eq!(value["process"]["args"], serde_json::json!(["/sbin/init"]));
         assert_eq!(value["process"]["noNewPrivileges"], true);
         assert_eq!(value["linux"]["seccomp"]["defaultAction"], "SCMP_ACT_ERRNO");
+        let expected_seccomp_architecture = match std::env::consts::ARCH {
+            "x86_64" => "SCMP_ARCH_X86_64",
+            "aarch64" => "SCMP_ARCH_AARCH64",
+            architecture => panic!("unexpected test architecture {architecture}"),
+        };
+        assert_eq!(
+            value["linux"]["seccomp"]["architectures"],
+            serde_json::json!([expected_seccomp_architecture])
+        );
         assert_eq!(
             value["linux"]["resources"]["memory"]["limit"],
             512 * 1024 * 1024i64
