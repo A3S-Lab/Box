@@ -410,38 +410,6 @@ fn require_live_pid(record: &BoxRecord, action: &str) -> Result<u32> {
     }
 }
 
-fn is_process_alive_with_identity(pid: u32, expected_start: Option<u64>) -> bool {
-    if !is_process_alive(pid) {
-        return false;
-    }
-    match expected_start {
-        Some(expected) => pid_start_time(pid) == Some(expected),
-        None => true,
-    }
-}
-
-#[cfg(unix)]
-fn is_process_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn is_process_alive(_pid: u32) -> bool {
-    false
-}
-
-#[cfg(target_os = "linux")]
-fn pid_start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_comm = stat.rsplit_once(") ")?.1;
-    after_comm.split_whitespace().nth(19)?.parse().ok()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn pid_start_time(_pid: u32) -> Option<u64> {
-    None
-}
-
 #[cfg(unix)]
 fn send_host_signal(pid: u32, signal: i32) -> std::io::Result<()> {
     let result = unsafe { libc::kill(pid as i32, signal) };
@@ -940,4 +908,3 @@ fn file_size_or_zero(path: &Path) -> Result<u64> {
         Ok(metadata.len())
     }
 }
-

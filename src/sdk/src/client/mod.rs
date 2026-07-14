@@ -20,13 +20,15 @@ use a3s_box_core::volume::VolumeConfig;
 use a3s_box_core::{ExecOutput, ExecRequest, FileRequest, FileResponse, StoredImage};
 use a3s_box_runtime::oci::BuildResult as RuntimeBuildResult;
 use a3s_box_runtime::{
-    BuildConfig as RuntimeBuildConfig, ImagePuller, ImageReference, ImageStore, NetworkStore,
-    OciImage, PushResult, RegistryAuth, RegistryProtocol, RegistryPusher, SignaturePolicy,
-    SnapshotStore, VolumeStore,
+    is_process_alive, is_process_alive_with_identity, BuildConfig as RuntimeBuildConfig,
+    ImagePuller, ImageReference, ImageStore, NetworkStore, OciImage, PushResult, RegistryAuth,
+    RegistryProtocol, RegistryPusher, SignaturePolicy, SnapshotStore, VolumeStore,
 };
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, System};
 
+#[cfg(all(test, unix))]
+use a3s_box_runtime::pid_start_time;
 #[cfg(unix)]
 use a3s_box_runtime::{AttestationReport, AttestationRequest, ExecClient, PtyClient};
 

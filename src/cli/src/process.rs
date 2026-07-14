@@ -1,5 +1,7 @@
 //! Shared process management utilities for CLI commands.
 
+pub use a3s_box_runtime::{is_process_alive, is_process_alive_with_identity, pid_start_time};
+
 /// Result of asking a VM/shim process to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
@@ -20,12 +22,6 @@ impl StopOutcome {
             Self::ForceKilled => Some(137),
         }
     }
-}
-
-/// Check if a process is alive.
-#[cfg(unix)]
-pub fn is_process_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 /// Whether `pid` has exited, treating a zombie (an exited-but-unreaped child)
@@ -58,64 +54,6 @@ pub fn is_process_exited(pid: u32) -> bool {
 #[cfg(not(unix))]
 pub fn is_process_exited(pid: u32) -> bool {
     !is_process_alive(pid)
-}
-
-/// Read a process's start time (field 22 of `/proc/<pid>/stat`, in clock ticks
-/// since boot) as a stable identity token. After a crash or reboot the kernel
-/// can reassign the old shim PID to an unrelated process; the start time lets us
-/// tell the original process apart from a reused PID. `None` when it cannot be
-/// determined (non-Linux, or the process is already gone).
-#[cfg(target_os = "linux")]
-pub fn pid_start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // Format: "<pid> (<comm>) <state> ...". comm may contain spaces/parens, so
-    // scan past the final ')': the tokens after it begin at field 3 (state), so
-    // field 22 (starttime) is the 20th of those (index 19).
-    let after = &stat[stat.rfind(')')? + 1..];
-    after
-        .split_whitespace()
-        .nth(19)
-        .and_then(|s| s.parse::<u64>().ok())
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn pid_start_time(_pid: u32) -> Option<u64> {
-    None
-}
-
-/// Liveness with PID-identity verification: the process is alive only if it
-/// exists AND — when an identity token was recorded — its current start time
-/// still matches. After a reboot or PID reuse the start time differs, so a stale
-/// record is treated as dead and no signal is ever delivered to an unrelated
-/// process. A `None` expected token (records persisted before this field
-/// existed) falls back to the bare liveness check, so an in-place upgrade never
-/// mis-marks a still-running box.
-pub fn is_process_alive_with_identity(pid: u32, expected_start: Option<u64>) -> bool {
-    if !is_process_alive(pid) {
-        return false;
-    }
-    match expected_start {
-        Some(expected) => pid_start_time(pid) == Some(expected),
-        None => true,
-    }
-}
-
-#[cfg(windows)]
-pub fn is_process_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::STILL_ACTIVE;
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION,
-    };
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
-        if handle == 0 {
-            return false;
-        }
-        let mut exit_code = 0u32;
-        let ok = GetExitCodeProcess(handle, &mut exit_code);
-        windows_sys::Win32::Foundation::CloseHandle(handle);
-        ok != 0 && exit_code == STILL_ACTIVE as u32
-    }
 }
 
 /// Terminate a process immediately.
