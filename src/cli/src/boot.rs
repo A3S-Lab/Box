@@ -233,7 +233,7 @@ pub async fn boot_and_record(
             if let Some(pid) = booted_pid {
                 crate::process::graceful_stop(pid, libc::SIGTERM, 5).await;
             }
-            crate::cleanup::cleanup_removed_box(record);
+            crate::cleanup::cleanup_removed_box(record)?;
             Ok(BootOutcome::RemovedDuringBoot)
         }
     }

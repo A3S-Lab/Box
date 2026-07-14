@@ -20,6 +20,30 @@ pub fn reap_orphaned_box(box_id: &str) {
     reap_orphaned_box_in(&a3s_box_core::dirs_home(), box_id);
 }
 
+/// Delete a durable Sandbox OCI runtime generation without removing its Box
+/// rootfs or persisted CLI state.
+///
+/// Callers must run this before unmounting or deleting Box paths: a failed
+/// runtime cleanup may mean a shared-kernel process still uses the rootfs.
+#[cfg(target_os = "linux")]
+pub fn cleanup_recorded_sandbox_runtime(box_dir: &Path, box_id: &str) -> a3s_box_core::Result<()> {
+    cleanup_recorded_sandbox_runtime_in(&a3s_box_core::dirs_home(), box_dir, box_id)
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_recorded_sandbox_runtime_in(
+    home_dir: &Path,
+    box_dir: &Path,
+    box_id: &str,
+) -> a3s_box_core::Result<()> {
+    match reap_orphaned_crun(home_dir, box_dir, box_id) {
+        SandboxReap::NotPresent | SandboxReap::Cleaned => Ok(()),
+        SandboxReap::Failed => Err(a3s_box_core::BoxError::StateError(format!(
+            "Failed to clean recorded Sandbox runtime for {box_id}; refusing to touch its rootfs"
+        ))),
+    }
+}
+
 /// [`reap_orphaned_box`] against an explicit home directory (for testing).
 #[cfg(target_os = "linux")]
 fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
@@ -214,8 +238,9 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
         }
     }
 
-    let _ = std::fs::remove_file(&record_path);
+    let _ = std::fs::remove_dir_all(&record.bundle_dir);
     let _ = std::fs::remove_dir_all(&record.runtime_root);
+    let _ = std::fs::remove_file(&record_path);
     tracing::info!(box_id, "Reaped orphaned crun Sandbox after runtime restart");
     SandboxReap::Cleaned
 }
@@ -243,6 +268,14 @@ fn wait_for_exit(pids: &[i32], timeout: std::time::Duration) {
 /// Non-Linux builds are development stubs (no microVMs to reap).
 #[cfg(not(target_os = "linux"))]
 pub fn reap_orphaned_box(_box_id: &str) {}
+
+#[cfg(not(target_os = "linux"))]
+pub fn cleanup_recorded_sandbox_runtime(
+    _box_dir: &std::path::Path,
+    _box_id: &str,
+) -> a3s_box_core::Result<()> {
+    Ok(())
+}
 
 #[cfg(all(test, not(target_os = "linux")))]
 mod tests {
@@ -312,5 +345,17 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         // No boxes/<id> dir at all — must not panic or error.
         reap_orphaned_box_in(home.path(), "absent-box-uuid");
+    }
+
+    #[test]
+    fn cleanup_absent_sandbox_runtime_preserves_box_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let box_id = "cleanup-test-no-runtime-record";
+        let box_dir = home.path().join("boxes").join(box_id);
+        std::fs::create_dir_all(&box_dir).unwrap();
+
+        cleanup_recorded_sandbox_runtime_in(home.path(), &box_dir, box_id).unwrap();
+
+        assert!(box_dir.exists());
     }
 }

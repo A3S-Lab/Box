@@ -169,13 +169,13 @@ async fn kill_one(
     // clobber a concurrent run/monitor/compose write with our pre-await snapshot.
     if is_stopping_signal(signal) {
         if record.auto_remove {
-            cleanup::cleanup_removed_box(&record);
+            cleanup::cleanup_removed_box(&record)?;
             StateFile::remove_record(&box_id)?;
             println!("{name} (auto-removed)");
             return Ok(());
         }
 
-        cleanup::cleanup_stopped_box(&record);
+        cleanup::cleanup_stopped_box(&record)?;
 
         let exit_code = signaled_exit_code(signal);
         StateFile::modify(|s| {

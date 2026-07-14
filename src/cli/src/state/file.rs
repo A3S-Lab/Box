@@ -385,10 +385,12 @@ impl StateFile {
         let outcome = sf.reconcile();
         if outcome.changed {
             for record in &outcome.stopped {
-                crate::cleanup::cleanup_stopped_box(record);
+                crate::cleanup::cleanup_stopped_box(record)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
             }
             for record in &outcome.removed {
-                crate::cleanup::cleanup_removed_box(record);
+                crate::cleanup::cleanup_removed_box(record)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
             }
             sf.write_to_disk()?;
         }
