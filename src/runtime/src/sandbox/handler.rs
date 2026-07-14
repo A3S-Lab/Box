@@ -25,6 +25,9 @@ pub(crate) struct CrunState {
 /// Owns both the foreground `crun run` process and the OCI runtime state.
 /// Lifecycle operations always target the container ID through `crun`; merely
 /// signalling the wrapper process is never treated as cleanup.
+/// Dropping the in-process handle deliberately detaches without destroying the
+/// workload so short-lived CLI commands can launch persistent boxes. Explicit
+/// lifecycle operations and crash reconciliation own runtime cleanup.
 pub struct CrunHandler {
     runtime_path: PathBuf,
     runtime_root: PathBuf,
@@ -309,25 +312,6 @@ impl VmHandler for CrunHandler {
     }
 }
 
-impl Drop for CrunHandler {
-    fn drop(&mut self) {
-        if self.cleaned {
-            return;
-        }
-        if self.query_state().ok().flatten().is_some() {
-            let _ = self.signal_container(SIGKILL_NUMBER);
-        }
-        if let Err(error) = self.delete_runtime_state() {
-            tracing::warn!(
-                container_id = %self.container_id,
-                %error,
-                "Failed to clean Sandbox runtime state on handler drop"
-            );
-        }
-        self.reap_child();
-    }
-}
-
 fn runtime_failure(operation: &str, output: &Output) -> BoxError {
     let stderr = String::from_utf8_lossy(&output.stderr);
     BoxError::ExecError(format!(
@@ -354,5 +338,39 @@ fn remove_dir_if_exists(path: &Path) {
         Err(error) => {
             tracing::warn!(path = %path.display(), %error, "Failed to remove Sandbox runtime directory")
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_handler_detaches_from_live_runtime_process() {
+        let temporary = tempfile::tempdir().unwrap();
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let handler = CrunHandler::from_child(
+            PathBuf::from("/bin/true"),
+            temporary.path().join("runtime"),
+            "detached-test".to_string(),
+            pid,
+            child,
+            temporary.path().join("bundle"),
+            temporary.path().join("runtime.json"),
+        );
+
+        drop(handler);
+        let remained_alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+            let mut status = 0;
+            libc::waitpid(pid as i32, &mut status, 0);
+        }
+        assert!(
+            remained_alive,
+            "dropping a runtime handle must not destroy a detached Sandbox"
+        );
     }
 }
