@@ -75,7 +75,8 @@ pub(crate) fn remove_host_cgroup(box_id: &str) {
 }
 
 /// Remove transient host resources for a stopped box while keeping its state.
-pub fn cleanup_stopped_box(record: &BoxRecord) {
+pub fn cleanup_stopped_box(record: &BoxRecord) -> a3s_box_core::error::Result<()> {
+    cleanup_sandbox_runtime(record)?;
     // Detach volumes but KEEP the network endpoint (network_name = None): a
     // persistent (non---rm) box must retain its IP/MAC across stop/start, the
     // same way `restart.rs` does (it skips this cleanup). Releasing it on stop
@@ -89,6 +90,7 @@ pub fn cleanup_stopped_box(record: &BoxRecord) {
     a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
     remove_host_cgroup(&record.id);
+    Ok(())
 }
 
 /// Remove anonymous volumes created from OCI `VOLUME` declarations.
@@ -132,7 +134,7 @@ pub fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
 }
 
 /// Remove all host-side resources owned by a box record.
-pub fn cleanup_removed_box(record: &BoxRecord) {
+pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()> {
     if record.auto_remove {
         if let Err(err) = crate::log_archive::archive_removed_logs(record) {
             tracing::debug!(
@@ -142,6 +144,8 @@ pub fn cleanup_removed_box(record: &BoxRecord) {
             );
         }
     }
+
+    cleanup_sandbox_runtime(record)?;
 
     cleanup_record_resources(record);
     cleanup_anonymous_volumes(&record.anonymous_volumes);
@@ -169,11 +173,27 @@ pub fn cleanup_removed_box(record: &BoxRecord) {
     if fs_mount_dir.exists() {
         let _ = std::fs::remove_dir_all(&fs_mount_dir);
     }
+    Ok(())
+}
+
+fn cleanup_sandbox_runtime(record: &BoxRecord) -> a3s_box_core::error::Result<()> {
+    if !record.isolation.is_sandbox() {
+        return Ok(());
+    }
+
+    a3s_box_runtime::vm::reap::cleanup_recorded_sandbox_runtime(&record.box_dir, &record.id)
 }
 
 /// Roll back a box record that was partially created.
 pub fn cleanup_partial_box_record(record: &BoxRecord, state: Option<&mut StateFile>) {
-    cleanup_removed_box(record);
+    if let Err(err) = cleanup_removed_box(record) {
+        tracing::warn!(
+            box_id = %record.id,
+            error = %err,
+            "Failed to clean partial Box resources; preserving state for recovery"
+        );
+        return;
+    }
 
     if let Some(state) = state {
         if let Err(err) = state.remove(&record.id) {

@@ -79,13 +79,13 @@ async fn stop_one(
     );
 
     if auto_remove {
-        cleanup::cleanup_removed_box(&record_snapshot);
+        cleanup::cleanup_removed_box(&record_snapshot)?;
         StateFile::remove_record(&box_id)?;
         println!("{name} (auto-removed)");
         return Ok(());
     }
 
-    cleanup::cleanup_stopped_box(&record_snapshot);
+    cleanup::cleanup_stopped_box(&record_snapshot)?;
 
     // Apply the status change atomically (load-fresh + mutate + save under the
     // state lock) so it cannot clobber a concurrent run/monitor/compose write

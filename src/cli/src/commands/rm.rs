@@ -64,7 +64,7 @@ fn rm_one(
 
     let box_id = record.id.clone();
     let name = record.name.clone();
-    cleanup::cleanup_removed_box(&record);
+    cleanup::cleanup_removed_box(&record)?;
 
     // Remove from state atomically under the lock (avoids clobbering concurrent
     // monitor/CLI writers that rewrite the whole record vector), then keep this
