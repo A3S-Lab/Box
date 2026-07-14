@@ -85,6 +85,12 @@ prometheus = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 a3s-box-netproxy = { version = "3.0", path = "../netproxy" }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.48", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
 [target.'cfg(unix)'.dependencies]
 # TEE attestation verification
 p384 = { workspace = true }

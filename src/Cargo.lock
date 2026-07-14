@@ -206,6 +206,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "uuid",
+ "windows-sys 0.48.0",
  "x509-cert",
  "xz2",
  "zstd",

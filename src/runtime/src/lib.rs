@@ -27,6 +27,7 @@ pub mod log;
 pub mod managed_execution_store;
 pub mod network;
 pub mod oci;
+pub mod process;
 pub mod prom;
 pub mod resize;
 pub mod rootfs;
@@ -69,6 +70,7 @@ pub use managed_execution_store::{
     ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,
     ManagedExecutionStoreResult,
 };
+pub use process::{is_process_alive, is_process_alive_with_identity, pid_start_time};
 
 // gRPC clients
 #[cfg(unix)]
