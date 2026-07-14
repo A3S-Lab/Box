@@ -19,6 +19,15 @@ python3 compat/e2b/fixtures/official-clients/run_fixtures.py generate
 python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify
 ```
 
+The runner uses `uv` when it is available on `PATH`, then falls back to the
+standard-library `venv` module. On hosts where Python was packaged without
+`ensurepip`, pass a trusted pip wheel without installing it into the host:
+
+```bash
+python3 compat/e2b/fixtures/official-clients/run_fixtures.py \
+  --pip-bootstrap-wheel /path/to/pip.whl verify
+```
+
 Generated JSON Lines files are compatibility evidence, not server
 implementations. The Rust control plane must satisfy them without adding A3S
 fields to upstream requests or responses.

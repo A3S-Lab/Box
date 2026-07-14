@@ -52,7 +52,11 @@ def download_artifact(artifact: dict[str, Any], destination: Path) -> None:
     destination.write_bytes(payload)
 
 
-def prepare_python(temp: Path, artifacts: dict[str, dict[str, Any]]) -> Path:
+def prepare_python(
+    temp: Path,
+    artifacts: dict[str, dict[str, Any]],
+    pip_bootstrap_wheel: Path | None,
+) -> Path:
     environment = temp / "python"
     python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     wheels = []
@@ -74,6 +78,25 @@ def prepare_python(temp: Path, artifacts: dict[str, dict[str, Any]]) -> Path:
             [uv, "pip", "install", "--python", str(python), *wheels],
             check=True,
             env=env,
+        )
+    elif pip_bootstrap_wheel:
+        bootstrap = pip_bootstrap_wheel.resolve()
+        if not bootstrap.is_file():
+            raise FileNotFoundError(f"pip bootstrap wheel not found: {bootstrap}")
+        venv.EnvBuilder(with_pip=False).create(environment)
+        bootstrap_env = env.copy()
+        bootstrap_env["PYTHONPATH"] = str(bootstrap)
+        subprocess.run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                *wheels,
+            ],
+            check=True,
+            env=bootstrap_env,
         )
     else:
         venv.EnvBuilder(with_pip=True).create(environment)
@@ -176,11 +199,16 @@ def run_client(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["generate", "verify"], nargs="?", default="verify")
+    parser.add_argument(
+        "--pip-bootstrap-wheel",
+        type=Path,
+        help="use this pip wheel when uv and ensurepip are unavailable",
+    )
     args = parser.parse_args()
     artifacts = load_artifacts()
     with tempfile.TemporaryDirectory(prefix="a3s-e2b-official-clients-") as directory:
         temp = Path(directory)
-        python = prepare_python(temp, artifacts)
+        python = prepare_python(temp, artifacts, args.pip_bootstrap_wheel)
         typescript_client = prepare_typescript(temp, artifacts)
         update = args.mode == "generate"
         run_client(
