@@ -163,7 +163,7 @@ pub(crate) struct RecordingExecutionManager {
 }
 
 impl RecordingExecutionManager {
-    fn new(clock: Arc<dyn Clock>) -> Self {
+    pub(crate) fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
             clock,
             fail_create: AtomicBool::new(false),
@@ -230,6 +230,30 @@ impl ExecutionManager for RecordingExecutionManager {
         })
     }
 
+    async fn pause(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        _keep_memory: bool,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let mut executions = self.executions.lock().unwrap();
+        let execution = executions
+            .get_mut(execution_id.as_str())
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        if execution.lease.generation != generation || execution.state != ExecutionState::Running {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "stale test pause".to_string(),
+            });
+        }
+        execution.state = ExecutionState::Paused;
+        let next_generation = generation.get().checked_add(1).ok_or_else(|| {
+            ExecutionManagerError::Internal("test execution generation is exhausted".into())
+        })?;
+        execution.lease.generation = ExecutionGeneration::new(next_generation)?;
+        Ok(execution.lease.clone())
+    }
+
     async fn resume(
         &self,
         execution_id: &ExecutionId,
@@ -246,7 +270,10 @@ impl ExecutionManager for RecordingExecutionManager {
             });
         }
         execution.state = ExecutionState::Running;
-        execution.lease.generation = ExecutionGeneration::new(generation.get() + 1)?;
+        let next_generation = generation.get().checked_add(1).ok_or_else(|| {
+            ExecutionManagerError::Internal("test execution generation is exhausted".into())
+        })?;
+        execution.lease.generation = ExecutionGeneration::new(next_generation)?;
         Ok(execution.lease.clone())
     }
 

@@ -58,6 +58,24 @@ pub trait SandboxRepository: Send + Sync {
 
     async fn list(&self, filter: &SandboxListFilter) -> RepositoryResult<SandboxPage>;
 
+    /// Page through every non-terminal record that startup reconciliation must inspect.
+    async fn list_reconcilable(
+        &self,
+        after: Option<&SandboxCursor>,
+        limit: NonZeroU32,
+    ) -> RepositoryResult<SandboxPage>;
+
+    /// Atomically claim actionable records whose expiry is at or before `deadline`.
+    ///
+    /// Returned records have already advanced to `pausing` or `killing`. A
+    /// concurrent timeout replacement must therefore either commit before the
+    /// claim and make the record ineligible, or observe a generation conflict.
+    async fn claim_expired(
+        &self,
+        deadline: DateTime<Utc>,
+        limit: NonZeroU32,
+    ) -> RepositoryResult<Vec<SandboxRecord>>;
+
     /// Replace one record only when its persisted generation equals `expected`.
     ///
     /// Implementations must reject a replacement with a different sandbox ID

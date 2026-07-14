@@ -315,14 +315,7 @@ impl SandboxRecord {
         lease: ExecutionLease,
     ) -> Result<SandboxGeneration, LifecycleError> {
         self.require_state(&[LifecycleState::Creating, LifecycleState::Resuming])?;
-        if lease.plan != self.plan {
-            return Err(LifecycleError::ExecutionPlanMismatch);
-        }
-        if let Some(execution_id) = &self.execution_id {
-            if execution_id != &lease.execution_id {
-                return Err(LifecycleError::ExecutionIdentityMismatch);
-            }
-        }
+        self.validate_execution_lease(&lease)?;
         let next = self.generation.next()?;
         self.execution_id = Some(lease.execution_id);
         self.execution_generation = Some(lease.generation);
@@ -338,8 +331,20 @@ impl SandboxRecord {
         self.transition(&[LifecycleState::Running], LifecycleState::Pausing)
     }
 
-    pub fn mark_paused(&mut self) -> Result<SandboxGeneration, LifecycleError> {
-        self.transition(&[LifecycleState::Pausing], LifecycleState::Paused)
+    pub fn mark_paused(
+        &mut self,
+        lease: ExecutionLease,
+    ) -> Result<SandboxGeneration, LifecycleError> {
+        self.require_state(&[LifecycleState::Pausing])?;
+        self.validate_execution_lease(&lease)?;
+        let next = self.generation.next()?;
+        self.execution_id = Some(lease.execution_id);
+        self.execution_generation = Some(lease.generation);
+        self.resources = lease.resources;
+        self.started_at.get_or_insert(lease.started_at);
+        self.state = LifecycleState::Paused;
+        self.generation = next;
+        Ok(next)
     }
 
     pub fn begin_resume(&mut self) -> Result<SandboxGeneration, LifecycleError> {
@@ -373,7 +378,9 @@ impl SandboxRecord {
     ) -> Result<SandboxGeneration, LifecycleError> {
         self.require_state(&[
             LifecycleState::Creating,
+            LifecycleState::Running,
             LifecycleState::Pausing,
+            LifecycleState::Paused,
             LifecycleState::Resuming,
         ])?;
         let next = self.generation.next()?;
@@ -406,6 +413,26 @@ impl SandboxRecord {
         Ok(next)
     }
 
+    fn validate_execution_lease(&self, lease: &ExecutionLease) -> Result<(), LifecycleError> {
+        if lease.plan != self.plan {
+            return Err(LifecycleError::ExecutionPlanMismatch);
+        }
+        if self
+            .execution_id
+            .as_ref()
+            .is_some_and(|execution_id| execution_id != &lease.execution_id)
+        {
+            return Err(LifecycleError::ExecutionIdentityMismatch);
+        }
+        if self
+            .execution_generation
+            .is_some_and(|generation| lease.generation <= generation)
+        {
+            return Err(LifecycleError::ExecutionGenerationMismatch);
+        }
+        Ok(())
+    }
+
     fn require_state(&self, allowed: &[LifecycleState]) -> Result<(), LifecycleError> {
         if allowed.contains(&self.state) {
             return Ok(());
@@ -436,6 +463,8 @@ pub enum LifecycleError {
     ExecutionPlanMismatch,
     #[error("runtime returned a different execution identity")]
     ExecutionIdentityMismatch,
+    #[error("runtime returned a stale execution generation")]
+    ExecutionGenerationMismatch,
     #[error("sandbox has no runtime execution to resume")]
     MissingExecution,
     #[error("invalid persisted sandbox state: {0}")]

@@ -217,6 +217,14 @@ pub trait ExecutionManager: Send + Sync {
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus>;
 
+    /// Pause one execution and return the generation-fenced paused lease.
+    async fn pause(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        keep_memory: bool,
+    ) -> ExecutionManagerResult<ExecutionLease>;
+
     async fn resume(
         &self,
         execution_id: &ExecutionId,

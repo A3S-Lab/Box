@@ -311,6 +311,30 @@ impl ExecutionManager for FixtureExecutionManager {
         })
     }
 
+    async fn pause(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        _keep_memory: bool,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let mut executions = self.executions()?;
+        let execution = executions
+            .get_mut(execution_id.as_str())
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        if execution.lease.generation != generation || execution.state != ExecutionState::Running {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "stale fixture pause".to_string(),
+            });
+        }
+        let next_generation = generation.get().checked_add(1).ok_or_else(|| {
+            ExecutionManagerError::Internal("fixture execution generation is exhausted".into())
+        })?;
+        execution.lease.generation = ExecutionGeneration::new(next_generation)?;
+        execution.state = ExecutionState::Paused;
+        Ok(execution.lease.clone())
+    }
+
     async fn resume(
         &self,
         execution_id: &ExecutionId,
