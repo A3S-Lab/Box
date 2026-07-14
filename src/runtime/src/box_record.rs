@@ -208,10 +208,12 @@ impl BoxRecord {
     /// runtime service cannot operate on a record written by incompatible
     /// code.
     pub fn managed_state(&self) -> a3s_box_core::Result<Option<ManagedExecutionState>> {
-        if self.managed_execution.is_none() {
+        let Some(metadata) = self.managed_execution.as_ref() else {
             return Ok(None);
-        }
-        ManagedExecutionState::from_status(&self.status).map(Some)
+        };
+        let state = ManagedExecutionState::from_status(&self.status)?;
+        validate_pending_operation(state, metadata.pending_operation.as_ref())?;
+        Ok(Some(state))
     }
 
     /// Render a concise lifecycle status with health, exit, and restart annotations.
@@ -244,6 +246,7 @@ impl BoxRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedExecutionState {
     Creating,
+    Starting,
     Running,
     Pausing,
     Paused,
@@ -258,6 +261,7 @@ impl ManagedExecutionState {
     pub const fn as_status(self) -> &'static str {
         match self {
             Self::Creating => "creating",
+            Self::Starting => "starting",
             Self::Running => "running",
             Self::Pausing => "pausing",
             Self::Paused => "paused",
@@ -274,6 +278,7 @@ impl ManagedExecutionState {
             // Accept the legacy pre-start and terminal spellings so records
             // created during the state-schema migration remain recoverable.
             "created" | "creating" => Ok(Self::Creating),
+            "starting" => Ok(Self::Starting),
             "running" => Ok(Self::Running),
             "pausing" => Ok(Self::Pausing),
             "paused" => Ok(Self::Paused),
@@ -336,6 +341,19 @@ pub struct ManagedExecutionMetadata {
     pub request: CreateExecutionRequest,
     /// Backend resolution validated before any launch side effects.
     pub plan: ResolvedExecutionPlan,
+    /// Lifecycle side effect claimed before calling the backend.
+    #[serde(default)]
+    pub pending_operation: Option<ManagedExecutionOperation>,
+}
+
+/// Recoverable backend operation associated with a transitional state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ManagedExecutionOperation {
+    Start,
+    Pause { keep_memory: bool },
+    Resume,
+    Kill,
 }
 
 impl ManagedExecutionMetadata {
@@ -356,6 +374,7 @@ impl ManagedExecutionMetadata {
             generation,
             request,
             plan,
+            pending_operation: None,
         })
     }
 
@@ -373,6 +392,42 @@ impl ManagedExecutionMetadata {
             ));
         }
         Ok(())
+    }
+}
+
+fn validate_pending_operation(
+    state: ManagedExecutionState,
+    operation: Option<&ManagedExecutionOperation>,
+) -> a3s_box_core::Result<()> {
+    let consistent = matches!(
+        (state, operation),
+        (
+            ManagedExecutionState::Starting,
+            Some(ManagedExecutionOperation::Start)
+        ) | (
+            ManagedExecutionState::Pausing,
+            Some(ManagedExecutionOperation::Pause { .. })
+        ) | (
+            ManagedExecutionState::Resuming,
+            Some(ManagedExecutionOperation::Resume)
+        ) | (
+            ManagedExecutionState::Killing,
+            Some(ManagedExecutionOperation::Kill)
+        ) | (
+            ManagedExecutionState::Creating
+                | ManagedExecutionState::Running
+                | ManagedExecutionState::Paused
+                | ManagedExecutionState::Stopped
+                | ManagedExecutionState::Failed,
+            None
+        )
+    );
+    if consistent {
+        Ok(())
+    } else {
+        Err(a3s_box_core::BoxError::StateError(format!(
+            "managed execution state {state} has inconsistent pending operation"
+        )))
     }
 }
 

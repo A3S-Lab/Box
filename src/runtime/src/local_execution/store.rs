@@ -1,0 +1,165 @@
+use a3s_box_core::{
+    ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult, OperationId,
+};
+
+use super::record::{apply_handle, clear_live_runtime, execution_id};
+use super::support::{generation, managed_state};
+use super::{LocalExecutionHandle, LocalExecutionManager};
+use crate::{
+    BoxRecord, ManagedExecutionOperation, ManagedExecutionReservation, ManagedExecutionState,
+    ManagedExecutionStoreError,
+};
+
+impl LocalExecutionManager {
+    pub(super) async fn reserve(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<ManagedExecutionReservation> {
+        let store = self.store.clone();
+        run_store(move || store.reserve(record)).await
+    }
+
+    pub(super) async fn get(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> ExecutionManagerResult<Option<BoxRecord>> {
+        let store = self.store.clone();
+        let execution_id = execution_id.clone();
+        run_store(move || store.get(&execution_id)).await
+    }
+
+    pub(super) async fn get_by_operation(
+        &self,
+        operation_id: &OperationId,
+    ) -> ExecutionManagerResult<Option<BoxRecord>> {
+        let store = self.store.clone();
+        let operation_id = operation_id.clone();
+        run_store(move || store.get_by_operation_id(&operation_id)).await
+    }
+
+    pub(super) async fn transition(
+        &self,
+        record: &BoxRecord,
+        from: ManagedExecutionState,
+        to: ManagedExecutionState,
+        update: RuntimeUpdate,
+    ) -> ExecutionManagerResult<BoxRecord> {
+        let store = self.store.clone();
+        let execution_id = execution_id(record)?;
+        let generation = generation(record, &execution_id)?;
+        run_store(move || {
+            store.transition_with(&execution_id, generation, from, to, |record| match update {
+                RuntimeUpdate::None => {}
+                RuntimeUpdate::Handle(handle) => apply_handle(record, &handle),
+                RuntimeUpdate::Terminal(exit_code) => clear_live_runtime(record, exit_code),
+                RuntimeUpdate::PauseClaim(keep_memory) => {
+                    if let Some(metadata) = record.managed_execution.as_mut() {
+                        metadata.pending_operation =
+                            Some(ManagedExecutionOperation::Pause { keep_memory });
+                    }
+                }
+            })
+        })
+        .await
+    }
+
+    pub(super) async fn complete_with_handle(
+        &self,
+        record: &BoxRecord,
+        from: ManagedExecutionState,
+        to: ManagedExecutionState,
+        handle: LocalExecutionHandle,
+    ) -> ExecutionManagerResult<BoxRecord> {
+        let execution_id = execution_id(record)?;
+        let current_generation = generation(record, &execution_id)?;
+        let expected_generation = if matches!(
+            (from, to),
+            (
+                ManagedExecutionState::Pausing,
+                ManagedExecutionState::Paused
+            ) | (
+                ManagedExecutionState::Resuming,
+                ManagedExecutionState::Running
+            )
+        ) {
+            ExecutionGeneration::new(current_generation.get().checked_add(1).ok_or_else(|| {
+                ExecutionManagerError::Internal(format!(
+                    "execution {execution_id} generation is exhausted"
+                ))
+            })?)?
+        } else {
+            current_generation
+        };
+        match self
+            .transition(record, from, to, RuntimeUpdate::Handle(handle))
+            .await
+        {
+            Ok(record) => Ok(record),
+            Err(error @ ExecutionManagerError::Conflict { .. }) => {
+                let Some(current) = self.get(&execution_id).await? else {
+                    return Err(ExecutionManagerError::NotFound(execution_id));
+                };
+                if managed_state(&current)? == to
+                    && generation(&current, &execution_id)? == expected_generation
+                {
+                    Ok(current)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+pub(super) enum RuntimeUpdate {
+    None,
+    Handle(LocalExecutionHandle),
+    Terminal(Option<i32>),
+    PauseClaim(bool),
+}
+
+async fn run_store<T>(
+    operation: impl FnOnce() -> Result<T, ManagedExecutionStoreError> + Send + 'static,
+) -> ExecutionManagerResult<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!("managed state task failed: {error}"))
+        })?
+        .map_err(map_store_error)
+}
+
+fn map_store_error(error: ManagedExecutionStoreError) -> ExecutionManagerError {
+    match error {
+        ManagedExecutionStoreError::Io(error) => {
+            ExecutionManagerError::Unavailable(error.to_string())
+        }
+        ManagedExecutionStoreError::NotFound(execution_id) => {
+            ExecutionManagerError::NotFound(execution_id)
+        }
+        ManagedExecutionStoreError::Conflict {
+            execution_id,
+            message,
+        } => ExecutionManagerError::Conflict {
+            execution_id,
+            message,
+        },
+        ManagedExecutionStoreError::Unmanaged(execution_id) => ExecutionManagerError::Internal(
+            format!("execution record is not managed: {execution_id}"),
+        ),
+        ManagedExecutionStoreError::InvalidRecord(message) => {
+            ExecutionManagerError::Internal(message)
+        }
+        ManagedExecutionStoreError::InvalidTransition {
+            execution_id,
+            from,
+            to,
+        } => ExecutionManagerError::Internal(format!(
+            "invalid managed transition for {execution_id}: {from} -> {to}"
+        )),
+    }
+}

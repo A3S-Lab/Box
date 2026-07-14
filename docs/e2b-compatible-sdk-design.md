@@ -760,6 +760,14 @@ creation intent matches, persists transitional lifecycle claims, rejects stale
 state or generation comparisons, and advances the generation exactly once when
 pause or resume completes. These file transactions are the local lifecycle
 source of truth; backend calls remain outside the state lock.
+`LocalExecutionManager` now implements the backend-neutral lifecycle contract
+over that store and an injectable runtime backend. It persists a `starting`
+claim before launch, keeps pause policy with the corresponding transitional
+record, performs state-file work on Tokio blocking workers, and resolves
+ambiguous backend errors from runtime observations before publishing a result.
+Startup reconciliation can therefore distinguish an unstarted claim from a
+runtime that became ready before its durable `running` publication. The
+production `VmManager` backend is still a separate remaining gate.
 Slice 4 remains incomplete until the real `ExecutionManager` owns
 create/start/run for both callers.
 

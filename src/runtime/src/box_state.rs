@@ -494,6 +494,20 @@ mod tests {
             .contains("unknown managed execution state"));
     }
 
+    #[test]
+    fn strict_load_rejects_transition_without_matching_pending_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("boxes.json");
+        let mut record = managed_record("managed", OperationId::new("operation-1").unwrap());
+        record.status = "pausing".to_string();
+        std::fs::write(&path, serde_json::to_vec(&vec![record]).unwrap()).unwrap();
+
+        let error = BoxStateStore::load(&path).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("inconsistent pending operation"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn concurrent_transactions_do_not_lose_records() {

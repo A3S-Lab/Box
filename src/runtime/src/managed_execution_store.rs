@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use a3s_box_core::{ExecutionGeneration, ExecutionId, OperationId};
 use thiserror::Error;
 
-use crate::{BoxRecord, BoxStateStore, ManagedExecutionState};
+use crate::{BoxRecord, BoxStateStore, ManagedExecutionOperation, ManagedExecutionState};
 
 /// Strict durable repository used by the local `ExecutionManager`.
 #[derive(Debug, Clone)]
@@ -164,6 +164,25 @@ impl ManagedExecutionStore {
         expected_state: ManagedExecutionState,
         next_state: ManagedExecutionState,
     ) -> ManagedExecutionStoreResult<BoxRecord> {
+        self.transition_with(
+            execution_id,
+            expected_generation,
+            expected_state,
+            next_state,
+            |_| {},
+        )
+    }
+
+    /// Persist one legal transition and update runtime evidence in the same
+    /// transaction.
+    pub fn transition_with(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+        expected_state: ManagedExecutionState,
+        next_state: ManagedExecutionState,
+        update: impl FnOnce(&mut BoxRecord),
+    ) -> ManagedExecutionStoreResult<BoxRecord> {
         let execution_id = execution_id.clone();
         BoxStateStore::transact(&self.path, move |store| {
             let record = store
@@ -195,12 +214,48 @@ impl ManagedExecutionStore {
                 next_state,
                 expected_generation,
             )?;
+            let original_metadata = record
+                .managed_execution
+                .as_ref()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?
+                .clone();
+            update(record);
+            if record.id != execution_id.as_str() {
+                return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                    "transition changed execution ID {execution_id}"
+                )));
+            }
+            let updated_metadata = record
+                .managed_execution
+                .as_ref()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            if updated_metadata.operation_id != original_metadata.operation_id
+                || !same_creation_intent(updated_metadata, &original_metadata)?
+            {
+                return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                    "transition changed creation identity for {execution_id}"
+                )));
+            }
             record.status = next_state.as_status().to_string();
-            record
+            let metadata = record
                 .managed_execution
                 .as_mut()
-                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?
-                .generation = next_generation;
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            metadata.generation = next_generation;
+            metadata.pending_operation = match next_state {
+                ManagedExecutionState::Starting => Some(ManagedExecutionOperation::Start),
+                ManagedExecutionState::Pausing => match metadata.pending_operation.take() {
+                    Some(operation @ ManagedExecutionOperation::Pause { .. }) => Some(operation),
+                    _ => Some(ManagedExecutionOperation::Pause { keep_memory: false }),
+                },
+                ManagedExecutionState::Resuming => Some(ManagedExecutionOperation::Resume),
+                ManagedExecutionState::Killing => Some(ManagedExecutionOperation::Kill),
+                ManagedExecutionState::Creating
+                | ManagedExecutionState::Running
+                | ManagedExecutionState::Paused
+                | ManagedExecutionState::Stopped
+                | ManagedExecutionState::Failed => None,
+            };
             Ok(record.clone())
         })
     }
@@ -252,12 +307,13 @@ fn transition_generation(
     current: ExecutionGeneration,
 ) -> ManagedExecutionStoreResult<ExecutionGeneration> {
     use ManagedExecutionState::{
-        Creating, Failed, Killing, Paused, Pausing, Resuming, Running, Stopped,
+        Creating, Failed, Killing, Paused, Pausing, Resuming, Running, Starting, Stopped,
     };
 
     let legal = matches!(
         (from, to),
-        (Creating, Running | Killing | Stopped | Failed)
+        (Creating, Starting | Killing | Stopped | Failed)
+            | (Starting, Creating | Running | Killing | Stopped | Failed)
             | (Running, Pausing | Killing | Stopped | Failed)
             | (Pausing, Paused | Running | Killing | Stopped | Failed)
             | (Paused, Resuming | Killing | Stopped | Failed)
@@ -385,11 +441,19 @@ mod tests {
             .reserve(managed_record(id.as_str(), "operation-1"))
             .unwrap();
 
-        let running = store
+        store
             .transition(
                 &id,
                 ExecutionGeneration::INITIAL,
                 ManagedExecutionState::Creating,
+                ManagedExecutionState::Starting,
+            )
+            .unwrap();
+        let running = store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Starting,
                 ManagedExecutionState::Running,
             )
             .unwrap();
@@ -450,6 +514,14 @@ mod tests {
                 &id,
                 ExecutionGeneration::INITIAL,
                 ManagedExecutionState::Creating,
+                ManagedExecutionState::Starting,
+            )
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Starting,
                 ManagedExecutionState::Running,
             )
             .unwrap();
@@ -502,6 +574,14 @@ mod tests {
                 &id,
                 ExecutionGeneration::INITIAL,
                 ManagedExecutionState::Creating,
+                ManagedExecutionState::Starting,
+            )
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Starting,
                 ManagedExecutionState::Running,
             )
             .unwrap();
