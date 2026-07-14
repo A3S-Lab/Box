@@ -4,7 +4,6 @@
 //! On every load, dead active PIDs are reconciled to mark boxes as dead.
 
 mod file;
-mod lock;
 pub(crate) mod policy;
 #[cfg(test)]
 mod tests;

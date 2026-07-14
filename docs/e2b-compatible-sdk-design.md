@@ -746,8 +746,12 @@ Slice 4 has started by moving the persisted execution record into
 `a3s-box-runtime` as the canonical schema shared by the CLI and Rust SDK. This
 prevents either client from dropping fields it does not model while the
 durable state store and lifecycle orchestration are moved behind the runtime
-facade. Slice 4 remains incomplete until those state transactions and the real
-`ExecutionManager` own create/start/run for both callers.
+facade. The runtime now also owns strict and recovery-compatible reads, the
+cross-process advisory lock, durable atomic writes, and synchronous
+read-modify-write transactions. The Rust SDK uses that store directly; the CLI
+keeps only its process reconciliation and resource-cleanup policy wrapper.
+Slice 4 remains incomplete until the real `ExecutionManager` owns
+create/start/run for both callers.
 
 Each slice must pass its focused tests and repository CI before merge. The
 Phase 2 gate remains closed until slice 5 proves real create/connect/list/
