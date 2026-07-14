@@ -17,5 +17,11 @@
   "mcp_schema_digest": "sha256:82457dc19eb9c7ae29ed66034ac9d763e92f5fa48f9398910d0e1dbf8b06e70e",
   "contract_inventory_digest": "sha256:0e7d4fb24ef4cf2508400533c58ee02c10ea5dfbe53439b7b61d49045de2e173",
   "public_export_inventory_digest": "sha256:82eb129a6f9d888b7d0eda2aa0d767d258974d0f07f68d122acee45d2fdb1e2b",
+  "client_artifact_digests": {
+    "python-code-interpreter-wheel": "sha256:8449ff1abb507e4c28134c9cbc4e59f76c09fadceab879c8c4031399b31a126a",
+    "python-e2b-wheel": "sha256:0f1971f8e287aa717ad3e44c2cbe26753da97acf34da24225b07675a07c57300",
+    "typescript-code-interpreter-tarball": "sha256:df9350312e46f6f6c4f62004da528fd15176078b3027b4507f7358a6eab0fe57",
+    "typescript-e2b-tarball": "sha256:53581eae5f11efb4b1020b64c05d7e8fc46fe3e14b5172322b5feb35c262e579"
+  },
   "a3s_compat_version": "0.1.0-preview.1"
 }

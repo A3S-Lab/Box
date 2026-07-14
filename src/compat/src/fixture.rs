@@ -175,6 +175,64 @@ fn validate_source_lock(paths: &FixturePaths, source_lock: &SourceLock) -> Resul
         }
     }
 
+    let mut artifact_ids = BTreeSet::new();
+    for artifact in &source_lock.artifacts {
+        if !artifact_ids.insert(artifact.id.as_str()) {
+            bail!("duplicate official client artifact id {}", artifact.id);
+        }
+        let source = source_lock.sources.get(&artifact.source).with_context(|| {
+            format!(
+                "official client artifact {} names unknown source {}",
+                artifact.id, artifact.source
+            )
+        })?;
+        let expected_version = source.packages.get(&artifact.language).with_context(|| {
+            format!(
+                "official client artifact {} has unknown language {}",
+                artifact.id, artifact.language
+            )
+        })?;
+        if artifact.version != *expected_version {
+            bail!(
+                "official client artifact {} version {} does not match pinned {} version {}",
+                artifact.id,
+                artifact.version,
+                artifact.language,
+                expected_version
+            );
+        }
+        if artifact.package.trim().is_empty()
+            || !artifact.url.starts_with("https://")
+            || !is_sha256(&artifact.sha256)
+        {
+            bail!(
+                "official client artifact {} has invalid metadata",
+                artifact.id
+            );
+        }
+        if artifact.language == "typescript"
+            && artifact
+                .integrity
+                .as_deref()
+                .is_none_or(|integrity| !integrity.starts_with("sha512-"))
+        {
+            bail!(
+                "official TypeScript client artifact {} is missing npm integrity",
+                artifact.id
+            );
+        }
+    }
+    for required in [
+        "python-e2b-wheel",
+        "python-code-interpreter-wheel",
+        "typescript-e2b-tarball",
+        "typescript-code-interpreter-tarball",
+    ] {
+        if !artifact_ids.contains(required) {
+            bail!("E2B upstream lock is missing official client artifact {required}");
+        }
+    }
+
     let mut locked_paths = BTreeSet::new();
     for file in &source_lock.files {
         validate_relative_path(&file.local_path)?;
@@ -240,6 +298,13 @@ fn validate_relative_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn is_sha256(value: &str) -> bool {
+    value.len() == 71
+        && value
+            .strip_prefix("sha256:")
+            .is_some_and(|digest| digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn build_manifest(
     source_lock: &SourceLock,
     inventory: &ContractInventory,
@@ -287,6 +352,11 @@ fn build_manifest(
         mcp_schema_digest: locked_digest(&file_digests, MCP_SCHEMA)?,
         contract_inventory_digest: sha256(contract_inventory_bytes),
         public_export_inventory_digest: sha256(public_export_bytes),
+        client_artifact_digests: source_lock
+            .artifacts
+            .iter()
+            .map(|artifact| (artifact.id.clone(), artifact.sha256.clone()))
+            .collect(),
         a3s_compat_version: source_lock.compatibility.version.clone(),
     })
 }
