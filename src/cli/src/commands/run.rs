@@ -4,9 +4,11 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use a3s_box_core::config::{BoxConfig, ResourceConfig, SidecarConfig, TeeConfig};
-use a3s_box_core::event::EventEmitter;
-use a3s_box_core::vmm::{parse_signal_name, DEFAULT_SHUTDOWN_TIMEOUT_MS};
-use a3s_box_runtime::VmManager;
+use a3s_box_core::{
+    CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionManager,
+    ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionState, OperationId,
+};
+use a3s_box_runtime::{LocalExecutionManager, VmLocalExecutionBackend};
 use clap::{Args, ValueEnum};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -137,7 +139,9 @@ pub struct RunArgs {
 
 /// Intermediate state produced by the setup phase, consumed by the run phase.
 struct RunContext {
-    vm: VmManager,
+    manager: LocalExecutionManager,
+    execution_id: ExecutionId,
+    generation: ExecutionGeneration,
     box_id: String,
     box_dir: PathBuf,
     name: String,
@@ -145,11 +149,8 @@ struct RunContext {
     exec_socket_path: PathBuf,
     #[cfg_attr(windows, allow(dead_code))]
     pty_socket_path: PathBuf,
-    volume_names: Vec<String>,
     anonymous_volumes: Vec<String>,
     health_checker: Option<tokio::task::JoinHandle<()>>,
-    stop_signal: i32,
-    stop_timeout_ms: u64,
 }
 
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -389,465 +390,14 @@ fn build_pool_client_run(
     })
 }
 
-// ============================================================================
-// Phase 1: Parse args, build config, boot VM, save state
-// ============================================================================
+mod setup;
 
-async fn setup_and_boot(args: &RunArgs) -> Result<RunContext, Box<dyn std::error::Error>> {
-    common::validate_runtime_options(&args.common)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let (restart_policy, max_restart_count) =
-        crate::state::parse_restart_policy(&args.common.restart)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    let memory_mb =
-        parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
-    let resource_limits = common::build_resource_limits(&args.common)?;
-
-    let log_driver: a3s_box_core::log::LogDriver = args
-        .log_driver
-        .parse()
-        .map_err(|e: String| format!("Invalid --log-driver: {e}"))?;
-    let log_opts = common::parse_env_vars(&args.log_opts)
-        .map_err(|e| e.replace("environment variable", "log option"))?;
-    let log_config = a3s_box_core::log::LogConfig {
-        driver: log_driver,
-        options: log_opts,
-    };
-
-    let name = args.common.name.clone().unwrap_or_else(generate_name);
-    let mut env = common::build_env_map(&args.common)?;
-    let port_map = common::normalize_port_maps(&args.common.publish)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let labels = common::parse_env_vars(&args.common.labels)
-        .map_err(|e| e.replace("environment variable", "label"))?;
-    let entrypoint_override = args
-        .common
-        .entrypoint
-        .as_ref()
-        .map(|ep| ep.split_whitespace().map(String::from).collect::<Vec<_>>());
-    let mut volume_specs = args.common.volumes.clone();
-    apply_package_caches(&args.package_cache, &mut volume_specs, &mut env);
-    let (resolved_volumes, volume_names) = resolve_volumes(&volume_specs)?;
-
-    // Parse --shm-size once; reuse for both tmpfs entry and the box record.
-    let shm_size = match &args.common.shm_size {
-        Some(s) => {
-            Some(common::parse_memory_bytes(s).map_err(|e| format!("Invalid --shm-size: {e}"))?)
-        }
-        None => None,
-    };
-    let mut tmpfs = args.common.tmpfs.clone();
-    if let Some(size_bytes) = shm_size {
-        tmpfs.push(format!("/dev/shm:size={}", size_bytes));
-    }
-
-    let network_mode = match &args.common.network {
-        Some(name) => a3s_box_core::NetworkMode::Bridge {
-            network: name.clone(),
-        },
-        None => a3s_box_core::NetworkMode::Tsi,
-    };
-
-    // Default (TSI) networking proxies guest sockets to the host, so a container
-    // cannot reach its own services over the guest loopback. A health check that
-    // probes localhost would always fail — point the user at bridge networking.
-    if matches!(network_mode, a3s_box_core::NetworkMode::Tsi) {
-        if let Some(cmd) = &args.common.health_cmd {
-            let lc = cmd.to_lowercase();
-            if lc.contains("localhost") || lc.contains("127.0.0.1") {
-                eprintln!(
-                    "warning: the health check probes localhost, but default (TSI) networking \
-                     cannot reach a container's own services over loopback, so the check will fail. \
-                     For a working localhost, create and attach a bridge network: \
-                     `a3s-box network create mynet` then run with `--network mynet`."
-                );
-            }
-        }
-    }
-
-    let tee = build_tee_config(args);
-
-    let config = build_box_config(
-        args,
-        memory_mb,
-        resource_limits.clone(),
-        entrypoint_override.clone(),
-        resolved_volumes.clone(),
-        env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        port_map.clone(),
-        network_mode.clone(),
-        tmpfs,
-        tee,
-    )
-    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    a3s_box_core::resolve_execution(&config)?;
-
-    let emitter = EventEmitter::new(256);
-    let mut vm = VmManager::new(config, emitter);
-    // The shim runs the log processor for the box's lifetime (so detached boxes
-    // keep logging after this CLI exits).
-    vm.set_log_config(log_config.clone());
-    let box_id = vm.box_id().to_string();
-    println!(
-        "Creating box {} ({})...",
-        name,
-        BoxRecord::make_short_id(&box_id)
-    );
-
-    let image_name = args.common.image.clone();
-    vm.set_pull_progress_fn(std::sync::Arc::new(move |current, total, digest, size| {
-        if current == 1 && size > 0 {
-            println!("Pulling {}...", image_name);
-        }
-        let short = &digest[digest.len().saturating_sub(12)..];
-        if size < 0 {
-            // Negative size signals completion
-            let actual_size = -size;
-            let size_str = if actual_size >= 1_048_576 {
-                format!("{:.1} MB", actual_size as f64 / 1_048_576.0)
-            } else if actual_size >= 1024 {
-                format!("{:.1} KB", actual_size as f64 / 1024.0)
-            } else {
-                format!("{} B", actual_size)
-            };
-            println!("  [{current}/{total}] {short}: {size_str} ✓");
-        } else {
-            // Positive size means downloading - just show once
-            let size_str = if size >= 1_048_576 {
-                format!("{:.1} MB", size as f64 / 1_048_576.0)
-            } else if size >= 1024 {
-                format!("{:.1} KB", size as f64 / 1024.0)
-            } else {
-                format!("{} B", size)
-            };
-            println!("  [{current}/{total}] {short}: Pulling {size_str}...");
-        }
-    }));
-
-    connect_network(args.common.network.as_deref(), &box_id, &name)?;
-    if let Err(error) = vm.boot().await {
-        crate::cleanup::cleanup_box_resources(
-            &box_id,
-            &volume_names,
-            args.common.network.as_deref(),
-        );
-        return Err(error.into());
-    }
-
-    let image_health_check = vm
-        .image_config()
-        .and_then(|config| config.health_check.clone());
-    let image_stop_signal = vm
-        .image_config()
-        .and_then(|config| config.stop_signal.clone());
-    let health_check = common::effective_health_check(&args.common, image_health_check.as_ref());
-    let effective_stop_signal = common::effective_stop_signal(
-        args.common.stop_signal.as_deref(),
-        image_stop_signal.as_deref(),
-    );
-
-    let pid = vm.pid().await;
-    let box_dir = a3s_box_core::dirs_home().join("boxes").join(&box_id);
-    let exec_socket_path = vm
-        .exec_socket_path()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| box_dir.join("sockets").join("exec.sock"));
-    let pty_socket_path = vm
-        .pty_socket_path()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| box_dir.join("sockets").join("pty.sock"));
-
-    let health_status = if health_check.is_some() {
-        "starting"
-    } else {
-        "none"
-    };
-    let record = BoxRecord {
-        id: box_id.clone(),
-        short_id: BoxRecord::make_short_id(&box_id),
-        name: name.clone(),
-        image: args.common.image.clone(),
-        isolation: common::execution_isolation(&args.common),
-        managed_execution: None,
-        status: "running".to_string(),
-        pid,
-        pid_start_time: pid.and_then(crate::process::pid_start_time),
-        cpus: args.common.cpus,
-        memory_mb,
-        volumes: resolved_volumes,
-        virtiofs_cache: args
-            .common
-            .virtiofs_cache
-            .map(|mode| mode.as_guest_value().to_string()),
-        env,
-        cmd: args.cmd.clone(),
-        entrypoint: entrypoint_override.clone(),
-        box_dir: box_dir.clone(),
-        exec_socket_path: exec_socket_path.clone(),
-        console_log: box_dir.join("logs").join("console.log"),
-        created_at: chrono::Utc::now(),
-        started_at: Some(chrono::Utc::now()),
-        auto_remove: args.rm,
-        hostname: args.common.hostname.clone(),
-        user: args.common.user.clone(),
-        workdir: args.common.workdir.clone(),
-        restart_policy,
-        port_map: port_map.clone(),
-        labels,
-        stopped_by_user: false,
-        restart_count: 0,
-        health_check: health_check.clone(),
-        healthcheck_disabled: args.common.no_healthcheck,
-        health_status: health_status.to_string(),
-        health_retries: 0,
-        health_last_check: None,
-        network_mode: network_mode.clone(),
-        network_name: args.common.network.clone(),
-        volume_names: volume_names.clone(),
-        tmpfs: args.common.tmpfs.clone(),
-        anonymous_volumes: vm.anonymous_volumes().to_vec(),
-        resource_limits,
-        log_config: log_config.clone(),
-        add_host: args.common.add_host.clone(),
-        platform: args.common.platform.clone(),
-        init: args.common.init,
-        read_only: args.common.read_only,
-        cap_add: args.common.cap_add.clone(),
-        cap_drop: args.common.cap_drop.clone(),
-        security_opt: args.common.security_opt.clone(),
-        privileged: args.common.privileged,
-        devices: args.common.device.clone(),
-        gpus: args.common.gpus.clone(),
-        shm_size,
-        stop_signal: effective_stop_signal.clone(),
-        stop_timeout: args.common.stop_timeout,
-        oom_kill_disable: args.common.oom_kill_disable,
-        oom_score_adj: args.common.oom_score_adj,
-        max_restart_count,
-        exit_code: None,
-    };
-
-    let stop_signal = effective_stop_signal
-        .as_deref()
-        .map(parse_signal_name)
-        .unwrap_or(15); // SIGTERM = 15
-    let stop_timeout_ms = args
-        .common
-        .stop_timeout
-        .map(|secs| secs.saturating_mul(1000)) // absurd --stop-timeout must not overflow ms
-        .unwrap_or(DEFAULT_SHUTDOWN_TIMEOUT_MS);
-    let anonymous_volumes = vm.anonymous_volumes().to_vec();
-    // Register atomically (load-fresh-under-lock → push → write). A stale
-    // `load_default()` + `state.add()` (save the in-memory snapshot) is a
-    // lost-update race: concurrent fork registrations clobber each other's records,
-    // so a burst of N forks would leave only a fraction registered.
-    if let Err(error) = StateFile::add_record(record.clone()) {
-        rollback_booted_setup(&mut vm, &record, stop_signal, stop_timeout_ms, None).await;
-        return Err(error.into());
-    }
-
-    if should_create_diff_baseline(args) {
-        if let Err(error) = super::diff::create_box_baseline_snapshot(&box_dir) {
-            tracing::warn!(
-                box_id = %box_id,
-                error = %error,
-                "Failed to create rootfs diff baseline snapshot"
-            );
-        }
-    } else {
-        tracing::debug!(
-            box_id = %box_id,
-            "Skipping rootfs diff baseline snapshot for foreground --rm box"
-        );
-    }
-
-    if let Err(error) = super::volume::attach_volumes(&volume_names, &box_id) {
-        // The record was registered atomically above; un-register it the same way.
-        let _ = StateFile::remove_record(&record.id);
-        rollback_booted_setup(&mut vm, &record, stop_signal, stop_timeout_ms, None).await;
-        return Err(error);
-    }
-
-    let log_dir = box_dir.join("logs");
-    if let Err(error) = std::fs::create_dir_all(&log_dir) {
-        let _ = StateFile::remove_record(&record.id);
-        rollback_booted_setup(&mut vm, &record, stop_signal, stop_timeout_ms, None).await;
-        return Err(error.into());
-    }
-    // Log processing now runs in the shim for the box's lifetime; see
-    // VmManager::set_log_config above. (log_dir is still created so the shim's
-    // container.json has a home.)
-    let _ = &log_dir;
-
-    Ok(RunContext {
-        vm,
-        box_id,
-        box_dir,
-        name,
-        record,
-        exec_socket_path,
-        pty_socket_path,
-        volume_names,
-        anonymous_volumes,
-        health_checker: None,
-        stop_signal,
-        stop_timeout_ms,
-    })
-}
-
-/// Build TeeConfig from run args.
-fn build_tee_config(args: &RunArgs) -> TeeConfig {
-    if args.tee || args.tee_simulate {
-        TeeConfig::SevSnp {
-            workload_id: args
-                .tee_workload_id
-                .clone()
-                .unwrap_or_else(|| args.common.image.clone()),
-            generation: Default::default(),
-            simulate: args.tee_simulate,
-        }
-    } else {
-        TeeConfig::None
-    }
-}
-
-/// Build BoxConfig from parsed run arguments.
-#[allow(clippy::too_many_arguments)]
-fn build_box_config(
-    args: &RunArgs,
-    memory_mb: u32,
-    resource_limits: a3s_box_core::config::ResourceLimits,
-    entrypoint_override: Option<Vec<String>>,
-    resolved_volumes: Vec<String>,
-    extra_env: Vec<(String, String)>,
-    port_map: Vec<String>,
-    network: a3s_box_core::NetworkMode,
-    tmpfs: Vec<String>,
-    tee: TeeConfig,
-) -> Result<BoxConfig, String> {
-    let (cmd, entrypoint_override) = if args.tty {
-        (
-            vec!["a3s-box-pty-keepalive".to_string()],
-            Some(interactive_keepalive_entrypoint()),
-        )
-    } else {
-        (args.cmd.clone(), entrypoint_override)
-    };
-
-    Ok(BoxConfig {
-        isolation: common::execution_isolation(&args.common),
-        image: args.common.image.clone(),
-        resources: ResourceConfig {
-            vcpus: args.common.cpus,
-            memory_mb,
-            ..Default::default()
-        },
-        cmd,
-        stdin_open: args.interactive && !args.no_stdin,
-        entrypoint_override,
-        user: common::normalize_user_option(args.common.user.as_deref())?,
-        workdir: args.common.workdir.clone(),
-        hostname: args.common.hostname.clone(),
-        volumes: resolved_volumes,
-        virtiofs_cache: args
-            .common
-            .virtiofs_cache
-            .map(|mode| mode.as_guest_value().to_string()),
-        extra_env,
-        port_map,
-        dns: args.common.dns.clone(),
-        add_hosts: args.common.add_host.clone(),
-        network,
-        tmpfs,
-        resource_limits,
-        tee,
-        read_only: args.common.read_only,
-        cap_add: args.common.cap_add.clone(),
-        cap_drop: args.common.cap_drop.clone(),
-        security_opt: args.common.security_opt.clone(),
-        privileged: args.common.privileged,
-        sidecar: args.sidecar.as_ref().map(|image| SidecarConfig {
-            image: image.clone(),
-            vsock_port: args.sidecar_vsock_port,
-            env: vec![],
-        }),
-        // A box without `--rm` survives its stop like a Docker stopped
-        // container: keep its dir (logs + overlay upper) so `logs`/`start` work
-        // afterwards. `--rm` boxes and CRI pods stay non-persistent (removed on
-        // teardown). `rm` force-removes either way (cleanup_removed_box).
-        persistent: args.common.persistent || !args.rm,
-        ..Default::default()
-    })
-}
-
-fn should_create_diff_baseline(args: &RunArgs) -> bool {
-    !args.rm || args.detach
-}
-
-/// Initial process used only to keep the guest init alive for `run -it`.
-///
-/// The actual user command is executed over the PTY after guest control sockets
-/// are ready, so short-lived interactive commands do not race the VM shutdown.
-fn interactive_keepalive_entrypoint() -> Vec<String> {
-    vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        "trap 'exit 0' TERM INT; while :; do sleep 3600; done".to_string(),
-    ]
-}
-
-/// Register a network endpoint for the box before booting.
-fn connect_network(
-    net_name: Option<&str>,
-    box_id: &str,
-    name: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(net_name) = net_name else {
-        return Ok(());
-    };
-    let net_store = a3s_box_runtime::NetworkStore::default_path()?;
-    let endpoint = connect_box_to_network(&net_store, net_name, box_id, name)?;
-    println!(
-        "Connected to network {} (IP: {})",
-        net_name, endpoint.ip_address
-    );
-    Ok(())
-}
-
-/// Allocate a network endpoint for a box atomically under the store's
-/// cross-process lock.
-///
-/// A plain `get → connect → update` reads the network outside the lock, so two
-/// concurrent `run --network` could allocate the same IP and drop one endpoint
-/// (#70 fixed the `network`/`start` paths but not this one). Split out from
-/// [`connect_network`] so the lost-update behavior is unit-testable with an
-/// explicit store — `NetworkStore::default_path` reads the process-global
-/// `A3S_HOME`, which cannot be raced safely across tests.
-fn connect_box_to_network(
-    net_store: &a3s_box_runtime::NetworkStore,
-    net_name: &str,
-    box_id: &str,
-    name: &str,
-) -> Result<a3s_box_core::network::NetworkEndpoint, Box<dyn std::error::Error>> {
-    net_store.with_write_lock(
-        |networks| -> Result<a3s_box_core::network::NetworkEndpoint, Box<dyn std::error::Error>> {
-            let net_config =
-                networks
-                    .get_mut(net_name)
-                    .ok_or_else(|| -> Box<dyn std::error::Error> {
-                        format!("network '{}' not found", net_name).into()
-                    })?;
-            super::network::validate_attachable_network(net_config)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            net_config
-                .connect(box_id, name)
-                .map_err(|e| -> Box<dyn std::error::Error> {
-                    format!("Failed to connect to network: {e}").into()
-                })
-        },
-    )
-}
+use setup::setup_and_boot;
+#[cfg(test)]
+use setup::{
+    build_box_config, build_execution_request, interactive_keepalive_entrypoint,
+    should_create_diff_baseline, RunRecordPolicy,
+};
 
 // ============================================================================
 // Phase 2a: Interactive PTY mode
@@ -903,13 +453,7 @@ async fn run_tty(mut ctx: RunContext, args: &RunArgs) -> Result<(), Box<dyn std:
     };
 
     // Cleanup
-    cleanup_box(
-        &mut ctx,
-        args.common.network.as_deref(),
-        args.rm,
-        Some(exit_code),
-    )
-    .await;
+    cleanup_box(&mut ctx, args.rm, Some(exit_code)).await?;
 
     if exit_code != 0 {
         std::process::exit(exit_code);
@@ -1043,20 +587,12 @@ async fn run_foreground(
                 break ForegroundStopReason::TimedOut;
             }
             _ = exit_poll.tick() => {
-                if ctx.vm.try_wait_exit().await?.is_some() {
-                    break ForegroundStopReason::ProcessExited;
-                }
-                if ctx.vm.has_exited().await {
-                    // The shim can exit between the reap attempt above and the
-                    // liveness check. Reap once more after observing exit; the
-                    // provider-specific persisted guest status is refreshed
-                    // after the final log drain below.
-                    let _ = ctx.vm.try_wait_exit().await?;
+                if !managed_process_alive(&ctx) {
                     break ForegroundStopReason::ProcessExited;
                 }
             }
             _ = health_poll.tick() => {
-                if !ctx.vm.health_check().await.unwrap_or(false) {
+                if !managed_runtime_healthy(&ctx).await {
                     break ForegroundStopReason::VmUnhealthy;
                 }
             }
@@ -1067,37 +603,17 @@ async fn run_foreground(
         .await;
     log_handle.abort();
 
-    if stop_reason == ForegroundStopReason::ProcessExited {
-        // guest-init syncs the authoritative container exit code into the
-        // writable rootfs before halt. Refresh after draining the final console
-        // bytes so a fast shim exit cannot leave the foreground CLI with its
-        // process-level fallback status.
-        let _ = ctx.vm.try_wait_exit().await?;
-    }
-
-    let exit_code = foreground_exit_code(stop_reason, ctx.vm.exit_code());
+    let persisted_exit_code = a3s_box_runtime::rootfs::read_persisted_exit_code(&ctx.box_dir);
+    let exit_code = foreground_exit_code(stop_reason, persisted_exit_code);
     archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
-
-    // Best-effort teardown: a stop failure (wedged VM, transient store error)
-    // must not orphan the box's other resources, so every step runs regardless
-    // of whether an earlier one failed.
-    if let Some(ref handle) = ctx.health_checker {
-        handle.abort();
-    }
-    if let Err(error) = ctx
-        .vm
-        .destroy_with_options(ctx.stop_signal, ctx.stop_timeout_ms)
-        .await
-    {
-        tracing::warn!(box_id = %ctx.box_id, %error, "Failed to destroy VM on stop; continuing teardown");
-    }
-    teardown_box_resources(
-        &ctx,
-        args.common.network.as_deref(),
+    cleanup_managed_execution(
+        &mut ctx,
         args.rm,
         exit_code,
         stop_reason.stopped_by_user(),
-    );
+        stop_reason == ForegroundStopReason::ProcessExited,
+    )
+    .await?;
     println!(
         "{}",
         foreground_completion_message(stop_reason, args.rm, &ctx.name)
@@ -1161,12 +677,41 @@ fn foreground_log_lengths(paths: &[(&std::path::Path, &AtomicU64)]) -> Vec<u64> 
 }
 
 fn foreground_exit_code(reason: ForegroundStopReason, vm_exit_code: Option<i32>) -> Option<i32> {
-    vm_exit_code.or(match reason {
-        ForegroundStopReason::ProcessExited => None,
-        ForegroundStopReason::UserInterrupted(signal) => Some(128 + signal),
-        ForegroundStopReason::VmUnhealthy => Some(1),
+    match reason {
+        ForegroundStopReason::ProcessExited => vm_exit_code,
+        ForegroundStopReason::UserInterrupted(signal) => vm_exit_code.or(Some(128 + signal)),
+        ForegroundStopReason::VmUnhealthy => vm_exit_code.or(Some(1)),
         ForegroundStopReason::TimedOut => Some(124),
+    }
+}
+
+fn managed_process_alive(ctx: &RunContext) -> bool {
+    ctx.record.pid.is_some_and(|pid| {
+        a3s_box_runtime::is_process_alive_with_identity(pid, ctx.record.pid_start_time)
     })
+}
+
+#[cfg(unix)]
+async fn managed_runtime_healthy(ctx: &RunContext) -> bool {
+    if !managed_process_alive(ctx) {
+        return false;
+    }
+    let probe = async {
+        let client = a3s_box_runtime::ExecClient::connect(&ctx.exec_socket_path)
+            .await
+            .ok()?;
+        client.heartbeat().await.ok().filter(|ready| *ready)
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(500), probe)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+#[cfg(not(unix))]
+async fn managed_runtime_healthy(ctx: &RunContext) -> bool {
+    managed_process_alive(ctx)
 }
 
 fn foreground_completion_message(
@@ -1199,24 +744,6 @@ fn foreground_completion_message(
 // ============================================================================
 // Shared helpers
 // ============================================================================
-
-async fn rollback_booted_setup(
-    vm: &mut VmManager,
-    record: &BoxRecord,
-    stop_signal: i32,
-    stop_timeout_ms: u64,
-    state: Option<&mut StateFile>,
-) {
-    if let Err(error) = vm.destroy_with_options(stop_signal, stop_timeout_ms).await {
-        tracing::debug!(
-            box_id = %record.id,
-            error = %error,
-            "Failed to destroy VM while rolling back run setup"
-        );
-    }
-
-    crate::cleanup::cleanup_partial_box_record(record, state);
-}
 
 /// Parse health check config from common args.
 #[cfg(test)]
@@ -1283,80 +810,90 @@ fn ensure_package_cache_volume(volume_specs: &mut Vec<String>, volume_spec: &str
     }
 }
 
-/// Disconnect from network if connected.
-fn disconnect_network(
-    box_id: &str,
-    net_name: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(net_name) = net_name {
-        let net_store = a3s_box_runtime::NetworkStore::default_path()?;
-        // Release the endpoint under the lock with a fresh read, so a
-        // concurrent connect to the same network is not clobbered.
-        net_store.with_write_lock(|networks| -> Result<(), Box<dyn std::error::Error>> {
-            if let Some(net_config) = networks.get_mut(net_name) {
-                net_config.disconnect(box_id).ok();
-            }
-            Ok(())
-        })?;
-    }
-    Ok(())
-}
-
-/// Shared cleanup: abort health checker, destroy VM, detach volumes, disconnect network, update state.
+/// Shared cleanup: stop the managed execution and update retained state.
 #[cfg(not(windows))]
 async fn cleanup_box(
     ctx: &mut RunContext,
-    net_name: Option<&str>,
     auto_remove: bool,
     exit_code: Option<i32>,
-) {
-    if let Some(ref handle) = ctx.health_checker {
-        handle.abort();
-    }
+) -> Result<(), Box<dyn std::error::Error>> {
     archive_auto_removed_logs(ctx, auto_remove, exit_code, false);
-    if let Err(error) = ctx
-        .vm
-        .destroy_with_options(ctx.stop_signal, ctx.stop_timeout_ms)
-        .await
-    {
-        tracing::warn!(box_id = %ctx.box_id, %error, "Failed to destroy VM on stop; continuing teardown");
-    }
-    teardown_box_resources(ctx, net_name, auto_remove, exit_code, false);
+    cleanup_managed_execution(ctx, auto_remove, exit_code, false, false).await
 }
 
-/// Best-effort teardown of a box's host + state resources after its VM has been
-/// destroyed. Every step runs even if an earlier one failed, so a wedged VM or a
-/// transient store error never orphans the box's other resources — volume
-/// attachment, network IP, the `boxes.json` record, and the box directory.
-///
-/// State writes go through the atomic primitives (`remove_record`/`modify`) so a
-/// concurrent writer (the monitor, or another box's stop) is not clobbered by a
-/// stale load → mutate → full-vector save.
-fn teardown_box_resources(
-    ctx: &RunContext,
-    net_name: Option<&str>,
+async fn cleanup_managed_execution(
+    ctx: &mut RunContext,
     auto_remove: bool,
     exit_code: Option<i32>,
     stopped_by_user: bool,
-) {
-    super::volume::detach_volumes(&ctx.volume_names, &ctx.box_id);
-    if let Err(error) = disconnect_network(&ctx.box_id, net_name) {
-        tracing::warn!(box_id = %ctx.box_id, %error, "Failed to disconnect network during teardown");
+    natural_exit: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(ref handle) = ctx.health_checker {
+        handle.abort();
     }
-    crate::cleanup::cleanup_external_socket_dir(&ctx.box_dir, &ctx.exec_socket_path);
+
+    let cleanup_result = if natural_exit {
+        match ctx.manager.inspect(&ctx.execution_id).await {
+            Ok(status)
+                if matches!(
+                    status.state,
+                    ExecutionState::Stopped | ExecutionState::Failed
+                ) =>
+            {
+                Ok(())
+            }
+            Ok(_) => ctx
+                .manager
+                .kill(&ctx.execution_id, ctx.generation)
+                .await
+                .map(|_| ()),
+            Err(_) => ctx
+                .manager
+                .kill(&ctx.execution_id, ctx.generation)
+                .await
+                .map(|_| ()),
+        }
+    } else {
+        ctx.manager
+            .kill(&ctx.execution_id, ctx.generation)
+            .await
+            .map(|_| ())
+    };
+
+    cleanup_result.map_err(|error| {
+        format!(
+            "failed to stop managed execution {}; state was preserved for recovery: {error}",
+            ctx.box_id
+        )
+    })?;
 
     if auto_remove {
-        crate::cleanup::cleanup_anonymous_volumes(&ctx.anonymous_volumes);
-        if let Err(error) = remove_auto_removed_record(&ctx.box_id, exit_code, stopped_by_user) {
-            tracing::warn!(box_id = %ctx.box_id, %error, "Failed to remove box record during teardown");
+        StateFile::remove_record(&ctx.box_id)
+            .map_err(|error| format!("failed to remove box {} state: {error}", ctx.box_id))?;
+        if natural_exit {
+            // Explicit managed kills remove auto-remove anonymous volumes in the
+            // backend. Natural exit has no kill path, so the CLI owns cleanup.
+            crate::cleanup::cleanup_anonymous_volumes(&ctx.anonymous_volumes);
         }
-        let _ = std::fs::remove_dir_all(&ctx.box_dir);
-    } else if let Err(error) = StateFile::modify(|s| {
-        mark_record_stopped(s, &ctx.box_id, exit_code, stopped_by_user);
-        Ok::<(), std::io::Error>(())
-    }) {
-        tracing::warn!(box_id = %ctx.box_id, %error, "Failed to mark box stopped during teardown");
+        if let Err(error) = std::fs::remove_dir_all(&ctx.box_dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!(
+                    "removed box {} state but failed to remove {}: {error}",
+                    ctx.box_id,
+                    ctx.box_dir.display()
+                )
+                .into());
+            }
+        }
+    } else {
+        StateFile::modify(|s| {
+            mark_record_stopped(s, &ctx.box_id, exit_code, stopped_by_user);
+            Ok::<(), std::io::Error>(())
+        })
+        .map_err(|error| format!("failed to mark box {} stopped: {error}", ctx.box_id))?;
     }
+
+    Ok(())
 }
 
 fn archive_auto_removed_logs(
@@ -1396,16 +933,6 @@ fn should_print_retained_log_hint(exit_code: Option<i32>, stopped_by_user: bool)
     matches!(exit_code, Some(code) if code != 0) && !stopped_by_user
 }
 
-fn remove_auto_removed_record(
-    box_id: &str,
-    exit_code: Option<i32>,
-    stopped_by_user: bool,
-) -> Result<Option<BoxRecord>, std::io::Error> {
-    StateFile::take_record(box_id).map(|record| {
-        record.map(|record| stopped_record_for_archive(&record, exit_code, stopped_by_user))
-    })
-}
-
 fn stopped_record_for_archive(
     record: &BoxRecord,
     exit_code: Option<i32>,
@@ -1434,933 +961,5 @@ fn mark_record_stopped(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Regression for the `run --network` lost-update race: connect_box_to_network
-    // must allocate a distinct IP per concurrent caller. A get → connect → update
-    // (the pre-fix code) would dup IPs and drop endpoints. The advisory lock is
-    // per-open-file-description, so separate FileLock::acquire calls serialize
-    // even across threads in one process — which exercises the fix in-process.
-    #[test]
-    fn concurrent_connect_box_to_network_allocates_distinct_ips() {
-        use a3s_box_core::network::NetworkConfig;
-        use a3s_box_runtime::NetworkStore;
-        use std::collections::HashSet;
-        use std::sync::Arc;
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(NetworkStore::new(dir.path().join("networks.json")));
-        store
-            .create(NetworkConfig::new("dev", "10.88.0.0/24").unwrap())
-            .unwrap();
-
-        let handles: Vec<_> = (0..16)
-            .map(|i| {
-                let store = Arc::clone(&store);
-                std::thread::spawn(move || {
-                    connect_box_to_network(&store, "dev", &format!("box-{i}"), &format!("name-{i}"))
-                        .unwrap()
-                        .ip_address
-                })
-            })
-            .collect();
-        let ips: HashSet<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        assert_eq!(
-            ips.len(),
-            16,
-            "every concurrent connect must get a distinct IP (no lost update)"
-        );
-    }
-
-    // --- build_resource_limits tests (using new struct layout) ---
-
-    fn default_run_args() -> RunArgs {
-        RunArgs {
-            common: common::CommonBoxArgs {
-                image: "test".to_string(),
-                isolation: None,
-                name: None,
-                cpus: 2,
-                memory: "512m".to_string(),
-                volumes: vec![],
-                env: vec![],
-                publish: vec![],
-                dns: vec![],
-                entrypoint: None,
-                hostname: None,
-                user: None,
-                workdir: None,
-                restart: "no".to_string(),
-                labels: vec![],
-                tmpfs: vec![],
-                virtiofs_cache: None,
-                network: None,
-                health_cmd: None,
-                health_interval: 30,
-                health_timeout: 5,
-                health_retries: 3,
-                health_start_period: 0,
-                pids_limit: None,
-                cpuset_cpus: None,
-                ulimits: vec![],
-                cpu_shares: None,
-                cpu_quota: None,
-                cpu_period: None,
-                memory_reservation: None,
-                memory_swap: None,
-                env_file: vec![],
-                add_host: vec![],
-                platform: None,
-                init: false,
-                read_only: false,
-                cap_add: vec![],
-                cap_drop: vec![],
-                security_opt: vec![],
-                privileged: false,
-                device: vec![],
-                gpus: None,
-                shm_size: None,
-                stop_signal: None,
-                stop_timeout: None,
-                no_healthcheck: false,
-                oom_kill_disable: false,
-                oom_score_adj: None,
-                persistent: false,
-            },
-            detach: false,
-            interactive: false,
-            no_stdin: false,
-            tty: false,
-            timeout: None,
-            rm: false,
-            pool: false,
-            pool_socket: DEFAULT_SOCKET.to_string(),
-            pool_autostart: false,
-            pool_exec: false,
-            package_cache: vec![],
-            cmd: vec![],
-            log_driver: "json-file".to_string(),
-            log_opts: vec![],
-            tee: false,
-            tee_workload_id: None,
-            tee_simulate: false,
-            sidecar: None,
-            sidecar_vsock_port: 4092,
-        }
-    }
-
-    fn default_pool_run_args() -> RunArgs {
-        let mut args = default_run_args();
-        args.pool = true;
-        args.rm = true;
-        args.cmd = vec!["echo".to_string(), "hello".to_string()];
-        args
-    }
-
-    #[test]
-    fn test_foreground_auto_remove_skips_diff_baseline() {
-        let mut args = default_run_args();
-        args.rm = true;
-
-        assert!(!should_create_diff_baseline(&args));
-    }
-
-    #[test]
-    fn test_detached_auto_remove_keeps_diff_baseline_while_running() {
-        let mut args = default_run_args();
-        args.rm = true;
-        args.detach = true;
-
-        assert!(should_create_diff_baseline(&args));
-    }
-
-    #[test]
-    fn test_persistent_run_keeps_diff_baseline() {
-        let args = default_run_args();
-
-        assert!(should_create_diff_baseline(&args));
-    }
-
-    #[test]
-    fn test_build_resource_limits_defaults() {
-        let args = default_run_args();
-        let limits = common::build_resource_limits(&args.common).unwrap();
-        assert!(limits.pids_limit.is_none());
-        assert!(limits.cpuset_cpus.is_none());
-        assert!(limits.cpu_shares.is_none());
-        assert!(limits.memory_reservation.is_none());
-        assert!(limits.memory_swap.is_none());
-    }
-
-    #[test]
-    fn test_build_resource_limits_with_values() {
-        let mut args = default_run_args();
-        args.common.pids_limit = Some(100);
-        args.common.cpuset_cpus = Some("0-3".to_string());
-        args.common.ulimits = vec!["nofile=1024:4096".to_string()];
-        args.common.cpu_shares = Some(512);
-        args.common.cpu_quota = Some(50000);
-        args.common.cpu_period = Some(100000);
-        args.common.memory_reservation = Some("256m".to_string());
-        args.common.memory_swap = Some("-1".to_string());
-
-        let limits = common::build_resource_limits(&args.common).unwrap();
-        assert_eq!(limits.pids_limit, Some(100));
-        assert_eq!(limits.cpuset_cpus, Some("0-3".to_string()));
-        assert_eq!(limits.cpu_shares, Some(512));
-        assert_eq!(limits.cpu_quota, Some(50000));
-        assert_eq!(limits.cpu_period, Some(100000));
-        assert_eq!(limits.memory_reservation, Some(256 * 1024 * 1024));
-        assert_eq!(limits.memory_swap, Some(-1));
-    }
-
-    #[test]
-    fn test_build_resource_limits_memory_swap_value() {
-        let mut args = default_run_args();
-        args.common.memory_swap = Some("1g".to_string());
-
-        let limits = common::build_resource_limits(&args.common).unwrap();
-        assert_eq!(limits.memory_swap, Some(1024 * 1024 * 1024));
-    }
-
-    #[test]
-    fn test_parse_health_check_none() {
-        let args = default_run_args();
-        assert!(parse_health_check(&args.common).is_none());
-    }
-
-    #[test]
-    fn test_parse_health_check_disabled() {
-        let mut args = default_run_args();
-        args.common.health_cmd = Some("curl localhost".to_string());
-        args.common.no_healthcheck = true;
-        assert!(parse_health_check(&args.common).is_none());
-    }
-
-    #[test]
-    fn test_parse_health_check_configured() {
-        let mut args = default_run_args();
-        args.common.health_cmd = Some("curl localhost".to_string());
-        args.common.health_interval = 10;
-        args.common.health_retries = 5;
-        let hc = parse_health_check(&args.common).unwrap();
-        assert_eq!(hc.cmd, vec!["sh", "-c", "curl localhost"]);
-        assert_eq!(hc.interval_secs, 10);
-        assert_eq!(hc.retries, 5);
-    }
-
-    #[test]
-    fn test_validate_run_mode_rejects_detached_tty_before_boot() {
-        let mut args = default_run_args();
-        args.detach = true;
-        args.tty = true;
-
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("Cannot use -t"));
-    }
-
-    #[test]
-    fn test_validate_run_mode_rejects_tty_without_terminal_before_boot() {
-        let mut args = default_run_args();
-        args.tty = true;
-
-        let err = validate_run_mode(&args, false).unwrap_err();
-        assert!(err.contains("requires a terminal"));
-    }
-
-    #[test]
-    fn test_validate_run_mode_allows_detached_without_tty() {
-        let mut args = default_run_args();
-        args.detach = true;
-
-        assert!(validate_run_mode(&args, false).is_ok());
-    }
-
-    #[test]
-    fn test_validate_run_mode_rejects_no_stdin_with_interactive() {
-        let mut args = default_run_args();
-        args.interactive = true;
-        args.no_stdin = true;
-
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("--interactive"));
-    }
-
-    #[test]
-    fn test_validate_run_mode_rejects_invalid_timeout_modes() {
-        let mut args = default_run_args();
-        args.timeout = Some(0);
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("greater than zero"));
-
-        let mut args = default_run_args();
-        args.timeout = Some(30);
-        args.detach = true;
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("--timeout"));
-        assert!(err.contains("detach"));
-
-        let mut args = default_run_args();
-        args.timeout = Some(30);
-        args.tty = true;
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("--timeout"));
-        assert!(err.contains("tty"));
-    }
-
-    #[test]
-    fn test_validate_pool_run_mode_requires_auto_remove_and_command() {
-        let mut args = default_pool_run_args();
-        args.rm = false;
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("requires --rm"));
-
-        let mut args = default_pool_run_args();
-        args.cmd = vec![];
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("explicit command"));
-    }
-
-    #[test]
-    fn test_validate_pool_run_mode_rejects_unsupported_modes() {
-        let mut args = default_pool_run_args();
-        args.detach = true;
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("--pool"));
-        assert!(err.contains("detach"));
-
-        let mut args = default_pool_run_args();
-        args.interactive = true;
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("--interactive"));
-
-        let mut args = default_pool_run_args();
-        args.common.publish = vec!["8080:80".to_string()];
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("currently supports only"));
-
-        let mut args = default_pool_run_args();
-        args.common.name = Some("named-pool-run".to_string());
-        let err = validate_run_mode(&args, true).unwrap_err();
-        assert!(err.contains("currently supports only"));
-    }
-
-    #[test]
-    fn test_validate_pool_run_mode_allows_timeout() {
-        let mut args = default_pool_run_args();
-        args.timeout = Some(30);
-
-        assert!(validate_run_mode(&args, true).is_ok());
-    }
-
-    #[test]
-    fn test_selected_pool_socket_prefers_explicit_pool_socket() {
-        let mut args = default_pool_run_args();
-        args.pool_socket = "/tmp/explicit.sock".to_string();
-
-        assert_eq!(
-            selected_pool_socket(&args, Some("/tmp/env.sock")).as_deref(),
-            Some("/tmp/explicit.sock")
-        );
-    }
-
-    #[test]
-    fn test_selected_pool_socket_uses_env_for_compatible_foreground_run() {
-        let mut args = default_run_args();
-        args.rm = true;
-        args.cmd = vec!["bash".to_string(), "-lc".to_string(), "echo ok".to_string()];
-        args.package_cache = vec![PackageCache::Pnpm];
-        args.common.volumes = vec!["/host/work:/workspace:rw".to_string()];
-        args.common.workdir = Some("/workspace".to_string());
-
-        assert_eq!(
-            selected_pool_socket(&args, Some(" /tmp/runtime.sock ")).as_deref(),
-            Some("/tmp/runtime.sock")
-        );
-    }
-
-    #[test]
-    fn test_selected_pool_socket_ignores_env_for_incompatible_run() {
-        let mut args = default_run_args();
-        args.rm = true;
-        args.detach = true;
-        args.cmd = vec!["echo".to_string(), "ok".to_string()];
-
-        assert!(selected_pool_socket(&args, Some("/tmp/runtime.sock")).is_none());
-
-        let mut named = default_run_args();
-        named.rm = true;
-        named.common.name = Some("named-run".to_string());
-        named.cmd = vec!["echo".to_string(), "ok".to_string()];
-        assert!(selected_pool_socket(&named, Some("/tmp/runtime.sock")).is_none());
-        assert!(selected_pool_socket(&args, Some("")).is_none());
-    }
-
-    #[test]
-    fn test_selected_pool_socket_uses_autostart_flag() {
-        let mut args = default_pool_run_args();
-        args.pool = false;
-        args.pool_autostart = true;
-        args.pool_socket = "/tmp/autostart.sock".to_string();
-
-        assert_eq!(
-            selected_pool_socket(&args, None).as_deref(),
-            Some("/tmp/autostart.sock")
-        );
-    }
-
-    #[test]
-    fn test_pool_autostart_config_prewarms_simple_run() {
-        let args = default_pool_run_args();
-        let config = pool_autostart_config_for_run(&args, "/tmp/pool.sock").unwrap();
-
-        assert_eq!(config.socket, "/tmp/pool.sock");
-        assert_eq!(config.image.as_deref(), Some("test"));
-    }
-
-    #[test]
-    fn test_pool_autostart_config_skips_prewarm_for_volume_shape() {
-        let mut args = default_pool_run_args();
-        args.common.volumes = vec!["/host:/work:ro".to_string()];
-        let config = pool_autostart_config_for_run(&args, "/tmp/pool.sock").unwrap();
-
-        assert!(config.image.is_none());
-    }
-
-    #[test]
-    fn test_build_pool_client_run_plumbs_supported_options() {
-        let tmp = tempfile::tempdir().unwrap();
-        let env_file = tmp.path().join("env.list");
-        std::fs::write(&env_file, "B=file\nC=file\n").unwrap();
-        let bind = format!("{}:/workspace:ro", tmp.path().display());
-
-        let mut args = default_pool_run_args();
-        args.common.image = "node:24-bookworm".to_string();
-        args.common.cpus = 4;
-        args.common.memory = "2g".to_string();
-        args.common.volumes = vec![bind.clone()];
-        args.common.env = vec!["A=cli".to_string(), "B=cli".to_string()];
-        args.common.env_file = vec![env_file.display().to_string()];
-        args.common.user = Some("root".to_string());
-        args.common.workdir = Some("/workspace".to_string());
-        args.pool_socket = "/tmp/a3s-box-test-pool.sock".to_string();
-        args.pool_exec = true;
-        args.timeout = Some(45);
-
-        let req = build_pool_client_run(&args, &args.pool_socket).unwrap();
-
-        assert_eq!(req.socket, "/tmp/a3s-box-test-pool.sock");
-        assert_eq!(req.image.as_deref(), Some("node:24-bookworm"));
-        assert_eq!(req.user.as_deref(), Some("0"));
-        assert_eq!(req.workdir.as_deref(), Some("/workspace"));
-        assert_eq!(req.volumes, vec![bind]);
-        assert_eq!(req.vcpus, 4);
-        assert_eq!(req.memory_mb, 2048);
-        assert!(req.exec);
-        assert_eq!(req.timeout_ns, Some(45_000_000_000));
-        assert_eq!(req.cmd, vec!["echo", "hello"]);
-        assert_eq!(req.env, vec!["A=cli", "B=cli", "C=file"]);
-    }
-
-    #[test]
-    fn test_apply_package_caches_adds_pnpm_volume_and_env() {
-        let mut volumes = Vec::new();
-        let mut env = std::collections::HashMap::new();
-
-        apply_package_caches(&[PackageCache::Pnpm], &mut volumes, &mut env);
-
-        assert_eq!(volumes, vec![PNPM_CACHE_VOLUME_SPEC.to_string()]);
-        assert_eq!(
-            env.get(PNPM_CONFIG_STORE_ENV).map(String::as_str),
-            Some(PNPM_STORE_DIR)
-        );
-        assert_eq!(
-            env.get(PNPM_STORE_ENV).map(String::as_str),
-            Some(PNPM_STORE_DIR)
-        );
-        assert_eq!(
-            env.get(PNPM_COREPACK_HOME_ENV).map(String::as_str),
-            Some(PNPM_COREPACK_HOME_DIR)
-        );
-        assert_eq!(
-            env.get(PNPM_HOME_ENV).map(String::as_str),
-            Some(PNPM_HOME_DIR)
-        );
-        assert_eq!(
-            env.get(PNPM_NPM_CACHE_ENV).map(String::as_str),
-            Some(PNPM_NPM_CACHE_DIR)
-        );
-        assert_eq!(
-            env.get(PNPM_CONFIG_PREFER_OFFLINE_ENV).map(String::as_str),
-            Some(PNPM_PREFER_OFFLINE_VALUE)
-        );
-        assert_eq!(
-            env.get(PNPM_PREFER_OFFLINE_ENV).map(String::as_str),
-            Some(PNPM_PREFER_OFFLINE_VALUE)
-        );
-        assert_eq!(
-            env.get(COREPACK_DOWNLOAD_PROMPT_ENV).map(String::as_str),
-            Some(COREPACK_DOWNLOAD_PROMPT_VALUE)
-        );
-    }
-
-    #[test]
-    fn test_apply_package_caches_preserves_user_pnpm_env() {
-        let mut volumes = Vec::new();
-        let mut env = std::collections::HashMap::from([
-            (
-                PNPM_CONFIG_STORE_ENV.to_string(),
-                "/custom/pnpm-config-store".to_string(),
-            ),
-            (PNPM_STORE_ENV.to_string(), "/custom/pnpm-store".to_string()),
-            (
-                PNPM_COREPACK_HOME_ENV.to_string(),
-                "/custom/corepack".to_string(),
-            ),
-            (PNPM_HOME_ENV.to_string(), "/custom/pnpm-home".to_string()),
-            (
-                PNPM_NPM_CACHE_ENV.to_string(),
-                "/custom/npm-cache".to_string(),
-            ),
-            (
-                PNPM_CONFIG_PREFER_OFFLINE_ENV.to_string(),
-                "false".to_string(),
-            ),
-            (PNPM_PREFER_OFFLINE_ENV.to_string(), "false".to_string()),
-            (COREPACK_DOWNLOAD_PROMPT_ENV.to_string(), "1".to_string()),
-        ]);
-
-        apply_package_caches(&[PackageCache::Pnpm], &mut volumes, &mut env);
-
-        assert_eq!(
-            env.get(PNPM_CONFIG_STORE_ENV).map(String::as_str),
-            Some("/custom/pnpm-config-store")
-        );
-        assert_eq!(
-            env.get(PNPM_STORE_ENV).map(String::as_str),
-            Some("/custom/pnpm-store")
-        );
-        assert_eq!(
-            env.get(PNPM_COREPACK_HOME_ENV).map(String::as_str),
-            Some("/custom/corepack")
-        );
-        assert_eq!(
-            env.get(PNPM_HOME_ENV).map(String::as_str),
-            Some("/custom/pnpm-home")
-        );
-        assert_eq!(
-            env.get(PNPM_NPM_CACHE_ENV).map(String::as_str),
-            Some("/custom/npm-cache")
-        );
-        assert_eq!(
-            env.get(PNPM_CONFIG_PREFER_OFFLINE_ENV).map(String::as_str),
-            Some("false")
-        );
-        assert_eq!(
-            env.get(PNPM_PREFER_OFFLINE_ENV).map(String::as_str),
-            Some("false")
-        );
-        assert_eq!(
-            env.get(COREPACK_DOWNLOAD_PROMPT_ENV).map(String::as_str),
-            Some("1")
-        );
-    }
-
-    #[test]
-    fn test_apply_package_caches_deduplicates_pnpm_volume() {
-        let mut volumes = vec![PNPM_CACHE_VOLUME_SPEC.to_string()];
-        let mut env = std::collections::HashMap::new();
-
-        apply_package_caches(
-            &[PackageCache::Pnpm, PackageCache::Pnpm],
-            &mut volumes,
-            &mut env,
-        );
-
-        assert_eq!(volumes, vec![PNPM_CACHE_VOLUME_SPEC.to_string()]);
-    }
-
-    #[test]
-    fn test_apply_package_caches_adds_npm_volume_and_env() {
-        let mut volumes = Vec::new();
-        let mut env = std::collections::HashMap::new();
-
-        apply_package_caches(&[PackageCache::Npm], &mut volumes, &mut env);
-
-        assert_eq!(volumes, vec![NPM_CACHE_VOLUME_SPEC.to_string()]);
-        assert_eq!(
-            env.get(NPM_CACHE_ENV).map(String::as_str),
-            Some(NPM_CACHE_DIR)
-        );
-        assert_eq!(
-            env.get(NPM_PREFER_OFFLINE_ENV).map(String::as_str),
-            Some(NPM_PREFER_OFFLINE_VALUE)
-        );
-        assert!(!env.contains_key(PNPM_STORE_ENV));
-        assert!(!env.contains_key(PNPM_COREPACK_HOME_ENV));
-        assert!(!env.contains_key(PNPM_HOME_ENV));
-    }
-
-    #[test]
-    fn test_apply_package_caches_preserves_user_npm_env() {
-        let mut volumes = Vec::new();
-        let mut env = std::collections::HashMap::from([
-            (NPM_CACHE_ENV.to_string(), "/custom/npm-cache".to_string()),
-            (NPM_PREFER_OFFLINE_ENV.to_string(), "false".to_string()),
-        ]);
-
-        apply_package_caches(&[PackageCache::Npm], &mut volumes, &mut env);
-
-        assert_eq!(
-            env.get(NPM_CACHE_ENV).map(String::as_str),
-            Some("/custom/npm-cache")
-        );
-        assert_eq!(
-            env.get(NPM_PREFER_OFFLINE_ENV).map(String::as_str),
-            Some("false")
-        );
-    }
-
-    #[test]
-    fn test_apply_package_caches_deduplicates_npm_volume() {
-        let mut volumes = vec![NPM_CACHE_VOLUME_SPEC.to_string()];
-        let mut env = std::collections::HashMap::new();
-
-        apply_package_caches(
-            &[PackageCache::Npm, PackageCache::Npm],
-            &mut volumes,
-            &mut env,
-        );
-
-        assert_eq!(volumes, vec![NPM_CACHE_VOLUME_SPEC.to_string()]);
-    }
-
-    #[test]
-    fn test_build_box_config_uses_keepalive_for_interactive_tty_boot() {
-        let mut args = default_run_args();
-        args.tty = true;
-        args.cmd = vec!["/bin/echo".to_string(), "hello".to_string()];
-
-        let config = build_box_config(
-            &args,
-            512,
-            Default::default(),
-            None,
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-
-        assert_eq!(config.cmd, vec!["a3s-box-pty-keepalive"]);
-        assert_eq!(
-            config.entrypoint_override,
-            Some(interactive_keepalive_entrypoint())
-        );
-    }
-
-    #[test]
-    fn test_build_box_config_plumbs_virtiofs_cache_mode() {
-        let mut args = default_run_args();
-        args.common.virtiofs_cache = Some(common::VirtiofsCacheMode::Always);
-
-        let config = build_box_config(
-            &args,
-            512,
-            Default::default(),
-            None,
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-
-        assert_eq!(config.virtiofs_cache.as_deref(), Some("always"));
-    }
-
-    #[test]
-    fn test_build_box_config_preserves_non_tty_command() {
-        let mut args = default_run_args();
-        args.cmd = vec!["/bin/echo".to_string(), "hello".to_string()];
-        let entrypoint = Some(vec!["/custom-entrypoint".to_string()]);
-
-        let config = build_box_config(
-            &args,
-            512,
-            Default::default(),
-            entrypoint.clone(),
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-
-        assert_eq!(config.cmd, args.cmd);
-        assert_eq!(config.entrypoint_override, entrypoint);
-    }
-
-    #[test]
-    fn test_build_box_config_controls_stdin_open() {
-        let args = default_run_args();
-        let config = build_box_config(
-            &args,
-            512,
-            Default::default(),
-            None,
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-        assert!(!config.stdin_open);
-
-        let mut args = default_run_args();
-        args.interactive = true;
-        let config = build_box_config(
-            &args,
-            512,
-            Default::default(),
-            None,
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-        assert!(config.stdin_open);
-
-        let mut args = default_run_args();
-        args.no_stdin = true;
-        let config = build_box_config(
-            &args,
-            512,
-            Default::default(),
-            None,
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-        assert!(!config.stdin_open);
-    }
-
-    #[test]
-    fn test_mark_record_stopped_persists_exit_context() {
-        let record = crate::test_helpers::fixtures::make_record(
-            "550e8400-e29b-41d4-a716-446655440000",
-            "run-exit",
-            "running",
-            Some(1234),
-        );
-        let (_tmp, mut state) = crate::test_helpers::fixtures::setup_state(vec![record]);
-
-        mark_record_stopped(
-            &mut state,
-            "550e8400-e29b-41d4-a716-446655440000",
-            Some(42),
-            true,
-        );
-
-        let record = state
-            .find_by_id("550e8400-e29b-41d4-a716-446655440000")
-            .unwrap();
-        assert_eq!(record.status, "stopped");
-        assert_eq!(record.pid, None);
-        assert_eq!(record.exit_code, Some(42));
-        assert!(record.stopped_by_user);
-    }
-
-    #[test]
-    fn test_foreground_exit_code_preserves_vm_code() {
-        assert_eq!(
-            foreground_exit_code(
-                ForegroundStopReason::UserInterrupted(FOREGROUND_SIGTERM),
-                Some(143)
-            ),
-            Some(143)
-        );
-        assert_eq!(
-            foreground_exit_code(ForegroundStopReason::VmUnhealthy, Some(2)),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn test_foreground_exit_code_has_deterministic_fallbacks() {
-        assert_eq!(
-            foreground_exit_code(ForegroundStopReason::ProcessExited, None),
-            None
-        );
-        assert_eq!(
-            foreground_exit_code(
-                ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT),
-                None
-            ),
-            Some(130)
-        );
-        assert_eq!(
-            foreground_exit_code(
-                ForegroundStopReason::UserInterrupted(FOREGROUND_SIGTERM),
-                None
-            ),
-            Some(143)
-        );
-        assert_eq!(
-            foreground_exit_code(ForegroundStopReason::VmUnhealthy, None),
-            Some(1)
-        );
-        assert_eq!(
-            foreground_exit_code(ForegroundStopReason::TimedOut, None),
-            Some(124)
-        );
-    }
-
-    #[test]
-    fn test_foreground_stop_reason_user_flag() {
-        assert!(ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT).stopped_by_user());
-        assert!(!ForegroundStopReason::ProcessExited.stopped_by_user());
-        assert!(!ForegroundStopReason::VmUnhealthy.stopped_by_user());
-        assert!(!ForegroundStopReason::TimedOut.stopped_by_user());
-    }
-
-    #[test]
-    fn test_foreground_poll_cadence_avoids_fixed_startup_delay() {
-        assert!(FOREGROUND_EXIT_POLL <= std::time::Duration::from_millis(20));
-        assert!(FOREGROUND_EXIT_POLL < FOREGROUND_HEALTH_POLL);
-        assert!(FOREGROUND_LOG_DRAIN_QUIET <= std::time::Duration::from_millis(50));
-        assert!(FOREGROUND_LOG_DRAIN_POLL < FOREGROUND_LOG_DRAIN_QUIET);
-    }
-
-    #[test]
-    fn test_retained_log_hint_only_for_non_user_failures() {
-        assert!(should_print_retained_log_hint(Some(1), false));
-        assert!(!should_print_retained_log_hint(Some(0), false));
-        assert!(!should_print_retained_log_hint(None, false));
-        assert!(!should_print_retained_log_hint(Some(130), true));
-    }
-
-    #[test]
-    fn test_foreground_completion_messages() {
-        assert_eq!(
-            foreground_completion_message(ForegroundStopReason::ProcessExited, true, "box"),
-            "Box box exited and was removed."
-        );
-        assert_eq!(
-            foreground_completion_message(
-                ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT),
-                false,
-                "box"
-            ),
-            "Box box stopped."
-        );
-        assert_eq!(
-            foreground_completion_message(ForegroundStopReason::VmUnhealthy, true, "box"),
-            "Box box stopped after VM health check failed and was removed."
-        );
-        assert_eq!(
-            foreground_completion_message(ForegroundStopReason::TimedOut, false, "box"),
-            "Box box stopped after --timeout expired."
-        );
-    }
-
-    #[test]
-    fn test_build_box_config_passes_security_options() {
-        let mut args = default_run_args();
-        args.common.cap_add = vec!["NET_ADMIN".to_string()];
-        args.common.cap_drop = vec!["NET_RAW".to_string()];
-        args.common.security_opt = vec!["seccomp=unconfined".to_string()];
-        args.common.privileged = true;
-
-        let config = build_box_config(
-            &args,
-            512,
-            a3s_box_core::config::ResourceLimits::default(),
-            None,
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-
-        assert_eq!(config.cap_add, vec!["NET_ADMIN"]);
-        assert_eq!(config.cap_drop, vec!["NET_RAW"]);
-        assert_eq!(config.security_opt, vec!["seccomp=unconfined"]);
-        assert!(config.privileged);
-    }
-
-    #[test]
-    fn test_build_box_config_passes_user_and_workdir() {
-        let mut args = default_run_args();
-        args.common.user = Some("root:root".to_string());
-        args.common.workdir = Some("/app".to_string());
-
-        let config = build_box_config(
-            &args,
-            512,
-            a3s_box_core::config::ResourceLimits::default(),
-            None,
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-
-        assert_eq!(config.user.as_deref(), Some("0:0"));
-        assert_eq!(config.workdir.as_deref(), Some("/app"));
-    }
-
-    #[test]
-    fn test_build_box_config_passes_hostname_and_add_hosts() {
-        let mut args = default_run_args();
-        args.common.hostname = Some("web".to_string());
-        args.common.add_host = vec!["db.local:10.88.0.10".to_string()];
-
-        let config = build_box_config(
-            &args,
-            512,
-            a3s_box_core::config::ResourceLimits::default(),
-            None,
-            vec![],
-            vec![],
-            vec![],
-            a3s_box_core::NetworkMode::Tsi,
-            vec![],
-            TeeConfig::None,
-        )
-        .unwrap();
-
-        assert_eq!(config.hostname.as_deref(), Some("web"));
-        assert_eq!(config.add_hosts, vec!["db.local:10.88.0.10"]);
-    }
-
-    #[test]
-    fn test_resolve_volumes_empty() {
-        let (resolved, names) = resolve_volumes(&[]).unwrap();
-        assert!(resolved.is_empty());
-        assert!(names.is_empty());
-    }
-}
+#[path = "run/tests.rs"]
+mod tests;

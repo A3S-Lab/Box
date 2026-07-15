@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use a3s_box_core::{
     EventEmitter, ExecutionBackend, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionState, KillOutcome,
+    ExecutionState, KillOutcome, DEFAULT_SHUTDOWN_TIMEOUT_MS,
 };
 use async_trait::async_trait;
 use dashmap::mapref::entry::Entry;
@@ -33,6 +33,7 @@ type SharedVm = Arc<Mutex<VmManager>>;
 pub struct VmLocalExecutionBackend {
     home_dir: PathBuf,
     managers: Arc<DashMap<String, SharedVm>>,
+    pull_progress_fn: Option<crate::PullProgressFn>,
 }
 
 impl VmLocalExecutionBackend {
@@ -40,7 +41,13 @@ impl VmLocalExecutionBackend {
         Self {
             home_dir: home_dir.into(),
             managers: Arc::new(DashMap::new()),
+            pull_progress_fn: None,
         }
+    }
+
+    pub fn with_pull_progress_fn(mut self, pull_progress_fn: crate::PullProgressFn) -> Self {
+        self.pull_progress_fn = Some(pull_progress_fn);
+        self
     }
 
     pub fn home_dir(&self) -> &Path {
@@ -97,6 +104,9 @@ impl VmLocalExecutionBackend {
         }
         let mut manager = VmManager::with_box_id(config, EventEmitter::new(256), record.id.clone());
         manager.home_dir = self.home_dir.clone();
+        if let Some(pull_progress_fn) = self.pull_progress_fn.clone() {
+            manager.set_pull_progress_fn(pull_progress_fn);
+        }
         manager.anonymous_volumes = record.anonymous_volumes.clone();
         manager.set_log_config(record.log_config.clone());
         manager.resolved_execution_plan = Some(metadata.plan.clone());
@@ -337,21 +347,9 @@ impl VmLocalExecutionBackend {
         } else {
             manager.anonymous_volumes().to_vec()
         };
-        let result = if let Some(timeout_secs) = timeout_secs {
-            let timeout_ms = timeout_secs.checked_mul(1_000).ok_or_else(|| {
-                ExecutionManagerError::InvalidRequest(format!(
-                    "restart timeout is too large for execution {}",
-                    record.id
-                ))
-            })?;
-            let signal = record
-                .stop_signal
-                .as_deref()
-                .map(a3s_box_core::vmm::parse_signal_name)
-                .unwrap_or(libc::SIGTERM);
-            manager.destroy_with_options(signal, timeout_ms).await
-        } else {
-            manager.destroy().await
+        let result = match graceful_stop_options(record, timeout_secs)? {
+            Some((signal, timeout_ms)) => manager.destroy_with_options(signal, timeout_ms).await,
+            None => manager.destroy().await,
         };
         drop(manager);
         self.remove_manager(&record.id, &shared);
@@ -554,14 +552,22 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
 
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         let metadata = self.metadata(record)?;
+        let remove_anonymous_volumes = record.auto_remove;
+        let timeout_secs = record.stop_timeout;
         if let Some(manager) = self.manager(&record.id) {
-            return self.destroy_registered(record, manager, true, None).await;
+            return self
+                .destroy_registered(record, manager, remove_anonymous_volumes, timeout_secs)
+                .await;
         }
         match metadata.plan.backend {
-            ExecutionBackend::Crun => self.destroy_detached_sandbox(record, true, None).await,
+            ExecutionBackend::Crun => {
+                self.destroy_detached_sandbox(record, remove_anonymous_volumes, timeout_secs)
+                    .await
+            }
             ExecutionBackend::Krun => {
                 let manager = self.recover_microvm(record).await?;
-                self.destroy_registered(record, manager, true, None).await
+                self.destroy_registered(record, manager, remove_anonymous_volumes, timeout_secs)
+                    .await
             }
         }
     }
@@ -590,6 +596,30 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             }
         }
     }
+}
+
+fn graceful_stop_options(
+    record: &BoxRecord,
+    timeout_secs: Option<u64>,
+) -> ExecutionManagerResult<Option<(i32, u64)>> {
+    if timeout_secs.is_none() && record.stop_signal.is_none() {
+        return Ok(None);
+    }
+    let timeout_ms = timeout_secs
+        .unwrap_or(DEFAULT_SHUTDOWN_TIMEOUT_MS / 1_000)
+        .checked_mul(1_000)
+        .ok_or_else(|| {
+            ExecutionManagerError::InvalidRequest(format!(
+                "stop timeout is too large for execution {}",
+                record.id
+            ))
+        })?;
+    let signal = record
+        .stop_signal
+        .as_deref()
+        .map(a3s_box_core::vmm::parse_signal_name)
+        .unwrap_or(libc::SIGTERM);
+    Ok(Some((signal, timeout_ms)))
 }
 
 async fn require_recorded_pid(
