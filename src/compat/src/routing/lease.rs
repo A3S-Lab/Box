@@ -191,7 +191,8 @@ mod tests {
 
     use crate::control::{
         LifecyclePolicy, MemorySandboxRepository, NewSandboxRecord, OnTimeoutAction,
-        RotatingTokenProvider, SandboxCredentials, SandboxRecord, TokenIssuer, TokenKeyMaterial,
+        RotatingTokenProvider, SandboxCredentials, SandboxRecord, SqliteSandboxRepository,
+        TokenIssuer, TokenKeyMaterial,
     };
     use crate::routing::{SandboxRoutePolicy, CODE_INTERPRETER_PORT, ENVD_PORT};
 
@@ -411,5 +412,39 @@ mod tests {
                 .await,
             Err(RouteLeaseError::Inactive)
         ));
+    }
+
+    #[tokio::test]
+    async fn resolves_a_generation_fenced_lease_after_sqlite_restart() {
+        let harness = Harness::new().await;
+        let record = harness
+            .repository
+            .get(&harness.sandbox_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("routes.db");
+        let repository = SqliteSandboxRepository::open(&path).await.unwrap();
+        repository.insert(record).await.unwrap();
+        drop(repository);
+
+        let repository = Arc::new(SqliteSandboxRepository::open(&path).await.unwrap());
+        let tokens = Arc::new(
+            RotatingTokenProvider::new(1, [TokenKeyMaterial::new(1, &[7; 32], &[8; 32]).unwrap()])
+                .unwrap(),
+        );
+        let service = RouteLeaseService::new(repository, tokens, Arc::new(FixedClock(harness.now)));
+        let lease = service
+            .resolve(
+                &harness.route(ENVD_PORT),
+                &token_headers(ENVD_ACCESS_TOKEN_HEADER, &harness.envd_secret),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(lease.sandbox_id(), &harness.sandbox_id);
+        assert_eq!(lease.token_scope(), TokenScope::Envd);
+        assert_eq!(lease.expires_at(), harness.now + Duration::minutes(5));
     }
 }
