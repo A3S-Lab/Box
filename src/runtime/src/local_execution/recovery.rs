@@ -50,6 +50,7 @@ impl LocalExecutionManager {
                 } else {
                     ManagedExecutionState::Failed
                 };
+                self.release_execution_resources(&record).await?;
                 let record = self
                     .transition(&record, internal, terminal, RuntimeUpdate::Terminal(None))
                     .await?;
@@ -168,6 +169,7 @@ impl LocalExecutionManager {
                 } else {
                     ManagedExecutionState::Failed
                 };
+                self.release_execution_resources(&record).await?;
                 let record = self
                     .transition(
                         &record,

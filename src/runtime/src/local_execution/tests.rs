@@ -803,6 +803,65 @@ async fn inspection_persists_an_external_terminal_observation() {
 }
 
 #[tokio::test]
+async fn inspection_releases_resources_after_an_external_terminal_observation() {
+    use a3s_box_core::{network::NetworkConfig, volume::VolumeConfig};
+
+    let (_directory, manager, backend) = harness();
+    let volumes = crate::VolumeStore::new(
+        manager.home_dir.join("volumes.json"),
+        manager.home_dir.join("volumes"),
+    );
+    volumes.create(VolumeConfig::new("workspace", "")).unwrap();
+    let networks = crate::NetworkStore::new(manager.home_dir.join("networks.json"));
+    networks
+        .create(NetworkConfig::new("dev", "10.88.0.0/24").unwrap())
+        .unwrap();
+
+    let mut create_request = request("sandbox-1");
+    create_request.config.isolation = ExecutionIsolation::Microvm;
+    create_request.config.network = NetworkMode::Bridge {
+        network: "dev".to_string(),
+    };
+    create_request.policy.name = Some("terminal-resources".to_string());
+    create_request.policy.volume_names = vec!["workspace".to_string()];
+    let running = manager
+        .create_and_start(create_request, &operation("operation-terminal-resources"))
+        .await
+        .unwrap();
+    volumes
+        .modify("workspace", |volume| {
+            volume.attach(running.execution_id.as_str())
+        })
+        .unwrap();
+    networks
+        .with_write_lock(|entries| -> Result<(), a3s_box_core::BoxError> {
+            entries
+                .get_mut("dev")
+                .unwrap()
+                .connect(running.execution_id.as_str(), "terminal-resources")
+                .map_err(a3s_box_core::BoxError::NetworkError)?;
+            Ok(())
+        })
+        .unwrap();
+
+    backend.stop_externally(&running.execution_id, 0);
+    manager.inspect(&running.execution_id).await.unwrap();
+
+    assert!(volumes
+        .get("workspace")
+        .unwrap()
+        .unwrap()
+        .in_use_by
+        .is_empty());
+    assert!(!networks
+        .get("dev")
+        .unwrap()
+        .unwrap()
+        .endpoints
+        .contains_key(running.execution_id.as_str()));
+}
+
+#[tokio::test]
 async fn restart_running_execution_advances_generation_once_and_is_idempotent() {
     let (_directory, manager, backend) = harness();
     let running = manager
