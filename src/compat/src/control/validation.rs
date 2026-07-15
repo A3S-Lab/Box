@@ -12,6 +12,9 @@ pub(crate) fn validate_persisted_record(record: &SandboxRecord) -> Result<(), Li
     if record.expires_at() < record.created_at() {
         return Err(LifecycleError::InvalidExpiry);
     }
+    record.routing().validate().map_err(|error| {
+        LifecycleError::InvalidPersistedState(format!("invalid route policy: {error}"))
+    })?;
     if record.execution_id().is_some() != record.execution_generation().is_some() {
         return Err(LifecycleError::InvalidPersistedState(
             "execution ID and generation must be present together".to_string(),

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::credential::SandboxCredentials;
+use crate::routing::SandboxRoutePolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -18,9 +19,17 @@ pub struct SandboxId(String);
 impl SandboxId {
     pub fn new(value: impl Into<String>) -> Result<Self, LifecycleError> {
         let value = value.into();
-        if value.trim().is_empty() {
+        let bytes = value.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > 48
+            || !is_sandbox_id_alphanumeric(bytes[0])
+            || !is_sandbox_id_alphanumeric(bytes[bytes.len() - 1])
+            || !bytes
+                .iter()
+                .all(|byte| is_sandbox_id_alphanumeric(*byte) || *byte == b'-')
+        {
             return Err(LifecycleError::InvalidIdentity(
-                "sandbox ID cannot be empty".to_string(),
+                "sandbox ID must be 1-48 lowercase DNS-label characters".to_string(),
             ));
         }
         Ok(Self(value))
@@ -29,6 +38,10 @@ impl SandboxId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+const fn is_sandbox_id_alphanumeric(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit()
 }
 
 impl fmt::Display for SandboxId {
@@ -151,6 +164,7 @@ pub struct NewSandboxRecord {
     pub secure: bool,
     pub allow_internet_access: Option<bool>,
     pub credentials: SandboxCredentials,
+    pub routing: SandboxRoutePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +188,8 @@ pub struct SandboxRecord {
     secure: bool,
     allow_internet_access: Option<bool>,
     credentials: SandboxCredentials,
+    #[serde(default)]
+    routing: SandboxRoutePolicy,
     failure: Option<LifecycleFailure>,
 }
 
@@ -210,6 +226,7 @@ impl SandboxRecord {
             secure: new.secure,
             allow_internet_access: new.allow_internet_access,
             credentials: new.credentials,
+            routing: new.routing,
             failure: None,
         })
     }
@@ -288,6 +305,10 @@ impl SandboxRecord {
 
     pub fn credentials(&self) -> &SandboxCredentials {
         &self.credentials
+    }
+
+    pub fn routing(&self) -> &SandboxRoutePolicy {
+        &self.routing
     }
 
     pub const fn failure(&self) -> Option<LifecycleFailure> {

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use super::SandboxId;
+use crate::routing::SandboxRoutePolicy;
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
@@ -40,6 +41,7 @@ pub trait SandboxIdentityProvider: Send + Sync {
 pub struct ResolvedTemplate {
     pub config: BoxConfig,
     pub envd_version: String,
+    pub routing: SandboxRoutePolicy,
 }
 
 #[derive(Debug, Error)]

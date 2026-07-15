@@ -9,5 +9,6 @@ mod proto;
 
 pub mod control;
 pub mod http;
+pub mod routing;
 
 pub use fixture::{generate_fixture, verify_fixture, FixturePaths};
