@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU16;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
     ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionReservation, ExecutionState, ExecutionStatus, KillOutcome,
-    NetworkMode, OperationId, ReconcileOutcome, ResourceConfig,
+    ExecutionManagerResult, ExecutionPortConnector, ExecutionPortStream, ExecutionReservation,
+    ExecutionState, ExecutionStatus, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
+    ResourceConfig,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
@@ -27,6 +30,7 @@ impl TestHarness {
         let service = Arc::new(ControlService::new(ControlServiceDependencies {
             repository: Arc::new(MemorySandboxRepository::default()),
             executions: executions.clone(),
+            ports: executions.clone(),
             clock,
             identities: Arc::new(TestIdentities::default()),
             templates: Arc::new(TestTemplates),
@@ -97,7 +101,10 @@ struct TestTemplates;
 #[async_trait]
 impl TemplateProvider for TestTemplates {
     async fn resolve(&self, template_id: &str) -> TemplateProviderResult<ResolvedTemplate> {
-        if template_id != "fixture-template" && template_id != "code-interpreter-v1" {
+        if !matches!(
+            template_id,
+            "fixture-template" | "code-interpreter-v1" | "runtime-envd-template"
+        ) {
             return Err(TemplateProviderError::NotFound(template_id.to_string()));
         }
         Ok(ResolvedTemplate {
@@ -112,7 +119,11 @@ impl TemplateProvider for TestTemplates {
                 ..BoxConfig::default()
             },
             envd_version: "0.1.3".to_string(),
-            envd_mode: EnvdMode::Broker,
+            envd_mode: if template_id == "runtime-envd-template" {
+                EnvdMode::Runtime
+            } else {
+                EnvdMode::Broker
+            },
             routing: if template_id == "code-interpreter-v1" {
                 crate::routing::SandboxRoutePolicy::default()
                     .with_port(crate::routing::CODE_INTERPRETER_PORT, TokenScope::Traffic)
@@ -169,6 +180,8 @@ struct TestExecution {
 pub(crate) struct RecordingExecutionManager {
     clock: Arc<dyn Clock>,
     fail_create: AtomicBool,
+    fail_ports: AtomicBool,
+    port_requests: Mutex<Vec<(String, u64, u16)>>,
     requests: Mutex<Vec<CreateExecutionRequest>>,
     operations: Mutex<BTreeMap<String, String>>,
     executions: Mutex<BTreeMap<String, TestExecution>>,
@@ -179,6 +192,8 @@ impl RecordingExecutionManager {
         Self {
             clock,
             fail_create: AtomicBool::new(false),
+            fail_ports: AtomicBool::new(false),
+            port_requests: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
             operations: Mutex::new(BTreeMap::new()),
             executions: Mutex::new(BTreeMap::new()),
@@ -193,6 +208,22 @@ impl RecordingExecutionManager {
         self.fail_create.store(true, Ordering::Relaxed);
     }
 
+    pub fn fail_ports(&self) {
+        self.fail_ports.store(true, Ordering::Relaxed);
+    }
+
+    pub fn port_requests(&self) -> Vec<(String, u64, u16)> {
+        self.port_requests.lock().unwrap().clone()
+    }
+
+    pub fn execution_state(&self, execution_id: &str) -> Option<ExecutionState> {
+        self.executions
+            .lock()
+            .unwrap()
+            .get(execution_id)
+            .map(|execution| execution.state)
+    }
+
     fn reservation(execution: &TestExecution) -> ExecutionReservation {
         ExecutionReservation {
             execution_id: execution.lease.execution_id.clone(),
@@ -201,6 +232,31 @@ impl RecordingExecutionManager {
             resources: execution.lease.resources.clone(),
             created_at: execution.lease.started_at,
         }
+    }
+}
+
+#[async_trait]
+impl ExecutionPortConnector for RecordingExecutionManager {
+    async fn connect_port(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        port: NonZeroU16,
+        _timeout: Duration,
+    ) -> ExecutionManagerResult<ExecutionPortStream> {
+        self.port_requests.lock().unwrap().push((
+            execution_id.to_string(),
+            generation.get(),
+            port.get(),
+        ));
+        if self.fail_ports.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "test runtime envd is unavailable".to_string(),
+            ));
+        }
+        let (stream, peer) = tokio::io::duplex(64);
+        drop(peer);
+        Ok(Box::pin(stream))
     }
 }
 

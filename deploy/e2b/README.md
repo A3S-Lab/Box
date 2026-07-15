@@ -10,9 +10,10 @@ The build pins:
 - Code Interpreter commit `5aeca43fe3fae2df260b1fb17c71fed5b5dac852`;
 - the JavaScript kernel commit declared in the Dockerfile.
 
-The image starts envd on port `49983`, initializes its default user and working
-directory, and starts the Code Interpreter service on port `49999`. A production
-ACL template selects the in-Sandbox daemon explicitly:
+The image waits for Jupyter and the Code Interpreter service on port `49999`
+before it starts envd on port `49983` and initializes envd's default user and
+working directory. A production ACL template selects the in-Sandbox daemon
+explicitly:
 
 ```acl
 template_policy "code-interpreter-v1" {

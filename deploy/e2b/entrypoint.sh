@@ -11,10 +11,30 @@ terminate() {
 }
 trap terminate EXIT INT TERM
 
-/usr/local/bin/envd -isnotfc -no-cgroups &
-children+=("$!")
+wait_for_service() {
+  local name="$1"
+  local url="$2"
+  local pid="$3"
 
-/usr/bin/python3 /usr/local/lib/a3s-box-e2b/init-envd.py
+  for attempt in {1..150}; do
+    if curl --fail --silent --output /dev/null "${url}"; then
+      return 0
+    fi
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      local status=0
+      wait "${pid}" || status=$?
+      echo "${name} exited before becoming healthy with status ${status}" >&2
+      if ((status == 0)); then
+        status=1
+      fi
+      return "${status}"
+    fi
+    sleep 0.2
+  done
+
+  echo "${name} did not become healthy within 30 seconds" >&2
+  return 1
+}
 
 runuser -u user -- env \
   HOME=/home/user \
@@ -23,17 +43,9 @@ runuser -u user -- env \
   --IdentityProvider.token= \
   --ServerApp.root_dir=/home/user &
 children+=("$!")
+jupyter_pid="$!"
 
-for attempt in {1..150}; do
-  if curl --fail --silent --output /dev/null http://127.0.0.1:8888/api/status; then
-    break
-  fi
-  if ((attempt == 150)); then
-    echo "Jupyter did not become healthy within 30 seconds" >&2
-    exit 1
-  fi
-  sleep 0.2
-done
+wait_for_service "Jupyter" "http://127.0.0.1:8888/api/status" "${jupyter_pid}"
 
 runuser -u user -- env \
   HOME=/home/user \
@@ -48,6 +60,17 @@ runuser -u user -- env \
   --no-use-colors \
   --timeout-keep-alive 640 &
 children+=("$!")
+code_interpreter_pid="$!"
+
+wait_for_service \
+  "Code Interpreter" \
+  "http://127.0.0.1:49999/health" \
+  "${code_interpreter_pid}"
+
+/usr/local/bin/envd -isnotfc -no-cgroups &
+children+=("$!")
+
+/usr/bin/python3 /usr/local/lib/a3s-box-e2b/init-envd.py
 
 set +e
 wait -n "${children[@]}"

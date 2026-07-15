@@ -65,6 +65,7 @@ impl E2bCompatService {
         let control = Arc::new(ControlService::new(ControlServiceDependencies {
             repository: repository.clone(),
             executions: executions.clone(),
+            ports: port_connector.clone(),
             clock: clock.clone(),
             identities: Arc::new(UuidSandboxIdentityProvider),
             templates,
