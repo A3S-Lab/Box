@@ -4,6 +4,7 @@ use std::num::{NonZeroU16, NonZeroUsize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
     resolve_execution, BoxConfig, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
     ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
@@ -11,7 +12,6 @@ use a3s_box_core::{
     ExecutionSessionManager, ExecutionState, ExecutionStatus, FileRequest, FileResponse,
     KillOutcome, OperationId, ReconcileOutcome,
 };
-use a3s_box_core::pty::PtyRequest;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::header::{HOST, ORIGIN};

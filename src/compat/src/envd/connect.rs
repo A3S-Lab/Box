@@ -30,11 +30,7 @@ impl ConnectFailure {
     }
 
     pub(super) fn failed_precondition(message: impl Into<String>) -> Self {
-        Self::new(
-            "failed_precondition",
-            message,
-            StatusCode::BAD_REQUEST,
-        )
+        Self::new("failed_precondition", message, StatusCode::BAD_REQUEST)
     }
 
     pub(super) fn unimplemented(message: impl Into<String>) -> Self {
@@ -42,11 +38,7 @@ impl ConnectFailure {
     }
 
     pub(super) fn resource_exhausted(message: impl Into<String>) -> Self {
-        Self::new(
-            "resource_exhausted",
-            message,
-            StatusCode::TOO_MANY_REQUESTS,
-        )
+        Self::new("resource_exhausted", message, StatusCode::TOO_MANY_REQUESTS)
     }
 
     pub(super) fn unavailable(message: impl Into<String>) -> Self {
@@ -69,9 +61,7 @@ impl ConnectFailure {
         response(
             self.status,
             CONTENT_TYPE_UNARY_JSON,
-            Body::from(
-                json!({ "code": self.code, "message": self.message }).to_string(),
-            ),
+            Body::from(json!({ "code": self.code, "message": self.message }).to_string()),
         )
     }
 
@@ -132,11 +122,7 @@ where
     T: Serialize,
 {
     match serde_json::to_vec(value) {
-        Ok(body) => response(
-            StatusCode::OK,
-            CONTENT_TYPE_UNARY_JSON,
-            Body::from(body),
-        ),
+        Ok(body) => response(StatusCode::OK, CONTENT_TYPE_UNARY_JSON, Body::from(body)),
         Err(error) => ConnectFailure::internal(format!(
             "failed to serialize Connect JSON response: {error}"
         ))
@@ -164,8 +150,7 @@ fn encode_json_frame(flags: u8, value: &Value) -> Vec<u8> {
     // serde_json::Value serialization is infallible for values constructed by
     // this module. Keep the fallback a valid Connect error envelope anyway.
     let payload = serde_json::to_vec(value).unwrap_or_else(|_| {
-        br#"{"error":{"code":"internal","message":"response serialization failed"}}"#
-            .to_vec()
+        br#"{"error":{"code":"internal","message":"response serialization failed"}}"#.to_vec()
     });
     let length = u32::try_from(payload.len()).unwrap_or(u32::MAX);
     let mut frame = Vec::with_capacity(payload.len().saturating_add(5));

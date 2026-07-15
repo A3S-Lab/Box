@@ -100,11 +100,10 @@ impl ExecutionSessionManager for TestSessions {
         generation: ExecutionGeneration,
         request: ExecRequest,
     ) -> ExecutionManagerResult<ExecutionProcess> {
-        self.requests.lock().unwrap().push((
-            execution_id.to_string(),
-            generation.get(),
-            request,
-        ));
+        self.requests
+            .lock()
+            .unwrap()
+            .push((execution_id.to_string(), generation.get(), request));
         let input = Arc::new(TestInput::default());
         self.inputs.lock().unwrap().push(input.clone());
         let events = self
@@ -178,10 +177,7 @@ fn decode_frames(bytes: &[u8]) -> Vec<(u8, Value)> {
         ]) as usize;
         let start = offset + 5;
         let end = start + length;
-        frames.push((
-            flags,
-            serde_json::from_slice(&bytes[start..end]).unwrap(),
-        ));
+        frames.push((flags, serde_json::from_slice(&bytes[start..end]).unwrap()));
         offset = end;
     }
     frames

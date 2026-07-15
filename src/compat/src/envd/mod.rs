@@ -45,11 +45,7 @@ impl EnvdBroker {
         if path.starts_with("/process.Process/") {
             return self
                 .processes
-                .handle(
-                    request,
-                    lease.execution_id(),
-                    lease.execution_generation(),
-                )
+                .handle(request, lease.execution_id(), lease.execution_generation())
                 .await;
         }
         self.dispatch(

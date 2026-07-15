@@ -154,11 +154,7 @@ impl ProcessBroker {
         }
     }
 
-    async fn connect(
-        &self,
-        request: Request<Body>,
-        key: &ProcessGeneration,
-    ) -> Response<Body> {
+    async fn connect(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
         let request: ConnectRequest = match decode_stream(request).await {
             Ok(request) => request,
             Err(error) => return stream_error(&error),
@@ -170,11 +166,7 @@ impl ProcessBroker {
         process_stream(entry.pid, entry.subscribe())
     }
 
-    async fn list(
-        &self,
-        request: Request<Body>,
-        key: &ProcessGeneration,
-    ) -> Response<Body> {
+    async fn list(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
         if let Err(error) = decode_unary::<EmptyRequest>(request).await {
             return error.unary_response();
         }
@@ -200,11 +192,7 @@ impl ProcessBroker {
         unary_ok(&ListResponse { processes })
     }
 
-    async fn send_input(
-        &self,
-        request: Request<Body>,
-        key: &ProcessGeneration,
-    ) -> Response<Body> {
+    async fn send_input(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
         let request: SendInputRequest = match decode_unary(request).await {
             Ok(request) => request,
             Err(error) => return error.unary_response(),
@@ -240,11 +228,7 @@ impl ProcessBroker {
         }
     }
 
-    async fn close_stdin(
-        &self,
-        request: Request<Body>,
-        key: &ProcessGeneration,
-    ) -> Response<Body> {
+    async fn close_stdin(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
         let request: CloseStdinRequest = match decode_unary(request).await {
             Ok(request) => request,
             Err(error) => return error.unary_response(),
@@ -265,11 +249,7 @@ impl ProcessBroker {
         }
     }
 
-    async fn send_signal(
-        &self,
-        request: Request<Body>,
-        key: &ProcessGeneration,
-    ) -> Response<Body> {
+    async fn send_signal(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
         let request: SendSignalRequest = match decode_unary(request).await {
             Ok(request) => request,
             Err(error) => return error.unary_response(),
@@ -290,11 +270,7 @@ impl ProcessBroker {
         }
     }
 
-    async fn update(
-        &self,
-        request: Request<Body>,
-        key: &ProcessGeneration,
-    ) -> Response<Body> {
+    async fn update(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
         let request: UpdateRequest = match decode_unary(request).await {
             Ok(request) => request,
             Err(error) => return error.unary_response(),
@@ -304,10 +280,8 @@ impl ProcessBroker {
             Err(error) => return error.unary_response(),
         };
         if !entry.pty {
-            return ConnectFailure::failed_precondition(
-                "UpdateRequest.pty requires a PTY process",
-            )
-            .unary_response();
+            return ConnectFailure::failed_precondition("UpdateRequest.pty requires a PTY process")
+                .unary_response();
         }
         let size = match request.pty.and_then(|pty| pty.size) {
             Some(size) => match size.validate() {
@@ -315,10 +289,8 @@ impl ProcessBroker {
                 Err(error) => return error.unary_response(),
             },
             None => {
-                return ConnectFailure::invalid_argument(
-                    "UpdateRequest.pty.size is required",
-                )
-                .unary_response()
+                return ConnectFailure::invalid_argument("UpdateRequest.pty.size is required")
+                    .unary_response()
             }
         };
         match entry.input.resize_pty(size.cols, size.rows).await {
@@ -379,9 +351,9 @@ impl ProcessBroker {
         key: &ProcessGeneration,
         selector: &Option<ProcessSelector>,
     ) -> Result<Arc<ProcessEntry>, ConnectFailure> {
-        let selector = selector.as_ref().ok_or_else(|| {
-            ConnectFailure::invalid_argument("process selector is required")
-        })?;
+        let selector = selector
+            .as_ref()
+            .ok_or_else(|| ConnectFailure::invalid_argument("process selector is required"))?;
         let registry = self.registry.read().await;
         let entries = registry
             .generations
@@ -398,9 +370,7 @@ impl ProcessBroker {
                 .filter(|entry| entry.is_running() && entry.tag.as_deref() == Some(tag))
                 .min_by_key(|entry| entry.pid)
                 .cloned()
-                .ok_or_else(|| {
-                    ConnectFailure::not_found(format!("process tag {tag:?} not found"))
-                }),
+                .ok_or_else(|| ConnectFailure::not_found(format!("process tag {tag:?} not found"))),
         }
     }
 
@@ -672,9 +642,7 @@ fn encode(data: &[u8]) -> String {
 
 fn manager_failure(error: ExecutionManagerError) -> ConnectFailure {
     match error {
-        ExecutionManagerError::InvalidRequest(message) => {
-            ConnectFailure::invalid_argument(message)
-        }
+        ExecutionManagerError::InvalidRequest(message) => ConnectFailure::invalid_argument(message),
         ExecutionManagerError::NotFound(execution_id) => {
             ConnectFailure::not_found(format!("execution {execution_id} not found"))
         }
@@ -692,7 +660,9 @@ fn process_timeout_ns(headers: &HeaderMap) -> Result<u64, ConnectFailure> {
             .to_str()
             .map_err(|_| ConnectFailure::invalid_argument("Connect timeout is not UTF-8"))?
             .parse::<u64>()
-            .map_err(|_| ConnectFailure::invalid_argument("Connect timeout must be milliseconds"))?,
+            .map_err(|_| {
+                ConnectFailure::invalid_argument("Connect timeout must be milliseconds")
+            })?,
         None => DEFAULT_PROCESS_TIMEOUT_MS,
     };
     timeout_ms.checked_mul(1_000_000).ok_or_else(|| {
@@ -764,16 +734,9 @@ impl ProcessConfig {
                 "process arguments cannot contain NUL",
             ));
         }
-        if self
-            .envs
-            .iter()
-            .any(|(key, value)| {
-                key.is_empty()
-                    || key.contains('=')
-                    || key.contains('\0')
-                    || value.contains('\0')
-            })
-        {
+        if self.envs.iter().any(|(key, value)| {
+            key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0')
+        }) {
             return Err(ConnectFailure::invalid_argument(
                 "process environment contains an invalid name or value",
             ));
