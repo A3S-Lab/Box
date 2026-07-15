@@ -134,7 +134,11 @@ impl TokenIssuer for TestTokens {
 
 #[async_trait]
 impl TokenResolver for TestTokens {
-    async fn resolve(&self, stored: &StoredToken) -> TokenIssuerResult<SecretToken> {
+    async fn resolve(
+        &self,
+        _scope: TokenScope,
+        stored: &StoredToken,
+    ) -> TokenIssuerResult<SecretToken> {
         SecretToken::new(
             std::str::from_utf8(stored.ciphertext())
                 .map_err(|_| TokenIssuerError::InvalidMaterial)?,

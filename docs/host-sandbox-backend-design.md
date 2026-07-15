@@ -135,9 +135,9 @@ but it is an internal and persisted value rather than a new CLI spelling. The
 public value `sandbox` stays concise, while state and audit output always
 expose `isolation_class=shared-kernel`.
 
-The equivalent HCL setting is explicit only for the sandbox backend:
+The equivalent ACL setting is explicit only for the sandbox backend:
 
-```hcl
+```acl
 runtime {
   isolation = "sandbox"
 }

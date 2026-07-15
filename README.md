@@ -361,9 +361,12 @@ manager, freezes image-defined health and stop defaults into the durable
 request, and leaves network, volume, rootfs, stop, and auto-remove ownership to
 the managed backend. The Rust SDK now exposes typed create, start, run, inspect,
 pause, resume, restart, kill, and reconciliation calls through that same
-manager. The production HCL service, encrypted credentials, generation-fenced
-route leases, wildcard TLS gateway, envd data plane, and real official-client
-Sandbox suite remain open gates.
+manager. Production credential providers now store account keys as salted
+PBKDF2-SHA256 hashes and protect scope-separated sandbox tokens with
+AES-256-GCM, independent HMAC validation, and versioned key rotation. Wiring
+those providers into the production ACL service, generation-fenced route
+leases, the wildcard TLS gateway, the envd data plane, and the real
+official-client Sandbox suite remain open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

@@ -173,7 +173,11 @@ impl TokenIssuer for FixtureTokens {
 
 #[async_trait]
 impl TokenResolver for FixtureTokens {
-    async fn resolve(&self, stored: &StoredToken) -> TokenIssuerResult<SecretToken> {
+    async fn resolve(
+        &self,
+        _scope: TokenScope,
+        stored: &StoredToken,
+    ) -> TokenIssuerResult<SecretToken> {
         let digest = Sha256::digest(stored.ciphertext());
         if &digest[..] != stored.digest() {
             return Err(TokenIssuerError::InvalidMaterial);

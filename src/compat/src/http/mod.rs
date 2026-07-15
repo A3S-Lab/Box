@@ -1,3 +1,4 @@
+mod account;
 mod auth;
 mod cursor;
 mod dto;
@@ -5,6 +6,10 @@ mod error;
 mod lifecycle;
 mod router;
 
+pub use account::{
+    CredentialHash, CredentialHashError, CredentialHashResult, HashedAccountCredential,
+    HashedCredentialVerifier,
+};
 pub use auth::{
     AuthenticatedAccount, AuthenticationError, AuthenticationResult, CredentialScheme,
     CredentialVerifier, PresentedCredential,
