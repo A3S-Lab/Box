@@ -31,6 +31,14 @@ pub(crate) fn runtime_socket_dir(home_dir: &Path, box_id: &str) -> PathBuf {
     }
 }
 
+fn registry_auth_for_image(home_dir: &Path, reference: &str) -> Result<crate::oci::RegistryAuth> {
+    let parsed = crate::oci::ImageReference::parse(reference)?;
+    Ok(crate::oci::RegistryAuth::from_credential_store_at(
+        home_dir,
+        &parsed.registry,
+    ))
+}
+
 impl VmManager {
     pub(crate) async fn prepare_layout(&self) -> Result<BoxLayout> {
         // Create box-specific directories
@@ -197,10 +205,8 @@ impl VmManager {
 
         let images_dir = self.home_dir.join("images");
         let store = crate::oci::ImageStore::new(&images_dir, crate::DEFAULT_IMAGE_CACHE_SIZE)?;
-        let mut puller = crate::oci::ImagePuller::new(
-            std::sync::Arc::new(store),
-            crate::oci::RegistryAuth::from_env(),
-        );
+        let auth = registry_auth_for_image(&self.home_dir, reference)?;
+        let mut puller = crate::oci::ImagePuller::new(std::sync::Arc::new(store), auth);
         if let Some(ref m) = self.prom {
             puller = puller.set_metrics(m.clone());
         }
@@ -913,6 +919,30 @@ mod tests {
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
         }
+    }
+
+    #[test]
+    fn vm_image_auth_uses_the_managers_explicit_home() {
+        let home = TempDir::new().unwrap();
+        let store = crate::oci::CredentialStore::new(home.path().join("auth/credentials.json"));
+        store
+            .store(
+                "manager-layout.invalid:5443",
+                "layout-user",
+                "layout-secret",
+            )
+            .unwrap();
+
+        let auth = registry_auth_for_image(
+            home.path(),
+            "manager-layout.invalid:5443/a3s/private:latest",
+        )
+        .unwrap();
+
+        assert_eq!(
+            auth.basic_credentials(),
+            Some(("layout-user".to_string(), "layout-secret".to_string()))
+        );
     }
 
     #[test]
