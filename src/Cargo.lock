@@ -219,6 +219,7 @@ version = "3.0.9"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
+ "async-trait",
  "chrono",
  "libc",
  "serde",
