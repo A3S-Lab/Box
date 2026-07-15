@@ -79,11 +79,15 @@ cargo run --locked -p a3s-box-compat --bin a3s-box-e2b -- \
 
 The validated schema and an operator example are documented in
 [`docs/e2b-compatible-sdk-design.md`](../../docs/e2b-compatible-sdk-design.md#configuration).
-This process currently exposes the lifecycle control subset. The wildcard TLS
-gateway and sandbox data-plane protocols remain required before the manifest
-can set `full_compatibility=true`.
+This process exposes the lifecycle control subset plus an authenticated
+wildcard TLS data-plane edge. The edge supports direct and shared route forms,
+HTTP/1.1 and HTTP/2 streaming proxying, CORS preflight, upgrades, bounded
+connections, and generation-fenced access to real Sandbox loopback ports. The
+pinned envd/ConnectRPC protocols and remaining data-plane behavior are still
+required before the manifest can set `full_compatibility=true`.
 
 The destructive A3S OS integration harness is
 [`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
 requires a dedicated runtime home and explicit acknowledgement, and verifies a
-real Sandbox lifecycle, service restart recovery, and resource cleanup.
+real Sandbox lifecycle, TLS direct/shared routing, token-scope denial, service
+restart recovery, stale-route fencing, and resource cleanup.

@@ -347,7 +347,7 @@ that structured Sandbox logs retain both stdout and stderr, drain final records
 before natural-exit or auto-remove archival, and leave no generation log worker,
 crun state, box directory, or socket behind.
 
-Those protocol and runtime tests are not yet a complete TLS data-plane path. CLI
+Those protocol and runtime tests are not yet a complete E2B data-plane path. CLI
 `create` now persists its reservation and complete caller policy through the
 canonical manager, and the first `start` of that reservation consumes its
 persisted generation through the same manager. The production backend prepares
@@ -372,8 +372,14 @@ the service, reconnects to the preserved execution, updates its timeout, kills
 it, and verifies runtime cleanup. Route policy is now persisted with each
 lifecycle record, and strict wildcard/shared parsing projects generation-,
 expiry-, port-, and token-scope-fenced leases without a second mutable routing
-state. The wildcard TLS gateway, envd data plane, and the real official-client
-Sandbox suite remain open gates.
+state. The production process now also terminates wildcard TLS, accepts both
+direct and shared sandbox routes, validates those immutable leases, strips edge
+credentials, and proxies HTTP/1.1 or HTTP/2 streams through a generation- and
+PID-fenced connection to the real `crun` network namespace. Its A3S OS smoke
+reaches a service on Sandbox loopback through both TLS route forms, rejects
+invalid and scope-swapped tokens, preserves the route across service restart,
+and fences it after kill. The envd/ConnectRPC implementation and the real
+official-client Sandbox suite remain open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

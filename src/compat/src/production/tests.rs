@@ -13,6 +13,7 @@ use super::config::E2bCompatConfig;
 use super::{E2bCompatService, E2bConfigError, UuidSandboxIdentityProvider};
 
 fn parse_config(root: &Path) -> E2bCompatConfig {
+    write_test_tls(root);
     E2bCompatConfig::parse_with_environment(&acl_config(root), test_environment).unwrap()
 }
 
@@ -20,6 +21,8 @@ fn acl_config(root: &Path) -> String {
     let database = acl_path(&root.join("lifecycle.sqlite3"));
     let runtime_home = acl_path(&root.join("runtime"));
     let runtime_state = acl_path(&root.join("managed-executions.json"));
+    let certificate = acl_path(&root.join("gateway-cert.pem"));
+    let private_key = acl_path(&root.join("gateway-key.pem"));
     let hash = CredentialHash::derive("e2b_a1b2c3", 100_000, &[3; 16]).unwrap();
     format!(
         r#"
@@ -31,6 +34,16 @@ e2b_compat {{
   runtime_home = "{runtime_home}"
   runtime_state_path = "{runtime_state}"
   max_json_bytes = 2097152
+
+  gateway {{
+    listen = "127.0.0.1:3002"
+    tls_certificate_path = "{certificate}"
+    tls_private_key_path = "{private_key}"
+    max_connections = 1024
+    handshake_timeout_ms = 5000
+    connect_timeout_ms = 2000
+    drain_timeout_seconds = 10
+  }}
 
   supervisor {{
     interval_seconds = 5
@@ -82,6 +95,16 @@ e2b_compat {{
     )
 }
 
+fn write_test_tls(root: &Path) {
+    let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(vec![
+        "*.box.example.com".to_string(),
+        "sandbox.box.example.com".to_string(),
+    ])
+    .unwrap();
+    std::fs::write(root.join("gateway-cert.pem"), cert.pem()).unwrap();
+    std::fs::write(root.join("gateway-key.pem"), key_pair.serialize_pem()).unwrap();
+}
+
 fn acl_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -105,6 +128,8 @@ async fn parses_acl_into_strict_runtime_credentials_and_template_policy() {
         "https://api.box.example.com/"
     );
     assert_eq!(config.sandbox_domain(), "box.example.com");
+    assert_eq!(config.gateway().listen().to_string(), "127.0.0.1:3002");
+    assert_eq!(config.gateway().max_connections().get(), 1024);
     assert_eq!(config.supervisor().batch_size().get(), 100);
     assert_eq!(config.templates.len(), 1);
     let template = config.templates.resolve("fixture-template").await.unwrap();
@@ -158,6 +183,53 @@ fn rejects_plaintext_token_keys_missing_environment_and_unknown_fields() {
     );
 }
 
+#[test]
+fn rejects_missing_or_unsafe_gateway_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let input = acl_config(root.path());
+
+    let missing = input.replace(
+        &input[input.find("  gateway {").unwrap()..input.find("  supervisor {").unwrap()],
+        "",
+    );
+    assert!(
+        E2bCompatConfig::parse_with_environment(&missing, test_environment)
+            .unwrap_err()
+            .to_string()
+            .contains("gateway block is required")
+    );
+
+    let same_listener = input.replace("listen = \"127.0.0.1:3002\"", "listen = \"127.0.0.1:3001\"");
+    assert!(
+        E2bCompatConfig::parse_with_environment(&same_listener, test_environment)
+            .unwrap_err()
+            .to_string()
+            .contains("must differ")
+    );
+
+    let relative_key = input.replace(
+        &format!(
+            "tls_private_key_path = \"{}\"",
+            acl_path(&root.path().join("gateway-key.pem"))
+        ),
+        "tls_private_key_path = \"gateway-key.pem\"",
+    );
+    assert!(
+        E2bCompatConfig::parse_with_environment(&relative_key, test_environment)
+            .unwrap_err()
+            .to_string()
+            .contains("absolute normalized path")
+    );
+
+    let unbounded = input.replace("max_connections = 1024", "max_connections = 0");
+    assert!(
+        E2bCompatConfig::parse_with_environment(&unbounded, test_environment)
+            .unwrap_err()
+            .to_string()
+            .contains("max_connections must be between")
+    );
+}
+
 #[tokio::test]
 async fn loader_requires_the_acl_extension_before_reading() {
     let root = tempfile::tempdir().unwrap();
@@ -187,6 +259,7 @@ async fn production_composition_wires_auth_sqlite_routing_and_supervision_withou
         .await
         .unwrap();
     assert_eq!(service.listen().to_string(), "127.0.0.1:3001");
+    assert_eq!(service.gateway_listen().to_string(), "127.0.0.1:3002");
     assert_eq!(service.sandbox_domain(), "box.example.com");
     assert!(service
         .route_parser()

@@ -55,7 +55,11 @@ dependencies = [
  "hyper 0.14.32",
  "prost",
  "prost-types",
+ "rcgen",
  "ring",
+ "rustls",
+ "rustls-pemfile 2.2.0",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -64,6 +68,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-rusqlite",
+ "tokio-rustls",
  "tower 0.4.13",
  "tracing",
  "tracing-subscriber",
@@ -2903,7 +2908,7 @@ dependencies = [
  "once_cell",
  "percent-encoding",
  "pin-project-lite",
- "rustls-pemfile",
+ "rustls-pemfile 1.0.4",
  "serde",
  "serde_json",
  "serde_urlencoded",
@@ -3052,6 +3057,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
 dependencies = [
  "base64 0.21.7",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
