@@ -20,9 +20,9 @@ use tracing::debug;
 
 use crate::envd::EnvdBroker;
 use crate::routing::{
-    RouteLeaseError, RouteLeaseService, RouteParseError, SandboxRouteParser,
-    ENVD_ACCESS_TOKEN_HEADER, ENVD_PORT, SANDBOX_ID_HEADER, SANDBOX_PORT_HEADER,
-    TRAFFIC_ACCESS_TOKEN_HEADER,
+    EnvdHealthResolution, ParsedSandboxRoute, RouteLeaseError, RouteLeaseService, RouteParseError,
+    SandboxRouteParser, ENVD_ACCESS_TOKEN_HEADER, ENVD_PORT, SANDBOX_ID_HEADER,
+    SANDBOX_PORT_HEADER, TRAFFIC_ACCESS_TOKEN_HEADER,
 };
 
 const ACCESS_CONTROL_REQUEST_METHOD: &str = "access-control-request-method";
@@ -75,6 +75,22 @@ impl DataPlaneProxy {
             return preflight_response(request.headers());
         }
 
+        if is_envd_health(&request, &route) {
+            let resolution = match self
+                .leases
+                .resolve_envd_health(&route, request.headers())
+                .await
+            {
+                Ok(resolution) => resolution,
+                Err(error) => return with_cors(error_response(ProxyFailure::Lease(error)), cors),
+            };
+            let response = match resolution {
+                EnvdHealthResolution::Running(lease) => self.envd.handle(request, &lease).await,
+                EnvdHealthResolution::Inactive => self.envd.inactive_health(),
+            };
+            return with_cors(response, cors);
+        }
+
         let lease = match self.leases.resolve(&route, request.headers()).await {
             Ok(lease) => lease,
             Err(error) => return with_cors(error_response(ProxyFailure::Lease(error)), cors),
@@ -104,6 +120,12 @@ impl DataPlaneProxy {
             }
         }
     }
+}
+
+fn is_envd_health(request: &Request<Body>, route: &ParsedSandboxRoute) -> bool {
+    route.port.get() == ENVD_PORT
+        && request.method() == Method::GET
+        && request.uri().path() == "/health"
 }
 
 async fn proxy_upstream(

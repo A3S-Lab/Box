@@ -3,8 +3,8 @@ mod parser;
 mod policy;
 
 pub use lease::{
-    RouteLease, RouteLeaseError, RouteLeaseResult, RouteLeaseService, ENVD_ACCESS_TOKEN_HEADER,
-    TRAFFIC_ACCESS_TOKEN_HEADER,
+    EnvdHealthResolution, RouteLease, RouteLeaseError, RouteLeaseResult, RouteLeaseService,
+    ENVD_ACCESS_TOKEN_HEADER, TRAFFIC_ACCESS_TOKEN_HEADER,
 };
 pub use parser::{
     ParsedSandboxRoute, RouteForm, RouteParseError, RouteParseResult, SandboxDomain,

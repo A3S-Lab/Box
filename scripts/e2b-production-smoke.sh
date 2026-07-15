@@ -408,8 +408,12 @@ CONNECT_RESPONSE="$STATE_DIR/connect.json"
   fail 'timeout replacement did not return HTTP 204'
 [[ "$(status_request DELETE "/sandboxes/$SANDBOX_ID" /dev/null)" == "204" ]] ||
   fail 'kill did not return HTTP 204'
-[[ "$(gateway_status "$DIRECT_HOST" /dev/null X-Access-Token "$ENVD_TOKEN")" == "404" ]] ||
-  fail 'stale TLS route remained available after kill'
+[[ "$(gateway_status "$DIRECT_HOST" /dev/null X-Access-Token "$ENVD_TOKEN")" == "502" ]] ||
+  fail 'authenticated envd health did not report the killed sandbox as stopped'
+[[ "$(gateway_status "$DIRECT_HOST" /dev/null X-Access-Token wrong-token)" == "401" ]] ||
+  fail 'terminal envd health accepted an invalid token'
+[[ "$(gateway_status "$TRAFFIC_HOST" /dev/null E2B-Traffic-Access-Token "$TRAFFIC_TOKEN")" == "404" ]] ||
+  fail 'stale TLS traffic route remained available after kill'
 
 EXECUTION_ID="$(python3 - "$STATE_DIR/managed-executions.json" "$SANDBOX_ID" <<'PY'
 import json

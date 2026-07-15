@@ -39,6 +39,10 @@ impl EnvdBroker {
         .await
     }
 
+    pub(crate) fn inactive_health(&self) -> Response<Body> {
+        sandbox_not_running()
+    }
+
     async fn dispatch(
         &self,
         method: &Method,

@@ -121,6 +121,7 @@ struct Harness {
     proxy: DataPlaneProxy,
     parser: SandboxRouteParser,
     leases: RouteLeaseService,
+    repository: Arc<MemorySandboxRepository>,
     executions: Arc<RunningExecutionManager>,
     connector: Arc<TcpConnector>,
     sandbox_id: SandboxId,
@@ -212,7 +213,7 @@ impl Harness {
         });
         let repository = Arc::new(MemorySandboxRepository::default());
         repository.insert(record).await.unwrap();
-        let leases = RouteLeaseService::new(repository, tokens, Arc::new(FixedClock(now)));
+        let leases = RouteLeaseService::new(repository.clone(), tokens, Arc::new(FixedClock(now)));
         let connector = Arc::new(TcpConnector {
             address,
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -229,6 +230,7 @@ impl Harness {
             proxy,
             parser,
             leases,
+            repository,
             executions,
             connector,
             sandbox_id,
@@ -256,6 +258,18 @@ impl Harness {
 
     fn call_count(&self) -> usize {
         self.connector.calls.lock().unwrap().len()
+    }
+
+    fn health_request(&self, token: &SecretToken) -> Request<Body> {
+        Request::builder()
+            .uri("/health")
+            .header(
+                HOST,
+                format!("{}-{}.box.example.com", ENVD_PORT, self.sandbox_id),
+            )
+            .header(ENVD_ACCESS_TOKEN_HEADER, token.expose_secret())
+            .body(Body::empty())
+            .unwrap()
     }
 }
 
@@ -398,6 +412,57 @@ async fn shared_routes_and_browser_preflight_use_the_same_validated_parser() {
     assert_eq!(
         harness.proxy.handle(shared).await.status(),
         StatusCode::NO_CONTENT
+    );
+    assert_eq!(harness.call_count(), 0);
+}
+
+#[tokio::test]
+async fn authenticated_terminal_health_returns_false_without_reopening_traffic_routes() {
+    let harness = Harness::new().await;
+    let mut record = harness
+        .repository
+        .get(&harness.sandbox_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let expected = record.generation();
+    record.begin_kill().unwrap();
+    harness
+        .repository
+        .compare_and_swap(&harness.sandbox_id, expected, record.clone())
+        .await
+        .unwrap();
+    let expected = record.generation();
+    record.mark_killed().unwrap();
+    harness
+        .repository
+        .compare_and_swap(&harness.sandbox_id, expected, record)
+        .await
+        .unwrap();
+
+    let inactive = harness
+        .proxy
+        .handle(harness.health_request(&harness.envd_token))
+        .await;
+    assert_eq!(inactive.status(), StatusCode::BAD_GATEWAY);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(inactive.into_body()).await.unwrap()).unwrap();
+    assert_eq!(body["code"], "SANDBOX_NOT_RUNNING");
+
+    let unauthorized = harness
+        .proxy
+        .handle(harness.health_request(&harness.traffic_token))
+        .await;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let traffic = harness.direct_request(
+        CODE_INTERPRETER_PORT,
+        TRAFFIC_ACCESS_TOKEN_HEADER,
+        &harness.traffic_token,
+    );
+    assert_eq!(
+        harness.proxy.handle(traffic).await.status(),
+        StatusCode::NOT_FOUND
     );
     assert_eq!(harness.call_count(), 0);
 }
