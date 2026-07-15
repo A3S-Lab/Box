@@ -114,7 +114,7 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
     use a3s_box_core::{
         resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration,
         ExecutionHealthCheck, ExecutionId, ExecutionLease, ExecutionRecordPolicy,
-        ExecutionReservation, ExecutionRestartPolicy, OperationId,
+        ExecutionReservation, ExecutionRestartPolicy, OperationId, ResourceLimits,
     };
     use chrono::Utc;
 
@@ -125,7 +125,10 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
         extra_env: vec![("SDK_CALLER".to_string(), "preserved".to_string())],
         dns: vec!["1.1.1.1".to_string()],
         read_only: true,
-        pids_limit: Some(64),
+        resource_limits: ResourceLimits {
+            pids_limit: Some(64),
+            ..ResourceLimits::default()
+        },
         ..BoxConfig::default()
     };
     let request = CreateExecutionRequest {
