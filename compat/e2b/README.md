@@ -82,17 +82,22 @@ The validated schema and an operator example are documented in
 This process exposes the lifecycle control subset plus an authenticated
 wildcard TLS data-plane edge. The edge supports direct and shared route forms,
 HTTP/1.1 and HTTP/2 streaming proxying, CORS preflight, upgrades, bounded
-connections, and generation-fenced access to real Sandbox loopback ports. The
-pinned envd/ConnectRPC protocols and remaining data-plane behavior are still
-required before the manifest can set `full_compatibility=true`.
+connections, and generation-fenced access to real Sandbox loopback ports. A
+host-side broker now implements authenticated envd `GET /health`; it returns
+`204` only after the runtime manager confirms the leased execution ID and
+generation are still running. The remaining pinned envd HTTP and ConnectRPC
+protocols are still required before the manifest can set
+`full_compatibility=true`.
 
 The destructive A3S OS integration harness is
 [`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
 requires a dedicated runtime home and explicit acknowledgement, and verifies a
 real Sandbox lifecycle, TLS direct/shared routing, token-scope denial, service
-restart recovery, stale-route fencing, and resource cleanup. With
+restart recovery, host envd health, a traffic-scoped workload service on port
+`49999`, stale-route fencing, and resource cleanup. With
 `A3S_BOX_E2B_OFFICIAL_CLIENTS=1`, it additionally runs the checksum-pinned,
 unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
-through the production lifecycle listener and verifies cleanup of every real
+through the production lifecycle listener, calls their official running-state
+health methods through the TLS gateway, and verifies cleanup of every real
 `crun` execution. That optional matrix does not exercise envd commands, files,
 PTY, or interpreter execution.

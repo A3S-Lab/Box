@@ -51,7 +51,7 @@ Generated JSON Lines files are compatibility evidence, not server
 implementations. The Rust control plane must satisfy them without adding A3S
 fields to upstream requests or responses.
 
-## Production lifecycle gate
+## Production lifecycle and health gate
 
 `run_production.py` installs the same checksum-pinned artifacts and runs the
 unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
@@ -72,6 +72,13 @@ of the destructive real-Sandbox gate by setting
 set `A3S_BOX_E2B_PIP_BOOTSTRAP_WHEEL`; the wheel is used through `PYTHONPATH`
 and is not installed into the host Python environment.
 
-This gate proves production lifecycle behavior and cleanup through the public
-clients. It does not claim envd command, filesystem, PTY, or Code Interpreter
-execution compatibility; those require their separate data-plane suites.
+Official-client health calls use standard HTTPS port `443`, so the configured
+wildcard sandbox domain must resolve to the gateway listener. The smoke accepts
+`A3S_BOX_E2B_GATEWAY_SMOKE_ADDRESS` for a loopback-only listener when a host
+already reserves IPv4 port 443; for example, `::1` with a `box.localhost`
+domain keeps the gate local while preserving normal TLS hostname behavior.
+
+This gate proves production lifecycle behavior, running-state envd health, and
+cleanup through the public clients. It does not claim envd command,
+filesystem, PTY, post-kill health, or Code Interpreter execution compatibility;
+those require their separate data-plane suites.

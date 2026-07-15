@@ -72,7 +72,7 @@ impl E2bCompatService {
         }));
         let supervisor = LifecycleSupervisor::new(LifecycleSupervisorDependencies {
             repository: repository.clone(),
-            executions,
+            executions: executions.clone(),
             clock: clock.clone(),
         });
         let route_parser = SandboxRouteParser::new(config.sandbox_domain.clone());
@@ -92,6 +92,7 @@ impl E2bCompatService {
             config.gateway.clone(),
             route_parser.clone(),
             route_leases.clone(),
+            executions,
             port_connector,
         )
         .await?;

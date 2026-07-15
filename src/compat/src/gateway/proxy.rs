@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_box_core::{ExecutionManagerError, ExecutionPortConnector, ExecutionPortStream};
+use a3s_box_core::{
+    ExecutionManager, ExecutionManagerError, ExecutionPortConnector, ExecutionPortStream,
+};
 use axum::body::Body;
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -16,9 +18,11 @@ use thiserror::Error;
 use tokio::io::copy_bidirectional;
 use tracing::debug;
 
+use crate::envd::EnvdBroker;
 use crate::routing::{
     RouteLeaseError, RouteLeaseService, RouteParseError, SandboxRouteParser,
-    ENVD_ACCESS_TOKEN_HEADER, SANDBOX_ID_HEADER, SANDBOX_PORT_HEADER, TRAFFIC_ACCESS_TOKEN_HEADER,
+    ENVD_ACCESS_TOKEN_HEADER, ENVD_PORT, SANDBOX_ID_HEADER, SANDBOX_PORT_HEADER,
+    TRAFFIC_ACCESS_TOKEN_HEADER,
 };
 
 const ACCESS_CONTROL_REQUEST_METHOD: &str = "access-control-request-method";
@@ -39,6 +43,7 @@ const EXPOSED_HEADERS: &str =
 pub struct DataPlaneProxy {
     parser: SandboxRouteParser,
     leases: RouteLeaseService,
+    envd: EnvdBroker,
     connector: Arc<dyn ExecutionPortConnector>,
     connect_timeout: Duration,
 }
@@ -47,12 +52,14 @@ impl DataPlaneProxy {
     pub(crate) fn new(
         parser: SandboxRouteParser,
         leases: RouteLeaseService,
+        executions: Arc<dyn ExecutionManager>,
         connector: Arc<dyn ExecutionPortConnector>,
         connect_timeout: Duration,
     ) -> Self {
         Self {
             parser,
             leases,
+            envd: EnvdBroker::new(executions),
             connector,
             connect_timeout,
         }
@@ -72,6 +79,9 @@ impl DataPlaneProxy {
             Ok(lease) => lease,
             Err(error) => return with_cors(error_response(ProxyFailure::Lease(error)), cors),
         };
+        if lease.port().get() == ENVD_PORT {
+            return with_cors(self.envd.handle(request, &lease).await, cors);
+        }
         let stream = match self
             .connector
             .connect_port(
