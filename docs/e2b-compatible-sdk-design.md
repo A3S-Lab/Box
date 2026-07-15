@@ -1,8 +1,6 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 3 complete;
-slice 4 runtime path and CLI create/start/restart/run complete, Rust SDK
-pending)**
+Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 4 complete)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -22,7 +20,7 @@ unversioned claim.
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, reaping, and startup reconciliation | Wire the repository and supervisor into the production service process and exercise restart and host-reboot recovery end to end |
-| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI `create`, first `start`, `run`, and explicit two-phase `restart` use generation fencing with caller-policy parity, idempotent resource preparation, failure rollback, and operation-ID recovery tests; A3S OS smoke tests prove reservation-only create, creation reconciliation, real `crun` start, managed restart, explicit pause rejection, kill, and cleanup without MicroVM fallback | Validate managed CLI `run` on A3S OS, migrate the Rust SDK, and add its caller parity tests |
+| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI and Rust SDK create/start/run paths use generation fencing with caller-policy parity, idempotent resource preparation, failure rollback, and operation-ID recovery; A3S OS smoke tests prove managed CLI and SDK execution through certified `crun`, explicit Sandbox pause rejection, kill, and cleanup without MicroVM fallback | Compose the runtime manager into the production compatibility service and exercise service restart recovery end to end |
 | Credentials and routing | Injected verifier, token, cursor, and template interfaces isolate protocol logic from infrastructure | Add production credential hashing, token encryption and rotation, generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
@@ -780,12 +778,11 @@ Phase 2 is delivered as small, immediately merged changes:
 3. **Complete:** add SQLite WAL migrations, strict compare-and-swap repository
    operations, atomic generation-fenced expiry claims, restart recovery,
    startup reconciliation, and corruption/crash/concurrency tests.
-4. **Partially complete:** extract canonical A3S state and the runtime
+4. **Complete:** extract canonical A3S state and the runtime
    `ExecutionManager`; add the production backend and prove its real Sandbox
    lifecycle; switch CLI create to the same reservation path; switch CLI
    start/restart/run and the Rust SDK to the same implementation with behavior
-   parity tests. CLI create, start, restart, and run are complete; the SDK
-   remains.
+   parity tests.
 5. Add the production HCL-configured service binary, credential and token
    providers, generation-fenced route leases, and TLS data-plane gateway. Pull
    each merge commit on an A3S OS server and run the unmodified official clients
@@ -855,10 +852,13 @@ volume, rootfs, stop, and auto-remove ownership to the managed backend. Caller
 parity tests cover isolation, DNS, environment, security, limits, TEE/sidecar,
 logs, health, stop policy, shared memory, persistence, and resource metadata.
 
-Slice 4 remains incomplete until the Rust SDK calls the same manager with
-behavior parity tests. The existing Rust SDK uses the canonical record store
-for management operations but still has a separate local lifecycle model and
-does not expose create/start/run.
+The Rust SDK now injects the same backend-neutral manager used by the CLI and
+exposes typed create, start, create-and-start, inspect, pause, resume, restart,
+kill, and reconciliation operations. Caller-parity coverage compares the full
+serialized `CreateExecutionRequest`, including `BoxConfig` and
+`ExecutionRecordPolicy`, at the injected manager boundary. An opt-in A3S OS
+smoke test proves staged create, start, create-and-start, inspect, kill, and
+runtime cleanup through the real Sandbox backend without invoking the CLI.
 
 Each slice must pass its focused tests and repository CI before merge. The
 Phase 2 gate remains closed until slice 5 composes the durable repository,

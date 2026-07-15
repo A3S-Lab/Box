@@ -1,8 +1,19 @@
 /// Runtime-backed SDK client for local a3s-box state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct A3sBoxClient {
     paths: A3sBoxPaths,
     image_cache_size: u64,
+    execution_manager: Arc<dyn ExecutionManager>,
+}
+
+impl std::fmt::Debug for A3sBoxClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("A3sBoxClient")
+            .field("paths", &self.paths)
+            .field("image_cache_size", &self.image_cache_size)
+            .finish_non_exhaustive()
+    }
 }
 
 impl A3sBoxClient {
@@ -18,9 +29,26 @@ impl A3sBoxClient {
 
     /// Create a client using explicit state paths.
     pub fn with_paths(paths: A3sBoxPaths) -> Self {
+        let execution_manager = Arc::new(a3s_box_runtime::LocalExecutionManager::with_vm_backend(
+            paths.boxes_file.clone(),
+            paths.home.clone(),
+        ));
+        Self::with_execution_manager(paths, execution_manager)
+    }
+
+    /// Create a client with an explicit backend-neutral execution manager.
+    ///
+    /// This keeps lifecycle calls on the same canonical facade used by the CLI
+    /// and remote compatibility service while allowing an embedding application
+    /// to inject its own manager implementation.
+    pub fn with_execution_manager(
+        paths: A3sBoxPaths,
+        execution_manager: Arc<dyn ExecutionManager>,
+    ) -> Self {
         Self {
             paths,
             image_cache_size: a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
+            execution_manager,
         }
     }
 
