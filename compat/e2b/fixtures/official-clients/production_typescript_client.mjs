@@ -16,6 +16,85 @@ const metadata = { client: 'typescript', suite: 'production-official' }
 let sandbox
 let interpreter
 
+async function exerciseDataPlane(sandbox, label) {
+  const root = `a3s-runtime-${label}`
+  const original = `${root}/nested/original.txt`
+  const renamed = `${root}/nested/renamed.txt`
+  const content = `${label}-filesystem`
+
+  await sandbox.files.remove(root)
+  assert.equal(await sandbox.files.makeDir(`${root}/nested`), true)
+  const written = await sandbox.files.write(original, content)
+  assert.equal(written.path, `/home/user/${original}`)
+  assert.equal(await sandbox.files.read(original), content)
+  const info = await sandbox.files.getInfo(original)
+  assert.equal(info.name, 'original.txt')
+  assert.equal(info.path, `/home/user/${original}`)
+  const entries = await sandbox.files.list(root, { depth: 2 })
+  assert.ok(entries.some((entry) => entry.path === `/home/user/${original}`))
+  const moved = await sandbox.files.rename(original, renamed)
+  assert.equal(moved.path, `/home/user/${renamed}`)
+  assert.equal(await sandbox.files.exists(original), false)
+  assert.equal(await sandbox.files.exists(renamed), true)
+  await sandbox.files.remove(root)
+  assert.equal(await sandbox.files.exists(root), false)
+
+  const payload = `${label}-stdin`
+  const command = await sandbox.commands.run('cat', {
+    background: true,
+    stdin: true,
+    timeoutMs: 20_000,
+  })
+  const processes = await sandbox.commands.list()
+  assert.ok(processes.some((process) => process.pid === command.pid))
+  await command.sendStdin(payload)
+  await command.closeStdin()
+  const result = await command.wait()
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.stdout, payload)
+  assert.equal(result.stderr, '')
+
+  let terminalOutput = ''
+  const decoder = new TextDecoder()
+  const terminal = await sandbox.pty.create({
+    cols: 80,
+    rows: 24,
+    onData: (data) => {
+      terminalOutput += decoder.decode(data)
+    },
+    timeoutMs: 20_000,
+  })
+  await sandbox.pty.resize(terminal.pid, { cols: 100, rows: 30 })
+  await sandbox.pty.sendInput(
+    terminal.pid,
+    new TextEncoder().encode(`printf '${label}-pty:'; stty size; exit\n`)
+  )
+  await terminal.wait()
+  assert.equal(terminal.exitCode, 0)
+  assert.ok(terminalOutput.includes(`${label}-pty:`))
+  assert.ok(terminalOutput.includes('30 100'))
+}
+
+async function exerciseInterpreter(interpreter, label) {
+  const execution = await interpreter.runCode(`print('${label}-code')\n6 * 7`)
+  assert.equal(execution.text, '42')
+  assert.ok(execution.logs.stdout.some((line) => line.includes(`${label}-code`)))
+
+  const context = await interpreter.createCodeContext({ language: 'python' })
+  let contexts = await interpreter.listCodeContexts()
+  assert.ok(contexts.some((item) => item.id === context.id))
+  const contextual = await interpreter.runCode('value = 41\nvalue + 1', {
+    context,
+  })
+  assert.equal(contextual.text, '42')
+  await interpreter.restartCodeContext(context.id)
+  const restarted = await interpreter.runCode('value', { context })
+  assert.equal(restarted.error?.name, 'NameError')
+  await interpreter.removeCodeContext(context.id)
+  contexts = await interpreter.listCodeContexts()
+  assert.equal(contexts.some((item) => item.id === context.id), false)
+}
+
 try {
   sandbox = await Sandbox.create(template, {
     ...connection,
@@ -36,6 +115,7 @@ try {
   )
   assert.equal(command.stdout, 'typescript:typescript')
   assert.equal(command.stderr, '')
+  await exerciseDataPlane(sandbox, 'typescript')
 
   const paginator = Sandbox.list({
     ...connection,
@@ -62,6 +142,7 @@ try {
     metadata: { client: 'typescript-code-interpreter' },
   })
   assert.equal(await interpreter.isRunning(), true)
+  await exerciseInterpreter(interpreter, 'typescript')
   assert.equal(await interpreter.kill(), true)
   assert.equal(await interpreter.isRunning(), false)
 } finally {

@@ -57,8 +57,10 @@ def main() -> None:
         subprocess.run(["node", str(typescript_client), *common], check=True)
 
     print(
-        "Official production clients passed: Python sync, Python async, "
-        "TypeScript, Code Interpreter lifecycle, and envd health"
+        "Official production clients passed: Python sync, Python async, and "
+        "TypeScript lifecycle, envd health, Filesystem operations, foreground "
+        "and background commands, stdin, PTY resize, and Code Interpreter "
+        "execution and contexts"
     )
 
 
