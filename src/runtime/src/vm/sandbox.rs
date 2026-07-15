@@ -37,6 +37,10 @@ impl VmManager {
                     .to_string(),
                 hint: None,
             })?;
+        // Sandbox logging is hosted by the packaged shim in a dedicated worker
+        // mode so it survives detached CLI clients. Resolve it before image or
+        // rootfs preparation to keep a missing artifact side-effect free.
+        let log_worker_path = crate::vmm::VmController::find_shim()?;
         let user_namespace =
             capabilities
                 .user_namespace
@@ -169,6 +173,10 @@ impl VmManager {
             stdout_path: console_output.clone(),
             stderr_path: a3s_box_core::log::stderr_console_path(&console_output),
             init_log_path: box_dir.join("logs").join("sandbox-init.log"),
+            log_config: self.log_config.clone(),
+            log_worker_path,
+            log_worker_log_path: box_dir.join("logs").join("sandbox-log-worker.log"),
+            log_worker_ready_path: sandbox_dir.join("bundle").join("log-worker.ready"),
         };
         let handler = match controller.start(launch).await {
             Ok(handler) => handler,

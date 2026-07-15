@@ -68,6 +68,8 @@ impl VmLocalExecutionBackend {
                 inspection.runtime.runtime_root,
                 record.id.clone(),
                 inspection.pid,
+                inspection.runtime.log_worker_pid,
+                inspection.runtime.log_worker_pid_start_time,
                 inspection.runtime.bundle_dir,
                 record.box_dir.join("sandbox/runtime.json"),
             ),

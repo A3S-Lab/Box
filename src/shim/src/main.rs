@@ -41,6 +41,12 @@ struct Args {
     #[arg(long)]
     config: Option<String>,
 
+    /// Internal: project one Sandbox generation's split console into its
+    /// configured log driver until the exact crun wrapper exits.
+    #[cfg(target_os = "linux")]
+    #[arg(long, hide = true)]
+    sandbox_log_worker_config: Option<String>,
+
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
     port_fwd_worker: bool,
@@ -113,6 +119,11 @@ fn maybe_enable_ksm_merge() {}
 
 fn run() -> Result<()> {
     let args = Args::parse();
+
+    #[cfg(target_os = "linux")]
+    if let Some(config) = args.sandbox_log_worker_config.as_deref() {
+        return run_sandbox_log_worker(config);
+    }
 
     #[cfg(target_os = "windows")]
     if args.port_fwd_worker {
@@ -202,6 +213,140 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_sandbox_log_worker(config: &str) -> Result<()> {
+    use a3s_box_core::log::{
+        run_log_processor_with_ready_and_eof_policy, ConsoleEofPolicy, SandboxLogWorkerSpec,
+    };
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let spec: SandboxLogWorkerSpec =
+        serde_json::from_str(config).map_err(|error| BoxError::BoxBootError {
+            message: format!("Failed to parse Sandbox log worker config: {error}"),
+            hint: None,
+        })?;
+    validate_sandbox_log_worker_spec(&spec)?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(AtomicUsize::new(0));
+    let console_log = spec.console_log.clone();
+    let log_dir = console_log
+        .parent()
+        .ok_or_else(|| BoxError::BoxBootError {
+            message: format!(
+                "Sandbox console path has no parent: {}",
+                console_log.display()
+            ),
+            hint: None,
+        })?
+        .to_path_buf();
+    let log_config = spec.log_config.clone();
+    let processor_stop = Arc::clone(&stop);
+    let processor_ready = Arc::clone(&ready);
+    let processor = std::thread::spawn(move || {
+        run_log_processor_with_ready_and_eof_policy(
+            &console_log,
+            &log_dir,
+            &log_config,
+            &processor_stop,
+            Some(&processor_ready),
+            ConsoleEofPolicy::WriterClosed,
+        );
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while ready.load(Ordering::Acquire) < 2 {
+        if processor.is_finished() {
+            let _ = processor.join();
+            return Err(BoxError::BoxBootError {
+                message: "Sandbox log processor exited before opening both console streams"
+                    .to_string(),
+                hint: None,
+            });
+        }
+        if Instant::now() >= deadline {
+            stop.store(true, Ordering::SeqCst);
+            let _ = processor.join();
+            return Err(BoxError::BoxBootError {
+                message: "Sandbox log processor did not become ready before timeout".to_string(),
+                hint: None,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    if let Some(parent) = spec.ready_file.parent() {
+        std::fs::create_dir_all(parent).map_err(BoxError::IoError)?;
+    }
+    let mut ready_file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&spec.ready_file)
+        .map_err(BoxError::IoError)?;
+    ready_file
+        .write_all(format!("{}\n", std::process::id()).as_bytes())
+        .map_err(BoxError::IoError)?;
+    ready_file.sync_all().map_err(BoxError::IoError)?;
+
+    while sandbox_watched_process_is_current(spec.watched_pid, spec.watched_pid_start_time) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The exact wrapper identity is gone (or a zombie), so its stdout/stderr
+    // descriptors are closed. WriterClosed makes the next EOF final and still
+    // flushes a trailing partial line.
+    stop.store(true, Ordering::SeqCst);
+    processor.join().map_err(|_| BoxError::BoxBootError {
+        message: format!("Sandbox log processor panicked for {}", spec.box_id),
+        hint: None,
+    })?;
+    tracing::debug!(box_id = %spec.box_id, "Sandbox logs fully drained");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_sandbox_log_worker_spec(spec: &a3s_box_core::log::SandboxLogWorkerSpec) -> Result<()> {
+    if spec.schema != a3s_box_core::log::SANDBOX_LOG_WORKER_SCHEMA
+        || spec.box_id.is_empty()
+        || spec.watched_pid == 0
+        || spec.watched_pid_start_time == 0
+        || !spec.console_log.is_absolute()
+        || !spec.ready_file.is_absolute()
+    {
+        return Err(BoxError::BoxBootError {
+            message: "Invalid Sandbox log worker identity or path configuration".to_string(),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sandbox_watched_process_is_current(pid: u32, expected_start_time: u64) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    linux_process_identity_from_stat(&stat)
+        .is_some_and(|(state, start_time)| state != 'Z' && start_time == expected_start_time)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_identity_from_stat(stat: &str) -> Option<(char, u64)> {
+    // `comm` may contain spaces and parentheses. Field 3 (state) begins after
+    // the final `)`, and field 22 (starttime) is token 19 from that point.
+    let fields: Vec<&str> = stat
+        .get(stat.rfind(')')? + 1..)?
+        .split_whitespace()
+        .collect();
+    let state = fields.first()?.chars().next()?;
+    let start_time = fields.get(19)?.parse().ok()?;
+    Some((state, start_time))
 }
 
 /// Parse a Docker-style ulimit string into a krun rlimit string.
@@ -998,6 +1143,33 @@ unsafe fn apply_user_config(ctx: &KrunContext, user: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_sandbox_worker_pid_identity_after_complex_comm() {
+        let stat =
+            "123 (crun (sandbox) worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242";
+        assert_eq!(linux_process_identity_from_stat(stat), Some(('S', 4242)));
+        assert_eq!(linux_process_identity_from_stat("malformed"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn validates_complete_sandbox_log_worker_identity() {
+        let mut spec = a3s_box_core::log::SandboxLogWorkerSpec {
+            schema: a3s_box_core::log::SANDBOX_LOG_WORKER_SCHEMA.to_string(),
+            box_id: "sandbox-id".to_string(),
+            console_log: std::path::PathBuf::from("/tmp/sandbox-id/console.log"),
+            log_config: a3s_box_core::log::LogConfig::default(),
+            watched_pid: 123,
+            watched_pid_start_time: 456,
+            ready_file: std::path::PathBuf::from("/tmp/sandbox-id/log-worker.ready"),
+        };
+        validate_sandbox_log_worker_spec(&spec).unwrap();
+
+        spec.watched_pid_start_time = 0;
+        assert!(validate_sandbox_log_worker_spec(&spec).is_err());
+    }
 
     #[test]
     fn test_parse_ulimit_nofile() {

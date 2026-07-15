@@ -118,6 +118,27 @@ pub struct LogEntry {
     pub time: String,
 }
 
+/// Schema used to hand one Sandbox log worker its immutable generation data.
+pub const SANDBOX_LOG_WORKER_SCHEMA: &str = "a3s.box.sandbox-log-worker.v1";
+
+/// Configuration for the host process that projects Sandbox stdout/stderr into
+/// the configured logging driver after the launching client has detached.
+///
+/// The worker watches the exact `crun run` wrapper PID identity. Once that
+/// process exits, both inherited output descriptors are closed and EOF is
+/// authoritative, so the worker can drain the final bytes without a fixed
+/// late-write delay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxLogWorkerSpec {
+    pub schema: String,
+    pub box_id: String,
+    pub console_log: PathBuf,
+    pub log_config: LogConfig,
+    pub watched_pid: u32,
+    pub watched_pid_start_time: u64,
+    pub ready_file: PathBuf,
+}
+
 /// Parse a human-readable size string (e.g., "10m", "1g", "4096") into bytes.
 fn parse_size(s: &str) -> std::result::Result<u64, String> {
     let s = s.trim().to_lowercase();
@@ -158,6 +179,18 @@ fn parse_size(s: &str) -> std::result::Result<u64, String> {
 use std::io::{BufRead, BufReader, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether the producer may still publish bytes after its apparent exit.
+///
+/// libkrun can return before its console backend's final host write becomes
+/// visible, whereas a reaped `crun run` wrapper has already closed stdout and
+/// stderr. Keeping the distinction explicit avoids imposing the MicroVM's
+/// half-second settle window on every short Sandbox execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleEofPolicy {
+    MayReceiveLateWrites,
+    WriterClosed,
+}
 
 /// Truncate `path` to empty if it has grown past `cap` bytes; returns whether it
 /// truncated.
@@ -209,20 +242,21 @@ fn tail_next_line(
     buf: &mut String,
     stop: &AtomicBool,
     on_eof: Option<&dyn Fn() -> bool>,
+    eof_policy: ConsoleEofPolicy,
 ) -> Option<String> {
     // `krun_start_enter()` can return a few scheduler ticks before the
     // virtio-console backend's final host write becomes visible. Treat the
     // first stopped EOFs as provisional; otherwise a very short detached
     // command can leave bytes in console.log after the processor has exited.
-    const STOPPED_EOF_SETTLE_POLLS: u8 = 25;
     const STOPPED_EOF_SETTLE_MILLIS: u64 = 20;
+    let stopped_eof_settle_polls = stopped_eof_settle_polls(eof_policy);
     let mut stopped_eof_polls = 0u8;
     loop {
         match reader.read_line(buf) {
             Ok(0) | Err(_) => {
                 if stop.load(Ordering::Relaxed) {
                     stopped_eof_polls = stopped_eof_polls.saturating_add(1);
-                    if stopped_eof_polls < STOPPED_EOF_SETTLE_POLLS {
+                    if stopped_eof_polls < stopped_eof_settle_polls {
                         std::thread::sleep(std::time::Duration::from_millis(
                             STOPPED_EOF_SETTLE_MILLIS,
                         ));
@@ -260,6 +294,14 @@ fn tail_next_line(
     }
 }
 
+fn stopped_eof_settle_polls(eof_policy: ConsoleEofPolicy) -> u8 {
+    const LATE_WRITE_POLLS: u8 = 25;
+    match eof_policy {
+        ConsoleEofPolicy::MayReceiveLateWrites => LATE_WRITE_POLLS,
+        ConsoleEofPolicy::WriterClosed => 1,
+    }
+}
+
 /// Run the log processor for a box, blocking until `stop` is set and the console
 /// is drained. Intended to run on a dedicated thread for the VM's lifetime; set
 /// `stop` after the VM exits, then join, to guarantee the final lines are
@@ -283,6 +325,29 @@ pub fn run_log_processor_with_ready(
     stop: &AtomicBool,
     ready: Option<&std::sync::atomic::AtomicUsize>,
 ) {
+    run_log_processor_with_ready_and_eof_policy(
+        console_log,
+        log_dir,
+        config,
+        stop,
+        ready,
+        ConsoleEofPolicy::MayReceiveLateWrites,
+    );
+}
+
+/// Run the log processor with an explicit final-EOF policy.
+///
+/// Sandbox workers use [`ConsoleEofPolicy::WriterClosed`] only after the exact
+/// `crun run` wrapper has exited. Other callers should retain the conservative
+/// default exposed by [`run_log_processor_with_ready`].
+pub fn run_log_processor_with_ready_and_eof_policy(
+    console_log: &Path,
+    log_dir: &Path,
+    config: &LogConfig,
+    stop: &AtomicBool,
+    ready: Option<&std::sync::atomic::AtomicUsize>,
+    eof_policy: ConsoleEofPolicy,
+) {
     match config.driver {
         // `none` produces no structured output, but libkrun still writes the raw
         // console for the VM's lifetime — drain + bound it so a chatty box with
@@ -293,6 +358,7 @@ pub fn run_log_processor_with_ready(
             Some(console_cap(config.max_size(), config.max_file())),
             stop,
             ready,
+            eof_policy,
         ),
         LogDriver::JsonFile => run_json_file_processor(
             console_log,
@@ -301,6 +367,7 @@ pub fn run_log_processor_with_ready(
             config.max_file(),
             stop,
             ready,
+            eof_policy,
         ),
         LogDriver::Syslog => run_syslog_processor(
             console_log,
@@ -310,6 +377,7 @@ pub fn run_log_processor_with_ready(
             Some(console_cap(config.max_size(), config.max_file())),
             stop,
             ready,
+            eof_policy,
         ),
     }
 }
@@ -347,6 +415,7 @@ fn run_tagged_tail(
     stop: &AtomicBool,
     emit: &(dyn Fn(&str, &str) + Sync),
     ready: Option<&std::sync::atomic::AtomicUsize>,
+    eof_policy: ConsoleEofPolicy,
 ) {
     let f = match open_console(file, stop) {
         Some(f) => f,
@@ -361,7 +430,7 @@ fn run_tagged_tail(
     // console_truncate_if_over). None = unbounded (used by tests).
     let truncate = bound.map(|cap| move || console_truncate_if_over(file, cap));
     let on_eof: Option<&dyn Fn() -> bool> = truncate.as_ref().map(|t| t as &dyn Fn() -> bool);
-    while let Some(line) = tail_next_line(&mut reader, &mut buf, stop, on_eof) {
+    while let Some(line) = tail_next_line(&mut reader, &mut buf, stop, on_eof, eof_policy) {
         if filter_noise && is_runtime_console_noise(&line) {
             continue;
         }
@@ -385,13 +454,29 @@ fn run_discard_processor(
     cap: Option<u64>,
     stop: &AtomicBool,
     ready: Option<&std::sync::atomic::AtomicUsize>,
+    eof_policy: ConsoleEofPolicy,
 ) {
     let err_log = stderr_console_path(console_log);
     let discard = |_line: &str, _stream: &str| {};
     let discard: &(dyn Fn(&str, &str) + Sync) = &discard;
     std::thread::scope(|s| {
-        s.spawn(|| run_tagged_tail(console_log, "stdout", false, cap, stop, discard, ready));
-        s.spawn(|| run_tagged_tail(&err_log, "stderr", false, cap, stop, discard, ready));
+        s.spawn(|| {
+            run_tagged_tail(
+                console_log,
+                "stdout",
+                false,
+                cap,
+                stop,
+                discard,
+                ready,
+                eof_policy,
+            )
+        });
+        s.spawn(|| {
+            run_tagged_tail(
+                &err_log, "stderr", false, cap, stop, discard, ready, eof_policy,
+            )
+        });
     });
 }
 
@@ -402,6 +487,7 @@ fn run_json_file_processor(
     max_file: u32,
     stop: &AtomicBool,
     ready: Option<&std::sync::atomic::AtomicUsize>,
+    eof_policy: ConsoleEofPolicy,
 ) {
     let json_path = json_log_path(log_dir);
     let writer = std::sync::Mutex::new(match RotatingWriter::new(&json_path, max_size, max_file) {
@@ -428,10 +514,21 @@ fn run_json_file_processor(
 
     let cap = Some(console_cap(max_size, max_file));
     std::thread::scope(|s| {
-        s.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit, ready));
+        s.spawn(|| {
+            run_tagged_tail(
+                console_log,
+                "stdout",
+                true,
+                cap,
+                stop,
+                emit,
+                ready,
+                eof_policy,
+            )
+        });
         // libkrun's `init.krun:` preamble can land on EITHER stream, so filter
         // the noise on stderr too.
-        s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready));
+        s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready, eof_policy));
     });
 }
 
@@ -444,6 +541,7 @@ fn run_syslog_processor(
     cap: Option<u64>,
     stop: &AtomicBool,
     ready: Option<&std::sync::atomic::AtomicUsize>,
+    eof_policy: ConsoleEofPolicy,
 ) {
     use std::net::UdpSocket;
 
@@ -469,8 +567,21 @@ fn run_syslog_processor(
             };
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
             std::thread::scope(|s| {
-                s.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit, ready));
-                s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready));
+                s.spawn(|| {
+                    run_tagged_tail(
+                        console_log,
+                        "stdout",
+                        true,
+                        cap,
+                        stop,
+                        emit,
+                        ready,
+                        eof_policy,
+                    )
+                });
+                s.spawn(|| {
+                    run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready, eof_policy)
+                });
             });
         }
         "tcp" => {
@@ -491,8 +602,21 @@ fn run_syslog_processor(
             };
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
             std::thread::scope(|sc| {
-                sc.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit, ready));
-                sc.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready));
+                sc.spawn(|| {
+                    run_tagged_tail(
+                        console_log,
+                        "stdout",
+                        true,
+                        cap,
+                        stop,
+                        emit,
+                        ready,
+                        eof_policy,
+                    )
+                });
+                sc.spawn(|| {
+                    run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready, eof_policy)
+                });
             });
         }
         _ => {}
@@ -645,6 +769,33 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_log_worker_spec_round_trips_generation_identity() {
+        let spec = SandboxLogWorkerSpec {
+            schema: SANDBOX_LOG_WORKER_SCHEMA.to_string(),
+            box_id: "sandbox-id".to_string(),
+            console_log: PathBuf::from("/tmp/sandbox-id/logs/console.log"),
+            log_config: LogConfig::default(),
+            watched_pid: 123,
+            watched_pid_start_time: 456,
+            ready_file: PathBuf::from("/tmp/sandbox-id/sandbox/log-worker.ready"),
+        };
+
+        let encoded = serde_json::to_vec(&spec).unwrap();
+        let decoded: SandboxLogWorkerSpec = serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded, spec);
+    }
+
+    #[test]
+    fn writer_closed_eof_skips_the_late_console_settle_window() {
+        assert_eq!(
+            stopped_eof_settle_polls(ConsoleEofPolicy::MayReceiveLateWrites),
+            25
+        );
+        assert_eq!(stopped_eof_settle_polls(ConsoleEofPolicy::WriterClosed), 1);
+    }
+
+    #[test]
     fn test_syslog_config_defaults() {
         let config = LogConfig {
             driver: LogDriver::Syslog,
@@ -698,14 +849,35 @@ mod tests {
         let mut buf = String::new();
         let stop = AtomicBool::new(true);
         assert_eq!(
-            tail_next_line(&mut reader, &mut buf, &stop, None),
+            tail_next_line(
+                &mut reader,
+                &mut buf,
+                &stop,
+                None,
+                ConsoleEofPolicy::MayReceiveLateWrites,
+            ),
             Some("alpha".to_string())
         );
         assert_eq!(
-            tail_next_line(&mut reader, &mut buf, &stop, None),
+            tail_next_line(
+                &mut reader,
+                &mut buf,
+                &stop,
+                None,
+                ConsoleEofPolicy::MayReceiveLateWrites,
+            ),
             Some("beta".to_string())
         );
-        assert_eq!(tail_next_line(&mut reader, &mut buf, &stop, None), None);
+        assert_eq!(
+            tail_next_line(
+                &mut reader,
+                &mut buf,
+                &stop,
+                None,
+                ConsoleEofPolicy::MayReceiveLateWrites,
+            ),
+            None
+        );
         assert!(buf.is_empty());
     }
 
@@ -718,10 +890,25 @@ mod tests {
         let mut buf = String::new();
         let stop = AtomicBool::new(true);
         assert_eq!(
-            tail_next_line(&mut reader, &mut buf, &stop, None),
+            tail_next_line(
+                &mut reader,
+                &mut buf,
+                &stop,
+                None,
+                ConsoleEofPolicy::MayReceiveLateWrites,
+            ),
             Some("only-partial".to_string())
         );
-        assert_eq!(tail_next_line(&mut reader, &mut buf, &stop, None), None);
+        assert_eq!(
+            tail_next_line(
+                &mut reader,
+                &mut buf,
+                &stop,
+                None,
+                ConsoleEofPolicy::MayReceiveLateWrites,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -757,7 +944,16 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let emit = move |line: &str, _stream: &str| c2.lock().unwrap().push(line.to_string());
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
-            run_tagged_tail(&p2, "stdout", false, Some(cap), &s2, emit, None);
+            run_tagged_tail(
+                &p2,
+                "stdout",
+                false,
+                Some(cap),
+                &s2,
+                emit,
+                None,
+                ConsoleEofPolicy::MayReceiveLateWrites,
+            );
         });
 
         // Let the tail drain l1..l3, hit EOF, and truncate (9 bytes > cap 4).
@@ -811,10 +1007,25 @@ mod tests {
         let mut buffer = String::new();
         let stop = AtomicBool::new(true);
         assert_eq!(
-            tail_next_line(&mut reader, &mut buffer, &stop, None),
+            tail_next_line(
+                &mut reader,
+                &mut buffer,
+                &stop,
+                None,
+                ConsoleEofPolicy::MayReceiveLateWrites,
+            ),
             Some("late-final-line".to_string())
         );
-        assert_eq!(tail_next_line(&mut reader, &mut buffer, &stop, None), None);
+        assert_eq!(
+            tail_next_line(
+                &mut reader,
+                &mut buffer,
+                &stop,
+                None,
+                ConsoleEofPolicy::MayReceiveLateWrites,
+            ),
+            None
+        );
         writer.join().unwrap();
     }
 
@@ -870,7 +1081,15 @@ mod tests {
         let console = dir.path().join("console.log");
         std::fs::write(&console, "AAA\ninit.krun: noise\nBBB\n").unwrap();
         let stop = AtomicBool::new(true);
-        run_json_file_processor(&console, dir.path(), 10 * 1024 * 1024, 3, &stop, None);
+        run_json_file_processor(
+            &console,
+            dir.path(),
+            10 * 1024 * 1024,
+            3,
+            &stop,
+            None,
+            ConsoleEofPolicy::MayReceiveLateWrites,
+        );
         let json = std::fs::read_to_string(json_log_path(dir.path())).unwrap();
         assert!(json.contains("\"log\":\"AAA\\n\""), "AAA missing: {json}");
         assert!(

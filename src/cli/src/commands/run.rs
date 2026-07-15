@@ -603,6 +603,10 @@ async fn run_foreground(
         .await;
     log_handle.abort();
 
+    if stop_reason == ForegroundStopReason::ProcessExited {
+        wait_for_sandbox_structured_log_drain(&ctx).await?;
+    }
+
     let persisted_exit_code = a3s_box_runtime::rootfs::read_persisted_exit_code(&ctx.box_dir);
     let exit_code = foreground_exit_code(stop_reason, persisted_exit_code);
     archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
@@ -625,6 +629,33 @@ async fn run_foreground(
         }
     }
 
+    Ok(())
+}
+
+async fn wait_for_sandbox_structured_log_drain(
+    ctx: &RunContext,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !ctx.record.isolation.is_sandbox() {
+        return Ok(());
+    }
+    let box_dir = ctx.box_dir.clone();
+    let box_id = ctx.box_id.clone();
+    let drained = tokio::task::spawn_blocking(move || {
+        a3s_box_runtime::vm::reap::wait_for_recorded_sandbox_log_drain(
+            &box_dir,
+            &box_id,
+            std::time::Duration::from_secs(3),
+        )
+    })
+    .await
+    .map_err(|error| format!("Sandbox log drain task failed for {}: {error}", ctx.box_id))??;
+    if !drained {
+        return Err(format!(
+            "Sandbox logs did not finish draining for {}; state was preserved for recovery",
+            ctx.box_id
+        )
+        .into());
+    }
     Ok(())
 }
 
