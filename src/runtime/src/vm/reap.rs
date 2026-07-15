@@ -30,6 +30,21 @@ pub fn cleanup_recorded_sandbox_runtime(box_dir: &Path, box_id: &str) -> a3s_box
     cleanup_recorded_sandbox_runtime_in(&a3s_box_core::dirs_home(), box_dir, box_id)
 }
 
+/// Wait for a naturally exited Sandbox generation to finish projecting both
+/// console streams before a caller archives or reads its final logs.
+#[cfg(target_os = "linux")]
+pub fn wait_for_recorded_sandbox_log_drain(
+    box_dir: &Path,
+    box_id: &str,
+    timeout: std::time::Duration,
+) -> a3s_box_core::Result<bool> {
+    let home_dir = a3s_box_core::dirs_home();
+    let Some(record) = load_recorded_sandbox_runtime(&home_dir, box_dir, box_id)? else {
+        return Ok(true);
+    };
+    Ok(wait_for_log_worker_identity(&record, timeout))
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn cleanup_recorded_sandbox_runtime_in(
     home_dir: &Path,
@@ -111,6 +126,10 @@ struct SandboxRuntimeRecord {
     runtime_root: std::path::PathBuf,
     bundle_dir: std::path::PathBuf,
     init_pid: u32,
+    #[serde(default)]
+    log_worker_pid: Option<u32>,
+    #[serde(default)]
+    log_worker_pid_start_time: Option<u64>,
 }
 
 /// Validated durable evidence for one live or stopped Sandbox generation.
@@ -121,6 +140,8 @@ pub(crate) struct RecordedSandboxRuntime {
     pub(crate) runtime_root: std::path::PathBuf,
     pub(crate) bundle_dir: std::path::PathBuf,
     pub(crate) init_pid: u32,
+    pub(crate) log_worker_pid: Option<u32>,
+    pub(crate) log_worker_pid_start_time: Option<u64>,
 }
 
 /// Load and validate the runtime-owned Sandbox record for one internal box ID.
@@ -153,11 +174,18 @@ pub(crate) fn load_recorded_sandbox_runtime(
     })?;
     let expected_runtime_root = home_dir.join("run/crun").join(box_id);
     let expected_bundle = box_dir.join("sandbox/bundle");
+    let log_worker_identity_valid = match (record.log_worker_pid, record.log_worker_pid_start_time)
+    {
+        (None, None) => true,
+        (Some(pid), Some(start_time)) => pid > 0 && start_time > 0,
+        _ => false,
+    };
     if record.schema != "a3s.box.sandbox-runtime.v1"
         || record.container_id != box_id
         || record.runtime_root != expected_runtime_root
         || record.bundle_dir != expected_bundle
         || record.init_pid == 0
+        || !log_worker_identity_valid
     {
         return Err(a3s_box_core::BoxError::StateError(format!(
             "Sandbox runtime record failed path or identity validation for {box_id}"
@@ -176,6 +204,8 @@ pub(crate) fn load_recorded_sandbox_runtime(
         runtime_root: record.runtime_root,
         bundle_dir: record.bundle_dir,
         init_pid: record.init_pid,
+        log_worker_pid: record.log_worker_pid,
+        log_worker_pid_start_time: record.log_worker_pid_start_time,
     }))
 }
 
@@ -261,11 +291,54 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
         }
     }
 
+    drain_recorded_log_worker(&record, box_id);
     let _ = std::fs::remove_dir_all(&record.bundle_dir);
     let _ = std::fs::remove_dir_all(&record.runtime_root);
     let _ = std::fs::remove_file(&record_path);
     tracing::info!(box_id, "Reaped orphaned crun Sandbox after runtime restart");
     SandboxReap::Cleaned
+}
+
+#[cfg(target_os = "linux")]
+fn drain_recorded_log_worker(record: &RecordedSandboxRuntime, box_id: &str) {
+    let (Some(pid), Some(_start_time)) = (record.log_worker_pid, record.log_worker_pid_start_time)
+    else {
+        return;
+    };
+    if wait_for_log_worker_identity(record, std::time::Duration::from_secs(2)) {
+        return;
+    }
+
+    tracing::warn!(
+        box_id,
+        log_worker_pid = pid,
+        "Recovered Sandbox log worker did not drain after crun cleanup; terminating it"
+    );
+    if let Ok(pid) = i32::try_from(pid) {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_log_worker_identity(
+    record: &RecordedSandboxRuntime,
+    timeout: std::time::Duration,
+) -> bool {
+    let (Some(pid), Some(start_time)) = (record.log_worker_pid, record.log_worker_pid_start_time)
+    else {
+        // Runtime records written before the worker fields have no process to
+        // wait for and retain their legacy raw-console behavior.
+        return true;
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    while crate::process::is_process_running_with_identity(pid, Some(start_time))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    !crate::process::is_process_running_with_identity(pid, Some(start_time))
 }
 
 /// Poll until every pid in `pids` has exited, or `timeout` elapses.
@@ -298,6 +371,15 @@ pub fn cleanup_recorded_sandbox_runtime(
     _box_id: &str,
 ) -> a3s_box_core::Result<()> {
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn wait_for_recorded_sandbox_log_drain(
+    _box_dir: &std::path::Path,
+    _box_id: &str,
+    _timeout: std::time::Duration,
+) -> a3s_box_core::Result<bool> {
+    Ok(true)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -371,6 +453,8 @@ mod tests {
             runtime_root: home_dir.join("run/crun").join(box_id),
             bundle_dir: box_dir.join("sandbox/bundle"),
             init_pid: 42,
+            log_worker_pid: None,
+            log_worker_pid_start_time: None,
         };
         mutate(&mut record);
         std::fs::create_dir_all(box_dir.join("sandbox")).unwrap();

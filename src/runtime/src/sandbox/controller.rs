@@ -14,13 +14,16 @@ use std::time::{Duration, Instant};
 
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::execution::ResolvedExecutionPlan;
+use a3s_box_core::log::LogConfig;
+#[cfg(target_os = "linux")]
+use a3s_box_core::log::{SandboxLogWorkerSpec, SANDBOX_LOG_WORKER_SCHEMA};
 use oci_spec::runtime::Spec;
 use serde::Serialize;
 
 use super::capability::{CertifiedCrun, SandboxCapabilitySnapshot};
 use super::handler::CrunHandler;
 #[cfg(target_os = "linux")]
-use super::handler::CrunState;
+use super::handler::{CrunHandlerSpec, CrunState};
 
 #[cfg(target_os = "linux")]
 const EXEC_LISTENER_FD: i32 = 3;
@@ -46,6 +49,10 @@ pub struct SandboxLaunchSpec {
     pub stdout_path: PathBuf,
     pub stderr_path: PathBuf,
     pub init_log_path: PathBuf,
+    pub log_config: LogConfig,
+    pub log_worker_path: PathBuf,
+    pub log_worker_log_path: PathBuf,
+    pub log_worker_ready_path: PathBuf,
 }
 
 #[cfg(target_os = "linux")]
@@ -57,6 +64,8 @@ struct SandboxRuntimeRecord<'a> {
     runtime_root: &'a Path,
     bundle_dir: &'a Path,
     init_pid: u32,
+    log_worker_pid: u32,
+    log_worker_pid_start_time: u64,
 }
 
 /// Controller pinned to one already-verified `crun` artifact.
@@ -258,6 +267,44 @@ impl CrunController {
             tokio::time::sleep(Duration::from_millis(25)).await;
         };
 
+        let watched_pid = child.id();
+        let watched_pid_start_time = match crate::process::pid_start_time(watched_pid) {
+            Some(start_time) => start_time,
+            None => {
+                cleanup_failed_start(&self.runtime.path, &launch);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BoxError::BoxBootError {
+                    message: "Failed to capture crun wrapper process identity for Sandbox logs"
+                        .to_string(),
+                    hint: None,
+                });
+            }
+        };
+        let mut log_worker = match start_log_worker(&launch, watched_pid, watched_pid_start_time) {
+            Ok(worker) => worker,
+            Err(error) => {
+                cleanup_failed_start(&self.runtime.path, &launch);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        let log_worker_pid = log_worker.id();
+        let log_worker_pid_start_time = match crate::process::pid_start_time(log_worker_pid) {
+            Some(start_time) => start_time,
+            None => {
+                cleanup_failed_start(&self.runtime.path, &launch);
+                reap_failed_log_worker(&mut log_worker);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BoxError::BoxBootError {
+                    message: "Failed to capture Sandbox log worker process identity".to_string(),
+                    hint: None,
+                });
+            }
+        };
+
         let record = SandboxRuntimeRecord {
             schema: "a3s.box.sandbox-runtime.v1",
             container_id: &launch.container_id,
@@ -265,22 +312,29 @@ impl CrunController {
             runtime_root: &launch.runtime_root,
             bundle_dir: &launch.bundle_dir,
             init_pid,
+            log_worker_pid,
+            log_worker_pid_start_time,
         };
         if let Err(error) = write_json_atomic(&launch.runtime_record, &record) {
             cleanup_failed_start(&self.runtime.path, &launch);
+            reap_failed_log_worker(&mut log_worker);
             let _ = child.kill();
             let _ = child.wait();
             return Err(error);
         }
 
         Ok(CrunHandler::from_child(
-            self.runtime.path.clone(),
-            launch.runtime_root,
-            launch.container_id,
-            init_pid,
+            CrunHandlerSpec::new(
+                self.runtime.path.clone(),
+                launch.runtime_root,
+                launch.container_id,
+                init_pid,
+                launch.bundle_dir,
+                launch.runtime_record,
+            ),
             child,
-            launch.bundle_dir,
-            launch.runtime_record,
+            log_worker,
+            log_worker_pid_start_time,
         ))
     }
 
@@ -363,6 +417,90 @@ fn open_log(path: &Path) -> Result<File> {
 }
 
 #[cfg(target_os = "linux")]
+fn start_log_worker(
+    launch: &SandboxLaunchSpec,
+    watched_pid: u32,
+    watched_pid_start_time: u64,
+) -> Result<std::process::Child> {
+    let _ = std::fs::remove_file(&launch.log_worker_ready_path);
+    let worker_spec = SandboxLogWorkerSpec {
+        schema: SANDBOX_LOG_WORKER_SCHEMA.to_string(),
+        box_id: launch.container_id.clone(),
+        console_log: launch.stdout_path.clone(),
+        log_config: launch.log_config.clone(),
+        watched_pid,
+        watched_pid_start_time,
+        ready_file: launch.log_worker_ready_path.clone(),
+    };
+    let config = serde_json::to_string(&worker_spec).map_err(|error| {
+        BoxError::SerializationError(format!(
+            "Failed to encode Sandbox log worker configuration: {error}"
+        ))
+    })?;
+    let stdout = open_log(&launch.log_worker_log_path)?;
+    let stderr = stdout.try_clone().map_err(BoxError::IoError)?;
+    let mut worker = Command::new(&launch.log_worker_path)
+        .arg("--sandbox-log-worker-config")
+        .arg(config)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| BoxError::BoxBootError {
+            message: format!("Failed to start Sandbox log worker: {error}"),
+            hint: None,
+        })?;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if launch.log_worker_ready_path.is_file() {
+            return Ok(worker);
+        }
+        match worker.try_wait() {
+            Ok(Some(status)) => {
+                let diagnostics =
+                    read_log_tail(&launch.log_worker_log_path, START_FAILURE_LOG_LIMIT_BYTES)
+                        .map(|excerpt| format!(": {excerpt}"))
+                        .unwrap_or_default();
+                return Err(BoxError::BoxBootError {
+                    message: format!(
+                        "Sandbox log worker exited before readiness with {status}{diagnostics}"
+                    ),
+                    hint: None,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => return Err(BoxError::IoError(error)),
+        }
+        if Instant::now() >= deadline {
+            reap_failed_log_worker(&mut worker);
+            return Err(BoxError::BoxBootError {
+                message: "Timed out waiting for Sandbox log worker readiness".to_string(),
+                hint: None,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reap_failed_log_worker(worker: &mut std::process::Child) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match worker.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => break,
+        }
+    }
+    let _ = worker.kill();
+    let _ = worker.wait();
+}
+
+#[cfg(target_os = "linux")]
 fn bind_control_listener(path: &Path) -> Result<std::os::unix::net::UnixListener> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
@@ -408,6 +546,7 @@ fn start_failure_diagnostics(launch: &SandboxLaunchSpec) -> String {
     let diagnostics = [
         ("crun stderr", &launch.stderr_path),
         ("guest-init log", &launch.init_log_path),
+        ("Sandbox log worker", &launch.log_worker_log_path),
     ]
     .into_iter()
     .filter_map(|(label, path)| {

@@ -64,12 +64,16 @@ impl VmLocalExecutionBackend {
         manager.port_forward_socket_path = Some(socket_dir.join("portfwd.sock"));
         *manager.handler.write().await = Some(Box::new(
             crate::sandbox::handler::CrunHandler::from_recorded_runtime(
-                inspection.runtime.runtime_path,
-                inspection.runtime.runtime_root,
-                record.id.clone(),
-                inspection.pid,
-                inspection.runtime.bundle_dir,
-                record.box_dir.join("sandbox/runtime.json"),
+                crate::sandbox::handler::CrunHandlerSpec::new(
+                    inspection.runtime.runtime_path,
+                    inspection.runtime.runtime_root,
+                    record.id.clone(),
+                    inspection.pid,
+                    inspection.runtime.bundle_dir,
+                    record.box_dir.join("sandbox/runtime.json"),
+                ),
+                inspection.runtime.log_worker_pid,
+                inspection.runtime.log_worker_pid_start_time,
             ),
         ));
         if !matches!(

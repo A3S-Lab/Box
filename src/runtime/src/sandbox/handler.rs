@@ -34,6 +34,9 @@ pub struct CrunHandler {
     container_id: String,
     init_pid: u32,
     process: Option<Child>,
+    log_worker: Option<Child>,
+    log_worker_pid: Option<u32>,
+    log_worker_pid_start_time: Option<u64>,
     metrics_sys: Mutex<System>,
     exit_code: Option<i32>,
     bundle_dir: PathBuf,
@@ -41,14 +44,23 @@ pub struct CrunHandler {
     cleaned: bool,
 }
 
-impl CrunHandler {
-    #[cfg(target_os = "linux")]
-    pub(crate) fn from_child(
+#[cfg(target_os = "linux")]
+pub(crate) struct CrunHandlerSpec {
+    runtime_path: PathBuf,
+    runtime_root: PathBuf,
+    container_id: String,
+    init_pid: u32,
+    bundle_dir: PathBuf,
+    runtime_record: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl CrunHandlerSpec {
+    pub(crate) fn new(
         runtime_path: PathBuf,
         runtime_root: PathBuf,
         container_id: String,
         init_pid: u32,
-        process: Child,
         bundle_dir: PathBuf,
         runtime_record: PathBuf,
     ) -> Self {
@@ -57,34 +69,57 @@ impl CrunHandler {
             runtime_root,
             container_id,
             init_pid,
-            process: Some(process),
-            metrics_sys: Mutex::new(System::new()),
-            exit_code: None,
             bundle_dir,
             runtime_record,
+        }
+    }
+}
+
+impl CrunHandler {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_child(
+        spec: CrunHandlerSpec,
+        process: Child,
+        log_worker: Child,
+        log_worker_pid_start_time: u64,
+    ) -> Self {
+        let log_worker_pid = log_worker.id();
+        Self {
+            runtime_path: spec.runtime_path,
+            runtime_root: spec.runtime_root,
+            container_id: spec.container_id,
+            init_pid: spec.init_pid,
+            process: Some(process),
+            log_worker: Some(log_worker),
+            log_worker_pid: Some(log_worker_pid),
+            log_worker_pid_start_time: Some(log_worker_pid_start_time),
+            metrics_sys: Mutex::new(System::new()),
+            exit_code: None,
+            bundle_dir: spec.bundle_dir,
+            runtime_record: spec.runtime_record,
             cleaned: false,
         }
     }
 
     #[cfg(all(target_os = "linux", feature = "vm"))]
     pub(crate) fn from_recorded_runtime(
-        runtime_path: PathBuf,
-        runtime_root: PathBuf,
-        container_id: String,
-        init_pid: u32,
-        bundle_dir: PathBuf,
-        runtime_record: PathBuf,
+        spec: CrunHandlerSpec,
+        log_worker_pid: Option<u32>,
+        log_worker_pid_start_time: Option<u64>,
     ) -> Self {
         Self {
-            runtime_path,
-            runtime_root,
-            container_id,
-            init_pid,
+            runtime_path: spec.runtime_path,
+            runtime_root: spec.runtime_root,
+            container_id: spec.container_id,
+            init_pid: spec.init_pid,
             process: None,
+            log_worker: None,
+            log_worker_pid,
+            log_worker_pid_start_time,
             metrics_sys: Mutex::new(System::new()),
             exit_code: None,
-            bundle_dir,
-            runtime_record,
+            bundle_dir: spec.bundle_dir,
+            runtime_record: spec.runtime_record,
             cleaned: false,
         }
     }
@@ -230,6 +265,65 @@ impl CrunHandler {
         }
     }
 
+    fn reap_log_worker(&mut self) {
+        const LOG_WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
+        const LOG_WORKER_EXIT_POLL: Duration = Duration::from_millis(10);
+
+        if let Some(mut worker) = self.log_worker.take() {
+            let deadline = Instant::now() + LOG_WORKER_EXIT_TIMEOUT;
+            loop {
+                match worker.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(LOG_WORKER_EXIT_POLL);
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        tracing::warn!(
+                            container_id = %self.container_id,
+                            %error,
+                            "Failed to poll Sandbox log worker before reaping"
+                        );
+                        break;
+                    }
+                }
+            }
+            tracing::warn!(
+                container_id = %self.container_id,
+                "Sandbox log worker did not exit after crun; terminating it"
+            );
+            let _ = worker.kill();
+            let _ = worker.wait();
+            return;
+        }
+
+        let (Some(pid), Some(start_time)) = (self.log_worker_pid, self.log_worker_pid_start_time)
+        else {
+            return;
+        };
+        let deadline = Instant::now() + LOG_WORKER_EXIT_TIMEOUT;
+        while crate::process::is_process_running_with_identity(pid, Some(start_time))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(LOG_WORKER_EXIT_POLL);
+        }
+        if crate::process::is_process_running_with_identity(pid, Some(start_time)) {
+            tracing::warn!(
+                container_id = %self.container_id,
+                log_worker_pid = pid,
+                "Recovered Sandbox log worker did not exit after crun; terminating it"
+            );
+            // The start-time token was revalidated immediately before the
+            // signal, so a reused PID cannot be targeted.
+            #[cfg(target_os = "linux")]
+            if let Ok(pid) = i32::try_from(pid) {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
     fn delete_runtime_state(&mut self) -> Result<()> {
         if self.cleaned {
             return Ok(());
@@ -243,6 +337,11 @@ impl CrunHandler {
         if !output.status.success() && self.query_state()?.is_some() {
             return Err(runtime_failure("crun delete --force", &output));
         }
+        // Reap the wrapper first: its inherited stdout/stderr descriptors must
+        // close before the worker treats EOF as final. Then wait for the worker
+        // to drain both streams before removing durable generation artifacts.
+        self.reap_child();
+        self.reap_log_worker();
         self.cleaned = true;
         remove_file_if_exists(&self.runtime_record);
         remove_dir_if_exists(&self.bundle_dir);
@@ -281,7 +380,6 @@ impl VmHandler for CrunHandler {
         if let Err(error) = self.delete_runtime_state() {
             first_error.get_or_insert(error);
         }
-        self.reap_child();
         match first_error {
             Some(error) => Err(error),
             None => Ok(()),
@@ -378,12 +476,16 @@ mod tests {
         let runtime_record = temporary.path().join("runtime.json");
 
         let handler = CrunHandler::from_recorded_runtime(
-            runtime_path.clone(),
-            runtime_root.clone(),
-            "recorded-test".to_string(),
-            42,
-            bundle_dir.clone(),
-            runtime_record.clone(),
+            CrunHandlerSpec::new(
+                runtime_path.clone(),
+                runtime_root.clone(),
+                "recorded-test".to_string(),
+                42,
+                bundle_dir.clone(),
+                runtime_record.clone(),
+            ),
+            None,
+            None,
         );
 
         assert_eq!(handler.runtime_path, runtime_path);
@@ -391,6 +493,8 @@ mod tests {
         assert_eq!(handler.container_id, "recorded-test");
         assert_eq!(handler.pid(), 42);
         assert!(handler.process.is_none());
+        assert!(handler.log_worker.is_none());
+        assert!(handler.log_worker_pid.is_none());
         assert_eq!(handler.bundle_dir, bundle_dir);
         assert_eq!(handler.runtime_record, runtime_record);
         assert!(!handler.cleaned);
@@ -401,27 +505,41 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let child = Command::new("sleep").arg("30").spawn().unwrap();
         let pid = child.id();
+        let log_worker = Command::new("sleep").arg("30").spawn().unwrap();
+        let log_worker_pid = log_worker.id();
+        let log_worker_pid_start_time = crate::process::pid_start_time(log_worker_pid).unwrap();
         let handler = CrunHandler::from_child(
-            PathBuf::from("/bin/true"),
-            temporary.path().join("runtime"),
-            "detached-test".to_string(),
-            pid,
+            CrunHandlerSpec::new(
+                PathBuf::from("/bin/true"),
+                temporary.path().join("runtime"),
+                "detached-test".to_string(),
+                pid,
+                temporary.path().join("bundle"),
+                temporary.path().join("runtime.json"),
+            ),
             child,
-            temporary.path().join("bundle"),
-            temporary.path().join("runtime.json"),
+            log_worker,
+            log_worker_pid_start_time,
         );
 
         drop(handler);
         let remained_alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+        let log_worker_remained_alive = unsafe { libc::kill(log_worker_pid as i32, 0) == 0 };
 
         unsafe {
             libc::kill(pid as i32, libc::SIGKILL);
             let mut status = 0;
             libc::waitpid(pid as i32, &mut status, 0);
+            libc::kill(log_worker_pid as i32, libc::SIGKILL);
+            libc::waitpid(log_worker_pid as i32, &mut status, 0);
         }
         assert!(
             remained_alive,
             "dropping a runtime handle must not destroy a detached Sandbox"
+        );
+        assert!(
+            log_worker_remained_alive,
+            "dropping a runtime handle must not destroy its detached log worker"
         );
     }
 }

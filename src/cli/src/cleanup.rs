@@ -135,6 +135,11 @@ pub fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
 
 /// Remove all host-side resources owned by a box record.
 pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()> {
+    // A Sandbox log worker exits only after crun closes both output streams.
+    // Reconcile that runtime first so the archive includes final stderr and a
+    // complete structured projection. This does not remove the box log dir.
+    cleanup_sandbox_runtime(record)?;
+
     if record.auto_remove {
         if let Err(err) = crate::log_archive::archive_removed_logs(record) {
             tracing::debug!(
@@ -144,8 +149,6 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
             );
         }
     }
-
-    cleanup_sandbox_runtime(record)?;
 
     cleanup_record_resources(record);
     cleanup_anonymous_volumes(&record.anonymous_volumes);

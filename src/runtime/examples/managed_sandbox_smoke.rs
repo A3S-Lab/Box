@@ -84,6 +84,10 @@ mod linux {
             home_dir.join("bin/a3s-box-guest-init").is_file(),
             "A3S_HOME/bin/a3s-box-guest-init is missing",
         )?;
+        require(
+            home_dir.join("bin/a3s-box-shim").is_file(),
+            "A3S_HOME/bin/a3s-box-shim is missing",
+        )?;
         Ok(home_dir)
     }
 
@@ -102,7 +106,8 @@ mod linux {
                 cmd: vec![
                     "/bin/sh".to_string(),
                     "-c".to_string(),
-                    "while :; do sleep 60; done".to_string(),
+                    "printf 'sandbox-stdout\\n'; printf 'sandbox-stderr\\n' >&2; while :; do sleep 60; done"
+                        .to_string(),
                 ],
                 network: NetworkMode::None,
                 ..Default::default()
@@ -176,7 +181,8 @@ mod linux {
             running_status.state == ExecutionState::Running,
             "started managed Sandbox is not running",
         )?;
-        validate_runtime_record(home_dir, &box_dir, &execution_id)?;
+        let log_worker_identity = validate_runtime_record(home_dir, &box_dir, &execution_id)?;
+        validate_structured_logs(&box_dir).await?;
         println!("started execution={} state=running", execution_id);
 
         let pause_error = match restarted
@@ -224,6 +230,7 @@ mod linux {
                 .exists(),
             "managed Sandbox socket directory leaked",
         )?;
+        wait_for_process_exit(log_worker_identity).await?;
         println!("killed execution={} state=stopped cleanup=ok", execution_id);
         Ok(())
     }
@@ -262,7 +269,7 @@ mod linux {
         home_dir: &Path,
         box_dir: &Path,
         execution_id: &ExecutionId,
-    ) -> Result<(), AnyError> {
+    ) -> Result<(u32, u64), AnyError> {
         let runtime_record = box_dir.join("sandbox/runtime.json");
         let record: serde_json::Value = serde_json::from_slice(&std::fs::read(&runtime_record)?)?;
         require(
@@ -285,7 +292,65 @@ mod linux {
         require(
             runtime_path.canonicalize()? == home_dir.join("bin/crun").canonicalize()?,
             "Sandbox runtime record does not reference the certified crun artifact",
-        )
+        )?;
+        let log_worker_pid = record
+            .get("log_worker_pid")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| failure("Sandbox runtime record has no log worker PID"))?;
+        let log_worker_pid_start_time = record
+            .get("log_worker_pid_start_time")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| failure("Sandbox runtime record has no log worker PID identity"))?;
+        require(
+            a3s_box_runtime::is_process_alive_with_identity(
+                log_worker_pid,
+                Some(log_worker_pid_start_time),
+            ),
+            "Sandbox log worker is not alive with its recorded identity",
+        )?;
+        Ok((log_worker_pid, log_worker_pid_start_time))
+    }
+
+    async fn validate_structured_logs(box_dir: &Path) -> Result<(), AnyError> {
+        let path = box_dir.join("logs/container.json");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(contents) = tokio::fs::read_to_string(&path).await {
+                let entries: Vec<a3s_box_core::log::LogEntry> = contents
+                    .lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect();
+                let stdout = entries
+                    .iter()
+                    .any(|entry| entry.stream == "stdout" && entry.log == "sandbox-stdout\n");
+                let stderr = entries
+                    .iter()
+                    .any(|entry| entry.stream == "stderr" && entry.log == "sandbox-stderr\n");
+                if stdout && stderr {
+                    println!("logs stdout=ok stderr=ok format=json-file");
+                    return Ok(());
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(failure(format!(
+                    "Sandbox structured logs did not capture both streams at {}",
+                    path.display()
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_for_process_exit(identity: (u32, u64)) -> Result<(), AnyError> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while a3s_box_runtime::is_process_alive_with_identity(identity.0, Some(identity.1)) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(failure("Sandbox log worker leaked after terminal cleanup"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        Ok(())
     }
 
     async fn cleanup(
