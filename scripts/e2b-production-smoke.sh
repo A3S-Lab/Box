@@ -8,6 +8,8 @@ TOKEN_ENCRYPTION="$(printf '07%.0s' {1..32})"
 TOKEN_DIGEST="$(printf '08%.0s' {1..32})"
 PORT="${A3S_BOX_E2B_SMOKE_PORT:-38081}"
 GATEWAY_PORT="${A3S_BOX_E2B_GATEWAY_SMOKE_PORT:-38443}"
+GATEWAY_ADDRESS="${A3S_BOX_E2B_GATEWAY_SMOKE_ADDRESS:-127.0.0.1}"
+SANDBOX_DOMAIN="${A3S_BOX_E2B_SANDBOX_DOMAIN:-box.example.com}"
 IMAGE="${A3S_BOX_SMOKE_IMAGE:-alpine:3.20}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OFFICIAL_CLIENT_RUNNER="${A3S_BOX_E2B_OFFICIAL_CLIENT_RUNNER:-$SCRIPT_DIR/../compat/e2b/fixtures/official-clients/run_production.py}"
@@ -40,7 +42,30 @@ fail() {
 [[ "$GATEWAY_PORT" =~ ^[0-9]+$ && "$GATEWAY_PORT" -gt 0 && "$GATEWAY_PORT" -le 65535 ]] ||
   fail 'A3S_BOX_E2B_GATEWAY_SMOKE_PORT must be a valid TCP port'
 [[ "$GATEWAY_PORT" != "$PORT" ]] || fail 'control and gateway ports must differ'
+if [[ "$GATEWAY_ADDRESS" == *:* ]]; then
+  GATEWAY_LISTEN="[$GATEWAY_ADDRESS]:$GATEWAY_PORT"
+  GATEWAY_RESOLVE="[$GATEWAY_ADDRESS]"
+else
+  GATEWAY_LISTEN="$GATEWAY_ADDRESS:$GATEWAY_PORT"
+  GATEWAY_RESOLVE="$GATEWAY_ADDRESS"
+fi
+if ! python3 - "$GATEWAY_ADDRESS" <<'PY'
+import ipaddress
+import sys
+
+address = ipaddress.ip_address(sys.argv[1])
+if not address.is_loopback:
+    raise SystemExit(1)
+PY
+then
+  fail 'A3S_BOX_E2B_GATEWAY_SMOKE_ADDRESS must be a loopback IP address'
+fi
+[[ "$SANDBOX_DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] ||
+  fail 'A3S_BOX_E2B_SANDBOX_DOMAIN must be a DNS name'
 command -v openssl >/dev/null || fail 'openssl is required for the TLS gateway smoke'
+if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" && "$GATEWAY_PORT" != "443" ]]; then
+  fail 'official-client envd health requires A3S_BOX_E2B_GATEWAY_SMOKE_PORT=443'
+fi
 
 umask 077
 STATE_DIR="$A3S_HOME/e2b-compat-smoke"
@@ -117,8 +142,9 @@ gateway_status() {
   local token="$4"
   shift 4
   curl --silent --show-error --output "$output" --write-out '%{http_code}' \
+    --noproxy '*' \
     --cacert "$TLS_CERT" \
-    --resolve "$host:$GATEWAY_PORT:127.0.0.1" \
+    --resolve "$host:$GATEWAY_PORT:$GATEWAY_RESOLVE" \
     --header "$token_header: $token" \
     "$@" "https://$host:$GATEWAY_PORT/health"
 }
@@ -129,7 +155,7 @@ wait_gateway_ready() {
   local status=""
   while (( attempts < 100 )); do
     status="$(gateway_status "$host" "$STATE_DIR/gateway-body.txt" X-Access-Token "$ENVD_TOKEN" || true)"
-    if [[ "$status" == "200" ]]; then
+    if [[ "$status" == "204" ]]; then
       return 0
     fi
     if [[ -n "$SERVICE_PID" ]] && ! kill -0 "$SERVICE_PID" 2>/dev/null; then
@@ -236,20 +262,20 @@ trap cleanup EXIT INT TERM
 rm -rf "$STATE_DIR"
 mkdir -p "$STATE_DIR"
 openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
-  -subj '/CN=*.box.example.com' \
-  -addext 'subjectAltName=DNS:*.box.example.com,DNS:sandbox.box.example.com' \
+  -subj "/CN=*.$SANDBOX_DOMAIN" \
+  -addext "subjectAltName=DNS:*.$SANDBOX_DOMAIN,DNS:sandbox.$SANDBOX_DOMAIN" \
   -keyout "$TLS_KEY" -out "$TLS_CERT" >/dev/null 2>&1
 cat >"$CONFIG" <<EOF
 e2b_compat {
   api_listen = "127.0.0.1:$PORT"
   api_public_url = "$BASE_URL"
-  sandbox_domain = "box.example.com"
+  sandbox_domain = "$SANDBOX_DOMAIN"
   database_path = "$STATE_DIR/lifecycle.sqlite3"
   runtime_home = "$A3S_HOME"
   runtime_state_path = "$STATE_DIR/managed-executions.json"
 
   gateway {
-    listen = "127.0.0.1:$GATEWAY_PORT"
+    listen = "$GATEWAY_LISTEN"
     tls_certificate_path = "$TLS_CERT"
     tls_private_key_path = "$TLS_KEY"
     max_connections = 128
@@ -283,7 +309,7 @@ e2b_compat {
     envd_version = "0.1.3"
     isolation = "sandbox"
     network = "none"
-    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49983 -e /tmp/e2b-smoke/respond"]
+    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
 
     resources {
       vcpus = 2
@@ -302,7 +328,7 @@ e2b_compat {
     envd_version = "0.1.3"
     isolation = "sandbox"
     network = "none"
-    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49983 -e /tmp/e2b-smoke/respond"]
+    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
 
     resources {
       vcpus = 2
@@ -326,7 +352,7 @@ CREATE_STATUS="$(status_request POST /sandboxes "$CREATE_RESPONSE" \
 [[ "$CREATE_STATUS" == "201" ]] || fail "create returned HTTP $CREATE_STATUS"
 SANDBOX_ID="$(json_field "$CREATE_RESPONSE" sandboxID)"
 [[ "$SANDBOX_ID" == sandbox-* ]] || fail 'create returned an invalid sandbox ID'
-[[ "$(json_field "$CREATE_RESPONSE" domain)" == "box.example.com" ]] ||
+[[ "$(json_field "$CREATE_RESPONSE" domain)" == "$SANDBOX_DOMAIN" ]] ||
   fail 'create returned the wrong sandbox domain'
 ENVD_TOKEN="$(json_field "$CREATE_RESPONSE" envdAccessToken)"
 TRAFFIC_TOKEN="$(json_field "$CREATE_RESPONSE" trafficAccessToken)"
@@ -335,19 +361,27 @@ TRAFFIC_TOKEN="$(json_field "$CREATE_RESPONSE" trafficAccessToken)"
 [[ -n "$TRAFFIC_TOKEN" ]] ||
   fail 'create omitted the traffic access token'
 
-DIRECT_HOST="49983-$SANDBOX_ID.box.example.com"
+DIRECT_HOST="49983-$SANDBOX_ID.$SANDBOX_DOMAIN"
 wait_gateway_ready "$DIRECT_HOST" || fail 'TLS direct route did not become ready'
-[[ "$(cat "$STATE_DIR/gateway-body.txt")" == "sandbox-data-plane" ]] ||
-  fail 'TLS gateway returned the wrong Sandbox response body'
+[[ ! -s "$STATE_DIR/gateway-body.txt" ]] ||
+  fail 'envd health returned an unexpected response body'
 [[ "$(gateway_status "$DIRECT_HOST" /dev/null X-Access-Token wrong-token)" == "401" ]] ||
   fail 'TLS gateway accepted an invalid envd token'
 [[ "$(gateway_status "$DIRECT_HOST" /dev/null E2B-Traffic-Access-Token "$TRAFFIC_TOKEN")" == "401" ]] ||
   fail 'TLS gateway accepted a traffic token for the envd scope'
-[[ "$(gateway_status sandbox.box.example.com "$STATE_DIR/shared-body.txt" X-Access-Token "$ENVD_TOKEN" \
-  --header "E2b-Sandbox-Id: $SANDBOX_ID" --header 'E2b-Sandbox-Port: 49983')" == "200" ]] ||
-  fail 'TLS shared route did not return HTTP 200'
-[[ "$(cat "$STATE_DIR/shared-body.txt")" == "sandbox-data-plane" ]] ||
-  fail 'TLS shared route returned the wrong Sandbox response body'
+[[ "$(gateway_status "sandbox.$SANDBOX_DOMAIN" "$STATE_DIR/shared-body.txt" X-Access-Token "$ENVD_TOKEN" \
+  --header "E2b-Sandbox-Id: $SANDBOX_ID" --header 'E2b-Sandbox-Port: 49983')" == "204" ]] ||
+  fail 'TLS shared envd route did not return HTTP 204'
+[[ ! -s "$STATE_DIR/shared-body.txt" ]] ||
+  fail 'TLS shared envd health returned an unexpected response body'
+
+TRAFFIC_HOST="49999-$SANDBOX_ID.$SANDBOX_DOMAIN"
+[[ "$(gateway_status "$TRAFFIC_HOST" "$STATE_DIR/traffic-body.txt" E2B-Traffic-Access-Token "$TRAFFIC_TOKEN")" == "200" ]] ||
+  fail 'TLS traffic route did not return HTTP 200'
+[[ "$(cat "$STATE_DIR/traffic-body.txt")" == "sandbox-data-plane" ]] ||
+  fail 'TLS traffic route returned the wrong Sandbox response body'
+[[ "$(gateway_status "$TRAFFIC_HOST" /dev/null E2B-Traffic-Access-Token "$ENVD_TOKEN")" == "401" ]] ||
+  fail 'TLS traffic route accepted an envd token'
 
 DETAIL_RESPONSE="$STATE_DIR/detail.json"
 [[ "$(status_request GET "/sandboxes/$SANDBOX_ID" "$DETAIL_RESPONSE")" == "200" ]] ||
@@ -405,7 +439,7 @@ if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" ]]; then
     fail "official-client runner is missing: $OFFICIAL_CLIENT_RUNNER"
   OFFICIAL_CLIENT_ARGS=(
     --api-url "$BASE_URL"
-    --domain box.example.com
+    --domain "$SANDBOX_DOMAIN"
     --template fixture-template
   )
   if [[ -n "${A3S_BOX_E2B_PIP_BOOTSTRAP_WHEEL:-}" ]]; then
@@ -416,7 +450,12 @@ if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" ]]; then
   if [[ -n "${A3S_BOX_E2B_ARTIFACT_CACHE:-}" ]]; then
     OFFICIAL_CLIENT_ARGS+=(--artifact-cache "$A3S_BOX_E2B_ARTIFACT_CACHE")
   fi
+  SMOKE_NO_PROXY="${NO_PROXY:+$NO_PROXY,}$SANDBOX_DOMAIN,.$SANDBOX_DOMAIN,127.0.0.1,localhost"
   E2B_API_KEY="$API_KEY" \
+    SSL_CERT_FILE="$TLS_CERT" \
+    NODE_EXTRA_CA_CERTS="$TLS_CERT" \
+    NO_PROXY="$SMOKE_NO_PROXY" \
+    no_proxy="$SMOKE_NO_PROXY" \
     "${A3S_BOX_E2B_OFFICIAL_PYTHON:-python3}" \
     "$OFFICIAL_CLIENT_RUNNER" "${OFFICIAL_CLIENT_ARGS[@]}"
 
@@ -444,4 +483,4 @@ PY
 fi
 
 stop_service
-printf 'E2B production smoke passed: lifecycle, TLS data plane, restart recovery, credentials, official clients when enabled, and cleanup\n'
+printf 'E2B production smoke passed: lifecycle, host envd health, TLS traffic proxy, restart recovery, credentials, official clients when enabled, and cleanup\n'

@@ -30,6 +30,7 @@ try {
     timeoutMs: 45_000,
   })
   assert.equal(connected.sandboxId, sandbox.sandboxId)
+  assert.equal(await sandbox.isRunning(), true)
 
   const paginator = Sandbox.list({
     ...connection,
@@ -54,6 +55,7 @@ try {
     timeoutMs: 60_000,
     metadata: { client: 'typescript-code-interpreter' },
   })
+  assert.equal(await interpreter.isRunning(), true)
   assert.equal(await interpreter.kill(), true)
 } finally {
   if (interpreter) {

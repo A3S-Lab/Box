@@ -58,7 +58,7 @@ def main() -> None:
 
     print(
         "Official production clients passed: Python sync, Python async, "
-        "TypeScript, and Code Interpreter lifecycle"
+        "TypeScript, Code Interpreter lifecycle, and envd health"
     )
 
 

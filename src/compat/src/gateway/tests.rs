@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use a3s_box_core::{
     resolve_execution, BoxConfig, ExecutionGeneration, ExecutionId, ExecutionIsolation,
-    ExecutionLease, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
-    ExecutionPortStream, OperationId,
+    ExecutionLease, ExecutionManager, ExecutionManagerError, ExecutionManagerResult,
+    ExecutionPortConnector, ExecutionPortStream, ExecutionState, ExecutionStatus, KillOutcome,
+    OperationId, ReconcileOutcome,
 };
 use async_trait::async_trait;
 use axum::body::Body;
@@ -66,10 +67,61 @@ impl ExecutionPortConnector for TcpConnector {
     }
 }
 
+struct RunningExecutionManager {
+    status: ExecutionStatus,
+}
+
+#[async_trait]
+impl ExecutionManager for RunningExecutionManager {
+    async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus> {
+        if execution_id != &self.status.execution_id {
+            return Err(ExecutionManagerError::NotFound(execution_id.clone()));
+        }
+        Ok(self.status.clone())
+    }
+
+    async fn pause(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _keep_memory: bool,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        Err(unsupported_manager_operation())
+    }
+
+    async fn resume(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        Err(unsupported_manager_operation())
+    }
+
+    async fn kill(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<KillOutcome> {
+        Err(unsupported_manager_operation())
+    }
+
+    async fn reconcile(
+        &self,
+        _operation_id: &OperationId,
+    ) -> ExecutionManagerResult<ReconcileOutcome> {
+        Err(unsupported_manager_operation())
+    }
+}
+
+fn unsupported_manager_operation() -> ExecutionManagerError {
+    ExecutionManagerError::Unavailable("unsupported test manager operation".to_string())
+}
+
 struct Harness {
     proxy: DataPlaneProxy,
     parser: SandboxRouteParser,
     leases: RouteLeaseService,
+    executions: Arc<RunningExecutionManager>,
     connector: Arc<TcpConnector>,
     sandbox_id: SandboxId,
     envd_token: SecretToken,
@@ -145,11 +197,19 @@ impl Harness {
             .mark_running(ExecutionLease {
                 execution_id: ExecutionId::new("execution-gateway-1").unwrap(),
                 generation: ExecutionGeneration::INITIAL,
-                plan,
+                plan: plan.clone(),
                 resources: config.resources,
                 started_at: now,
             })
             .unwrap();
+        let executions = Arc::new(RunningExecutionManager {
+            status: ExecutionStatus {
+                execution_id: ExecutionId::new("execution-gateway-1").unwrap(),
+                generation: ExecutionGeneration::INITIAL,
+                state: ExecutionState::Running,
+                plan: plan.clone(),
+            },
+        });
         let repository = Arc::new(MemorySandboxRepository::default());
         repository.insert(record).await.unwrap();
         let leases = RouteLeaseService::new(repository, tokens, Arc::new(FixedClock(now)));
@@ -161,6 +221,7 @@ impl Harness {
         let proxy = DataPlaneProxy::new(
             parser.clone(),
             leases.clone(),
+            executions.clone(),
             connector.clone(),
             Duration::from_secs(2),
         );
@@ -168,6 +229,7 @@ impl Harness {
             proxy,
             parser,
             leases,
+            executions,
             connector,
             sandbox_id,
             envd_token: envd.secret,
@@ -235,8 +297,11 @@ async fn upstream_response(
 #[tokio::test]
 async fn translates_downstream_http2_to_plaintext_http1_upstream() {
     let harness = Harness::new().await;
-    let mut request =
-        harness.direct_request(ENVD_PORT, ENVD_ACCESS_TOKEN_HEADER, &harness.envd_token);
+    let mut request = harness.direct_request(
+        CODE_INTERPRETER_PORT,
+        TRAFFIC_ACCESS_TOKEN_HEADER,
+        &harness.traffic_token,
+    );
     let authority = request.headers_mut().remove(HOST).unwrap();
     *request.uri_mut() = format!("https://{}/echo?value=one", authority.to_str().unwrap())
         .parse()
@@ -255,7 +320,11 @@ async fn translates_downstream_http2_to_plaintext_http1_upstream() {
 #[tokio::test]
 async fn authenticated_direct_route_proxies_stream_and_strips_edge_credentials() {
     let harness = Harness::new().await;
-    let request = harness.direct_request(ENVD_PORT, ENVD_ACCESS_TOKEN_HEADER, &harness.envd_token);
+    let request = harness.direct_request(
+        CODE_INTERPRETER_PORT,
+        TRAFFIC_ACCESS_TOKEN_HEADER,
+        &harness.traffic_token,
+    );
     let response = harness.proxy.handle(request).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value =
@@ -271,7 +340,7 @@ async fn authenticated_direct_route_proxies_stream_and_strips_edge_credentials()
     assert!(body["forwardedHost"]
         .as_str()
         .unwrap()
-        .starts_with("49983-sandbox-gateway-1"));
+        .starts_with("49999-sandbox-gateway-1"));
     assert!(body["forwardedFor"].is_null());
     assert_eq!(harness.call_count(), 1);
 }
@@ -326,8 +395,11 @@ async fn shared_routes_and_browser_preflight_use_the_same_validated_parser() {
         .header(ENVD_ACCESS_TOKEN_HEADER, harness.envd_token.expose_secret())
         .body(Body::empty())
         .unwrap();
-    assert_eq!(harness.proxy.handle(shared).await.status(), StatusCode::OK);
-    assert_eq!(harness.call_count(), 1);
+    assert_eq!(
+        harness.proxy.handle(shared).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(harness.call_count(), 0);
 }
 
 #[tokio::test]
@@ -359,6 +431,7 @@ async fn wildcard_tls_listener_serves_an_authenticated_route() {
         config,
         harness.parser.clone(),
         harness.leases.clone(),
+        harness.executions.clone(),
         harness.connector.clone(),
     )
     .await
@@ -383,13 +456,13 @@ async fn wildcard_tls_listener_serves_an_authenticated_route() {
     let (mut sender, connection) = hyper::client::conn::handshake(tls).await.unwrap();
     let client_task = tokio::spawn(connection);
     let request = Request::builder()
-        .uri("/echo")
+        .uri("/health")
         .header(HOST, host)
         .header(ENVD_ACCESS_TOKEN_HEADER, harness.envd_token.expose_secret())
-        .body(Body::from("tls"))
+        .body(Body::empty())
         .unwrap();
     let response = sender.send_request(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
     let _ = to_bytes(response.into_body()).await.unwrap();
     drop(sender);
     client_task.await.unwrap().unwrap();

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_box_core::ExecutionPortConnector;
+use a3s_box_core::{ExecutionManager, ExecutionPortConnector};
 use hyper::server::conn::Http;
 use hyper::service::service_fn;
 use rustls::ServerConfig;
@@ -69,11 +69,18 @@ impl DataPlaneGateway {
         config: DataPlaneGatewayConfig,
         parser: SandboxRouteParser,
         leases: RouteLeaseService,
+        executions: Arc<dyn ExecutionManager>,
         connector: Arc<dyn ExecutionPortConnector>,
     ) -> DataPlaneGatewayResult<Self> {
         let tls =
             tls::load_server_config(&config.certificate_path, &config.private_key_path).await?;
-        let proxy = DataPlaneProxy::new(parser, leases, connector, config.connect_timeout);
+        let proxy = DataPlaneProxy::new(
+            parser,
+            leases,
+            executions,
+            connector,
+            config.connect_timeout,
+        );
         Ok(Self { config, tls, proxy })
     }
 

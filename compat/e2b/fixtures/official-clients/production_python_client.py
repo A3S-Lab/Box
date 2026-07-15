@@ -49,6 +49,8 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         connected = Sandbox.connect(sandbox.sandbox_id, timeout=45, **options)
         if connected.sandbox_id != sandbox.sandbox_id:
             raise AssertionError("connect returned a different sandbox ID")
+        if not sandbox.is_running():
+            raise AssertionError("envd health reported the running sandbox as stopped")
 
         paginator = Sandbox.list(
             query=SandboxQuery(metadata=metadata, state=[SandboxState.RUNNING]),
@@ -75,6 +77,8 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
             metadata={"client": "python-code-interpreter"},
             **options,
         )
+        if not interpreter.is_running():
+            raise AssertionError("Code Interpreter envd health check failed")
         if not interpreter.kill():
             raise AssertionError("Code Interpreter lifecycle kill failed")
     finally:
@@ -104,6 +108,8 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         )
         if connected.sandbox_id != sandbox.sandbox_id:
             raise AssertionError("connect returned a different sandbox ID")
+        if not await sandbox.is_running():
+            raise AssertionError("envd health reported the running sandbox as stopped")
 
         paginator = AsyncSandbox.list(
             query=SandboxQuery(metadata=metadata, state=[SandboxState.RUNNING]),
@@ -130,6 +136,8 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
             metadata={"client": "python-async-code-interpreter"},
             **options,
         )
+        if not await interpreter.is_running():
+            raise AssertionError("async Code Interpreter envd health check failed")
         if not await interpreter.kill():
             raise AssertionError("Code Interpreter lifecycle kill failed")
     finally:
