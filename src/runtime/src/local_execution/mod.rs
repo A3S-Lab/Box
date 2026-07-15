@@ -9,6 +9,7 @@ mod record;
 mod recovery;
 mod resources;
 mod restart;
+#[cfg(unix)]
 mod session;
 mod store;
 mod support;
@@ -19,6 +20,10 @@ mod vm_process;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use a3s_box_core::{
+    ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
+};
 
 pub use backend::{LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation};
 use record::{build_managed_record, status_from_record};
@@ -51,6 +56,39 @@ impl LocalExecutionManager {
 
     pub fn state_path(&self) -> &std::path::Path {
         self.store.path()
+    }
+
+    pub(super) async fn require_running_record(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<BoxRecord> {
+        let record = self
+            .get(execution_id)
+            .await?
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        support::require_generation(&record, execution_id, generation)?;
+        if support::managed_state(&record)? != ManagedExecutionState::Running {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "execution is not running".to_string(),
+            });
+        }
+        if record.exec_socket_path.as_os_str().is_empty() {
+            return Err(ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no exec endpoint"
+            )));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let pid = record
+                .pid
+                .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+            if !crate::process::is_process_alive_with_identity(pid, record.pid_start_time) {
+                return Err(ExecutionManagerError::NotFound(execution_id.clone()));
+            }
+        }
+        Ok(record)
     }
 
     #[cfg(feature = "vm")]
