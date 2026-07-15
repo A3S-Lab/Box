@@ -9,6 +9,7 @@ mod record;
 mod recovery;
 mod resources;
 mod restart;
+#[cfg(unix)]
 mod session;
 mod store;
 mod support;
