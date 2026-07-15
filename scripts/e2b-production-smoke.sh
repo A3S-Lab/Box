@@ -152,10 +152,66 @@ print(value)
 PY
 }
 
+preserve_failure_diagnostics() {
+  local diagnostics="$STATE_DIR/failure-diagnostics"
+  local records="$STATE_DIR/managed-executions.json"
+  mkdir -p "$diagnostics"
+  [[ -f "$records" ]] || return 0
+
+  while IFS=$'\t' read -r execution_id pid pid_start_time; do
+    [[ -n "$execution_id" && "$execution_id" != *[!a-zA-Z0-9._-]* ]] || continue
+    local execution_diagnostics="$diagnostics/$execution_id"
+    local box_dir="$A3S_HOME/boxes/$execution_id"
+    local runtime_root="$A3S_HOME/run/crun/$execution_id"
+    mkdir -p "$execution_diagnostics"
+    printf 'pid=%s\npid_start_time=%s\n' "$pid" "$pid_start_time" \
+      >"$execution_diagnostics/process-identity.txt"
+    if [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/stat" ]]; then
+      cp "/proc/$pid/stat" "$execution_diagnostics/proc-stat.txt" || true
+      readlink "/proc/$pid/ns/net" \
+        >"$execution_diagnostics/network-namespace.txt" 2>&1 || true
+    fi
+    if [[ -d "$box_dir/logs" ]]; then
+      cp -a "$box_dir/logs" "$execution_diagnostics/logs" || true
+    fi
+    for relative_path in \
+      sandbox/runtime.json \
+      sandbox/bundle/config.json \
+      sandbox/bundle/execution-plan.json \
+      sandbox/bundle/capabilities.json; do
+      if [[ -f "$box_dir/$relative_path" ]]; then
+        mkdir -p "$execution_diagnostics/$(dirname "$relative_path")"
+        cp "$box_dir/$relative_path" \
+          "$execution_diagnostics/$relative_path" || true
+      fi
+    done
+    "$A3S_BOX_CRUN_PATH" --root "$runtime_root" state "$execution_id" \
+      >"$execution_diagnostics/crun-state.json" \
+      2>"$execution_diagnostics/crun-state.stderr" || true
+  done < <(python3 - "$records" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    records = json.load(source)
+for record in records:
+    print(
+        record.get("id", ""),
+        record.get("pid") or "",
+        record.get("pid_start_time") or "",
+        sep="\t",
+    )
+PY
+)
+}
+
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
   set +e
+  if [[ "$exit_code" -ne 0 && "${A3S_BOX_E2B_KEEP_STATE_ON_FAILURE:-}" == "1" ]]; then
+    preserve_failure_diagnostics
+  fi
   if [[ -n "$SANDBOX_ID" ]]; then
     if [[ -z "$SERVICE_PID" ]] || ! kill -0 "$SERVICE_PID" 2>/dev/null; then
       start_service >/dev/null 2>&1
