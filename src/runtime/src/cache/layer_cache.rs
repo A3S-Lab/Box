@@ -501,17 +501,21 @@ pub(crate) fn write_meta_atomically(meta_path: &Path, json: &str) -> Result<()> 
 
 /// Calculate the total size of a directory recursively.
 pub(crate) fn dir_size(path: &Path) -> std::io::Result<u64> {
-    let mut total = 0;
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                total += dir_size(&path)?;
-            } else {
-                total += entry.metadata()?.len();
-            }
-        }
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+
+    let mut total = 0_u64;
+    for entry in std::fs::read_dir(path)? {
+        total = total.saturating_add(dir_size(&entry?.path())?);
     }
     Ok(total)
 }
@@ -876,6 +880,42 @@ mod tests {
 
         let size = dir_size(&dir).unwrap();
         assert_eq!(size, 10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_size_does_not_follow_external_directory_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("sized");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(dir.join("local"), b"local").unwrap();
+        std::fs::write(outside.join("host-data"), vec![0_u8; 4096]).unwrap();
+        let link = dir.join("external");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let size = dir_size(&dir).unwrap();
+
+        assert_eq!(
+            size,
+            5 + std::fs::symlink_metadata(link).unwrap().len(),
+            "cache sizing must count the symlink itself without entering its target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_size_does_not_follow_symlink_cycle() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("sized");
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("loop");
+        std::os::unix::fs::symlink(".", &link).unwrap();
+
+        let size = dir_size(&dir).unwrap();
+
+        assert_eq!(size, std::fs::symlink_metadata(link).unwrap().len());
     }
 
     #[test]
