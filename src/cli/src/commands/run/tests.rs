@@ -820,6 +820,36 @@ fn test_foreground_poll_cadence_avoids_fixed_startup_delay() {
     assert!(FOREGROUND_LOG_DRAIN_POLL < FOREGROUND_LOG_DRAIN_QUIET);
 }
 
+#[tokio::test]
+async fn finished_sandbox_writers_need_no_additional_quiet_period() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("console.log");
+    std::fs::write(&log, b"complete").unwrap();
+    let position = AtomicU64::new(8);
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(5),
+        wait_for_foreground_log_drain(&[(&log, &position)], true),
+    )
+    .await
+    .expect("a caught-up tail must return immediately after every writer exited");
+}
+
+#[tokio::test]
+async fn finished_sandbox_writer_wait_still_requires_tail_catch_up() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("console.log");
+    std::fs::write(&log, b"pending").unwrap();
+    let position = AtomicU64::new(0);
+
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(5),
+        wait_for_foreground_log_drain(&[(&log, &position)], true),
+    )
+    .await
+    .is_err());
+}
+
 #[test]
 fn test_retained_log_hint_only_for_non_user_failures() {
     assert!(should_print_retained_log_hint(Some(1), false));

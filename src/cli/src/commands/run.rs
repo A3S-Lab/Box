@@ -604,16 +604,34 @@ async fn run_foreground(
         foreground_start.elapsed(),
     );
 
+    let sandbox_natural_exit =
+        stop_reason == ForegroundStopReason::ProcessExited && ctx.record.isolation.is_sandbox();
+    if sandbox_natural_exit {
+        // The generation-owned worker exits only after crun has closed both
+        // raw console streams and projected their final records. Once it is
+        // gone, the terminal tailers can catch up to immutable file lengths
+        // without an additional writer-quiet grace period.
+        let structured_log_drain_start = std::time::Instant::now();
+        wait_for_sandbox_structured_log_drain(&ctx).await?;
+        a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+            "foreground.structured_log_drain",
+            structured_log_drain_start.elapsed(),
+        );
+    }
+
     let raw_log_drain_start = std::time::Instant::now();
-    wait_for_foreground_log_drain(&[(&console_log, &stdout_pos), (&console_err, &stderr_pos)])
-        .await;
+    wait_for_foreground_log_drain(
+        &[(&console_log, &stdout_pos), (&console_err, &stderr_pos)],
+        sandbox_natural_exit,
+    )
+    .await;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
         "foreground.raw_log_drain",
         raw_log_drain_start.elapsed(),
     );
     log_handle.abort();
 
-    if stop_reason == ForegroundStopReason::ProcessExited {
+    if stop_reason == ForegroundStopReason::ProcessExited && !sandbox_natural_exit {
         let structured_log_drain_start = std::time::Instant::now();
         wait_for_sandbox_structured_log_drain(&ctx).await?;
         a3s_box_core::lifecycle_profile::record_lifecycle_phase(
@@ -687,7 +705,10 @@ async fn recv_foreground_timeout(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-async fn wait_for_foreground_log_drain(paths: &[(&std::path::Path, &AtomicU64)]) {
+async fn wait_for_foreground_log_drain(
+    paths: &[(&std::path::Path, &AtomicU64)],
+    writers_finished: bool,
+) {
     let start = std::time::Instant::now();
     let mut last_lens = foreground_log_lengths(paths);
     let mut quiet_since = None;
@@ -699,6 +720,10 @@ async fn wait_for_foreground_log_drain(paths: &[(&std::path::Path, &AtomicU64)])
             .iter()
             .zip(lens.iter())
             .all(|((_, pos), len)| pos.load(Ordering::Relaxed) >= *len);
+
+        if writers_finished && tails_caught_up {
+            break;
+        }
 
         if lengths_stable && tails_caught_up {
             let now = std::time::Instant::now();

@@ -224,7 +224,11 @@ impl VmManager {
 
         let readiness_start = std::time::Instant::now();
         if let Err(error) = async {
-            self.wait_for_vm_running().await?;
+            // CrunController::start only returns after the certified runtime
+            // reports this exact generation as running. The generic VM grace
+            // period would merely recheck process liveness for a fixed 250 ms;
+            // the heartbeat path below already checks liveness on every
+            // attempt and returns immediately for a naturally exited one-shot.
             #[cfg(unix)]
             self.wait_for_exec_ready(&layout.exec_socket_path).await?;
             Ok(())

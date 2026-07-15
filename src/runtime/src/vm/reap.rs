@@ -39,7 +39,20 @@ pub fn wait_for_recorded_sandbox_log_drain(
     timeout: std::time::Duration,
 ) -> a3s_box_core::Result<bool> {
     let home_dir = a3s_box_core::dirs_home();
-    let Some(record) = load_recorded_sandbox_runtime(&home_dir, box_dir, box_id)? else {
+    wait_for_recorded_sandbox_log_drain_in(&home_dir, box_dir, box_id, timeout)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_recorded_sandbox_log_drain_in(
+    home_dir: &Path,
+    box_dir: &Path,
+    box_id: &str,
+    timeout: std::time::Duration,
+) -> a3s_box_core::Result<bool> {
+    // Waiting is read-only: it neither executes the recorded runtime nor
+    // signals a process. Validate fixed paths and the PID/start-time pair, but
+    // leave runtime artifact certification to paths that query or execute crun.
+    let Some(record) = load_recorded_sandbox_runtime_identity(home_dir, box_dir, box_id)? else {
         return Ok(true);
     };
     Ok(wait_for_log_worker_identity(&record, timeout))
@@ -154,6 +167,27 @@ pub(crate) fn load_recorded_sandbox_runtime(
     box_dir: &Path,
     box_id: &str,
 ) -> a3s_box_core::Result<Option<RecordedSandboxRuntime>> {
+    let Some(mut record) = load_recorded_sandbox_runtime_identity(home_dir, box_dir, box_id)?
+    else {
+        return Ok(None);
+    };
+    let capabilities = crate::sandbox::probe_sandbox_capabilities(Some(&record.runtime_path));
+    let runtime = capabilities.runtime.ok_or_else(|| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Cannot verify the recorded Sandbox runtime for {box_id}: {:?}",
+            capabilities.failures
+        ))
+    })?;
+    record.runtime_path = runtime.path;
+    Ok(Some(record))
+}
+
+#[cfg(target_os = "linux")]
+fn load_recorded_sandbox_runtime_identity(
+    home_dir: &Path,
+    box_dir: &Path,
+    box_id: &str,
+) -> a3s_box_core::Result<Option<RecordedSandboxRuntime>> {
     let expected_box_dir = home_dir.join("boxes").join(box_id);
     if box_dir != expected_box_dir {
         return Err(a3s_box_core::BoxError::StateError(format!(
@@ -192,15 +226,8 @@ pub(crate) fn load_recorded_sandbox_runtime(
         )));
     }
 
-    let capabilities = crate::sandbox::probe_sandbox_capabilities(Some(&record.runtime_path));
-    let runtime = capabilities.runtime.ok_or_else(|| {
-        a3s_box_core::BoxError::StateError(format!(
-            "Cannot verify the recorded Sandbox runtime for {box_id}: {:?}",
-            capabilities.failures
-        ))
-    })?;
     Ok(Some(RecordedSandboxRuntime {
-        runtime_path: runtime.path,
+        runtime_path: record.runtime_path,
         runtime_root: record.runtime_root,
         bundle_dir: record.bundle_dir,
         init_pid: record.init_pid,
@@ -524,5 +551,26 @@ mod tests {
 
         assert!(message.contains("path or identity validation"));
         assert!(!message.contains("Cannot verify the recorded Sandbox runtime"));
+    }
+
+    #[test]
+    fn log_drain_wait_validates_identity_without_recertifying_crun() {
+        let home = tempfile::tempdir().unwrap();
+        let box_id = "recorded-sandbox-log-drain";
+        let box_dir = home.path().join("boxes").join(box_id);
+        write_runtime_record(home.path(), &box_dir, box_id, |_| {});
+
+        assert!(wait_for_recorded_sandbox_log_drain_in(
+            home.path(),
+            &box_dir,
+            box_id,
+            std::time::Duration::ZERO,
+        )
+        .unwrap());
+
+        let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Cannot verify the recorded Sandbox runtime"));
     }
 }
