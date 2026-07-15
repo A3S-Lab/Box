@@ -90,4 +90,9 @@ The destructive A3S OS integration harness is
 [`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
 requires a dedicated runtime home and explicit acknowledgement, and verifies a
 real Sandbox lifecycle, TLS direct/shared routing, token-scope denial, service
-restart recovery, stale-route fencing, and resource cleanup.
+restart recovery, stale-route fencing, and resource cleanup. With
+`A3S_BOX_E2B_OFFICIAL_CLIENTS=1`, it additionally runs the checksum-pinned,
+unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
+through the production lifecycle listener and verifies cleanup of every real
+`crun` execution. That optional matrix does not exercise envd commands, files,
+PTY, or interpreter execution.
