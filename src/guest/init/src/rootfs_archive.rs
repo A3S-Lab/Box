@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use a3s_box_core::rootfs_metadata::IMAGE_ROOTFS_METADATA_PATH;
 use a3s_box_core::rootfs_metadata::{
-    RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest, ROOTFS_METADATA_PATH,
+    runtime_managed_system_file_mode, RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+    ROOTFS_METADATA_PATH,
 };
 use base64::Engine;
 
@@ -132,6 +133,7 @@ fn apply_metadata_manifest(
         };
         if actual_kind != entry.kind
             || (strict_content
+                && runtime_managed_system_file_mode(&relative).is_none()
                 && actual_kind == RootfsEntryKind::Regular
                 && metadata.size() != entry.size)
         {
@@ -190,15 +192,18 @@ fn apply_metadata_manifest(
     for (entry, target, _, _, _) in &decoded {
         if entry.kind != RootfsEntryKind::Symlink {
             let current_mode = std::fs::symlink_metadata(target)?.mode() & 0o7777;
-            if current_mode == entry.mode & 0o7777 {
+            let relative = target.strip_prefix(root)?;
+            let desired_mode =
+                runtime_managed_system_file_mode(relative).unwrap_or(entry.mode & 0o7777);
+            if current_mode == desired_mode {
                 continue;
             }
-            std::fs::set_permissions(target, std::fs::Permissions::from_mode(entry.mode & 0o7777))
+            std::fs::set_permissions(target, std::fs::Permissions::from_mode(desired_mode))
                 .map_err(|error| {
                     format!(
                         "failed to restore mode at {} to {:o}: {error}",
                         target.display(),
-                        entry.mode & 0o7777
+                        desired_mode
                     )
                 })?;
         }
@@ -407,6 +412,66 @@ fn decode_mountinfo_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn metadata_replay_normalizes_runtime_managed_files() {
+        use base64::Engine;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let etc = directory.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let hosts = etc.join("hosts");
+        let probe = etc.join("probe");
+        std::fs::write(&hosts, "127.0.0.1 localhost\n").unwrap();
+        std::fs::write(&probe, "probe\n").unwrap();
+        for path in [&hosts, &probe] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let metadata = std::fs::metadata(&hosts).unwrap();
+        let entry = |path: &str, size: u64| RootfsMetadataEntry {
+            path_base64: base64::engine::general_purpose::STANDARD
+                .encode(Path::new(path).as_os_str().as_bytes()),
+            kind: RootfsEntryKind::Regular,
+            mode: 0o100600,
+            uid: metadata.uid() as u64,
+            gid: metadata.gid() as u64,
+            mtime: 0,
+            size,
+            link_target_base64: None,
+        };
+        let manifest = RootfsMetadataManifest::new(vec![
+            // Deliberately stale size and mode: both are runtime-owned.
+            entry("./etc/hosts", 1),
+            entry("./etc/probe", 6),
+        ]);
+        std::fs::write(
+            directory
+                .path()
+                .join(ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        apply_metadata_manifest(
+            directory.path(),
+            ROOTFS_METADATA_PATH,
+            true,
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(hosts).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(probe).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+    }
 
     #[test]
     fn archive_preserves_guest_visible_mode_uid_gid_and_symlink() {
