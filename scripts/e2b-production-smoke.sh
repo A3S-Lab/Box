@@ -65,7 +65,9 @@ fi
   fail 'A3S_BOX_E2B_SANDBOX_DOMAIN must be a DNS name'
 command -v openssl >/dev/null || fail 'openssl is required for the TLS gateway smoke'
 if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" && "$GATEWAY_PORT" != "443" ]]; then
-  fail 'official-client envd health requires A3S_BOX_E2B_GATEWAY_SMOKE_PORT=443'
+  EXPECTED_SANDBOX_URL="https://sandbox.$SANDBOX_DOMAIN:$GATEWAY_PORT"
+  [[ "${E2B_SANDBOX_URL:-}" == "$EXPECTED_SANDBOX_URL" ]] ||
+    fail "non-443 official-client smoke requires E2B_SANDBOX_URL=$EXPECTED_SANDBOX_URL"
 fi
 
 umask 077
