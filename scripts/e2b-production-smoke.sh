@@ -7,10 +7,17 @@ CREDENTIAL_HASH='pbkdf2-sha256$100000$03030303030303030303030303030303$6ea6a4ae2
 TOKEN_ENCRYPTION="$(printf '07%.0s' {1..32})"
 TOKEN_DIGEST="$(printf '08%.0s' {1..32})"
 PORT="${A3S_BOX_E2B_SMOKE_PORT:-38081}"
+GATEWAY_PORT="${A3S_BOX_E2B_GATEWAY_SMOKE_PORT:-38443}"
 IMAGE="${A3S_BOX_SMOKE_IMAGE:-alpine:3.20}"
+# A dependency-free HTTP/1.1 responder used with BusyBox nc -e. Alpine's
+# BusyBox build does not guarantee the optional httpd applet.
+HTTP_RESPONDER_B64='IyEvYmluL3NoCndoaWxlIElGUz0gcmVhZCAtciBsaW5lOyBkbwogIFsgIiRsaW5lIiA9ICIkKHByaW50ZiAnXHInKSIgXSAmJiBicmVhawpkb25lCmJvZHk9J3NhbmRib3gtZGF0YS1wbGFuZScKcHJpbnRmICdIVFRQLzEuMSAyMDAgT0tcclxuQ29udGVudC1MZW5ndGg6ICVzXHJcbkNvbm5lY3Rpb246IGNsb3NlXHJcbkNvbnRlbnQtVHlwZTogdGV4dC9wbGFpblxyXG5cclxuJXMnICIkeyNib2R5fSIgIiRib2R5Igo='
 
 fail() {
   printf 'E2B production smoke failed: %s\n' "$*" >&2
+  if [[ -n "${LOG:-}" && -f "$LOG" ]]; then
+    tail -100 "$LOG" >&2 || true
+  fi
   exit 1
 }
 
@@ -28,14 +35,22 @@ fail() {
 [[ -x "$A3S_HOME/bin/a3s-box-shim" ]] || fail 'shim is missing'
 [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -gt 0 && "$PORT" -le 65535 ]] ||
   fail 'A3S_BOX_E2B_SMOKE_PORT must be a valid TCP port'
+[[ "$GATEWAY_PORT" =~ ^[0-9]+$ && "$GATEWAY_PORT" -gt 0 && "$GATEWAY_PORT" -le 65535 ]] ||
+  fail 'A3S_BOX_E2B_GATEWAY_SMOKE_PORT must be a valid TCP port'
+[[ "$GATEWAY_PORT" != "$PORT" ]] || fail 'control and gateway ports must differ'
+command -v openssl >/dev/null || fail 'openssl is required for the TLS gateway smoke'
 
 umask 077
 STATE_DIR="$A3S_HOME/e2b-compat-smoke"
 CONFIG="$STATE_DIR/service.acl"
 LOG="$STATE_DIR/service.log"
+TLS_CERT="$STATE_DIR/gateway-cert.pem"
+TLS_KEY="$STATE_DIR/gateway-key.pem"
 BASE_URL="http://127.0.0.1:$PORT"
 SERVICE_PID=""
 SANDBOX_ID=""
+ENVD_TOKEN=""
+TRAFFIC_TOKEN=""
 
 stop_service() {
   if [[ -n "$SERVICE_PID" ]] && kill -0 "$SERVICE_PID" 2>/dev/null; then
@@ -72,7 +87,7 @@ start_service() {
     A3S_BOX_CRUN_PATH="$A3S_BOX_CRUN_PATH" \
     TOKEN_ENCRYPTION="$TOKEN_ENCRYPTION" \
     TOKEN_DIGEST="$TOKEN_DIGEST" \
-    RUST_LOG="a3s_box_compat=info" \
+    RUST_LOG="${RUST_LOG:-a3s_box_compat=info}" \
     "$A3S_BOX_E2B_BIN" --config "$CONFIG" >"$LOG" 2>&1 &
   SERVICE_PID=$!
   wait_ready
@@ -93,6 +108,40 @@ status_request() {
   curl "${arguments[@]}" "$BASE_URL$path"
 }
 
+gateway_status() {
+  local host="$1"
+  local output="$2"
+  local token_header="$3"
+  local token="$4"
+  shift 4
+  curl --silent --show-error --output "$output" --write-out '%{http_code}' \
+    --cacert "$TLS_CERT" \
+    --resolve "$host:$GATEWAY_PORT:127.0.0.1" \
+    --header "$token_header: $token" \
+    "$@" "https://$host:$GATEWAY_PORT/health"
+}
+
+wait_gateway_ready() {
+  local host="$1"
+  local attempts=0
+  local status=""
+  while (( attempts < 100 )); do
+    status="$(gateway_status "$host" "$STATE_DIR/gateway-body.txt" X-Access-Token "$ENVD_TOKEN" || true)"
+    if [[ "$status" == "200" ]]; then
+      return 0
+    fi
+    if [[ -n "$SERVICE_PID" ]] && ! kill -0 "$SERVICE_PID" 2>/dev/null; then
+      tail -100 "$LOG" >&2 || true
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  printf 'gateway readiness timed out with HTTP %s\n' "$status" >&2
+  tail -100 "$LOG" >&2 || true
+  return 1
+}
+
 json_field() {
   python3 - "$1" "$2" <<'PY'
 import json
@@ -106,10 +155,66 @@ print(value)
 PY
 }
 
+preserve_failure_diagnostics() {
+  local diagnostics="$STATE_DIR/failure-diagnostics"
+  local records="$STATE_DIR/managed-executions.json"
+  mkdir -p "$diagnostics"
+  [[ -f "$records" ]] || return 0
+
+  while IFS=$'\t' read -r execution_id pid pid_start_time; do
+    [[ -n "$execution_id" && "$execution_id" != *[!a-zA-Z0-9._-]* ]] || continue
+    local execution_diagnostics="$diagnostics/$execution_id"
+    local box_dir="$A3S_HOME/boxes/$execution_id"
+    local runtime_root="$A3S_HOME/run/crun/$execution_id"
+    mkdir -p "$execution_diagnostics"
+    printf 'pid=%s\npid_start_time=%s\n' "$pid" "$pid_start_time" \
+      >"$execution_diagnostics/process-identity.txt"
+    if [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/stat" ]]; then
+      cp "/proc/$pid/stat" "$execution_diagnostics/proc-stat.txt" || true
+      readlink "/proc/$pid/ns/net" \
+        >"$execution_diagnostics/network-namespace.txt" 2>&1 || true
+    fi
+    if [[ -d "$box_dir/logs" ]]; then
+      cp -a "$box_dir/logs" "$execution_diagnostics/logs" || true
+    fi
+    for relative_path in \
+      sandbox/runtime.json \
+      sandbox/bundle/config.json \
+      sandbox/bundle/execution-plan.json \
+      sandbox/bundle/capabilities.json; do
+      if [[ -f "$box_dir/$relative_path" ]]; then
+        mkdir -p "$execution_diagnostics/$(dirname "$relative_path")"
+        cp "$box_dir/$relative_path" \
+          "$execution_diagnostics/$relative_path" || true
+      fi
+    done
+    "$A3S_BOX_CRUN_PATH" --root "$runtime_root" state "$execution_id" \
+      >"$execution_diagnostics/crun-state.json" \
+      2>"$execution_diagnostics/crun-state.stderr" || true
+  done < <(python3 - "$records" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    records = json.load(source)
+for record in records:
+    print(
+        record.get("id", ""),
+        record.get("pid") or "",
+        record.get("pid_start_time") or "",
+        sep="\t",
+    )
+PY
+)
+}
+
 cleanup() {
   local exit_code=$?
   trap - EXIT INT TERM
   set +e
+  if [[ "$exit_code" -ne 0 && "${A3S_BOX_E2B_KEEP_STATE_ON_FAILURE:-}" == "1" ]]; then
+    preserve_failure_diagnostics
+  fi
   if [[ -n "$SANDBOX_ID" ]]; then
     if [[ -z "$SERVICE_PID" ]] || ! kill -0 "$SERVICE_PID" 2>/dev/null; then
       start_service >/dev/null 2>&1
@@ -117,13 +222,21 @@ cleanup() {
     status_request DELETE "/sandboxes/$SANDBOX_ID" /dev/null >/dev/null 2>&1
   fi
   stop_service
-  rm -rf "$STATE_DIR"
+  if [[ "$exit_code" -ne 0 && "${A3S_BOX_E2B_KEEP_STATE_ON_FAILURE:-}" == "1" ]]; then
+    printf 'Preserved failed smoke state at %s\n' "$STATE_DIR" >&2
+  else
+    rm -rf "$STATE_DIR"
+  fi
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
 
 rm -rf "$STATE_DIR"
 mkdir -p "$STATE_DIR"
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+  -subj '/CN=*.box.example.com' \
+  -addext 'subjectAltName=DNS:*.box.example.com,DNS:sandbox.box.example.com' \
+  -keyout "$TLS_KEY" -out "$TLS_CERT" >/dev/null 2>&1
 cat >"$CONFIG" <<EOF
 e2b_compat {
   api_listen = "127.0.0.1:$PORT"
@@ -132,6 +245,16 @@ e2b_compat {
   database_path = "$STATE_DIR/lifecycle.sqlite3"
   runtime_home = "$A3S_HOME"
   runtime_state_path = "$STATE_DIR/managed-executions.json"
+
+  gateway {
+    listen = "127.0.0.1:$GATEWAY_PORT"
+    tls_certificate_path = "$TLS_CERT"
+    tls_private_key_path = "$TLS_KEY"
+    max_connections = 128
+    handshake_timeout_ms = 5000
+    connect_timeout_ms = 2000
+    drain_timeout_seconds = 5
+  }
 
   supervisor {
     interval_seconds = 1
@@ -158,7 +281,7 @@ e2b_compat {
     envd_version = "0.1.3"
     isolation = "sandbox"
     network = "none"
-    command = ["/bin/sh", "-c", "while :; do sleep 60; done"]
+    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49983 -e /tmp/e2b-smoke/respond"]
 
     resources {
       vcpus = 2
@@ -184,10 +307,26 @@ SANDBOX_ID="$(json_field "$CREATE_RESPONSE" sandboxID)"
 [[ "$SANDBOX_ID" == sandbox-* ]] || fail 'create returned an invalid sandbox ID'
 [[ "$(json_field "$CREATE_RESPONSE" domain)" == "box.example.com" ]] ||
   fail 'create returned the wrong sandbox domain'
-[[ -n "$(json_field "$CREATE_RESPONSE" envdAccessToken)" ]] ||
+ENVD_TOKEN="$(json_field "$CREATE_RESPONSE" envdAccessToken)"
+TRAFFIC_TOKEN="$(json_field "$CREATE_RESPONSE" trafficAccessToken)"
+[[ -n "$ENVD_TOKEN" ]] ||
   fail 'create omitted the envd access token'
-[[ -n "$(json_field "$CREATE_RESPONSE" trafficAccessToken)" ]] ||
+[[ -n "$TRAFFIC_TOKEN" ]] ||
   fail 'create omitted the traffic access token'
+
+DIRECT_HOST="49983-$SANDBOX_ID.box.example.com"
+wait_gateway_ready "$DIRECT_HOST" || fail 'TLS direct route did not become ready'
+[[ "$(cat "$STATE_DIR/gateway-body.txt")" == "sandbox-data-plane" ]] ||
+  fail 'TLS gateway returned the wrong Sandbox response body'
+[[ "$(gateway_status "$DIRECT_HOST" /dev/null X-Access-Token wrong-token)" == "401" ]] ||
+  fail 'TLS gateway accepted an invalid envd token'
+[[ "$(gateway_status "$DIRECT_HOST" /dev/null E2B-Traffic-Access-Token "$TRAFFIC_TOKEN")" == "401" ]] ||
+  fail 'TLS gateway accepted a traffic token for the envd scope'
+[[ "$(gateway_status sandbox.box.example.com "$STATE_DIR/shared-body.txt" X-Access-Token "$ENVD_TOKEN" \
+  --header "E2b-Sandbox-Id: $SANDBOX_ID" --header 'E2b-Sandbox-Port: 49983')" == "200" ]] ||
+  fail 'TLS shared route did not return HTTP 200'
+[[ "$(cat "$STATE_DIR/shared-body.txt")" == "sandbox-data-plane" ]] ||
+  fail 'TLS shared route returned the wrong Sandbox response body'
 
 DETAIL_RESPONSE="$STATE_DIR/detail.json"
 [[ "$(status_request GET "/sandboxes/$SANDBOX_ID" "$DETAIL_RESPONSE")" == "200" ]] ||
@@ -202,6 +341,7 @@ start_service
   fail 'sandbox was unavailable after service restart'
 [[ "$(json_field "$DETAIL_RESPONSE" state)" == "running" ]] ||
   fail 'startup reconciliation did not preserve the running sandbox'
+wait_gateway_ready "$DIRECT_HOST" || fail 'TLS route was unavailable after service restart'
 
 CONNECT_RESPONSE="$STATE_DIR/connect.json"
 [[ "$(status_request POST "/sandboxes/$SANDBOX_ID/connect" "$CONNECT_RESPONSE" '{"timeout":45}')" == "200" ]] ||
@@ -213,6 +353,8 @@ CONNECT_RESPONSE="$STATE_DIR/connect.json"
   fail 'timeout replacement did not return HTTP 204'
 [[ "$(status_request DELETE "/sandboxes/$SANDBOX_ID" /dev/null)" == "204" ]] ||
   fail 'kill did not return HTTP 204'
+[[ "$(gateway_status "$DIRECT_HOST" /dev/null X-Access-Token "$ENVD_TOKEN")" == "404" ]] ||
+  fail 'stale TLS route remained available after kill'
 
 EXECUTION_ID="$(python3 - "$STATE_DIR/managed-executions.json" "$SANDBOX_ID" <<'PY'
 import json
@@ -237,4 +379,4 @@ PY
 
 SANDBOX_ID=""
 stop_service
-printf 'E2B production smoke passed: lifecycle, restart recovery, credentials, and cleanup\n'
+printf 'E2B production smoke passed: lifecycle, TLS data plane, restart recovery, credentials, and cleanup\n'

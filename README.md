@@ -347,33 +347,46 @@ that structured Sandbox logs retain both stdout and stderr, drain final records
 before natural-exit or auto-remove archival, and leave no generation log worker,
 crun state, box directory, or socket behind.
 
-Those protocol and runtime tests are not yet a complete TLS data-plane path. CLI
-`create` now persists its reservation and complete caller policy through the
-canonical manager, and the first `start` of that reservation consumes its
-persisted generation through the same manager. The production backend prepares
-named-volume and network ownership idempotently and rolls back only resources
-acquired by a failed start attempt. Ordinary `start` does not revive a terminal
-managed execution. CLI `restart` now uses a durable two-phase operation that
-terminates the old runtime before advancing the generation, recovers ambiguous
-kill/start responses from backend evidence, and rebinds local resources without
-duplicating ownership. CLI `run` now reserves and starts through the same
-manager, freezes image-defined health and stop defaults into the durable
-request, and leaves network, volume, rootfs, stop, and auto-remove ownership to
-the managed backend. The Rust SDK now exposes typed create, start, run, inspect,
-pause, resume, restart, kill, and reconciliation calls through that same
-manager. Production credential providers now store account keys as salted
-PBKDF2-SHA256 hashes and protect scope-separated sandbox tokens with
-AES-256-GCM, independent HMAC validation, and versioned key rotation. The
-`a3s-box-e2b` process reads only `.acl` configuration through `a3s-acl` and
-composes those providers with SQLite lifecycle state, the canonical runtime
-manager, startup reconciliation, periodic expiry reaping, and graceful
-shutdown. Its A3S OS smoke creates a real `crun` Sandbox through HTTP, restarts
-the service, reconnects to the preserved execution, updates its timeout, kills
-it, and verifies runtime cleanup. Route policy is now persisted with each
-lifecycle record, and strict wildcard/shared parsing projects generation-,
-expiry-, port-, and token-scope-fenced leases without a second mutable routing
-state. The wildcard TLS gateway, envd data plane, and the real official-client
-Sandbox suite remain open gates.
+The first production E2B data-plane slice is now implemented, while the full
+envd surface remains incomplete. CLI `create` persists its reservation and
+complete caller policy through the canonical manager, and the first `start` of
+that reservation consumes its persisted generation through the same manager.
+The production backend prepares named-volume and network ownership
+idempotently and rolls back only resources acquired by a failed start attempt.
+Ordinary `start` does not revive a terminal managed execution. CLI `restart`
+uses a durable two-phase operation that terminates the old runtime before
+advancing the generation, recovers ambiguous kill/start responses from backend
+evidence, and rebinds local resources without duplicating ownership. CLI `run`
+reserves and starts through the same manager, freezes image-defined health and
+stop defaults into the durable request, and leaves network, volume, rootfs,
+stop, and auto-remove ownership to the managed backend. The Rust SDK exposes
+typed create, start, run, inspect, pause, resume, restart, kill, and
+reconciliation calls through that same manager.
+
+The `a3s-box-e2b` process accepts only `.acl` configuration parsed by `a3s-acl`.
+It composes SQLite lifecycle state, the canonical runtime manager, production
+credential providers, startup reconciliation, periodic expiry reaping, and
+graceful shutdown. Account keys use salted PBKDF2-SHA256 hashes; scope-separated
+sandbox tokens use AES-256-GCM, independent HMAC validation, and versioned key
+rotation. Route policy is persisted with each lifecycle record, and strict
+wildcard/shared parsing projects immutable leases fenced by generation, expiry,
+port, and token scope without a second mutable routing state.
+
+The production wildcard TLS gateway supports HTTP/1.1 and HTTP/2 clients over
+both direct and shared sandbox routes. It validates each lease, applies CORS,
+strips edge credentials, and enters the real `crun` network namespace through a
+generation- and PID-fenced connector. As with the official E2B sandbox proxy,
+the plaintext Sandbox origin is contacted with HTTP/1.1, including when the
+downstream client uses HTTP/2; the origin is not required to provide h2c.
+
+An A3S OS production smoke test exercises this path on a real `crun` OCI
+Sandbox created with `--isolation sandbox`. It verifies lifecycle operations,
+both TLS route forms, HTTP/2-to-HTTP/1.1 translation, invalid and scope-swapped
+token denial, service-restart recovery, stale-route fencing after kill,
+structured-log drainage, and complete runtime cleanup. Failed runs preserve
+the Sandbox PID, `crun` state, OCI bundle, and service logs for diagnosis. The
+envd/ConnectRPC implementation and the complete unchanged-official-client
+Sandbox suite remain open release gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

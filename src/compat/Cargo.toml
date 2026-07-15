@@ -21,6 +21,9 @@ hyper = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 ring = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = "2"
+rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -28,6 +31,7 @@ sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
 tokio-rusqlite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -35,6 +39,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+rcgen = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 
 [[bin]]

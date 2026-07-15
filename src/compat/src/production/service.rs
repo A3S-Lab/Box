@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use a3s_box_core::ExecutionManager;
+use a3s_box_core::{ExecutionManager, ExecutionPortConnector};
 use a3s_box_runtime::LocalExecutionManager;
 use axum::Router;
 use thiserror::Error;
@@ -17,6 +17,7 @@ use crate::control::{
     RotatingTokenProvider, SandboxRepository, SqliteSandboxRepository, SystemClock,
     TokenIssuerError,
 };
+use crate::gateway::{DataPlaneGateway, DataPlaneGatewayError};
 use crate::http::{
     lifecycle_router, CredentialHashError, HashedCredentialVerifier, LifecycleHttpConfig,
     LifecycleHttpState, RejectingCursorDecoder,
@@ -28,9 +29,11 @@ use super::{E2bCompatConfig, SupervisorConfig, UuidSandboxIdentityProvider};
 /// Production service with one canonical lifecycle store and runtime manager.
 pub struct E2bCompatService {
     listen: SocketAddr,
+    gateway_listen: SocketAddr,
     public_url: Url,
     sandbox_domain: String,
     router: Router,
+    gateway: DataPlaneGateway,
     supervisor: LifecycleSupervisor,
     supervisor_config: SupervisorConfig,
     route_parser: SandboxRouteParser,
@@ -44,11 +47,12 @@ impl E2bCompatService {
         prepare_parent(&config.runtime_state_path).await?;
 
         let repository = Arc::new(SqliteSandboxRepository::open(&config.database_path).await?);
-        let executions: Arc<dyn ExecutionManager> =
-            Arc::new(LocalExecutionManager::with_vm_backend(
-                &config.runtime_state_path,
-                &config.runtime_home,
-            ));
+        let local_executions = Arc::new(LocalExecutionManager::with_vm_backend(
+            &config.runtime_state_path,
+            &config.runtime_home,
+        ));
+        let executions: Arc<dyn ExecutionManager> = local_executions.clone();
+        let port_connector: Arc<dyn ExecutionPortConnector> = local_executions;
         let clock = Arc::new(SystemClock);
         let tokens = Arc::new(RotatingTokenProvider::new(
             config.active_token_version,
@@ -84,12 +88,21 @@ impl E2bCompatService {
                 max_json_bytes: config.max_json_bytes,
             },
         ));
+        let gateway = DataPlaneGateway::build(
+            config.gateway.clone(),
+            route_parser.clone(),
+            route_leases.clone(),
+            port_connector,
+        )
+        .await?;
 
         Ok(Self {
             listen: config.api_listen,
+            gateway_listen: gateway.listen(),
             public_url: config.api_public_url,
             sandbox_domain,
             router,
+            gateway,
             supervisor,
             supervisor_config: config.supervisor,
             route_parser,
@@ -103,6 +116,10 @@ impl E2bCompatService {
 
     pub fn public_url(&self) -> &Url {
         &self.public_url
+    }
+
+    pub fn gateway_listen(&self) -> SocketAddr {
+        self.gateway_listen
     }
 
     pub fn sandbox_domain(&self) -> &str {
@@ -141,6 +158,12 @@ impl E2bCompatService {
                 address: self.listen,
                 source,
             })?;
+        let gateway_listener = tokio::net::TcpListener::bind(self.gateway_listen)
+            .await
+            .map_err(|source| E2bServiceError::Bind {
+                address: self.gateway_listen,
+                source,
+            })?;
         let listener = listener
             .into_std()
             .map_err(|source| E2bServiceError::Bind {
@@ -155,6 +178,10 @@ impl E2bCompatService {
             supervisor_config,
             shutdown_receiver.clone(),
         ));
+        let mut gateway = Box::pin(
+            self.gateway
+                .serve(gateway_listener, shutdown_receiver.clone()),
+        );
         let mut server = Box::pin(
             axum::Server::from_tcp(listener)
                 .map_err(E2bServiceError::Listener)?
@@ -166,32 +193,70 @@ impl E2bCompatService {
             listen = %local_address,
             public_url = %self.public_url,
             sandbox_domain = %self.sandbox_domain,
+            gateway_listen = %self.gateway_listen,
             "E2B compatibility service started"
         );
 
-        tokio::select! {
+        let termination = tokio::select! {
             signal = shutdown_signal() => {
-                signal?;
-                info!("shutdown signal received");
-                request_shutdown(&shutdown_sender);
-                server.await.map_err(E2bServiceError::Server)?;
-                join_maintenance(maintenance.await)?
+                Termination::Signal(signal)
             }
             server_result = &mut server => {
-                request_shutdown(&shutdown_sender);
-                let maintenance_result = maintenance.await;
-                server_result.map_err(E2bServiceError::Server)?;
-                join_maintenance(maintenance_result)?
+                Termination::Control(server_result)
+            }
+            gateway_result = &mut gateway => {
+                Termination::Gateway(gateway_result)
             }
             maintenance_result = &mut maintenance => {
-                request_shutdown(&shutdown_sender);
-                server.await.map_err(E2bServiceError::Server)?;
-                join_maintenance(maintenance_result)?
+                Termination::Maintenance(maintenance_result)
+            }
+        };
+        request_shutdown(&shutdown_sender);
+        match termination {
+            Termination::Signal(signal) => {
+                if signal.is_ok() {
+                    info!("shutdown signal received");
+                }
+                let control = server.await;
+                let gateway_result = gateway.await;
+                let maintenance_result = maintenance.await;
+                signal?;
+                control.map_err(E2bServiceError::Server)?;
+                gateway_result?;
+                join_maintenance(maintenance_result)?;
+            }
+            Termination::Control(control) => {
+                let gateway_result = gateway.await;
+                let maintenance_result = maintenance.await;
+                control.map_err(E2bServiceError::Server)?;
+                gateway_result?;
+                join_maintenance(maintenance_result)?;
+            }
+            Termination::Gateway(gateway_result) => {
+                let control = server.await;
+                let maintenance_result = maintenance.await;
+                gateway_result?;
+                control.map_err(E2bServiceError::Server)?;
+                join_maintenance(maintenance_result)?;
+            }
+            Termination::Maintenance(maintenance_result) => {
+                let control = server.await;
+                let gateway_result = gateway.await;
+                join_maintenance(maintenance_result)?;
+                control.map_err(E2bServiceError::Server)?;
+                gateway_result?;
             }
         }
         info!("E2B compatibility service stopped");
         Ok(())
     }
+}
+
+enum Termination {
+    Signal(E2bServiceResult<()>),
+    Control(Result<(), hyper::Error>),
+    Gateway(Result<(), DataPlaneGatewayError>),
+    Maintenance(Result<E2bServiceResult<()>, tokio::task::JoinError>),
 }
 
 async fn run_maintenance(
@@ -336,6 +401,8 @@ pub enum E2bServiceError {
     Token(#[from] TokenIssuerError),
     #[error(transparent)]
     Supervisor(#[from] LifecycleSupervisorError),
+    #[error(transparent)]
+    Gateway(#[from] DataPlaneGatewayError),
 }
 
 pub type E2bServiceResult<T> = std::result::Result<T, E2bServiceError>;

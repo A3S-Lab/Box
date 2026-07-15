@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -11,6 +11,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::control::{ResolvedTemplate, TokenKeyMaterial, TokenScope};
+use crate::gateway::DataPlaneGatewayConfig;
 use crate::http::{CredentialHash, CredentialScheme, HashedAccountCredential};
 use crate::routing::{SandboxDomain, SandboxRoutePolicy, ENVD_PORT};
 
@@ -55,6 +56,7 @@ pub struct E2bCompatConfig {
     pub(crate) runtime_home: PathBuf,
     pub(crate) runtime_state_path: PathBuf,
     pub(crate) max_json_bytes: usize,
+    pub(crate) gateway: DataPlaneGatewayConfig,
     pub(crate) supervisor: SupervisorConfig,
     pub(crate) credentials: Vec<HashedAccountCredential>,
     pub(crate) active_token_version: u32,
@@ -114,6 +116,10 @@ impl E2bCompatConfig {
         self.supervisor
     }
 
+    pub fn gateway(&self) -> &DataPlaneGatewayConfig {
+        &self.gateway
+    }
+
     pub(super) fn parse_with_environment<F>(
         input: &str,
         mut environment: F,
@@ -137,6 +143,7 @@ impl fmt::Debug for E2bCompatConfig {
             .field("runtime_home", &self.runtime_home)
             .field("runtime_state_path", &self.runtime_state_path)
             .field("max_json_bytes", &self.max_json_bytes)
+            .field("gateway", &self.gateway)
             .field("supervisor", &self.supervisor)
             .field("credential_count", &self.credentials.len())
             .field("active_token_version", &self.active_token_version)
@@ -186,7 +193,13 @@ where
             "runtime_state_path",
             "max_json_bytes",
         ],
-        &["supervisor", "account", "token_key", "template_policy"],
+        &[
+            "supervisor",
+            "gateway",
+            "account",
+            "token_key",
+            "template_policy",
+        ],
         "e2b_compat",
     )?;
 
@@ -216,6 +229,12 @@ where
     }
 
     let supervisor = parse_supervisor(single_child(root, "supervisor", "e2b_compat")?)?;
+    let gateway = parse_gateway(single_child(root, "gateway", "e2b_compat")?)?;
+    if gateway.listen == api_listen {
+        return Err(invalid(
+            "e2b_compat.gateway.listen must differ from e2b_compat.api_listen",
+        ));
+    }
     let credentials = parse_credentials(children(root, "account"))?;
     let (active_token_version, token_keys) =
         parse_token_keys(children(root, "token_key"), environment)?;
@@ -231,11 +250,83 @@ where
         runtime_home,
         runtime_state_path,
         max_json_bytes,
+        gateway,
         supervisor,
         credentials,
         active_token_version,
         token_keys,
         templates,
+    })
+}
+
+fn parse_gateway(block: &Block) -> E2bConfigResult<DataPlaneGatewayConfig> {
+    const MAX_CONNECTIONS: usize = 100_000;
+    const MAX_TIMEOUT_MILLISECONDS: u64 = 60_000;
+    const MAX_DRAIN_SECONDS: u64 = 300;
+
+    let context = "e2b_compat.gateway";
+    require_no_labels(block, context)?;
+    ensure_shape(
+        block,
+        &[
+            "listen",
+            "tls_certificate_path",
+            "tls_private_key_path",
+            "max_connections",
+            "handshake_timeout_ms",
+            "connect_timeout_ms",
+            "drain_timeout_seconds",
+        ],
+        &[],
+        context,
+    )?;
+    let listen = required_string(block, "listen", context)?
+        .parse::<SocketAddr>()
+        .map_err(|_| invalid("e2b_compat.gateway.listen must be an IP socket address"))?;
+    if listen.port() == 0 {
+        return Err(invalid("e2b_compat.gateway.listen port must be non-zero"));
+    }
+    let certificate_path = required_absolute_path(block, "tls_certificate_path", context)?;
+    let private_key_path = required_absolute_path(block, "tls_private_key_path", context)?;
+    if certificate_path == private_key_path {
+        return Err(invalid(
+            "e2b_compat.gateway TLS certificate and private key paths must differ",
+        ));
+    }
+    let max_connections = NonZeroUsize::new(required_usize(block, "max_connections", context)?)
+        .filter(|value| value.get() <= MAX_CONNECTIONS)
+        .ok_or_else(|| {
+            invalid(format!(
+                "{context}.max_connections must be between 1 and {MAX_CONNECTIONS}"
+            ))
+        })?;
+    let handshake_timeout_ms = required_u64(block, "handshake_timeout_ms", context)?;
+    let connect_timeout_ms = required_u64(block, "connect_timeout_ms", context)?;
+    if !(100..=MAX_TIMEOUT_MILLISECONDS).contains(&handshake_timeout_ms) {
+        return Err(invalid(format!(
+            "{context}.handshake_timeout_ms must be between 100 and {MAX_TIMEOUT_MILLISECONDS}"
+        )));
+    }
+    if !(10..=MAX_TIMEOUT_MILLISECONDS).contains(&connect_timeout_ms) {
+        return Err(invalid(format!(
+            "{context}.connect_timeout_ms must be between 10 and {MAX_TIMEOUT_MILLISECONDS}"
+        )));
+    }
+    let drain_timeout_seconds = required_u64(block, "drain_timeout_seconds", context)?;
+    if !(1..=MAX_DRAIN_SECONDS).contains(&drain_timeout_seconds) {
+        return Err(invalid(format!(
+            "{context}.drain_timeout_seconds must be between 1 and {MAX_DRAIN_SECONDS}"
+        )));
+    }
+
+    Ok(DataPlaneGatewayConfig {
+        listen,
+        certificate_path,
+        private_key_path,
+        max_connections,
+        handshake_timeout: Duration::from_millis(handshake_timeout_ms),
+        connect_timeout: Duration::from_millis(connect_timeout_ms),
+        drain_timeout: Duration::from_secs(drain_timeout_seconds),
     })
 }
 
@@ -759,6 +850,12 @@ fn optional_usize(block: &Block, field: &str, context: &str) -> E2bConfigResult<
                 .map_err(|_| invalid(format!("{context}.{field} exceeds the platform range")))
         })
         .transpose()
+}
+
+fn required_usize(block: &Block, field: &str, context: &str) -> E2bConfigResult<usize> {
+    let value = required_u64(block, field, context)?;
+    usize::try_from(value)
+        .map_err(|_| invalid(format!("{context}.{field} exceeds the platform range")))
 }
 
 fn number_as_u64(value: &Value, field: &str, context: &str) -> E2bConfigResult<u64> {

@@ -1,7 +1,7 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 4 complete;
-slice 5 control-service composition complete, TLS data plane pending)**
+Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 6 complete;
+TLS routing reaches real Sandbox ports, envd protocol implementation pending)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -22,16 +22,18 @@ unversioned claim.
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
 | Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; an A3S OS smoke creates through HTTP, starts through certified `crun`, reconnects after service restart, replaces timeout, kills, and verifies box, runtime-state, and socket cleanup | Complete the host-reboot and official-client matrices |
-| Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, and durable-record-projected generation-fenced leases | Add the TLS data-plane gateway and exercise routed traffic through it |
+| Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
-The lifecycle control path is now composed and exercised against a real
-Sandbox on A3S OS. That smoke uses HTTP requests rather than the pinned
-official SDKs, and it does not traverse the wildcard TLS or sandbox data-plane
-gateway. The unchanged-client fixture still uses an in-memory repository and
-fake execution manager. These are complementary results rather than the full
-black-box compatibility matrix, so `full_compatibility=false` remains
-mandatory.
+The lifecycle control path and authenticated wildcard/shared TLS routes are
+composed and exercised against a real Sandbox on A3S OS. The smoke reaches a
+service bound to the Sandbox loopback interface, rejects invalid and
+scope-swapped tokens, survives a compatibility-service restart, and fences the
+route after kill. It still uses direct HTTP requests rather than the pinned
+official SDKs, and the unchanged-client fixture still uses an in-memory
+repository and fake execution manager. These are complementary results rather
+than the full black-box compatibility matrix, so `full_compatibility=false`
+remains mandatory.
 
 ## Executive decision
 
@@ -562,6 +564,16 @@ e2b_compat {
   runtime_home     = "/var/lib/a3s"
   runtime_state_path = "/var/lib/a3s-box/e2b/managed-executions.json"
 
+  gateway {
+    listen                   = "0.0.0.0:443"
+    tls_certificate_path     = "/etc/a3s-box/tls/sandbox-chain.pem"
+    tls_private_key_path     = "/etc/a3s-box/tls/sandbox-key.pem"
+    max_connections          = 4096
+    handshake_timeout_ms     = 5000
+    connect_timeout_ms       = 2000
+    drain_timeout_seconds    = 30
+  }
+
   supervisor {
     interval_seconds          = 5
     batch_size                = 100
@@ -603,11 +615,13 @@ e2b_compat {
 
 The envd port and envd token scope are added when omitted. Runtime paths,
 credentials, key versions, template execution policy, resources, and routed
-ports are validated before the listener opens. Startup runs durable lifecycle
-reconciliation; a bounded supervisor then reaps expired records until graceful
-shutdown. The control listener remains behind the deployment TLS edge in this
-slice. Wildcard TLS termination and the sandbox data-plane proxy are the next
-focused slice.
+ports and TLS settings are validated before either listener opens. Startup
+runs durable lifecycle reconciliation; a bounded supervisor then reaps expired
+records until graceful shutdown. The control listener remains behind the
+deployment TLS edge. The separate wildcard TLS listener accepts HTTP/1.1 and
+HTTP/2, validates every direct or shared route and token before opening an
+upstream connection, strips edge credentials, preserves streaming bodies and
+trailers, bridges HTTP upgrades, and drains bounded connections on shutdown.
 
 ## Repository boundaries
 
@@ -843,11 +857,17 @@ Phase 2 is delivered as small, immediately merged changes:
    lifecycle; switch CLI create to the same reservation path; switch CLI
    start/restart/run and the Rust SDK to the same implementation with behavior
    parity tests.
-5. **In progress:** production account credentials, sandbox token providers,
+5. **Complete:** production account credentials, sandbox token providers,
    generation-fenced route leases, validated wildcard/shared parsing, and the
-   ACL-configured service binary are complete. Add the TLS data-plane gateway.
-   Pull each merge commit on an A3S OS server and run the unmodified official
-   clients against real `--isolation sandbox` executions.
+   ACL-configured service binary.
+6. **Complete:** add wildcard TLS termination, bounded HTTP/1.1 and HTTP/2
+   reverse proxying, CORS preflight, credential stripping, upgrade bridging,
+   and a Linux connector that enters the generation-fenced `crun` network
+   namespace on a disposable OS thread. Pull the merge commit on an A3S OS
+   server and prove direct/shared routing, restart recovery, scope denial, and
+   stale-route fencing against a real `--isolation sandbox` execution.
+7. **In progress:** implement the pinned envd HTTP and ConnectRPC protocols,
+   then run the unmodified official clients through the production listeners.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
 is the canonical schema shared by the CLI and Rust SDK, preventing either

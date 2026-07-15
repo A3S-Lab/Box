@@ -8,6 +8,7 @@ mod openapi;
 mod proto;
 
 pub mod control;
+pub mod gateway;
 pub mod http;
 pub mod production;
 pub mod routing;

@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use axum::http::header::HOST;
 use axum::http::uri::Authority;
+use axum::http::Uri;
 use axum::http::{HeaderMap, HeaderName};
 use thiserror::Error;
 
@@ -75,6 +76,30 @@ impl SandboxRouteParser {
         self.parse_host(host, headers)
     }
 
+    /// Parse either an HTTP/1.1 Host header or an HTTP/2 `:authority` URI.
+    /// When both forms are present they must identify the same DNS host.
+    pub fn parse_uri(
+        &self,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> RouteParseResult<ParsedSandboxRoute> {
+        let header_authority = single_header(headers, &HOST)?;
+        let uri_authority = uri.authority().map(Authority::as_str);
+        let authority = match (header_authority, uri_authority) {
+            (None, None) => return Err(RouteParseError::MissingHost),
+            (Some(authority), None) | (None, Some(authority)) => authority,
+            (Some(header), Some(uri)) => {
+                let header_host = parse_authority_host(header)?;
+                let uri_host = parse_authority_host(uri)?;
+                if !header_host.eq_ignore_ascii_case(&uri_host) {
+                    return Err(RouteParseError::ConflictingAuthority);
+                }
+                header
+            }
+        };
+        self.parse_host(authority, headers)
+    }
+
     pub fn parse_host(
         &self,
         authority: &str,
@@ -110,6 +135,12 @@ impl SandboxRouteParser {
             form: RouteForm::Direct,
         })
     }
+}
+
+fn parse_authority_host(authority: &str) -> RouteParseResult<String> {
+    Authority::from_str(authority)
+        .map(|authority| authority.host().to_string())
+        .map_err(|_| RouteParseError::InvalidHost)
 }
 
 fn route_headers(headers: &HeaderMap) -> RouteParseResult<Option<(SandboxId, NonZeroU16)>> {
@@ -195,6 +226,8 @@ pub enum RouteParseError {
     InvalidRouteHeaders,
     #[error("sandbox route headers conflict with the direct hostname")]
     ConflictingRouteHeaders,
+    #[error("Host and HTTP/2 authority identify different sandbox domains")]
+    ConflictingAuthority,
     #[error("routing header is duplicated")]
     DuplicateHeader,
 }
@@ -296,5 +329,21 @@ mod tests {
         for valid in ["localhost", "box.example", "sandbox-1.box.example"] {
             assert!(SandboxDomain::new(valid).is_ok(), "rejected {valid}");
         }
+    }
+
+    #[test]
+    fn parses_http2_authority_and_rejects_conflicting_host() {
+        let uri = "https://49983-sandbox-abc.box.example.com/health"
+            .parse::<Uri>()
+            .unwrap();
+        let route = parser().parse_uri(&uri, &HeaderMap::new()).unwrap();
+        assert_eq!(route.sandbox_id.as_str(), "sandbox-abc");
+        assert_eq!(route.port.get(), 49_983);
+
+        let conflicting = headers("49983-sandbox-other.box.example.com");
+        assert_eq!(
+            parser().parse_uri(&uri, &conflicting).unwrap_err(),
+            RouteParseError::ConflictingAuthority
+        );
     }
 }
