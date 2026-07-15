@@ -9,6 +9,9 @@ TOKEN_DIGEST="$(printf '08%.0s' {1..32})"
 PORT="${A3S_BOX_E2B_SMOKE_PORT:-38081}"
 GATEWAY_PORT="${A3S_BOX_E2B_GATEWAY_SMOKE_PORT:-38443}"
 IMAGE="${A3S_BOX_SMOKE_IMAGE:-alpine:3.20}"
+# A dependency-free HTTP/1.1 responder used with BusyBox nc -e. Alpine's
+# BusyBox build does not guarantee the optional httpd applet.
+HTTP_RESPONDER_B64='IyEvYmluL3NoCndoaWxlIElGUz0gcmVhZCAtciBsaW5lOyBkbwogIFsgIiRsaW5lIiA9ICIkKHByaW50ZiAnXHInKSIgXSAmJiBicmVhawpkb25lCmJvZHk9J3NhbmRib3gtZGF0YS1wbGFuZScKcHJpbnRmICdIVFRQLzEuMSAyMDAgT0tcclxuQ29udGVudC1MZW5ndGg6ICVzXHJcbkNvbm5lY3Rpb246IGNsb3NlXHJcbkNvbnRlbnQtVHlwZTogdGV4dC9wbGFpblxyXG5cclxuJXMnICIkeyNib2R5fSIgIiRib2R5Igo='
 
 fail() {
   printf 'E2B production smoke failed: %s\n' "$*" >&2
@@ -278,7 +281,7 @@ e2b_compat {
     envd_version = "0.1.3"
     isolation = "sandbox"
     network = "none"
-    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && echo sandbox-data-plane > /tmp/e2b-smoke/health && exec busybox httpd -f -p 49983 -h /tmp/e2b-smoke"]
+    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49983 -e /tmp/e2b-smoke/respond"]
 
     resources {
       vcpus = 2
