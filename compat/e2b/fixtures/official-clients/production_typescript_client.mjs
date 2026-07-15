@@ -31,6 +31,11 @@ try {
   })
   assert.equal(connected.sandboxId, sandbox.sandboxId)
   assert.equal(await sandbox.isRunning(), true)
+  const command = await sandbox.commands.run(
+    'printf \'typescript:%s\' "$OFFICIAL_CLIENT"'
+  )
+  assert.equal(command.stdout, 'typescript:typescript')
+  assert.equal(command.stderr, '')
 
   const paginator = Sandbox.list({
     ...connection,

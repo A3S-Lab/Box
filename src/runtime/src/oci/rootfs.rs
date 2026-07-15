@@ -136,6 +136,24 @@ impl OciRootfsBuilder {
             tracing::debug!(dir = %full_path.display(), "Created directory");
         }
 
+        // The service can run with a restrictive umask (the production smoke
+        // uses 077), but the root of a Linux container must remain traversable
+        // by image users other than root. Layer archives normally omit an
+        // explicit `.` entry, so without this normalization the host-created
+        // rootfs directory becomes `/` with mode 0700 inside the container.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&self.rootfs_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(|error| {
+                    BoxError::BuildError(format!(
+                        "Failed to set rootfs permissions on {}: {error}",
+                        self.rootfs_path.display()
+                    ))
+                })?;
+        }
+
         Ok(())
     }
 
@@ -469,6 +487,32 @@ mod tests {
         assert!(rootfs_path.join("tmp").exists());
         assert!(rootfs_path.join("etc").exists());
         assert!(rootfs_path.join("workspace").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_oci_rootfs_builder_makes_root_searchable_by_image_users() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs_path = temp_dir.path().join("rootfs");
+        let image = temp_dir.path().join("image");
+
+        std::fs::create_dir_all(&rootfs_path).unwrap();
+        std::fs::set_permissions(&rootfs_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        create_test_oci_image(&image);
+
+        OciRootfsBuilder::new(&rootfs_path)
+            .with_image(&image)
+            .build()
+            .unwrap();
+
+        let mode = std::fs::metadata(&rootfs_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
     }
 
     #[test]

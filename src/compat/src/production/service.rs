@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use a3s_box_core::{ExecutionManager, ExecutionPortConnector};
+use a3s_box_core::{ExecutionManager, ExecutionPortConnector, ExecutionSessionManager};
 use a3s_box_runtime::LocalExecutionManager;
 use axum::Router;
 use thiserror::Error;
@@ -52,6 +52,7 @@ impl E2bCompatService {
             &config.runtime_home,
         ));
         let executions: Arc<dyn ExecutionManager> = local_executions.clone();
+        let sessions: Arc<dyn ExecutionSessionManager> = local_executions.clone();
         let port_connector: Arc<dyn ExecutionPortConnector> = local_executions;
         let clock = Arc::new(SystemClock);
         let tokens = Arc::new(RotatingTokenProvider::new(
@@ -93,6 +94,7 @@ impl E2bCompatService {
             route_parser.clone(),
             route_leases.clone(),
             executions,
+            sessions,
             port_connector,
         )
         .await?;

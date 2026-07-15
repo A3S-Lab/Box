@@ -11,6 +11,7 @@ pub mod event;
 pub mod execution;
 pub mod metrics;
 pub mod registry;
+pub mod session;
 pub mod store;
 
 pub use audit::AuditSink;
@@ -26,6 +27,9 @@ pub use execution::{
 };
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};
+pub use session::{
+    ExecutionProcess, ExecutionProcessInput, ExecutionProcessStream, ExecutionSessionManager,
+};
 pub use store::{
     ImageStoreBackend, NetworkStoreBackend, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
 };

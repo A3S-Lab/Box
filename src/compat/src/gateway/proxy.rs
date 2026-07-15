@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use a3s_box_core::{
     ExecutionManager, ExecutionManagerError, ExecutionPortConnector, ExecutionPortStream,
+    ExecutionSessionManager,
 };
 use axum::body::Body;
 use axum::http::header::{
@@ -53,13 +54,14 @@ impl DataPlaneProxy {
         parser: SandboxRouteParser,
         leases: RouteLeaseService,
         executions: Arc<dyn ExecutionManager>,
+        sessions: Arc<dyn ExecutionSessionManager>,
         connector: Arc<dyn ExecutionPortConnector>,
         connect_timeout: Duration,
     ) -> Self {
         Self {
             parser,
             leases,
-            envd: EnvdBroker::new(executions),
+            envd: EnvdBroker::new(executions, sessions),
             connector,
             connect_timeout,
         }

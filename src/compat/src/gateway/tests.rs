@@ -4,11 +4,13 @@ use std::num::{NonZeroU16, NonZeroUsize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
-    resolve_execution, BoxConfig, ExecutionGeneration, ExecutionId, ExecutionIsolation,
-    ExecutionLease, ExecutionManager, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionPortConnector, ExecutionPortStream, ExecutionState, ExecutionStatus, KillOutcome,
-    OperationId, ReconcileOutcome,
+    resolve_execution, BoxConfig, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
+    ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
+    ExecutionManagerResult, ExecutionPortConnector, ExecutionPortStream, ExecutionProcess,
+    ExecutionSessionManager, ExecutionState, ExecutionStatus, FileRequest, FileResponse,
+    KillOutcome, OperationId, ReconcileOutcome,
 };
 use async_trait::async_trait;
 use axum::body::Body;
@@ -109,6 +111,45 @@ impl ExecutionManager for RunningExecutionManager {
         &self,
         _operation_id: &OperationId,
     ) -> ExecutionManagerResult<ReconcileOutcome> {
+        Err(unsupported_manager_operation())
+    }
+}
+
+#[async_trait]
+impl ExecutionSessionManager for RunningExecutionManager {
+    async fn execute(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: ExecRequest,
+    ) -> ExecutionManagerResult<ExecOutput> {
+        Err(unsupported_manager_operation())
+    }
+
+    async fn start_process(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: ExecRequest,
+    ) -> ExecutionManagerResult<ExecutionProcess> {
+        Err(unsupported_manager_operation())
+    }
+
+    async fn start_pty(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: PtyRequest,
+    ) -> ExecutionManagerResult<ExecutionProcess> {
+        Err(unsupported_manager_operation())
+    }
+
+    async fn transfer_file(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: FileRequest,
+    ) -> ExecutionManagerResult<FileResponse> {
         Err(unsupported_manager_operation())
     }
 }
@@ -222,6 +263,7 @@ impl Harness {
         let proxy = DataPlaneProxy::new(
             parser.clone(),
             leases.clone(),
+            executions.clone(),
             executions.clone(),
             connector.clone(),
             Duration::from_secs(2),
@@ -496,6 +538,7 @@ async fn wildcard_tls_listener_serves_an_authenticated_route() {
         config,
         harness.parser.clone(),
         harness.leases.clone(),
+        harness.executions.clone(),
         harness.executions.clone(),
         harness.connector.clone(),
     )

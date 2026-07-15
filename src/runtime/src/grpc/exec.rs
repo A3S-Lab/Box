@@ -55,26 +55,34 @@ pub struct ExecClient {
 }
 
 impl ExecClient {
+    pub(crate) fn for_socket(socket_path: &Path) -> Self {
+        Self {
+            socket_path: socket_path.to_path_buf(),
+        }
+    }
+
     /// Connect to the exec server via Unix socket.
     ///
     /// Verifies the socket is connectable.
     pub async fn connect(socket_path: &Path) -> Result<Self> {
-        let _stream = UnixStream::connect(socket_path).await.map_err(|e| {
-            BoxError::ExecError(format!(
-                "Failed to connect to exec server at {}: {}",
-                socket_path.display(),
-                e,
-            ))
-        })?;
-
-        Ok(Self {
-            socket_path: socket_path.to_path_buf(),
-        })
+        let client = Self::for_socket(socket_path);
+        let _stream = client.open_stream().await?;
+        Ok(client)
     }
 
     /// Get the socket path this client is connected to.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    pub(crate) async fn open_stream(&self) -> Result<UnixStream> {
+        UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            BoxError::ExecError(format!(
+                "Exec connection failed to {}: {}",
+                self.socket_path.display(),
+                e,
+            ))
+        })
     }
 
     /// Execute a command in the guest.
@@ -84,16 +92,17 @@ impl ExecClient {
         &self,
         request: &a3s_box_core::exec::ExecRequest,
     ) -> Result<a3s_box_core::exec::ExecOutput> {
+        let stream = self.open_stream().await?;
+        self.exec_command_on_stream(stream, request).await
+    }
+
+    pub(crate) async fn exec_command_on_stream(
+        &self,
+        mut stream: UnixStream,
+        request: &a3s_box_core::exec::ExecRequest,
+    ) -> Result<a3s_box_core::exec::ExecOutput> {
         let payload = serde_json::to_vec(request)
             .map_err(|e| BoxError::ExecError(format!("Failed to serialize exec request: {}", e)))?;
-
-        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            BoxError::ExecError(format!(
-                "Exec connection failed to {}: {}",
-                self.socket_path.display(),
-                e,
-            ))
-        })?;
 
         // Send request as Data frame
         let request_frame = a3s_transport::Frame::data(payload);
@@ -157,19 +166,20 @@ impl ExecClient {
         &self,
         request: &a3s_box_core::exec::ExecRequest,
     ) -> Result<StreamingExec> {
+        let stream = self.open_stream().await?;
+        self.exec_stream_on_stream(stream, request).await
+    }
+
+    pub(crate) async fn exec_stream_on_stream(
+        &self,
+        stream: UnixStream,
+        request: &a3s_box_core::exec::ExecRequest,
+    ) -> Result<StreamingExec> {
         let mut req = request.clone();
         req.streaming = true;
 
         let payload = serde_json::to_vec(&req)
             .map_err(|e| BoxError::ExecError(format!("Failed to serialize exec request: {}", e)))?;
-
-        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            BoxError::ExecError(format!(
-                "Exec connection failed to {}: {}",
-                self.socket_path.display(),
-                e,
-            ))
-        })?;
 
         let (r, w) = tokio::io::split(stream);
         let mut writer = a3s_transport::FrameWriter::new(w);
@@ -275,16 +285,17 @@ impl ExecClient {
         &self,
         request: &a3s_box_core::exec::FileRequest,
     ) -> Result<a3s_box_core::exec::FileResponse> {
+        let stream = self.open_stream().await?;
+        self.file_transfer_on_stream(stream, request).await
+    }
+
+    pub(crate) async fn file_transfer_on_stream(
+        &self,
+        mut stream: UnixStream,
+        request: &a3s_box_core::exec::FileRequest,
+    ) -> Result<a3s_box_core::exec::FileResponse> {
         let payload = serde_json::to_vec(request)
             .map_err(|e| BoxError::ExecError(format!("Failed to serialize file request: {}", e)))?;
-
-        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
-            BoxError::ExecError(format!(
-                "Exec connection failed to {}: {}",
-                self.socket_path.display(),
-                e,
-            ))
-        })?;
 
         let request_frame = a3s_transport::Frame::data(payload);
         let encoded = request_frame.encode().map_err(|e| {

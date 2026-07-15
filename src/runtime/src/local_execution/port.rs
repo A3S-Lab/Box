@@ -7,8 +7,7 @@ use a3s_box_core::{
 };
 use async_trait::async_trait;
 
-use super::support::{managed_state, require_generation};
-use super::{LocalExecutionManager, ManagedExecutionState};
+use super::LocalExecutionManager;
 use crate::BoxRecord;
 
 #[async_trait]
@@ -79,16 +78,8 @@ impl LocalExecutionManager {
         generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<BoxRecord> {
         let record = self
-            .get(execution_id)
-            .await?
-            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
-        require_generation(&record, execution_id, generation)?;
-        if managed_state(&record)? != ManagedExecutionState::Running {
-            return Err(ExecutionManagerError::Conflict {
-                execution_id: execution_id.clone(),
-                message: "execution is not running".to_string(),
-            });
-        }
+            .require_running_record(execution_id, generation)
+            .await?;
         let backend = record
             .managed_execution
             .as_ref()

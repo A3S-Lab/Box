@@ -16,6 +16,7 @@ OFFICIAL_CLIENT_RUNNER="${A3S_BOX_E2B_OFFICIAL_CLIENT_RUNNER:-$SCRIPT_DIR/../com
 # A dependency-free HTTP/1.1 responder used with BusyBox nc -e. Alpine's
 # BusyBox build does not guarantee the optional httpd applet.
 HTTP_RESPONDER_B64='IyEvYmluL3NoCndoaWxlIElGUz0gcmVhZCAtciBsaW5lOyBkbwogIFsgIiRsaW5lIiA9ICIkKHByaW50ZiAnXHInKSIgXSAmJiBicmVhawpkb25lCmJvZHk9J3NhbmRib3gtZGF0YS1wbGFuZScKcHJpbnRmICdIVFRQLzEuMSAyMDAgT0tcclxuQ29udGVudC1MZW5ndGg6ICVzXHJcbkNvbm5lY3Rpb246IGNsb3NlXHJcbkNvbnRlbnQtVHlwZTogdGV4dC9wbGFpblxyXG5cclxuJXMnICIkeyNib2R5fSIgIiRib2R5Igo='
+BASH_COMPAT_WRAPPER_B64='IyEvYmluL3NoCmV4ZWMgL2Jpbi9zaCAiJEAiCg=='
 
 fail() {
   printf 'E2B production smoke failed: %s\n' "$*" >&2
@@ -64,7 +65,9 @@ fi
   fail 'A3S_BOX_E2B_SANDBOX_DOMAIN must be a DNS name'
 command -v openssl >/dev/null || fail 'openssl is required for the TLS gateway smoke'
 if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" && "$GATEWAY_PORT" != "443" ]]; then
-  fail 'official-client envd health requires A3S_BOX_E2B_GATEWAY_SMOKE_PORT=443'
+  EXPECTED_SANDBOX_URL="https://sandbox.$SANDBOX_DOMAIN:$GATEWAY_PORT"
+  [[ "${E2B_SANDBOX_URL:-}" == "$EXPECTED_SANDBOX_URL" ]] ||
+    fail "non-443 official-client smoke requires E2B_SANDBOX_URL=$EXPECTED_SANDBOX_URL"
 fi
 
 umask 077
@@ -309,7 +312,7 @@ e2b_compat {
     envd_version = "0.1.3"
     isolation = "sandbox"
     network = "none"
-    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
+    command = ["/bin/sh", "-c", "adduser -D -u 1000 user >/dev/null 2>&1 || true; printf '%s' '$BASH_COMPAT_WRAPPER_B64' | /bin/busybox base64 -d > /bin/bash && chmod 755 /bin/bash && mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
 
     resources {
       vcpus = 2
@@ -328,7 +331,7 @@ e2b_compat {
     envd_version = "0.1.3"
     isolation = "sandbox"
     network = "none"
-    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
+    command = ["/bin/sh", "-c", "adduser -D -u 1000 user >/dev/null 2>&1 || true; printf '%s' '$BASH_COMPAT_WRAPPER_B64' | /bin/busybox base64 -d > /bin/bash && chmod 755 /bin/bash && mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
 
     resources {
       vcpus = 2

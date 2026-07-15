@@ -273,10 +273,15 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             e
         ))
     })?;
+    let src_meta = std::fs::symlink_metadata(src).map_err(|e| {
+        BoxError::CacheError(format!(
+            "Failed to read directory metadata for {}: {}",
+            src.display(),
+            e
+        ))
+    })?;
     // Mirror the source directory's ownership onto the destination (root only).
-    if let Ok(src_meta) = std::fs::symlink_metadata(src) {
-        preserve_owner(&src_meta, dst);
-    }
+    preserve_owner(&src_meta, dst);
 
     for entry in std::fs::read_dir(src).map_err(|e| {
         BoxError::CacheError(format!("Failed to read directory {}: {}", src.display(), e))
@@ -336,6 +341,17 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             preserve_owner(&meta, &dst_path);
         }
     }
+
+    // Apply directory permissions only after copying its children. This both
+    // preserves image modes in the cache and avoids making a read-only source
+    // directory's destination unwritable before recursion is complete.
+    std::fs::set_permissions(dst, src_meta.permissions()).map_err(|e| {
+        BoxError::CacheError(format!(
+            "Failed to preserve directory permissions on {}: {}",
+            dst.display(),
+            e
+        ))
+    })?;
 
     Ok(())
 }
@@ -1183,6 +1199,32 @@ mod tests {
             let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o755, "executable bit must survive the copy");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_copy_dir_recursive_preserves_directory_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let nested = src.join("nested");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("file"), b"content").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o710)).unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        let root_mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+        let nested_mode = std::fs::metadata(dst.join("nested"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(root_mode, 0o755);
+        assert_eq!(nested_mode, 0o710);
     }
 
     #[test]

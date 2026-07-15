@@ -1,7 +1,11 @@
+mod connect;
+mod process;
+
 use std::sync::Arc;
 
 use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionManager, ExecutionManagerError, ExecutionState,
+    ExecutionGeneration, ExecutionId, ExecutionManager, ExecutionManagerError,
+    ExecutionSessionManager, ExecutionState,
 };
 use axum::body::Body;
 use axum::http::header::{ALLOW, CONTENT_TYPE};
@@ -18,11 +22,18 @@ use crate::routing::RouteLease;
 #[derive(Clone)]
 pub struct EnvdBroker {
     executions: Arc<dyn ExecutionManager>,
+    processes: process::ProcessBroker,
 }
 
 impl EnvdBroker {
-    pub fn new(executions: Arc<dyn ExecutionManager>) -> Self {
-        Self { executions }
+    pub fn new(
+        executions: Arc<dyn ExecutionManager>,
+        sessions: Arc<dyn ExecutionSessionManager>,
+    ) -> Self {
+        Self {
+            executions,
+            processes: process::ProcessBroker::new(sessions),
+        }
     }
 
     pub(crate) async fn handle(
@@ -30,9 +41,16 @@ impl EnvdBroker {
         request: Request<Body>,
         lease: &RouteLease,
     ) -> Response<Body> {
+        let path = request.uri().path().to_string();
+        if path.starts_with("/process.Process/") {
+            return self
+                .processes
+                .handle(request, lease.execution_id(), lease.execution_generation())
+                .await;
+        }
         self.dispatch(
             request.method(),
-            request.uri().path(),
+            &path,
             lease.execution_id(),
             lease.execution_generation(),
         )
