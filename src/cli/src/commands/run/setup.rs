@@ -18,6 +18,7 @@ pub(super) struct RunRecordPolicy {
 pub(super) async fn setup_and_boot(
     args: &RunArgs,
 ) -> Result<RunContext, Box<dyn std::error::Error>> {
+    let create_start = std::time::Instant::now();
     common::validate_runtime_options(&args.common)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let (restart_policy, max_restart_count) =
@@ -110,7 +111,12 @@ pub(super) async fn setup_and_boot(
     // compatibility check above, so an invalid Sandbox request has no registry
     // or runtime side effects.
     let pull_progress_fn = pull_progress_callback(args.common.image.clone());
+    let image_config_start = std::time::Instant::now();
     let image_config = pull_image_config(args, std::sync::Arc::clone(&pull_progress_fn)).await?;
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+        "cli.image_config",
+        image_config_start.elapsed(),
+    );
     let health_check =
         common::effective_health_check(&args.common, image_config.health_check.as_ref());
     let effective_stop_signal = common::effective_stop_signal(
@@ -139,7 +145,9 @@ pub(super) async fn setup_and_boot(
     let backend = VmLocalExecutionBackend::new(&home).with_pull_progress_fn(pull_progress_fn);
     let manager =
         LocalExecutionManager::new(home.join("boxes.json"), &home, std::sync::Arc::new(backend));
+    let reserve_start = std::time::Instant::now();
     let reservation = manager.create(request, &operation_id).await?;
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase("cli.reserve", reserve_start.elapsed());
     let execution_id = reservation.execution_id.clone();
     let box_id = execution_id.to_string();
     println!(
@@ -147,6 +155,7 @@ pub(super) async fn setup_and_boot(
         name,
         BoxRecord::make_short_id(&box_id)
     );
+    let runtime_start = std::time::Instant::now();
     let lease = match manager.start(&execution_id, reservation.generation).await {
         Ok(lease) => lease,
         Err(error) => {
@@ -154,6 +163,10 @@ pub(super) async fn setup_and_boot(
             return Err(error.into());
         }
     };
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+        "cli.runtime_start",
+        runtime_start.elapsed(),
+    );
     // A short-lived command can exit between `start` and this reload. Use the
     // side-effect-free snapshot so legacy PID reconciliation cannot auto-remove
     // the just-created managed record before foreground cleanup observes it.
@@ -184,7 +197,7 @@ pub(super) async fn setup_and_boot(
         );
     }
 
-    Ok(RunContext {
+    let context = RunContext {
         manager,
         execution_id,
         generation: lease.generation,
@@ -196,7 +209,12 @@ pub(super) async fn setup_and_boot(
         pty_socket_path,
         anonymous_volumes,
         health_checker: None,
-    })
+    };
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+        "cli.create_start",
+        create_start.elapsed(),
+    );
+    Ok(context)
 }
 
 fn pull_progress_callback(image_name: String) -> a3s_box_runtime::PullProgressFn {

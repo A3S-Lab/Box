@@ -27,6 +27,7 @@ impl VmManager {
     ) -> Result<()> {
         // This probe is deliberately before image pulls, rootfs mounts, volume
         // creation, or bundle writes. Every mandatory control is fail-closed.
+        let capability_start = std::time::Instant::now();
         let capabilities = probe_sandbox_capabilities(None);
         capabilities.require_ready()?;
         let runtime = capabilities
@@ -50,6 +51,10 @@ impl VmManager {
                         .to_string(),
                     hint: None,
                 })?;
+        a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+            "sandbox.capability",
+            capability_start.elapsed(),
+        );
 
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         let sandbox_dir = box_dir.join("sandbox");
@@ -67,6 +72,7 @@ impl VmManager {
             "Booting Sandbox"
         );
 
+        let layout_start = std::time::Instant::now();
         let layout = match self.prepare_layout().await {
             Ok(layout) => layout,
             Err(error) => {
@@ -74,9 +80,14 @@ impl VmManager {
                 return Err(error);
             }
         };
+        a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+            "sandbox.layout",
+            layout_start.elapsed(),
+        );
         self.image_config = layout.oci_config.clone();
 
         let prepare = (|| -> Result<_> {
+            let instance_prepare_start = std::time::Instant::now();
             let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
             std::fs::write(layout.rootfs_path.join("etc/resolv.conf"), resolv_content)
                 .map_err(BoxError::IoError)?;
@@ -109,15 +120,30 @@ impl VmManager {
             let maximum_uid = rootfs_ids.maximum_uid.max(account_uid).max(process_uid);
             let maximum_gid = rootfs_ids.maximum_gid.max(account_gid).max(process_gid);
             let id_mappings = plan_id_mappings(user_namespace, maximum_uid, maximum_gid)?;
+            a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+                "sandbox.instance_prepare",
+                instance_prepare_start.elapsed(),
+            );
 
+            let mount_sources_start = std::time::Instant::now();
             self.prepare_sandbox_mount_sources(&layout, &mounts, &id_mappings)?;
+            a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+                "sandbox.mount_sources",
+                mount_sources_start.elapsed(),
+            );
+            let rootfs_ownership_start = std::time::Instant::now();
             prepare_rootfs_ownership(
                 &layout.rootfs_path,
                 &id_mappings,
                 user_namespace.effective_uid,
                 self.config.read_only,
             )?;
+            a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+                "sandbox.rootfs_ownership",
+                rootfs_ownership_start.elapsed(),
+            );
 
+            let bundle_start = std::time::Instant::now();
             let resources = SandboxResources::from_box_config(&self.config)?;
             let execution_plan_digest = digest_json(&execution_plan)?;
             let bundle_spec = SandboxBundleSpec {
@@ -147,6 +173,10 @@ impl VmManager {
                 &layout.rootfs_path,
                 &bundle_spec.id_mappings,
             )?;
+            a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+                "sandbox.bundle",
+                bundle_start.elapsed(),
+            );
 
             Ok((instance_spec, bundle_spec))
         })();
@@ -178,6 +208,7 @@ impl VmManager {
             log_worker_log_path: box_dir.join("logs").join("sandbox-log-worker.log"),
             log_worker_ready_path: sandbox_dir.join("bundle").join("log-worker.ready"),
         };
+        let launch_start = std::time::Instant::now();
         let handler = match controller.start(launch).await {
             Ok(handler) => handler,
             Err(error) => {
@@ -185,8 +216,13 @@ impl VmManager {
                 return Err(error);
             }
         };
+        a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+            "sandbox.launch",
+            launch_start.elapsed(),
+        );
         *self.handler.write().await = Some(Box::new(handler));
 
+        let readiness_start = std::time::Instant::now();
         if let Err(error) = async {
             self.wait_for_vm_running().await?;
             #[cfg(unix)]
@@ -198,6 +234,10 @@ impl VmManager {
             self.cleanup_boot_failure().await;
             return Err(error);
         }
+        a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+            "sandbox.readiness",
+            readiness_start.elapsed(),
+        );
 
         self.exec_socket_path = Some(layout.exec_socket_path);
         self.pty_socket_path = Some(layout.pty_socket_path);
@@ -217,6 +257,10 @@ impl VmManager {
             parent: boot_span,
             box_id = %self.box_id,
             "Sandbox ready"
+        );
+        a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+            "sandbox.start_total",
+            boot_start.elapsed(),
         );
         Ok(())
     }

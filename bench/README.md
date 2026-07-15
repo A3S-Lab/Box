@@ -19,6 +19,7 @@ is the environment used by the original foreground-latency regression report.
 bench/bench.sh            # default Linux/KVM suite, including foreground latency
 bench/bench.sh cold       # cold-boot latency only
 bench/bench.sh foreground # cached foreground no-op, optionally versus Docker
+bench/bench.sh sandbox    # phased hot Sandbox lifecycle, optionally versus Docker
 bench/bench.sh warm       # warm-pool acquire latency
 bench/bench.sh fork       # snapshot-fork pool fill (cold-fill vs CoW restore)
 bench/bench.sh leak       # churn + leak assertion (exit != 0 on leak)
@@ -38,6 +39,11 @@ Tunables (env):
 | `FOREGROUND_DOCKER` | `1` | compare Docker when its CLI and daemon are available |
 | `FOREGROUND_MAX_P50_MS` | `0` | optional absolute a3s-box p50 gate; `0` reports without gating |
 | `FOREGROUND_MAX_DOCKER_RATIO` | `0` | optional p50 ratio gate; `0` reports without gating |
+| `SANDBOX_RUNS` | `RUNS` | recorded hot Sandbox lifecycle samples |
+| `SANDBOX_WARMUPS` | `1` | unmeasured warm-up runs before Sandbox sampling |
+| `SANDBOX_DOCKER` | `1` | alternate matching Docker samples when its daemon is available |
+| `SANDBOX_RESULTS` | `/tmp/a3s-box-sandbox-lifecycle-<pid>.csv` | machine-readable per-sample output |
+| `SANDBOX_LOG_DIR` | `/tmp/a3s-box-sandbox-lifecycle-<pid>` | raw opt-in JSONL profile logs |
 | `POOL_SIZE` | `16` | warm-pool / fork fill size |
 | `CHURN` | `30` | create/run/remove cycles for the leak test |
 | `PNPM_PROJECT` | unset | project directory with `package.json` and `pnpm-lock.yaml` for `pnpm` mode |
@@ -61,6 +67,15 @@ Tunables (env):
   and minimum. When Docker is available, the harness runs the matching cached
   Docker no-op and reports the p50 ratio. Set `FOREGROUND_MAX_DOCKER_RATIO` only
   on a stable dedicated runner when the comparison should be a hard gate.
+- **sandbox** — explicitly selects `--isolation sandbox`, completes image pull
+  and unpack before warm-up, then records the hot one-shot lifecycle as four
+  non-cold measurements: create/start, command execution, reconciliation, and
+  removal. The CSV also retains the create/start internals (capability probe,
+  layout, instance preparation, managed mount preparation, rootfs ownership,
+  OCI bundle, `crun` launch, and readiness) for regression diagnosis. When
+  Docker is available, samples alternate runtime order and the matching hot
+  `docker run --rm IMAGE true` totals are written to the same CSV. Profiling is
+  opt-in and emits no workload arguments, paths, or credentials.
 - **warm** — `pool start` then `pool run` acquire latency (p50 / p90 / min).
 - **fork** — `pool start --size N` fill time **without** vs **with**
   `--snapshot-fork`, as total + amortized-per-VM, so the CoW speedup is a

@@ -533,6 +533,7 @@ async fn run_foreground(
     mut ctx: RunContext,
     args: &RunArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let foreground_start = std::time::Instant::now();
     println!(
         "Box {} ({}) started. Press Ctrl-C to stop.",
         ctx.name,
@@ -598,18 +599,37 @@ async fn run_foreground(
             }
         }
     };
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+        "foreground.command_execution",
+        foreground_start.elapsed(),
+    );
 
+    let raw_log_drain_start = std::time::Instant::now();
     wait_for_foreground_log_drain(&[(&console_log, &stdout_pos), (&console_err, &stderr_pos)])
         .await;
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+        "foreground.raw_log_drain",
+        raw_log_drain_start.elapsed(),
+    );
     log_handle.abort();
 
     if stop_reason == ForegroundStopReason::ProcessExited {
+        let structured_log_drain_start = std::time::Instant::now();
         wait_for_sandbox_structured_log_drain(&ctx).await?;
+        a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+            "foreground.structured_log_drain",
+            structured_log_drain_start.elapsed(),
+        );
     }
 
     let persisted_exit_code = a3s_box_runtime::rootfs::read_persisted_exit_code(&ctx.box_dir);
     let exit_code = foreground_exit_code(stop_reason, persisted_exit_code);
+    let archive_start = std::time::Instant::now();
     archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+        "foreground.archive",
+        archive_start.elapsed(),
+    );
     cleanup_managed_execution(
         &mut ctx,
         args.rm,
@@ -863,6 +883,7 @@ async fn cleanup_managed_execution(
         handle.abort();
     }
 
+    let manager_reconcile_start = std::time::Instant::now();
     let cleanup_result = if natural_exit {
         match ctx.manager.inspect(&ctx.execution_id).await {
             Ok(status)
@@ -897,7 +918,12 @@ async fn cleanup_managed_execution(
             ctx.box_id
         )
     })?;
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+        "foreground.manager_reconcile",
+        manager_reconcile_start.elapsed(),
+    );
 
+    let removal_start = std::time::Instant::now();
     if auto_remove {
         StateFile::remove_record(&ctx.box_id)
             .map_err(|error| format!("failed to remove box {} state: {error}", ctx.box_id))?;
@@ -923,6 +949,10 @@ async fn cleanup_managed_execution(
         })
         .map_err(|error| format!("failed to mark box {} stopped: {error}", ctx.box_id))?;
     }
+    a3s_box_core::lifecycle_profile::record_lifecycle_phase(
+        "foreground.removal",
+        removal_start.elapsed(),
+    );
 
     Ok(())
 }
