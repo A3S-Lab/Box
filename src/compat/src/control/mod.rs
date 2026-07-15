@@ -6,11 +6,12 @@ mod repository;
 mod service;
 mod sqlite;
 mod supervisor;
+mod token_keyring;
 mod validation;
 
 pub use credential::{
     IssuedToken, SandboxCredentials, SecretToken, StoredToken, TokenIssuer, TokenIssuerError,
-    TokenIssuerResult, TokenResolver, TokenScope,
+    TokenIssuerResult, TokenResolver, TokenScope, TokenVerifier,
 };
 pub use memory::MemorySandboxRepository;
 pub use model::{
@@ -35,6 +36,7 @@ pub use supervisor::{
     LifecycleMaintenanceFailure, LifecycleMaintenanceReport, LifecycleSupervisor,
     LifecycleSupervisorDependencies, LifecycleSupervisorError, LifecycleSupervisorResult,
 };
+pub use token_keyring::{RotatingTokenProvider, TokenKeyMaterial};
 
 #[cfg(test)]
 mod tests;

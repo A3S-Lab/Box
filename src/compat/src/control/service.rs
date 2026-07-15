@@ -320,11 +320,11 @@ impl ControlService {
     ) -> ControlServiceResult<SandboxConnection> {
         let envd_access_token = self
             .token_resolver
-            .resolve(&record.credentials().envd)
+            .resolve(TokenScope::Envd, &record.credentials().envd)
             .await?;
         let traffic_access_token = self
             .token_resolver
-            .resolve(&record.credentials().traffic)
+            .resolve(TokenScope::Traffic, &record.credentials().traffic)
             .await?;
         Ok(SandboxConnection {
             record,

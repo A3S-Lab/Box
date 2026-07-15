@@ -47,6 +47,7 @@ dependencies = [
  "hyper 0.14.32",
  "prost",
  "prost-types",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml",
