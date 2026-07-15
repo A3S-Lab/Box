@@ -11,9 +11,9 @@ use sha2::{Digest, Sha256};
 
 use crate::sandbox::{
     compile_oci_spec, inspect_rootfs_identity_requirements, plan_id_mappings,
-    prepare_managed_mount_source, prepare_rootfs_ownership, probe_sandbox_capabilities,
-    validate_external_mount_access, write_bundle, CrunController, SandboxBundleSpec,
-    SandboxLaunchSpec, SandboxMount, SandboxResources, SandboxTmpfs,
+    prepare_crun_path_access, prepare_managed_mount_source, prepare_rootfs_ownership,
+    probe_sandbox_capabilities, validate_external_mount_access, write_bundle, CrunController,
+    SandboxBundleSpec, SandboxLaunchSpec, SandboxMount, SandboxResources, SandboxTmpfs,
 };
 
 use super::{BoxState, VmManager};
@@ -136,6 +136,13 @@ impl VmManager {
             };
             let oci_spec = compile_oci_spec(&bundle_spec)?;
             write_bundle(&bundle_dir, &oci_spec, &execution_plan, &capabilities)?;
+            prepare_crun_path_access(
+                &self.home_dir,
+                &self.box_id,
+                &bundle_dir,
+                &layout.rootfs_path,
+                &bundle_spec.id_mappings,
+            )?;
 
             Ok((instance_spec, bundle_spec))
         })();
