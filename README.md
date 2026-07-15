@@ -40,6 +40,7 @@ As of **v2.4.0**, three adversarial audits — production-operability (24 findin
 | OCI images | Pull, load, save, tag, inspect, history, remove, and local cache resolution are implemented. Push and cosign signing/verification paths exist and require registry access for end-to-end validation. |
 | Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell/exec-form `RUN` are implemented by the host engine on Linux. `--run-pool` can execute `RUN` through a leased warm-pool VM by mounting the mutable build rootfs into the guest. On macOS, auto `RUN` builds still delegate to BuildKit inside an A3S Linux VM (`--builder=buildkit-vm`) unless `--run-pool` is selected; unsafe host execution remains an explicit experiment-only escape hatch. |
 | Lifecycle and exec | `run`, `create`, `start`, `stop`, `restart`, `rm`, `wait`, foreground/detached runs, non-PTY exec, PTY exec, logs, stats, and inspect are implemented. |
+| OCI Sandbox | Linux-only, explicit `--isolation sandbox` shared-kernel execution through certified `crun`. Structured `json-file` logs preserve stdout/stderr identity for foreground, detached, natural-exit, stop, kill, and auto-remove paths. Generation-owned log workers are PID-start-time fenced, drained before archival, and recovered during cleanup. The security-negative matrix and performance gate remain release work; this mode does not claim MicroVM-equivalent isolation. |
 | Warm pool and snapshot-fork | A warm pool serves pre-booted sandboxes over a socket. Native snapshot-fork (Copy-on-Write microVM cloning) snapshots one booted template and restores many forks from it, each mapping the template RAM `MAP_PRIVATE`. Verified on `/dev/kvm`: ~4× faster than a cold boot per fork, 100 forks in under ~1 s (~8 ms amortized each). Requires `/dev/kvm`; opt in with `pool start --snapshot-fork` or the `KRUN_SNAPSHOT_*` / `KRUN_RESTORE_FROM` env. |
 | Networking | Default TSI networking, TCP `host:guest` publishing, user-defined bridge networks, network inspect/connect/disconnect/rm, and `/etc/hosts` peer discovery are implemented with documented platform boundaries. |
 | Compose | A useful local subset is implemented: image, command, entrypoint, env, env_file, ports, volumes, depends_on, networks, DNS, tmpfs, workdir, hostname, extra_hosts, labels, healthcheck, restart, CPU/memory, capabilities, and privileged mode. |
@@ -341,7 +342,10 @@ choices with runtime defaults.
 Separately, an A3S OS smoke harness proves that `--isolation sandbox` create
 persists a recoverable `created` reservation without allocating backend
 resources, then starts through certified `crun`, rejects pause explicitly, and
-owns kill and cleanup without MicroVM fallback.
+owns kill and cleanup without MicroVM fallback. The same host validation proves
+that structured Sandbox logs retain both stdout and stderr, drain final records
+before natural-exit or auto-remove archival, and leave no generation log worker,
+crun state, box directory, or socket behind.
 
 Those protocol and runtime tests are not yet one end-to-end service path. CLI
 `create` now persists its reservation and complete caller policy through the

@@ -330,6 +330,30 @@ The shim owns the OCI container lifecycle, control listeners, stdio pipes,
 ready handshake, and durable cleanup metadata. The workload must not be able to
 replace the shim or mutate its bundle after validation.
 
+### Structured log lifecycle
+
+Each running Sandbox generation owns a separate packaged log worker alongside
+`crun run`. The runtime opens independent raw console files for container
+stdout and stderr, and the worker tails both into Docker-compatible
+`logs/container.json` records without losing the `stdout` or `stderr` stream
+field. Runtime and init diagnostics use their dedicated log and are never
+projected as workload output.
+
+The worker becomes ready only after both console readers are open. It watches
+the exact `crun run` PID and Linux process start time recorded for that
+generation, so PID reuse cannot end or extend another generation's logging.
+Once that writer is gone or is an unreaped zombie, its output descriptors are
+closed and the worker drains both files through final EOF, including a trailing
+partial line. The runtime record persists the worker PID and start time so an
+explicit stop, kill, detached natural-exit reconciliation, or crash recovery can
+wait for the same generation to finish before deleting its artifacts.
+
+Auto-remove archival happens only after that drain completes. Consequently,
+`a3s-box logs <name-or-id>` reads complete structured output from
+`removed-logs`, even after the box directory and crun state have been removed.
+Failure to prove that the worker finished is a cleanup error: state is retained
+for recovery instead of silently archiving an incomplete log.
+
 ### OCI bundle compiler
 
 The compiler writes a protected, per-box bundle from the resolved plan. It must
@@ -554,7 +578,7 @@ explicitly unsafe execution posture and cannot satisfy production acceptance.
 | run, foreground, detach | Supported | MVP |
 | exec and non-TTY streams | Supported | MVP |
 | PTY, shell, attach | Supported | MVP |
-| logs and exit code | Supported | MVP |
+| logs and exit code | Supported | Split structured stdout/stderr, final drain, detached recovery, and auto-remove archival implemented |
 | stop, kill, wait, restart | Supported | MVP |
 | health checks | Supported | MVP |
 | numeric user/workdir/env | Supported | MVP |
