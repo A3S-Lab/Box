@@ -44,6 +44,7 @@ pub struct CrunHandler {
     cleaned: bool,
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) struct CrunHandlerSpec {
     runtime_path: PathBuf,
     runtime_root: PathBuf,
@@ -53,6 +54,7 @@ pub(crate) struct CrunHandlerSpec {
     runtime_record: PathBuf,
 }
 
+#[cfg(target_os = "linux")]
 impl CrunHandlerSpec {
     pub(crate) fn new(
         runtime_path: PathBuf,
@@ -313,6 +315,7 @@ impl CrunHandler {
             );
             // The start-time token was revalidated immediately before the
             // signal, so a reused PID cannot be targeted.
+            #[cfg(target_os = "linux")]
             if let Ok(pid) = i32::try_from(pid) {
                 unsafe {
                     libc::kill(pid, libc::SIGKILL);

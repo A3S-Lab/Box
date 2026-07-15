@@ -20,9 +20,10 @@ use libkrun_sys::krun_set_port_map;
 use libkrun_sys::{krun_add_net_tcp, krun_add_vsock_port_windows, krun_set_kernel};
 #[cfg(target_os = "linux")]
 use libkrun_sys::{krun_add_net_unixstream, krun_split_irqchip};
+#[cfg(unix)]
+use libkrun_sys::{krun_add_virtio_console_default, krun_disable_implicit_console};
 use libkrun_sys::{
-    krun_add_virtio_console_default, krun_add_virtiofs, krun_create_ctx,
-    krun_disable_implicit_console, krun_free_ctx, krun_init_log, krun_set_console_output,
+    krun_add_virtiofs, krun_create_ctx, krun_free_ctx, krun_init_log, krun_set_console_output,
     krun_set_env, krun_set_exec, krun_set_rlimits, krun_set_root, krun_set_vm_config,
     krun_set_workdir, krun_setgid, krun_setuid, krun_start_enter,
 };
@@ -442,6 +443,7 @@ impl KrunContext {
     /// Replace the implicit console with a virtio-console whose stdout and
     /// stderr go to SEPARATE host fds (so the guest's stderr can be tagged).
     /// `input_fd` may be -1 (no stdin). Caller owns the fds for the VM lifetime.
+    #[cfg(unix)]
     pub unsafe fn add_split_console(
         &self,
         input_fd: i32,

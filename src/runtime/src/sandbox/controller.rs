@@ -21,9 +21,9 @@ use oci_spec::runtime::Spec;
 use serde::Serialize;
 
 use super::capability::{CertifiedCrun, SandboxCapabilitySnapshot};
+use super::handler::CrunHandler;
 #[cfg(target_os = "linux")]
-use super::handler::CrunState;
-use super::handler::{CrunHandler, CrunHandlerSpec};
+use super::handler::{CrunHandlerSpec, CrunState};
 
 #[cfg(target_os = "linux")]
 const EXEC_LISTENER_FD: i32 = 3;
