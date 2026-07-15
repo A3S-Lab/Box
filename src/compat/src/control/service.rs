@@ -1,17 +1,26 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
-use a3s_box_core::{resolve_execution, CreateExecutionRequest, ExecutionManager, NetworkMode};
+use a3s_box_core::{
+    resolve_execution, CreateExecutionRequest, ExecutionLease, ExecutionManager,
+    ExecutionManagerError, ExecutionPortConnector, NetworkMode,
+};
 use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 use super::{
-    Clock, CompareAndSwapResult, IdentityProviderError, LifecycleError, LifecycleFailure,
+    Clock, CompareAndSwapResult, EnvdMode, IdentityProviderError, LifecycleError, LifecycleFailure,
     LifecyclePolicy, LifecycleState, NewSandboxRecord, RepositoryError, SandboxCredentials,
     SandboxIdentityProvider, SandboxListFilter, SandboxPage, SandboxRecord, SandboxRepository,
     SecretToken, TemplateProvider, TemplateProviderError, TokenIssuer, TokenIssuerError,
     TokenResolver, TokenScope,
 };
+use crate::routing::ENVD_PORT;
+
+const RUNTIME_ENVD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const RUNTIME_ENVD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const RUNTIME_ENVD_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
 #[derive(Debug, Clone)]
 pub struct CreateSandboxRequest {
@@ -79,6 +88,7 @@ pub type ControlServiceResult<T> = std::result::Result<T, ControlServiceError>;
 pub struct ControlService {
     repository: Arc<dyn SandboxRepository>,
     executions: Arc<dyn ExecutionManager>,
+    ports: Arc<dyn ExecutionPortConnector>,
     clock: Arc<dyn Clock>,
     identities: Arc<dyn SandboxIdentityProvider>,
     templates: Arc<dyn TemplateProvider>,
@@ -89,6 +99,7 @@ pub struct ControlService {
 pub struct ControlServiceDependencies {
     pub repository: Arc<dyn SandboxRepository>,
     pub executions: Arc<dyn ExecutionManager>,
+    pub ports: Arc<dyn ExecutionPortConnector>,
     pub clock: Arc<dyn Clock>,
     pub identities: Arc<dyn SandboxIdentityProvider>,
     pub templates: Arc<dyn TemplateProvider>,
@@ -101,6 +112,7 @@ impl ControlService {
         Self {
             repository: dependencies.repository,
             executions: dependencies.executions,
+            ports: dependencies.ports,
             clock: dependencies.clock,
             identities: dependencies.identities,
             templates: dependencies.templates,
@@ -180,6 +192,24 @@ impl ControlService {
                 return Err(error.into());
             }
         };
+        if template.envd_mode == EnvdMode::Runtime {
+            if let Err(readiness_error) = self.wait_for_runtime_envd(&lease).await {
+                let cleanup = self
+                    .executions
+                    .kill(&lease.execution_id, lease.generation)
+                    .await;
+                let expected = record.generation();
+                record.mark_failed(LifecycleFailure::RuntimeFailed)?;
+                self.replace(expected, record).await?;
+                return Err(match cleanup {
+                    Ok(_) => readiness_error,
+                    Err(cleanup_error) => ExecutionManagerError::Internal(format!(
+                        "{readiness_error}; runtime cleanup failed: {cleanup_error}"
+                    )),
+                }
+                .into());
+            }
+        }
 
         let expected = record.generation();
         if let Err(error) = record.mark_running(lease) {
@@ -195,6 +225,44 @@ impl ControlService {
             traffic_access_token: traffic.secret,
             disposition: ConnectionDisposition::Created,
         })
+    }
+
+    async fn wait_for_runtime_envd(
+        &self,
+        lease: &ExecutionLease,
+    ) -> Result<(), ExecutionManagerError> {
+        let port = NonZeroU16::new(ENVD_PORT).ok_or_else(|| {
+            ExecutionManagerError::Internal("envd port must be non-zero".to_string())
+        })?;
+        let deadline = tokio::time::Instant::now() + RUNTIME_ENVD_READY_TIMEOUT;
+        loop {
+            let last_error = match self
+                .ports
+                .connect_port(
+                    &lease.execution_id,
+                    lease.generation,
+                    port,
+                    RUNTIME_ENVD_CONNECT_TIMEOUT,
+                )
+                .await
+            {
+                Ok(stream) => {
+                    drop(stream);
+                    return Ok(());
+                }
+                Err(error @ ExecutionManagerError::InvalidRequest(_))
+                | Err(error @ ExecutionManagerError::Internal(_)) => return Err(error),
+                Err(error) => error,
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "runtime envd did not become ready within {} seconds: {}",
+                    RUNTIME_ENVD_READY_TIMEOUT.as_secs(),
+                    last_error
+                )));
+            }
+            tokio::time::sleep(RUNTIME_ENVD_RETRY_INTERVAL).await;
+        }
     }
 
     pub async fn connect(

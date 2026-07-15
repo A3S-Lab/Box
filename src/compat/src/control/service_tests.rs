@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
+use a3s_box_core::{ExecutionManagerError, ExecutionState};
 use chrono::Duration;
 
 use super::test_support::{assert_sandbox_request, create_request, test_time, TestHarness};
@@ -120,6 +121,58 @@ async fn failed_runtime_create_is_not_published() {
         harness.service.create(create_request("owner-1")).await,
         Err(ControlServiceError::Execution(_))
     ));
+    let sandbox_id = SandboxId::new("sandbox-1").unwrap();
+    assert!(matches!(
+        harness.service.get("owner-1", &sandbox_id).await,
+        Err(ControlServiceError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn runtime_envd_is_ready_before_the_sandbox_is_published() {
+    let harness = TestHarness::new();
+    let mut request = create_request("owner-1");
+    request.template_id = "runtime-envd-template".to_string();
+
+    let created = harness.service.create(request).await.unwrap();
+
+    assert_eq!(created.record.state(), LifecycleState::Running);
+    assert_eq!(created.record.envd_mode(), EnvdMode::Runtime);
+    assert_eq!(
+        harness.executions.port_requests(),
+        vec![(
+            "execution-operation-1".to_string(),
+            1,
+            crate::routing::ENVD_PORT,
+        )]
+    );
+}
+
+#[tokio::test]
+async fn permanent_runtime_envd_failure_stops_and_hides_the_execution() {
+    let harness = TestHarness::new();
+    harness.executions.fail_ports();
+    let mut request = create_request("owner-1");
+    request.template_id = "runtime-envd-template".to_string();
+
+    assert!(matches!(
+        harness.service.create(request).await,
+        Err(ControlServiceError::Execution(
+            ExecutionManagerError::InvalidRequest(_)
+        ))
+    ));
+    assert_eq!(
+        harness.executions.port_requests(),
+        vec![(
+            "execution-operation-1".to_string(),
+            1,
+            crate::routing::ENVD_PORT,
+        )]
+    );
+    assert_eq!(
+        harness.executions.execution_state("execution-operation-1"),
+        Some(ExecutionState::Stopped)
+    );
     let sandbox_id = SandboxId::new("sandbox-1").unwrap();
     assert!(matches!(
         harness.service.get("owner-1", &sandbox_id).await,
