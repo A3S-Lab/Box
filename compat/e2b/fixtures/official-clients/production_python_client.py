@@ -51,6 +51,11 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
             raise AssertionError("connect returned a different sandbox ID")
         if not sandbox.is_running():
             raise AssertionError("envd health reported the running sandbox as stopped")
+        result = sandbox.commands.run(
+            "printf 'python-sync:%s' \"$OFFICIAL_CLIENT\""
+        )
+        if result.stdout != "python-sync:python-sync" or result.stderr:
+            raise AssertionError(f"unexpected sync command result: {result!r}")
 
         paginator = Sandbox.list(
             query=SandboxQuery(metadata=metadata, state=[SandboxState.RUNNING]),
@@ -114,6 +119,11 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
             raise AssertionError("connect returned a different sandbox ID")
         if not await sandbox.is_running():
             raise AssertionError("envd health reported the running sandbox as stopped")
+        result = await sandbox.commands.run(
+            "printf 'python-async:%s' \"$OFFICIAL_CLIENT\""
+        )
+        if result.stdout != "python-async:python-async" or result.stderr:
+            raise AssertionError(f"unexpected async command result: {result!r}")
 
         paginator = AsyncSandbox.list(
             query=SandboxQuery(metadata=metadata, state=[SandboxState.RUNNING]),

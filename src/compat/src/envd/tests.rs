@@ -1,10 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use a3s_box_core::{
-    resolve_execution, BoxConfig, ExecutionGeneration, ExecutionId, ExecutionLease,
-    ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionState,
-    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome,
+    resolve_execution, BoxConfig, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
+    ExecutionLease, ExecutionManager, ExecutionManagerError, ExecutionManagerResult,
+    ExecutionProcess, ExecutionSessionManager, ExecutionState, ExecutionStatus, FileRequest,
+    FileResponse, KillOutcome, OperationId, ReconcileOutcome,
 };
+use a3s_box_core::pty::PtyRequest;
 use async_trait::async_trait;
 use axum::http::{Method, StatusCode};
 
@@ -74,6 +76,45 @@ impl ExecutionManager for InspectOnlyManager {
     }
 }
 
+#[async_trait]
+impl ExecutionSessionManager for InspectOnlyManager {
+    async fn execute(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: ExecRequest,
+    ) -> ExecutionManagerResult<ExecOutput> {
+        Err(unsupported())
+    }
+
+    async fn start_process(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: ExecRequest,
+    ) -> ExecutionManagerResult<ExecutionProcess> {
+        Err(unsupported())
+    }
+
+    async fn start_pty(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: PtyRequest,
+    ) -> ExecutionManagerResult<ExecutionProcess> {
+        Err(unsupported())
+    }
+
+    async fn transfer_file(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: FileRequest,
+    ) -> ExecutionManagerResult<FileResponse> {
+        Err(unsupported())
+    }
+}
+
 fn unsupported() -> ExecutionManagerError {
     ExecutionManagerError::Unavailable("unsupported test operation".to_string())
 }
@@ -88,7 +129,8 @@ fn status(state: ExecutionState, generation: ExecutionGeneration) -> ExecutionSt
 }
 
 fn broker(inspection: Inspection) -> EnvdBroker {
-    EnvdBroker::new(Arc::new(InspectOnlyManager::new(inspection)))
+    let manager = Arc::new(InspectOnlyManager::new(inspection));
+    EnvdBroker::new(manager.clone(), manager)
 }
 
 #[tokio::test]

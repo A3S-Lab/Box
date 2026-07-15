@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_box_core::{ExecutionManager, ExecutionPortConnector};
+use a3s_box_core::{ExecutionManager, ExecutionPortConnector, ExecutionSessionManager};
 use hyper::server::conn::Http;
 use hyper::service::service_fn;
 use rustls::ServerConfig;
@@ -70,6 +70,7 @@ impl DataPlaneGateway {
         parser: SandboxRouteParser,
         leases: RouteLeaseService,
         executions: Arc<dyn ExecutionManager>,
+        sessions: Arc<dyn ExecutionSessionManager>,
         connector: Arc<dyn ExecutionPortConnector>,
     ) -> DataPlaneGatewayResult<Self> {
         let tls =
@@ -78,6 +79,7 @@ impl DataPlaneGateway {
             parser,
             leases,
             executions,
+            sessions,
             connector,
             config.connect_timeout,
         );
