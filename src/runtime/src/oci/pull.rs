@@ -54,6 +54,16 @@ impl ImagePuller {
         Self::with_platform(store, auth, None)
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_registry_puller(store: Arc<ImageStore>, puller: RegistryPuller) -> Self {
+        Self {
+            store,
+            puller,
+            metrics: None,
+            mirrors: std::collections::HashMap::new(),
+        }
+    }
+
     /// Create an image puller that resolves multi-arch images to an explicit
     /// platform (e.g. "linux/arm64") instead of the host architecture. `None`
     /// keeps the host-architecture default.

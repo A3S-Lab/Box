@@ -18,8 +18,16 @@ use super::credentials::CredentialStore;
 use super::reference::ImageReference;
 use super::signing::{verify_image_signature, SignaturePolicy, VerifyResult};
 
+mod basic_pull;
+mod blob_pull;
+
+use basic_pull::{BasicImageManifest, BasicPullClient};
+#[cfg(test)]
+use blob_pull::HashingFileWriter;
+use blob_pull::{stream_and_verify_blob, BlobPullTransport};
+
 const REGISTRY_PROTOCOL_ENV: &str = "A3S_REGISTRY_PROTOCOL";
-const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json";
+const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json";
 
 /// Transport protocol used for registry operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,135 +85,15 @@ pub(crate) fn validated_digest_hex(digest: &str) -> Result<&str> {
         })
 }
 
-/// An `AsyncWrite` that streams bytes straight to a file while computing their
-/// SHA-256, so a pulled blob is hashed and written in bounded chunks instead of
-/// being fully buffered in memory.
-struct HashingFileWriter {
-    file: tokio::fs::File,
-    hasher: sha2::Sha256,
-}
-
-impl HashingFileWriter {
-    fn new(file: tokio::fs::File) -> Self {
-        use sha2::Digest;
-        Self {
-            file,
-            hasher: sha2::Sha256::new(),
-        }
-    }
-
-    fn finalize_hex(self) -> String {
-        use sha2::Digest;
-        format!("{:x}", self.hasher.finalize())
-    }
-}
-
-impl tokio::io::AsyncWrite for HashingFileWriter {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        use sha2::Digest;
-        let this = self.get_mut();
-        match std::pin::Pin::new(&mut this.file).poll_write(cx, buf) {
-            std::task::Poll::Ready(Ok(n)) => {
-                this.hasher.update(&buf[..n]);
-                std::task::Poll::Ready(Ok(n))
-            }
-            other => other,
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().file).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().file).poll_shutdown(cx)
-    }
-}
-
-/// Stream a blob to `dest`, verifying its SHA-256 against `descriptor.digest`
-/// as it downloads. The blob is written to a `.partial` temp file and only
-/// renamed into place once the digest checks out, so a failed/corrupted pull
-/// never leaves a bad blob under its content-addressed name. A blob whose digest
-/// uses an unsupported algorithm (anything but sha256) is rejected rather than
-/// stored unverified.
-async fn stream_and_verify_blob(
-    client: &Client,
-    oci_ref: &Reference,
-    descriptor: &oci_distribution::manifest::OciDescriptor,
-    dest: &Path,
-    what: &str,
-    registry: &str,
-) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let tmp = dest.with_extension("partial");
-    let file = tokio::fs::File::create(&tmp)
-        .await
-        .map_err(|e| BoxError::RegistryError {
-            registry: registry.to_string(),
-            message: format!("Failed to create {what} file: {e}"),
-        })?;
-    let mut writer = HashingFileWriter::new(file);
-
-    if let Err(e) = client.pull_blob(oci_ref, descriptor, &mut writer).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(BoxError::RegistryError {
-            registry: registry.to_string(),
-            message: format!("Failed to pull {what}: {e}"),
-        });
-    }
-    let _ = writer.flush().await;
-    let _ = writer.shutdown().await;
-    let actual_hex = writer.finalize_hex();
-
-    match descriptor.digest.strip_prefix("sha256:") {
-        Some(expected_hex) if actual_hex.eq_ignore_ascii_case(expected_hex) => {}
-        Some(expected_hex) => {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(BoxError::RegistryError {
-                registry: registry.to_string(),
-                message: format!(
-                    "{what} digest mismatch: expected sha256:{expected_hex}, computed sha256:{actual_hex}"
-                ),
-            });
-        }
-        None => {
-            // We can only verify sha256. Refuse to store a blob whose digest
-            // algorithm we cannot check rather than silently trust the registry's
-            // bytes — otherwise a malicious/MITM registry could serve arbitrary
-            // content under a sha512:/unknown digest and have it reach the rootfs.
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(BoxError::RegistryError {
-                registry: registry.to_string(),
-                message: format!(
-                    "{what} uses an unsupported digest algorithm ({}); refusing to store \
-                     unverifiable content (only sha256 is supported)",
-                    descriptor.digest
-                ),
-            });
-        }
-    }
-
-    tokio::fs::rename(&tmp, dest)
-        .await
-        .map_err(|e| BoxError::RegistryError {
-            registry: registry.to_string(),
-            message: format!("Failed to store {what} blob: {e}"),
-        })
-}
-
 /// Callback type for layer pull progress: `(current, total, digest, size_bytes)`.
 type PullProgressFn = Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>;
+
+struct PulledImageManifest {
+    manifest: OciImageManifest,
+    digest: String,
+    bytes: Option<Vec<u8>>,
+    used_basic: bool,
+}
 
 /// Authentication credentials for a container registry.
 #[derive(Debug, Clone)]
@@ -285,6 +173,8 @@ impl RegistryAuth {
 pub(crate) struct RegistryPuller {
     client: Client,
     auth: RegistryAuth,
+    protocol: RegistryProtocol,
+    target_arch: String,
     /// Signature verification policy (default: Skip).
     signature_policy: SignaturePolicy,
     /// Optional layer progress callback: (current, total, digest, size_bytes).
@@ -305,19 +195,11 @@ impl RegistryPuller {
 
     /// Create a new registry puller with the given authentication.
     pub fn with_auth(auth: RegistryAuth) -> Self {
-        let config = ClientConfig {
-            protocol: RegistryProtocol::from_env().client_protocol(),
-            platform_resolver: Some(Box::new(linux_platform_resolver)),
-            ..Default::default()
-        };
-        let client = Client::new(config);
-
-        Self {
-            client,
+        Self::with_auth_arch_and_protocol(
             auth,
-            signature_policy: SignaturePolicy::default(),
-            progress_fn: None,
-        }
+            resolve_target_arch(None),
+            RegistryProtocol::from_env(),
+        )
     }
 
     /// Like [`with_auth`](Self::with_auth) but resolves multi-arch image indexes
@@ -328,9 +210,17 @@ impl RegistryPuller {
             return Self::with_auth(auth);
         };
         let arch = resolve_target_arch(Some(&platform));
+        Self::with_auth_arch_and_protocol(auth, arch, RegistryProtocol::from_env())
+    }
+
+    fn with_auth_arch_and_protocol(
+        auth: RegistryAuth,
+        target_arch: String,
+        protocol: RegistryProtocol,
+    ) -> Self {
         let config = ClientConfig {
-            protocol: RegistryProtocol::from_env().client_protocol(),
-            platform_resolver: Some(Box::new(platform_resolver_for(arch))),
+            protocol: protocol.client_protocol(),
+            platform_resolver: Some(Box::new(platform_resolver_for(target_arch.clone()))),
             ..Default::default()
         };
         let client = Client::new(config);
@@ -338,6 +228,8 @@ impl RegistryPuller {
         Self {
             client,
             auth,
+            protocol,
+            target_arch,
             signature_policy: SignaturePolicy::default(),
             progress_fn: None,
         }
@@ -378,15 +270,11 @@ impl RegistryPuller {
         })?;
 
         // Pull manifest (resolves multi-arch image indexes to current platform)
-        let auth = self.auth.to_oci_auth();
-        let (image_manifest, manifest_digest) = self
-            .client
-            .pull_image_manifest(&oci_ref, &auth)
-            .await
-            .map_err(|e| BoxError::RegistryError {
-                registry: reference.registry.clone(),
-                message: format!("Failed to pull manifest: {}", e),
-            })?;
+        let pulled_manifest = self
+            .pull_image_manifest_with_auth_fallback(reference, &oci_ref)
+            .await?;
+        let image_manifest = pulled_manifest.manifest;
+        let manifest_digest = pulled_manifest.digest;
 
         // Verify image signature before downloading layers
         let verify_result = verify_image_signature(
@@ -421,7 +309,9 @@ impl RegistryPuller {
         // the Docker-Content-Digest header verbatim, and feeding `sha256:../../x`
         // into blobs_dir.join() would write the (attacker-shaped) manifest JSON to
         // an arbitrary host path outside the store.
-        let manifest_json = serde_json::to_vec(&image_manifest)?;
+        let manifest_json = pulled_manifest
+            .bytes
+            .unwrap_or(serde_json::to_vec(&image_manifest)?);
         let manifest_digest_hex = validated_digest_hex(&manifest_digest)?;
         std::fs::write(blobs_dir.join(manifest_digest_hex), &manifest_json).map_err(|e| {
             BoxError::RegistryError {
@@ -431,8 +321,14 @@ impl RegistryPuller {
         })?;
 
         // Pull image config and layers
-        self.pull_image_content(&oci_ref, &image_manifest, &blobs_dir, &reference.registry)
-            .await?;
+        self.pull_image_content(
+            reference,
+            &oci_ref,
+            &image_manifest,
+            &blobs_dir,
+            pulled_manifest.used_basic,
+        )
+        .await?;
 
         // Write oci-layout file
         std::fs::write(
@@ -476,43 +372,165 @@ impl RegistryPuller {
         let oci_ref = self.to_oci_reference(reference)?;
         let auth = self.auth.to_oci_auth();
 
-        let (_manifest, digest) =
-            self.client
-                .pull_manifest(&oci_ref, &auth)
-                .await
-                .map_err(|e| BoxError::RegistryError {
-                    registry: reference.registry.clone(),
-                    message: format!("Failed to pull manifest: {}", e),
-                })?;
+        match self.client.pull_manifest(&oci_ref, &auth).await {
+            Ok((_manifest, digest)) => {
+                validated_digest_hex(&digest)?;
+                Ok(digest)
+            }
+            Err(first_error)
+                if is_unauthorized_registry_error(&first_error)
+                    && self.auth.basic_credentials().is_some() =>
+            {
+                tracing::warn!(
+                    reference = %reference,
+                    error = %registry_error_summary(&first_error, &self.auth),
+                    "Registry rejected the default OCI manifest auth flow; retrying with preemptive Basic auth"
+                );
+                let basic_client = self
+                    .basic_pull_client(reference)
+                    .map_err(|fallback_error| {
+                        self.combined_pull_error(reference, &first_error, &fallback_error)
+                    })?;
+                basic_client
+                    .pull_manifest_digest(reference)
+                    .await
+                    .map_err(|fallback_error| {
+                        self.combined_pull_error(reference, &first_error, &fallback_error)
+                    })
+            }
+            Err(error) => Err(self.pull_error(reference, &error)),
+        }
+    }
 
-        Ok(digest)
+    async fn pull_image_manifest_with_auth_fallback(
+        &self,
+        reference: &ImageReference,
+        oci_ref: &Reference,
+    ) -> Result<PulledImageManifest> {
+        let auth = self.auth.to_oci_auth();
+        match self.client.pull_image_manifest(oci_ref, &auth).await {
+            Ok((manifest, digest)) => Ok(PulledImageManifest {
+                manifest,
+                digest,
+                bytes: None,
+                used_basic: false,
+            }),
+            Err(first_error)
+                if is_unauthorized_registry_error(&first_error)
+                    && self.auth.basic_credentials().is_some() =>
+            {
+                tracing::warn!(
+                    reference = %reference,
+                    error = %registry_error_summary(&first_error, &self.auth),
+                    "Registry rejected the default OCI manifest auth flow; retrying with preemptive Basic auth"
+                );
+                let basic_client = self
+                    .basic_pull_client(reference)
+                    .map_err(|fallback_error| {
+                        self.combined_pull_error(reference, &first_error, &fallback_error)
+                    })?;
+                let BasicImageManifest {
+                    manifest,
+                    digest,
+                    bytes,
+                } = basic_client.pull_image_manifest(reference).await.map_err(
+                    |fallback_error| {
+                        self.combined_pull_error(reference, &first_error, &fallback_error)
+                    },
+                )?;
+                Ok(PulledImageManifest {
+                    manifest,
+                    digest,
+                    bytes: Some(bytes),
+                    used_basic: true,
+                })
+            }
+            Err(error) => Err(self.pull_error(reference, &error)),
+        }
+    }
+
+    fn basic_pull_client(
+        &self,
+        reference: &ImageReference,
+    ) -> std::result::Result<BasicPullClient, OciDistributionError> {
+        BasicPullClient::new(
+            self.protocol,
+            reference,
+            &self.auth,
+            self.target_arch.clone(),
+        )
+    }
+
+    fn pull_error(&self, reference: &ImageReference, error: &OciDistributionError) -> BoxError {
+        BoxError::RegistryError {
+            registry: reference.registry.clone(),
+            message: format!(
+                "Failed to pull manifest: {}",
+                registry_error_summary(error, &self.auth)
+            ),
+        }
+    }
+
+    fn combined_pull_error(
+        &self,
+        reference: &ImageReference,
+        first_error: &OciDistributionError,
+        fallback_error: &OciDistributionError,
+    ) -> BoxError {
+        BoxError::RegistryError {
+            registry: reference.registry.clone(),
+            message: format!(
+                "Failed to pull manifest: default auth failed: {}; preemptive Basic retry failed: {}",
+                registry_error_summary(first_error, &self.auth),
+                registry_error_summary(fallback_error, &self.auth)
+            ),
+        }
     }
 
     /// Pull config and layers for an image manifest, writing blobs to disk.
     async fn pull_image_content(
         &self,
+        reference: &ImageReference,
         oci_ref: &Reference,
         manifest: &OciImageManifest,
         blobs_dir: &Path,
-        registry: &str,
+        force_basic: bool,
     ) -> Result<()> {
+        let basic_client = if self.auth.basic_credentials().is_some() {
+            Some(
+                self.basic_pull_client(reference)
+                    .map_err(|error| BoxError::RegistryError {
+                        registry: reference.registry.clone(),
+                        message: format!(
+                            "Failed to prepare authenticated blob pull: {}",
+                            registry_error_summary(&error, &self.auth)
+                        ),
+                    })?,
+            )
+        } else {
+            None
+        };
+        let transport = BlobPullTransport {
+            client: &self.client,
+            oci_ref,
+            basic_client: basic_client.as_ref(),
+            force_basic,
+            auth: &self.auth,
+            registry: &reference.registry,
+        };
+
         // Stream the config blob to disk, verifying its digest on the fly.
         // pull_blob delivers raw bytes without validation, so the streaming
         // hasher both bounds memory and guards against a buggy/malicious
         // registry or a corrupted transfer being stored content-addressed and
         // later extracted into the guest.
         let config_descriptor = &manifest.config;
-        let config_digest_hex = config_descriptor
-            .digest
-            .strip_prefix("sha256:")
-            .unwrap_or(&config_descriptor.digest);
+        let config_digest_hex = validated_digest_hex(&config_descriptor.digest)?;
         stream_and_verify_blob(
-            &self.client,
-            oci_ref,
+            &transport,
             config_descriptor,
             &blobs_dir.join(config_digest_hex),
             "config blob",
-            registry,
         )
         .await?;
 
@@ -529,17 +547,12 @@ impl RegistryPuller {
                 f(idx + 1, total, &layer.digest, layer.size);
             }
 
-            let layer_digest_hex = layer
-                .digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&layer.digest);
+            let layer_digest_hex = validated_digest_hex(&layer.digest)?;
             stream_and_verify_blob(
-                &self.client,
-                oci_ref,
+                &transport,
                 layer,
                 &blobs_dir.join(layer_digest_hex),
                 "layer",
-                registry,
             )
             .await?;
 
@@ -809,7 +822,7 @@ impl RegistryPusher {
             .await
         {
             Err(first_error)
-                if is_unauthorized_push_error(&first_error)
+                if is_unauthorized_registry_error(&first_error)
                     && self.auth.basic_credentials().is_some() =>
             {
                 tracing::warn!(
@@ -923,7 +936,7 @@ impl RegistryPusher {
                 verify_remote_manifest_digest(reference, expected_digest, &remote_digest)
             }
             Err(error)
-                if is_unauthorized_push_error(&error)
+                if is_unauthorized_registry_error(&error)
                     && self.auth.basic_credentials().is_some() =>
             {
                 let remote_digest = self
@@ -1018,6 +1031,18 @@ fn registry_manifest_url(
 ) -> std::result::Result<oci_reqwest::Url, OciDistributionError> {
     oci_reqwest::Url::parse(&format!(
         "{}/v2/{repository}/manifests/{reference}",
+        base.as_str().trim_end_matches('/')
+    ))
+    .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))
+}
+
+fn registry_blob_url(
+    base: &oci_reqwest::Url,
+    repository: &str,
+    digest: &str,
+) -> std::result::Result<oci_reqwest::Url, OciDistributionError> {
+    oci_reqwest::Url::parse(&format!(
+        "{}/v2/{repository}/blobs/{digest}",
         base.as_str().trim_end_matches('/')
     ))
     .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))
@@ -1175,17 +1200,32 @@ async fn push_blob_with_basic_auth(
     response_location_or_url(&response, &complete_url)
 }
 
-fn is_unauthorized_push_error(error: &OciDistributionError) -> bool {
+fn is_unauthorized_registry_error(error: &OciDistributionError) -> bool {
     match error {
         OciDistributionError::UnauthorizedError { .. }
         | OciDistributionError::AuthenticationFailure(_)
         | OciDistributionError::ServerError { code: 401, .. } => true,
+        OciDistributionError::RequestError(error) => error
+            .status()
+            .is_some_and(|status| status == oci_reqwest::StatusCode::UNAUTHORIZED),
         OciDistributionError::RegistryError { envelope, .. } => envelope
             .errors
             .iter()
             .any(|err| matches!(err.code, OciErrorCode::Unauthorized)),
         _ => false,
     }
+}
+
+fn registry_error_summary(error: &OciDistributionError, auth: &RegistryAuth) -> String {
+    let mut message = error.to_string();
+    if let Some((username, password)) = auth.basic_credentials() {
+        for secret in [username, password] {
+            if !secret.is_empty() {
+                message = message.replace(&secret, "[redacted]");
+            }
+        }
+    }
+    message
 }
 
 fn is_repository_already_exists_push_error(error: &OciDistributionError) -> bool {
@@ -1274,11 +1314,6 @@ fn platform_resolver_for(arch: String) -> impl Fn(&[ImageIndexEntry]) -> Option<
             })
             .map(|entry| entry.digest.clone())
     }
-}
-
-/// Platform resolver selecting the linux manifest matching the host architecture.
-fn linux_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
-    platform_resolver_for(resolve_target_arch(None))(manifests)
 }
 
 #[cfg(test)]
@@ -1707,3 +1742,6 @@ mod tests {
         assert!(err.to_string().contains(&layer_digest));
     }
 }
+
+#[cfg(test)]
+mod basic_pull_tests;

@@ -171,6 +171,7 @@ dependencies = [
  "a3s-box-netproxy",
  "a3s-common",
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bzip2",
  "chrono",
