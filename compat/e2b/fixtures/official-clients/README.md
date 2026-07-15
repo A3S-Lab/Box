@@ -78,7 +78,7 @@ wildcard sandbox domain must resolve to the gateway listener. The smoke accepts
 already reserves IPv4 port 443; for example, `::1` with a `box.localhost`
 domain keeps the gate local while preserving normal TLS hostname behavior.
 
-This gate proves production lifecycle behavior, running-state envd health, and
-cleanup through the public clients. It does not claim envd command,
-filesystem, PTY, post-kill health, or Code Interpreter execution compatibility;
-those require their separate data-plane suites.
+This gate proves production lifecycle behavior, running and post-kill envd
+health, and cleanup through the public clients. It does not claim envd command,
+filesystem, PTY, or Code Interpreter execution compatibility; those require
+their separate data-plane suites.
