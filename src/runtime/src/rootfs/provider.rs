@@ -268,8 +268,36 @@ impl RootfsProvider for CaseSensitiveApfsProvider {
 /// ```
 pub struct OverlayProvider;
 
+impl OverlayProvider {
+    fn lower_dir(box_dir: &Path, cache_dir: &Path) -> Result<PathBuf> {
+        let rootfs = box_dir.join("rootfs");
+        match std::fs::read_dir(&rootfs) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    // A cache miss builds the first generation directly in `rootfs`.
+                    // Once that generation has run, the cache will usually be warm.
+                    // Keep the original writable tree as the overlay lower instead
+                    // of switching the next generation to the immutable image cache;
+                    // otherwise persistent guest writes silently disappear on restart.
+                    Ok(rootfs)
+                } else {
+                    Ok(cache_dir.to_path_buf())
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(cache_dir.to_path_buf())
+            }
+            Err(error) => Err(BoxError::BuildError(format!(
+                "Failed to inspect existing rootfs {}: {error}",
+                rootfs.display()
+            ))),
+        }
+    }
+}
+
 impl RootfsProvider for OverlayProvider {
     fn prepare(&self, box_dir: &Path, cache_dir: &Path) -> Result<PathBuf> {
+        let lower = Self::lower_dir(box_dir, cache_dir)?;
         let upper = box_dir.join("upper");
         let work = box_dir.join("work");
         let merged = box_dir.join("merged");
@@ -291,10 +319,10 @@ impl RootfsProvider for OverlayProvider {
             return Ok(merged);
         }
 
-        super::overlay::overlay_mount(cache_dir, &upper, &work, &merged)?;
+        super::overlay::overlay_mount(&lower, &upper, &work, &merged)?;
 
         tracing::info!(
-            lower = %cache_dir.display(),
+            lower = %lower.display(),
             merged = %merged.display(),
             "Overlay mount ready"
         );
@@ -311,8 +339,10 @@ impl RootfsProvider for OverlayProvider {
         super::unmount_box_overlay(&merged);
 
         if persistent {
-            // Keep upper (writes) and remove only merged/work (not needed at rest)
-            tracing::info!("Persistent box: keeping overlay upper layer on disk");
+            // Keep both possible persistent generations: a cache-miss generation
+            // lives in `rootfs`, while later overlay writes live in `upper`.
+            // The next prepare mounts their union again.
+            tracing::info!("Persistent box: keeping rootfs and overlay upper on disk");
             for dir_name in &["merged", "work"] {
                 let dir = box_dir.join(dir_name);
                 if dir.exists() {
@@ -324,7 +354,7 @@ impl RootfsProvider for OverlayProvider {
             return Ok(());
         }
 
-        for dir_name in &["upper", "work", "merged"] {
+        for dir_name in &["rootfs", "upper", "work", "merged"] {
             let dir = box_dir.join(dir_name);
             if dir.exists() {
                 if let Err(e) = std::fs::remove_dir_all(&dir) {
@@ -475,12 +505,43 @@ mod tests {
     }
 
     #[test]
-    fn test_overlay_provider_cleanup_persistent_keeps_upper_only() {
+    fn test_overlay_provider_uses_populated_rootfs_as_persistent_lower() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let box_dir = tmp.path().join("box");
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join("restart-proof"), "generation-one").unwrap();
+
+        assert_eq!(
+            OverlayProvider::lower_dir(&box_dir, &cache_dir).unwrap(),
+            rootfs
+        );
+    }
+
+    #[test]
+    fn test_overlay_provider_ignores_empty_rootfs_as_lower() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::create_dir_all(box_dir.join("rootfs")).unwrap();
+
+        assert_eq!(
+            OverlayProvider::lower_dir(&box_dir, &cache_dir).unwrap(),
+            cache_dir
+        );
+    }
+
+    #[test]
+    fn test_overlay_provider_cleanup_persistent_keeps_rootfs_and_upper() {
         let tmp = TempDir::new().unwrap();
         let box_dir = tmp.path().join("box");
-        for dir in ["upper", "work", "merged"] {
+        for dir in ["rootfs", "upper", "work", "merged"] {
             std::fs::create_dir_all(box_dir.join(dir)).unwrap();
         }
+        std::fs::write(box_dir.join("rootfs/restart-proof"), "generation-one").unwrap();
         std::fs::write(box_dir.join("upper/data.txt"), "state").unwrap();
         std::fs::write(box_dir.join("work/scratch.txt"), "work").unwrap();
         std::fs::write(box_dir.join("merged/view.txt"), "merged").unwrap();
@@ -491,6 +552,10 @@ mod tests {
             std::fs::read_to_string(box_dir.join("upper/data.txt")).unwrap(),
             "state"
         );
+        assert_eq!(
+            std::fs::read_to_string(box_dir.join("rootfs/restart-proof")).unwrap(),
+            "generation-one"
+        );
         assert!(!box_dir.join("work").exists());
         assert!(!box_dir.join("merged").exists());
     }
@@ -499,13 +564,14 @@ mod tests {
     fn test_overlay_provider_cleanup_nonpersistent_removes_all_overlay_dirs() {
         let tmp = TempDir::new().unwrap();
         let box_dir = tmp.path().join("box");
-        for dir in ["upper", "work", "merged"] {
+        for dir in ["rootfs", "upper", "work", "merged"] {
             std::fs::create_dir_all(box_dir.join(dir)).unwrap();
             std::fs::write(box_dir.join(dir).join("file.txt"), "data").unwrap();
         }
 
         OverlayProvider.cleanup(&box_dir, false).unwrap();
 
+        assert!(!box_dir.join("rootfs").exists());
         assert!(!box_dir.join("upper").exists());
         assert!(!box_dir.join("work").exists());
         assert!(!box_dir.join("merged").exists());
