@@ -112,6 +112,7 @@ impl TemplateProvider for TestTemplates {
                 ..BoxConfig::default()
             },
             envd_version: "0.1.3".to_string(),
+            envd_mode: EnvdMode::Broker,
             routing: if template_id == "code-interpreter-v1" {
                 crate::routing::SandboxRoutePolicy::default()
                     .with_port(crate::routing::CODE_INTERPRETER_PORT, TokenScope::Traffic)

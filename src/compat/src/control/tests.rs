@@ -47,6 +47,7 @@ fn creating_record_with_timeout_action(id: &str, on_timeout: OnTimeoutAction) ->
         expires_at: instant(0) + Duration::seconds(300),
         metadata: BTreeMap::from([("team".to_string(), "fixture".to_string())]),
         envd_version: "0.1.3".to_string(),
+        envd_mode: EnvdMode::Broker,
         secure: true,
         allow_internet_access: Some(false),
         credentials: SandboxCredentials {
@@ -242,12 +243,14 @@ fn persisted_control_identifiers_preserve_invariants() {
 }
 
 #[test]
-fn records_written_before_route_policies_default_to_envd_only() {
+fn records_written_before_route_policies_and_envd_modes_use_broker_defaults() {
     let record = creating_record("legacy-route-record");
     let mut value = serde_json::to_value(record).unwrap();
     value.as_object_mut().unwrap().remove("routing");
+    value.as_object_mut().unwrap().remove("envd_mode");
 
     let restored: SandboxRecord = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.envd_mode(), EnvdMode::Broker);
     assert_eq!(
         restored.routing().token_scope(crate::routing::ENVD_PORT),
         Some(TokenScope::Envd)

@@ -19,8 +19,8 @@ pub use model::{
     OnTimeoutAction, PublicSandboxState, SandboxGeneration, SandboxId, SandboxRecord,
 };
 pub use ports::{
-    Clock, IdentityProviderError, IdentityProviderResult, ResolvedTemplate, SandboxIdentity,
-    SandboxIdentityProvider, SystemClock, TemplateProvider, TemplateProviderError,
+    Clock, EnvdMode, IdentityProviderError, IdentityProviderResult, ResolvedTemplate,
+    SandboxIdentity, SandboxIdentityProvider, SystemClock, TemplateProvider, TemplateProviderError,
     TemplateProviderResult,
 };
 pub use repository::{

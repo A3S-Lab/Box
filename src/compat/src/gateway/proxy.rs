@@ -19,6 +19,7 @@ use thiserror::Error;
 use tokio::io::copy_bidirectional;
 use tracing::debug;
 
+use crate::control::EnvdMode;
 use crate::envd::EnvdBroker;
 use crate::routing::{
     EnvdHealthResolution, ParsedSandboxRoute, RouteLeaseError, RouteLeaseService, RouteParseError,
@@ -87,7 +88,12 @@ impl DataPlaneProxy {
                 Err(error) => return with_cors(error_response(ProxyFailure::Lease(error)), cors),
             };
             let response = match resolution {
-                EnvdHealthResolution::Running(lease) => self.envd.handle(request, &lease).await,
+                EnvdHealthResolution::Running(lease) => {
+                    if lease.envd_mode() == EnvdMode::Runtime {
+                        return with_cors(self.proxy_runtime(&mut request, &lease).await, cors);
+                    }
+                    self.envd.handle(request, &lease).await
+                }
                 EnvdHealthResolution::Inactive => self.envd.inactive_health(),
             };
             return with_cors(response, cors);
@@ -97,9 +103,17 @@ impl DataPlaneProxy {
             Ok(lease) => lease,
             Err(error) => return with_cors(error_response(ProxyFailure::Lease(error)), cors),
         };
-        if lease.port().get() == ENVD_PORT {
+        if lease.port().get() == ENVD_PORT && lease.envd_mode() == EnvdMode::Broker {
             return with_cors(self.envd.handle(request, &lease).await, cors);
         }
+        with_cors(self.proxy_runtime(&mut request, &lease).await, cors)
+    }
+
+    async fn proxy_runtime(
+        &self,
+        request: &mut Request<Body>,
+        lease: &crate::routing::RouteLease,
+    ) -> Response<Body> {
         let stream = match self
             .connector
             .connect_port(
@@ -111,14 +125,14 @@ impl DataPlaneProxy {
             .await
         {
             Ok(stream) => stream,
-            Err(error) => return with_cors(error_response(ProxyFailure::Connect(error)), cors),
+            Err(error) => return error_response(ProxyFailure::Connect(error)),
         };
 
-        match proxy_upstream(&mut request, stream).await {
-            Ok(response) => with_cors(response, cors),
+        match proxy_upstream(request, stream).await {
+            Ok(response) => response,
             Err(error) => {
                 debug!(%error, "sandbox data-plane upstream request failed");
-                with_cors(error_response(error), cors)
+                error_response(error)
             }
         }
     }

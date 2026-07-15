@@ -10,8 +10,8 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::control::{
-    LifecyclePolicy, NewSandboxRecord, OnTimeoutAction, PublicSandboxState, SandboxCredentials,
-    StoredToken,
+    EnvdMode, LifecyclePolicy, NewSandboxRecord, OnTimeoutAction, PublicSandboxState,
+    SandboxCredentials, StoredToken,
 };
 
 fn instant(second: u32) -> DateTime<Utc> {
@@ -76,6 +76,7 @@ fn running_record_at(
         expires_at: created_at + Duration::seconds(300),
         metadata,
         envd_version: "0.1.3".to_string(),
+        envd_mode: EnvdMode::Broker,
         secure: true,
         allow_internet_access: Some(false),
         credentials: SandboxCredentials {

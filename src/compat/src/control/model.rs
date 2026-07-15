@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::credential::SandboxCredentials;
+use super::{credential::SandboxCredentials, EnvdMode};
 use crate::routing::SandboxRoutePolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -161,6 +161,7 @@ pub struct NewSandboxRecord {
     pub expires_at: DateTime<Utc>,
     pub metadata: BTreeMap<String, String>,
     pub envd_version: String,
+    pub envd_mode: EnvdMode,
     pub secure: bool,
     pub allow_internet_access: Option<bool>,
     pub credentials: SandboxCredentials,
@@ -185,6 +186,8 @@ pub struct SandboxRecord {
     expires_at: DateTime<Utc>,
     metadata: BTreeMap<String, String>,
     envd_version: String,
+    #[serde(default)]
+    envd_mode: EnvdMode,
     secure: bool,
     allow_internet_access: Option<bool>,
     credentials: SandboxCredentials,
@@ -223,6 +226,7 @@ impl SandboxRecord {
             expires_at: new.expires_at,
             metadata: new.metadata,
             envd_version: new.envd_version,
+            envd_mode: new.envd_mode,
             secure: new.secure,
             allow_internet_access: new.allow_internet_access,
             credentials: new.credentials,
@@ -293,6 +297,10 @@ impl SandboxRecord {
 
     pub fn envd_version(&self) -> &str {
         &self.envd_version
+    }
+
+    pub const fn envd_mode(&self) -> EnvdMode {
+        self.envd_mode
     }
 
     pub const fn secure(&self) -> bool {

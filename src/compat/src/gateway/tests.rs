@@ -23,7 +23,7 @@ use rustls::pki_types::ServerName;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::control::{
-    Clock, LifecyclePolicy, MemorySandboxRepository, NewSandboxRecord, OnTimeoutAction,
+    Clock, EnvdMode, LifecyclePolicy, MemorySandboxRepository, NewSandboxRecord, OnTimeoutAction,
     RotatingTokenProvider, SandboxCredentials, SandboxId, SandboxRecord, SandboxRepository,
     SecretToken, TokenIssuer, TokenKeyMaterial, TokenScope,
 };
@@ -173,6 +173,10 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
+        Self::new_with_envd_mode(EnvdMode::Broker).await
+    }
+
+    async fn new_with_envd_mode(envd_mode: EnvdMode) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let upstream = tokio::spawn(async move {
@@ -226,6 +230,7 @@ impl Harness {
             expires_at: now + chrono::Duration::minutes(5),
             metadata: BTreeMap::new(),
             envd_version: "0.1.3".to_string(),
+            envd_mode,
             secure: true,
             allow_internet_access: Some(false),
             credentials: SandboxCredentials {
@@ -402,6 +407,52 @@ async fn authenticated_direct_route_proxies_stream_and_strips_edge_credentials()
 }
 
 #[tokio::test]
+async fn runtime_envd_routes_health_process_and_filesystem_to_the_sandbox() {
+    let harness = Harness::new_with_envd_mode(EnvdMode::Runtime).await;
+
+    let health = harness
+        .proxy
+        .handle(harness.health_request(&harness.envd_token))
+        .await;
+    assert_eq!(health.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(health.into_body()).await.unwrap()).unwrap();
+    assert_eq!(body["uri"], "/health");
+    assert_eq!(body["envdTokenForwarded"], false);
+
+    for path in [
+        "/process.Process/Start",
+        "/filesystem.Filesystem/MakeDir",
+        "/files?path=%2Ftmp%2Ffixture",
+    ] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(
+                HOST,
+                format!("{}-{}.box.example.com", ENVD_PORT, harness.sandbox_id),
+            )
+            .header(ENVD_ACCESS_TOKEN_HEADER, harness.envd_token.expose_secret())
+            .header(SANDBOX_ID_HEADER, harness.sandbox_id.as_str())
+            .header(SANDBOX_PORT_HEADER, ENVD_PORT.to_string())
+            .body(Body::from("runtime-envd"))
+            .unwrap();
+        let response = harness.proxy.handle(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
+        assert_eq!(body["uri"], path);
+        assert_eq!(body["envdTokenForwarded"], false);
+        assert_eq!(body["sandboxIdForwarded"], false);
+        assert_eq!(body["sandboxPortForwarded"], false);
+    }
+
+    let calls = harness.connector.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 4);
+    assert!(calls.iter().all(|(_, _, port)| *port == ENVD_PORT));
+}
+
+#[tokio::test]
 async fn token_scope_is_checked_before_opening_an_upstream_connection() {
     let harness = Harness::new().await;
     let swapped = harness.direct_request(
@@ -460,7 +511,7 @@ async fn shared_routes_and_browser_preflight_use_the_same_validated_parser() {
 
 #[tokio::test]
 async fn authenticated_terminal_health_returns_false_without_reopening_traffic_routes() {
-    let harness = Harness::new().await;
+    let harness = Harness::new_with_envd_mode(EnvdMode::Runtime).await;
     let mut record = harness
         .repository
         .get(&harness.sandbox_id)

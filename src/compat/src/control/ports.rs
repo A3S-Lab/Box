@@ -1,6 +1,7 @@
 use a3s_box_core::{BoxConfig, OperationId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::SandboxId;
@@ -37,10 +38,19 @@ pub trait SandboxIdentityProvider: Send + Sync {
     fn next_identity(&self) -> IdentityProviderResult<SandboxIdentity>;
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvdMode {
+    #[default]
+    Broker,
+    Runtime,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedTemplate {
     pub config: BoxConfig,
     pub envd_version: String,
+    pub envd_mode: EnvdMode,
     pub routing: SandboxRoutePolicy,
 }
 
