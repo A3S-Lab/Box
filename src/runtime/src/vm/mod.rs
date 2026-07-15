@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Callback type for image pull progress: `(current, total, digest, size_bytes)`.
-type PullProgressFn = Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>;
+pub type PullProgressFn = Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>;
 
 use a3s_box_core::config::BoxConfig;
 #[cfg(unix)]

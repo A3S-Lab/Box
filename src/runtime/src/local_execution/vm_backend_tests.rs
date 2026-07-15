@@ -54,6 +54,19 @@ fn manager_uses_the_full_persisted_request_config() {
 }
 
 #[test]
+fn manager_uses_the_backend_pull_progress_callback() {
+    let temporary = tempfile::tempdir().unwrap();
+    let callback: crate::PullProgressFn = Arc::new(|_, _, _, _| {});
+    let backend =
+        VmLocalExecutionBackend::new(temporary.path()).with_pull_progress_fn(Arc::clone(&callback));
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+
+    let manager = backend.new_manager(&record).unwrap();
+
+    assert!(manager.pull_progress_fn.is_some());
+}
+
+#[test]
 fn manager_applies_persisted_shared_memory_policy_to_runtime_config() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
@@ -156,7 +169,7 @@ async fn unsupported_pause_modes_fail_before_starting_a_runtime() {
 }
 
 #[tokio::test]
-async fn restart_stop_preserves_anonymous_volumes_but_terminal_kill_removes_them() {
+async fn retained_stops_preserve_anonymous_volumes_but_auto_remove_kill_removes_them() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
@@ -176,7 +189,54 @@ async fn restart_stop_preserves_anonymous_volumes_but_terminal_kill_removes_them
     let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
     backend.managers.insert(record.id.clone(), manager);
     backend.kill(&record).await.unwrap();
+    assert!(volumes.get(volume_name).unwrap().is_some());
+
+    record.auto_remove = true;
+    record
+        .managed_execution
+        .as_mut()
+        .unwrap()
+        .request
+        .policy
+        .auto_remove = true;
+    let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
+    backend.managers.insert(record.id.clone(), manager);
+    backend.kill(&record).await.unwrap();
     assert!(volumes.get(volume_name).unwrap().is_none());
+}
+
+#[test]
+fn managed_kill_uses_persisted_stop_signal_and_timeout() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+
+    assert_eq!(graceful_stop_options(&record, None).unwrap(), None);
+
+    record.stop_signal = Some("SIGINT".to_string());
+    assert_eq!(
+        graceful_stop_options(&record, None).unwrap(),
+        Some((libc::SIGINT, a3s_box_core::DEFAULT_SHUTDOWN_TIMEOUT_MS))
+    );
+
+    record.stop_timeout = Some(7);
+    assert_eq!(
+        graceful_stop_options(&record, record.stop_timeout).unwrap(),
+        Some((libc::SIGINT, 7_000))
+    );
+    assert_eq!(
+        graceful_stop_options(&record, Some(3)).unwrap(),
+        Some((libc::SIGINT, 3_000))
+    );
+}
+
+#[test]
+fn managed_kill_rejects_stop_timeout_overflow() {
+    let temporary = tempfile::tempdir().unwrap();
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+
+    let error = graceful_stop_options(&record, Some(u64::MAX)).unwrap_err();
+
+    assert!(error.to_string().contains("stop timeout is too large"));
 }
 
 #[test]

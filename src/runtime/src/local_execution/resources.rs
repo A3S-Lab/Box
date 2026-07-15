@@ -383,4 +383,44 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn concurrent_preparation_allocates_distinct_network_endpoints() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Barrier};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let home_dir = temporary.path().to_path_buf();
+        let (_volumes, networks) = stores(&home_dir);
+        let barrier = Arc::new(Barrier::new(16));
+        let handles = (0..16)
+            .map(|index| {
+                let home_dir = home_dir.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut record = record(&home_dir);
+                    record.id = format!("00000000-0000-4000-8000-{index:012}");
+                    record.name = format!("worker-{index}");
+                    record.volume_names.clear();
+                    barrier.wait();
+                    ExecutionResourceGuard::prepare(&home_dir, &record)
+                        .unwrap()
+                        .disarm();
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let network = networks.get("dev").unwrap().unwrap();
+        let addresses = network
+            .endpoints
+            .values()
+            .map(|endpoint| endpoint.ip_address)
+            .collect::<HashSet<_>>();
+        assert_eq!(network.endpoints.len(), 16);
+        assert_eq!(addresses.len(), 16);
+    }
 }

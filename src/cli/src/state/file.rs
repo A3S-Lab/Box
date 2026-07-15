@@ -121,16 +121,6 @@ impl StateFile {
         Self::modify(|sf| Ok::<bool, std::io::Error>(sf.store.remove_by_id(id)))
     }
 
-    /// Remove a record by id atomically under the state lock and return it.
-    pub(crate) fn take_record(id: &str) -> Result<Option<BoxRecord>, std::io::Error> {
-        Self::modify(|sf| {
-            let Some(index) = sf.store.records().iter().position(|record| record.id == id) else {
-                return Ok(None);
-            };
-            Ok::<Option<BoxRecord>, std::io::Error>(Some(sf.store.records_mut().remove(index)))
-        })
-    }
-
     /// Add a record and persist.
     pub fn add(&mut self, record: BoxRecord) -> Result<(), std::io::Error> {
         self.store.records_mut().push(record);

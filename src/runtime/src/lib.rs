@@ -114,7 +114,7 @@ pub use tee::{AttestationReport, AttestationRequest, PlatformInfo};
 
 // VM
 #[cfg(feature = "vm")]
-pub use vm::{BoxState, VmManager};
+pub use vm::{BoxState, PullProgressFn, VmManager};
 #[cfg(feature = "vm")]
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, ShimHandler, TeeInstanceConfig,
