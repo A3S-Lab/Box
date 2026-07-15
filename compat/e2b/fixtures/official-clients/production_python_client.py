@@ -61,6 +61,8 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         sandbox.set_timeout(30)
         if not sandbox.kill():
             raise AssertionError("kill did not terminate the production sandbox")
+        if sandbox.is_running():
+            raise AssertionError("envd health reported the killed sandbox as running")
 
         missing_id = "missing-production-python-sync"
         if Sandbox.kill(missing_id, **options):
@@ -81,6 +83,8 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
             raise AssertionError("Code Interpreter envd health check failed")
         if not interpreter.kill():
             raise AssertionError("Code Interpreter lifecycle kill failed")
+        if interpreter.is_running():
+            raise AssertionError("Code Interpreter remained running after kill")
     finally:
         if interpreter is not None:
             Sandbox.kill(interpreter.sandbox_id, **options)
@@ -120,6 +124,8 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         await sandbox.set_timeout(30)
         if not await sandbox.kill():
             raise AssertionError("kill did not terminate the production sandbox")
+        if await sandbox.is_running():
+            raise AssertionError("envd health reported the killed sandbox as running")
 
         missing_id = "missing-production-python-async"
         if await AsyncSandbox.kill(missing_id, **options):
@@ -140,6 +146,8 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
             raise AssertionError("async Code Interpreter envd health check failed")
         if not await interpreter.kill():
             raise AssertionError("Code Interpreter lifecycle kill failed")
+        if await interpreter.is_running():
+            raise AssertionError("async Code Interpreter remained running after kill")
     finally:
         if interpreter is not None:
             await AsyncSandbox.kill(interpreter.sandbox_id, **options)

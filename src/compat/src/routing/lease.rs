@@ -28,6 +28,12 @@ pub struct RouteLease {
     expires_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvdHealthResolution {
+    Running(RouteLease),
+    Inactive,
+}
+
 impl RouteLease {
     pub fn sandbox_id(&self) -> &SandboxId {
         &self.sandbox_id
@@ -105,10 +111,7 @@ impl RouteLeaseService {
         if record.expires_at() <= now {
             return Err(RouteLeaseError::Expired);
         }
-        let token_scope = record
-            .routing()
-            .token_scope(route.port.get())
-            .ok_or(RouteLeaseError::PortDenied)?;
+        let token_scope = self.verify_route_token(&record, route, headers).await?;
         let execution_id = record
             .execution_id()
             .cloned()
@@ -116,14 +119,6 @@ impl RouteLeaseService {
         let execution_generation = record
             .execution_generation()
             .ok_or(RouteLeaseError::InvalidRecord)?;
-        let presented = presented_token(headers, token_scope)?;
-        let stored = match token_scope {
-            TokenScope::Envd => &record.credentials().envd,
-            TokenScope::Traffic => &record.credentials().traffic,
-        };
-        if !self.tokens.verify(token_scope, &presented, stored).await? {
-            return Err(RouteLeaseError::Unauthorized);
-        }
         Ok(RouteLease {
             sandbox_id: record.sandbox_id().clone(),
             execution_id,
@@ -133,6 +128,70 @@ impl RouteLeaseService {
             token_scope,
             expires_at: record.expires_at(),
         })
+    }
+
+    /// Resolve an authenticated envd health request without issuing a live
+    /// route lease for an inactive or expired sandbox.
+    ///
+    /// This preserves the official client's `502 -> false` behavior after a
+    /// successful kill while ensuring an invalid token cannot probe terminal
+    /// sandbox state. All other data-plane requests continue to require a live
+    /// [`RouteLease`].
+    pub async fn resolve_envd_health(
+        &self,
+        route: &ParsedSandboxRoute,
+        headers: &HeaderMap,
+    ) -> RouteLeaseResult<EnvdHealthResolution> {
+        let record = self
+            .repository
+            .get(&route.sandbox_id)
+            .await?
+            .ok_or(RouteLeaseError::NotFound)?;
+        let token_scope = self.verify_route_token(&record, route, headers).await?;
+        if token_scope != TokenScope::Envd {
+            return Err(RouteLeaseError::PortDenied);
+        }
+        let now = self.clock.now();
+        if record.state() != LifecycleState::Running || record.expires_at() <= now {
+            return Ok(EnvdHealthResolution::Inactive);
+        }
+        let execution_id = record
+            .execution_id()
+            .cloned()
+            .ok_or(RouteLeaseError::InvalidRecord)?;
+        let execution_generation = record
+            .execution_generation()
+            .ok_or(RouteLeaseError::InvalidRecord)?;
+        Ok(EnvdHealthResolution::Running(RouteLease {
+            sandbox_id: record.sandbox_id().clone(),
+            execution_id,
+            sandbox_generation: record.generation(),
+            execution_generation,
+            port: route.port,
+            token_scope,
+            expires_at: record.expires_at(),
+        }))
+    }
+
+    async fn verify_route_token(
+        &self,
+        record: &SandboxRecord,
+        route: &ParsedSandboxRoute,
+        headers: &HeaderMap,
+    ) -> RouteLeaseResult<TokenScope> {
+        let token_scope = record
+            .routing()
+            .token_scope(route.port.get())
+            .ok_or(RouteLeaseError::PortDenied)?;
+        let presented = presented_token(headers, token_scope)?;
+        let stored = match token_scope {
+            TokenScope::Envd => &record.credentials().envd,
+            TokenScope::Traffic => &record.credentials().traffic,
+        };
+        if !self.tokens.verify(token_scope, &presented, stored).await? {
+            return Err(RouteLeaseError::Unauthorized);
+        }
+        Ok(token_scope)
     }
 }
 
@@ -315,6 +374,17 @@ mod tests {
             .unwrap();
         assert_eq!(envd.token_scope(), TokenScope::Envd);
         assert_eq!(envd.execution_id().as_str(), "execution-route-1");
+        assert!(matches!(
+            harness
+                .service
+                .resolve_envd_health(
+                    &harness.route(ENVD_PORT),
+                    &token_headers(ENVD_ACCESS_TOKEN_HEADER, &harness.envd_secret),
+                )
+                .await
+                .unwrap(),
+            EnvdHealthResolution::Running(lease) if lease == envd
+        ));
 
         let traffic = harness
             .service
@@ -399,6 +469,13 @@ mod tests {
         record.begin_kill().unwrap();
         harness
             .repository
+            .compare_and_swap(&harness.sandbox_id, expected, record.clone())
+            .await
+            .unwrap();
+        let expected = record.generation();
+        record.mark_killed().unwrap();
+        harness
+            .repository
             .compare_and_swap(&harness.sandbox_id, expected, record)
             .await
             .unwrap();
@@ -411,6 +488,27 @@ mod tests {
                 )
                 .await,
             Err(RouteLeaseError::Inactive)
+        ));
+        assert_eq!(
+            harness
+                .service
+                .resolve_envd_health(
+                    &harness.route(ENVD_PORT),
+                    &token_headers(ENVD_ACCESS_TOKEN_HEADER, &harness.envd_secret),
+                )
+                .await
+                .unwrap(),
+            EnvdHealthResolution::Inactive
+        );
+        assert!(matches!(
+            harness
+                .service
+                .resolve_envd_health(
+                    &harness.route(ENVD_PORT),
+                    &token_headers(ENVD_ACCESS_TOKEN_HEADER, &harness.traffic_secret),
+                )
+                .await,
+            Err(RouteLeaseError::Unauthorized)
         ));
     }
 

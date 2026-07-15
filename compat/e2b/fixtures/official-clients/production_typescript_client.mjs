@@ -42,6 +42,7 @@ try {
 
   await sandbox.setTimeout(30_000)
   assert.equal(await sandbox.kill(), true)
+  assert.equal(await sandbox.isRunning(), false)
 
   const missingId = 'missing-production-typescript'
   assert.equal(await Sandbox.kill(missingId, connection), false)
@@ -57,6 +58,7 @@ try {
   })
   assert.equal(await interpreter.isRunning(), true)
   assert.equal(await interpreter.kill(), true)
+  assert.equal(await interpreter.isRunning(), false)
 } finally {
   if (interpreter) {
     await Sandbox.kill(interpreter.sandboxId, connection)
