@@ -1,7 +1,7 @@
 use a3s_box_core::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
     ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionState,
-    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome,
+    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome, RestartExecutionOptions,
 };
 use async_trait::async_trait;
 
@@ -101,6 +101,21 @@ impl ExecutionManager for LocalExecutionManager {
         self.finish_resume(claimed).await
     }
 
+    async fn restart_with_options(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+        operation_id: &OperationId,
+        options: RestartExecutionOptions,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let record = self
+            .get(execution_id)
+            .await?
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        self.restart_record(record, expected_generation, operation_id, options)
+            .await
+    }
+
     async fn kill(
         &self,
         execution_id: &ExecutionId,
@@ -114,6 +129,12 @@ impl ExecutionManager for LocalExecutionManager {
         let state = managed_state(&record)?;
         if state.is_terminal() {
             return Ok(KillOutcome::AlreadyStopped);
+        }
+        if matches!(
+            state,
+            ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting
+        ) {
+            return Err(state_conflict(&record, execution_id, "kill"));
         }
         let claimed = if state == ManagedExecutionState::Killing {
             record
@@ -166,6 +187,10 @@ impl ExecutionManager for LocalExecutionManager {
                 self.finish_kill(record).await?;
                 Ok(ReconcileOutcome::Failed)
             }
+            ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => self
+                .resume_restart(record)
+                .await
+                .map(ReconcileOutcome::Ready),
             _ => {
                 let (record, state) = self.observe_record(record).await?;
                 outcome_from_record(record, state)

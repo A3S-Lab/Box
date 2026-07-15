@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use a3s_box_core::{ExecutionGeneration, ExecutionId, OperationId};
 use thiserror::Error;
 
-use crate::{BoxRecord, BoxStateStore, ManagedExecutionOperation, ManagedExecutionState};
+use crate::{
+    BoxRecord, BoxStateStore, ManagedExecutionOperation, ManagedExecutionState,
+    ManagedRestartCompletion, ManagedRestartOutcome,
+};
 
 /// Strict durable repository used by the local `ExecutionManager`.
 #[derive(Debug, Clone)]
@@ -154,9 +157,9 @@ impl ManagedExecutionStore {
 
     /// Atomically compare generation and state, then persist one legal edge.
     ///
-    /// Completing pause and resume advances the runtime generation exactly
-    /// once. Claim, rollback, terminal, and kill transitions retain the current
-    /// generation.
+    /// Completing pause and resume, and advancing a restart from teardown to
+    /// startup, increments the runtime generation exactly once. Other edges
+    /// retain the current generation.
     pub fn transition(
         &self,
         execution_id: &ExecutionId,
@@ -242,6 +245,35 @@ impl ManagedExecutionStore {
                 .as_mut()
                 .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
             metadata.generation = next_generation;
+            if expected_state == ManagedExecutionState::RestartStarting
+                && matches!(
+                    next_state,
+                    ManagedExecutionState::Running | ManagedExecutionState::Failed
+                )
+            {
+                let Some(ManagedExecutionOperation::Restart {
+                    operation_id,
+                    source_generation,
+                    stop_timeout_secs,
+                    ..
+                }) = metadata.pending_operation.as_ref()
+                else {
+                    return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                        "restart completion for {execution_id} has no persisted restart intent"
+                    )));
+                };
+                metadata.last_restart = Some(ManagedRestartCompletion {
+                    operation_id: operation_id.clone(),
+                    source_generation: *source_generation,
+                    target_generation: next_generation,
+                    outcome: if next_state == ManagedExecutionState::Running {
+                        ManagedRestartOutcome::Running
+                    } else {
+                        ManagedRestartOutcome::Failed
+                    },
+                    stop_timeout_secs: *stop_timeout_secs,
+                });
+            }
             metadata.pending_operation = match next_state {
                 ManagedExecutionState::Starting => Some(ManagedExecutionOperation::Start),
                 ManagedExecutionState::Pausing => match metadata.pending_operation.take() {
@@ -250,6 +282,18 @@ impl ManagedExecutionStore {
                 },
                 ManagedExecutionState::Resuming => Some(ManagedExecutionOperation::Resume),
                 ManagedExecutionState::Killing => Some(ManagedExecutionOperation::Kill),
+                ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => {
+                    match metadata.pending_operation.take() {
+                        Some(operation @ ManagedExecutionOperation::Restart { .. }) => {
+                            Some(operation)
+                        }
+                        _ => {
+                            return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                            "restart transition for {execution_id} has no persisted restart intent"
+                        )))
+                        }
+                    }
+                }
                 ManagedExecutionState::Creating
                 | ManagedExecutionState::Created
                 | ManagedExecutionState::Running
@@ -308,22 +352,35 @@ fn transition_generation(
     current: ExecutionGeneration,
 ) -> ManagedExecutionStoreResult<ExecutionGeneration> {
     use ManagedExecutionState::{
-        Created, Creating, Failed, Killing, Paused, Pausing, Resuming, Running, Starting, Stopped,
+        Created, Creating, Failed, Killing, Paused, Pausing, RestartStarting, RestartStopping,
+        Resuming, Running, Starting, Stopped,
     };
 
     let legal = matches!(
         (from, to),
         (Creating, Created | Starting | Killing | Stopped | Failed)
-            | (Created, Starting | Killing | Stopped | Failed)
+            | (
+                Created,
+                Starting | Killing | RestartStopping | Stopped | Failed
+            )
             | (
                 Starting,
                 Created | Creating | Running | Killing | Stopped | Failed
             )
-            | (Running, Pausing | Killing | Stopped | Failed)
+            | (
+                Running,
+                Pausing | Killing | RestartStopping | Stopped | Failed
+            )
             | (Pausing, Paused | Running | Killing | Stopped | Failed)
-            | (Paused, Resuming | Killing | Stopped | Failed)
+            | (
+                Paused,
+                Resuming | Killing | RestartStopping | Stopped | Failed
+            )
             | (Resuming, Running | Paused | Killing | Stopped | Failed)
             | (Killing, Stopped | Failed)
+            | (Stopped | Failed, RestartStopping)
+            | (RestartStopping, RestartStarting)
+            | (RestartStarting, Running | Failed)
     );
     if !legal {
         return Err(ManagedExecutionStoreError::InvalidTransition {
@@ -333,7 +390,10 @@ fn transition_generation(
         });
     }
 
-    if matches!((from, to), (Pausing, Paused) | (Resuming, Running)) {
+    if matches!(
+        (from, to),
+        (Pausing, Paused) | (Resuming, Running) | (RestartStopping, RestartStarting)
+    ) {
         let value = current.get().checked_add(1).ok_or_else(|| {
             ManagedExecutionStoreError::InvalidRecord(format!(
                 "execution {execution_id} generation is exhausted"
@@ -505,6 +565,85 @@ mod tests {
             resumed.managed_execution.unwrap().generation,
             ExecutionGeneration::new(3).unwrap()
         );
+    }
+
+    #[test]
+    fn restart_advances_generation_between_durable_teardown_and_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ManagedExecutionStore::new(directory.path().join("boxes.json"));
+        let id = ExecutionId::new("execution-1").unwrap();
+        store
+            .reserve(managed_record(id.as_str(), "operation-create"))
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Created,
+                ManagedExecutionState::Starting,
+            )
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Starting,
+                ManagedExecutionState::Running,
+            )
+            .unwrap();
+        let restart_operation = OperationId::new("operation-restart").unwrap();
+        let stopping = store
+            .transition_with(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Running,
+                ManagedExecutionState::RestartStopping,
+                |record| {
+                    record.managed_execution.as_mut().unwrap().pending_operation =
+                        Some(ManagedExecutionOperation::Restart {
+                            operation_id: restart_operation.clone(),
+                            source_generation: ExecutionGeneration::INITIAL,
+                            source_state: ManagedExecutionState::Running,
+                            stop_timeout_secs: Some(10),
+                        });
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stopping.managed_execution.as_ref().unwrap().generation,
+            ExecutionGeneration::INITIAL
+        );
+
+        let starting = store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::RestartStopping,
+                ManagedExecutionState::RestartStarting,
+            )
+            .unwrap();
+        let generation_two = ExecutionGeneration::new(2).unwrap();
+        assert_eq!(
+            starting.managed_execution.as_ref().unwrap().generation,
+            generation_two
+        );
+        let running = store
+            .transition(
+                &id,
+                generation_two,
+                ManagedExecutionState::RestartStarting,
+                ManagedExecutionState::Running,
+            )
+            .unwrap();
+        let metadata = running.managed_execution.unwrap();
+        assert_eq!(metadata.generation, generation_two);
+        assert!(metadata.pending_operation.is_none());
+        let completed = metadata.last_restart.unwrap();
+        assert_eq!(completed.operation_id, restart_operation);
+        assert_eq!(completed.source_generation, ExecutionGeneration::INITIAL);
+        assert_eq!(completed.target_generation, generation_two);
+        assert_eq!(completed.outcome, ManagedRestartOutcome::Running);
+        assert_eq!(completed.stop_timeout_secs, Some(10));
     }
 
     #[test]

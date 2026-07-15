@@ -64,8 +64,8 @@ pub use traits::{
     ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionRecordPolicy,
     ExecutionReservation, ExecutionRestartPolicy, ExecutionState, ExecutionStatus, ImageRegistry,
     ImageStoreBackend, KillOutcome, MetricsCollector, NetworkStoreBackend, NoopMetrics,
-    OperationId, PulledImage, ReconcileOutcome, SnapshotStoreBackend, StoredImage,
-    VolumeStoreBackend,
+    OperationId, PulledImage, ReconcileOutcome, RestartExecutionOptions, SnapshotStoreBackend,
+    StoredImage, VolumeStoreBackend,
 };
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmHandler,

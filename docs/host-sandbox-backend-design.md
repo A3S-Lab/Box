@@ -1,8 +1,15 @@
 # Host Sandbox Backend Design
 
-Status: **Proposed**
+Status: **Implementation in progress**
 
-Scope: architecture only; implementation has not started
+Scope: architecture, implemented OCI runtime foundation, and remaining
+lifecycle/security/performance gates
+
+The certified `crun` launch path, protected OCI bundle construction, managed
+create/start/kill lifecycle, exec, health, named volumes, shared memory, and
+durable two-phase managed restart are implemented. This document remains the
+source for unfinished hardening, lifecycle parity, and a3s-bench gates; it is
+not a claim that the complete validation matrix has passed.
 
 Target platform: Linux without `/dev/kvm`
 

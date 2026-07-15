@@ -354,4 +354,33 @@ mod tests {
             .endpoints
             .contains_key(&record.id));
     }
+
+    #[test]
+    fn restart_release_and_prepare_rebind_resources_exactly_once() {
+        let temporary = tempfile::tempdir().unwrap();
+        let record = record(temporary.path());
+        let (volumes, networks) = stores(temporary.path());
+        ExecutionResourceGuard::prepare(temporary.path(), &record)
+            .unwrap()
+            .disarm();
+
+        release_resources(temporary.path(), &record).unwrap();
+        ExecutionResourceGuard::prepare(temporary.path(), &record)
+            .unwrap()
+            .disarm();
+
+        assert_eq!(
+            volumes.get("workspace").unwrap().unwrap().in_use_by,
+            vec![record.id.clone()]
+        );
+        let network = networks.get("dev").unwrap().unwrap();
+        assert_eq!(
+            network
+                .endpoints
+                .keys()
+                .filter(|execution_id| execution_id.as_str() == record.id)
+                .count(),
+            1
+        );
+    }
 }

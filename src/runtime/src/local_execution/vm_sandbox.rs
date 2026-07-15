@@ -72,7 +72,10 @@ impl VmLocalExecutionBackend {
                 record.box_dir.join("sandbox/runtime.json"),
             ),
         ));
-        if managed_state(record)? != ManagedExecutionState::Starting {
+        if !matches!(
+            managed_state(record)?,
+            ManagedExecutionState::Starting | ManagedExecutionState::RestartStarting
+        ) {
             *manager.state.write().await = crate::BoxState::Ready;
         }
 
@@ -102,10 +105,18 @@ impl VmLocalExecutionBackend {
     pub(super) async fn destroy_detached_sandbox(
         &self,
         record: &BoxRecord,
+        remove_anonymous_volumes: bool,
+        timeout_secs: Option<u64>,
     ) -> ExecutionManagerResult<KillOutcome> {
         self.inspect_sandbox(record).await?;
         if let Some(manager) = self.manager(&record.id) {
-            return self.destroy_registered(record, manager).await;
+            return self
+                .destroy_registered(record, manager, remove_anonymous_volumes, timeout_secs)
+                .await;
+        }
+        if remove_anonymous_volumes {
+            let anonymous_volumes = self.anonymous_volumes_for_record(record).await;
+            self.cleanup_anonymous_volumes(anonymous_volumes).await;
         }
         Ok(KillOutcome::Killed)
     }
@@ -131,8 +142,6 @@ impl VmLocalExecutionBackend {
             .destroy()
             .await
             .map_err(|error| runtime_error("clean up", record, error))?;
-        let anonymous_volumes = self.anonymous_volumes_for_record(record).await;
-        self.cleanup_anonymous_volumes(anonymous_volumes).await;
         Ok(())
     }
 }

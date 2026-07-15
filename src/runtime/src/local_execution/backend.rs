@@ -94,5 +94,15 @@ pub trait LocalExecutionBackend: Send + Sync {
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle>;
 
+    /// Stop the current runtime while preserving execution-owned storage for
+    /// the replacement generation.
+    async fn stop_for_restart(
+        &self,
+        record: &BoxRecord,
+        _timeout_secs: Option<u64>,
+    ) -> ExecutionManagerResult<KillOutcome> {
+        self.kill(record).await
+    }
+
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome>;
 }

@@ -214,7 +214,7 @@ impl BoxRecord {
             return Ok(None);
         };
         let state = ManagedExecutionState::from_status(&self.status)?;
-        validate_pending_operation(state, metadata.pending_operation.as_ref())?;
+        validate_pending_operation(state, metadata)?;
         Ok(Some(state))
     }
 
@@ -245,7 +245,8 @@ impl BoxRecord {
 /// Transitional states are persisted before backend side effects. This lets
 /// a restarted manager distinguish work that was never claimed from work that
 /// may already have reached the runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ManagedExecutionState {
     Creating,
     Created,
@@ -255,6 +256,8 @@ pub enum ManagedExecutionState {
     Paused,
     Resuming,
     Killing,
+    RestartStopping,
+    RestartStarting,
     Stopped,
     Failed,
 }
@@ -271,6 +274,8 @@ impl ManagedExecutionState {
             Self::Paused => "paused",
             Self::Resuming => "resuming",
             Self::Killing => "killing",
+            Self::RestartStopping => "restart_stopping",
+            Self::RestartStarting => "restart_starting",
             Self::Stopped => "stopped",
             Self::Failed => "failed",
         }
@@ -287,6 +292,8 @@ impl ManagedExecutionState {
             "paused" => Ok(Self::Paused),
             "resuming" => Ok(Self::Resuming),
             "killing" => Ok(Self::Killing),
+            "restart_stopping" => Ok(Self::RestartStopping),
+            "restart_starting" => Ok(Self::RestartStarting),
             "stopped" => Ok(Self::Stopped),
             "dead" | "failed" => Ok(Self::Failed),
             other => Err(a3s_box_core::BoxError::StateError(format!(
@@ -331,6 +338,9 @@ pub struct ManagedExecutionMetadata {
     /// Lifecycle side effect claimed before calling the backend.
     #[serde(default)]
     pub pending_operation: Option<ManagedExecutionOperation>,
+    /// Most recent completed restart retained for idempotent response replay.
+    #[serde(default)]
+    pub last_restart: Option<ManagedRestartCompletion>,
 }
 
 /// Recoverable backend operation associated with a transitional state.
@@ -338,9 +348,37 @@ pub struct ManagedExecutionMetadata {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ManagedExecutionOperation {
     Start,
-    Pause { keep_memory: bool },
+    Pause {
+        keep_memory: bool,
+    },
     Resume,
     Kill,
+    Restart {
+        operation_id: OperationId,
+        source_generation: ExecutionGeneration,
+        source_state: ManagedExecutionState,
+        #[serde(default)]
+        stop_timeout_secs: Option<u64>,
+    },
+}
+
+/// Durable result of the most recent restart operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedRestartOutcome {
+    Running,
+    Failed,
+}
+
+/// Restart identity retained after its transitional state has completed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedRestartCompletion {
+    pub operation_id: OperationId,
+    pub source_generation: ExecutionGeneration,
+    pub target_generation: ExecutionGeneration,
+    pub outcome: ManagedRestartOutcome,
+    #[serde(default)]
+    pub stop_timeout_secs: Option<u64>,
 }
 
 impl ManagedExecutionMetadata {
@@ -362,6 +400,7 @@ impl ManagedExecutionMetadata {
             request,
             plan,
             pending_operation: None,
+            last_restart: None,
         })
     }
 
@@ -378,14 +417,25 @@ impl ManagedExecutionMetadata {
                 "managed execution plan does not match its persisted creation request".to_string(),
             ));
         }
+        if let Some(completed) = &self.last_restart {
+            let expected_target = next_generation(completed.source_generation)?;
+            if completed.target_generation != expected_target {
+                return Err(a3s_box_core::BoxError::StateError(format!(
+                    "completed restart {} has inconsistent generations",
+                    completed.operation_id
+                )));
+            }
+            validate_restart_timeout(completed.stop_timeout_secs)?;
+        }
         Ok(())
     }
 }
 
 fn validate_pending_operation(
     state: ManagedExecutionState,
-    operation: Option<&ManagedExecutionOperation>,
+    metadata: &ManagedExecutionMetadata,
 ) -> a3s_box_core::Result<()> {
+    let operation = metadata.pending_operation.as_ref();
     let consistent = matches!(
         (state, operation),
         (
@@ -401,6 +451,9 @@ fn validate_pending_operation(
             ManagedExecutionState::Killing,
             Some(ManagedExecutionOperation::Kill)
         ) | (
+            ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting,
+            Some(ManagedExecutionOperation::Restart { .. })
+        ) | (
             ManagedExecutionState::Creating
                 | ManagedExecutionState::Created
                 | ManagedExecutionState::Running
@@ -410,13 +463,69 @@ fn validate_pending_operation(
             None
         )
     );
-    if consistent {
-        Ok(())
-    } else {
-        Err(a3s_box_core::BoxError::StateError(format!(
+    if !consistent {
+        return Err(a3s_box_core::BoxError::StateError(format!(
             "managed execution state {state} has inconsistent pending operation"
-        )))
+        )));
     }
+
+    if let Some(ManagedExecutionOperation::Restart {
+        source_generation,
+        source_state,
+        stop_timeout_secs,
+        ..
+    }) = operation
+    {
+        if !matches!(
+            source_state,
+            ManagedExecutionState::Created
+                | ManagedExecutionState::Running
+                | ManagedExecutionState::Paused
+                | ManagedExecutionState::Stopped
+                | ManagedExecutionState::Failed
+        ) {
+            return Err(a3s_box_core::BoxError::StateError(
+                "restart source state is not stable".to_string(),
+            ));
+        }
+        let expected = match state {
+            ManagedExecutionState::RestartStopping => *source_generation,
+            ManagedExecutionState::RestartStarting => next_generation(*source_generation)?,
+            _ => {
+                return Err(a3s_box_core::BoxError::StateError(
+                    "restart operation is attached to a non-restart state".to_string(),
+                ))
+            }
+        };
+        if metadata.generation != expected {
+            return Err(a3s_box_core::BoxError::StateError(format!(
+                "restart state {state} has generation {}, expected {}",
+                metadata.generation.get(),
+                expected.get()
+            )));
+        }
+        validate_restart_timeout(*stop_timeout_secs)?;
+    }
+    Ok(())
+}
+
+fn validate_restart_timeout(timeout_secs: Option<u64>) -> a3s_box_core::Result<()> {
+    if timeout_secs.is_some_and(|timeout| timeout.checked_mul(1_000).is_none()) {
+        Err(a3s_box_core::BoxError::StateError(
+            "restart stop timeout is too large".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn next_generation(generation: ExecutionGeneration) -> a3s_box_core::Result<ExecutionGeneration> {
+    let value = generation.get().checked_add(1).ok_or_else(|| {
+        a3s_box_core::BoxError::StateError("execution generation is exhausted".to_string())
+    })?;
+    ExecutionGeneration::new(value).map_err(|error| {
+        a3s_box_core::BoxError::StateError(format!("invalid execution generation: {error}"))
+    })
 }
 
 fn default_restart_policy() -> String {
