@@ -44,61 +44,80 @@ pub struct CrunHandler {
     cleaned: bool,
 }
 
-impl CrunHandler {
-    #[cfg(target_os = "linux")]
-    pub(crate) fn from_child(
+pub(crate) struct CrunHandlerSpec {
+    runtime_path: PathBuf,
+    runtime_root: PathBuf,
+    container_id: String,
+    init_pid: u32,
+    bundle_dir: PathBuf,
+    runtime_record: PathBuf,
+}
+
+impl CrunHandlerSpec {
+    pub(crate) fn new(
         runtime_path: PathBuf,
         runtime_root: PathBuf,
         container_id: String,
         init_pid: u32,
-        process: Child,
-        log_worker: Child,
-        log_worker_pid_start_time: u64,
         bundle_dir: PathBuf,
         runtime_record: PathBuf,
     ) -> Self {
-        let log_worker_pid = log_worker.id();
         Self {
             runtime_path,
             runtime_root,
             container_id,
             init_pid,
+            bundle_dir,
+            runtime_record,
+        }
+    }
+}
+
+impl CrunHandler {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_child(
+        spec: CrunHandlerSpec,
+        process: Child,
+        log_worker: Child,
+        log_worker_pid_start_time: u64,
+    ) -> Self {
+        let log_worker_pid = log_worker.id();
+        Self {
+            runtime_path: spec.runtime_path,
+            runtime_root: spec.runtime_root,
+            container_id: spec.container_id,
+            init_pid: spec.init_pid,
             process: Some(process),
             log_worker: Some(log_worker),
             log_worker_pid: Some(log_worker_pid),
             log_worker_pid_start_time: Some(log_worker_pid_start_time),
             metrics_sys: Mutex::new(System::new()),
             exit_code: None,
-            bundle_dir,
-            runtime_record,
+            bundle_dir: spec.bundle_dir,
+            runtime_record: spec.runtime_record,
             cleaned: false,
         }
     }
 
     #[cfg(all(target_os = "linux", feature = "vm"))]
     pub(crate) fn from_recorded_runtime(
-        runtime_path: PathBuf,
-        runtime_root: PathBuf,
-        container_id: String,
-        init_pid: u32,
+        spec: CrunHandlerSpec,
         log_worker_pid: Option<u32>,
         log_worker_pid_start_time: Option<u64>,
-        bundle_dir: PathBuf,
-        runtime_record: PathBuf,
     ) -> Self {
         Self {
-            runtime_path,
-            runtime_root,
-            container_id,
-            init_pid,
+            runtime_path: spec.runtime_path,
+            runtime_root: spec.runtime_root,
+            container_id: spec.container_id,
+            init_pid: spec.init_pid,
             process: None,
             log_worker: None,
             log_worker_pid,
             log_worker_pid_start_time,
             metrics_sys: Mutex::new(System::new()),
             exit_code: None,
-            bundle_dir,
-            runtime_record,
+            bundle_dir: spec.bundle_dir,
+            runtime_record: spec.runtime_record,
             cleaned: false,
         }
     }
@@ -454,14 +473,16 @@ mod tests {
         let runtime_record = temporary.path().join("runtime.json");
 
         let handler = CrunHandler::from_recorded_runtime(
-            runtime_path.clone(),
-            runtime_root.clone(),
-            "recorded-test".to_string(),
-            42,
+            CrunHandlerSpec::new(
+                runtime_path.clone(),
+                runtime_root.clone(),
+                "recorded-test".to_string(),
+                42,
+                bundle_dir.clone(),
+                runtime_record.clone(),
+            ),
             None,
             None,
-            bundle_dir.clone(),
-            runtime_record.clone(),
         );
 
         assert_eq!(handler.runtime_path, runtime_path);
@@ -485,15 +506,17 @@ mod tests {
         let log_worker_pid = log_worker.id();
         let log_worker_pid_start_time = crate::process::pid_start_time(log_worker_pid).unwrap();
         let handler = CrunHandler::from_child(
-            PathBuf::from("/bin/true"),
-            temporary.path().join("runtime"),
-            "detached-test".to_string(),
-            pid,
+            CrunHandlerSpec::new(
+                PathBuf::from("/bin/true"),
+                temporary.path().join("runtime"),
+                "detached-test".to_string(),
+                pid,
+                temporary.path().join("bundle"),
+                temporary.path().join("runtime.json"),
+            ),
             child,
             log_worker,
             log_worker_pid_start_time,
-            temporary.path().join("bundle"),
-            temporary.path().join("runtime.json"),
         );
 
         drop(handler);

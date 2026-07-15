@@ -369,16 +369,7 @@ pub fn run_log_processor_with_ready_and_eof_policy(
             ready,
             eof_policy,
         ),
-        LogDriver::Syslog => run_syslog_processor(
-            console_log,
-            config.syslog_address(),
-            config.syslog_facility(),
-            config.tag().unwrap_or("a3s-box"),
-            Some(console_cap(config.max_size(), config.max_file())),
-            stop,
-            ready,
-            eof_policy,
-        ),
+        LogDriver::Syslog => run_syslog_processor(console_log, config, stop, ready, eof_policy),
     }
 }
 
@@ -407,34 +398,41 @@ pub fn stderr_console_path(console_log: &Path) -> PathBuf {
 /// Tail one console file, emitting each container line via `emit(line, stream)`.
 /// `filter_noise` drops libkrun's `init.krun:` preamble (only on the stdout
 /// console). Blocks until `stop` is set and the file is drained.
-fn run_tagged_tail(
-    file: &Path,
-    stream: &str,
+#[derive(Clone, Copy)]
+struct TaggedTailOptions<'a> {
+    stream: &'static str,
     filter_noise: bool,
     bound: Option<u64>,
+    ready: Option<&'a std::sync::atomic::AtomicUsize>,
+    eof_policy: ConsoleEofPolicy,
+}
+
+fn run_tagged_tail(
+    file: &Path,
     stop: &AtomicBool,
     emit: &(dyn Fn(&str, &str) + Sync),
-    ready: Option<&std::sync::atomic::AtomicUsize>,
-    eof_policy: ConsoleEofPolicy,
+    options: TaggedTailOptions<'_>,
 ) {
     let f = match open_console(file, stop) {
         Some(f) => f,
         None => return,
     };
-    if let Some(ready) = ready {
+    if let Some(ready) = options.ready {
         ready.fetch_add(1, Ordering::Release);
     }
     let mut reader = BufReader::new(f);
     let mut buf = String::new();
     // Bound the raw console file's growth at clean line boundaries (see
     // console_truncate_if_over). None = unbounded (used by tests).
-    let truncate = bound.map(|cap| move || console_truncate_if_over(file, cap));
+    let truncate = options
+        .bound
+        .map(|cap| move || console_truncate_if_over(file, cap));
     let on_eof: Option<&dyn Fn() -> bool> = truncate.as_ref().map(|t| t as &dyn Fn() -> bool);
-    while let Some(line) = tail_next_line(&mut reader, &mut buf, stop, on_eof, eof_policy) {
-        if filter_noise && is_runtime_console_noise(&line) {
+    while let Some(line) = tail_next_line(&mut reader, &mut buf, stop, on_eof, options.eof_policy) {
+        if options.filter_noise && is_runtime_console_noise(&line) {
             continue;
         }
-        emit(&line, stream);
+        emit(&line, options.stream);
     }
 }
 
@@ -463,18 +461,29 @@ fn run_discard_processor(
         s.spawn(|| {
             run_tagged_tail(
                 console_log,
-                "stdout",
-                false,
-                cap,
                 stop,
                 discard,
-                ready,
-                eof_policy,
+                TaggedTailOptions {
+                    stream: "stdout",
+                    filter_noise: false,
+                    bound: cap,
+                    ready,
+                    eof_policy,
+                },
             )
         });
         s.spawn(|| {
             run_tagged_tail(
-                &err_log, "stderr", false, cap, stop, discard, ready, eof_policy,
+                &err_log,
+                stop,
+                discard,
+                TaggedTailOptions {
+                    stream: "stderr",
+                    filter_noise: false,
+                    bound: cap,
+                    ready,
+                    eof_policy,
+                },
             )
         });
     });
@@ -517,34 +526,50 @@ fn run_json_file_processor(
         s.spawn(|| {
             run_tagged_tail(
                 console_log,
-                "stdout",
-                true,
-                cap,
                 stop,
                 emit,
-                ready,
-                eof_policy,
+                TaggedTailOptions {
+                    stream: "stdout",
+                    filter_noise: true,
+                    bound: cap,
+                    ready,
+                    eof_policy,
+                },
             )
         });
         // libkrun's `init.krun:` preamble can land on EITHER stream, so filter
         // the noise on stderr too.
-        s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready, eof_policy));
+        s.spawn(|| {
+            run_tagged_tail(
+                &err_log,
+                stop,
+                emit,
+                TaggedTailOptions {
+                    stream: "stderr",
+                    filter_noise: true,
+                    bound: cap,
+                    ready,
+                    eof_policy,
+                },
+            )
+        });
     });
 }
 
 /// Forward both console streams (stdout + stderr) to a syslog endpoint.
 fn run_syslog_processor(
     console_log: &Path,
-    address: &str,
-    _facility: &str,
-    tag: &str,
-    cap: Option<u64>,
+    config: &LogConfig,
     stop: &AtomicBool,
     ready: Option<&std::sync::atomic::AtomicUsize>,
     eof_policy: ConsoleEofPolicy,
 ) {
     use std::net::UdpSocket;
 
+    let address = config.syslog_address();
+    let _facility = config.syslog_facility();
+    let tag = config.tag().unwrap_or("a3s-box");
+    let cap = Some(console_cap(config.max_size(), config.max_file()));
     let (proto, addr) = if let Some(rest) = address.strip_prefix("udp://") {
         ("udp", rest)
     } else if let Some(rest) = address.strip_prefix("tcp://") {
@@ -570,17 +595,30 @@ fn run_syslog_processor(
                 s.spawn(|| {
                     run_tagged_tail(
                         console_log,
-                        "stdout",
-                        true,
-                        cap,
                         stop,
                         emit,
-                        ready,
-                        eof_policy,
+                        TaggedTailOptions {
+                            stream: "stdout",
+                            filter_noise: true,
+                            bound: cap,
+                            ready,
+                            eof_policy,
+                        },
                     )
                 });
                 s.spawn(|| {
-                    run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready, eof_policy)
+                    run_tagged_tail(
+                        &err_log,
+                        stop,
+                        emit,
+                        TaggedTailOptions {
+                            stream: "stderr",
+                            filter_noise: true,
+                            bound: cap,
+                            ready,
+                            eof_policy,
+                        },
+                    )
                 });
             });
         }
@@ -605,17 +643,30 @@ fn run_syslog_processor(
                 sc.spawn(|| {
                     run_tagged_tail(
                         console_log,
-                        "stdout",
-                        true,
-                        cap,
                         stop,
                         emit,
-                        ready,
-                        eof_policy,
+                        TaggedTailOptions {
+                            stream: "stdout",
+                            filter_noise: true,
+                            bound: cap,
+                            ready,
+                            eof_policy,
+                        },
                     )
                 });
                 sc.spawn(|| {
-                    run_tagged_tail(&err_log, "stderr", true, cap, stop, emit, ready, eof_policy)
+                    run_tagged_tail(
+                        &err_log,
+                        stop,
+                        emit,
+                        TaggedTailOptions {
+                            stream: "stderr",
+                            filter_noise: true,
+                            bound: cap,
+                            ready,
+                            eof_policy,
+                        },
+                    )
                 });
             });
         }
@@ -946,13 +997,15 @@ mod tests {
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
             run_tagged_tail(
                 &p2,
-                "stdout",
-                false,
-                Some(cap),
                 &s2,
                 emit,
-                None,
-                ConsoleEofPolicy::MayReceiveLateWrites,
+                TaggedTailOptions {
+                    stream: "stdout",
+                    filter_noise: false,
+                    bound: Some(cap),
+                    ready: None,
+                    eof_policy: ConsoleEofPolicy::MayReceiveLateWrites,
+                },
             );
         });
 

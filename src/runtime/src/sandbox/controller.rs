@@ -21,9 +21,9 @@ use oci_spec::runtime::Spec;
 use serde::Serialize;
 
 use super::capability::{CertifiedCrun, SandboxCapabilitySnapshot};
-use super::handler::CrunHandler;
 #[cfg(target_os = "linux")]
 use super::handler::CrunState;
+use super::handler::{CrunHandler, CrunHandlerSpec};
 
 #[cfg(target_os = "linux")]
 const EXEC_LISTENER_FD: i32 = 3;
@@ -324,15 +324,17 @@ impl CrunController {
         }
 
         Ok(CrunHandler::from_child(
-            self.runtime.path.clone(),
-            launch.runtime_root,
-            launch.container_id,
-            init_pid,
+            CrunHandlerSpec::new(
+                self.runtime.path.clone(),
+                launch.runtime_root,
+                launch.container_id,
+                init_pid,
+                launch.bundle_dir,
+                launch.runtime_record,
+            ),
             child,
             log_worker,
             log_worker_pid_start_time,
-            launch.bundle_dir,
-            launch.runtime_record,
         ))
     }
 
