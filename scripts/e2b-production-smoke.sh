@@ -11,6 +11,11 @@ GATEWAY_PORT="${A3S_BOX_E2B_GATEWAY_SMOKE_PORT:-38443}"
 GATEWAY_ADDRESS="${A3S_BOX_E2B_GATEWAY_SMOKE_ADDRESS:-127.0.0.1}"
 SANDBOX_DOMAIN="${A3S_BOX_E2B_SANDBOX_DOMAIN:-box.example.com}"
 IMAGE="${A3S_BOX_SMOKE_IMAGE:-alpine:3.20}"
+RUNTIME_IMAGE="${A3S_BOX_E2B_RUNTIME_IMAGE:-}"
+EXPECTED_TRAFFIC_BODY="sandbox-data-plane"
+if [[ -n "$RUNTIME_IMAGE" ]]; then
+  EXPECTED_TRAFFIC_BODY='"OK"'
+fi
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OFFICIAL_CLIENT_RUNNER="${A3S_BOX_E2B_OFFICIAL_CLIENT_RUNNER:-$SCRIPT_DIR/../compat/e2b/fixtures/official-clients/run_production.py}"
 # A dependency-free HTTP/1.1 responder used with BusyBox nc -e. Alpine's
@@ -306,46 +311,69 @@ e2b_compat {
     encryption_key = env("TOKEN_ENCRYPTION")
     digest_key = env("TOKEN_DIGEST")
   }
-
-  template_policy "fixture-template" {
-    image = "$IMAGE"
-    envd_version = "0.1.3"
-    isolation = "sandbox"
-    network = "none"
-    command = ["/bin/sh", "-c", "adduser -D -u 1000 user >/dev/null 2>&1 || true; printf '%s' '$BASH_COMPAT_WRAPPER_B64' | /bin/busybox base64 -d > /bin/bash && chmod 755 /bin/bash && mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
-
-    resources {
-      vcpus = 2
-      memory_mb = 512
-      disk_mb = 1024
-    }
-
-    route {
-      port = 49999
-      token_scope = "traffic"
-    }
-  }
-
-  template_policy "code-interpreter-v1" {
-    image = "$IMAGE"
-    envd_version = "0.1.3"
-    isolation = "sandbox"
-    network = "none"
-    command = ["/bin/sh", "-c", "adduser -D -u 1000 user >/dev/null 2>&1 || true; printf '%s' '$BASH_COMPAT_WRAPPER_B64' | /bin/busybox base64 -d > /bin/bash && chmod 755 /bin/bash && mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
-
-    resources {
-      vcpus = 2
-      memory_mb = 512
-      disk_mb = 1024
-    }
-
-    route {
-      port = 49999
-      token_scope = "traffic"
-    }
-  }
-}
 EOF
+
+append_template_policy() {
+  local template_id="$1"
+  local template_image="$IMAGE"
+  local envd_version="0.1.3"
+  if [[ -n "$RUNTIME_IMAGE" ]]; then
+    template_image="$RUNTIME_IMAGE"
+    envd_version="0.6.9"
+  fi
+
+  cat >>"$CONFIG" <<EOF
+
+  template_policy "$template_id" {
+    image = "$template_image"
+    envd_version = "$envd_version"
+    isolation = "sandbox"
+    network = "none"
+EOF
+
+  if [[ -n "$RUNTIME_IMAGE" ]]; then
+    cat >>"$CONFIG" <<EOF
+    envd_mode = "runtime"
+
+    resources {
+      vcpus = 2
+      memory_mb = 2048
+      disk_mb = 8192
+    }
+
+    route {
+      port = 49983
+      token_scope = "envd"
+    }
+
+    route {
+      port = 49999
+      token_scope = "traffic"
+    }
+EOF
+  else
+    cat >>"$CONFIG" <<EOF
+    command = ["/bin/sh", "-c", "adduser -D -u 1000 user >/dev/null 2>&1 || true; printf '%s' '$BASH_COMPAT_WRAPPER_B64' | /bin/busybox base64 -d > /bin/bash && chmod 755 /bin/bash && mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49999 -e /tmp/e2b-smoke/respond"]
+
+    resources {
+      vcpus = 2
+      memory_mb = 512
+      disk_mb = 1024
+    }
+
+    route {
+      port = 49999
+      token_scope = "traffic"
+    }
+EOF
+  fi
+
+  printf '  }\n' >>"$CONFIG"
+}
+
+append_template_policy fixture-template
+append_template_policy code-interpreter-v1
+printf '}\n' >>"$CONFIG"
 
 start_service
 
@@ -381,7 +409,7 @@ wait_gateway_ready "$DIRECT_HOST" || fail 'TLS direct route did not become ready
 TRAFFIC_HOST="49999-$SANDBOX_ID.$SANDBOX_DOMAIN"
 [[ "$(gateway_status "$TRAFFIC_HOST" "$STATE_DIR/traffic-body.txt" E2B-Traffic-Access-Token "$TRAFFIC_TOKEN")" == "200" ]] ||
   fail 'TLS traffic route did not return HTTP 200'
-[[ "$(cat "$STATE_DIR/traffic-body.txt")" == "sandbox-data-plane" ]] ||
+[[ "$(cat "$STATE_DIR/traffic-body.txt")" == "$EXPECTED_TRAFFIC_BODY" ]] ||
   fail 'TLS traffic route returned the wrong Sandbox response body'
 [[ "$(gateway_status "$TRAFFIC_HOST" /dev/null E2B-Traffic-Access-Token "$ENVD_TOKEN")" == "401" ]] ||
   fail 'TLS traffic route accepted an envd token'
