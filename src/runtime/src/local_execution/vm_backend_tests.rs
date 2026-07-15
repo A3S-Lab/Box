@@ -53,6 +53,29 @@ fn manager_uses_the_full_persisted_request_config() {
 }
 
 #[test]
+fn manager_applies_persisted_shared_memory_policy_to_runtime_config() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    let shm_size = 64 * 1024 * 1024;
+    record.shm_size = Some(shm_size);
+    record
+        .managed_execution
+        .as_mut()
+        .unwrap()
+        .request
+        .policy
+        .shm_size = Some(shm_size);
+
+    let manager = backend.new_manager(&record).unwrap();
+
+    assert!(manager
+        .config
+        .tmpfs
+        .contains(&format!("/dev/shm:size={shm_size}")));
+}
+
+#[test]
 fn validation_rejects_a_host_path_derived_from_external_input() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());

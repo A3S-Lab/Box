@@ -1,7 +1,8 @@
 # E2B Protocol Compatibility and SDK Design
 
 Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 3 complete;
-slice 4 runtime path proven, caller migration pending)**
+slice 4 runtime path and staged CLI create/start complete, remaining callers
+pending)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -21,7 +22,7 @@ unversioned claim.
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, reaping, and startup reconciliation | Wire the repository and supervisor into the production service process and exercise restart and host-reboot recovery end to end |
-| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI `create` uses the same reservation path with caller-policy parity tests; an A3S OS smoke test proves reservation-only create, restart reconciliation, real `crun` start, explicit pause rejection, kill, and cleanup without MicroVM fallback | Migrate CLI start/run and the Rust SDK to the same manager and add the remaining caller parity tests |
+| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI staged `create` and first `start` use the same generation-fenced path with caller-policy parity tests, idempotent named-volume/network preparation, and start-failure rollback; an A3S OS smoke test proves reservation-only create, restart reconciliation, real `crun` start, explicit pause rejection, kill, and cleanup without MicroVM fallback | Add an explicit generation-advancing restart operation, then migrate CLI restart/run and the Rust SDK and add the remaining caller parity tests |
 | Credentials and routing | Injected verifier, token, cursor, and template interfaces isolate protocol logic from infrastructure | Add production credential hashing, token encryption and rotation, generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 

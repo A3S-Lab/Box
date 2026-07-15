@@ -443,6 +443,19 @@ impl NetworkConfig {
         })
     }
 
+    /// Validate the driver and policy that the runtime can enforce today.
+    pub fn validate_runtime(&self) -> Result<(), String> {
+        if self.driver != "bridge" {
+            return Err(format!(
+                "Unsupported network driver '{}'. Only 'bridge' is currently supported",
+                self.driver
+            ));
+        }
+        self.policy
+            .validate()
+            .map_err(|error| format!("Unsupported network isolation mode: {error}"))
+    }
+
     /// Allocate an IP and register a new endpoint for a box.
     pub fn connect(&mut self, box_id: &str, box_name: &str) -> Result<NetworkEndpoint, String> {
         self.connect_with_aliases(box_id, box_name, &[])
@@ -1178,6 +1191,23 @@ mod tests {
         let err = policy.validate().unwrap_err();
         assert!(err.contains("custom"));
         assert!(err.contains("not yet enforced"));
+    }
+
+    #[test]
+    fn test_network_config_runtime_validation_accepts_supported_configuration() {
+        let network = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+
+        assert!(network.validate_runtime().is_ok());
+    }
+
+    #[test]
+    fn test_network_config_runtime_validation_rejects_unsupported_driver() {
+        let mut network = NetworkConfig::new("mynet", "10.88.0.0/24").unwrap();
+        network.driver = "overlay".to_string();
+
+        let error = network.validate_runtime().unwrap_err();
+
+        assert!(error.contains("Unsupported network driver"));
     }
 
     // --- NetworkConfig::set_policy tests ---

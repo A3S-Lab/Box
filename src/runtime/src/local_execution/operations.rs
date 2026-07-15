@@ -137,6 +137,7 @@ impl LocalExecutionManager {
     ) -> ExecutionManagerResult<KillOutcome> {
         match self.backend.kill(&record).await {
             Ok(outcome) => {
+                self.release_execution_resources(&record).await?;
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
@@ -147,6 +148,7 @@ impl LocalExecutionManager {
                 Ok(outcome)
             }
             Err(ExecutionManagerError::NotFound(_)) => {
+                self.release_execution_resources(&record).await?;
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
@@ -177,6 +179,9 @@ impl LocalExecutionManager {
             _ => false,
         };
         if !terminal {
+            return None;
+        }
+        if self.release_execution_resources(&record).await.is_err() {
             return None;
         }
         self.transition(

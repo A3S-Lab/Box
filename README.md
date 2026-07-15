@@ -187,6 +187,12 @@ Important supported options:
 
 For CI-style one-shot commands, prefer foreground `run --rm --timeout <seconds>` and avoid `-i` unless the command truly needs stdin. A timed-out foreground run stops/removes the box according to the usual `--rm` behavior and exits with code 124. `a3s-box wait` prints a low-frequency stderr keepalive while it is blocking so long CI or SSH sessions do not look idle; use `--no-heartbeat` or `--heartbeat-interval <seconds>` to tune it.
 
+The manager-backed `create` path treats `start` as first activation of its
+nonterminal reservation. Once that managed execution is stopped or failed,
+ordinary `start` rejects it instead of reusing a stale generation. The explicit
+generation-advancing managed restart operation is the next lifecycle slice;
+legacy records retain their existing stopped-box `start` behavior meanwhile.
+
 Health checks for detached `run`, Compose services, and boxes brought back by
 `start`/`restart` are owned by a generation-fenced background worker, not by the
 short-lived creating CLI. The worker stops when that box generation stops or is
@@ -327,10 +333,15 @@ owns kill and cleanup without MicroVM fallback.
 
 Those protocol and runtime tests are not yet one end-to-end service path. CLI
 `create` now persists its reservation and complete caller policy through the
-canonical manager; CLI `start`/`run` and the Rust SDK still need migration. The
-production HCL service, encrypted credentials, generation-fenced route leases,
-wildcard TLS gateway, envd data plane, and real official-client Sandbox suite
-also remain open gates.
+canonical manager, and the first `start` of that reservation consumes its
+persisted generation through the same manager. The production backend prepares
+named-volume and network ownership idempotently and rolls back only resources
+acquired by a failed start attempt. Ordinary `start` does not revive a terminal
+managed execution; an explicit restart transition must advance its generation.
+CLI `restart`/`run` and the Rust SDK still need migration. The production HCL
+service, encrypted credentials, generation-fenced route leases, wildcard TLS
+gateway, envd data plane, and real official-client Sandbox suite also remain
+open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

@@ -84,7 +84,7 @@ pub enum Command {
     Run(run::RunArgs),
     /// Create a new box without starting it
     Create(create::CreateArgs),
-    /// Start one or more stopped or created boxes
+    /// Start one or more eligible boxes
     Start(start::StartArgs),
     /// Gracefully stop one or more running boxes
     Stop(stop::StopArgs),
