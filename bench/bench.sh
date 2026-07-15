@@ -8,7 +8,7 @@
 # foreground comparison also runs on macOS with HVF.
 #
 # Usage:
-#   bench/bench.sh [all|cold|foreground|warm|fork|leak|race|pnpm]   (default: all)
+#   bench/bench.sh [all|cold|foreground|sandbox|warm|fork|leak|race|pnpm]   (default: all)
 # Env:
 #   A3S_BOX   path to the a3s-box binary           (default: a3s-box on PATH)
 #   IMAGE     OCI image to benchmark                (default: alpine:latest)
@@ -21,6 +21,11 @@
 #   FOREGROUND_DOCKER 1 compares Docker when available, 0 skips it (default: 1)
 #   FOREGROUND_MAX_P50_MS optional a3s-box p50 gate; 0 only reports (default: 0)
 #   FOREGROUND_MAX_DOCKER_RATIO optional p50 ratio gate; 0 only reports (default: 0)
+#   SANDBOX_RUNS hot Sandbox lifecycle samples       (default: RUNS)
+#   SANDBOX_WARMUPS unmeasured Sandbox warm-ups      (default: 1)
+#   SANDBOX_DOCKER 1 alternates matching Docker samples, 0 skips (default: 1)
+#   SANDBOX_RESULTS machine-readable CSV output path (default: /tmp/...csv)
+#   SANDBOX_LOG_DIR per-sample profile logs           (default: /tmp/...)
 #   PNPM_PROJECT project dir with package.json + pnpm-lock.yaml (required for pnpm mode)
 #   PNPM_IMAGE   Node image for pnpm mode             (default: node:22-alpine)
 #   PNPM_VERSION pnpm version for corepack prepare    (default: 10.30.3)
@@ -46,6 +51,11 @@ FOREGROUND_WARMUPS="${FOREGROUND_WARMUPS:-1}"
 FOREGROUND_DOCKER="${FOREGROUND_DOCKER:-1}"
 FOREGROUND_MAX_P50_MS="${FOREGROUND_MAX_P50_MS:-0}"
 FOREGROUND_MAX_DOCKER_RATIO="${FOREGROUND_MAX_DOCKER_RATIO:-0}"
+SANDBOX_RUNS="${SANDBOX_RUNS:-$RUNS}"
+SANDBOX_WARMUPS="${SANDBOX_WARMUPS:-1}"
+SANDBOX_DOCKER="${SANDBOX_DOCKER:-1}"
+SANDBOX_RESULTS="${SANDBOX_RESULTS:-/tmp/a3s-box-sandbox-lifecycle-$$.csv}"
+SANDBOX_LOG_DIR="${SANDBOX_LOG_DIR:-/tmp/a3s-box-sandbox-lifecycle-$$}"
 PNPM_PROJECT="${PNPM_PROJECT:-}"
 PNPM_IMAGE="${PNPM_IMAGE:-node:22-alpine}"
 PNPM_VERSION="${PNPM_VERSION:-10.30.3}"
@@ -208,6 +218,217 @@ bench_foreground() {
   fi
 
   rm -f "$a3s_log" "$docker_log"
+}
+
+# Parse the opt-in JSONL events produced by one profiled `a3s-box run`.
+# Output order matches the machine-readable CSV columns in
+# bench_sandbox_lifecycle. Reconciliation is the sum of the raw/structured log
+# drains, log archival, and managed runtime reconciliation. Removal is the
+# final durable-state and residual-path deletion phase.
+sandbox_profile_fields() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+prefix = "A3S_BOX_LIFECYCLE "
+durations = {}
+with open(sys.argv[1], encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        marker = line.find(prefix)
+        if marker < 0:
+            continue
+        try:
+            event = json.loads(line[marker + len(prefix):])
+        except json.JSONDecodeError:
+            continue
+        if event.get("schema") != "a3s.box.lifecycle-profile.v1":
+            continue
+        phase = event.get("phase")
+        duration = event.get("duration_ns")
+        if isinstance(phase, str) and isinstance(duration, int):
+            durations[phase] = durations.get(phase, 0) + duration
+
+required = [
+    "cli.create_start",
+    "foreground.command_execution",
+    "foreground.raw_log_drain",
+    "foreground.structured_log_drain",
+    "foreground.archive",
+    "foreground.manager_reconcile",
+    "foreground.removal",
+    "sandbox.capability",
+    "sandbox.layout",
+    "sandbox.instance_prepare",
+    "sandbox.mount_sources",
+    "sandbox.rootfs_ownership",
+    "sandbox.bundle",
+    "sandbox.launch",
+    "sandbox.readiness",
+]
+missing = [phase for phase in required if phase not in durations]
+if missing:
+    raise SystemExit("missing lifecycle profile phases: " + ", ".join(missing))
+
+def milliseconds(phase):
+    return durations[phase] / 1_000_000
+
+reconciliation = sum(milliseconds(phase) for phase in [
+    "foreground.raw_log_drain",
+    "foreground.structured_log_drain",
+    "foreground.archive",
+    "foreground.manager_reconcile",
+])
+fields = [
+    milliseconds("cli.create_start"),
+    milliseconds("foreground.command_execution"),
+    reconciliation,
+    milliseconds("foreground.removal"),
+    milliseconds("sandbox.capability"),
+    milliseconds("sandbox.layout"),
+    milliseconds("sandbox.instance_prepare"),
+    milliseconds("sandbox.mount_sources"),
+    milliseconds("sandbox.rootfs_ownership"),
+    milliseconds("sandbox.bundle"),
+    milliseconds("sandbox.launch"),
+    milliseconds("sandbox.readiness"),
+]
+print(",".join(f"{value:.3f}" for value in fields))
+PY
+}
+
+bench_sandbox_lifecycle() {
+  echo "## Hot Sandbox lifecycle ($SANDBOX_RUNS runs, $SANDBOX_WARMUPS warm-up, $IMAGE)"
+  echo "  cold image import/unpack: excluded (pull completes before warm-up)"
+  mkdir -p "$SANDBOX_LOG_DIR" "$(dirname "$SANDBOX_RESULTS")"
+  printf '%s\n' "runtime,iteration,wall_ms,create_start_ms,command_execution_ms,reconciliation_ms,removal_ms,capability_ms,layout_ms,instance_prepare_ms,mount_sources_ms,rootfs_ownership_ms,bundle_ms,launch_ms,readiness_ms,exit_code" >"$SANDBOX_RESULTS"
+
+  local a3s_log="$SANDBOX_LOG_DIR/a3s-warmup.log"
+  local docker_log="$SANDBOX_LOG_DIR/docker-warmup.log"
+  local i status
+  "$A3S_BOX" pull "$IMAGE" >"$SANDBOX_LOG_DIR/a3s-pull.log" 2>&1 || {
+    echo "  FAIL: a3s-box image preparation failed" >&2
+    tail -80 "$SANDBOX_LOG_DIR/a3s-pull.log" >&2
+    return 1
+  }
+  for i in $(seq 1 "$SANDBOX_WARMUPS"); do
+    if ! "$A3S_BOX" run --rm --isolation sandbox --no-stdin --timeout 180 "$IMAGE" -- true >"$a3s_log" 2>&1; then
+      echo "  FAIL: Sandbox warm-up $i failed" >&2
+      tail -80 "$a3s_log" >&2
+      return 1
+    fi
+  done
+
+  local compare_docker="$SANDBOX_DOCKER"
+  if [ "$compare_docker" = "1" ]; then
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+      docker pull "$IMAGE" >"$SANDBOX_LOG_DIR/docker-pull.log" 2>&1 || {
+        echo "  FAIL: Docker image preparation failed" >&2
+        tail -80 "$SANDBOX_LOG_DIR/docker-pull.log" >&2
+        return 1
+      }
+      for i in $(seq 1 "$SANDBOX_WARMUPS"); do
+        if ! docker run --rm "$IMAGE" true >"$docker_log" 2>&1; then
+          echo "  FAIL: Docker warm-up $i failed" >&2
+          tail -80 "$docker_log" >&2
+          return 1
+        fi
+      done
+    else
+      compare_docker=0
+      echo "  Docker comparison: skipped (docker CLI or daemon unavailable)"
+    fi
+  fi
+
+  local a3s_samples="" docker_samples=""
+  local create_samples="" command_samples="" reconciliation_samples="" removal_samples=""
+  local capability_samples="" layout_samples="" instance_samples="" mount_samples=""
+  local ownership_samples="" bundle_samples="" launch_samples="" readiness_samples=""
+
+  measure_a3s_sandbox_sample() {
+    local iteration="$1"
+    local log_file="$SANDBOX_LOG_DIR/a3s-$iteration.log"
+    local s e wall fields
+    s=$(now_ms)
+    A3S_BOX_LIFECYCLE_PROFILE=1 "$A3S_BOX" run --rm --isolation sandbox --no-stdin --timeout 180 "$IMAGE" -- true >"$log_file" 2>&1
+    status=$?
+    e=$(now_ms)
+    wall=$(( e - s ))
+    if [ "$status" -ne 0 ]; then
+      printf 'a3s,%s,%s,,,,,,,,,,,,,%s\n' "$iteration" "$wall" "$status" >>"$SANDBOX_RESULTS"
+      echo "  FAIL: Sandbox sample $iteration failed" >&2
+      tail -100 "$log_file" >&2
+      return "$status"
+    fi
+    if ! fields=$(sandbox_profile_fields "$log_file"); then
+      echo "  FAIL: incomplete lifecycle profile for Sandbox sample $iteration" >&2
+      tail -120 "$log_file" >&2
+      return 1
+    fi
+    local create command reconciliation removal capability layout instance mount ownership bundle launch readiness
+    IFS=, read -r create command reconciliation removal capability layout instance mount ownership bundle launch readiness <<EOF
+$fields
+EOF
+    printf 'a3s,%s,%s,%s,%s\n' "$iteration" "$wall" "$fields" "$status" >>"$SANDBOX_RESULTS"
+    a3s_samples="$a3s_samples $wall"
+    create_samples="$create_samples $create"
+    command_samples="$command_samples $command"
+    reconciliation_samples="$reconciliation_samples $reconciliation"
+    removal_samples="$removal_samples $removal"
+    capability_samples="$capability_samples $capability"
+    layout_samples="$layout_samples $layout"
+    instance_samples="$instance_samples $instance"
+    mount_samples="$mount_samples $mount"
+    ownership_samples="$ownership_samples $ownership"
+    bundle_samples="$bundle_samples $bundle"
+    launch_samples="$launch_samples $launch"
+    readiness_samples="$readiness_samples $readiness"
+  }
+
+  measure_docker_sandbox_sample() {
+    local iteration="$1"
+    local log_file="$SANDBOX_LOG_DIR/docker-$iteration.log"
+    local s e wall
+    s=$(now_ms)
+    docker run --rm "$IMAGE" true >"$log_file" 2>&1
+    status=$?
+    e=$(now_ms)
+    wall=$(( e - s ))
+    printf 'docker,%s,%s,,,,,,,,,,,,,%s\n' "$iteration" "$wall" "$status" >>"$SANDBOX_RESULTS"
+    if [ "$status" -ne 0 ]; then
+      echo "  FAIL: Docker sample $iteration failed" >&2
+      tail -100 "$log_file" >&2
+      return "$status"
+    fi
+    docker_samples="$docker_samples $wall"
+  }
+
+  for i in $(seq 1 "$SANDBOX_RUNS"); do
+    if [ "$compare_docker" = "1" ] && [ $(( i % 2 )) -eq 0 ]; then
+      measure_docker_sandbox_sample "$i" || return $?
+      measure_a3s_sandbox_sample "$i" || return $?
+    else
+      measure_a3s_sandbox_sample "$i" || return $?
+      if [ "$compare_docker" = "1" ]; then
+        measure_docker_sandbox_sample "$i" || return $?
+      fi
+    fi
+  done
+
+  echo "  a3s-box total:       mean=$(mean_ms "$a3s_samples")ms p50=$(pct "$a3s_samples" 50)ms p95=$(pct "$a3s_samples" 95)ms"
+  echo "  create/start:        p50=$(pct "$create_samples" 50)ms"
+  echo "  command execution:   p50=$(pct "$command_samples" 50)ms"
+  echo "  reconciliation:      p50=$(pct "$reconciliation_samples" 50)ms"
+  echo "  removal:             p50=$(pct "$removal_samples" 50)ms"
+  echo "  start internals p50: capability=$(pct "$capability_samples" 50)ms layout=$(pct "$layout_samples" 50)ms instance=$(pct "$instance_samples" 50)ms mounts=$(pct "$mount_samples" 50)ms ownership=$(pct "$ownership_samples" 50)ms bundle=$(pct "$bundle_samples" 50)ms launch=$(pct "$launch_samples" 50)ms readiness=$(pct "$readiness_samples" 50)ms"
+  if [ "$compare_docker" = "1" ]; then
+    local a3s_p50 docker_p50
+    a3s_p50=$(pct "$a3s_samples" 50)
+    docker_p50=$(pct "$docker_samples" 50)
+    echo "  Docker total:        mean=$(mean_ms "$docker_samples")ms p50=${docker_p50}ms p95=$(pct "$docker_samples" 95)ms"
+    echo "  a3s-box/Docker p50:  $(ratio "$a3s_p50" "$docker_p50")"
+  fi
+  echo "  CSV: $SANDBOX_RESULTS"
+  echo "  profile logs: $SANDBOX_LOG_DIR"
 }
 
 bench_warm() {
@@ -511,6 +732,7 @@ rc=0
 case "$MODE" in
   cold) bench_cold ;;
   foreground) bench_foreground || rc=$? ;;
+  sandbox) bench_sandbox_lifecycle || rc=$? ;;
   warm) bench_warm ;;
   fork) bench_fork ;;
   leak) bench_leak || rc=$? ;;
@@ -524,6 +746,6 @@ case "$MODE" in
     bench_leak || rc=$?
     bench_race || rc=$?
     ;;
-  *) echo "unknown mode: $MODE (use all|cold|foreground|warm|fork|leak|race|pnpm)"; exit 2 ;;
+  *) echo "unknown mode: $MODE (use all|cold|foreground|sandbox|warm|fork|leak|race|pnpm)"; exit 2 ;;
 esac
 exit "$rc"

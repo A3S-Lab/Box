@@ -239,6 +239,7 @@ fn extract_layer_with_cap(
         } else if entry.header().entry_type().is_hard_link() {
             prepare_hardlink_destination(target_dir, &path)?;
         }
+        reject_overlay_private_xattrs(&mut entry, &path)?;
 
         let desired = if track_metadata {
             Some(metadata_from_header(&entry, &normalized)?)
@@ -277,6 +278,50 @@ fn extract_layer_with_cap(
         "Extracted OCI layer"
     );
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reject_overlay_private_xattrs<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    path: &Path,
+) -> Result<()> {
+    const PAX_XATTR_PREFIX: &[u8] = b"SCHILY.xattr.";
+    let Some(extensions) = entry.pax_extensions().map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Failed to inspect extended attributes for {}: {error}",
+            path.display()
+        ))
+    })?
+    else {
+        return Ok(());
+    };
+
+    for extension in extensions {
+        let extension = extension.map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Invalid PAX extended attribute for {}: {error}",
+                path.display()
+            ))
+        })?;
+        let Some(name) = extension.key_bytes().strip_prefix(PAX_XATTR_PREFIX) else {
+            continue;
+        };
+        if name.starts_with(b"trusted.overlay.") || name.starts_with(b"user.overlay.") {
+            return Err(BoxError::OciImageError(format!(
+                "OCI layer entry {} contains reserved overlayfs metadata",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_overlay_private_xattrs<R: Read>(
+    _entry: &mut tar::Entry<'_, R>,
+    _path: &Path,
+) -> Result<()> {
     Ok(())
 }
 
@@ -928,6 +973,28 @@ mod tests {
         assert!(error.to_string().contains("reserved internal path"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_overlayfs_private_xattrs() {
+        let temp_dir = TempDir::new().unwrap();
+        for (index, xattr) in ["trusted.overlay.metacopy", "user.overlay.redirect"]
+            .into_iter()
+            .enumerate()
+        {
+            let layer = temp_dir
+                .path()
+                .join(format!("overlay-xattr-{index}.tar.gz"));
+            let target = temp_dir.path().join(format!("rootfs-{index}"));
+            create_overlay_xattr_test_layer(&layer, xattr);
+
+            let error = extract_layer_with_metadata(&layer, &target).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("contains reserved overlayfs metadata"));
+            assert!(!target.join("payload").exists());
+        }
+    }
+
     #[test]
     fn extract_layer_rejects_decompression_bomb_past_cap() {
         let temp_dir = TempDir::new().unwrap();
@@ -1015,6 +1082,31 @@ mod tests {
         header.set_gid(gid);
         header.set_cksum();
         builder.append_data(&mut header, name, content).unwrap();
+        builder.finish().unwrap();
+    }
+
+    #[cfg(unix)]
+    fn create_overlay_xattr_test_layer(path: &Path, xattr: &str) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tar::Builder;
+
+        let file = File::create(path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        let key = format!("SCHILY.xattr.{xattr}");
+        builder
+            .append_pax_extensions([(key.as_str(), b"".as_slice())])
+            .unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(7);
+        header.set_mode(0o644);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "payload", b"payload".as_slice())
+            .unwrap();
         builder.finish().unwrap();
     }
 

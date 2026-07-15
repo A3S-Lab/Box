@@ -64,7 +64,10 @@ impl RootfsCache {
         env: &[(String, String)],
     ) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(b"rootfs-cache-v1\n");
+        // v2 excludes OCI-provided overlayfs private xattrs before a cached
+        // directory may become a metacopy lower. Do not reuse v1 entries that
+        // predate that ingestion invariant.
+        hasher.update(b"rootfs-cache-v2\n");
         hasher.update(image_ref.as_bytes());
         hasher.update(b"\n");
 

@@ -27,81 +27,114 @@ pub fn overlay_mount(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> 
         }
     }
 
-    let opts = format!(
-        "lowerdir={},upperdir={},workdir={}",
-        lower.display(),
-        upper.display(),
-        work.display()
-    );
+    let base_options = overlay_options(lower, upper, work, false);
 
     // Try mount(2) syscall first
     #[cfg(target_os = "linux")]
     {
         use std::ffi::CString;
 
+        // Metadata-only copy-up avoids copying every executable's contents
+        // when Sandbox ownership is shifted for its user namespace. Restrict
+        // it to the initial root namespace: rootless overlay uses user.*
+        // private xattrs that an untrusted workload could forge. OCI ingestion
+        // separately rejects both trusted.overlay.* and user.overlay.* xattrs.
+        let metadata_options = overlay_options(lower, upper, work, true);
+        let options = if unsafe { libc::geteuid() } == 0 {
+            vec![(&metadata_options, true), (&base_options, false)]
+        } else {
+            vec![(&base_options, false)]
+        };
         let source = CString::new("overlay").unwrap();
         let target = CString::new(merged.to_string_lossy().as_ref())
             .map_err(|e| BoxError::BuildError(format!("Invalid merged path for mount: {}", e)))?;
         let fstype = CString::new("overlay").unwrap();
-        let data = CString::new(opts.as_str())
-            .map_err(|e| BoxError::BuildError(format!("Invalid overlay mount options: {}", e)))?;
+        let mut failures = Vec::new();
 
-        let ret = unsafe {
-            libc::mount(
-                source.as_ptr(),
-                target.as_ptr(),
-                fstype.as_ptr(),
-                0,
-                data.as_ptr() as *const libc::c_void,
-            )
-        };
-
-        if ret == 0 {
-            tracing::debug!(
-                lower = %lower.display(),
-                merged = %merged.display(),
-                "Overlay mounted via mount(2)"
-            );
-            return Ok(());
+        for &(options, metadata_copy) in &options {
+            let data = CString::new(options.as_str()).map_err(|error| {
+                BoxError::BuildError(format!("Invalid overlay mount options: {error}"))
+            })?;
+            let ret = unsafe {
+                libc::mount(
+                    source.as_ptr(),
+                    target.as_ptr(),
+                    fstype.as_ptr(),
+                    0,
+                    data.as_ptr() as *const libc::c_void,
+                )
+            };
+            if ret == 0 {
+                tracing::debug!(
+                    lower = %lower.display(),
+                    merged = %merged.display(),
+                    metadata_copy,
+                    "Overlay mounted via mount(2)"
+                );
+                return Ok(());
+            }
+            failures.push(format!(
+                "mount(2), metacopy={metadata_copy}: {}",
+                std::io::Error::last_os_error()
+            ));
         }
 
-        let errno = std::io::Error::last_os_error();
         tracing::debug!(
-            error = %errno,
+            errors = ?failures,
             "mount(2) failed, trying mount command"
         );
 
-        // Fallback: try `mount` command
-        let status = std::process::Command::new("mount")
-            .args(["-t", "overlay", "overlay", "-o", &opts])
-            .arg(merged)
-            .status()
-            .map_err(|e| BoxError::BuildError(format!("Failed to run mount command: {}", e)))?;
-
-        if status.success() {
-            tracing::debug!(
-                lower = %lower.display(),
-                merged = %merged.display(),
-                "Overlay mounted via mount command"
-            );
-            return Ok(());
+        for &(options, metadata_copy) in &options {
+            match std::process::Command::new("mount")
+                .args(["-t", "overlay", "overlay", "-o", options])
+                .arg(merged)
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    tracing::debug!(
+                        lower = %lower.display(),
+                        merged = %merged.display(),
+                        metadata_copy,
+                        "Overlay mounted via mount command"
+                    );
+                    return Ok(());
+                }
+                Ok(status) => {
+                    failures.push(format!("mount command, metacopy={metadata_copy}: {status}"))
+                }
+                Err(error) => {
+                    failures.push(format!("mount command, metacopy={metadata_copy}: {error}"))
+                }
+            }
         }
 
         Err(BoxError::BuildError(format!(
-            "Failed to mount overlayfs at {}: mount(2) returned {} and mount command exited with {}",
+            "Failed to mount overlayfs at {}: {}",
             merged.display(),
-            errno,
-            status
+            failures.join("; ")
         )))
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (lower, upper, work, merged, opts);
+        let _ = (lower, upper, work, merged, base_options);
         Err(BoxError::BuildError(
             "Overlayfs is only supported on Linux".to_string(),
         ))
     }
+}
+
+fn overlay_options(lower: &Path, upper: &Path, work: &Path, metadata_copy: bool) -> String {
+    let mut options = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        lower.display(),
+        upper.display(),
+        work.display()
+    );
+    if metadata_copy {
+        options.push_str(",metacopy=on");
+    }
+    options
 }
 
 /// Unmount an overlayfs at `merged`.
@@ -238,6 +271,22 @@ mod tests {
 
         assert!(err.to_string().contains("contains a comma"));
         assert!(err.to_string().contains("lower,with-comma"));
+    }
+
+    #[test]
+    fn metadata_copy_option_is_explicit() {
+        let lower = Path::new("/cache/lower");
+        let upper = Path::new("/box/upper");
+        let work = Path::new("/box/work");
+
+        assert_eq!(
+            overlay_options(lower, upper, work, false),
+            "lowerdir=/cache/lower,upperdir=/box/upper,workdir=/box/work"
+        );
+        assert_eq!(
+            overlay_options(lower, upper, work, true),
+            "lowerdir=/cache/lower,upperdir=/box/upper,workdir=/box/work,metacopy=on"
+        );
     }
 
     #[cfg(not(target_os = "linux"))]

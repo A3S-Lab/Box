@@ -921,7 +921,7 @@ fn run_init() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Step 9: Wait for agent process (reap zombies, handle SIGTERM)
-    wait_for_children(container_pid)?;
+    wait_for_children(container_pid, bootstrap_mode)?;
 
     persist_terminal_rootfs_metadata();
 
@@ -1609,7 +1609,10 @@ fn remount_rootfs_readonly() -> Result<(), Box<dyn std::error::Error>> {
 /// children for their handler. This propagates the container exit code AND fixes
 /// the zombie leak (orphans were previously never reaped until shutdown).
 #[cfg(target_os = "linux")]
-fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std::error::Error>> {
+fn wait_for_children(
+    container_pid: nix::unistd::Pid,
+    bootstrap_mode: BootstrapMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     use a3s_box_guest_init::reaper;
     use nix::sys::wait::{waitid, waitpid, Id, WaitPidFlag, WaitStatus};
 
@@ -1672,12 +1675,15 @@ fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std:
                 // Flush the stdout/stderr relays so the container's last output
                 // reaches the console before this process::exit halts the VM.
                 flush_stdio_relays();
-                // The relay write has reached virtio-console, but libkrun exits
-                // the host shim as soon as PID 1 exits. Give the already-ready
-                // host tail threads one bounded poll interval to consume those
-                // bytes; without this handoff, short detached commands could
-                // leave a complete console.log and an empty container.json.
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                // MicroVM logging still needs a bounded handoff before PID 1
+                // halts the VMM. Host Sandbox logging has a generation-owned
+                // worker that waits for crun to close both writers and drains
+                // through EOF, so retaining this legacy delay there only adds
+                // fixed latency to every short command.
+                let handoff = console_handoff_delay(bootstrap_mode);
+                if !handoff.is_zero() {
+                    std::thread::sleep(handoff);
+                }
                 process::exit(code);
             } else if reaper::is_managed(pid.as_raw()) {
                 // Owned by an exec/PTY handler, which reaps it for the real status.
@@ -1691,6 +1697,15 @@ fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std:
         }
 
         std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn console_handoff_delay(bootstrap_mode: BootstrapMode) -> std::time::Duration {
+    if bootstrap_mode.is_host_sandbox() {
+        std::time::Duration::ZERO
+    } else {
+        std::time::Duration::from_millis(250)
     }
 }
 
@@ -1711,7 +1726,10 @@ fn persist_terminal_rootfs_metadata() {}
 
 /// Non-Linux development stub: just wait for the container process to exit.
 #[cfg(not(target_os = "linux"))]
-fn wait_for_children(container_pid: nix::unistd::Pid) -> Result<(), Box<dyn std::error::Error>> {
+fn wait_for_children(
+    container_pid: nix::unistd::Pid,
+    _bootstrap_mode: BootstrapMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 
     loop {
@@ -1839,6 +1857,18 @@ mod tests {
             BootstrapMode::HostSandbox
         );
         assert!(BootstrapMode::from_value(Some("sandbox-ish")).is_err());
+    }
+
+    #[test]
+    fn host_sandbox_uses_owned_log_drain_instead_of_legacy_handoff() {
+        assert_eq!(
+            console_handoff_delay(BootstrapMode::HostSandbox),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            console_handoff_delay(BootstrapMode::Microvm),
+            std::time::Duration::from_millis(250)
+        );
     }
 
     fn set_sidecar_env(image: &str, vsock_port: u32, env: &[(&str, &str)]) {
