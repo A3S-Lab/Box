@@ -3,6 +3,11 @@
 version = 4
 
 [[package]]
+name = "a3s-acl"
+version = "0.2.1"
+source = "git+https://github.com/A3S-Lab/ACL.git?rev=6e2a6469edc0f4c61b1e588d0ace873aaf15ce22#6e2a6469edc0f4c61b1e588d0ace873aaf15ce22"
+
+[[package]]
 name = "a3s-box-cli"
 version = "3.0.9"
 dependencies = [
@@ -38,11 +43,14 @@ dependencies = [
 name = "a3s-box-compat"
 version = "3.0.9"
 dependencies = [
+ "a3s-acl",
  "a3s-box-core",
+ "a3s-box-runtime",
  "anyhow",
  "async-trait",
  "axum",
  "chrono",
+ "clap",
  "hex",
  "hyper 0.14.32",
  "prost",
@@ -57,7 +65,10 @@ dependencies = [
  "tokio",
  "tokio-rusqlite",
  "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
