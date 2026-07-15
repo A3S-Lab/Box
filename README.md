@@ -221,6 +221,16 @@ a3s-box push --plain-http localhost:5000/org/image:v1
 
 Docker Hub aliases share cache resolution, so `alpine`, `alpine:latest`, and `docker.io/library/alpine:latest` can resolve to the same local image when unambiguous. Digest-only references resolve locally when the digest matches exactly or by unique prefix.
 
+Authenticated pulls use credentials from `a3s-box login`, Docker configuration,
+or `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`. If a registry advertises Basic
+authentication only after a protected manifest or blob request, Box retries an
+unauthorized request with preemptive Basic authentication when both credential
+fields are non-empty. Manifest, config, and layer digests are verified; layers
+remain streamed to disk. Same-origin redirects retain authentication, while
+cross-origin redirects never receive the registry Authorization header. The
+same pull path is used by explicit `pull` and an implicit image pull during
+`run`.
+
 Use `a3s-box push --plain-http` for an explicit HTTP registry. `--insecure` is accepted as an alias, and `--tls-verify=false` maps to the same behavior for Docker-compatible scripts.
 
 Build support is intentionally explicit:
