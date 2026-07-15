@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use a3s_box_core::rootfs_metadata::IMAGE_ROOTFS_METADATA_PATH;
 use a3s_box_core::rootfs_metadata::{
-    runtime_managed_system_file_mode, RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+    runtime_managed_rootfs_mode, RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
     ROOTFS_METADATA_PATH,
 };
 use base64::Engine;
@@ -133,7 +133,7 @@ fn apply_metadata_manifest(
         };
         if actual_kind != entry.kind
             || (strict_content
-                && runtime_managed_system_file_mode(&relative).is_none()
+                && runtime_managed_rootfs_mode(&relative).is_none()
                 && actual_kind == RootfsEntryKind::Regular
                 && metadata.size() != entry.size)
         {
@@ -193,8 +193,7 @@ fn apply_metadata_manifest(
         if entry.kind != RootfsEntryKind::Symlink {
             let current_mode = std::fs::symlink_metadata(target)?.mode() & 0o7777;
             let relative = target.strip_prefix(root)?;
-            let desired_mode =
-                runtime_managed_system_file_mode(relative).unwrap_or(entry.mode & 0o7777);
+            let desired_mode = runtime_managed_rootfs_mode(relative).unwrap_or(entry.mode & 0o7777);
             if current_mode == desired_mode {
                 continue;
             }
@@ -425,11 +424,15 @@ mod tests {
         std::fs::create_dir(&etc).unwrap();
         let hosts = etc.join("hosts");
         let probe = etc.join("probe");
+        let init = directory.path().join("usr/sbin/init");
+        std::fs::create_dir_all(init.parent().unwrap()).unwrap();
         std::fs::write(&hosts, "127.0.0.1 localhost\n").unwrap();
         std::fs::write(&probe, "probe\n").unwrap();
         for path in [&hosts, &probe] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
+        std::fs::write(&init, "guest init\n").unwrap();
+        std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o755)).unwrap();
         let metadata = std::fs::metadata(&hosts).unwrap();
         let entry = |path: &str, size: u64| RootfsMetadataEntry {
             path_base64: base64::engine::general_purpose::STANDARD
@@ -446,6 +449,7 @@ mod tests {
             // Deliberately stale size and mode: both are runtime-owned.
             entry("./etc/hosts", 1),
             entry("./etc/probe", 6),
+            entry("./usr/sbin/init", 1),
         ]);
         std::fs::write(
             directory
@@ -470,6 +474,10 @@ mod tests {
         assert_eq!(
             std::fs::metadata(probe).unwrap().permissions().mode() & 0o7777,
             0o600
+        );
+        assert_eq!(
+            std::fs::metadata(init).unwrap().permissions().mode() & 0o7777,
+            0o755
         );
     }
 

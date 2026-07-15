@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::rootfs_metadata::{
-    runtime_managed_system_file_mode, RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH,
+    runtime_managed_rootfs_mode, RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH,
     ROOTFS_METADATA_PATH,
 };
 #[cfg(any(target_os = "linux", test))]
@@ -194,8 +194,8 @@ pub fn prepare_rootfs_ownership(
     modes.sort_by_key(|entry| std::cmp::Reverse(entry.relative.components().count()));
     for entry in modes {
         use std::os::unix::fs::PermissionsExt;
-        let mode = runtime_managed_system_file_mode(&entry.relative)
-            .unwrap_or(entry.metadata.mode & 0o7777);
+        let mode =
+            runtime_managed_rootfs_mode(&entry.relative).unwrap_or(entry.metadata.mode & 0o7777);
         std::fs::set_permissions(&entry.target, std::fs::Permissions::from_mode(mode)).map_err(
             |error| BoxError::BoxBootError {
                 message: format!(
@@ -618,11 +618,15 @@ mod tests {
         std::fs::create_dir(&etc).unwrap();
         let hosts = etc.join("hosts");
         let probe = etc.join("probe");
+        let init = directory.path().join("usr/sbin/init");
+        std::fs::create_dir_all(init.parent().unwrap()).unwrap();
         std::fs::write(&hosts, "127.0.0.1 localhost\n").unwrap();
         std::fs::write(&probe, "probe\n").unwrap();
         for path in [&hosts, &probe] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
+        std::fs::write(&init, "guest init\n").unwrap();
+        std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let owner = std::fs::metadata(directory.path()).unwrap();
         let entry = |path: &str, size: u64| RootfsMetadataEntry {
@@ -637,7 +641,11 @@ mod tests {
         };
         let manifest = RootfsMetadataManifest {
             schema: ROOTFS_METADATA_SCHEMA.to_string(),
-            entries: vec![entry("./etc/hosts", 20), entry("./etc/probe", 6)],
+            entries: vec![
+                entry("./etc/hosts", 20),
+                entry("./etc/probe", 6),
+                entry("./usr/sbin/init", 1),
+            ],
         };
         std::fs::write(
             directory
@@ -670,6 +678,10 @@ mod tests {
         assert_eq!(
             std::fs::metadata(probe).unwrap().permissions().mode() & 0o7777,
             0o600
+        );
+        assert_eq!(
+            std::fs::metadata(init).unwrap().permissions().mode() & 0o7777,
+            0o755
         );
     }
 }
