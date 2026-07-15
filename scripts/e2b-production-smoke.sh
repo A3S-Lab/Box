@@ -12,6 +12,9 @@ IMAGE="${A3S_BOX_SMOKE_IMAGE:-alpine:3.20}"
 
 fail() {
   printf 'E2B production smoke failed: %s\n' "$*" >&2
+  if [[ -n "${LOG:-}" && -f "$LOG" ]]; then
+    tail -100 "$LOG" >&2 || true
+  fi
   exit 1
 }
 
@@ -81,7 +84,7 @@ start_service() {
     A3S_BOX_CRUN_PATH="$A3S_BOX_CRUN_PATH" \
     TOKEN_ENCRYPTION="$TOKEN_ENCRYPTION" \
     TOKEN_DIGEST="$TOKEN_DIGEST" \
-    RUST_LOG="a3s_box_compat=info" \
+    RUST_LOG="${RUST_LOG:-a3s_box_compat=info}" \
     "$A3S_BOX_E2B_BIN" --config "$CONFIG" >"$LOG" 2>&1 &
   SERVICE_PID=$!
   wait_ready
@@ -160,7 +163,11 @@ cleanup() {
     status_request DELETE "/sandboxes/$SANDBOX_ID" /dev/null >/dev/null 2>&1
   fi
   stop_service
-  rm -rf "$STATE_DIR"
+  if [[ "$exit_code" -ne 0 && "${A3S_BOX_E2B_KEEP_STATE_ON_FAILURE:-}" == "1" ]]; then
+    printf 'Preserved failed smoke state at %s\n' "$STATE_DIR" >&2
+  else
+    rm -rf "$STATE_DIR"
+  fi
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
