@@ -1,8 +1,8 @@
 # E2B Protocol Compatibility and SDK Design
 
 Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 3 complete;
-slice 4 runtime path and staged CLI create/start complete, remaining callers
-pending)**
+slice 4 runtime path and staged CLI create/start/restart complete, remaining
+callers pending)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -22,7 +22,7 @@ unversioned claim.
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, reaping, and startup reconciliation | Wire the repository and supervisor into the production service process and exercise restart and host-reboot recovery end to end |
-| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI staged `create` and first `start` use the same generation-fenced path with caller-policy parity tests, idempotent named-volume/network preparation, and start-failure rollback; an A3S OS smoke test proves reservation-only create, restart reconciliation, real `crun` start, explicit pause rejection, kill, and cleanup without MicroVM fallback | Add an explicit generation-advancing restart operation, then migrate CLI restart/run and the Rust SDK and add the remaining caller parity tests |
+| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI `create`, first `start`, and explicit two-phase `restart` use generation fencing with caller-policy parity, idempotent resource preparation, failure rollback, and operation-ID recovery tests; an A3S OS smoke test proves reservation-only create, creation reconciliation, real `crun` start, explicit pause rejection, kill, and cleanup without MicroVM fallback | Validate managed restart on A3S OS, then migrate CLI run and the Rust SDK and add the remaining caller parity tests |
 | Credentials and routing | Injected verifier, token, cursor, and template interfaces isolate protocol logic from infrastructure | Add production credential hashing, token encryption and rotation, generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
@@ -784,8 +784,8 @@ Phase 2 is delivered as small, immediately merged changes:
 4. **Partially complete:** extract canonical A3S state and the runtime
    `ExecutionManager`; add the production backend and prove its real Sandbox
    lifecycle; switch CLI create to the same reservation path; switch CLI
-   start/run and the Rust SDK to the same implementation with behavior parity
-   tests.
+   start/restart/run and the Rust SDK to the same implementation with behavior
+   parity tests. Create, start, and restart are complete; run and the SDK remain.
 5. Add the production HCL-configured service binary, credential and token
    providers, generation-fenced route leases, and TLS data-plane gateway. Pull
    each merge commit on an A3S OS server and run the unmodified official clients
@@ -799,7 +799,8 @@ writes, and synchronous read-modify-write transactions protect that state. The
 managed-execution store reserves creation operations atomically, returns an
 existing record only when the full creation intent matches, persists
 transitional lifecycle claims, rejects stale state or generation comparisons,
-and advances the generation exactly once when pause or resume completes.
+and advances the generation exactly once when pause or resume completes or a
+restart moves from old-runtime teardown to new-runtime startup.
 Backend calls remain outside the state lock.
 
 `LocalExecutionManager` implements the backend-neutral lifecycle contract over
@@ -812,6 +813,19 @@ state-file work on Tokio blocking workers, and resolves ambiguous backend
 errors from runtime observations before publishing a result. Startup
 reconciliation can therefore distinguish an unstarted reservation from a
 runtime that became ready before its durable `running` publication.
+
+Explicit restart persists `restart_stopping` before terminating an active old
+runtime. Only confirmed terminal backend evidence and resource release permit
+the atomic transition to `restart_starting`, which increments the generation
+once. The restart operation ID, source generation, and source state survive a
+manager crash. A retry can therefore finish a lost kill response, start a
+generation that was advanced before the backend call, or replay a completed
+lease without starting another runtime. Start failure is recorded at the new
+generation and requires a new operation ID for any later restart. Graceful-stop
+timeout is part of the restart intent, so a retry cannot silently change it.
+Named-volume and network ownership is released and rebound once, while
+execution-owned anonymous volumes remain available to the replacement
+generation; a terminal kill still removes them.
 
 The production VM/Sandbox backend is also complete for this slice. It owns live
 runtime handles, reconstructs MicroVM processes with PID identity fencing,
@@ -832,8 +846,8 @@ managed request, including config-only values such as DNS and persistent
 filesystem policy. Named-volume bookkeeping remains attached only after the
 durable reservation succeeds and rolls the reservation back on failure.
 
-Slice 4 remains incomplete until CLI start/run and the Rust SDK call the same
-manager with behavior parity tests. The existing Rust SDK uses the canonical
+Slice 4 remains incomplete until CLI run and the Rust SDK call the same manager
+with behavior parity tests. The existing Rust SDK uses the canonical
 record store for management operations but still has a separate local
 lifecycle model and does not expose create/start/run.
 

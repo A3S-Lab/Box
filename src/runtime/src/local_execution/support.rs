@@ -94,6 +94,22 @@ pub(super) fn pending_pause_policy(
     }
 }
 
+pub(super) fn pending_restart_source_state(
+    record: &BoxRecord,
+    execution_id: &ExecutionId,
+) -> ExecutionManagerResult<ManagedExecutionState> {
+    match record
+        .managed_execution
+        .as_ref()
+        .and_then(|metadata| metadata.pending_operation.as_ref())
+    {
+        Some(ManagedExecutionOperation::Restart { source_state, .. }) => Ok(*source_state),
+        _ => Err(ExecutionManagerError::Internal(format!(
+            "restarting execution {execution_id} has no persisted restart source state"
+        ))),
+    }
+}
+
 pub(super) fn outcome_from_record(
     record: BoxRecord,
     state: ExecutionState,

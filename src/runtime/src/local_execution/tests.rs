@@ -6,7 +6,7 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId,
     ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionManagerResult,
     ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionState, KillOutcome, NetworkMode,
-    OperationId, ReconcileOutcome,
+    OperationId, ReconcileOutcome, RestartExecutionOptions,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -28,9 +28,13 @@ struct FakeBackend {
     pauses: AtomicUsize,
     resumes: AtomicUsize,
     kills: AtomicUsize,
+    fail_start: AtomicBool,
+    fail_start_after_effect: AtomicBool,
+    fail_kill_after_effect: AtomicBool,
     fail_pause: AtomicBool,
     fail_pause_after_effect: AtomicBool,
     last_keep_memory: Mutex<Option<bool>>,
+    last_restart_timeout: Mutex<Option<Option<u64>>>,
 }
 
 impl FakeBackend {
@@ -55,6 +59,13 @@ impl FakeBackend {
         execution.state = ExecutionState::Stopped;
         execution.exit_code = Some(exit_code);
     }
+
+    fn fail_externally(&self, execution_id: &ExecutionId, exit_code: i32) {
+        let mut executions = self.executions.lock().unwrap();
+        let execution = executions.get_mut(execution_id.as_str()).unwrap();
+        execution.state = ExecutionState::Failed;
+        execution.exit_code = Some(exit_code);
+    }
 }
 
 #[async_trait]
@@ -62,15 +73,20 @@ impl LocalExecutionBackend for FakeBackend {
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         let mut executions = self.executions.lock().unwrap();
         if let Some(execution) = executions.get(&record.id) {
-            return match execution.state {
-                ExecutionState::Running | ExecutionState::Paused => Ok(execution.handle.clone()),
-                state => Err(ExecutionManagerError::Conflict {
-                    execution_id: Self::execution_id(record),
-                    message: format!("fake execution is {state:?}"),
-                }),
-            };
+            if matches!(
+                execution.state,
+                ExecutionState::Running | ExecutionState::Paused
+            ) {
+                return Ok(execution.handle.clone());
+            }
         }
         self.starts.fetch_add(1, Ordering::Relaxed);
+        if self.fail_start.load(Ordering::Relaxed) {
+            executions.remove(&record.id);
+            return Err(ExecutionManagerError::Unavailable(
+                "fake start is unavailable".to_string(),
+            ));
+        }
         let handle = Self::handle(record);
         executions.insert(
             record.id.clone(),
@@ -80,6 +96,11 @@ impl LocalExecutionBackend for FakeBackend {
                 exit_code: None,
             },
         );
+        if self.fail_start_after_effect.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake start response was lost".to_string(),
+            ));
+        }
         Ok(handle)
     }
 
@@ -149,6 +170,15 @@ impl LocalExecutionBackend for FakeBackend {
         Ok(execution.handle.clone())
     }
 
+    async fn stop_for_restart(
+        &self,
+        record: &BoxRecord,
+        timeout_secs: Option<u64>,
+    ) -> ExecutionManagerResult<KillOutcome> {
+        *self.last_restart_timeout.lock().unwrap() = Some(timeout_secs);
+        self.kill(record).await
+    }
+
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         self.kills.fetch_add(1, Ordering::Relaxed);
         let mut executions = self.executions.lock().unwrap();
@@ -159,6 +189,11 @@ impl LocalExecutionBackend for FakeBackend {
             return Ok(KillOutcome::AlreadyStopped);
         }
         execution.state = ExecutionState::Stopped;
+        if self.fail_kill_after_effect.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake kill response was lost".to_string(),
+            ));
+        }
         Ok(KillOutcome::Killed)
     }
 }
@@ -764,5 +799,471 @@ async fn inspection_persists_an_external_terminal_observation() {
     assert_eq!(
         record.managed_state().unwrap(),
         Some(ManagedExecutionState::Stopped)
+    );
+}
+
+#[tokio::test]
+async fn restart_running_execution_advances_generation_once_and_is_idempotent() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("sandbox-1"), &operation("operation-create"))
+        .await
+        .unwrap();
+    let restart_operation = operation("operation-restart");
+
+    let restarted = manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        )
+        .await
+        .unwrap();
+    let retry = manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(restarted.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(retry.generation, restarted.generation);
+    assert_eq!(backend.kills.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 2);
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Running)
+    );
+    let completed = record
+        .managed_execution
+        .unwrap()
+        .last_restart
+        .expect("completed restart must remain durable for idempotent retries");
+    assert_eq!(completed.operation_id, restart_operation);
+    assert_eq!(completed.source_generation, running.generation);
+    assert_eq!(completed.target_generation, restarted.generation);
+}
+
+#[tokio::test]
+async fn stale_restart_generation_has_no_backend_side_effects() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("sandbox-1"), &operation("operation-create"))
+        .await
+        .unwrap();
+
+    let error = manager
+        .restart(
+            &running.execution_id,
+            ExecutionGeneration::new(2).unwrap(),
+            &operation("operation-stale-restart"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(backend.kills.load(Ordering::Relaxed), 0);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn restart_persists_stop_options_and_rejects_retry_drift() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("sandbox-1"), &operation("operation-create"))
+        .await
+        .unwrap();
+    let restart_operation = operation("operation-restart");
+    let options = RestartExecutionOptions {
+        stop_timeout_secs: Some(7),
+    };
+
+    manager
+        .restart_with_options(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+            options,
+        )
+        .await
+        .unwrap();
+    let starts_after_restart = backend.starts.load(Ordering::Relaxed);
+    let drift = manager
+        .restart_with_options(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+            RestartExecutionOptions {
+                stop_timeout_secs: Some(8),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(drift, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(backend.starts.load(Ordering::Relaxed), starts_after_restart);
+    assert_eq!(*backend.last_restart_timeout.lock().unwrap(), Some(Some(7)));
+    assert_eq!(
+        persisted(&manager, &running.execution_id)
+            .managed_execution
+            .unwrap()
+            .last_restart
+            .unwrap()
+            .stop_timeout_secs,
+        Some(7)
+    );
+}
+
+#[tokio::test]
+async fn restart_supports_paused_stopped_and_failed_executions() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("paused"), &operation("create-paused"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap();
+    let restarted_paused = manager
+        .restart(
+            &paused.execution_id,
+            paused.generation,
+            &operation("restart-paused"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted_paused.generation,
+        ExecutionGeneration::new(3).unwrap()
+    );
+
+    let stopped = manager
+        .create_and_start(request("stopped"), &operation("create-stopped"))
+        .await
+        .unwrap();
+    manager
+        .kill(&stopped.execution_id, stopped.generation)
+        .await
+        .unwrap();
+    let kills_before_stopped_restart = backend.kills.load(Ordering::Relaxed);
+    let restarted_stopped = manager
+        .restart(
+            &stopped.execution_id,
+            stopped.generation,
+            &operation("restart-stopped"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted_stopped.generation,
+        ExecutionGeneration::new(2).unwrap()
+    );
+    assert_eq!(
+        backend.kills.load(Ordering::Relaxed),
+        kills_before_stopped_restart
+    );
+
+    let failed = manager
+        .create_and_start(request("failed"), &operation("create-failed"))
+        .await
+        .unwrap();
+    backend.fail_externally(&failed.execution_id, 17);
+    assert_eq!(
+        manager.inspect(&failed.execution_id).await.unwrap().state,
+        ExecutionState::Failed
+    );
+    let kills_before_failed_restart = backend.kills.load(Ordering::Relaxed);
+    let restarted_failed = manager
+        .restart(
+            &failed.execution_id,
+            failed.generation,
+            &operation("restart-failed"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted_failed.generation,
+        ExecutionGeneration::new(2).unwrap()
+    );
+    assert_eq!(
+        backend.kills.load(Ordering::Relaxed),
+        kills_before_failed_restart
+    );
+}
+
+#[tokio::test]
+async fn restart_of_an_unstarted_reservation_starts_generation_two_without_kill() {
+    let (_directory, manager, backend) = harness();
+    let created = manager
+        .create(request("created"), &operation("create-created"))
+        .await
+        .unwrap();
+
+    let restarted = manager
+        .restart(
+            &created.execution_id,
+            created.generation,
+            &operation("restart-created"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(restarted.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(backend.kills.load(Ordering::Relaxed), 0);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn restart_recovers_when_kill_succeeded_but_its_response_was_lost() {
+    let (directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("sandbox-1"), &operation("operation-create"))
+        .await
+        .unwrap();
+    let restart_operation = operation("operation-restart");
+    let record = persisted(&manager, &running.execution_id);
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::RestartStopping,
+            RuntimeUpdate::RestartClaim {
+                operation_id: restart_operation.clone(),
+                options: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    backend
+        .fail_kill_after_effect
+        .store(true, Ordering::Relaxed);
+    assert!(backend.kill(&claimed).await.is_err());
+    backend
+        .fail_kill_after_effect
+        .store(false, Ordering::Relaxed);
+
+    let restarted_manager = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let restarted = restarted_manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(restarted.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn restart_recovers_after_generation_advance_before_backend_start() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("operation-create");
+    let running = manager
+        .create_and_start(request("sandbox-1"), &create_operation)
+        .await
+        .unwrap();
+    let restart_operation = operation("operation-restart");
+    let record = persisted(&manager, &running.execution_id);
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::RestartStopping,
+            RuntimeUpdate::RestartClaim {
+                operation_id: restart_operation.clone(),
+                options: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    backend.kill(&claimed).await.unwrap();
+    let restarting = manager
+        .transition(
+            &claimed,
+            ManagedExecutionState::RestartStopping,
+            ManagedExecutionState::RestartStarting,
+            RuntimeUpdate::RestartAdvance,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restarting.managed_execution.as_ref().unwrap().generation,
+        ExecutionGeneration::new(2).unwrap()
+    );
+
+    let restarted_manager = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let ReconcileOutcome::Ready(restarted) = restarted_manager
+        .reconcile(&create_operation)
+        .await
+        .unwrap()
+    else {
+        panic!("expected restart reconciliation to return a ready lease");
+    };
+
+    assert_eq!(restarted.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn concurrent_retries_of_one_restart_start_the_new_generation_once() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("sandbox-1"), &operation("operation-create"))
+        .await
+        .unwrap();
+    let restart_operation = operation("operation-restart");
+
+    let (left, right) = tokio::join!(
+        manager.restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        ),
+        manager.restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        ),
+    );
+
+    let successes = [left, right]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    assert_eq!(successes.len(), 2);
+    assert!(successes
+        .iter()
+        .all(|lease| lease.generation == ExecutionGeneration::new(2).unwrap()));
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn a_different_operation_cannot_take_over_an_in_progress_restart() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("sandbox-1"), &operation("operation-create"))
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::RestartStopping,
+            RuntimeUpdate::RestartClaim {
+                operation_id: operation("restart-owner"),
+                options: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &operation("restart-contender"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(backend.kills.load(Ordering::Relaxed), 0);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn ambiguous_restart_start_error_uses_backend_evidence() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("sandbox-1"), &operation("operation-create"))
+        .await
+        .unwrap();
+    backend
+        .fail_start_after_effect
+        .store(true, Ordering::Relaxed);
+
+    let restarted = manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &operation("operation-restart"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(restarted.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn failed_restart_start_is_terminal_at_the_new_generation() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("sandbox-1"), &operation("operation-create"))
+        .await
+        .unwrap();
+    manager
+        .kill(&running.execution_id, running.generation)
+        .await
+        .unwrap();
+    backend.fail_start.store(true, Ordering::Relaxed);
+    let restart_operation = operation("operation-restart");
+
+    let error = manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        )
+        .await
+        .unwrap_err();
+    let attempts_after_failure = backend.starts.load(Ordering::Relaxed);
+    let retry = manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    assert!(matches!(retry, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(
+        backend.starts.load(Ordering::Relaxed),
+        attempts_after_failure
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Failed)
+    );
+    assert_eq!(
+        record.managed_execution.as_ref().unwrap().generation,
+        ExecutionGeneration::new(2).unwrap()
+    );
+    assert_eq!(
+        record
+            .managed_execution
+            .unwrap()
+            .last_restart
+            .unwrap()
+            .outcome,
+        crate::ManagedRestartOutcome::Failed
     );
 }

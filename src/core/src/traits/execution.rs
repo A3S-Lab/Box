@@ -333,6 +333,15 @@ pub enum KillOutcome {
     AlreadyStopped,
 }
 
+/// Per-operation controls persisted with an idempotent restart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartExecutionOptions {
+    /// Graceful stop deadline for the old runtime. `None` uses persisted
+    /// execution policy or the backend default.
+    #[serde(default)]
+    pub stop_timeout_secs: Option<u64>,
+}
+
 /// Runtime evidence recovered after a service restart.
 #[derive(Debug, Clone)]
 pub enum ReconcileOutcome {
@@ -417,6 +426,36 @@ pub trait ExecutionManager: Send + Sync {
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<ExecutionLease>;
+
+    /// Terminate the current runtime, advance its generation exactly once,
+    /// and start it again under an idempotent operation identity.
+    async fn restart(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        operation_id: &OperationId,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        self.restart_with_options(
+            execution_id,
+            generation,
+            operation_id,
+            RestartExecutionOptions::default(),
+        )
+        .await
+    }
+
+    /// Restart with controls that become part of the durable operation intent.
+    async fn restart_with_options(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _operation_id: &OperationId,
+        _options: RestartExecutionOptions,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not support restart".to_string(),
+        ))
+    }
 
     async fn kill(
         &self,

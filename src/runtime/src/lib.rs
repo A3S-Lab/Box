@@ -60,7 +60,7 @@ pub use audit::{read_audit_log, AuditLog, AuditQuery};
 // Canonical local execution metadata
 pub use box_record::{
     BoxRecord, HealthCheck, ManagedExecutionMetadata, ManagedExecutionOperation,
-    ManagedExecutionState,
+    ManagedExecutionState, ManagedRestartCompletion, ManagedRestartOutcome,
 };
 pub use box_state::BoxStateStore;
 #[cfg(feature = "vm")]

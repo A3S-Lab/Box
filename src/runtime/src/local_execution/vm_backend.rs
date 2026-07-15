@@ -20,7 +20,10 @@ use tokio::sync::Mutex;
 use super::resources::ExecutionResourceGuard;
 use super::vm_process::{locate_microvm_process, LocatedProcess};
 use super::{LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation};
-use crate::{BoxRecord, ManagedExecutionMetadata, ManagedExecutionState, VmManager};
+use crate::{
+    BoxRecord, ManagedExecutionMetadata, ManagedExecutionOperation, ManagedExecutionState,
+    VmManager,
+};
 
 type SharedVm = Arc<Mutex<VmManager>>;
 
@@ -231,8 +234,10 @@ impl VmLocalExecutionBackend {
                 record.id
             )));
         }
-        if managed_state(record)? == ManagedExecutionState::Starting
-            && !exec_endpoint_ready(manager.exec_socket_path()).await
+        if matches!(
+            managed_state(record)?,
+            ManagedExecutionState::Starting | ManagedExecutionState::RestartStarting
+        ) && !exec_endpoint_ready(manager.exec_socket_path()).await
         {
             return Ok(LocalExecutionObservation {
                 state: ExecutionState::Creating,
@@ -323,6 +328,8 @@ impl VmLocalExecutionBackend {
         &self,
         record: &BoxRecord,
         shared: SharedVm,
+        remove_anonymous_volumes: bool,
+        timeout_secs: Option<u64>,
     ) -> ExecutionManagerResult<KillOutcome> {
         let mut manager = shared.lock().await;
         let mut anonymous_volumes = if manager.anonymous_volumes().is_empty() {
@@ -330,14 +337,31 @@ impl VmLocalExecutionBackend {
         } else {
             manager.anonymous_volumes().to_vec()
         };
-        let result = manager.destroy().await;
+        let result = if let Some(timeout_secs) = timeout_secs {
+            let timeout_ms = timeout_secs.checked_mul(1_000).ok_or_else(|| {
+                ExecutionManagerError::InvalidRequest(format!(
+                    "restart timeout is too large for execution {}",
+                    record.id
+                ))
+            })?;
+            let signal = record
+                .stop_signal
+                .as_deref()
+                .map(a3s_box_core::vmm::parse_signal_name)
+                .unwrap_or(libc::SIGTERM);
+            manager.destroy_with_options(signal, timeout_ms).await
+        } else {
+            manager.destroy().await
+        };
         drop(manager);
         self.remove_manager(&record.id, &shared);
         result.map_err(|error| runtime_error("kill", record, error))?;
-        if anonymous_volumes.is_empty() {
-            anonymous_volumes = self.anonymous_volumes_for_record(record).await;
+        if remove_anonymous_volumes {
+            if anonymous_volumes.is_empty() {
+                anonymous_volumes = self.anonymous_volumes_for_record(record).await;
+            }
+            self.cleanup_anonymous_volumes(anonymous_volumes).await;
         }
-        self.cleanup_anonymous_volumes(anonymous_volumes).await;
         Ok(KillOutcome::Killed)
     }
 
@@ -531,13 +555,38 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         let metadata = self.metadata(record)?;
         if let Some(manager) = self.manager(&record.id) {
-            return self.destroy_registered(record, manager).await;
+            return self.destroy_registered(record, manager, true, None).await;
         }
         match metadata.plan.backend {
-            ExecutionBackend::Crun => self.destroy_detached_sandbox(record).await,
+            ExecutionBackend::Crun => self.destroy_detached_sandbox(record, true, None).await,
             ExecutionBackend::Krun => {
                 let manager = self.recover_microvm(record).await?;
-                self.destroy_registered(record, manager).await
+                self.destroy_registered(record, manager, true, None).await
+            }
+        }
+    }
+
+    async fn stop_for_restart(
+        &self,
+        record: &BoxRecord,
+        timeout_secs: Option<u64>,
+    ) -> ExecutionManagerResult<KillOutcome> {
+        let metadata = self.metadata(record)?;
+        let timeout_secs = timeout_secs.or(record.stop_timeout);
+        if let Some(manager) = self.manager(&record.id) {
+            return self
+                .destroy_registered(record, manager, false, timeout_secs)
+                .await;
+        }
+        match metadata.plan.backend {
+            ExecutionBackend::Crun => {
+                self.destroy_detached_sandbox(record, false, timeout_secs)
+                    .await
+            }
+            ExecutionBackend::Krun => {
+                let manager = self.recover_microvm(record).await?;
+                self.destroy_registered(record, manager, false, timeout_secs)
+                    .await
             }
         }
     }
@@ -566,9 +615,28 @@ fn visible_active_state(record: &BoxRecord) -> ExecutionManagerResult<ExecutionS
             Ok(ExecutionState::Paused)
         }
         ManagedExecutionState::Starting
+        | ManagedExecutionState::RestartStarting
         | ManagedExecutionState::Running
         | ManagedExecutionState::Pausing
         | ManagedExecutionState::Killing => Ok(ExecutionState::Running),
+        ManagedExecutionState::RestartStopping => match record
+            .managed_execution
+            .as_ref()
+            .and_then(|metadata| metadata.pending_operation.as_ref())
+        {
+            Some(ManagedExecutionOperation::Restart {
+                source_state: ManagedExecutionState::Paused,
+                ..
+            }) => Ok(ExecutionState::Paused),
+            Some(ManagedExecutionOperation::Restart {
+                source_state: ManagedExecutionState::Running,
+                ..
+            }) => Ok(ExecutionState::Running),
+            _ => Err(ExecutionManagerError::Internal(format!(
+                "execution {} has invalid restart teardown metadata",
+                record.id
+            ))),
+        },
         state => Err(ExecutionManagerError::Internal(format!(
             "execution {} has no active runtime in managed state {state}",
             record.id

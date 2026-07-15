@@ -189,9 +189,11 @@ For CI-style one-shot commands, prefer foreground `run --rm --timeout <seconds>`
 
 The manager-backed `create` path treats `start` as first activation of its
 nonterminal reservation. Once that managed execution is stopped or failed,
-ordinary `start` rejects it instead of reusing a stale generation. The explicit
-generation-advancing managed restart operation is the next lifecycle slice;
-legacy records retain their existing stopped-box `start` behavior meanwhile.
+ordinary `start` rejects it instead of reusing a stale generation. Explicit
+managed restart persists separate teardown and startup phases, advances the
+generation only after the old runtime is terminal, and retains its operation ID
+for idempotent crash recovery. CLI `restart` uses that manager path for managed
+records; legacy records retain their existing stop-and-boot behavior.
 
 Health checks for detached `run`, Compose services, and boxes brought back by
 `start`/`restart` are owned by a generation-fenced background worker, not by the
@@ -337,8 +339,10 @@ canonical manager, and the first `start` of that reservation consumes its
 persisted generation through the same manager. The production backend prepares
 named-volume and network ownership idempotently and rolls back only resources
 acquired by a failed start attempt. Ordinary `start` does not revive a terminal
-managed execution; an explicit restart transition must advance its generation.
-CLI `restart`/`run` and the Rust SDK still need migration. The production HCL
+managed execution. CLI `restart` now uses a durable two-phase operation that
+terminates the old runtime before advancing the generation, recovers ambiguous
+kill/start responses from backend evidence, and rebinds local resources without
+duplicating ownership. CLI `run` and the Rust SDK still need migration. The production HCL
 service, encrypted credentials, generation-fenced route leases, wildcard TLS
 gateway, envd data plane, and real official-client Sandbox suite also remain
 open gates.

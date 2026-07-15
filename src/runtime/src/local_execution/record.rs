@@ -116,6 +116,16 @@ pub(crate) fn apply_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle
 
 pub(crate) fn apply_start_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle) {
     apply_handle(record, handle);
+    initialize_health(record);
+    record.restart_count = 0;
+}
+
+pub(crate) fn apply_restart_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle) {
+    apply_handle(record, handle);
+    initialize_health(record);
+}
+
+fn initialize_health(record: &mut BoxRecord) {
     record.health_status = if record.health_check.is_some() {
         "starting".to_string()
     } else {
@@ -124,7 +134,6 @@ pub(crate) fn apply_start_handle(record: &mut BoxRecord, handle: &LocalExecution
     record.health_retries = 0;
     record.health_last_check = None;
     record.stopped_by_user = false;
-    record.restart_count = 0;
 }
 
 pub(crate) fn clear_live_runtime(record: &mut BoxRecord, exit_code: Option<i32>) {

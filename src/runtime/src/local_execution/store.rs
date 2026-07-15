@@ -1,8 +1,11 @@
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult, OperationId,
+    RestartExecutionOptions,
 };
 
-use super::record::{apply_handle, apply_start_handle, clear_live_runtime, execution_id};
+use super::record::{
+    apply_handle, apply_restart_handle, apply_start_handle, clear_live_runtime, execution_id,
+};
 use super::support::{generation, managed_state};
 use super::{LocalExecutionHandle, LocalExecutionManager};
 use crate::{
@@ -59,6 +62,22 @@ impl LocalExecutionManager {
                             Some(ManagedExecutionOperation::Pause { keep_memory });
                     }
                 }
+                RuntimeUpdate::RestartClaim {
+                    operation_id,
+                    options,
+                } => {
+                    if let Some(metadata) = record.managed_execution.as_mut() {
+                        metadata.pending_operation = Some(ManagedExecutionOperation::Restart {
+                            operation_id,
+                            source_generation: metadata.generation,
+                            source_state: from,
+                            stop_timeout_secs: options.stop_timeout_secs,
+                        });
+                    }
+                }
+                RuntimeUpdate::RestartAdvance => clear_live_runtime(record, None),
+                RuntimeUpdate::RestartHandle(handle) => apply_restart_handle(record, &handle),
+                RuntimeUpdate::RestartFailed(exit_code) => clear_live_runtime(record, exit_code),
             })
         })
         .await
@@ -122,6 +141,13 @@ pub(super) enum RuntimeUpdate {
     StartHandle(LocalExecutionHandle),
     Terminal(Option<i32>),
     PauseClaim(bool),
+    RestartClaim {
+        operation_id: OperationId,
+        options: RestartExecutionOptions,
+    },
+    RestartAdvance,
+    RestartHandle(LocalExecutionHandle),
+    RestartFailed(Option<i32>),
 }
 
 async fn run_store<T>(

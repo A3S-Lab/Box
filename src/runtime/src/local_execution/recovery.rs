@@ -3,7 +3,9 @@ use a3s_box_core::{
 };
 
 use super::record::{execution_id, lease_from_record};
-use super::support::{managed_state, outcome_from_record, required_handle};
+use super::support::{
+    managed_state, outcome_from_record, pending_restart_source_state, required_handle,
+};
 use super::{BoxRecord, LocalExecutionManager, ManagedExecutionState, RuntimeUpdate};
 
 impl LocalExecutionManager {
@@ -18,13 +20,29 @@ impl LocalExecutionManager {
             }
             ManagedExecutionState::Stopped => return Ok((record, ExecutionState::Stopped)),
             ManagedExecutionState::Failed => return Ok((record, ExecutionState::Failed)),
+            ManagedExecutionState::RestartStopping => {
+                let id = execution_id(&record)?;
+                if matches!(
+                    pending_restart_source_state(&record, &id)?,
+                    ManagedExecutionState::Created
+                        | ManagedExecutionState::Stopped
+                        | ManagedExecutionState::Failed
+                ) {
+                    return Ok((record, ExecutionState::Creating));
+                }
+            }
             _ => {}
         }
         let id = execution_id(&record)?;
         let observation = match self.backend.inspect(&record).await {
             Ok(observation) => observation,
             Err(ExecutionManagerError::NotFound(_)) => {
-                if internal == ManagedExecutionState::Starting {
+                if matches!(
+                    internal,
+                    ManagedExecutionState::Starting
+                        | ManagedExecutionState::RestartStopping
+                        | ManagedExecutionState::RestartStarting
+                ) {
                     return Ok((record, ExecutionState::Creating));
                 }
                 let terminal = if internal == ManagedExecutionState::Killing {
@@ -99,6 +117,44 @@ impl LocalExecutionManager {
             }
             (ManagedExecutionState::Killing, ExecutionState::Creating) => {
                 Ok((record, ExecutionState::Creating))
+            }
+            (
+                ManagedExecutionState::RestartStopping,
+                state @ (ExecutionState::Running | ExecutionState::Paused),
+            ) => Ok((record, state)),
+            (
+                ManagedExecutionState::RestartStopping,
+                ExecutionState::Created
+                | ExecutionState::Creating
+                | ExecutionState::Stopped
+                | ExecutionState::Failed,
+            ) => Ok((record, ExecutionState::Creating)),
+            (ManagedExecutionState::RestartStarting, ExecutionState::Running) => {
+                self.complete_restart_with_handle(&record, required_handle(&observation, &id)?)
+                    .await?;
+                let current = self
+                    .get(&id)
+                    .await?
+                    .ok_or_else(|| ExecutionManagerError::NotFound(id.clone()))?;
+                Ok((current, ExecutionState::Running))
+            }
+            (
+                ManagedExecutionState::RestartStarting,
+                ExecutionState::Created | ExecutionState::Creating,
+            ) => Ok((record, ExecutionState::Creating)),
+            (
+                ManagedExecutionState::RestartStarting,
+                ExecutionState::Stopped | ExecutionState::Failed,
+            ) => {
+                let record = self
+                    .transition(
+                        &record,
+                        ManagedExecutionState::RestartStarting,
+                        ManagedExecutionState::Failed,
+                        RuntimeUpdate::RestartFailed(observation.exit_code),
+                    )
+                    .await?;
+                Ok((record, ExecutionState::Failed))
             }
             (ManagedExecutionState::Running, ExecutionState::Running) => {
                 Ok((record, ExecutionState::Running))

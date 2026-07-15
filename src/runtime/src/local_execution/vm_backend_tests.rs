@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, OperationId,
+    volume::VolumeConfig, BoxConfig, CreateExecutionRequest, ExecutionGeneration,
+    ExecutionIsolation, OperationId,
 };
 
 use super::*;
@@ -108,6 +109,35 @@ fn transitional_states_retry_idempotent_pause_and_resume_operations() {
     );
 }
 
+#[test]
+fn restart_teardown_preserves_old_runtime_visibility_until_generation_advance() {
+    let temporary = tempfile::tempdir().unwrap();
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::RestartStopping
+        .as_status()
+        .to_string();
+    record.managed_execution.as_mut().unwrap().pending_operation =
+        Some(crate::ManagedExecutionOperation::Restart {
+            operation_id: OperationId::new("operation-restart").unwrap(),
+            source_generation: ExecutionGeneration::INITIAL,
+            source_state: ManagedExecutionState::Paused,
+            stop_timeout_secs: None,
+        });
+    assert_eq!(
+        visible_active_state(&record).unwrap(),
+        ExecutionState::Paused
+    );
+
+    record.status = ManagedExecutionState::RestartStarting
+        .as_status()
+        .to_string();
+    record.managed_execution.as_mut().unwrap().generation = ExecutionGeneration::new(2).unwrap();
+    assert_eq!(
+        visible_active_state(&record).unwrap(),
+        ExecutionState::Running
+    );
+}
+
 #[tokio::test]
 async fn unsupported_pause_modes_fail_before_starting_a_runtime() {
     let temporary = tempfile::tempdir().unwrap();
@@ -123,6 +153,30 @@ async fn unsupported_pause_modes_fail_before_starting_a_runtime() {
         .to_string()
         .contains("pause without memory retention"));
     assert!(backend.managers.is_empty());
+}
+
+#[tokio::test]
+async fn restart_stop_preserves_anonymous_volumes_but_terminal_kill_removes_them() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    let volume_name = "anonymous-restart-volume";
+    let volumes = crate::VolumeStore::new(
+        temporary.path().join("volumes.json"),
+        temporary.path().join("volumes"),
+    );
+    volumes.create(VolumeConfig::new(volume_name, "")).unwrap();
+    record.anonymous_volumes = vec![volume_name.to_string()];
+
+    let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
+    backend.managers.insert(record.id.clone(), manager);
+    backend.stop_for_restart(&record, Some(0)).await.unwrap();
+    assert!(volumes.get(volume_name).unwrap().is_some());
+
+    let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
+    backend.managers.insert(record.id.clone(), manager);
+    backend.kill(&record).await.unwrap();
+    assert!(volumes.get(volume_name).unwrap().is_none());
 }
 
 #[test]
