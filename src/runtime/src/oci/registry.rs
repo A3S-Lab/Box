@@ -137,16 +137,39 @@ impl RegistryAuth {
     /// Create authentication from the credential store, falling back to env vars,
     /// then anonymous.
     pub fn from_credential_store(registry: &str) -> Self {
-        // Try credential store first
         if let Ok(store) = CredentialStore::default_path() {
-            if let Ok(Some((username, password))) = store.get(registry) {
-                return Self::basic(username, password);
+            if let Some(auth) = Self::from_store(&store, registry) {
+                return auth;
             }
         }
+        Self::from_external_sources(registry)
+    }
+
+    /// Create authentication from an explicit A3S home credential store.
+    ///
+    /// Runtime services can own a home directory without mutating the process
+    /// `A3S_HOME`. Registry-specific A3S credentials still take precedence over
+    /// supported Docker credentials and environment fallback.
+    pub fn from_credential_store_at(home_dir: &Path, registry: &str) -> Self {
+        let store = CredentialStore::new(home_dir.join("auth").join("credentials.json"));
+        if let Some(auth) = Self::from_store(&store, registry) {
+            return auth;
+        }
+        Self::from_external_sources(registry)
+    }
+
+    fn from_store(store: &CredentialStore, registry: &str) -> Option<Self> {
+        store
+            .get(registry)
+            .ok()
+            .flatten()
+            .map(|(username, password)| Self::basic(username, password))
+    }
+
+    fn from_external_sources(registry: &str) -> Self {
         if let Some((username, password)) = super::credentials::docker_credentials(registry) {
             return Self::basic(username, password);
         }
-        // Fall back to env vars, then anonymous
         Self::from_env()
     }
 
@@ -1423,6 +1446,56 @@ mod tests {
         let auth = RegistryAuth::basic("user", "pass");
         assert_eq!(auth.username, Some("user".to_string()));
         assert_eq!(auth.password, Some("pass".to_string()));
+    }
+
+    #[test]
+    fn explicit_home_registry_credentials_are_loaded() {
+        let home = tempfile::tempdir().unwrap();
+        let store = CredentialStore::new(home.path().join("auth/credentials.json"));
+        store
+            .store(
+                "manager-auth.invalid:5443",
+                "manager-user",
+                "manager-secret",
+            )
+            .unwrap();
+
+        let auth = RegistryAuth::from_credential_store_at(home.path(), "manager-auth.invalid:5443");
+
+        assert_eq!(
+            auth.basic_credentials(),
+            Some(("manager-user".to_string(), "manager-secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn malformed_explicit_home_store_falls_back_to_environment() {
+        let _guard = env_lock();
+        let previous_username = std::env::var_os("REGISTRY_USERNAME");
+        let previous_password = std::env::var_os("REGISTRY_PASSWORD");
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("auth")).unwrap();
+        std::fs::write(home.path().join("auth/credentials.json"), b"not-json").unwrap();
+        std::env::set_var("REGISTRY_USERNAME", "fallback-user");
+        std::env::set_var("REGISTRY_PASSWORD", "fallback-secret");
+
+        let auth = RegistryAuth::from_credential_store_at(
+            home.path(),
+            "malformed-manager-auth.invalid:5443",
+        );
+
+        assert_eq!(
+            auth.basic_credentials(),
+            Some(("fallback-user".to_string(), "fallback-secret".to_string()))
+        );
+        match previous_username {
+            Some(value) => std::env::set_var("REGISTRY_USERNAME", value),
+            None => std::env::remove_var("REGISTRY_USERNAME"),
+        }
+        match previous_password {
+            Some(value) => std::env::set_var("REGISTRY_PASSWORD", value),
+            None => std::env::remove_var("REGISTRY_PASSWORD"),
+        }
     }
 
     #[test]
