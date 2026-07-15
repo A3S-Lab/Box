@@ -101,5 +101,8 @@ restart recovery, host envd health, a traffic-scoped workload service on port
 unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
 through the production lifecycle listener, calls their official running-state
 health methods through the TLS gateway before and after kill, and verifies
-cleanup of every real `crun` execution. That optional matrix does not exercise
-envd commands, files, PTY, or interpreter execution.
+cleanup of every real `crun` execution. The three base clients also execute and
+validate one foreground non-PTY `commands.run` through the ConnectRPC JSON
+transport. This does not establish full Process compatibility, and the matrix
+does not exercise Filesystem, the complete PTY/input/signal/reconnect surface,
+or Code Interpreter execution.

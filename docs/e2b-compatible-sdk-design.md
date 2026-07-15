@@ -1,8 +1,8 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 6 and the
-production official-client lifecycle gate complete; authenticated running and
-terminal envd health slice complete)**
+Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 6 complete;
+the production official-client lifecycle, authenticated envd health, and first
+foreground Process command gates complete)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -25,7 +25,7 @@ unversioned claim.
 | Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, reconnect, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery and the official-client data-plane matrices |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
 | envd HTTP | A host-side broker implements authenticated `GET /health`; after route/token validation it re-inspects the exact execution ID and generation and returns `204` only for `Running`; a valid envd token receives terminal `502` after kill without reopening a route lease, while invalid tokens remain unauthorized; unchanged official Python sync/async, TypeScript, and Code Interpreter objects pass `is_running`/`isRunning` before and after kill over production TLS | Implement `/metrics`, `/init`, `/envs`, and file-content routes |
-| Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
+| Commands and SDK surface | The Process broker has generation-scoped synthetic IDs plus Start, JSON-framed Connect, List, SendInput, CloseStdin, SIGKILL, PTY Start/resize, and ordered event streams; pinned official Python sync/async and TypeScript clients each pass a foreground non-PTY `commands.run` against real `crun` | Complete binary Connect framing, `StreamInput`, SIGTERM and other signals, the PTY/reconnect/backpressure matrix, Filesystem and signed URLs, Code Interpreter/MCP execution, the remaining public surface, and native convenience packages |
 
 The lifecycle control path and authenticated wildcard/shared TLS routes are
 composed and exercised against a real Sandbox on A3S OS. The smoke reaches a
@@ -37,10 +37,13 @@ lease. A separate production gate now runs the checksum-pinned official Python
 sync, Python async, TypeScript, and Code Interpreter packages unchanged against
 the ACL-configured service and real `crun` Sandboxes. Their running and
 post-kill health methods traverse the wildcard TLS gateway and host envd broker,
-and the gate verifies complete cleanup. The fixture gate still uses an in-memory
-repository and fake execution manager, and the remaining envd/ConnectRPC
-operations are not covered. These are complementary results rather than the
-full black-box compatibility matrix, so `full_compatibility=false` remains
+the three base clients each verify one foreground `commands.run` through the
+ConnectRPC JSON transport, and the gate verifies complete cleanup. Code
+Interpreter is covered only for lifecycle and health, not code execution. The
+fixture gate still uses an in-memory repository and fake execution manager,
+and the remaining envd, Process, Filesystem, PTY, interpreter, and MCP matrices
+are not covered. These are complementary results rather than the full
+black-box compatibility matrix, so `full_compatibility=false` remains
 mandatory.
 
 ## Executive decision
@@ -406,7 +409,7 @@ semantics.
 
 ## Command and PTY compatibility
 
-The compatibility implementation covers the current process service contract:
+The target process service contract includes:
 
 - list processes;
 - start and stream a command;
@@ -418,14 +421,26 @@ The compatibility implementation covers the current process service contract:
 - enforce request timeout independently from process timeout;
 - preserve detached process handles after the initiating client disconnects.
 
-The current A3S one-shot exec protocol is insufficient by itself. It needs a
-durable process-session layer with independent stdin, stdout, stderr, signal,
-wait, and PTY channels. Both MicroVM and host-sandbox transports implement the
-same internal trait; the compatibility broker only sees that trait.
+The implemented preview is a strict subset. The broker allocates synthetic
+process IDs within one execution generation and currently supports Start,
+JSON-framed Process Connect, List, SendInput, CloseStdin, SIGKILL, PTY
+Start/resize, and ordered start, stdout, stderr, PTY, keepalive, and end events.
+The production A3S OS gate proves only one foreground non-PTY `commands.run`
+per pinned official Python sync, Python async, and TypeScript client on a real
+`crun` Sandbox. That evidence covers command launch, streamed output, and a
+successful exit as the image's default non-root user.
+
+This is not full Process compatibility. Client-streaming `StreamInput`, binary
+Connect framing, SIGTERM and other signals, the complete PTY, reconnect,
+backpressure, cancellation, and detached-process matrices, and durable process
+recovery across a compatibility-service restart remain open. The internal
+session layer must eventually provide independent stdin, stdout, stderr,
+signal, wait, and PTY channels on every advertised backend; the compatibility
+broker must continue to depend only on that backend-neutral interface.
 
 ## Filesystem compatibility
 
-The filesystem service covers:
+The Filesystem service is not implemented yet. Its target contract must cover:
 
 - read and write one or multiple files;
 - octet-stream and multipart upload modes;
@@ -437,15 +452,17 @@ The filesystem service covers:
 - stable errors for invalid path, invalid user, not found, and insufficient
   space.
 
-All paths are resolved beneath the workload rootfs with descriptor-relative
-operations. String-prefix checks are not sufficient. Symlink traversal and
+When implemented, all paths must be resolved beneath the workload rootfs with
+descriptor-relative operations. String-prefix checks are not sufficient. Symlink traversal and
 rename races must be covered by negative tests. The broker must not expose the
 host bundle, state directory, runtime sockets, or rootfs lower layers.
 
 ## Code Interpreter compatibility
 
-The code-interpreter template contains a versioned kernel service reached
-through the standard sandbox port router. It implements:
+Code Interpreter execution is not implemented yet; only official-client
+lifecycle and envd health have passed. The planned code-interpreter template
+must contain a versioned kernel service reached through the standard sandbox
+port router and implement:
 
 ```text
 GET    /health
@@ -456,8 +473,8 @@ DELETE /contexts/{id}
 POST   /contexts/{id}/restart
 ```
 
-`/execute` returns the pinned newline-delimited streaming format. The adapter
-preserves:
+`/execute` must return the pinned newline-delimited streaming format. The
+adapter must preserve:
 
 - Python, JavaScript, R, Java, Bash, and explicitly advertised languages;
 - persistent named contexts;
@@ -475,8 +492,9 @@ credentials.
 
 ## Python SDK
 
-The Python distribution provides both synchronous and asynchronous surfaces
-matching the pinned SDK:
+The native A3S Python distribution is not implemented yet. It is planned to
+provide synchronous and asynchronous surfaces matching the pinned SDK; the
+following is a target API, not a currently working example:
 
 ```python
 from a3s_box import AsyncSandbox, Sandbox
@@ -495,16 +513,16 @@ support `async with` cleanup without changing the behavior of explicit
 `kill()`.
 
 The first compatibility proof uses the published `e2b` and
-`e2b-code-interpreter` wheels unchanged. The A3S package then exposes the same
-call shapes with A3S endpoint defaults and typed A3S-only diagnostics in a
+`e2b-code-interpreter` wheels unchanged. A future A3S package will expose the
+same call shapes with A3S endpoint defaults and typed A3S-only diagnostics in a
 separate namespace. It must not add required parameters or inject A3S fields
 into upstream-compatible response types.
 
 ## TypeScript SDK
 
-The TypeScript distribution exports the pinned class and type surface and works
-in supported Node.js, edge, and browser environments where the upstream SDK is
-expected to work:
+The native A3S TypeScript distribution is not implemented yet. It is planned
+to export the pinned class and type surface in the Node.js, edge, and browser
+environments supported by the upstream SDK; the following is a target API:
 
 ```typescript
 import { Sandbox } from '@a3s-lab/box'
@@ -515,14 +533,14 @@ await sandbox.files.write('/tmp/input.txt', 'hello')
 await sandbox.kill()
 ```
 
-It provides `Sandbox`, `Commands`, command handles, `Pty`, `Filesystem`, watch
+It must provide `Sandbox`, `Commands`, command handles, `Pty`, `Filesystem`, watch
 handles, templates, snapshots, volumes, paginators, and code-interpreter result
 types. Cancellation uses `AbortSignal`; timeouts remain milliseconds; binary
 stdin and file content remain `Uint8Array`-compatible.
 
 The first compatibility proof uses the published `e2b` and
-`@e2b/code-interpreter` packages unchanged. The A3S package uses the same wire
-clients and exposes A3S-only diagnostics through an additive namespace. Public
+`@e2b/code-interpreter` packages unchanged. A future A3S package will use the
+same wire clients and expose A3S-only diagnostics through an additive namespace. Public
 export snapshots and TypeScript compile fixtures prevent accidental source API
 drift.
 
@@ -896,11 +914,13 @@ Phase 2 is delivered as small, immediately merged changes:
    server and prove direct/shared routing, restart recovery, scope denial, and
    stale-route fencing against a real `--isolation sandbox` execution.
 7. **In progress:** the unmodified official clients now pass their lifecycle
-   flows through the production control listener and real Sandbox runtime, and
+   flows through the production control listener and real Sandbox runtime,
    their running and post-kill health methods pass through the production TLS
-   listener and host envd broker. Implement the remaining pinned envd HTTP and
-   ConnectRPC protocols, then extend the same clients through command,
-   filesystem, PTY, public-port, and interpreter operations.
+   listener and host envd broker, and the Python sync/async and TypeScript base
+   clients each pass one foreground `commands.run`. Complete the remaining
+   pinned envd HTTP, Process, Filesystem, PTY, public-port, interpreter, and MCP
+   matrices without broadening this first command result into a full
+   compatibility claim.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
 is the canonical schema shared by the CLI and Rust SDK, preventing either
@@ -980,11 +1000,12 @@ lifecycle HTTP router are now composed in one ACL-configured process. The real
 create/connect/list/timeout/kill matrix now passes through that production
 control listener and real Sandbox executions. Returned official-client Sandbox
 objects now traverse the production TLS listener for running and post-kill envd
-health, but the Phase 2 gate remains closed until the remaining envd,
-ConnectRPC, PTY, public-port, interpreter, and MCP matrices pass. Passing the
+health, and the three base clients pass one foreground command over ConnectRPC
+JSON. The Phase 2 gate remains closed until the remaining envd, Process,
+Filesystem, PTY, public-port, interpreter, and MCP matrices pass. Passing the
 fake manager in slice 2, the direct runtime smoke in slice 4, and the production
-health clients are complementary evidence, not proof of the missing data-plane
-behavior.
+health/command clients are complementary evidence, not proof of the missing
+data-plane behavior.
 
 Slice 2 evidence includes exact recorder drift checks plus live requests from
 the pinned, unmodified clients to the Rust router. The live gate was also run
@@ -998,9 +1019,11 @@ The production lifecycle gate reuses the artifact checksums from
 TypeScript, and Code Interpreter packages without source changes. On A3S OS it
 has passed create, reconnect, filtered list, timeout replacement, kill,
 not-found mapping, Code Interpreter lifecycle creation, running and post-kill
-`is_running`/`isRunning` over authenticated wildcard TLS, and cleanup for every
-real `crun` execution. It intentionally does not count Code Interpreter object
-creation or health as interpreter execution compatibility.
+`is_running`/`isRunning` over authenticated wildcard TLS, one foreground
+`commands.run` from each base Python sync/async and TypeScript client, and
+cleanup for every real `crun` execution. It intentionally does not count Code
+Interpreter object creation or health as interpreter execution compatibility,
+and it does not cover the remaining Process or Filesystem operations.
 
 The Slice 3 persistence batch uses a bundled SQLite build through a dedicated
 asynchronous connection thread. Versioned migrations create a STRICT table in
@@ -1041,9 +1064,12 @@ implementation begins.
 Gate: unmodified official SDKs create, reconnect to, list, time out, and kill an
 A3S sandbox.
 
-### Phase 3: commands, files, and PTY
+### Phase 3: commands, files, and PTY (in progress)
 
-- Implement ConnectRPC process and filesystem services plus HTTP file transfer.
+- Complete the ConnectRPC Process service; the first foreground JSON command
+  path is implemented and production-validated, but the full stream, signal,
+  reconnect, and PTY matrix is not.
+- Implement the Filesystem service plus HTTP file transfer.
 - Add durable process handles, PTY resize, streaming, watch, and signed URLs.
 
 Gate: upstream command/filesystem contract suites pass in Python sync, Python

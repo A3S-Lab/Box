@@ -41,6 +41,7 @@ As of **v2.4.0**, three adversarial audits — production-operability (24 findin
 | Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell/exec-form `RUN` are implemented by the host engine on Linux. `--run-pool` can execute `RUN` through a leased warm-pool VM by mounting the mutable build rootfs into the guest. On macOS, auto `RUN` builds still delegate to BuildKit inside an A3S Linux VM (`--builder=buildkit-vm`) unless `--run-pool` is selected; unsafe host execution remains an explicit experiment-only escape hatch. |
 | Lifecycle and exec | `run`, `create`, `start`, `stop`, `restart`, `rm`, `wait`, foreground/detached runs, non-PTY exec, PTY exec, logs, stats, and inspect are implemented. |
 | OCI Sandbox | Linux-only, explicit `--isolation sandbox` shared-kernel execution through certified `crun`. Structured `json-file` logs preserve stdout/stderr identity for foreground, detached, natural-exit, stop, kill, and auto-remove paths. Generation-owned log workers are PID-start-time fenced, drained before archival, and recovered during cleanup. The security-negative matrix and performance gate remain release work; this mode does not claim MicroVM-equivalent isolation. |
+| E2B protocol preview | The ACL-configured service has passed lifecycle, TLS envd health, and one foreground `commands.run` path with the pinned official Python sync/async and TypeScript clients on real `crun` Sandboxes. Code Interpreter is validated only for lifecycle and health. Filesystem, the complete Process/PTY matrix, interpreter execution, MCP, native SDK packages, and the full release suite remain incomplete; `full_compatibility=false`. |
 | Warm pool and snapshot-fork | A warm pool serves pre-booted sandboxes over a socket. Native snapshot-fork (Copy-on-Write microVM cloning) snapshots one booted template and restores many forks from it, each mapping the template RAM `MAP_PRIVATE`. Verified on `/dev/kvm`: ~4× faster than a cold boot per fork, 100 forks in under ~1 s (~8 ms amortized each). Requires `/dev/kvm`; opt in with `pool start --snapshot-fork` or the `KRUN_SNAPSHOT_*` / `KRUN_RESTORE_FROM` env. |
 | Networking | Default TSI networking, TCP `host:guest` publishing, user-defined bridge networks, network inspect/connect/disconnect/rm, and `/etc/hosts` peer discovery are implemented with documented platform boundaries. |
 | Compose | A useful local subset is implemented: image, command, entrypoint, env, env_file, ports, volumes, depends_on, networks, DNS, tmpfs, workdir, hostname, extra_hosts, labels, healthcheck, restart, CPU/memory, capabilities, and privileged mode. |
@@ -338,12 +339,16 @@ An opt-in A3S OS gate now installs those same checksum-pinned packages without
 modification and runs them against the ACL-configured production process and
 real `crun` Sandboxes. Python sync, Python async, and TypeScript each pass
 create, connect, filtered list, timeout replacement, kill, and not-found
-behavior; both Code Interpreter packages also pass production lifecycle create
-and cleanup. Each Python sync/async, TypeScript, and Code Interpreter object
-also calls its official `is_running`/`isRunning` method through the production
-TLS gateway and host-side envd health broker before and after kill, returning
-`true` while running and `false` after termination. This matrix does not
-exercise envd commands, files, PTY, or interpreter execution.
+behavior. The tested base packages are Python `e2b` 2.32.0 in sync and async
+modes and TypeScript `e2b` 2.33.0. All three run one foreground `commands.run`
+through the ConnectRPC JSON transport as the image's default non-root user and
+verify its stdout, empty stderr, and successful exit on a real `crun`
+execution. Python `e2b-code-interpreter` 2.8.1 and TypeScript
+`@e2b/code-interpreter` 2.6.1 pass production lifecycle create and cleanup
+only; they do not execute code. Each Python sync/async, TypeScript, and Code
+Interpreter object also calls its official `is_running`/`isRunning` method
+through the production TLS gateway and host-side envd health broker before and
+after kill, returning `true` while running and `false` after termination.
 
 Managed creation requests also persist a typed caller policy for names,
 restart and health behavior, logging, stop behavior, and local resource
@@ -397,6 +402,16 @@ execution is running. After kill, a scope-valid envd token receives the terminal
 invalid token remains unauthorized and no live route lease is issued. Other
 routed ports continue through the fenced Sandbox network-namespace proxy.
 
+The first Process broker slice is also implemented. It uses generation-scoped
+synthetic process IDs and supports Start, JSON-framed Connect, List, SendInput,
+CloseStdin, SIGKILL, PTY Start/resize, and ordered start, output, keepalive, and
+end events. Production evidence is deliberately narrower: the pinned Python
+sync/async and TypeScript clients each pass one foreground, non-PTY
+`commands.run`. Client-streaming `StreamInput`, SIGTERM and other signals,
+binary Connect framing, the complete PTY/reconnect/backpressure matrix, and
+durable process recovery across service restart are not yet compatibility
+claims.
+
 An A3S OS production smoke test exercises this path on a real `crun` OCI
 Sandbox created with `--isolation sandbox`. It verifies lifecycle operations,
 host envd health over both TLS route forms, a real traffic-token-protected
@@ -404,10 +419,12 @@ workload service on port `49999`, HTTP/2-to-HTTP/1.1 translation, invalid and
 scope-swapped token denial, service-restart recovery, stale-route fencing after
 kill, authenticated terminal health, structured-log drainage, and complete
 runtime cleanup. The same A3S OS gate runs the unchanged official clients
-through both running and post-kill health checks. Failed runs preserve the
-Sandbox PID, `crun` state, OCI bundle, and service logs for diagnosis. The
-remaining envd HTTP endpoints, ConnectRPC commands/filesystem, PTY, public-port
-matrix, and Code Interpreter execution suites remain open release gates.
+through both running and post-kill health checks and the foreground command
+case described above. Failed runs preserve the Sandbox PID, `crun` state, OCI
+bundle, and service logs for diagnosis. The remaining envd HTTP endpoints,
+complete Process and PTY matrices, Filesystem service, signed URLs, official
+public-port coverage, Code Interpreter execution, MCP, and native SDK packages
+remain open release gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in
