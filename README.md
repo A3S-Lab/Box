@@ -334,6 +334,14 @@ generation-fenced transitions and restart reconciliation; and a canonical
 runtime `ExecutionManager` with a production VM/Sandbox backend. CI runs the
 pinned official Python sync/async, TypeScript, and Code Interpreter clients
 against the router through an in-memory repository and fake execution manager.
+An opt-in A3S OS gate now installs those same checksum-pinned packages without
+modification and runs them against the ACL-configured production process and
+real `crun` Sandboxes. Python sync, Python async, and TypeScript each pass
+create, connect, filtered list, timeout replacement, kill, and not-found
+behavior; both Code Interpreter packages also pass production lifecycle create
+and cleanup. This matrix exercises the public lifecycle clients, not envd or
+interpreter execution.
+
 Managed creation requests also persist a typed caller policy for names,
 restart and health behavior, logging, stop behavior, and local resource
 metadata. An idempotent retry therefore cannot silently reuse a reservation
@@ -385,8 +393,9 @@ both TLS route forms, HTTP/2-to-HTTP/1.1 translation, invalid and scope-swapped
 token denial, service-restart recovery, stale-route fencing after kill,
 structured-log drainage, and complete runtime cleanup. Failed runs preserve
 the Sandbox PID, `crun` state, OCI bundle, and service logs for diagnosis. The
-envd/ConnectRPC implementation and the complete unchanged-official-client
-Sandbox suite remain open release gates.
+envd/ConnectRPC implementation and the unchanged-official-client command,
+filesystem, PTY, public-port, and Code Interpreter execution suites remain open
+release gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in
