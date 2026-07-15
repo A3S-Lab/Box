@@ -359,10 +359,11 @@ kill/start responses from backend evidence, and rebinds local resources without
 duplicating ownership. CLI `run` now reserves and starts through the same
 manager, freezes image-defined health and stop defaults into the durable
 request, and leaves network, volume, rootfs, stop, and auto-remove ownership to
-the managed backend. The Rust SDK still needs migration. The production
-HCL service, encrypted credentials, generation-fenced route leases, wildcard
-TLS gateway, envd data plane, and real official-client Sandbox suite also
-remain open gates.
+the managed backend. The Rust SDK now exposes typed create, start, run, inspect,
+pause, resume, restart, kill, and reconciliation calls through that same
+manager. The production HCL service, encrypted credentials, generation-fenced
+route leases, wildcard TLS gateway, envd data plane, and real official-client
+Sandbox suite remain open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

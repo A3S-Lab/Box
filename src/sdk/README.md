@@ -63,10 +63,59 @@ println!(
 Use `A3sBoxClient::from_home(path)` for tests or tools that should operate on a
 non-default a3s-box state directory.
 
+## Managed Lifecycle
+
+The SDK submits lifecycle requests directly to the same generation-fenced
+`ExecutionManager` used by the CLI and compatibility service. It does not spawn
+the CLI or construct a parallel box record.
+
+```rust
+use std::collections::BTreeMap;
+
+use a3s_box_sdk::{
+    A3sBoxClient, BoxConfig, CreateExecutionRequest, ExecutionIsolation,
+    ExecutionRecordPolicy, OperationId,
+};
+
+# async fn lifecycle() -> Result<(), a3s_box_sdk::ClientError> {
+let client = A3sBoxClient::new();
+let operation = OperationId::new("example-create")?;
+let request = CreateExecutionRequest {
+    external_sandbox_id: "example-sandbox".to_string(),
+    config: BoxConfig {
+        image: "alpine:latest".to_string(),
+        isolation: ExecutionIsolation::Sandbox,
+        cmd: vec!["sleep".to_string(), "60".to_string()],
+        ..BoxConfig::default()
+    },
+    labels: BTreeMap::new(),
+    policy: ExecutionRecordPolicy {
+        name: Some("sdk-example".to_string()),
+        ..ExecutionRecordPolicy::default()
+    },
+};
+
+let reservation = client.create_box(request, &operation).await?;
+let lease = client
+    .start_box(&reservation.execution_id, reservation.generation)
+    .await?;
+let status = client.inspect_execution(&lease.execution_id).await?;
+client
+    .kill_execution(&status.execution_id, status.generation)
+    .await?;
+# Ok(()) }
+```
+
+`run_box` provides the idempotent create-and-start composition. Typed methods
+also expose inspect, pause, resume, restart, kill, and operation reconciliation.
+`A3sBoxClient::with_execution_manager` accepts an explicit typed manager for
+embedding or tests without changing request semantics.
+
 ## API Coverage
 
-- Boxes: list, get, pause, unpause, stop on Unix, remove, prune inactive boxes,
-  log snapshots, and host-side stats snapshots.
+- Boxes: generation-fenced create, start, run, inspect, pause, resume, restart,
+  kill, and reconciliation; plus list, get, legacy pause/unpause, Unix stop,
+  remove, prune inactive boxes, log snapshots, and host-side stats snapshots.
 - Images: list, get, inspect local OCI metadata, read OCI history, pull, build,
   tag, push, remove, and evict.
 - Volumes: list, get, create, remove, and prune.
@@ -84,13 +133,11 @@ The client reads the shared `boxes.json` state format through an SDK-local model
 so it does not depend on the CLI crate. Image, volume, network, snapshot, build,
 registry, exec, PTY, and attestation operations use `a3s-box-runtime` directly.
 
-The runtime now provides generation-fenced `create`, `start`, and
-`create_and_start` operations over the canonical managed-execution store.
-Container lifecycle orchestration is not exposed by this SDK yet: the SDK
-adapter and the CLI-specific record-policy mapping still need behavior-parity
-coverage before becoming default APIs. Pause, unpause, Unix stop, and box
-removal remain available through the existing direct management surface. The
-default SDK does not shell out for lifecycle commands.
+Managed lifecycle methods preserve the complete typed `BoxConfig` and
+`ExecutionRecordPolicy` request and call the canonical runtime facade. Pause,
+unpause, Unix stop, and box removal remain available through the existing
+query-based management surface for backwards compatibility. The default SDK
+does not shell out for lifecycle commands.
 
 ## Maintenance Calls
 
