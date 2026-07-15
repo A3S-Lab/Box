@@ -1,7 +1,7 @@
 # E2B Protocol Compatibility and SDK Design
 
 Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 4 complete;
-slice 5 credential providers complete)**
+slice 5 credential and routing foundations complete)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -22,7 +22,7 @@ unversioned claim.
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, reaping, and startup reconciliation | Wire the repository and supervisor into the production service process and exercise restart and host-reboot recovery end to end |
 | Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI and Rust SDK create/start/run paths use generation fencing with caller-policy parity, idempotent resource preparation, failure rollback, and operation-ID recovery; A3S OS smoke tests prove managed CLI and SDK execution through certified `crun`, explicit Sandbox pause rejection, kill, and cleanup without MicroVM fallback | Compose the runtime manager into the production compatibility service and exercise service restart recovery end to end |
-| Credentials and routing | Injected interfaces isolate protocol logic; production account credentials use salted PBKDF2-SHA256 hashes; sandbox tokens use scope-bound AES-256-GCM ciphertext, independent HMAC validation, and versioned key rotation | Wire the providers through ACL, then add generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
+| Credentials and routing | Production account credentials use salted PBKDF2-SHA256 hashes; sandbox tokens use scope-bound AES-256-GCM ciphertext, independent HMAC validation, and versioned key rotation; strict direct/shared route parsing and durable-record-projected leases fence sandbox and execution generations, expiry, port policy, and token scope | Wire these components through ACL and add the TLS data-plane gateway |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
 The lifecycle fixture and the managed Sandbox smoke validate opposite sides of
@@ -687,8 +687,9 @@ src/compat/src/
     error.rs          # exact upstream error mapping
     lifecycle.rs      # lifecycle route handlers and DTO conversion
     router.rs         # route assembly and request limits
-  routing/            # planned production data-plane boundary
-    lease.rs          # generation-fenced sandbox route leases
+  routing/            # production data-plane authorization boundary
+    policy.rs         # persisted exact-port and token-scope policy
+    lease.rs          # generation-fenced sandbox route projection
     parser.rs         # wildcard host and explicit-header validation
   bin/
     a3s-box-e2b-fixture-server.rs # deterministic protocol fixture
@@ -777,6 +778,17 @@ host parser is a pure validated component. It accepts neither arbitrary
 hostnames nor a sandbox ID recovered by string splitting after routing has
 begun.
 
+Route policy is persisted inside the canonical lifecycle record. A lease is an
+immutable projection of a currently running record rather than a second mutable
+database row, so timeout replacement, pause, kill, or recreation advances the
+record generation and immediately fences every prior lease. Resolution also
+checks the execution generation, expiry, exact routed port, and the separately
+scoped envd or traffic HMAC. Both `<port>-<sandbox-id>.<domain>` and the shared
+host plus `E2b-Sandbox-Id`/`E2b-Sandbox-Port` form use the same parser; duplicate
+or conflicting headers and domain-suffix confusion fail closed. SQLite restart
+coverage proves that the policy and generation remain authoritative after the
+service process is recreated.
+
 ### Incremental merge gates
 
 Phase 2 is delivered as small, immediately merged changes:
@@ -796,11 +808,11 @@ Phase 2 is delivered as small, immediately merged changes:
    lifecycle; switch CLI create to the same reservation path; switch CLI
    start/restart/run and the Rust SDK to the same implementation with behavior
    parity tests.
-5. **In progress:** production account credential and sandbox token providers
-   are complete. Add the ACL-configured service binary, generation-fenced route
-   leases, and TLS data-plane gateway. Pull each merge commit on an A3S OS
-   server and run the unmodified official clients against real
-   `--isolation sandbox` executions.
+5. **In progress:** production account credentials, sandbox token providers,
+   generation-fenced route leases, and validated wildcard/shared parsing are
+   complete. Add the ACL-configured service binary and TLS data-plane gateway.
+   Pull each merge commit on an A3S OS server and run the unmodified official
+   clients against real `--isolation sandbox` executions.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
 is the canonical schema shared by the CLI and Rust SDK, preventing either

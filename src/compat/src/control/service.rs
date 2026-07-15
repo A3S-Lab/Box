@@ -156,6 +156,7 @@ impl ControlService {
                 envd: envd.stored,
                 traffic: traffic.stored,
             },
+            routing: template.routing,
         })?;
         self.repository.insert(record.clone()).await?;
 

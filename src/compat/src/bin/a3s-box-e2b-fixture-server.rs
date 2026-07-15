@@ -151,6 +151,16 @@ impl TemplateProvider for FixtureTemplates {
                 ..BoxConfig::default()
             },
             envd_version: "0.1.3".to_string(),
+            routing: if template_id == "code-interpreter-v1" {
+                a3s_box_compat::routing::SandboxRoutePolicy::default()
+                    .with_port(
+                        a3s_box_compat::routing::CODE_INTERPRETER_PORT,
+                        TokenScope::Traffic,
+                    )
+                    .map_err(|error| TemplateProviderError::Invalid(error.to_string()))?
+            } else {
+                a3s_box_compat::routing::SandboxRoutePolicy::default()
+            },
         })
     }
 }

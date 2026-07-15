@@ -364,9 +364,11 @@ pause, resume, restart, kill, and reconciliation calls through that same
 manager. Production credential providers now store account keys as salted
 PBKDF2-SHA256 hashes and protect scope-separated sandbox tokens with
 AES-256-GCM, independent HMAC validation, and versioned key rotation. Wiring
-those providers into the production ACL service, generation-fenced route
-leases, the wildcard TLS gateway, the envd data plane, and the real
-official-client Sandbox suite remain open gates.
+those providers into the production ACL service and the wildcard TLS gateway
+remains open. Route policy is now persisted with each lifecycle record, and
+strict wildcard/shared parsing projects generation-, expiry-, port-, and
+token-scope-fenced leases without a second mutable routing state. The envd data
+plane and the real official-client Sandbox suite also remain open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

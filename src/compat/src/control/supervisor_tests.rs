@@ -58,6 +58,7 @@ fn creating_record(sandbox_id: &str, action: OnTimeoutAction) -> (SandboxRecord,
             envd: stored_token(10),
             traffic: stored_token(20),
         },
+        routing: crate::routing::SandboxRoutePolicy::default(),
     })
     .unwrap();
     (record, config)

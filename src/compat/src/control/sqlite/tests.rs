@@ -82,6 +82,7 @@ fn running_record_at(
             envd: stored_token(10),
             traffic: stored_token(20),
         },
+        routing: crate::routing::SandboxRoutePolicy::default(),
     })
     .unwrap();
     record
@@ -229,6 +230,7 @@ async fn records_survive_restart_and_cas_rejects_stale_writers() {
     assert_eq!(loaded.owner_id(), "owner-1");
     assert_eq!(loaded.execution_id(), record.execution_id());
     assert_eq!(loaded.credentials(), record.credentials());
+    assert_eq!(loaded.routing(), record.routing());
 
     let expected = loaded.generation();
     let mut replacement = loaded.clone();
