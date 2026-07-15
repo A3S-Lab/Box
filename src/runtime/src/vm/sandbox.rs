@@ -272,27 +272,7 @@ impl VmManager {
         mounts: &[SandboxMount],
         id_mappings: &crate::sandbox::SandboxIdMappingPlan,
     ) -> Result<()> {
-        let mut managed = HashSet::new();
-        if self.config.workspace.as_os_str().is_empty() {
-            managed.insert(layout.workspace_path.clone());
-        }
-        let volume_store = crate::volume::VolumeStore::new(
-            self.home_dir.join("volumes.json"),
-            self.home_dir.join("volumes"),
-        );
-        for name in &self.anonymous_volumes {
-            let volume = volume_store
-                .get(name)?
-                .ok_or_else(|| BoxError::BoxBootError {
-                    message: format!("Sandbox anonymous volume {name} disappeared during boot"),
-                    hint: None,
-                })?;
-            managed.insert(
-                PathBuf::from(volume.mount_point)
-                    .canonicalize()
-                    .map_err(BoxError::IoError)?,
-            );
-        }
+        let managed = self.managed_sandbox_mount_sources(&layout.workspace_path, mounts)?;
 
         for mount in mounts {
             if managed.contains(&mount.source) {
@@ -302,6 +282,51 @@ impl VmManager {
             }
         }
         Ok(())
+    }
+
+    fn managed_sandbox_mount_sources(
+        &self,
+        workspace_path: &Path,
+        mounts: &[SandboxMount],
+    ) -> Result<HashSet<PathBuf>> {
+        let mut managed = HashSet::new();
+        if self.config.workspace.as_os_str().is_empty() {
+            managed.insert(workspace_path.to_path_buf());
+        }
+        let volume_store = crate::volume::VolumeStore::new(
+            self.home_dir.join("volumes.json"),
+            self.home_dir.join("volumes"),
+        );
+        let volumes = volume_store.load()?;
+        for name in &self.anonymous_volumes {
+            let volume = volumes.get(name).ok_or_else(|| BoxError::BoxBootError {
+                message: format!("Sandbox anonymous volume {name} disappeared during boot"),
+                hint: None,
+            })?;
+            managed.insert(
+                PathBuf::from(&volume.mount_point)
+                    .canonicalize()
+                    .map_err(BoxError::IoError)?,
+            );
+        }
+
+        // Named volumes are resolved to host paths before VmManager boots, so
+        // their names are not present in BoxConfig. Match only mount roots that
+        // are registered in A3S's volume store; arbitrary bind mounts remain
+        // external and are never chowned implicitly.
+        for volume in volumes.values() {
+            let Ok(source) = PathBuf::from(&volume.mount_point).canonicalize() else {
+                // A stale, unused volume entry must not prevent unrelated boxes
+                // from starting. A mounted missing path already fails while the
+                // Sandbox volume specification is canonicalized.
+                continue;
+            };
+            if mounts.iter().any(|mount| mount.source == source) {
+                managed.insert(source);
+            }
+        }
+
+        Ok(managed)
     }
 }
 
@@ -543,6 +568,8 @@ fn digest_json(value: &impl serde::Serialize) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use a3s_box_core::{volume::VolumeConfig, BoxConfig, EventEmitter};
+
     use super::*;
 
     #[test]
@@ -564,5 +591,45 @@ mod tests {
         let error =
             ensure_mount_destination(rootfs.path(), Path::new("/escape/host"), false).unwrap_err();
         assert!(error.to_string().contains("symlink"));
+    }
+
+    #[test]
+    fn named_volume_mounts_are_classified_as_a3s_managed() {
+        let home = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let store = crate::volume::VolumeStore::new(
+            home.path().join("volumes.json"),
+            home.path().join("volumes"),
+        );
+        let volume = store.create(VolumeConfig::new("sandbox-data", "")).unwrap();
+        let named_source = PathBuf::from(volume.mount_point).canonicalize().unwrap();
+        let external_source = external.path().canonicalize().unwrap();
+        let mounts = vec![
+            SandboxMount {
+                source: named_source.clone(),
+                destination: PathBuf::from("/data"),
+                read_only: false,
+            },
+            SandboxMount {
+                source: external_source.clone(),
+                destination: PathBuf::from("/external"),
+                read_only: false,
+            },
+        ];
+        let mut manager = VmManager::with_box_id(
+            BoxConfig::default(),
+            EventEmitter::new(16),
+            "sandbox-managed-volume-test".to_string(),
+        );
+        manager.home_dir = home.path().to_path_buf();
+        let workspace = home.path().join("boxes/test/workspace");
+
+        let managed = manager
+            .managed_sandbox_mount_sources(&workspace, &mounts)
+            .unwrap();
+
+        assert!(managed.contains(&workspace));
+        assert!(managed.contains(&named_source));
+        assert!(!managed.contains(&external_source));
     }
 }

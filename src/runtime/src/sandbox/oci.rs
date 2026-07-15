@@ -573,9 +573,10 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
                 tmpfs.destination.display()
             )));
         }
+        let is_shared_memory = tmpfs.destination == Path::new("/dev/shm");
         if path_is_or_below(&tmpfs.destination, Path::new("/proc"))
             || path_is_or_below(&tmpfs.destination, Path::new("/sys"))
-            || path_is_or_below(&tmpfs.destination, Path::new("/dev"))
+            || (path_is_or_below(&tmpfs.destination, Path::new("/dev")) && !is_shared_memory)
             || path_is_or_below(&tmpfs.destination, Path::new("/run/a3s-box"))
             || tmpfs.destination == Path::new("/")
         {
@@ -590,7 +591,10 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             .iter()
             .position(|mount| mount.destination() == &tmpfs.destination)
         {
-            if !matches!(tmpfs.destination.to_str(), Some("/tmp" | "/run")) {
+            if !matches!(
+                tmpfs.destination.to_str(),
+                Some("/tmp" | "/run" | "/dev/shm")
+            ) {
                 return Err(BoxError::ConfigError(format!(
                     "Duplicate Sandbox mount destination {}",
                     tmpfs.destination.display()
@@ -605,17 +609,21 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
                 tmpfs.destination.display()
             )));
         }
+        let mut options = vec![
+            "nosuid".to_string(),
+            "nodev".to_string(),
+            "mode=1777".to_string(),
+            format!("size={}", tmpfs.size_bytes),
+        ];
+        if is_shared_memory {
+            options.push("noexec".to_string());
+        }
         mounts.push(
             MountBuilder::default()
                 .destination(tmpfs.destination.clone())
                 .typ("tmpfs".to_string())
                 .source(PathBuf::from("tmpfs"))
-                .options(vec![
-                    "nosuid".to_string(),
-                    "nodev".to_string(),
-                    "mode=1777".to_string(),
-                    format!("size={}", tmpfs.size_bytes),
-                ])
+                .options(options)
                 .build()
                 .map_err(oci_error)?,
         );
@@ -1336,6 +1344,30 @@ mod tests {
 
         let mut input = sample_input();
         input.mounts.push(input.mounts[0].clone());
+        assert!(compile_oci_spec(&input).is_err());
+    }
+
+    #[test]
+    fn compiler_allows_only_the_exact_shared_memory_tmpfs_override() {
+        let mut input = sample_input();
+        input.tmpfs.push(SandboxTmpfs {
+            destination: PathBuf::from("/dev/shm"),
+            size_bytes: 128 * 1024 * 1024,
+        });
+
+        let value = as_json(&compile_oci_spec(&input).unwrap());
+        let shared_memory = value["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|mount| mount["destination"] == "/dev/shm")
+            .collect::<Vec<_>>();
+        assert_eq!(shared_memory.len(), 1);
+        let options = shared_memory[0]["options"].as_array().unwrap();
+        assert!(options.iter().any(|option| option == "size=134217728"));
+        assert!(options.iter().any(|option| option == "noexec"));
+
+        input.tmpfs[0].destination = PathBuf::from("/dev/shm/nested");
         assert!(compile_oci_spec(&input).is_err());
     }
 

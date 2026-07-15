@@ -381,6 +381,64 @@ async fn create_preserves_complete_caller_record_policy() {
 }
 
 #[tokio::test]
+async fn first_start_initializes_health_state_from_persisted_policy() {
+    let (_directory, manager, _backend) = harness();
+    let mut create_request = request("sandbox-1");
+    create_request.policy.health_check = Some(ExecutionHealthCheck {
+        cmd: vec!["test".to_string(), "-f".to_string(), "/ready".to_string()],
+        interval_secs: 11,
+        timeout_secs: 3,
+        retries: 7,
+        start_period_secs: 5,
+    });
+    let reservation = manager
+        .create(create_request, &operation("operation-health"))
+        .await
+        .unwrap();
+
+    manager
+        .start(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap();
+
+    let record = persisted(&manager, &reservation.execution_id);
+    assert_eq!(record.health_status, "starting");
+    assert_eq!(record.health_retries, 0);
+    assert!(record.health_last_check.is_none());
+}
+
+#[tokio::test]
+async fn ordinary_start_never_revives_a_terminal_managed_execution() {
+    let (_directory, manager, backend) = harness();
+    let reservation = manager
+        .create(request("sandbox-1"), &operation("operation-terminal"))
+        .await
+        .unwrap();
+    let lease = manager
+        .start(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap();
+    manager
+        .kill(&lease.execution_id, lease.generation)
+        .await
+        .unwrap();
+
+    let error = manager
+        .start(&lease.execution_id, lease.generation)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        persisted(&manager, &lease.execution_id)
+            .managed_state()
+            .unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+}
+
+#[tokio::test]
 async fn repeated_create_rejects_caller_policy_drift() {
     let (_directory, manager, backend) = harness();
     let operation_id = operation("operation-policy-drift");

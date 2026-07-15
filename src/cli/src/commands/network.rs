@@ -286,12 +286,7 @@ fn subnets_overlap(a: &str, b: &str) -> bool {
 }
 
 pub(crate) fn validate_attachable_network(config: &NetworkConfig) -> Result<(), String> {
-    validate_network_driver(&config.driver)?;
-    config
-        .policy
-        .validate()
-        .map_err(|e| format!("Unsupported network isolation mode: {e}"))?;
-    Ok(())
+    config.validate_runtime()
 }
 
 pub(crate) fn validate_network_driver(driver: &str) -> Result<(), String> {

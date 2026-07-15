@@ -2,7 +2,7 @@ use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult, OperationId,
 };
 
-use super::record::{apply_handle, clear_live_runtime, execution_id};
+use super::record::{apply_handle, apply_start_handle, clear_live_runtime, execution_id};
 use super::support::{generation, managed_state};
 use super::{LocalExecutionHandle, LocalExecutionManager};
 use crate::{
@@ -51,6 +51,7 @@ impl LocalExecutionManager {
             store.transition_with(&execution_id, generation, from, to, |record| match update {
                 RuntimeUpdate::None => {}
                 RuntimeUpdate::Handle(handle) => apply_handle(record, &handle),
+                RuntimeUpdate::StartHandle(handle) => apply_start_handle(record, &handle),
                 RuntimeUpdate::Terminal(exit_code) => clear_live_runtime(record, exit_code),
                 RuntimeUpdate::PauseClaim(keep_memory) => {
                     if let Some(metadata) = record.managed_execution.as_mut() {
@@ -90,10 +91,13 @@ impl LocalExecutionManager {
         } else {
             current_generation
         };
-        match self
-            .transition(record, from, to, RuntimeUpdate::Handle(handle))
-            .await
-        {
+        let update =
+            if from == ManagedExecutionState::Starting && to == ManagedExecutionState::Running {
+                RuntimeUpdate::StartHandle(handle)
+            } else {
+                RuntimeUpdate::Handle(handle)
+            };
+        match self.transition(record, from, to, update).await {
             Ok(record) => Ok(record),
             Err(error @ ExecutionManagerError::Conflict { .. }) => {
                 let Some(current) = self.get(&execution_id).await? else {
@@ -115,6 +119,7 @@ impl LocalExecutionManager {
 pub(super) enum RuntimeUpdate {
     None,
     Handle(LocalExecutionHandle),
+    StartHandle(LocalExecutionHandle),
     Terminal(Option<i32>),
     PauseClaim(bool),
 }

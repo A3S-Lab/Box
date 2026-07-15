@@ -17,6 +17,7 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
+use super::resources::ExecutionResourceGuard;
 use super::vm_process::{locate_microvm_process, LocatedProcess};
 use super::{LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation};
 use crate::{BoxRecord, ManagedExecutionMetadata, ManagedExecutionState, VmManager};
@@ -81,11 +82,17 @@ impl VmLocalExecutionBackend {
 
     fn new_manager(&self, record: &BoxRecord) -> ExecutionManagerResult<VmManager> {
         let metadata = self.metadata(record)?;
-        let mut manager = VmManager::with_box_id(
-            metadata.request.config.clone(),
-            EventEmitter::new(256),
-            record.id.clone(),
-        );
+        let mut config = metadata.request.config.clone();
+        if let Some(shm_size) = metadata.request.policy.shm_size {
+            let has_shared_memory_mount = config
+                .tmpfs
+                .iter()
+                .any(|entry| entry.split(':').next() == Some("/dev/shm"));
+            if !has_shared_memory_mount {
+                config.tmpfs.push(format!("/dev/shm:size={shm_size}"));
+            }
+        }
+        let mut manager = VmManager::with_box_id(config, EventEmitter::new(256), record.id.clone());
         manager.home_dir = self.home_dir.clone();
         manager.anonymous_volumes = record.anonymous_volumes.clone();
         manager.set_log_config(record.log_config.clone());
@@ -424,11 +431,42 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         }
 
         let mut guard = manager.lock().await;
+        let resource_home = self.home_dir.clone();
+        let resource_record = record.clone();
+        let resources = match tokio::task::spawn_blocking(move || {
+            ExecutionResourceGuard::prepare(&resource_home, &resource_record)
+        })
+        .await
+        {
+            Ok(Ok(resources)) => resources,
+            Ok(Err(error)) => {
+                drop(guard);
+                self.remove_manager(&record.id, &manager);
+                return Err(error);
+            }
+            Err(error) => {
+                drop(guard);
+                self.remove_manager(&record.id, &manager);
+                return Err(ExecutionManagerError::Internal(format!(
+                    "managed resource preparation task failed for {}: {error}",
+                    record.id
+                )));
+            }
+        };
         if let Err(error) = guard.boot().await {
             drop(guard);
             self.remove_manager(&record.id, &manager);
+            let rollback = tokio::task::spawn_blocking(move || resources.rollback()).await;
+            if let Err(rollback_error) = rollback {
+                tracing::warn!(
+                    execution_id = %record.id,
+                    %rollback_error,
+                    "Managed resource rollback task failed"
+                );
+            }
             return Err(runtime_error("start", record, error));
         }
+        resources.disarm();
         self.handle_from_manager(record, &guard).await
     }
 

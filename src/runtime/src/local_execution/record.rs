@@ -114,6 +114,19 @@ pub(crate) fn apply_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle
     record.exit_code = None;
 }
 
+pub(crate) fn apply_start_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle) {
+    apply_handle(record, handle);
+    record.health_status = if record.health_check.is_some() {
+        "starting".to_string()
+    } else {
+        "none".to_string()
+    };
+    record.health_retries = 0;
+    record.health_last_check = None;
+    record.stopped_by_user = false;
+    record.restart_count = 0;
+}
+
 pub(crate) fn clear_live_runtime(record: &mut BoxRecord, exit_code: Option<i32>) {
     record.pid = None;
     record.pid_start_time = None;
