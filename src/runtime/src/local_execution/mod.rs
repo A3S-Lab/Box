@@ -9,6 +9,7 @@ mod record;
 mod recovery;
 mod resources;
 mod restart;
+mod session;
 mod store;
 mod support;
 #[cfg(feature = "vm")]
