@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use crate::control::{
-    Clock, LifecycleState, RepositoryError, SandboxGeneration, SandboxId, SandboxRecord,
+    Clock, EnvdMode, LifecycleState, RepositoryError, SandboxGeneration, SandboxId, SandboxRecord,
     SandboxRepository, SecretToken, TokenIssuerError, TokenScope, TokenVerifier,
 };
 
@@ -25,6 +25,7 @@ pub struct RouteLease {
     execution_generation: ExecutionGeneration,
     port: NonZeroU16,
     token_scope: TokenScope,
+    envd_mode: EnvdMode,
     expires_at: DateTime<Utc>,
 }
 
@@ -59,6 +60,10 @@ impl RouteLease {
         self.token_scope
     }
 
+    pub const fn envd_mode(&self) -> EnvdMode {
+        self.envd_mode
+    }
+
     pub const fn expires_at(&self) -> DateTime<Utc> {
         self.expires_at
     }
@@ -70,6 +75,7 @@ impl RouteLease {
             && record.execution_id() == Some(&self.execution_id)
             && record.execution_generation() == Some(self.execution_generation)
             && record.expires_at() > now
+            && record.envd_mode() == self.envd_mode
             && record.routing().token_scope(self.port.get()) == Some(self.token_scope)
     }
 }
@@ -126,6 +132,7 @@ impl RouteLeaseService {
             execution_generation,
             port: route.port,
             token_scope,
+            envd_mode: record.envd_mode(),
             expires_at: record.expires_at(),
         })
     }
@@ -169,6 +176,7 @@ impl RouteLeaseService {
             execution_generation,
             port: route.port,
             token_scope,
+            envd_mode: record.envd_mode(),
             expires_at: record.expires_at(),
         }))
     }
@@ -314,6 +322,7 @@ mod tests {
                 expires_at: now + Duration::minutes(5),
                 metadata: BTreeMap::new(),
                 envd_version: "0.1.3".to_string(),
+                envd_mode: EnvdMode::Broker,
                 secure: true,
                 allow_internet_access: Some(false),
                 credentials: SandboxCredentials {

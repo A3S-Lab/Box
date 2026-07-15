@@ -150,6 +150,7 @@ impl ControlService {
             expires_at,
             metadata: request.metadata.clone(),
             envd_version: template.envd_version,
+            envd_mode: template.envd_mode,
             secure: request.secure,
             allow_internet_access: request.allow_internet_access,
             credentials: SandboxCredentials {

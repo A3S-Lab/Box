@@ -151,6 +151,7 @@ impl TemplateProvider for FixtureTemplates {
                 ..BoxConfig::default()
             },
             envd_version: "0.1.3".to_string(),
+            envd_mode: a3s_box_compat::control::EnvdMode::Broker,
             routing: if template_id == "code-interpreter-v1" {
                 a3s_box_compat::routing::SandboxRoutePolicy::default()
                     .with_port(

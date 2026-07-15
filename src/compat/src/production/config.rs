@@ -10,7 +10,7 @@ use a3s_box_core::{BoxConfig, ExecutionIsolation, NetworkMode, ResourceConfig};
 use thiserror::Error;
 use url::Url;
 
-use crate::control::{ResolvedTemplate, TokenKeyMaterial, TokenScope};
+use crate::control::{EnvdMode, ResolvedTemplate, TokenKeyMaterial, TokenScope};
 use crate::gateway::DataPlaneGatewayConfig;
 use crate::http::{CredentialHash, CredentialScheme, HashedAccountCredential};
 use crate::routing::{SandboxDomain, SandboxRoutePolicy, ENVD_PORT};
@@ -554,6 +554,7 @@ fn parse_templates(blocks: Vec<&Block>) -> E2bConfigResult<Vec<(String, Resolved
             &[
                 "image",
                 "envd_version",
+                "envd_mode",
                 "isolation",
                 "network",
                 "command",
@@ -574,6 +575,15 @@ fn parse_templates(blocks: Vec<&Block>) -> E2bConfigResult<Vec<(String, Resolved
             )));
         }
         let envd_version = required_nonempty_string(block, "envd_version", &context, 128)?;
+        let envd_mode = match optional_string(block, "envd_mode", &context)?.as_deref() {
+            None | Some("broker") => EnvdMode::Broker,
+            Some("runtime") => EnvdMode::Runtime,
+            Some(_) => {
+                return Err(invalid(format!(
+                    "{context}.envd_mode must be broker or runtime"
+                )))
+            }
+        };
         let isolation = match optional_string(block, "isolation", &context)?.as_deref() {
             None => ExecutionIsolation::Microvm,
             Some("sandbox") => ExecutionIsolation::Sandbox,
@@ -618,6 +628,7 @@ fn parse_templates(blocks: Vec<&Block>) -> E2bConfigResult<Vec<(String, Resolved
                     ..BoxConfig::default()
                 },
                 envd_version,
+                envd_mode,
                 routing,
             },
         ));

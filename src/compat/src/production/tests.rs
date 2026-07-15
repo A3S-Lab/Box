@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use tower::ServiceExt;
 
-use crate::control::{SandboxIdentityProvider, TemplateProvider, TokenScope};
+use crate::control::{EnvdMode, SandboxIdentityProvider, TemplateProvider, TokenScope};
 use crate::http::CredentialHash;
 use crate::routing::{CODE_INTERPRETER_PORT, ENVD_PORT};
 
@@ -68,6 +68,7 @@ e2b_compat {{
   template_policy "fixture-template" {{
     image = "alpine:3.20"
     envd_version = "0.1.3"
+    envd_mode = "runtime"
     isolation = "sandbox"
     network = "none"
     command = ["/bin/sh", "-c", "while :; do sleep 60; done"]
@@ -136,6 +137,7 @@ async fn parses_acl_into_strict_runtime_credentials_and_template_policy() {
     assert_eq!(template.config.isolation, ExecutionIsolation::Sandbox);
     assert_eq!(template.config.image, "alpine:3.20");
     assert_eq!(template.config.resources.memory_mb, 512);
+    assert_eq!(template.envd_mode, EnvdMode::Runtime);
     assert_eq!(
         template.routing.token_scope(ENVD_PORT),
         Some(TokenScope::Envd)
@@ -180,6 +182,24 @@ fn rejects_plaintext_token_keys_missing_environment_and_unknown_fields() {
             .unwrap_err()
             .to_string()
             .contains("unknown attribute accidental_backend")
+    );
+}
+
+#[tokio::test]
+async fn defaults_templates_to_broker_envd_and_rejects_unknown_modes() {
+    let root = tempfile::tempdir().unwrap();
+    let input = acl_config(root.path());
+    let broker = input.replace("    envd_mode = \"runtime\"\n", "");
+    let config = E2bCompatConfig::parse_with_environment(&broker, test_environment).unwrap();
+    let template = config.templates.resolve("fixture-template").await.unwrap();
+    assert_eq!(template.envd_mode, EnvdMode::Broker);
+
+    let invalid = input.replace("envd_mode = \"runtime\"", "envd_mode = \"sidecar\"");
+    assert!(
+        E2bCompatConfig::parse_with_environment(&invalid, test_environment)
+            .unwrap_err()
+            .to_string()
+            .contains("envd_mode must be broker or runtime")
     );
 }
 
