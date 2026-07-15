@@ -36,6 +36,9 @@ mod linux {
     type AnyError = Box<dyn Error + Send + Sync>;
 
     pub(super) async fn run() -> Result<(), AnyError> {
+        // Production services commonly use UMask=0077. Keep the real crun
+        // smoke from accidentally relying on world-searchable runtime paths.
+        let _umask = RestrictiveUmask::install();
         let home_dir = validated_home()?;
         let state_path = home_dir.join("managed-executions.json");
         let operation_id =
@@ -318,5 +321,24 @@ mod linux {
 
     fn failure(message: impl Into<String>) -> AnyError {
         Box::new(io::Error::other(message.into()))
+    }
+
+    struct RestrictiveUmask(libc::mode_t);
+
+    impl RestrictiveUmask {
+        fn install() -> Self {
+            // SAFETY: umask has no memory-safety preconditions. This smoke is a
+            // single-purpose process, and the guard restores the caller value.
+            Self(unsafe { libc::umask(0o077) })
+        }
+    }
+
+    impl Drop for RestrictiveUmask {
+        fn drop(&mut self) {
+            // SAFETY: see `install`; restoring the process umask is infallible.
+            unsafe {
+                libc::umask(self.0);
+            }
+        }
     }
 }

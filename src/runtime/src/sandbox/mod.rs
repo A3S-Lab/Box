@@ -8,6 +8,7 @@ pub mod capability;
 pub mod controller;
 pub mod handler;
 pub mod oci;
+pub mod path_access;
 pub mod rootfs;
 
 pub use capability::{
@@ -20,6 +21,7 @@ pub use oci::{
     compile_oci_spec, SandboxBundleSpec, SandboxMount, SandboxResources, SandboxTmpfs,
     DEFAULT_SANDBOX_PIDS_LIMIT,
 };
+pub use path_access::prepare_crun_path_access;
 pub use rootfs::{
     inspect_rootfs_identity_requirements, mapped_root_ids, prepare_managed_mount_source,
     prepare_rootfs_ownership, validate_external_mount_access, RootfsIdentityRequirements,
