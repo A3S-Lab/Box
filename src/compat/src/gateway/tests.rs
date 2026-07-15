@@ -12,7 +12,7 @@ use a3s_box_core::{
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::header::{HOST, ORIGIN};
-use axum::http::{HeaderValue, Method, Request, Response, StatusCode};
+use axum::http::{HeaderValue, Method, Request, Response, StatusCode, Version};
 use chrono::{DateTime, TimeZone, Utc};
 use hyper::body::to_bytes;
 use hyper::service::service_fn;
@@ -88,10 +88,9 @@ impl Harness {
                 };
                 tokio::spawn(async move {
                     let service = service_fn(upstream_response);
-                    let _ = hyper::server::conn::Http::new()
-                        .serve_connection(socket, service)
-                        .with_upgrades()
-                        .await;
+                    let mut http = hyper::server::conn::Http::new();
+                    http.http1_only(true);
+                    let _ = http.serve_connection(socket, service).with_upgrades().await;
                 });
             }
         });
@@ -209,11 +208,13 @@ async fn upstream_response(
 ) -> Result<Response<Body>, std::convert::Infallible> {
     let method = request.method().to_string();
     let uri = request.uri().to_string();
+    let version = format!("{:?}", request.version());
     let headers = request.headers().clone();
     let body = to_bytes(request.into_body()).await.unwrap();
     let value = serde_json::json!({
         "method": method,
         "uri": uri,
+        "version": version,
         "body": String::from_utf8_lossy(&body),
         "envdTokenForwarded": headers.contains_key(ENVD_ACCESS_TOKEN_HEADER),
         "trafficTokenForwarded": headers.contains_key(TRAFFIC_ACCESS_TOKEN_HEADER),
@@ -228,6 +229,21 @@ async fn upstream_response(
         .headers_mut()
         .insert("content-type", HeaderValue::from_static("application/json"));
     Ok(response)
+}
+
+#[tokio::test]
+async fn translates_downstream_http2_to_plaintext_http1_upstream() {
+    let harness = Harness::new().await;
+    let mut request =
+        harness.direct_request(ENVD_PORT, ENVD_ACCESS_TOKEN_HEADER, &harness.envd_token);
+    *request.version_mut() = Version::HTTP_2;
+
+    let response = harness.proxy.handle(request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
+    assert_eq!(body["version"], "HTTP/1.1");
+    assert_eq!(harness.call_count(), 1);
 }
 
 #[tokio::test]
