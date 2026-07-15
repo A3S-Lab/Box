@@ -45,5 +45,5 @@ fn initialize_tracing() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .try_init()
-        .context("initialize tracing")
+        .map_err(|error| anyhow::anyhow!("initialize tracing: {error}"))
 }
