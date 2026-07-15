@@ -378,6 +378,20 @@ impl OciRootfsBuilder {
             BoxError::BuildError(format!("Failed to write {}: {}", full_path.display(), e))
         })?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(0o644)).map_err(
+                |e| {
+                    BoxError::BuildError(format!(
+                        "Failed to set permissions on {}: {}",
+                        full_path.display(),
+                        e
+                    ))
+                },
+            )?;
+        }
+
         tracing::debug!(path = %full_path.display(), "Created file");
         Ok(())
     }
@@ -535,6 +549,35 @@ mod tests {
 
         let passwd = fs::read_to_string(rootfs_path.join("etc/passwd")).unwrap();
         assert!(passwd.contains("root:x:0:0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_oci_rootfs_builder_makes_essential_files_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs_path = temp_dir.path().join("rootfs");
+        let builder = OciRootfsBuilder::new(&rootfs_path);
+        let essential_files = ["passwd", "group", "hosts", "resolv.conf", "nsswitch.conf"];
+
+        fs::create_dir_all(rootfs_path.join("etc")).unwrap();
+        for name in essential_files {
+            let path = rootfs_path.join("etc").join(name);
+            fs::write(&path, "image content\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        builder.create_essential_files().unwrap();
+
+        for name in essential_files {
+            let mode = fs::metadata(rootfs_path.join("etc").join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o644, "unexpected mode for /etc/{name}");
+        }
     }
 
     #[test]

@@ -74,10 +74,32 @@ impl VmManager {
         let add_hosts = self.parse_add_hosts()?;
         let aliases = self.hostname_aliases(None);
         if aliases.is_empty() && add_hosts.is_empty() {
-            return Ok(());
+            return self.ensure_standalone_hosts_readable(layout);
         }
 
         self.write_hosts_content(layout, None, &aliases, &[], &add_hosts)
+    }
+
+    fn ensure_standalone_hosts_readable(&self, layout: &super::BoxLayout) -> Result<()> {
+        let hosts_path = layout.rootfs_path.join("etc/hosts");
+        if !hosts_path.exists() {
+            return self.write_hosts_content(layout, None, &[], &[], &[]);
+        }
+
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &hosts_path,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o644),
+        )
+        .map_err(|e| {
+            BoxError::NetworkError(format!(
+                "Failed to set permissions on {}: {}",
+                hosts_path.display(),
+                e
+            ))
+        })?;
+
+        Ok(())
     }
 
     /// Set up bridge networking by looking up the network, spawning passt,
@@ -391,6 +413,35 @@ mod tests {
         let hosts = std::fs::read_to_string(layout.rootfs_path.join("etc/hosts")).unwrap();
         assert!(hosts.contains("127.0.1.1 web"));
         assert!(hosts.contains("10.88.0.10 db.local"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_standalone_hosts_file_repairs_restrictive_cached_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let layout = test_layout(dir.path().join("rootfs"));
+        let hosts_path = layout.rootfs_path.join("etc/hosts");
+        std::fs::create_dir_all(hosts_path.parent().unwrap()).unwrap();
+        std::fs::write(&hosts_path, "127.0.0.1 localhost\n::1 localhost\n").unwrap();
+        std::fs::set_permissions(&hosts_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let vm = VmManager::with_box_id(
+            a3s_box_core::config::BoxConfig::default(),
+            a3s_box_core::event::EventEmitter::new(16),
+            "box-id".to_string(),
+        );
+
+        vm.write_standalone_hosts_file(&layout).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&hosts_path).unwrap(),
+            "127.0.0.1 localhost\n::1 localhost\n"
+        );
+        assert_eq!(
+            std::fs::metadata(&hosts_path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[test]
