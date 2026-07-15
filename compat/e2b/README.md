@@ -61,3 +61,24 @@ vendored sources, inventories, and manifest remain byte-for-byte consistent.
 
 Never edit generated inventories by hand or infer compatibility from matching
 method names alone.
+
+## Production control service
+
+`a3s-box-e2b` composes the lifecycle router with the SQLite repository, the
+canonical A3S runtime manager, production credential providers, startup
+reconciliation, and periodic expiry maintenance. It requires a `.acl` file
+parsed by `a3s-acl`; literal sandbox token keys are rejected in favor of
+`env("VARIABLE")` references.
+
+Run it from the Rust workspace:
+
+```bash
+cargo run --locked -p a3s-box-compat --bin a3s-box-e2b -- \
+  --config /etc/a3s-box/e2b.acl
+```
+
+The validated schema and an operator example are documented in
+[`docs/e2b-compatible-sdk-design.md`](../../docs/e2b-compatible-sdk-design.md#configuration).
+This process currently exposes the lifecycle control subset. The wildcard TLS
+gateway and sandbox data-plane protocols remain required before the manifest
+can set `full_compatibility=true`.

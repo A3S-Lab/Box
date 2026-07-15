@@ -347,7 +347,7 @@ that structured Sandbox logs retain both stdout and stderr, drain final records
 before natural-exit or auto-remove archival, and leave no generation log worker,
 crun state, box directory, or socket behind.
 
-Those protocol and runtime tests are not yet one end-to-end service path. CLI
+Those protocol and runtime tests are not yet a complete TLS data-plane path. CLI
 `create` now persists its reservation and complete caller policy through the
 canonical manager, and the first `start` of that reservation consumes its
 persisted generation through the same manager. The production backend prepares
@@ -363,12 +363,15 @@ the managed backend. The Rust SDK now exposes typed create, start, run, inspect,
 pause, resume, restart, kill, and reconciliation calls through that same
 manager. Production credential providers now store account keys as salted
 PBKDF2-SHA256 hashes and protect scope-separated sandbox tokens with
-AES-256-GCM, independent HMAC validation, and versioned key rotation. Wiring
-those providers into the production ACL service and the wildcard TLS gateway
-remains open. Route policy is now persisted with each lifecycle record, and
+AES-256-GCM, independent HMAC validation, and versioned key rotation. The
+`a3s-box-e2b` process reads only `.acl` configuration through `a3s-acl` and
+composes those providers with SQLite lifecycle state, the canonical runtime
+manager, startup reconciliation, periodic expiry reaping, and graceful
+shutdown. Route policy is now persisted with each lifecycle record, and
 strict wildcard/shared parsing projects generation-, expiry-, port-, and
-token-scope-fenced leases without a second mutable routing state. The envd data
-plane and the real official-client Sandbox suite also remain open gates.
+token-scope-fenced leases without a second mutable routing state. The wildcard
+TLS gateway, envd data plane, and the real official-client Sandbox suite remain
+open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in
