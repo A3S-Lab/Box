@@ -48,7 +48,7 @@ stop_service() {
 wait_ready() {
   local attempts=0
   while (( attempts < 100 )); do
-    if curl --silent --show-error --output /dev/null \
+    if curl --silent --output /dev/null \
       --header "X-API-Key: $API_KEY" "$BASE_URL/v2/sandboxes"; then
       return 0
     fi
@@ -226,7 +226,7 @@ matches = [
 ]
 if len(matches) != 1:
     raise SystemExit("managed execution record is missing or ambiguous")
-if matches[0].get("managed_execution", {}).get("state") != "stopped":
+if matches[0].get("status") != "stopped":
     raise SystemExit("managed execution did not persist stopped state")
 print(matches[0]["id"])
 PY
