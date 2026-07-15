@@ -9,6 +9,8 @@ TOKEN_DIGEST="$(printf '08%.0s' {1..32})"
 PORT="${A3S_BOX_E2B_SMOKE_PORT:-38081}"
 GATEWAY_PORT="${A3S_BOX_E2B_GATEWAY_SMOKE_PORT:-38443}"
 IMAGE="${A3S_BOX_SMOKE_IMAGE:-alpine:3.20}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+OFFICIAL_CLIENT_RUNNER="${A3S_BOX_E2B_OFFICIAL_CLIENT_RUNNER:-$SCRIPT_DIR/../compat/e2b/fixtures/official-clients/run_production.py}"
 # A dependency-free HTTP/1.1 responder used with BusyBox nc -e. Alpine's
 # BusyBox build does not guarantee the optional httpd applet.
 HTTP_RESPONDER_B64='IyEvYmluL3NoCndoaWxlIElGUz0gcmVhZCAtciBsaW5lOyBkbwogIFsgIiRsaW5lIiA9ICIkKHByaW50ZiAnXHInKSIgXSAmJiBicmVhawpkb25lCmJvZHk9J3NhbmRib3gtZGF0YS1wbGFuZScKcHJpbnRmICdIVFRQLzEuMSAyMDAgT0tcclxuQ29udGVudC1MZW5ndGg6ICVzXHJcbkNvbm5lY3Rpb246IGNsb3NlXHJcbkNvbnRlbnQtVHlwZTogdGV4dC9wbGFpblxyXG5cclxuJXMnICIkeyNib2R5fSIgIiRib2R5Igo='
@@ -294,6 +296,25 @@ e2b_compat {
       token_scope = "traffic"
     }
   }
+
+  template_policy "code-interpreter-v1" {
+    image = "$IMAGE"
+    envd_version = "0.1.3"
+    isolation = "sandbox"
+    network = "none"
+    command = ["/bin/sh", "-c", "mkdir -p /tmp/e2b-smoke && printf '%s' '$HTTP_RESPONDER_B64' | /bin/busybox base64 -d > /tmp/e2b-smoke/respond && chmod 755 /tmp/e2b-smoke/respond && exec /bin/busybox nc -lk -p 49983 -e /tmp/e2b-smoke/respond"]
+
+    resources {
+      vcpus = 2
+      memory_mb = 512
+      disk_mb = 1024
+    }
+
+    route {
+      port = 49999
+      token_scope = "traffic"
+    }
+  }
 }
 EOF
 
@@ -378,5 +399,49 @@ PY
 [[ ! -e "/tmp/a3s-box-sockets/$EXECUTION_ID" ]] || fail 'runtime socket directory leaked after kill'
 
 SANDBOX_ID=""
+
+if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" ]]; then
+  [[ -f "$OFFICIAL_CLIENT_RUNNER" ]] ||
+    fail "official-client runner is missing: $OFFICIAL_CLIENT_RUNNER"
+  OFFICIAL_CLIENT_ARGS=(
+    --api-url "$BASE_URL"
+    --domain box.example.com
+    --template fixture-template
+  )
+  if [[ -n "${A3S_BOX_E2B_PIP_BOOTSTRAP_WHEEL:-}" ]]; then
+    OFFICIAL_CLIENT_ARGS+=(
+      --pip-bootstrap-wheel "$A3S_BOX_E2B_PIP_BOOTSTRAP_WHEEL"
+    )
+  fi
+  if [[ -n "${A3S_BOX_E2B_ARTIFACT_CACHE:-}" ]]; then
+    OFFICIAL_CLIENT_ARGS+=(--artifact-cache "$A3S_BOX_E2B_ARTIFACT_CACHE")
+  fi
+  E2B_API_KEY="$API_KEY" \
+    "${A3S_BOX_E2B_OFFICIAL_PYTHON:-python3}" \
+    "$OFFICIAL_CLIENT_RUNNER" "${OFFICIAL_CLIENT_ARGS[@]}"
+
+  python3 - "$STATE_DIR/managed-executions.json" "$A3S_HOME" <<'PY'
+import json
+import pathlib
+import sys
+
+records_path = pathlib.Path(sys.argv[1])
+home = pathlib.Path(sys.argv[2])
+with records_path.open(encoding="utf-8") as source:
+    records = json.load(source)
+for record in records:
+    execution_id = record["id"]
+    if record.get("status") != "stopped":
+        raise SystemExit(f"managed execution {execution_id} is not stopped")
+    for path in (
+        home / "boxes" / execution_id,
+        home / "run" / "crun" / execution_id,
+        pathlib.Path("/tmp/a3s-box-sockets") / execution_id,
+    ):
+        if path.exists():
+            raise SystemExit(f"runtime resource leaked after official clients: {path}")
+PY
+fi
+
 stop_service
-printf 'E2B production smoke passed: lifecycle, TLS data plane, restart recovery, credentials, and cleanup\n'
+printf 'E2B production smoke passed: lifecycle, TLS data plane, restart recovery, credentials, official clients when enabled, and cleanup\n'
