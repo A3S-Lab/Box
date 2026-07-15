@@ -51,6 +51,9 @@ impl VmManager {
             .filter_map(|v| v.split(':').nth(1).map(String::from))
             .collect();
         let mut anon_vol_offset = self.config.volumes.len();
+        let mut seen_anonymous_volumes = std::collections::HashSet::new();
+        self.anonymous_volumes
+            .retain(|name| seen_anonymous_volumes.insert(name.clone()));
 
         if let Some(ref oci_config) = layout.oci_config {
             for vol_path in &oci_config.volumes {
@@ -77,7 +80,9 @@ impl VmManager {
                             host_path: PathBuf::from(&host_path),
                             read_only: false,
                         });
-                        self.anonymous_volumes.push(anon_name.clone());
+                        if seen_anonymous_volumes.insert(anon_name.clone()) {
+                            self.anonymous_volumes.push(anon_name.clone());
+                        }
                         if created {
                             self.created_anonymous_volumes.push(anon_name);
                         }
@@ -1572,10 +1577,20 @@ mod tests {
 
         let mut second_vm = test_vm_manager(BoxConfig::default());
         second_vm.home_dir = home.path().to_path_buf();
+        second_vm.anonymous_volumes = vec![volume_name.clone(), volume_name.clone()];
+        second_vm.build_instance_spec(&layout).unwrap();
         second_vm.build_instance_spec(&layout).unwrap();
 
         assert_eq!(second_vm.anonymous_volumes, vec![volume_name]);
         assert!(second_vm.created_anonymous_volumes.is_empty());
+        assert_eq!(
+            store
+                .get(&second_vm.anonymous_volumes[0])
+                .unwrap()
+                .unwrap()
+                .in_use_by,
+            vec!["test-box".to_string()]
+        );
     }
 
     #[cfg(target_os = "windows")]
