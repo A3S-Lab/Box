@@ -326,10 +326,11 @@ resources, then starts through certified `crun`, rejects pause explicitly, and
 owns kill and cleanup without MicroVM fallback.
 
 Those protocol and runtime tests are not yet one end-to-end service path. CLI
-create/start/run and the Rust SDK still need migration to the canonical manager,
-and the production HCL service, encrypted credentials, generation-fenced route
-leases, wildcard TLS gateway, envd data plane, and real official-client Sandbox
-suite remain open gates.
+`create` now persists its reservation and complete caller policy through the
+canonical manager; CLI `start`/`run` and the Rust SDK still need migration. The
+production HCL service, encrypted credentials, generation-fenced route leases,
+wildcard TLS gateway, envd data plane, and real official-client Sandbox suite
+also remain open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

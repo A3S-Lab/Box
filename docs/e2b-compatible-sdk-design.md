@@ -21,7 +21,7 @@ unversioned claim.
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, reaping, and startup reconciliation | Wire the repository and supervisor into the production service process and exercise restart and host-reboot recovery end to end |
-| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; an A3S OS smoke test proves reservation-only create, restart reconciliation, real `crun` start, explicit pause rejection, kill, and cleanup without MicroVM fallback | Migrate CLI create/start/run and the Rust SDK to the same manager and add caller parity tests |
+| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI `create` uses the same reservation path with caller-policy parity tests; an A3S OS smoke test proves reservation-only create, restart reconciliation, real `crun` start, explicit pause rejection, kill, and cleanup without MicroVM fallback | Migrate CLI start/run and the Rust SDK to the same manager and add the remaining caller parity tests |
 | Credentials and routing | Injected verifier, token, cursor, and template interfaces isolate protocol logic from infrastructure | Add production credential hashing, token encryption and rotation, generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
@@ -606,11 +606,12 @@ must not assume that the single-host limit is part of the upstream contract.
 ### Dependency direction
 
 The runtime now owns a canonical managed-execution store, a backend-neutral
-`LocalExecutionManager`, and a production VM/Sandbox backend. The current CLI
-still owns a separate complete `create` and `start` orchestration path, while
-the Rust SDK intentionally omits those operations. The compatibility service
-must not work around that caller gap by spawning `a3s-box`, importing CLI
-modules, or editing `boxes.json`. Phase 2 completes this dependency direction:
+`LocalExecutionManager`, and a production VM/Sandbox backend. CLI `create`
+reserves through that manager, while CLI `start`/`run` still own separate boot
+paths and the Rust SDK intentionally omits those operations. The compatibility
+service must not work around the remaining caller gap by spawning `a3s-box`,
+importing CLI modules, or editing `boxes.json`. Phase 2 completes this
+dependency direction:
 
 ```text
 a3s-box-core
@@ -781,8 +782,9 @@ Phase 2 is delivered as small, immediately merged changes:
    startup reconciliation, and corruption/crash/concurrency tests.
 4. **Partially complete:** extract canonical A3S state and the runtime
    `ExecutionManager`; add the production backend and prove its real Sandbox
-   lifecycle; switch CLI create/start/run and the Rust SDK to the same
-   implementation with behavior parity tests.
+   lifecycle; switch CLI create to the same reservation path; switch CLI
+   start/run and the Rust SDK to the same implementation with behavior parity
+   tests.
 5. Add the production HCL-configured service binary, credential and token
    providers, generation-fenced route leases, and TLS data-plane gateway. Pull
    each merge commit on an A3S OS server and run the unmodified official clients
@@ -821,10 +823,18 @@ reservation; and explicit `start` launches through `crun`. It also proves pause
 rollback, kill, and terminal cleanup. Deterministic image-pull failure injection
 proves that a failed start does not create those runtime resources.
 
-Slice 4 remains incomplete until CLI create/start/run and the Rust SDK call the
-same manager with behavior parity tests. The existing Rust SDK uses the
-canonical record store for management operations but still has a separate
-local lifecycle model and does not expose create/start/run.
+CLI `create` now converts its validated arguments into `BoxConfig` and
+`ExecutionRecordPolicy`, then calls `LocalExecutionManager::create`. It no
+longer pre-allocates the Box directory, log directory, or socket directory.
+Caller parity coverage verifies both the legacy inspection fields and the full
+managed request, including config-only values such as DNS and persistent
+filesystem policy. Named-volume bookkeeping remains attached only after the
+durable reservation succeeds and rolls the reservation back on failure.
+
+Slice 4 remains incomplete until CLI start/run and the Rust SDK call the same
+manager with behavior parity tests. The existing Rust SDK uses the canonical
+record store for management operations but still has a separate local
+lifecycle model and does not expose create/start/run.
 
 Each slice must pass its focused tests and repository CI before merge. The
 Phase 2 gate remains closed until slice 5 composes the durable repository,

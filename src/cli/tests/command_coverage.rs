@@ -388,6 +388,8 @@ fn test_create_persists_rich_runtime_options() {
         "4",
         "--memory",
         "768m",
+        "--dns",
+        "1.1.1.1",
         "--volume",
         "covrichdata:/data:ro",
         "--env-file",
@@ -531,6 +533,44 @@ fn test_create_persists_rich_runtime_options() {
     assert_eq!(inspect["stop_timeout"], 12);
     assert_eq!(inspect["oom_kill_disable"], true);
     assert_eq!(inspect["oom_score_adj"], 100);
+    assert!(
+        !std::path::Path::new(inspect["box_dir"].as_str().expect("box directory path")).exists(),
+        "reservation-only create must not allocate a runtime directory"
+    );
+
+    let managed = &inspect["managed_execution"];
+    assert_eq!(managed["generation"], 1);
+    assert!(managed["pending_operation"].is_null());
+    assert!(managed["operation_id"]
+        .as_str()
+        .expect("managed operation ID")
+        .starts_with("cli-create-"));
+    assert!(managed["request"]["external_sandbox_id"]
+        .as_str()
+        .expect("external diagnostic ID")
+        .starts_with("cli-create-"));
+    assert_eq!(
+        managed["request"]["config"]["image"],
+        "docker.io/library/alpine:latest"
+    );
+    assert_eq!(
+        managed["request"]["config"]["dns"],
+        serde_json::json!(["1.1.1.1"])
+    );
+    assert_eq!(
+        managed["request"]["config"]["extra_env"],
+        serde_json::json!([
+            ["FROM_FILE", "kept"],
+            ["INLINE", "present"],
+            ["OVERRIDE", "cli"]
+        ])
+    );
+    assert_eq!(managed["request"]["config"]["persistent"], true);
+    assert_eq!(managed["request"]["policy"]["name"], "cov-rich");
+    assert_eq!(managed["request"]["policy"]["restart_policy"], "on-failure");
+    assert_eq!(managed["request"]["policy"]["max_restart_count"], 3);
+    assert_eq!(managed["request"]["policy"]["stop_timeout"], 12);
+    assert_eq!(managed["request"]["labels"]["purpose"], "coverage");
 
     let volume = cli.ok(&["volume", "inspect", "covrichdata"]);
     assert!(volume.contains("covrichdata"));

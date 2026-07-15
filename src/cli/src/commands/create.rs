@@ -1,10 +1,15 @@
 //! `a3s-box create` command — Create without starting.
 
+use a3s_box_core::{
+    BoxConfig, CreateExecutionRequest, ExecutionManager, ExecutionRecordPolicy,
+    ExecutionRestartPolicy, OperationId, ResourceConfig,
+};
+use a3s_box_runtime::LocalExecutionManager;
 use clap::Args;
 
 use super::common::{self, CommonBoxArgs};
 use crate::output::parse_memory;
-use crate::state::{generate_name, BoxRecord, StateFile};
+use crate::state::{generate_name, StateFile};
 
 #[derive(Args)]
 pub struct CreateArgs {
@@ -24,6 +29,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     let (restart_policy, max_restart_count) =
         crate::state::parse_restart_policy(&args.common.restart)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let restart_policy = execution_restart_policy(&restart_policy)?;
 
     let memory_mb =
         parse_memory(&args.common.memory).map_err(|e| format!("Invalid --memory: {e}"))?;
@@ -35,7 +41,9 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let env = common::build_env_map(&args.common)?;
     let labels = common::parse_env_vars(&args.common.labels)
-        .map_err(|e| e.replace("environment variable", "label"))?;
+        .map_err(|e| e.replace("environment variable", "label"))?
+        .into_iter()
+        .collect();
     if let Some(network) = args.common.network.as_deref() {
         ensure_network_exists(network)?;
     }
@@ -64,22 +72,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         None => None,
     };
 
-    let box_id = uuid::Uuid::new_v4().to_string();
-    let short_id = BoxRecord::make_short_id(&box_id);
-
     let home = a3s_box_core::dirs_home();
-    let box_dir = home.join("boxes").join(&box_id);
-
-    // Arm cleanup for the pre-registration section: create_dir_all and volume
-    // resolution below can fail with `?` after the box dir already exists, and
-    // until the box is registered it's invisible to `prune`/`rm`. The guard
-    // removes the orphaned dir on any early return; it is disarmed right before
-    // the add_record block, after which cleanup_partial_box_record takes over.
-    let mut dir_guard = crate::cleanup::BoxDirGuard::new(box_dir.clone());
-
-    // Create box directory structure
-    std::fs::create_dir_all(box_dir.join("sockets"))?;
-    std::fs::create_dir_all(box_dir.join("logs"))?;
 
     // Resolve named volumes
     let mut resolved_volumes = Vec::new();
@@ -105,90 +98,80 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         },
         None => a3s_box_core::NetworkMode::Tsi,
     };
+    let mut extra_env = env.into_iter().collect::<Vec<_>>();
+    extra_env.sort_by(|left, right| left.0.cmp(&right.0));
 
-    let record = BoxRecord {
-        id: box_id.clone(),
-        short_id: short_id.clone(),
-        name: name.clone(),
-        image: args.common.image.clone(),
+    let config = BoxConfig {
         isolation,
-        managed_execution: None,
-        status: "created".to_string(),
-        pid: None,
-        pid_start_time: None,
-        cpus: args.common.cpus,
-        memory_mb,
+        image: args.common.image.clone(),
+        resources: ResourceConfig {
+            vcpus: args.common.cpus,
+            memory_mb,
+            ..Default::default()
+        },
+        cmd: args.cmd.clone(),
+        entrypoint_override: entrypoint,
+        user: args.common.user.clone(),
+        workdir: args.common.workdir.clone(),
+        hostname: args.common.hostname.clone(),
         volumes: resolved_volumes,
         virtiofs_cache: args
             .common
             .virtiofs_cache
             .map(|mode| mode.as_guest_value().to_string()),
-        env,
-        cmd: args.cmd.clone(),
-        entrypoint,
-        box_dir: box_dir.clone(),
-        exec_socket_path: box_dir.join("sockets").join("exec.sock"),
-        console_log: box_dir.join("logs").join("console.log"),
-        created_at: chrono::Utc::now(),
-        started_at: None,
-        auto_remove: false,
-        hostname: args.common.hostname,
-        user: args.common.user,
-        workdir: args.common.workdir,
-        restart_policy,
+        extra_env,
         port_map,
-        labels,
-        stopped_by_user: false,
-        restart_count: 0,
+        dns: args.common.dns.clone(),
+        add_hosts: args.common.add_host.clone(),
+        network: network_mode,
+        tmpfs: args.common.tmpfs.clone(),
+        resource_limits,
+        read_only: args.common.read_only,
+        cap_add: args.common.cap_add.clone(),
+        cap_drop: args.common.cap_drop.clone(),
+        security_opt: args.common.security_opt.clone(),
+        privileged: args.common.privileged,
+        // A created box is restartable and therefore retains its writable
+        // filesystem until an explicit remove.
+        persistent: true,
+        ..Default::default()
+    };
+    let policy = ExecutionRecordPolicy {
+        name: Some(name.clone()),
+        auto_remove: false,
+        restart_policy,
         max_restart_count,
-        exit_code: None,
         health_check,
         healthcheck_disabled: args.common.no_healthcheck,
-        health_status: "none".to_string(),
-        health_retries: 0,
-        health_last_check: None,
-        network_mode,
-        network_name: args.common.network,
-        volume_names: volume_names.clone(),
-        tmpfs: args.common.tmpfs,
-        anonymous_volumes: vec![],
-        resource_limits,
         log_config: a3s_box_core::log::LogConfig::default(),
-        add_host: args.common.add_host,
-        platform: args.common.platform,
+        volume_names: volume_names.clone(),
+        platform: args.common.platform.clone(),
         init: args.common.init,
-        read_only: args.common.read_only,
-        cap_add: args.common.cap_add,
-        cap_drop: args.common.cap_drop,
-        security_opt: args.common.security_opt,
-        privileged: args.common.privileged,
-        devices: args.common.device,
-        gpus: args.common.gpus,
+        devices: args.common.device.clone(),
+        gpus: args.common.gpus.clone(),
         shm_size,
         stop_signal: effective_stop_signal,
         stop_timeout: args.common.stop_timeout,
         oom_kill_disable: args.common.oom_kill_disable,
         oom_score_adj: args.common.oom_score_adj,
     };
-
-    let record_for_cleanup = record.clone();
-    // Past the fallible pre-registration section: hand box-dir ownership to the
-    // record-level cleanup below (cleanup_partial_box_record), which also clears
-    // state + attached resources.
-    dir_guard.disarm();
-
-    // Atomic append under the state lock so concurrent `create`/`run` cannot
-    // lose records (load_default()+add() is a lost-update race).
-    if let Err(error) = StateFile::add_record(record) {
-        let mut state = StateFile::load_default()?;
-        crate::cleanup::cleanup_partial_box_record(&record_for_cleanup, Some(&mut state));
-        return Err(error.into());
-    }
+    let operation_id = OperationId::new(format!("cli-create-{}", uuid::Uuid::new_v4()))?;
+    let request = CreateExecutionRequest {
+        external_sandbox_id: operation_id.as_str().to_string(),
+        config,
+        labels,
+        policy,
+    };
+    let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), home);
+    let reservation = manager.create(request, &operation_id).await?;
+    let box_id = reservation.execution_id.to_string();
 
     // Attach named volumes to this box
     if let Err(error) = super::volume::attach_volumes(&volume_names, &box_id) {
         let mut state = StateFile::load_default()?;
-        crate::cleanup::cleanup_partial_box_record(&record_for_cleanup, Some(&mut state));
+        if let Some(record) = state.find_by_id(&box_id).cloned() {
+            crate::cleanup::cleanup_partial_box_record(&record, Some(&mut state));
+        }
         return Err(error);
     }
 
@@ -202,6 +185,16 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+fn execution_restart_policy(value: &str) -> Result<ExecutionRestartPolicy, String> {
+    match value {
+        "no" => Ok(ExecutionRestartPolicy::No),
+        "always" => Ok(ExecutionRestartPolicy::Always),
+        "on-failure" => Ok(ExecutionRestartPolicy::OnFailure),
+        "unless-stopped" => Ok(ExecutionRestartPolicy::UnlessStopped),
+        other => Err(format!("Invalid normalized restart policy: {other}")),
+    }
+}
+
 fn ensure_network_exists(network: &str) -> Result<(), Box<dyn std::error::Error>> {
     let store = a3s_box_runtime::NetworkStore::default_path()?;
     let config = store
@@ -210,4 +203,30 @@ fn ensure_network_exists(network: &str) -> Result<(), Box<dyn std::error::Error>
     super::network::validate_attachable_network(&config)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_restart_policies_map_to_typed_creation_policy() {
+        assert_eq!(
+            execution_restart_policy("no").unwrap(),
+            ExecutionRestartPolicy::No
+        );
+        assert_eq!(
+            execution_restart_policy("always").unwrap(),
+            ExecutionRestartPolicy::Always
+        );
+        assert_eq!(
+            execution_restart_policy("on-failure").unwrap(),
+            ExecutionRestartPolicy::OnFailure
+        );
+        assert_eq!(
+            execution_restart_policy("unless-stopped").unwrap(),
+            ExecutionRestartPolicy::UnlessStopped
+        );
+        assert!(execution_restart_policy("on-failure:3").is_err());
+    }
 }
