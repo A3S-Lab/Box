@@ -82,3 +82,8 @@ The validated schema and an operator example are documented in
 This process currently exposes the lifecycle control subset. The wildcard TLS
 gateway and sandbox data-plane protocols remain required before the manifest
 can set `full_compatibility=true`.
+
+The destructive A3S OS integration harness is
+[`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
+requires a dedicated runtime home and explicit acknowledgement, and verifies a
+real Sandbox lifecycle, service restart recovery, and resource cleanup.

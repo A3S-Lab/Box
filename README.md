@@ -367,11 +367,13 @@ AES-256-GCM, independent HMAC validation, and versioned key rotation. The
 `a3s-box-e2b` process reads only `.acl` configuration through `a3s-acl` and
 composes those providers with SQLite lifecycle state, the canonical runtime
 manager, startup reconciliation, periodic expiry reaping, and graceful
-shutdown. Route policy is now persisted with each lifecycle record, and
-strict wildcard/shared parsing projects generation-, expiry-, port-, and
-token-scope-fenced leases without a second mutable routing state. The wildcard
-TLS gateway, envd data plane, and the real official-client Sandbox suite remain
-open gates.
+shutdown. Its A3S OS smoke creates a real `crun` Sandbox through HTTP, restarts
+the service, reconnects to the preserved execution, updates its timeout, kills
+it, and verifies runtime cleanup. Route policy is now persisted with each
+lifecycle record, and strict wildcard/shared parsing projects generation-,
+expiry-, port-, and token-scope-fenced leases without a second mutable routing
+state. The wildcard TLS gateway, envd data plane, and the real official-client
+Sandbox suite remain open gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in

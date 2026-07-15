@@ -20,17 +20,18 @@ unversioned claim.
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
-| Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service | Exercise service restart and host-reboot recovery end to end |
-| Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI and Rust SDK create/start/run paths use generation fencing with caller-policy parity, idempotent resource preparation, failure rollback, and operation-ID recovery; the production compatibility process now uses the same manager | Complete the real-service restart and host-reboot matrix |
+| Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
+| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; an A3S OS smoke creates through HTTP, starts through certified `crun`, reconnects after service restart, replaces timeout, kills, and verifies box, runtime-state, and socket cleanup | Complete the host-reboot and official-client matrices |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, and durable-record-projected generation-fenced leases | Add the TLS data-plane gateway and exercise routed traffic through it |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
-The lifecycle fixture and the managed Sandbox smoke validate opposite sides of
-the architecture. They have not yet been composed into one production path:
-the fixture uses an in-memory repository and fake execution manager, while the
-runtime smoke calls `LocalExecutionManager` directly without the compatibility
-HTTP service or data-plane gateway. Neither result alone is an end-to-end
-compatibility claim, so `full_compatibility=false` remains mandatory.
+The lifecycle control path is now composed and exercised against a real
+Sandbox on A3S OS. That smoke uses HTTP requests rather than the pinned
+official SDKs, and it does not traverse the wildcard TLS or sandbox data-plane
+gateway. The unchanged-client fixture still uses an in-memory repository and
+fake execution manager. These are complementary results rather than the full
+black-box compatibility matrix, so `full_compatibility=false` remains
+mandatory.
 
 ## Executive decision
 
