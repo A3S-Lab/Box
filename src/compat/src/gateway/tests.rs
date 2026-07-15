@@ -215,6 +215,7 @@ async fn upstream_response(
         "method": method,
         "uri": uri,
         "version": version,
+        "host": headers.get(HOST).and_then(|value| value.to_str().ok()),
         "body": String::from_utf8_lossy(&body),
         "envdTokenForwarded": headers.contains_key(ENVD_ACCESS_TOKEN_HEADER),
         "trafficTokenForwarded": headers.contains_key(TRAFFIC_ACCESS_TOKEN_HEADER),
@@ -236,6 +237,10 @@ async fn translates_downstream_http2_to_plaintext_http1_upstream() {
     let harness = Harness::new().await;
     let mut request =
         harness.direct_request(ENVD_PORT, ENVD_ACCESS_TOKEN_HEADER, &harness.envd_token);
+    let authority = request.headers_mut().remove(HOST).unwrap();
+    *request.uri_mut() = format!("https://{}/echo?value=one", authority.to_str().unwrap())
+        .parse()
+        .unwrap();
     *request.version_mut() = Version::HTTP_2;
 
     let response = harness.proxy.handle(request).await;
@@ -243,6 +248,7 @@ async fn translates_downstream_http2_to_plaintext_http1_upstream() {
     let body: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body()).await.unwrap()).unwrap();
     assert_eq!(body["version"], "HTTP/1.1");
+    assert_eq!(body["host"], authority.to_str().unwrap());
     assert_eq!(harness.call_count(), 1);
 }
 

@@ -100,17 +100,16 @@ async fn proxy_upstream(
     request: &mut Request<Body>,
     stream: ExecutionPortStream,
 ) -> Result<Response<Body>, ProxyFailure> {
-    let version = request.version();
-    let upgrade = is_upgrade(request.headers(), version);
+    let downstream_version = request.version();
+    let upgrade = is_upgrade(request.headers(), downstream_version);
     let downstream_upgrade = upgrade.then(|| hyper::upgrade::on(&mut *request));
-    normalize_uri(request)?;
-    sanitize_request_headers(request.headers_mut(), version, upgrade);
+    normalize_http1_upstream(request)?;
+    sanitize_request_headers(request.headers_mut(), downstream_version, upgrade);
+    // Downstream ALPN does not describe the plaintext Sandbox origin. E2B's
+    // data plane translates both HTTP/1.1 and HTTP/2 clients to HTTP/1.1 here.
+    *request.version_mut() = Version::HTTP_11;
 
-    let mut builder = conn::Builder::new();
-    if version == Version::HTTP_2 {
-        builder.http2_only(true);
-    }
-    let (mut sender, connection) = builder.handshake(stream).await?;
+    let (mut sender, connection) = conn::Builder::new().handshake(stream).await?;
     tokio::spawn(async move {
         if let Err(error) = connection.await {
             debug!(%error, "sandbox data-plane upstream connection closed");
@@ -119,7 +118,11 @@ async fn proxy_upstream(
     let outbound = std::mem::replace(request, Request::new(Body::empty()));
     let mut response = sender.send_request(outbound).await?;
     let switched_protocols = response.status() == StatusCode::SWITCHING_PROTOCOLS && upgrade;
-    sanitize_response_headers(response.headers_mut(), version, switched_protocols);
+    sanitize_response_headers(
+        response.headers_mut(),
+        downstream_version,
+        switched_protocols,
+    );
 
     if let Some(downstream_upgrade) = downstream_upgrade.filter(|_| switched_protocols) {
         let upstream_upgrade = hyper::upgrade::on(&mut response);
@@ -140,31 +143,26 @@ async fn proxy_upstream(
     Ok(response)
 }
 
-fn normalize_uri(request: &mut Request<Body>) -> Result<(), ProxyFailure> {
+fn normalize_http1_upstream(request: &mut Request<Body>) -> Result<(), ProxyFailure> {
+    let authority = request
+        .uri()
+        .authority()
+        .map(|value| value.as_str().to_string());
     let path_and_query = request
         .uri()
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/")
         .to_string();
-    if request.version() == Version::HTTP_2 {
-        if request.uri().scheme().is_some() && request.uri().authority().is_some() {
-            return Ok(());
-        }
-        let authority = request
-            .headers()
-            .get(HOST)
-            .ok_or(ProxyFailure::InvalidUpstreamUri)?
-            .to_str()
-            .map_err(|_| ProxyFailure::InvalidUpstreamUri)?;
-        *request.uri_mut() = format!("https://{authority}{path_and_query}")
-            .parse::<Uri>()
-            .map_err(|_| ProxyFailure::InvalidUpstreamUri)?;
-    } else {
-        *request.uri_mut() = path_and_query
-            .parse::<Uri>()
-            .map_err(|_| ProxyFailure::InvalidUpstreamUri)?;
+    if !request.headers().contains_key(HOST) {
+        let authority = authority.ok_or(ProxyFailure::InvalidUpstreamUri)?;
+        let host =
+            HeaderValue::from_str(&authority).map_err(|_| ProxyFailure::InvalidUpstreamUri)?;
+        request.headers_mut().insert(HOST, host);
     }
+    *request.uri_mut() = path_and_query
+        .parse::<Uri>()
+        .map_err(|_| ProxyFailure::InvalidUpstreamUri)?;
     Ok(())
 }
 
