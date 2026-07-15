@@ -369,10 +369,8 @@ where
                 "{context}.version must be unique and greater than zero"
             )));
         }
-        if required_bool(block, "active", &context)? {
-            if active_version.replace(version).is_some() {
-                return Err(invalid("exactly one token key can be active"));
-            }
+        if required_bool(block, "active", &context)? && active_version.replace(version).is_some() {
+            return Err(invalid("exactly one token key can be active"));
         }
         let encryption = required_environment_key(block, "encryption_key", &context, environment)?;
         let digest = required_environment_key(block, "digest_key", &context, environment)?;
