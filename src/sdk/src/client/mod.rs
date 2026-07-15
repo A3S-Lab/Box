@@ -17,7 +17,11 @@ use a3s_box_core::platform::Platform;
 use a3s_box_core::snapshot::SnapshotMetadata;
 use a3s_box_core::vmm::parse_signal_name;
 use a3s_box_core::volume::VolumeConfig;
-use a3s_box_core::{ExecOutput, ExecRequest, FileRequest, FileResponse, StoredImage};
+use a3s_box_core::{
+    CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
+    ExecutionLease, ExecutionManager, ExecutionReservation, ExecutionStatus, FileRequest,
+    FileResponse, KillOutcome, OperationId, ReconcileOutcome, RestartExecutionOptions, StoredImage,
+};
 use a3s_box_runtime::oci::BuildResult as RuntimeBuildResult;
 use a3s_box_runtime::{
     is_process_alive, is_process_alive_with_identity, BuildConfig as RuntimeBuildConfig,
@@ -37,6 +41,7 @@ use crate::box_state::{BoxRecord, StateFile};
 include!("types.rs");
 include!("summaries.rs");
 include!("core.rs");
+include!("lifecycle.rs");
 include!("support.rs");
 
 #[cfg(test)]

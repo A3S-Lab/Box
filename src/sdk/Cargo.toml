@@ -46,4 +46,5 @@ path = "tests/soak_kvm.rs"
 required-features = ["pipeline-cli"]
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tempfile = { workspace = true }
