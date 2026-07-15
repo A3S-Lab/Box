@@ -37,6 +37,41 @@ jobs:
           workspaces: src
       - run: cd src && cargo test --workspace --lib
 
+  # ── Build native SDK release assets ───────────────────────────
+  sdk:
+    name: Build SDK packages
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - name: Build and verify Python package
+        run: |
+          mkdir -p sdk-artifacts
+          python -m pip install build
+          python -m build sdk/python --outdir "$GITHUB_WORKSPACE/sdk-artifacts"
+          python -m venv /tmp/a3s-box-python-sdk
+          /tmp/a3s-box-python-sdk/bin/pip install sdk-artifacts/*.whl
+          /tmp/a3s-box-python-sdk/bin/python -m unittest discover -s sdk/python/tests
+      - name: Build and verify TypeScript package
+        working-directory: sdk/typescript
+        run: |
+          npm ci
+          npm run build
+          npm test
+          npm pack --pack-destination "$GITHUB_WORKSPACE/sdk-artifacts"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sdk-packages
+          path: sdk-artifacts/*
+
   # ── Build matrix ───────────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
@@ -171,7 +206,7 @@ jobs:
   # ── Create GitHub Release ──────────────────────────────────────
   release:
     name: GitHub Release
-    needs: build
+    needs: [build, sdk]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -188,6 +223,8 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/**/*.tar.gz
+            artifacts/**/*.whl
+            artifacts/**/*.tgz
 
   # ── Publish to crates.io ───────────────────────────────────────
   publish-crates:
