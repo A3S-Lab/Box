@@ -1,6 +1,7 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 4 complete)**
+Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 4 complete;
+slice 5 credential providers complete)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -21,7 +22,7 @@ unversioned claim.
 | Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against the Rust fixture server | Run the same unchanged clients through the production service and a real Sandbox execution |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, reaping, and startup reconciliation | Wire the repository and supervisor into the production service process and exercise restart and host-reboot recovery end to end |
 | Runtime lifecycle | Canonical managed-execution store, two-stage backend-neutral `LocalExecutionManager`, and production VM/Sandbox backend; CLI and Rust SDK create/start/run paths use generation fencing with caller-policy parity, idempotent resource preparation, failure rollback, and operation-ID recovery; A3S OS smoke tests prove managed CLI and SDK execution through certified `crun`, explicit Sandbox pause rejection, kill, and cleanup without MicroVM fallback | Compose the runtime manager into the production compatibility service and exercise service restart recovery end to end |
-| Credentials and routing | Injected verifier, token, cursor, and template interfaces isolate protocol logic from infrastructure | Add production credential hashing, token encryption and rotation, generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
+| Credentials and routing | Injected interfaces isolate protocol logic; production account credentials use salted PBKDF2-SHA256 hashes; sandbox tokens use scope-bound AES-256-GCM ciphertext, independent HMAC validation, and versioned key rotation | Wire the providers through ACL, then add generation-fenced route leases, validated wildcard/direct routing, and the TLS data-plane gateway |
 | Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
 The lifecycle fixture and the managed Sandbox smoke validate opposite sides of
@@ -545,9 +546,10 @@ modified with required A3S fields.
 
 ## Configuration
 
-Product configuration uses HCL. A production service configuration resembles:
+Product configuration uses A3S Agent Configuration Language (ACL), parsed by
+`a3s-acl`. A production service configuration resembles:
 
-```hcl
+```acl
 e2b_compat {
   api_listen          = "0.0.0.0:443"
   api_public_url      = "https://api.box.example.com"
@@ -606,10 +608,10 @@ must not assume that the single-host limit is part of the upstream contract.
 
 The runtime now owns a canonical managed-execution store, a backend-neutral
 `LocalExecutionManager`, and a production VM/Sandbox backend. CLI
-`create`/`start`/`restart`/`run` use that manager, while the Rust SDK
-intentionally omits those lifecycle operations. The compatibility service must
-not work around the remaining SDK gap by spawning `a3s-box`, importing CLI
-modules, or editing `boxes.json`. Phase 2 completes this dependency direction:
+`create`/`start`/`restart`/`run` and the Rust SDK lifecycle API use that
+manager. The compatibility service must use the same manager directly rather
+than spawning `a3s-box`, importing CLI modules, or editing `boxes.json`. Phase
+2 completes this dependency direction:
 
 ```text
 a3s-box-core
@@ -704,7 +706,7 @@ unless protocol translation eventually requires one.
 ### Durable lifecycle transaction
 
 The initial durable repository is SQLite in WAL mode through an asynchronous
-driver. Its location is explicit in HCL and it owns versioned migrations. A
+driver. Its location is explicit in ACL and it owns versioned migrations. A
 database transaction is never held across an image pull, sandbox boot, or shim
 call.
 
@@ -758,6 +760,17 @@ logs raw headers. The first server fixture uses an injected verifier; the
 production binary refuses to start without a configured credential and token
 encryption provider.
 
+The production credential provider stores account credentials as encoded
+PBKDF2-SHA256 records with a per-credential random salt and a minimum work
+factor. Compatibility API keys retain the pinned `e2b_[0-9a-f]+` lexical form;
+Bearer and Supabase credentials use the same hashed-record boundary without
+sharing plaintext material. Sandbox envd and traffic tokens are encrypted with
+AES-256-GCM and authenticated separately with a scope- and version-bound HMAC.
+The active key version issues new tokens while retained older versions remain
+decryptable during rotation. Removing an old version makes its records fail
+closed, and swapping an envd token into the traffic scope fails both decryption
+and constant-time digest validation.
+
 Each published route lease contains the external sandbox ID, internal
 execution ID, generation, port scope, expiry, and token scope. The wildcard
 host parser is a pure validated component. It accepts neither arbitrary
@@ -783,10 +796,11 @@ Phase 2 is delivered as small, immediately merged changes:
    lifecycle; switch CLI create to the same reservation path; switch CLI
    start/restart/run and the Rust SDK to the same implementation with behavior
    parity tests.
-5. Add the production HCL-configured service binary, credential and token
-   providers, generation-fenced route leases, and TLS data-plane gateway. Pull
-   each merge commit on an A3S OS server and run the unmodified official clients
-   against real `--isolation sandbox` executions.
+5. **In progress:** production account credential and sandbox token providers
+   are complete. Add the ACL-configured service binary, generation-fenced route
+   leases, and TLS data-plane gateway. Pull each merge commit on an A3S OS
+   server and run the unmodified official clients against real
+   `--isolation sandbox` executions.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
 is the canonical schema shared by the CLI and Rust SDK, preventing either
