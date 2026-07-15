@@ -321,7 +321,7 @@ pub enum E2bServiceError {
         source: std::io::Error,
     },
     #[error("failed to create E2B compatibility listener: {0}")]
-    Listener(#[source] std::io::Error),
+    Listener(#[source] hyper::Error),
     #[error("E2B compatibility HTTP server failed: {0}")]
     Server(#[source] hyper::Error),
     #[error("failed to install or receive the shutdown signal: {0}")]
