@@ -236,6 +236,8 @@ fn extract_layer_with_cap(
 
         if entry.header().entry_type() == tar::EntryType::Symlink {
             prepare_symlink_destination(target_dir, &path)?;
+        } else if entry.header().entry_type().is_hard_link() {
+            prepare_hardlink_destination(target_dir, &path)?;
         }
 
         let desired = if track_metadata {
@@ -620,6 +622,32 @@ fn prepare_symlink_destination(target_dir: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn prepare_hardlink_destination(target_dir: &Path, path: &Path) -> Result<()> {
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let Some(parent) = resolve_within_or_base(target_dir, parent) else {
+        tracing::warn!(parent = %parent.display(), "Skipping hardlink destination preparation: parent escapes the rootfs");
+        return Ok(());
+    };
+    let candidate = parent.join(name);
+    let Ok(metadata) = std::fs::symlink_metadata(&candidate) else {
+        return Ok(());
+    };
+    let result = if metadata.is_dir() {
+        std::fs::remove_dir_all(&candidate)
+    } else {
+        std::fs::remove_file(&candidate)
+    };
+    result.map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Failed to replace {} with hardlink from layer: {error}",
+            candidate.display()
+        ))
+    })
+}
+
 /// Resolve `rel` beneath `target_dir`, following symlinks, returning the real
 /// path ONLY if it stays inside `target_dir`.
 ///
@@ -769,6 +797,41 @@ mod tests {
         extract_layer(&layer2_path, &target_dir).unwrap();
         let content2 = fs::read_to_string(target_dir.join("file.txt")).unwrap();
         assert_eq!(content2, "version 2");
+    }
+
+    #[test]
+    fn test_extract_layer_overwrites_existing_hardlink_destination() {
+        let temp_dir = TempDir::new().unwrap();
+        let layer1_path = temp_dir.path().join("layer1.tar.gz");
+        let layer2_path = temp_dir.path().join("layer2.tar.gz");
+        let target_dir = temp_dir.path().join("extracted");
+
+        create_test_layer(
+            &layer1_path,
+            &[
+                ("usr/bin/perl", b"current interpreter"),
+                ("usr/bin/perl5.38.2", b"stale interpreter"),
+            ],
+        );
+        create_hardlink_test_layer(&layer2_path, "usr/bin/perl5.38.2", "usr/bin/perl");
+
+        extract_layer(&layer1_path, &target_dir).unwrap();
+        extract_layer(&layer2_path, &target_dir).unwrap();
+
+        assert_eq!(
+            fs::read(target_dir.join("usr/bin/perl5.38.2")).unwrap(),
+            b"current interpreter"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(target_dir.join("usr/bin/perl")).unwrap().ino(),
+                fs::metadata(target_dir.join("usr/bin/perl5.38.2"))
+                    .unwrap()
+                    .ino(),
+            );
+        }
     }
 
     #[test]
@@ -952,6 +1015,24 @@ mod tests {
         header.set_gid(gid);
         header.set_cksum();
         builder.append_data(&mut header, name, content).unwrap();
+        builder.finish().unwrap();
+    }
+
+    fn create_hardlink_test_layer(path: &Path, name: &str, target: &str) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use tar::Builder;
+
+        let file = File::create(path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Link);
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_uid(0);
+        header.set_gid(0);
+        builder.append_link(&mut header, name, target).unwrap();
         builder.finish().unwrap();
     }
 
