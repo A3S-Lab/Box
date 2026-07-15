@@ -2,8 +2,14 @@
 /** Exercise the unchanged official TypeScript clients against production. */
 
 import assert from 'node:assert/strict'
-import { Sandbox, SandboxNotFoundError } from 'e2b'
-import { Sandbox as CodeInterpreter } from '@e2b/code-interpreter'
+
+const nativeSdk = process.env.A3S_BOX_NATIVE_SDK === '1'
+const baseSdk = await import(nativeSdk ? '@a3s-lab/box' : 'e2b')
+const codeInterpreterSdk = await import(
+  nativeSdk ? '@a3s-lab/box/code-interpreter' : '@e2b/code-interpreter'
+)
+const { Sandbox, SandboxNotFoundError } = baseSdk
+const { Sandbox: CodeInterpreter } = codeInterpreterSdk
 
 const [apiUrl, domain, template] = process.argv.slice(2)
 const apiKey = process.env.E2B_API_KEY
@@ -11,7 +17,9 @@ if (!apiUrl || !domain || !template || !apiKey) {
   throw new Error('API URL, domain, template, and E2B_API_KEY are required')
 }
 
-const connection = { apiKey, apiUrl, domain }
+const connection = nativeSdk
+  ? new baseSdk.A3SConnectionConfig({ apiKey, apiUrl, domain }).typescriptOptions()
+  : { apiKey, apiUrl, domain }
 const metadata = { client: 'typescript', suite: 'production-official' }
 let sandbox
 let interpreter

@@ -8,22 +8,47 @@ import asyncio
 import os
 from typing import Any
 
-from e2b import (
-    AsyncSandbox,
-    Sandbox,
-    SandboxNotFoundException,
-    SandboxQuery,
-    SandboxState,
-)
 from e2b.sandbox.commands.command_handle import PtySize
-from e2b_code_interpreter import AsyncSandbox as AsyncCodeInterpreter
-from e2b_code_interpreter import Sandbox as CodeInterpreter
+
+NATIVE_SDK = os.environ.get("A3S_BOX_NATIVE_SDK") == "1"
+
+if NATIVE_SDK:
+    from a3s_box import (  # type: ignore[import-not-found]
+        A3SConnectionConfig,
+        AsyncSandbox,
+        Sandbox,
+        SandboxNotFoundException,
+        SandboxQuery,
+        SandboxState,
+    )
+    from a3s_box.code_interpreter import (  # type: ignore[import-not-found]
+        AsyncSandbox as AsyncCodeInterpreter,
+    )
+    from a3s_box.code_interpreter import (  # type: ignore[import-not-found]
+        Sandbox as CodeInterpreter,
+    )
+else:
+    from e2b import (
+        AsyncSandbox,
+        Sandbox,
+        SandboxNotFoundException,
+        SandboxQuery,
+        SandboxState,
+    )
+    from e2b_code_interpreter import AsyncSandbox as AsyncCodeInterpreter
+    from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 
 def connection(api_url: str, domain: str) -> dict[str, Any]:
     api_key = os.environ.get("E2B_API_KEY")
     if not api_key:
         raise RuntimeError("E2B_API_KEY is required")
+    if NATIVE_SDK:
+        return A3SConnectionConfig(  # type: ignore[name-defined]
+            api_url=api_url,
+            domain=domain,
+            api_key=api_key,
+        ).python_options()
     return {"api_key": api_key, "api_url": api_url, "domain": domain}
 
 
