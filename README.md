@@ -339,8 +339,10 @@ modification and runs them against the ACL-configured production process and
 real `crun` Sandboxes. Python sync, Python async, and TypeScript each pass
 create, connect, filtered list, timeout replacement, kill, and not-found
 behavior; both Code Interpreter packages also pass production lifecycle create
-and cleanup. This matrix exercises the public lifecycle clients, not envd or
-interpreter execution.
+and cleanup. Each running Python sync/async, TypeScript, and Code Interpreter
+object also calls its official `is_running`/`isRunning` method through the
+production TLS gateway and host-side envd health broker. This matrix does not
+exercise envd commands, files, PTY, or interpreter execution.
 
 Managed creation requests also persist a typed caller policy for names,
 restart and health behavior, logging, stop behavior, and local resource
@@ -355,7 +357,7 @@ that structured Sandbox logs retain both stdout and stderr, drain final records
 before natural-exit or auto-remove archival, and leave no generation log worker,
 crun state, box directory, or socket behind.
 
-The first production E2B data-plane slice is now implemented, while the full
+The first production E2B data-plane slices are now implemented, while the full
 envd surface remains incomplete. CLI `create` persists its reservation and
 complete caller policy through the canonical manager, and the first `start` of
 that reservation consumes its persisted generation through the same manager.
@@ -386,15 +388,22 @@ strips edge credentials, and enters the real `crun` network namespace through a
 generation- and PID-fenced connector. As with the official E2B sandbox proxy,
 the plaintext Sandbox origin is contacted with HTTP/1.1, including when the
 downstream client uses HTTP/2; the origin is not required to provide h2c.
+Port `49983` is owned by a host-side broker rather than the workload. Its first
+implemented endpoint is authenticated `GET /health`: the broker re-inspects the
+leased execution ID and generation and returns `204` only while that exact
+execution is running. Other routed ports continue through the fenced Sandbox
+network-namespace proxy.
 
 An A3S OS production smoke test exercises this path on a real `crun` OCI
 Sandbox created with `--isolation sandbox`. It verifies lifecycle operations,
-both TLS route forms, HTTP/2-to-HTTP/1.1 translation, invalid and scope-swapped
-token denial, service-restart recovery, stale-route fencing after kill,
-structured-log drainage, and complete runtime cleanup. Failed runs preserve
-the Sandbox PID, `crun` state, OCI bundle, and service logs for diagnosis. The
-envd/ConnectRPC implementation and the unchanged-official-client command,
-filesystem, PTY, public-port, and Code Interpreter execution suites remain open
+host envd health over both TLS route forms, a real traffic-token-protected
+workload service on port `49999`, HTTP/2-to-HTTP/1.1 translation, invalid and
+scope-swapped token denial, service-restart recovery, stale-route fencing after
+kill, structured-log drainage, and complete runtime cleanup. The same A3S OS
+gate runs the unchanged official clients through the health route. Failed runs
+preserve the Sandbox PID, `crun` state, OCI bundle, and service logs for
+diagnosis. The remaining envd HTTP endpoints, ConnectRPC commands/filesystem,
+PTY, public-port matrix, and Code Interpreter execution suites remain open
 release gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client

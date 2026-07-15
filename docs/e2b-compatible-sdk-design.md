@@ -1,8 +1,8 @@
 # E2B Protocol Compatibility and SDK Design
 
 Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 6 and the
-production official-client lifecycle gate complete; envd implementation
-pending)**
+production official-client lifecycle gate complete; first host envd health
+slice complete)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -20,24 +20,27 @@ unversioned claim.
 | Area | Implemented evidence | Remaining gate |
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
-| Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions | Extend the unchanged-client matrix through envd and the production TLS data plane |
+| Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions | Extend the unchanged-client matrix through command, filesystem, PTY, public-port, and interpreter operations |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
 | Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, reconnect, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery and the official-client data-plane matrices |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
-| Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement envd HTTP, ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
+| envd HTTP | A host-side broker implements authenticated `GET /health`; after route/token validation it re-inspects the exact execution ID and generation and returns `204` only for `Running`; unchanged official Python sync/async, TypeScript, and Code Interpreter objects pass their running-state health methods over production TLS | Implement `/metrics`, `/init`, `/envs`, file-content routes, and post-kill `is_running`/`isRunning` behavior |
+| Commands and SDK surface | Pinned Process/Filesystem descriptors and Python/TypeScript public-export inventories prevent unreviewed drift | Implement ConnectRPC, PTY, signed URLs, Code Interpreter/MCP streams, the remaining public control surface, and native convenience packages |
 
 The lifecycle control path and authenticated wildcard/shared TLS routes are
 composed and exercised against a real Sandbox on A3S OS. The smoke reaches a
-service bound to the Sandbox loopback interface, rejects invalid and
-scope-swapped tokens, survives a compatibility-service restart, and fences the
-route after kill. Those TLS assertions use direct HTTP requests. A separate
-production lifecycle gate now runs the checksum-pinned official Python sync,
-Python async, TypeScript, and Code Interpreter packages unchanged against the
-ACL-configured service and real `crun` Sandboxes, including complete cleanup.
-Those clients do not call envd in this lifecycle matrix, while the fixture gate
-still uses an in-memory repository and fake execution manager. These are
-complementary results rather than the full black-box compatibility matrix, so
-`full_compatibility=false` remains mandatory.
+traffic-scoped service on Sandbox loopback port `49999`, while envd health on
+port `49983` stays in the host broker. It rejects invalid and scope-swapped
+tokens, survives a compatibility-service restart, and fences the route after
+kill. A separate production gate now runs the checksum-pinned official Python
+sync, Python async, TypeScript, and Code Interpreter packages unchanged against
+the ACL-configured service and real `crun` Sandboxes. Their running-state
+health methods traverse the wildcard TLS gateway and host envd broker, and the
+gate verifies complete cleanup. The fixture gate still uses an in-memory
+repository and fake execution manager, and the remaining envd/ConnectRPC
+operations are not covered. These are complementary results rather than the
+full black-box compatibility matrix, so `full_compatibility=false` remains
+mandatory.
 
 ## Executive decision
 
@@ -304,6 +307,16 @@ separate format outside this compatibility surface.
 The envd-compatible service is a host-side broker backed by the existing A3S
 control protocols. Keeping it outside the workload prevents the workload from
 replacing the compatibility endpoint or stealing its access token.
+
+The first broker route is implemented: after the gateway resolves an
+authenticated `49983` lease, `GET /health` calls `ExecutionManager::inspect`
+and compares the returned execution ID, generation, and `Running` state with
+that lease. Exact live evidence returns an empty `204`; once a lease has been
+issued, runtime evidence that becomes missing, stopped, or generation-stale
+returns `502`, while an unavailable inspector returns `503`. Other envd routes
+currently return `404` and remain explicit release gates. Workload traffic on
+every non-envd route continues through the existing generation- and PID-fenced
+network-namespace connector.
 
 It translates:
 
@@ -744,9 +757,17 @@ src/compat/src/
     policy.rs         # persisted exact-port and token-scope policy
     lease.rs          # generation-fenced sandbox route projection
     parser.rs         # wildcard host and explicit-header validation
+  envd/
+    mod.rs             # host broker and generation-fenced health route
+  gateway/
+    mod.rs             # bounded TLS listener and graceful connection drain
+    proxy.rs           # traffic proxy and envd broker dispatch
+    tls.rs             # certificate and private-key loading
+  production/
+    service.rs         # control, broker, gateway, runtime, and supervisor wiring
   bin/
     a3s-box-e2b-fixture-server.rs # deterministic protocol fixture
-    a3s-box-e2b.rs                # planned production composition root
+    a3s-box-e2b.rs                # production composition root
 ```
 
 No handler accesses the database or runtime directly. Handlers authenticate,
@@ -871,9 +892,11 @@ Phase 2 is delivered as small, immediately merged changes:
    server and prove direct/shared routing, restart recovery, scope denial, and
    stale-route fencing against a real `--isolation sandbox` execution.
 7. **In progress:** the unmodified official clients now pass their lifecycle
-   flows through the production control listener and real Sandbox runtime;
-   implement the pinned envd HTTP and ConnectRPC protocols, then extend those
-   clients through the production TLS data-plane listener.
+   flows through the production control listener and real Sandbox runtime, and
+   their running-state health methods pass through the production TLS listener
+   and host envd broker. Implement the remaining pinned envd HTTP and
+   ConnectRPC protocols, then extend the same clients through command,
+   filesystem, PTY, public-port, and interpreter operations.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
 is the canonical schema shared by the CLI and Rust SDK, preventing either
@@ -951,11 +974,12 @@ Each slice must pass its focused tests and repository CI before merge. The
 durable repository, production execution manager, credentials, routing, and
 lifecycle HTTP router are now composed in one ACL-configured process. The real
 create/connect/list/timeout/kill matrix now passes through that production
-control listener and real Sandbox executions. The Phase 2 gate remains closed
-until the returned official-client Sandbox objects also traverse the
-production TLS envd/data-plane listener. Passing the fake manager in slice 2,
-the direct runtime smoke in slice 4, and the production lifecycle clients are
-complementary evidence, not proof of the missing data-plane behavior.
+control listener and real Sandbox executions. Returned official-client Sandbox
+objects now traverse the production TLS listener for running-state envd health,
+but the Phase 2 gate remains closed until the remaining envd, ConnectRPC, PTY,
+public-port, interpreter, and MCP matrices pass. Passing the fake manager in
+slice 2, the direct runtime smoke in slice 4, and the production health clients
+are complementary evidence, not proof of the missing data-plane behavior.
 
 Slice 2 evidence includes exact recorder drift checks plus live requests from
 the pinned, unmodified clients to the Rust router. The live gate was also run
@@ -968,9 +992,11 @@ The production lifecycle gate reuses the artifact checksums from
 `upstream.lock.json` and runs the published Python sync, Python async,
 TypeScript, and Code Interpreter packages without source changes. On A3S OS it
 has passed create, reconnect, filtered list, timeout replacement, kill,
-not-found mapping, Code Interpreter lifecycle creation, and cleanup for every
+not-found mapping, Code Interpreter lifecycle creation, running-state
+`is_running`/`isRunning` over authenticated wildcard TLS, and cleanup for every
 real `crun` execution. It intentionally does not count Code Interpreter object
-creation as interpreter execution compatibility.
+creation or health as interpreter execution compatibility, and post-kill health
+remains outside this slice.
 
 The Slice 3 persistence batch uses a bundled SQLite build through a dedicated
 asynchronous connection thread. Versioned migrations create a STRICT table in
