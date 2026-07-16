@@ -1,14 +1,65 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use a3s_box_core::{ExecutionManagerError, ExecutionState};
+use async_trait::async_trait;
 use chrono::Duration;
 
 use super::test_support::{
     assert_sandbox_request, create_request, test_time, AdvancingClock, TestHarness,
 };
 use super::*;
+use crate::volume::{
+    ResolvedVolumeMount, VolumeMount, VolumeMountResolver, VolumeServiceResult,
+};
+
+struct TestVolumeMountResolver;
+
+#[async_trait]
+impl VolumeMountResolver for TestVolumeMountResolver {
+    async fn resolve_mounts(
+        &self,
+        owner_id: &str,
+        mounts: &[VolumeMount],
+    ) -> VolumeServiceResult<Vec<ResolvedVolumeMount>> {
+        assert_eq!(owner_id, "owner-1");
+        assert_eq!(mounts, &[VolumeMount::new("data", "/mnt/data").unwrap()]);
+        Ok(vec![ResolvedVolumeMount {
+            public: mounts[0].clone(),
+            runtime_name: "e2b-internal-volume".to_string(),
+            host_path: PathBuf::from("/var/lib/a3s/volumes/e2b-internal-volume"),
+        }])
+    }
+}
+
+#[tokio::test]
+async fn typed_volume_mounts_reach_runtime_policy_and_public_records() {
+    let harness = TestHarness::new();
+    let service = harness
+        .service
+        .as_ref()
+        .clone()
+        .with_volume_mount_resolver(Arc::new(TestVolumeMountResolver));
+    let mount = VolumeMount::new("data", "/mnt/data").unwrap();
+
+    let created = service
+        .create_with_mounts(create_request("owner-1"), vec![mount.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(created.record.volume_mounts(), &[mount]);
+    let requests = harness.executions.requests();
+    assert_eq!(
+        requests[0].config.volumes,
+        vec!["/var/lib/a3s/volumes/e2b-internal-volume:/mnt/data:rw"]
+    );
+    assert_eq!(
+        requests[0].policy.volume_names,
+        vec!["e2b-internal-volume"]
+    );
+}
 
 #[tokio::test]
 async fn lifecycle_service_runs_the_official_control_flow() {
