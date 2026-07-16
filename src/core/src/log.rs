@@ -108,7 +108,7 @@ impl LogConfig {
 }
 
 /// A single structured log entry (Docker-compatible JSON format).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     /// The log message (including trailing newline).
     pub log: String,

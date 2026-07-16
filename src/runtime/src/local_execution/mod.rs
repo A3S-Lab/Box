@@ -3,6 +3,7 @@
 mod api;
 mod backend;
 mod create;
+mod logs;
 mod operations;
 mod port;
 mod record;

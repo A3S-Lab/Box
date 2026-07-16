@@ -30,7 +30,7 @@ pub use repository::{
 };
 pub use service::{
     ConnectionDisposition, ControlService, ControlServiceDependencies, ControlServiceError,
-    ControlServiceResult, CreateSandboxRequest, SandboxConnection, SandboxMetric,
+    ControlServiceResult, CreateSandboxRequest, SandboxConnection, SandboxLog, SandboxMetric,
 };
 pub use sqlite::SqliteSandboxRepository;
 pub use supervisor::{
