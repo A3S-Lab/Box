@@ -29,4 +29,4 @@ pub use service::{
 pub use sqlite::SqliteVolumeRepository;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
