@@ -505,6 +505,59 @@ wait_gateway_ready "$DIRECT_HOST" || fail 'TLS direct route did not become ready
 [[ ! -s "$STATE_DIR/shared-body.txt" ]] ||
   fail 'TLS shared envd health returned an unexpected response body'
 
+CONTROL_LOGS_V1="$STATE_DIR/control-logs-v1.json"
+CONTROL_LOGS_V2="$STATE_DIR/control-logs-v2.json"
+[[ "$(status_request GET "/sandboxes/$SANDBOX_ID/logs?start=0&limit=1000" "$CONTROL_LOGS_V1")" == "200" ]] ||
+  fail 'control-plane v1 logs did not return HTTP 200'
+[[ "$(status_request GET "/v2/sandboxes/$SANDBOX_ID/logs?direction=backward&limit=1000" "$CONTROL_LOGS_V2")" == "200" ]] ||
+  fail 'control-plane v2 logs did not return HTTP 200'
+if ! python3 - "$CONTROL_LOGS_V1" "$CONTROL_LOGS_V2" <<'PY'
+import datetime
+import json
+import sys
+
+
+def timestamp(value: str) -> datetime.datetime:
+    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    legacy = json.load(source)
+with open(sys.argv[2], encoding="utf-8") as source:
+    current = json.load(source)
+
+legacy_lines = legacy.get("logs")
+legacy_entries = legacy.get("logEntries")
+current_entries = current.get("logs")
+if not legacy_lines or not legacy_entries or not current_entries:
+    raise SystemExit("runtime logs were empty")
+
+for item in legacy_lines:
+    timestamp(item["timestamp"])
+    line = json.loads(item["line"])
+    if line.get("logger") != "a3s-box-runtime" or line.get("stream") not in {"stdout", "stderr"}:
+        raise SystemExit(f"invalid legacy log line: {line!r}")
+
+for item in [*legacy_entries, *current_entries]:
+    timestamp(item["timestamp"])
+    if item.get("level") not in {"debug", "info", "warn", "error"}:
+        raise SystemExit(f"invalid log level: {item!r}")
+    if not isinstance(item.get("message"), str):
+        raise SystemExit(f"invalid log message: {item!r}")
+    if item.get("fields", {}).get("stream") not in {"stdout", "stderr"}:
+        raise SystemExit(f"invalid structured log fields: {item!r}")
+
+legacy_times = [timestamp(item["timestamp"]) for item in legacy_entries]
+current_times = [timestamp(item["timestamp"]) for item in current_entries]
+if legacy_times != sorted(legacy_times):
+    raise SystemExit("v1 logs were not ordered forward")
+if current_times != sorted(current_times, reverse=True):
+    raise SystemExit("v2 backward logs were not ordered backward")
+PY
+then
+  fail 'control-plane runtime logs violated the pinned schemas or ordering'
+fi
+
 if [[ -n "$RUNTIME_IMAGE" ]]; then
   METRICS_RESPONSE="$STATE_DIR/envd-metrics.json"
   [[ "$(gateway_request "$DIRECT_HOST" "$METRICS_RESPONSE" X-Access-Token "$ENVD_TOKEN" /metrics)" == "200" ]] ||
