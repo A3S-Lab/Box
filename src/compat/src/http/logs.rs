@@ -194,6 +194,8 @@ fn parse_i32_limit(value: &str, name: &str) -> Result<u32, ApiError> {
 }
 
 fn select_logs(logs: &[SandboxLog], query: &LogQuery) -> Vec<SandboxLogEntryResponse> {
+    let mut ordered = logs.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|log| log.timestamp);
     let include = |log: &&SandboxLog| {
         let timestamp = log.timestamp.timestamp_millis();
         let in_range = match (query.direction, query.cursor_millis) {
@@ -220,14 +222,14 @@ fn select_logs(logs: &[SandboxLog], query: &LogQuery) -> Vec<SandboxLogEntryResp
     };
 
     match query.direction {
-        LogsDirection::Forward => logs
-            .iter()
+        LogsDirection::Forward => ordered
+            .into_iter()
             .filter(include)
             .take(query.limit as usize)
             .map(convert)
             .collect(),
-        LogsDirection::Backward => logs
-            .iter()
+        LogsDirection::Backward => ordered
+            .into_iter()
             .rev()
             .filter(include)
             .take(query.limit as usize)
@@ -290,19 +292,28 @@ mod tests {
     #[test]
     fn filters_v2_logs_by_cursor_direction_level_and_search() {
         let logs = vec![
+            log(2, "stdout", "ready"),
             log(0, "stdout", "starting"),
             log(1, "stderr", "failed once"),
-            log(2, "stdout", "ready"),
         ];
         let raw_query = format!(
             "cursor={}&limit=1&direction=backward&level=error&search=failed",
-            logs[2].timestamp.timestamp_millis()
+            logs[0].timestamp.timestamp_millis()
         );
         let query = LogQuery::parse_v2(Some(&raw_query)).unwrap();
         let selected = select_logs(&logs, &query);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].message, "failed once");
         assert_eq!(selected[0].level, LogLevel::Error);
+
+        let forward = select_logs(&logs, &LogQuery::parse_v2(None).unwrap());
+        assert_eq!(
+            forward
+                .iter()
+                .map(|entry| entry.message.as_str())
+                .collect::<Vec<_>>(),
+            vec!["starting", "failed once", "ready"]
+        );
     }
 
     #[test]
