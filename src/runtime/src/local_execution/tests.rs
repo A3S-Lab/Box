@@ -90,6 +90,7 @@ impl LocalExecutionBackend for FakeBackend {
         }
         #[cfg(target_os = "linux")]
         write_fake_sandbox_bundle(record)?;
+        write_fake_resolved_image_config(record)?;
         let handle = Self::handle(record);
         executions.insert(
             record.id.clone(),
@@ -234,6 +235,35 @@ fn write_fake_sandbox_bundle(record: &BoxRecord) -> ExecutionManagerResult<()> {
     )
     .map_err(|error| {
         ExecutionManagerError::Internal(format!("failed to write fake OCI bundle: {error}"))
+    })
+}
+
+fn write_fake_resolved_image_config(record: &BoxRecord) -> ExecutionManagerResult<()> {
+    let config = SnapshotImageConfig {
+        entrypoint: Some(vec!["/usr/local/bin/envd".to_string()]),
+        cmd: Some(vec!["--port".to_string(), "49983".to_string()]),
+        env: vec![("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string())],
+        working_dir: Some("/home/user".to_string()),
+        user: Some("1000:1000".to_string()),
+        ..Default::default()
+    };
+    std::fs::create_dir_all(&record.box_dir).map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to create fake resolved image configuration directory: {error}"
+        ))
+    })?;
+    std::fs::write(
+        record.box_dir.join(crate::RESOLVED_IMAGE_CONFIG_FILE),
+        serde_json::to_vec_pretty(&config).map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "failed to encode fake resolved image configuration: {error}"
+            ))
+        })?,
+    )
+    .map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to write fake resolved image configuration: {error}"
+        ))
     })
 }
 
@@ -1484,21 +1514,6 @@ fn populate_rootfs(manager: &LocalExecutionManager, execution_id: &ExecutionId, 
     std::fs::write(rootfs.join("workspace/state.txt"), value).unwrap();
 }
 
-fn persist_test_image_config(manager: &LocalExecutionManager, execution_id: &ExecutionId) {
-    let config = SnapshotImageConfig {
-        entrypoint: Some(vec!["/usr/local/bin/envd".to_string()]),
-        cmd: Some(vec!["--port".to_string(), "49983".to_string()]),
-        env: vec![("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string())],
-        working_dir: Some("/home/user".to_string()),
-        user: Some("1000:1000".to_string()),
-        ..Default::default()
-    };
-    let artifact = persisted(manager, execution_id)
-        .box_dir
-        .join(".oci-image-config.json");
-    std::fs::write(artifact, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-}
-
 #[tokio::test]
 async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation() {
     let (directory, manager, backend) = harness();
@@ -1568,7 +1583,6 @@ async fn filesystem_snapshot_after_manager_restart_keeps_resolved_image_config()
         .await
         .unwrap();
     populate_rootfs(&manager, &running.execution_id, "captured-state");
-    persist_test_image_config(&manager, &running.execution_id);
 
     let restarted = LocalExecutionManager::new(
         directory.path().join("boxes.json"),

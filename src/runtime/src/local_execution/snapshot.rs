@@ -245,7 +245,7 @@ impl LocalExecutionManager {
                     record.id
                 ))
             })?;
-            let metadata = build_snapshot_metadata(&record, &snapshot_id);
+            let metadata = build_snapshot_metadata(&record, &snapshot_id)?;
             #[cfg(target_os = "linux")]
             let rootfs_metadata = capture_sandbox_rootfs_metadata(&record, &rootfs)?;
             #[cfg(target_os = "linux")]
@@ -605,7 +605,7 @@ fn maximum_container_id(
 fn build_snapshot_metadata(
     record: &BoxRecord,
     snapshot_id: &ExecutionSnapshotId,
-) -> SnapshotMetadata {
+) -> ExecutionManagerResult<SnapshotMetadata> {
     let mut metadata = SnapshotMetadata::new(
         snapshot_id.to_string(),
         snapshot_id.to_string(),
@@ -619,7 +619,22 @@ fn build_snapshot_metadata(
     metadata.entrypoint = record.entrypoint.clone();
     metadata.workdir = record.workdir.clone();
     metadata.labels = record.labels.clone();
-    metadata
+    metadata.image_config = crate::load_resolved_image_config(&record.box_dir)
+        .map_err(|error| snapshot_error(record, "load resolved image configuration", error))?;
+    if metadata.image_config.is_none() {
+        return Err(snapshot_error(
+            record,
+            "load resolved image configuration",
+            format!(
+                "{} is missing",
+                record
+                    .box_dir
+                    .join(crate::RESOLVED_IMAGE_CONFIG_FILE)
+                    .display()
+            ),
+        ));
+    }
+    Ok(metadata)
 }
 
 fn snapshot_error(

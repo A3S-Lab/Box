@@ -680,6 +680,13 @@ impl A3sBoxClient {
         metadata.labels = record.labels.clone();
         metadata.network_mode = Some(record.network_mode.to_string());
         metadata.description = request.description.unwrap_or_default();
+        metadata.image_config = load_resolved_image_config(&record.box_dir)?;
+        if metadata.image_config.is_none() {
+            return Err(ClientError::Validation(format!(
+                "resolved image configuration is missing for box {}; restart it before creating a filesystem snapshot",
+                record.name
+            )));
+        }
 
         Ok(SnapshotSummary::from(
             self.snapshot_store()?.save(metadata, &rootfs_path)?,

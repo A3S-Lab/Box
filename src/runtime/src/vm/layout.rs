@@ -90,6 +90,14 @@ impl VmManager {
         // result, slower). This mirrors the rootfs cache-hit path below.
         if let Some(lower) = snapshot_lower_dir(&box_dir) {
             if lower.is_dir() {
+                let oci_config = match crate::resolved_image::load_snapshot_oci_config(
+                    &lower,
+                    &self.config.image,
+                )? {
+                    Some(config) => Some(config),
+                    None => crate::resolved_image::load_resolved_image_config(&box_dir)?
+                        .map(crate::oci::OciImageConfig::from),
+                };
                 tracing::info!(
                     lower = %lower.display(),
                     "Restoring snapshot via copy-on-write overlay lower"
@@ -106,6 +114,9 @@ impl VmManager {
                         tracing::warn!(error = %e, "Failed to refresh guest init on restored overlay");
                     }
                 }
+                if let Some(config) = oci_config.as_ref() {
+                    crate::resolved_image::persist_resolved_image_config(&box_dir, config)?;
+                }
                 let tee_instance_config = self.generate_tee_config(&box_dir)?;
                 return Ok(BoxLayout {
                     rootfs_path,
@@ -115,7 +126,7 @@ impl VmManager {
                     port_forward_socket_path: socket_dir.join("portfwd.sock"),
                     workspace_path,
                     console_output: Some(logs_dir.join("console.log")),
-                    oci_config: None,
+                    oci_config,
                     tee_instance_config,
                 });
             }
@@ -142,6 +153,8 @@ impl VmManager {
                 .map(|mut it| it.next().is_some())
                 .unwrap_or(false);
         if prebuilt_is_populated {
+            let oci_config = crate::resolved_image::load_resolved_image_config(&box_dir)?
+                .map(crate::oci::OciImageConfig::from);
             tracing::info!(
                 rootfs = %prebuilt_rootfs.display(),
                 "Booting from pre-populated rootfs (snapshot restore)"
@@ -165,7 +178,7 @@ impl VmManager {
                 port_forward_socket_path: socket_dir.join("portfwd.sock"),
                 workspace_path,
                 console_output: Some(logs_dir.join("console.log")),
-                oci_config: None,
+                oci_config,
                 tee_instance_config,
             });
         }
@@ -306,6 +319,10 @@ impl VmManager {
                     (rootfs_path, Some(config))
                 }
             };
+
+        if let Some(config) = oci_config.as_ref() {
+            crate::resolved_image::persist_resolved_image_config(&box_dir, config)?;
+        }
 
         // Generate TEE configuration if enabled
         let tee_instance_config = self.generate_tee_config(&box_dir)?;
@@ -1004,6 +1021,7 @@ mod tests {
         )
         .unwrap();
         let mut vm = make_vm_manager_with_home(home.path());
+        vm.config.image = "example.invalid/runtime:latest".to_string();
         vm.rootfs_provider = Box::new(crate::rootfs::CopyProvider);
 
         let layout = vm.prepare_layout().await.unwrap();
