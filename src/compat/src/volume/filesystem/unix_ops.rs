@@ -22,8 +22,8 @@ pub struct PreparedUpload {
     parent: OwnedFd,
     temporary_name: CString,
     final_name: CString,
-    temporary_device: u64,
-    temporary_inode: u64,
+    temporary_device: libc::dev_t,
+    temporary_inode: libc::ino_t,
     host_uid: u32,
     host_gid: u32,
     mode: u32,
@@ -39,8 +39,7 @@ impl Drop for PreparedUpload {
         let Ok(stat) = stat_at(&self.parent, &self.temporary_name) else {
             return;
         };
-        if stat.st_dev as u64 == self.temporary_device && stat.st_ino as u64 == self.temporary_inode
-        {
+        if stat.st_dev == self.temporary_device && stat.st_ino == self.temporary_inode {
             unsafe {
                 libc::unlinkat(self.parent.as_raw_fd(), self.temporary_name.as_ptr(), 0);
             }
@@ -266,8 +265,8 @@ pub fn prepare_upload(
         parent,
         temporary_name,
         final_name: final_name.clone(),
-        temporary_device: stat.st_dev as u64,
-        temporary_inode: stat.st_ino as u64,
+        temporary_device: stat.st_dev,
+        temporary_inode: stat.st_ino,
         host_uid,
         host_gid,
         mode,
@@ -279,15 +278,11 @@ pub fn prepare_upload(
 
 pub fn finish_upload(mut prepared: PreparedUpload, file: File) -> VolumeContentResult<()> {
     let stat = fstat_file(&file)?;
-    if stat.st_dev as u64 != prepared.temporary_device
-        || stat.st_ino as u64 != prepared.temporary_inode
-    {
+    if stat.st_dev != prepared.temporary_device || stat.st_ino != prepared.temporary_inode {
         return Err(VolumeContentError::Conflict);
     }
     let linked = stat_at(&prepared.parent, &prepared.temporary_name)?;
-    if linked.st_dev as u64 != prepared.temporary_device
-        || linked.st_ino as u64 != prepared.temporary_inode
-    {
+    if linked.st_dev != prepared.temporary_device || linked.st_ino != prepared.temporary_inode {
         return Err(VolumeContentError::Conflict);
     }
     set_identity_and_mode(
@@ -681,10 +676,10 @@ fn entry_from_stat(
         name: display_name.to_string(),
         entry_type,
         path: path.to_string(),
-        size: stat.st_size as i64,
-        mode: (stat.st_mode as u32) & 0o7777,
-        uid: ids.container_uid(stat.st_uid as u32)?,
-        gid: ids.container_gid(stat.st_gid as u32)?,
+        size: file_size(stat.st_size),
+        mode: permission_mode(stat.st_mode),
+        uid: ids.container_uid(stat.st_uid)?,
+        gid: ids.container_gid(stat.st_gid)?,
         atime: timestamp(atime_seconds, atime_nanos)?,
         mtime: timestamp(mtime_seconds, mtime_nanos)?,
         ctime: timestamp(ctime_seconds, ctime_nanos)?,
@@ -741,43 +736,52 @@ fn timestamp(seconds: i64, nanos: i64) -> VolumeContentResult<DateTime<Utc>> {
     })
 }
 
+// libc scalar aliases vary across Unix targets even when the protocol's wire
+// representation does not. Normalize them once at the ABI boundary rather
+// than spreading target-dependent casts through filesystem logic.
+#[allow(clippy::unnecessary_cast)]
+fn file_size(size: libc::off_t) -> i64 {
+    size as i64
+}
+
+#[allow(clippy::unnecessary_cast)]
+fn permission_mode(mode: libc::mode_t) -> u32 {
+    (mode as u32) & 0o7777
+}
+
+#[allow(clippy::unnecessary_cast)]
+fn timestamp_parts(seconds: libc::time_t, nanos: libc::c_long) -> (i64, i64) {
+    (seconds as i64, nanos as i64)
+}
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn atime(stat: &libc::stat) -> (i64, i64) {
-    (stat.st_atime as i64, stat.st_atime_nsec as i64)
+    timestamp_parts(stat.st_atime, stat.st_atime_nsec)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn mtime(stat: &libc::stat) -> (i64, i64) {
-    (stat.st_mtime as i64, stat.st_mtime_nsec as i64)
+    timestamp_parts(stat.st_mtime, stat.st_mtime_nsec)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn ctime(stat: &libc::stat) -> (i64, i64) {
-    (stat.st_ctime as i64, stat.st_ctime_nsec as i64)
+    timestamp_parts(stat.st_ctime, stat.st_ctime_nsec)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn atime(stat: &libc::stat) -> (i64, i64) {
-    (
-        stat.st_atimespec.tv_sec as i64,
-        stat.st_atimespec.tv_nsec as i64,
-    )
+    timestamp_parts(stat.st_atimespec.tv_sec, stat.st_atimespec.tv_nsec)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn mtime(stat: &libc::stat) -> (i64, i64) {
-    (
-        stat.st_mtimespec.tv_sec as i64,
-        stat.st_mtimespec.tv_nsec as i64,
-    )
+    timestamp_parts(stat.st_mtimespec.tv_sec, stat.st_mtimespec.tv_nsec)
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn ctime(stat: &libc::stat) -> (i64, i64) {
-    (
-        stat.st_ctimespec.tv_sec as i64,
-        stat.st_ctimespec.tv_nsec as i64,
-    )
+    timestamp_parts(stat.st_ctimespec.tv_sec, stat.st_ctimespec.tv_nsec)
 }
 
 #[cfg(not(any(
