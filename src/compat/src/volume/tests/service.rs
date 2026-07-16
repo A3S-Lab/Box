@@ -11,10 +11,7 @@ async fn service_scopes_names_owners_and_tokens_without_leaking_runtime_names() 
 
     assert_ne!(owner_a.record.volume_id(), owner_b.record.volume_id());
     assert_ne!(owner_a.record.runtime_name(), owner_b.record.runtime_name());
-    assert_ne!(
-        owner_a.token.expose_secret(),
-        owner_b.token.expose_secret()
-    );
+    assert_ne!(owner_a.token.expose_secret(), owner_b.token.expose_secret());
     assert!(matches!(
         harness
             .service
@@ -51,10 +48,7 @@ async fn service_scopes_names_owners_and_tokens_without_leaking_runtime_names() 
 
     let mounts = harness
         .service
-        .resolve_mounts(
-            "owner-a",
-            &[VolumeMount::new("data", "/mnt/data").unwrap()],
-        )
+        .resolve_mounts("owner-a", &[VolumeMount::new("data", "/mnt/data").unwrap()])
         .await
         .unwrap();
     assert_eq!(mounts.len(), 1);
@@ -86,7 +80,13 @@ async fn deletion_conflict_restores_visibility_and_success_removes_content() {
         Err(VolumeServiceError::Conflict)
     ));
     assert_eq!(
-        harness.service.get("owner-a", &id).await.unwrap().record.state(),
+        harness
+            .service
+            .get("owner-a", &id)
+            .await
+            .unwrap()
+            .record
+            .state(),
         VolumeState::Active
     );
     assert!(root.join("value.txt").exists());

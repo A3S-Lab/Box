@@ -21,12 +21,7 @@ async fn filesystem() -> (tempfile::TempDir, std::path::PathBuf, VolumeFilesyste
 async fn streams_atomic_writes_and_returns_stable_depth_limited_metadata() {
     let (_directory, root, filesystem) = filesystem().await;
     filesystem
-        .make_dir(
-            &root,
-            "/nested/deep",
-            VolumeMetadataUpdate::default(),
-            true,
-        )
+        .make_dir(&root, "/nested/deep", VolumeMetadataUpdate::default(), true)
         .await
         .unwrap();
 
@@ -62,7 +57,10 @@ async fn streams_atomic_writes_and_returns_stable_depth_limited_metadata() {
             .collect::<Vec<_>>(),
         vec!["/nested/deep/data.txt"]
     );
-    assert_eq!(read(&filesystem, &root, "/nested/deep/data.txt").await, b"old");
+    assert_eq!(
+        read(&filesystem, &root, "/nested/deep/data.txt").await,
+        b"old"
+    );
 
     let entry = replacement.finish().await.unwrap();
     assert_eq!(entry.size, 9);
@@ -74,18 +72,17 @@ async fn streams_atomic_writes_and_returns_stable_depth_limited_metadata() {
         b"new-value"
     );
 
-    assert_eq!(paths(filesystem.list(&root, "/", 1).await.unwrap()), vec!["/nested"]);
+    assert_eq!(
+        paths(filesystem.list(&root, "/", 1).await.unwrap()),
+        vec!["/nested"]
+    );
     assert_eq!(
         paths(filesystem.list(&root, "/", 2).await.unwrap()),
         vec!["/nested", "/nested/deep"]
     );
     assert_eq!(
         paths(filesystem.list(&root, "/", 3).await.unwrap()),
-        vec![
-            "/nested",
-            "/nested/deep",
-            "/nested/deep/data.txt"
-        ]
+        vec!["/nested", "/nested/deep", "/nested/deep/data.txt"]
     );
 
     let updated = filesystem
@@ -124,9 +121,7 @@ async fn streams_atomic_writes_and_returns_stable_depth_limited_metadata() {
     abandoned.write_all(b"partial").await.unwrap();
     drop(abandoned);
     assert!(matches!(
-        filesystem
-            .stat(&root, "/nested/deep/abandoned.txt")
-            .await,
+        filesystem.stat(&root, "/nested/deep/abandoned.txt").await,
         Err(VolumeContentError::NotFound)
     ));
 
@@ -159,7 +154,12 @@ async fn rejects_traversal_reserved_paths_symlink_escape_and_root_mutation() {
         Err(VolumeContentError::InvalidPath(_))
     ));
 
-    for path in ["relative", "/../escape", "/nested/../escape", "/.a3s-upload-user"] {
+    for path in [
+        "relative",
+        "/../escape",
+        "/nested/../escape",
+        "/.a3s-upload-user",
+    ] {
         assert!(matches!(
             filesystem.stat(&root, path).await,
             Err(VolumeContentError::InvalidPath(_))
@@ -181,7 +181,10 @@ async fn rejects_traversal_reserved_paths_symlink_escape_and_root_mutation() {
     ));
 
     filesystem.remove(&root, "/escape").await.unwrap();
-    assert_eq!(std::fs::read(outside.path().join("secret.txt")).unwrap(), b"secret");
+    assert_eq!(
+        std::fs::read(outside.path().join("secret.txt")).unwrap(),
+        b"secret"
+    );
 }
 
 async fn read(filesystem: &VolumeFilesystem, root: &std::path::Path, path: &str) -> Vec<u8> {
