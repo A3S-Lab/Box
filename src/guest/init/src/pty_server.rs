@@ -13,7 +13,10 @@ use tracing::info;
 use tracing::{error, warn};
 
 #[cfg(target_os = "linux")]
-use crate::user::parse_process_user;
+use crate::user::{
+    home_dir_for_uid, parse_process_user, primary_gid_for_uid, resolve_image_groups,
+    resolve_named_user,
+};
 
 /// A bound, listening PTY-server socket — produced by [`bind_pty_server`] and
 /// consumed by [`serve_pty_server`]. Same early-bind rationale as
@@ -175,13 +178,26 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
         write_error(&mut stream, &error)?;
         return Ok(());
     }
-    let process_user = match parse_process_user(request.user.as_deref()) {
-        Ok(user) => user,
-        Err(error) => {
-            write_error(&mut stream, &error)?;
-            return Ok(());
+    let resolve_rootfs = request.rootfs.as_deref().unwrap_or("/");
+    let resolved_user = request
+        .user
+        .as_deref()
+        .and_then(|user| resolve_named_user(user, resolve_rootfs));
+    let mut process_user =
+        match parse_process_user(resolved_user.as_deref().or(request.user.as_deref())) {
+            Ok(user) => user,
+            Err(error) => {
+                write_error(&mut stream, &error)?;
+                return Ok(());
+            }
+        };
+    if let Some(process_user) = process_user.as_mut() {
+        if process_user.gid.is_none() {
+            process_user.gid = primary_gid_for_uid(resolve_rootfs, process_user.uid);
         }
-    };
+    }
+    let process_home =
+        process_user.and_then(|process_user| home_dir_for_uid(resolve_rootfs, process_user.uid));
 
     info!(cmd = ?request.cmd, "PTY session starting");
 
@@ -192,7 +208,7 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
     // running with full capabilities, no seccomp and no_new_privs unset despite
     // the pod's securityContext (#11). The same async-signal-safe namespace::
     // primitives the exec path uses are applied in the child below.
-    let sec_supplemental_groups: Vec<u32> = request
+    let mut sec_supplemental_groups: Vec<u32> = request
         .env
         .iter()
         .find_map(|entry| entry.strip_prefix("A3S_SEC_SUPPLEMENTAL_GROUPS="))
@@ -202,6 +218,16 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
                 .collect()
         })
         .unwrap_or_default();
+    if let Some(process_user) = process_user {
+        sec_supplemental_groups.extend(resolve_image_groups(
+            resolve_rootfs,
+            process_user.uid,
+            process_user.gid,
+            request.user.as_deref().unwrap_or("root"),
+        ));
+        let mut seen = std::collections::HashSet::new();
+        sec_supplemental_groups.retain(|gid| seen.insert(*gid));
+    }
     let sec_cap_drop: Vec<String> = request
         .env
         .iter()
@@ -389,6 +415,15 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
             for entry in &request.env {
                 if let Some((key, value)) = entry.split_once('=') {
                     std::env::set_var(key, value);
+                }
+            }
+            if !request
+                .env
+                .iter()
+                .any(|entry| entry.split_once('=').is_some_and(|(key, _)| key == "HOME"))
+            {
+                if let Some(ref home) = process_home {
+                    std::env::set_var("HOME", home);
                 }
             }
 

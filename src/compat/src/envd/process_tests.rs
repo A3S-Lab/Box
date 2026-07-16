@@ -14,7 +14,7 @@ use axum::http::{Request, StatusCode};
 use hyper::body::{to_bytes, HttpBody};
 use serde_json::{json, Value};
 
-use super::ProcessBroker;
+use super::{process_user, ProcessBroker};
 
 #[derive(Default)]
 struct TestInput {
@@ -181,6 +181,16 @@ fn decode_frames(bytes: &[u8]) -> Vec<(u8, Value)> {
         offset = end;
     }
     frames
+}
+
+#[test]
+fn missing_user_header_selects_the_pinned_envd_default() {
+    assert_eq!(
+        process_user(&axum::http::HeaderMap::new())
+            .unwrap()
+            .as_deref(),
+        Some("user")
+    );
 }
 
 fn pid_from_start_frame(bytes: &[u8]) -> u32 {

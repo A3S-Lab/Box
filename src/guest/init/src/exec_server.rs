@@ -865,6 +865,8 @@ fn build_command(
             process_user.gid = crate::user::primary_gid_for_uid(resolve_rootfs, process_user.uid);
         }
     }
+    let process_home = process_user
+        .and_then(|process_user| crate::user::home_dir_for_uid(resolve_rootfs, process_user.uid));
 
     if let Some(rootfs) = spec.rootfs {
         if rootfs.is_empty()
@@ -956,6 +958,15 @@ fn build_command(
                 continue;
             }
             command.env(key, value);
+        }
+    }
+    if !spec
+        .env
+        .iter()
+        .any(|entry| entry.split_once('=').is_some_and(|(key, _)| key == "HOME"))
+    {
+        if let Some(home) = process_home {
+            command.env("HOME", home);
         }
     }
 
@@ -2222,6 +2233,49 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().to_string())
                 .collect::<Vec<_>>(),
             vec!["hello".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_build_command_uses_selected_users_home_unless_overridden() {
+        let rootfs = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
+        std::fs::write(
+            rootfs.path().join("etc/passwd"),
+            "tester:x:1000:1000:tester:/home/tester:/bin/sh\n",
+        )
+        .unwrap();
+        let rootfs = rootfs.path().to_str().unwrap();
+
+        let build = |env: &[String]| {
+            build_command(
+                ExecCommandSpec {
+                    cmd: &["true".to_string()],
+                    timeout_ns: 0,
+                    env,
+                    working_dir: None,
+                    rootfs: Some(rootfs),
+                    stdin_data: None,
+                    stdin_streaming: false,
+                    user: Some("tester"),
+                },
+                None,
+            )
+            .unwrap()
+            .0
+        };
+
+        let command = build(&[]);
+        assert!(command.get_envs().any(
+            |(key, value)| key == "HOME" && value == Some(std::ffi::OsStr::new("/home/tester"))
+        ));
+
+        let command = build(&["HOME=/workspace".to_string()]);
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key == "HOME"
+                    && value == Some(std::ffi::OsStr::new("/workspace")))
         );
     }
 

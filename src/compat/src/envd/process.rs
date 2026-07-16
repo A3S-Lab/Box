@@ -30,6 +30,7 @@ const MAX_PROCESSES_PER_GENERATION: usize = 1024;
 const PROCESS_EVENT_CAPACITY: usize = 4096;
 const PROCESS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT_HEADER: &str = "connect-timeout-ms";
+const DEFAULT_PROCESS_USER: &str = "user";
 
 #[derive(Clone)]
 pub(super) struct ProcessBroker {
@@ -672,7 +673,11 @@ fn process_timeout_ns(headers: &HeaderMap) -> Result<u64, ConnectFailure> {
 
 fn process_user(headers: &HeaderMap) -> Result<Option<String>, ConnectFailure> {
     let Some(value) = headers.get(AUTHORIZATION) else {
-        return Ok(None);
+        // envd 0.4.0 and newer applies the user selected during /init when a
+        // request omits Basic authentication. The pinned A3S E2B runtime uses
+        // the upstream SDK default, `user`; applying it here preserves that
+        // behavior while the host-side broker owns the Process service.
+        return Ok(Some(DEFAULT_PROCESS_USER.to_string()));
     };
     let value = value
         .to_str()
