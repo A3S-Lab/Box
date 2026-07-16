@@ -2020,7 +2020,9 @@ mod tests {
         use std::os::unix::net::UnixStream;
 
         let (server, mut client) = UnixStream::pair().unwrap();
-        client.write_all(&[FrameType::Heartbeat as u8]).unwrap();
+        client
+            .write_all(&[FrameType::Heartbeat as u8, 0, 0, 0, 1])
+            .unwrap();
         drop(client);
 
         let server = OwnedFd::from(server);
