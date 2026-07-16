@@ -74,10 +74,11 @@ Set `A3S_BOX_DOMAIN` only when the control endpoint does not follow the
 conventional `api.<domain>` form. The service advertises the direct Sandbox
 authority, including a non-standard public TLS port, so normal deployments do
 not need a client-side Sandbox URL override. `A3S_BOX_SANDBOX_URL` remains a
-single-Sandbox fixture escape hatch. `E2B_API_URL` is not an A3S SDK setting.
-It is used only when an unchanged official E2B SDK is connected directly to
-A3S Box, because that is the endpoint variable exposed by the official client;
-its value still points to A3S Box.
+single-Sandbox fixture escape hatch. Normal A3S SDK applications do not set
+`E2B_API_URL`. That name appears only when an unchanged official E2B SDK is
+connected directly to A3S Box, because it is the endpoint variable exposed by
+the official client; its value still points to A3S Box, not an E2B-hosted
+service.
 
 Python uses async lifecycle management so the remote Sandbox is always cleaned
 up:
@@ -166,7 +167,7 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
 | Rust SDK | Typed, direct runtime-backed management and guest-control APIs | Implemented in `a3s-box-sdk`. The optional `pipeline-cli` feature retains the CLI-driven programmable pipeline. |
-| E2B protocol and language SDKs | Pinned contracts, durable lifecycle, v1/v2 listing, monotonic refresh, current single/batch control metrics, TLS routing, envd health/metrics/environment/HTTP file transfer, Filesystem, foreground/background Process, stdin, PTY, and Python Code Interpreter contexts | Production-tested preview subset on A3S OS with certified `crun`: pinned official Python sync/async and TypeScript clients, plus A3S Python sync/async and TypeScript packages, pass the same matrix. Templates, snapshots, volumes, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, and the rest of the pinned contract remain gates; `full_compatibility=false`. PyPI/npm publication is also pending. |
+| E2B protocol and language SDKs | Pinned contracts, durable lifecycle, memory-preserving pause/resume, v1/v2 listing, monotonic refresh, current single/batch control metrics, TLS routing, envd health/metrics/environment/HTTP file transfer, Filesystem, foreground/background Process, stdin, PTY, and Python Code Interpreter contexts | Production-tested preview subset on A3S OS with certified `crun`: pinned official Python sync/async and TypeScript clients, plus A3S Python sync/async and TypeScript packages, pass the same matrix, including paused-state listing and survival of an already-running process after resume. Templates, snapshots, volumes, filesystem-only pause, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, and the rest of the pinned contract remain gates; `full_compatibility=false`. PyPI/npm publication is also pending. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
 | Windows | Native x86_64 WHPX/libkrun code paths | Integration surface requiring host-specific validation. Current standard release automation focuses on Linux and macOS; Windows CRI is out of scope. |
@@ -542,7 +543,7 @@ compatibility:
 
 | Surface | Implemented preview | Not yet a release claim |
 | --- | --- | --- |
-| Control plane | Owner-scoped create, connect, get, v1 running list, v2 filtered list, timeout replacement, monotonic refresh, kill, and current single/batch metrics for runtime-envd Sandboxes, with SQLite WAL persistence, restart reconciliation, cleanup, and a complete requested timeout measured from runtime and envd readiness | Templates, snapshots, volumes, pause/resume, logs, network updates, historical metric retention, cache attribution, full pagination edge cases, and host-reboot recovery semantics |
+| Control plane | Owner-scoped create, connect, get, memory-preserving pause, connect/resume, v1 running list, v2 filtered running/paused list, timeout replacement, monotonic refresh, kill, and current single/batch metrics for runtime-envd Sandboxes, with SQLite WAL persistence, restart reconciliation, cleanup, and a complete requested timeout measured from runtime and envd readiness | Templates, snapshots, volumes, filesystem-only pause, logs, network updates, historical metric retention, cache attribution, full pagination edge cases, and host-reboot recovery semantics |
 | Credentials and routing | PBKDF2 account-key hashes, encrypted scope-bound Sandbox tokens, generation-fenced leases, wildcard TLS, direct/shared routes, CORS, HTTP/2, and PID-fenced Sandbox access | Certificate rotation and the complete streaming, upgrade, signed-file, and public-port route matrix |
 | envd | Authenticated running/terminal health; fail-closed runtime initialization; production-validated `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Volume-content endpoints plus multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
 | Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground and background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output on real Sandboxes | Additional signals, binary framing, reconnect, cancellation, backpressure, and adversarial concurrent-stream coverage |
@@ -555,6 +556,12 @@ by `a3s-acl`. For runtime-envd templates, create does not become visible until
 envd accepts initialization; failed initialization kills the execution and
 marks its lifecycle as failed and keeps it hidden instead of returning a
 partially usable Sandbox.
+
+Memory-preserving pause maps to certified `crun pause`; a later `connect` or
+deprecated `resume` request maps to `crun resume`. The production matrix starts
+a background process before pausing and proves that the same process continues
+after resume. Filesystem-only pause (`memory: false`) is rejected explicitly
+until cold-pause semantics are implemented.
 
 ```bash
 cd src

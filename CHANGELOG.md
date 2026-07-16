@@ -4,6 +4,16 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Memory-preserving E2B Sandbox pause and resume.** The compatibility service
+  now exposes generation-fenced pause/resume transitions backed by certified
+  `crun`, preserves paused state across listing and reconciliation, and resumes
+  through `connect` without shortening the existing TTL. Official and A3S
+  Python sync/async and TypeScript clients prove that an already-running
+  process survives the cycle. Filesystem-only pause remains explicitly
+  unsupported.
+
 ### Fixed
 
 - **E2B Sandbox timeout starts at readiness.** A cold-starting Sandbox now

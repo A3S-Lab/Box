@@ -112,14 +112,17 @@ health methods through the TLS gateway before and after kill, and verifies
 cleanup of every real `crun` execution. The clients exercise foreground and
 background commands, process listing, stdin send/close, wait, PTY
 create/resize/input/wait, Filesystem remove/mkdir/write/read/stat/list/rename,
-current Sandbox metrics with historical-range filtering, and Python Code
-Interpreter execution plus context create/list/run/restart/remove.
+current Sandbox metrics with historical-range filtering, memory-preserving
+pause, paused-state listing, connect-based resume, survival of the same
+background process, and Python Code Interpreter execution plus context
+create/list/run/restart/remove.
 
 With `A3S_BOX_E2B_NATIVE_SDKS=1`, the harness repeats that matrix through the
 A3S Python sync/async and TypeScript packages after removing every `E2B_*`
 connection variable and configuring only `A3S_BOX_*`. This production subset
 passes on A3S OS with certified `crun`, but it does not establish full protocol
 compatibility. Templates, snapshots, volumes, volume-content, signed files,
-historical metrics, MCP, additional signals, reconnect, cancellation,
-backpressure, multi-file and large-file behavior, and other pinned edge cases
-remain outside the matrix, so `full_compatibility=false` remains mandatory.
+filesystem-only pause, historical metrics, MCP, additional signals, reconnect,
+cancellation, backpressure, multi-file and large-file behavior, and other
+pinned edge cases remain outside the matrix, so `full_compatibility=false`
+remains mandatory.

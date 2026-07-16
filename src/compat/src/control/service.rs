@@ -3,7 +3,7 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use a3s_box_core::{
-    resolve_execution, CreateExecutionRequest, ExecutionLease, ExecutionManager,
+    resolve_execution, CreateExecutionRequest, ExecutionBackend, ExecutionLease, ExecutionManager,
     ExecutionManagerError, ExecutionPortConnector, NetworkMode,
 };
 use chrono::{DateTime, Utc};
@@ -371,7 +371,7 @@ impl ControlService {
                     Ok(lease) => lease,
                     Err(error) => {
                         let expected = record.generation();
-                        record.mark_failed(LifecycleFailure::RuntimeFailed)?;
+                        record.abort_resume()?;
                         self.replace(expected, record).await?;
                         return Err(error.into());
                     }
@@ -384,10 +384,81 @@ impl ControlService {
             _ => return Err(ControlServiceError::Conflict(sandbox_id.clone())),
         };
 
-        let expected = record.generation();
-        record.replace_expiry(expiry_from(self.clock.now(), timeout_seconds)?)?;
-        self.replace(expected, record.clone()).await?;
+        let refreshed_expiry = expiry_from(self.clock.now(), timeout_seconds)?;
+        if refreshed_expiry > record.expires_at() {
+            let expected = record.generation();
+            record.replace_expiry(refreshed_expiry)?;
+            self.replace(expected, record.clone()).await?;
+        }
         self.connection(record, disposition).await
+    }
+
+    pub async fn pause(
+        &self,
+        owner_id: &str,
+        sandbox_id: &super::SandboxId,
+        keep_memory: bool,
+    ) -> ControlServiceResult<()> {
+        let mut record = self.require_visible(owner_id, sandbox_id).await?;
+        if record.state() != LifecycleState::Running {
+            return Err(ControlServiceError::Conflict(sandbox_id.clone()));
+        }
+        if !keep_memory
+            && matches!(
+                record.plan().backend,
+                ExecutionBackend::Crun | ExecutionBackend::Krun
+            )
+        {
+            return Err(ControlServiceError::InvalidRequest(
+                "filesystem-only pause is not implemented for this execution backend".to_string(),
+            ));
+        }
+        let execution_id = record
+            .execution_id()
+            .cloned()
+            .ok_or_else(|| ControlServiceError::Conflict(sandbox_id.clone()))?;
+        let execution_generation = record
+            .execution_generation()
+            .ok_or_else(|| ControlServiceError::Conflict(sandbox_id.clone()))?;
+        let expected = record.generation();
+        record.begin_pause()?;
+        self.replace(expected, record.clone()).await?;
+
+        let lease = match self
+            .executions
+            .pause(&execution_id, execution_generation, keep_memory)
+            .await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
+                let expected = record.generation();
+                record.abort_pause()?;
+                self.replace(expected, record).await?;
+                return Err(error.into());
+            }
+        };
+        let expected = record.generation();
+        record.mark_paused(lease)?;
+        self.replace(expected, record).await
+    }
+
+    pub async fn resume(
+        &self,
+        owner_id: &str,
+        sandbox_id: &super::SandboxId,
+        timeout_seconds: u32,
+        auto_pause: bool,
+    ) -> ControlServiceResult<SandboxConnection> {
+        let record = self.require_visible(owner_id, sandbox_id).await?;
+        if record.state() != LifecycleState::Paused {
+            return Err(ControlServiceError::Conflict(sandbox_id.clone()));
+        }
+        if auto_pause && record.lifecycle().on_timeout != super::OnTimeoutAction::Pause {
+            return Err(ControlServiceError::InvalidRequest(
+                "autoPause cannot change the sandbox lifecycle policy during resume".to_string(),
+            ));
+        }
+        self.connect(owner_id, sandbox_id, timeout_seconds).await
     }
 
     pub async fn get(

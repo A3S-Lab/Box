@@ -28,6 +28,9 @@ const sandbox = await Sandbox.create('fixture-template', {
 })
 assert.equal(sandbox.sandboxId, 'fixture-sandbox')
 
+assert.equal(await sandbox.pause({ keepMemory: true }), true)
+assert.equal(await sandbox.pause({ keepMemory: true }), false)
+
 const connected = await Sandbox.connect('fixture-sandbox', {
   ...connection,
   timeoutMs: 222_000,

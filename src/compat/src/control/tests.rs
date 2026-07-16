@@ -211,6 +211,26 @@ fn pause_and_resume_reject_stale_execution_generations() {
 }
 
 #[test]
+fn failed_pause_and_resume_attempts_restore_the_stable_state() {
+    let mut record = creating_record("sandbox-1");
+    record.mark_running(execution_lease(&record, 1)).unwrap();
+    let running_generation = record.generation();
+
+    record.begin_pause().unwrap();
+    record.abort_pause().unwrap();
+    assert_eq!(record.state(), LifecycleState::Running);
+    assert!(record.generation() > running_generation);
+    assert_eq!(record.execution_generation().unwrap().get(), 1);
+
+    record.begin_pause().unwrap();
+    record.mark_paused(execution_lease(&record, 2)).unwrap();
+    record.begin_resume().unwrap();
+    record.abort_resume().unwrap();
+    assert_eq!(record.state(), LifecycleState::Paused);
+    assert_eq!(record.execution_generation().unwrap().get(), 2);
+}
+
+#[test]
 fn invalid_transition_does_not_mutate_record() {
     let mut record = creating_record("sandbox-1");
     let generation = record.generation();

@@ -85,8 +85,10 @@ not routable.
 
 The public-client matrix covers production lifecycle behavior, envd health,
 Filesystem, foreground and background Process operations, stdin, PTY resize,
-Code Interpreter execution and contexts, and cleanup. The enclosing smoke gate
-also validates envd metrics/environment and HTTP file transfer directly through
-the authenticated production data-plane route. The repository compatibility
-manifest remains the source of truth for the versions and matrix that have
-passed in production.
+memory-preserving pause, paused-state listing, connect-based resume, survival
+of the same background process, Code Interpreter execution and contexts, and
+cleanup. The enclosing smoke gate also validates envd metrics/environment and
+HTTP file transfer directly through the authenticated production data-plane
+route. Filesystem-only pause remains outside this matrix. The repository
+compatibility manifest remains the source of truth for the versions and matrix
+that have passed in production.
