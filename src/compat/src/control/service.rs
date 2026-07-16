@@ -69,6 +69,13 @@ pub struct SandboxMetric {
     pub disk_total: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxLog {
+    pub timestamp: DateTime<Utc>,
+    pub stream: String,
+    pub message: String,
+}
+
 impl std::fmt::Debug for SandboxConnection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -551,6 +558,46 @@ impl ControlService {
             disk_used: metrics.disk_used,
             disk_total: metrics.disk_total,
         }))
+    }
+
+    pub async fn logs(
+        &self,
+        owner_id: &str,
+        sandbox_id: &super::SandboxId,
+    ) -> ControlServiceResult<Vec<SandboxLog>> {
+        let record = self.require_visible(owner_id, sandbox_id).await?;
+        let execution_id = record
+            .execution_id()
+            .ok_or_else(|| ControlServiceError::Conflict(sandbox_id.clone()))?;
+        let generation = record
+            .execution_generation()
+            .ok_or_else(|| ControlServiceError::Conflict(sandbox_id.clone()))?;
+        self.executions
+            .read_logs(execution_id, generation)
+            .await?
+            .into_iter()
+            .map(|entry| -> ControlServiceResult<SandboxLog> {
+                let timestamp = DateTime::parse_from_rfc3339(&entry.time)
+                    .map(|value| value.with_timezone(&Utc))
+                    .map_err(|error| {
+                        ExecutionManagerError::Internal(format!(
+                            "runtime returned an invalid structured log timestamp: {error}"
+                        ))
+                    })?;
+                if !matches!(entry.stream.as_str(), "stdout" | "stderr") {
+                    return Err(ExecutionManagerError::Internal(format!(
+                        "runtime returned an invalid structured log stream {}",
+                        entry.stream
+                    ))
+                    .into());
+                }
+                Ok(SandboxLog {
+                    timestamp,
+                    stream: entry.stream,
+                    message: entry.log.trim_end_matches(['\r', '\n']).to_string(),
+                })
+            })
+            .collect()
     }
 
     pub async fn kill(

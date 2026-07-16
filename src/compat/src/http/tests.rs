@@ -89,19 +89,28 @@ async fn router_serves_the_pinned_official_lifecycle_shape() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let logs = body_json(response).await;
-    assert!(logs["logs"].is_array());
-    assert!(logs["logEntries"].is_array());
+    assert_eq!(logs["logs"].as_array().unwrap().len(), 2);
+    assert_eq!(logs["logEntries"].as_array().unwrap().len(), 2);
+    assert_eq!(logs["logEntries"][0]["message"], "starting");
+    assert_eq!(logs["logEntries"][1]["level"], "error");
+    let legacy_line: Value =
+        serde_json::from_str(logs["logs"][1]["line"].as_str().unwrap()).unwrap();
+    assert_eq!(legacy_line["logger"], "a3s-box-runtime");
+    assert_eq!(legacy_line["stream"], "stderr");
 
     let response = send(
         &app,
         Method::GET,
-        "/v2/sandboxes/sandbox-1/logs?direction=backward&limit=1",
+        "/v2/sandboxes/sandbox-1/logs?direction=backward&limit=1&level=error&search=failed",
         None,
         true,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(body_json(response).await["logs"].is_array());
+    let logs = body_json(response).await;
+    assert_eq!(logs["logs"].as_array().unwrap().len(), 1);
+    assert_eq!(logs["logs"][0]["message"], "failed once");
+    assert_eq!(logs["logs"][0]["fields"]["stream"], "stderr");
 
     let response = send(
         &app,

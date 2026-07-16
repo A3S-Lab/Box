@@ -4,6 +4,7 @@ mod cursor;
 mod dto;
 mod error;
 mod lifecycle;
+mod logs;
 mod router;
 
 pub use account::{

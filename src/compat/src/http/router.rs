@@ -13,6 +13,7 @@ use super::auth::{CredentialVerifier, PresentedCredential};
 use super::cursor::CursorDecoder;
 use super::error::ApiError;
 use super::lifecycle;
+use super::logs;
 
 #[derive(Debug, Clone)]
 pub struct LifecycleHttpConfig {
@@ -79,6 +80,7 @@ pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
             get(lifecycle::get).delete(lifecycle::kill),
         )
         .route("/sandboxes/:sandbox_id/connect", post(lifecycle::connect))
+        .route("/sandboxes/:sandbox_id/logs", get(logs::legacy))
         .route("/sandboxes/:sandbox_id/pause", post(lifecycle::pause))
         .route("/sandboxes/:sandbox_id/resume", post(lifecycle::resume))
         .route(
@@ -90,6 +92,7 @@ pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
             "/sandboxes/:sandbox_id/timeout",
             post(lifecycle::set_timeout),
         )
+        .route("/v2/sandboxes/:sandbox_id/logs", get(logs::v2))
         .fallback(fallback)
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(DefaultBodyLimit::max(max_json_bytes))

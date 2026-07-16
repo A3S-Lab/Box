@@ -454,6 +454,24 @@ impl ExecutionManager for RecordingExecutionManager {
         })
     }
 
+    async fn read_logs(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<Vec<a3s_box_core::log::LogEntry>> {
+        let executions = self.executions.lock().unwrap();
+        let execution = executions
+            .get(execution_id.as_str())
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        if execution.lease.generation != generation {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "stale test log read".to_string(),
+            });
+        }
+        Ok(test_log_entries(self.clock.now()))
+    }
+
     async fn pause(
         &self,
         execution_id: &ExecutionId,
@@ -550,6 +568,21 @@ impl ExecutionManager for RecordingExecutionManager {
             ExecutionState::Stopped | ExecutionState::Failed => ReconcileOutcome::Failed,
         })
     }
+}
+
+fn test_log_entries(started_at: DateTime<Utc>) -> Vec<a3s_box_core::log::LogEntry> {
+    [
+        ("stdout", "starting\n", 0_i64),
+        ("stderr", "failed once\n", 1_i64),
+        ("stdout", "ready\n", 2_i64),
+    ]
+    .into_iter()
+    .map(|(stream, message, offset)| a3s_box_core::log::LogEntry {
+        log: message.to_string(),
+        stream: stream.to_string(),
+        time: (started_at + chrono::Duration::seconds(offset)).to_rfc3339(),
+    })
+    .collect()
 }
 
 pub(crate) fn assert_sandbox_request(request: &CreateExecutionRequest) {

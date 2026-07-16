@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::config::{BoxConfig, ResourceConfig};
 use crate::execution::ResolvedExecutionPlan;
-use crate::log::LogConfig;
+use crate::log::{LogConfig, LogEntry};
 
 /// Stable identifier assigned to one runtime execution.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -439,6 +439,17 @@ pub trait ExecutionManager: Send + Sync {
     }
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus>;
+
+    /// Read structured stdout/stderr entries after fencing the runtime generation.
+    async fn read_logs(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<Vec<LogEntry>> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not expose structured logs".to_string(),
+        ))
+    }
 
     /// Pause one execution and return the generation-fenced paused lease.
     async fn pause(
