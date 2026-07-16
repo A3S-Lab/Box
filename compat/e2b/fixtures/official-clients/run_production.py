@@ -182,7 +182,8 @@ def main() -> None:
         "Official production clients passed: Python sync, Python async, and "
         "TypeScript lifecycle, envd health, Filesystem operations, foreground "
         "and background commands, stdin, PTY resize, Volume control/content, "
-        "bidirectional Sandbox mounts, in-use deletion conflicts, and Code "
+        "bidirectional Sandbox mounts, filesystem Snapshot capture/list, "
+        "source deletion, restore, active-use conflicts and deletion, and Code "
         "Interpreter execution and contexts"
         + (" through both official and A3S SDK packages" if args.native_sdks else "")
     )

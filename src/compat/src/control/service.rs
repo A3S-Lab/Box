@@ -24,6 +24,7 @@ use super::{
     TokenResolver, TokenScope,
 };
 use crate::routing::ENVD_PORT;
+use crate::snapshot::{SnapshotRecord, SnapshotService, SnapshotServiceError};
 use crate::volume::{ResolvedVolumeMount, VolumeMount, VolumeMountResolver, VolumeServiceError};
 
 const RUNTIME_ENVD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -109,6 +110,8 @@ pub enum ControlServiceError {
     Credential(#[from] TokenIssuerError),
     #[error(transparent)]
     Volume(#[from] VolumeServiceError),
+    #[error(transparent)]
+    Snapshot(#[from] SnapshotServiceError),
     #[error("sandbox lifecycle failed: {0}")]
     Lifecycle(#[from] LifecycleError),
 }
@@ -126,6 +129,7 @@ pub struct ControlService {
     token_issuer: Arc<dyn TokenIssuer>,
     token_resolver: Arc<dyn TokenResolver>,
     volume_mounts: Option<Arc<dyn VolumeMountResolver>>,
+    snapshots: Option<Arc<SnapshotService>>,
 }
 
 pub struct ControlServiceDependencies {
@@ -151,11 +155,17 @@ impl ControlService {
             token_issuer: dependencies.token_issuer,
             token_resolver: dependencies.token_resolver,
             volume_mounts: None,
+            snapshots: None,
         }
     }
 
     pub fn with_volume_mount_resolver(mut self, resolver: Arc<dyn VolumeMountResolver>) -> Self {
         self.volume_mounts = Some(resolver);
+        self
+    }
+
+    pub fn with_snapshot_service(mut self, snapshots: Arc<SnapshotService>) -> Self {
+        self.snapshots = Some(snapshots);
         self
     }
 
@@ -178,7 +188,10 @@ impl ControlService {
         }
 
         let identity = self.identities.next_identity()?;
-        let template = self.templates.resolve(&request.template_id).await?;
+        let template = self
+            .templates
+            .resolve(&request.owner_id, &request.template_id)
+            .await?;
         let mut config = template.config;
         let resolved_mounts = self
             .resolve_volume_mounts(&request.owner_id, &volume_mounts)
@@ -243,6 +256,7 @@ impl ControlService {
             config,
             labels: request.metadata,
             policy,
+            rootfs_snapshot_id: template.rootfs_snapshot_id,
         };
         let lease = match self
             .executions
@@ -528,6 +542,28 @@ impl ControlService {
         sandbox_id: &super::SandboxId,
     ) -> ControlServiceResult<SandboxRecord> {
         self.require_visible(owner_id, sandbox_id).await
+    }
+
+    pub async fn create_snapshot(
+        &self,
+        owner_id: &str,
+        sandbox_id: &super::SandboxId,
+        name: Option<&str>,
+    ) -> ControlServiceResult<SnapshotRecord> {
+        let source = self.require_visible(owner_id, sandbox_id).await?;
+        let template = self
+            .templates
+            .resolve(owner_id, source.template_id())
+            .await?;
+        let snapshots = self.snapshots.as_ref().ok_or_else(|| {
+            ControlServiceError::InvalidRequest(
+                "filesystem snapshots are unavailable in this service".to_string(),
+            )
+        })?;
+        let pending = snapshots
+            .capture(owner_id, &source, name, template)
+            .await?;
+        Ok(snapshots.publish(pending).await?)
     }
 
     pub async fn list(&self, filter: &SandboxListFilter) -> ControlServiceResult<SandboxPage> {

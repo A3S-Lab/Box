@@ -12,6 +12,7 @@ mod resources;
 mod restart;
 #[cfg(unix)]
 mod session;
+mod snapshot;
 mod store;
 mod support;
 #[cfg(feature = "vm")]

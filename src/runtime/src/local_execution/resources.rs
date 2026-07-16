@@ -12,6 +12,7 @@ pub(super) struct ExecutionResourceGuard {
     execution_id: String,
     attached_volumes: Vec<String>,
     connected_network: Option<String>,
+    snapshot_marker_created: bool,
     armed: bool,
 }
 
@@ -22,8 +23,11 @@ impl ExecutionResourceGuard {
             execution_id: record.id.clone(),
             attached_volumes: Vec::new(),
             connected_network: None,
+            snapshot_marker_created: false,
             armed: true,
         };
+
+        guard.prepare_snapshot_lower(record)?;
 
         let volume_store =
             VolumeStore::new(home_dir.join("volumes.json"), home_dir.join("volumes"));
@@ -124,7 +128,146 @@ impl ExecutionResourceGuard {
             }
         }
 
+        if self.snapshot_marker_created {
+            let marker = self
+                .home_dir
+                .join("boxes")
+                .join(&self.execution_id)
+                .join(".snapshot-lower");
+            if let Err(error) = std::fs::remove_file(&marker) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        execution_id = %self.execution_id,
+                        path = %marker.display(),
+                        %error,
+                        "Failed to roll back managed snapshot marker"
+                    );
+                }
+            }
+        }
+
         self.armed = false;
+    }
+}
+
+impl ExecutionResourceGuard {
+    fn prepare_snapshot_lower(&mut self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        let Some(snapshot_id) = record
+            .managed_execution
+            .as_ref()
+            .and_then(|metadata| metadata.request.rootfs_snapshot_id.as_ref())
+        else {
+            return Ok(());
+        };
+        let snapshots_root = self.home_dir.join("snapshots");
+        let canonical_root = snapshots_root.canonicalize().map_err(|error| {
+            resource_error(record, "canonicalize managed snapshot root", error)
+        })?;
+        let snapshot_dir = snapshots_root.join(snapshot_id.as_str());
+        let canonical_snapshot = snapshot_dir
+            .canonicalize()
+            .map_err(|error| resource_error(record, "resolve managed snapshot", error))?;
+        if canonical_snapshot.parent() != Some(canonical_root.as_path()) {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "filesystem snapshot '{snapshot_id}' is not a published managed snapshot"
+            )));
+        }
+        let metadata_path = canonical_snapshot.join("metadata.json");
+        if std::fs::symlink_metadata(&metadata_path)
+            .map_err(|error| resource_error(record, "inspect managed snapshot metadata", error))?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "filesystem snapshot '{snapshot_id}' has unsafe metadata"
+            )));
+        }
+        let metadata_file = metadata_path.canonicalize().map_err(|error| {
+            resource_error(record, "resolve managed snapshot metadata", error)
+        })?;
+        let metadata: a3s_box_core::snapshot::SnapshotMetadata = serde_json::from_slice(
+            &std::fs::read(&metadata_file)
+                .map_err(|error| resource_error(record, "read managed snapshot metadata", error))?,
+        )
+        .map_err(|error| {
+            ExecutionManagerError::Unavailable(format!(
+                "filesystem snapshot '{snapshot_id}' has invalid metadata: {error}"
+            ))
+        })?;
+        if metadata_file.parent() != Some(canonical_snapshot.as_path())
+            || metadata.id != snapshot_id.as_str()
+        {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "filesystem snapshot '{snapshot_id}' has inconsistent metadata"
+            )));
+        }
+        let rootfs_path = canonical_snapshot.join("rootfs");
+        if std::fs::symlink_metadata(&rootfs_path)
+            .map_err(|error| resource_error(record, "inspect managed snapshot rootfs", error))?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "filesystem snapshot '{snapshot_id}' has an unsafe rootfs"
+            )));
+        }
+        let rootfs = rootfs_path
+            .canonicalize()
+            .map_err(|error| resource_error(record, "resolve managed snapshot rootfs", error))?;
+        if rootfs.parent() != Some(canonical_snapshot.as_path()) || !rootfs.is_dir() {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "filesystem snapshot '{snapshot_id}' has no rootfs"
+            )));
+        }
+
+        let boxes_root = self.home_dir.join("boxes");
+        std::fs::create_dir_all(&boxes_root)
+            .map_err(|error| resource_error(record, "create managed boxes root", error))?;
+        let canonical_boxes_root = boxes_root
+            .canonicalize()
+            .map_err(|error| resource_error(record, "resolve managed boxes root", error))?;
+        let box_dir = boxes_root.join(&record.id);
+        std::fs::create_dir_all(&box_dir)
+            .map_err(|error| resource_error(record, "create managed box directory", error))?;
+        let canonical_box_dir = box_dir
+            .canonicalize()
+            .map_err(|error| resource_error(record, "resolve managed box directory", error))?;
+        if canonical_box_dir.parent() != Some(canonical_boxes_root.as_path()) {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "execution {} has an unsafe managed box directory",
+                record.id
+            )));
+        }
+        let marker = box_dir.join(".snapshot-lower");
+        let expected = rootfs.to_string_lossy().into_owned();
+        if marker.exists() {
+            let marker_type = std::fs::symlink_metadata(&marker)
+                .map_err(|error| resource_error(record, "inspect snapshot marker", error))?
+                .file_type();
+            if !marker_type.is_file() || marker_type.is_symlink() {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "execution {} has an unsafe filesystem snapshot marker",
+                    record.id
+                )));
+            }
+            let current = std::fs::read_to_string(&marker)
+                .map_err(|error| resource_error(record, "read snapshot marker", error))?;
+            if current.trim() != expected {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "execution {} has a conflicting filesystem snapshot marker",
+                    record.id
+                )));
+            }
+            return Ok(());
+        }
+        let temporary = box_dir.join(format!(
+            ".snapshot-lower.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        a3s_box_core::fs_atomic::write_durable(&temporary, &marker, expected.as_bytes())
+            .map_err(|error| resource_error(record, "write snapshot marker", error))?;
+        self.snapshot_marker_created = true;
+        Ok(())
     }
 }
 
@@ -198,7 +341,11 @@ fn resource_error(
 
 #[cfg(test)]
 mod tests {
-    use a3s_box_core::{network::NetworkConfig, volume::VolumeConfig};
+    use a3s_box_core::{
+        network::NetworkConfig, snapshot::SnapshotMetadata, volume::VolumeConfig,
+        CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, ExecutionSnapshotId,
+        OperationId,
+    };
 
     use super::*;
 
@@ -239,6 +386,51 @@ mod tests {
             .create(NetworkConfig::new("dev", "10.88.0.0/24").unwrap())
             .unwrap();
         (volumes, networks)
+    }
+
+    fn snapshot_record(home_dir: &Path, snapshot_id: &str) -> BoxRecord {
+        let mut record = record(home_dir);
+        record.volume_names.clear();
+        record.network_mode = NetworkMode::None;
+        record.network_name = None;
+        let config = a3s_box_core::BoxConfig {
+            image: record.image.clone(),
+            isolation: ExecutionIsolation::Sandbox,
+            ..Default::default()
+        };
+        record.isolation = ExecutionIsolation::Sandbox;
+        record.managed_execution = Some(
+            crate::ManagedExecutionMetadata::new(
+                OperationId::new("snapshot-restore-operation").unwrap(),
+                ExecutionGeneration::INITIAL,
+                CreateExecutionRequest {
+                    external_sandbox_id: "snapshot-restore".to_string(),
+                    config,
+                    labels: Default::default(),
+                    policy: Default::default(),
+                    rootfs_snapshot_id: Some(ExecutionSnapshotId::new(snapshot_id).unwrap()),
+                },
+            )
+            .unwrap(),
+        );
+        record
+    }
+
+    fn create_snapshot(home_dir: &Path, snapshot_id: &str) -> PathBuf {
+        let source = home_dir.join("snapshot-source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("state.txt"), "safe-state").unwrap();
+        let metadata = SnapshotMetadata::new(
+            snapshot_id,
+            snapshot_id,
+            "source-execution",
+            "alpine:latest",
+        );
+        crate::SnapshotStore::new(&home_dir.join("snapshots"))
+            .unwrap()
+            .save(metadata, &source)
+            .unwrap();
+        home_dir.join("snapshots").join(snapshot_id).join("rootfs")
     }
 
     #[test]
@@ -328,6 +520,84 @@ mod tests {
             .unwrap()
             .endpoints
             .contains_key(&record.id));
+    }
+
+    #[test]
+    fn snapshot_marker_is_canonical_atomic_and_rolled_back_with_the_start_attempt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let snapshot_id = "managed-snapshot";
+        let expected = create_snapshot(temporary.path(), snapshot_id)
+            .canonicalize()
+            .unwrap();
+        let record = snapshot_record(temporary.path(), snapshot_id);
+        let marker = record.box_dir.join(".snapshot-lower");
+
+        let guard = ExecutionResourceGuard::prepare(temporary.path(), &record).unwrap();
+        assert_eq!(
+            PathBuf::from(std::fs::read_to_string(&marker).unwrap()),
+            expected
+        );
+        assert!(std::fs::symlink_metadata(&marker)
+            .unwrap()
+            .file_type()
+            .is_file());
+        drop(guard);
+        assert!(!marker.exists());
+
+        ExecutionResourceGuard::prepare(temporary.path(), &record)
+            .unwrap()
+            .disarm();
+        assert_eq!(
+            PathBuf::from(std::fs::read_to_string(marker).unwrap()),
+            expected
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_rejects_a_conflicting_existing_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let snapshot_id = "managed-snapshot";
+        create_snapshot(temporary.path(), snapshot_id);
+        let record = snapshot_record(temporary.path(), snapshot_id);
+        std::fs::create_dir_all(&record.box_dir).unwrap();
+        std::fs::write(record.box_dir.join(".snapshot-lower"), "/tmp/untrusted").unwrap();
+
+        assert!(matches!(
+            ExecutionResourceGuard::prepare(temporary.path(), &record),
+            Err(ExecutionManagerError::Unavailable(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_restore_rejects_a_symlinked_rootfs_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let snapshot_id = "managed-snapshot";
+        let snapshot_dir = temporary.path().join("snapshots").join(snapshot_id);
+        let outside = temporary.path().join("outside-rootfs");
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let metadata = SnapshotMetadata::new(
+            snapshot_id,
+            snapshot_id,
+            "source-execution",
+            "alpine:latest",
+        );
+        std::fs::write(
+            snapshot_dir.join("metadata.json"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        symlink(&outside, snapshot_dir.join("rootfs")).unwrap();
+        let record = snapshot_record(temporary.path(), snapshot_id);
+
+        assert!(matches!(
+            ExecutionResourceGuard::prepare(temporary.path(), &record),
+            Err(ExecutionManagerError::Unavailable(_))
+        ));
+        assert!(!record.box_dir.join(".snapshot-lower").exists());
     }
 
     #[test]

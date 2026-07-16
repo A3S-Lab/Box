@@ -161,6 +161,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         config,
         labels,
         policy,
+        rootfs_snapshot_id: None,
     };
     let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), home);
     let reservation = manager.create(request, &operation_id).await?;

@@ -28,8 +28,8 @@ mod linux {
 
     use a3s_box_core::{
         BoxConfig, CreateExecutionRequest, ExecutionBackend, ExecutionId, ExecutionIsolation,
-        ExecutionManager, ExecutionManagerError, ExecutionState, IsolationClass, KillOutcome,
-        NetworkMode, OperationId, ReconcileOutcome, ResourceConfig,
+        ExecutionManager, ExecutionManagerError, ExecutionSnapshotId, ExecutionState,
+        IsolationClass, KillOutcome, NetworkMode, OperationId, ReconcileOutcome, ResourceConfig,
     };
     use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionStore};
 
@@ -41,15 +41,42 @@ mod linux {
         let _umask = RestrictiveUmask::install();
         let home_dir = validated_home()?;
         let state_path = home_dir.join("managed-executions.json");
-        let operation_id =
+        let source_operation_id =
             OperationId::new(format!("managed-sandbox-smoke-{}", uuid::Uuid::new_v4()))?;
+        let restored_operation_id = OperationId::new(format!(
+            "managed-sandbox-restore-{}",
+            uuid::Uuid::new_v4()
+        ))?;
+        let snapshot_id = ExecutionSnapshotId::new(format!(
+            "managed-smoke-{}",
+            uuid::Uuid::new_v4().simple()
+        ))?;
 
-        let result = exercise(&home_dir, &state_path, &operation_id).await;
-        if let Err(cleanup_error) = cleanup(&home_dir, &state_path, &operation_id).await {
-            if result.is_ok() {
-                return Err(cleanup_error);
+        let result = exercise(
+            &home_dir,
+            &state_path,
+            &source_operation_id,
+            &restored_operation_id,
+            &snapshot_id,
+        )
+        .await;
+        for operation_id in [&source_operation_id, &restored_operation_id] {
+            if let Err(cleanup_error) = cleanup(&home_dir, &state_path, operation_id).await {
+                if result.is_ok() {
+                    return Err(cleanup_error);
+                }
+                eprintln!("managed Sandbox cleanup also failed: {cleanup_error}");
             }
-            eprintln!("managed Sandbox cleanup also failed: {cleanup_error}");
+        }
+        let cleanup_manager = LocalExecutionManager::with_vm_backend(&state_path, &home_dir);
+        if let Err(cleanup_error) = cleanup_manager
+            .delete_filesystem_snapshot(&snapshot_id)
+            .await
+        {
+            if result.is_ok() {
+                return Err(cleanup_error.into());
+            }
+            eprintln!("managed snapshot cleanup also failed: {cleanup_error}");
         }
         result
     }
@@ -94,30 +121,34 @@ mod linux {
     async fn exercise(
         home_dir: &Path,
         state_path: &Path,
-        operation_id: &OperationId,
+        source_operation_id: &OperationId,
+        restored_operation_id: &OperationId,
+        snapshot_id: &ExecutionSnapshotId,
     ) -> Result<(), AnyError> {
         let image =
             std::env::var("A3S_BOX_SMOKE_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_string());
+        let config = BoxConfig {
+            isolation: ExecutionIsolation::Sandbox,
+            image,
+            cmd: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "mkdir -p /state; if [ ! -f /state/value ]; then printf 'captured' > /state/value; fi; printf 'sandbox-state=%s\\n' \"$(cat /state/value)\"; printf 'sandbox-stderr\\n' >&2; while :; do sleep 60; done"
+                    .to_string(),
+            ],
+            network: NetworkMode::None,
+            ..Default::default()
+        };
         let request = CreateExecutionRequest {
             external_sandbox_id: "managed-sandbox-smoke-external-id".to_string(),
-            config: BoxConfig {
-                isolation: ExecutionIsolation::Sandbox,
-                image,
-                cmd: vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "printf 'sandbox-stdout\\n'; printf 'sandbox-stderr\\n' >&2; while :; do sleep 60; done"
-                        .to_string(),
-                ],
-                network: NetworkMode::None,
-                ..Default::default()
-            },
+            config: config.clone(),
             labels: BTreeMap::from([("purpose".to_string(), "managed-sandbox-smoke".to_string())]),
             policy: Default::default(),
+            rootfs_snapshot_id: None,
         };
 
         let manager = LocalExecutionManager::with_vm_backend(state_path, home_dir);
-        let reservation = manager.create(request, operation_id).await?;
+        let reservation = manager.create(request, source_operation_id).await?;
         require(
             reservation.plan.backend == ExecutionBackend::Crun
                 && reservation.plan.isolation_class == IsolationClass::SharedKernel,
@@ -143,7 +174,7 @@ mod linux {
 
         drop(manager);
         let restarted = LocalExecutionManager::with_vm_backend(state_path, home_dir);
-        let recovered_reservation = match restarted.reconcile(operation_id).await? {
+        let recovered_reservation = match restarted.reconcile(source_operation_id).await? {
             ReconcileOutcome::Created(reservation) => reservation,
             _ => {
                 return Err(failure(
@@ -185,27 +216,52 @@ mod linux {
         validate_structured_logs(&box_dir).await?;
         println!("started execution={} state=running", execution_id);
 
-        let pause_error = match restarted
+        let paused = restarted
             .pause(&execution_id, running_status.generation, true)
-            .await
-        {
-            Ok(_) => return Err(failure("Sandbox pause unexpectedly succeeded")),
-            Err(error) => error,
-        };
+            .await?;
         require(
-            matches!(pause_error, ExecutionManagerError::Conflict { .. }),
-            "Sandbox pause did not return a conflict",
+            restarted.inspect(&execution_id).await?.state == ExecutionState::Paused,
+            "managed Sandbox did not enter the paused state",
         )?;
-        let rolled_back = restarted.inspect(&execution_id).await?;
+        let resumed = restarted
+            .resume(&execution_id, paused.generation)
+            .await?;
         require(
-            rolled_back.state == ExecutionState::Running
-                && rolled_back.generation == running_status.generation,
-            "failed Sandbox pause did not roll back to the running generation",
+            resumed.generation.get() == paused.generation.get() + 1
+                && restarted.inspect(&execution_id).await?.state == ExecutionState::Running,
+            "managed Sandbox did not resume at the next generation",
         )?;
-        println!("pause-rejected execution={} state=running", execution_id);
+        println!(
+            "pause-resume execution={} generation={}",
+            execution_id,
+            resumed.generation.get()
+        );
+
+        let snapshot_started = std::time::Instant::now();
+        let snapshot = restarted
+            .create_filesystem_snapshot(&execution_id, resumed.generation, snapshot_id)
+            .await?;
+        let snapshot_elapsed = snapshot_started.elapsed();
+        require(
+            snapshot.state == ExecutionState::Running
+                && snapshot.lease.generation == resumed.generation
+                && snapshot.size_bytes > 0,
+            "managed Sandbox snapshot returned inconsistent evidence",
+        )?;
+        require(
+            snapshot_elapsed <= std::time::Duration::from_secs(30),
+            "managed Sandbox snapshot exceeded the 30-second smoke gate",
+        )?;
+        println!(
+            "snapshot execution={} id={} bytes={} elapsed_ms={}",
+            execution_id,
+            snapshot_id,
+            snapshot.size_bytes,
+            snapshot_elapsed.as_millis()
+        );
 
         let outcome = restarted
-            .kill(&execution_id, rolled_back.generation)
+            .kill(&execution_id, resumed.generation)
             .await?;
         require(
             outcome == KillOutcome::Killed,
@@ -232,6 +288,71 @@ mod linux {
         )?;
         wait_for_process_exit(log_worker_identity).await?;
         println!("killed execution={} state=stopped cleanup=ok", execution_id);
+
+        let restored_request = CreateExecutionRequest {
+            external_sandbox_id: "managed-sandbox-restored-external-id".to_string(),
+            config,
+            labels: BTreeMap::from([(
+                "purpose".to_string(),
+                "managed-sandbox-restore-smoke".to_string(),
+            )]),
+            policy: Default::default(),
+            rootfs_snapshot_id: Some(snapshot_id.clone()),
+        };
+        let restore_started = std::time::Instant::now();
+        let restored_lease = restarted
+            .create_and_start(restored_request, restored_operation_id)
+            .await?;
+        let restore_elapsed = restore_started.elapsed();
+        require(
+            restored_lease.plan.backend == ExecutionBackend::Crun
+                && restored_lease.plan.isolation_class == IsolationClass::SharedKernel,
+            "restored Sandbox did not stay on the crun backend",
+        )?;
+        require(
+            restore_elapsed <= std::time::Duration::from_secs(30),
+            "managed Sandbox restore exceeded the 30-second smoke gate",
+        )?;
+        let restored_id = restored_lease.execution_id.clone();
+        let restored_box_dir = home_dir.join("boxes").join(restored_id.as_str());
+        let restored_log_worker =
+            validate_runtime_record(home_dir, &restored_box_dir, &restored_id)?;
+        validate_snapshot_marker(home_dir, &restored_box_dir, snapshot_id)?;
+        validate_structured_logs(&restored_box_dir).await?;
+        require(
+            matches!(
+                restarted.delete_filesystem_snapshot(snapshot_id).await,
+                Err(ExecutionManagerError::Conflict { .. })
+            ),
+            "active restored Sandbox did not protect its snapshot lower",
+        )?;
+        println!(
+            "restored execution={} snapshot={} elapsed_ms={}",
+            restored_id,
+            snapshot_id,
+            restore_elapsed.as_millis()
+        );
+
+        require(
+            restarted
+                .kill(&restored_id, restored_lease.generation)
+                .await?
+                == KillOutcome::Killed,
+            "restored Sandbox kill did not own runtime cleanup",
+        )?;
+        require(
+            restarted.delete_filesystem_snapshot(snapshot_id).await?,
+            "managed snapshot was not deleted after restored Sandbox cleanup",
+        )?;
+        require(
+            !restored_box_dir.exists(),
+            "restored managed Sandbox box directory leaked",
+        )?;
+        wait_for_process_exit(restored_log_worker).await?;
+        println!(
+            "killed restored_execution={} snapshot_delete=ok cleanup=ok",
+            restored_id
+        );
         Ok(())
     }
 
@@ -263,6 +384,25 @@ mod linux {
             && left.memory_mb == right.memory_mb
             && left.disk_mb == right.disk_mb
             && left.timeout == right.timeout
+    }
+
+    fn validate_snapshot_marker(
+        home_dir: &Path,
+        box_dir: &Path,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> Result<(), AnyError> {
+        let expected = home_dir
+            .join("snapshots")
+            .join(snapshot_id.as_str())
+            .join("rootfs")
+            .canonicalize()?;
+        let marker = box_dir.join(".snapshot-lower");
+        let actual = PathBuf::from(std::fs::read_to_string(&marker)?.trim());
+        require(actual == expected, "restored Sandbox has the wrong CoW lower")?;
+        require(
+            std::fs::symlink_metadata(marker)?.file_type().is_file(),
+            "restored Sandbox snapshot marker is not a regular file",
+        )
     }
 
     fn validate_runtime_record(
@@ -323,7 +463,9 @@ mod linux {
                     .collect();
                 let stdout = entries
                     .iter()
-                    .any(|entry| entry.stream == "stdout" && entry.log == "sandbox-stdout\n");
+                    .any(|entry| {
+                        entry.stream == "stdout" && entry.log == "sandbox-state=captured\n"
+                    });
                 let stderr = entries
                     .iter()
                     .any(|entry| entry.stream == "stderr" && entry.log == "sandbox-stderr\n");

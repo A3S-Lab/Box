@@ -16,6 +16,10 @@ use a3s_box_compat::http::{
     CredentialScheme, CredentialVerifier, CursorDecoder, CursorError, CursorResult,
     LifecycleHttpConfig, LifecycleHttpState, PresentedCredential,
 };
+use a3s_box_compat::snapshot::{
+    MemorySnapshotRepository, SnapshotService, SnapshotServiceDependencies,
+    SnapshotTemplateProvider,
+};
 use a3s_box_compat::volume::{
     A3sRuntimeVolumeStore, IdentityVolumeIdMapper, MemoryVolumeRepository, VolumeFilesystem,
     VolumeService, VolumeServiceDependencies,
@@ -24,7 +28,8 @@ use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
     ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionPortConnector, ExecutionPortStream, ExecutionReservation,
-    ExecutionState, ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome, ResourceConfig,
+    ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, ExecutionStatus, KillOutcome,
+    OperationId, ReconcileOutcome, ResourceConfig,
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -47,6 +52,16 @@ async fn run() -> Result<()> {
     let clock = Arc::new(FixedClock(fixture_time()?));
     let tokens = Arc::new(FixtureTokens);
     let executions = Arc::new(FixtureExecutionManager::new(clock.clone()));
+    let snapshot_repository = Arc::new(MemorySnapshotRepository::default());
+    let snapshots = Arc::new(SnapshotService::new(SnapshotServiceDependencies {
+        repository: snapshot_repository.clone(),
+        executions: executions.clone(),
+        clock: clock.clone(),
+    }));
+    let templates = Arc::new(SnapshotTemplateProvider::new(
+        Arc::new(FixtureTemplates),
+        snapshot_repository,
+    ));
     let volumes = Arc::new(VolumeService::new(VolumeServiceDependencies {
         repository: Arc::new(MemoryVolumeRepository::default()),
         runtime: Arc::new(A3sRuntimeVolumeStore::new(&volume_home)),
@@ -65,11 +80,12 @@ async fn run() -> Result<()> {
             ports: executions,
             clock,
             identities: Arc::new(FixtureIdentities::default()),
-            templates: Arc::new(FixtureTemplates),
+            templates,
             token_issuer: tokens.clone(),
             token_resolver: tokens,
         })
-        .with_volume_mount_resolver(volumes.clone()),
+        .with_volume_mount_resolver(volumes.clone())
+        .with_snapshot_service(snapshots.clone()),
     );
     let state = LifecycleHttpState::new(
         service,
@@ -80,7 +96,8 @@ async fn run() -> Result<()> {
             ..LifecycleHttpConfig::default()
         },
     )
-    .with_volume_service(volumes);
+    .with_volume_service(volumes)
+    .with_snapshot_service(snapshots);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .context("bind fixture listener")?;
@@ -138,7 +155,8 @@ impl SandboxIdentityProvider for FixtureIdentities {
         let sequence = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let sandbox_id = match sequence {
             1 => "fixture-sandbox".to_string(),
-            2 => "fixture-interpreter".to_string(),
+            2 => "fixture-restored".to_string(),
+            3 => "fixture-interpreter".to_string(),
             value => format!("fixture-sandbox-{value}"),
         };
         Ok(SandboxIdentity {
@@ -158,7 +176,11 @@ struct FixtureTemplates;
 
 #[async_trait]
 impl TemplateProvider for FixtureTemplates {
-    async fn resolve(&self, template_id: &str) -> TemplateProviderResult<ResolvedTemplate> {
+    async fn resolve(
+        &self,
+        _owner_id: &str,
+        template_id: &str,
+    ) -> TemplateProviderResult<ResolvedTemplate> {
         if !matches!(template_id, "fixture-template" | "code-interpreter-v1") {
             return Err(TemplateProviderError::NotFound(template_id.to_string()));
         }
@@ -186,6 +208,7 @@ impl TemplateProvider for FixtureTemplates {
             } else {
                 a3s_box_compat::routing::SandboxRoutePolicy::default()
             },
+            rootfs_snapshot_id: None,
         })
     }
 }
@@ -287,6 +310,7 @@ struct FixtureExecutionManager {
     clock: Arc<dyn Clock>,
     operations: Mutex<BTreeMap<String, String>>,
     executions: Mutex<BTreeMap<String, FixtureExecution>>,
+    snapshots: Mutex<BTreeMap<String, u64>>,
 }
 
 impl FixtureExecutionManager {
@@ -295,6 +319,7 @@ impl FixtureExecutionManager {
             clock,
             operations: Mutex::new(BTreeMap::new()),
             executions: Mutex::new(BTreeMap::new()),
+            snapshots: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -309,6 +334,12 @@ impl FixtureExecutionManager {
     ) -> ExecutionManagerResult<MutexGuard<'_, BTreeMap<String, FixtureExecution>>> {
         self.executions.lock().map_err(|_| {
             ExecutionManagerError::Unavailable("fixture execution lock poisoned".into())
+        })
+    }
+
+    fn snapshots(&self) -> ExecutionManagerResult<MutexGuard<'_, BTreeMap<String, u64>>> {
+        self.snapshots.lock().map_err(|_| {
+            ExecutionManagerError::Unavailable("fixture snapshot lock poisoned".into())
         })
     }
 
@@ -438,6 +469,50 @@ impl ExecutionManager for FixtureExecutionManager {
             time: (execution.lease.started_at + chrono::Duration::seconds(offset)).to_rfc3339(),
         })
         .collect())
+    }
+
+    async fn create_filesystem_snapshot(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<ExecutionSnapshot> {
+        let mut executions = self.executions()?;
+        let execution = executions
+            .get_mut(execution_id.as_str())
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        if execution.lease.generation != generation
+            || !matches!(execution.state, ExecutionState::Running | ExecutionState::Paused)
+        {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "stale fixture snapshot".to_string(),
+            });
+        }
+        let result = ExecutionSnapshot {
+            snapshot_id: snapshot_id.clone(),
+            size_bytes: 4_096,
+            state: execution.state,
+            lease: execution.lease.clone(),
+        };
+        drop(executions);
+        self.snapshots()?
+            .insert(snapshot_id.to_string(), result.size_bytes);
+        Ok(result)
+    }
+
+    async fn filesystem_snapshot_size(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<Option<u64>> {
+        Ok(self.snapshots()?.get(snapshot_id.as_str()).copied())
+    }
+
+    async fn delete_filesystem_snapshot(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<bool> {
+        Ok(self.snapshots()?.remove(snapshot_id.as_str()).is_some())
     }
 
     async fn pause(

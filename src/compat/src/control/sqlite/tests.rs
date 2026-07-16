@@ -156,7 +156,7 @@ async fn opens_in_wal_mode_and_applies_exact_migration_history() {
     assert_eq!(journal_mode, "wal");
     assert_eq!(
         migrations,
-        "1:lifecycle_records,2:temporal_indexes,3:volume_records"
+        "1:lifecycle_records,2:temporal_indexes,3:volume_records,4:snapshot_records"
     );
     assert_eq!(strict, 1);
     assert!(created_index.contains("julianday(created_at)"));
@@ -177,6 +177,7 @@ async fn upgrades_a_version_one_repository_without_rewriting_records() {
                     "DROP INDEX sandbox_records_owner_state_created; \
                      DROP INDEX sandbox_records_expiry; \
                      DROP INDEX sandbox_records_reconcilable; \
+                     DROP TABLE snapshot_records; \
                      DROP TABLE volume_records; \
                      CREATE INDEX sandbox_records_owner_state_created \
                          ON sandbox_records(\
@@ -219,7 +220,7 @@ async fn upgrades_a_version_one_repository_without_rewriting_records() {
         .unwrap();
     assert_eq!(
         migrations,
-        "1:lifecycle_records,2:temporal_indexes,3:volume_records"
+        "1:lifecycle_records,2:temporal_indexes,3:volume_records,4:snapshot_records"
     );
     assert!(expiry_index.contains("julianday(expires_at)"));
 }

@@ -23,6 +23,10 @@ use crate::http::{
     LifecycleHttpState, RejectingCursorDecoder,
 };
 use crate::routing::{RouteLeaseService, SandboxRouteParser};
+use crate::snapshot::{
+    SnapshotReconciliationReport, SnapshotService, SnapshotServiceDependencies,
+    SnapshotTemplateProvider, SqliteSnapshotRepository,
+};
 use crate::volume::{
     current_volume_id_mapper, A3sRuntimeVolumeStore, SqliteVolumeRepository, VolumeFilesystem,
     VolumeReconciliationReport, VolumeService, VolumeServiceDependencies,
@@ -44,6 +48,7 @@ pub struct E2bCompatService {
     route_parser: SandboxRouteParser,
     route_leases: RouteLeaseService,
     volumes: Arc<VolumeService>,
+    snapshots: Arc<SnapshotService>,
 }
 
 impl E2bCompatService {
@@ -66,7 +71,8 @@ impl E2bCompatService {
             config.token_keys,
         )?);
         let verifier = Arc::new(HashedCredentialVerifier::new(config.credentials)?);
-        let templates = Arc::new(config.templates);
+        let configured_templates: Arc<dyn crate::control::TemplateProvider> =
+            Arc::new(config.templates);
 
         let volume_repository = Arc::new(SqliteVolumeRepository::new(repository.connection()));
         let volume_filesystem = Arc::new(VolumeFilesystem::new(current_volume_id_mapper()?));
@@ -79,6 +85,16 @@ impl E2bCompatService {
             token_verifier: tokens.clone(),
             filesystem: volume_filesystem,
         }));
+        let snapshot_repository = Arc::new(SqliteSnapshotRepository::new(repository.connection()));
+        let snapshots = Arc::new(SnapshotService::new(SnapshotServiceDependencies {
+            repository: snapshot_repository.clone(),
+            executions: executions.clone(),
+            clock: clock.clone(),
+        }));
+        let templates = Arc::new(SnapshotTemplateProvider::new(
+            configured_templates,
+            snapshot_repository,
+        ));
 
         let control = Arc::new(
             ControlService::new(ControlServiceDependencies {
@@ -91,7 +107,8 @@ impl E2bCompatService {
                 token_issuer: tokens.clone(),
                 token_resolver: tokens.clone(),
             })
-            .with_volume_mount_resolver(volumes.clone()),
+            .with_volume_mount_resolver(volumes.clone())
+            .with_snapshot_service(snapshots.clone()),
         );
         let supervisor = LifecycleSupervisor::new(LifecycleSupervisorDependencies {
             repository: repository.clone(),
@@ -113,7 +130,8 @@ impl E2bCompatService {
                     max_json_bytes: config.max_json_bytes,
                 },
             )
-            .with_volume_service(volumes.clone()),
+            .with_volume_service(volumes.clone())
+            .with_snapshot_service(snapshots.clone()),
         );
         let gateway = DataPlaneGateway::build(
             config.gateway.clone(),
@@ -138,6 +156,7 @@ impl E2bCompatService {
             route_parser,
             route_leases,
             volumes,
+            snapshots,
         })
     }
 
@@ -176,10 +195,13 @@ impl E2bCompatService {
     pub async fn reconcile_startup(&self) -> E2bServiceResult<LifecycleMaintenanceReport> {
         let volume_report = self.volumes.reconcile_startup().await?;
         log_volume_report("startup reconciliation", &volume_report);
-        Ok(self
+        let snapshot_report = self.snapshots.reconcile_startup().await?;
+        log_snapshot_report("startup reconciliation", &snapshot_report);
+        let lifecycle_report = self
             .supervisor
             .reconcile_startup(self.supervisor_config.reconciliation_page_size())
-            .await?)
+            .await?;
+        Ok(lifecycle_report)
     }
 
     pub async fn serve(self) -> E2bServiceResult<()> {
@@ -210,10 +232,12 @@ impl E2bCompatService {
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
         let supervisor = self.supervisor.clone();
         let volumes = self.volumes.clone();
+        let snapshots = self.snapshots.clone();
         let supervisor_config = self.supervisor_config;
         let mut maintenance = tokio::spawn(run_maintenance(
             supervisor,
             volumes,
+            snapshots,
             supervisor_config,
             shutdown_receiver.clone(),
         ));
@@ -302,11 +326,14 @@ enum Termination {
 async fn run_maintenance(
     supervisor: LifecycleSupervisor,
     volumes: Arc<VolumeService>,
+    snapshots: Arc<SnapshotService>,
     config: SupervisorConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> E2bServiceResult<()> {
     let volume_report = volumes.reconcile_startup().await?;
     log_volume_report("startup reconciliation", &volume_report);
+    let snapshot_report = snapshots.reconcile_startup().await?;
+    log_snapshot_report("startup reconciliation", &snapshot_report);
     let report = supervisor
         .reconcile_startup(config.reconciliation_page_size())
         .await?;
@@ -323,10 +350,36 @@ async fn run_maintenance(
                 }
             }
             _ = interval.tick() => {
+                let snapshot_report = snapshots.reconcile_startup().await?;
+                log_snapshot_report("snapshot maintenance", &snapshot_report);
                 let report = supervisor.reap_expired(config.batch_size()).await?;
                 log_report("expiry maintenance", &report);
             }
         }
+    }
+}
+
+fn log_snapshot_report(operation: &str, report: &SnapshotReconciliationReport) {
+    if report.failures.is_empty() {
+        info!(
+            operation,
+            examined = report.examined,
+            completed = report.completed,
+            deferred = report.deferred,
+            "snapshot maintenance completed"
+        );
+        return;
+    }
+    warn!(
+        operation,
+        examined = report.examined,
+        completed = report.completed,
+        deferred = report.deferred,
+        failures = report.failures.len(),
+        "snapshot maintenance completed with isolated record failures"
+    );
+    for message in &report.failures {
+        error!(operation, message, "snapshot record maintenance failed");
     }
 }
 
@@ -474,6 +527,8 @@ pub enum E2bServiceError {
     Volume(#[from] crate::volume::VolumeServiceError),
     #[error(transparent)]
     VolumeContent(#[from] crate::volume::VolumeContentError),
+    #[error(transparent)]
+    Snapshot(#[from] crate::snapshot::SnapshotServiceError),
 }
 
 pub type E2bServiceResult<T> = std::result::Result<T, E2bServiceError>;

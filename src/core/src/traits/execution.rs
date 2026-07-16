@@ -56,6 +56,56 @@ impl From<ExecutionId> for String {
     }
 }
 
+/// Opaque identifier for one runtime-managed filesystem snapshot.
+///
+/// Snapshot identifiers are used as directory names below the runtime's
+/// managed snapshot root. Keeping the lexical contract here prevents callers
+/// from turning a protocol template reference into an arbitrary host path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ExecutionSnapshotId(String);
+
+impl ExecutionSnapshotId {
+    pub fn new(value: impl Into<String>) -> ExecutionManagerResult<Self> {
+        let value = value.into();
+        if value.is_empty()
+            || value.len() > 128
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(ExecutionManagerError::InvalidRequest(
+                "execution snapshot ID must match [A-Za-z0-9_-]{1,128}".to_string(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ExecutionSnapshotId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for ExecutionSnapshotId {
+    type Error = ExecutionManagerError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ExecutionSnapshotId> for String {
+    fn from(value: ExecutionSnapshotId) -> Self {
+        value.0
+    }
+}
+
 /// Idempotency identity for a lifecycle operation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -287,6 +337,11 @@ pub struct CreateExecutionRequest {
     /// Caller-owned lifecycle and local record policy.
     #[serde(default)]
     pub policy: ExecutionRecordPolicy,
+    /// Runtime-managed filesystem snapshot used as this execution's immutable
+    /// rootfs lower. The runtime derives the host path from this validated ID;
+    /// callers never supply a host path.
+    #[serde(default)]
+    pub rootfs_snapshot_id: Option<ExecutionSnapshotId>,
 }
 
 /// Durable evidence returned after an execution is created but not started.
@@ -307,6 +362,17 @@ pub struct ExecutionLease {
     pub plan: ResolvedExecutionPlan,
     pub resources: ResourceConfig,
     pub started_at: DateTime<Utc>,
+}
+
+/// Result of atomically capturing one execution filesystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionSnapshot {
+    pub snapshot_id: ExecutionSnapshotId,
+    pub size_bytes: u64,
+    /// Stable state restored after the temporary snapshot pause.
+    pub state: ExecutionState,
+    /// Generation-fenced runtime evidence after snapshot completion.
+    pub lease: ExecutionLease,
 }
 
 /// Runtime state visible through the backend-neutral lifecycle facade.
@@ -451,6 +517,41 @@ pub trait ExecutionManager: Send + Sync {
         ))
     }
 
+    /// Temporarily quiesce the execution, atomically capture its rootfs in the
+    /// runtime-managed snapshot store, and restore its prior stable state.
+    async fn create_filesystem_snapshot(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<ExecutionSnapshot> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not support filesystem snapshots".to_string(),
+        ))
+    }
+
+    /// Return the size of a fully published runtime-managed snapshot, or
+    /// `None` when it does not exist.
+    async fn filesystem_snapshot_size(
+        &self,
+        _snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<Option<u64>> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not expose filesystem snapshots".to_string(),
+        ))
+    }
+
+    /// Delete a runtime-managed snapshot, refusing while an active execution
+    /// still uses it as a copy-on-write lower.
+    async fn delete_filesystem_snapshot(
+        &self,
+        _snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<bool> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not support filesystem snapshot deletion".to_string(),
+        ))
+    }
+
     /// Pause one execution and return the generation-fenced paused lease.
     async fn pause(
         &self,
@@ -540,6 +641,32 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_identifiers_are_safe_managed_directory_names() {
+        for valid in ["snapshot-1", "SNAPSHOT_2", "a"] {
+            assert_eq!(
+                ExecutionSnapshotId::new(valid).unwrap().as_str(),
+                valid
+            );
+        }
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../snapshot",
+            "snapshot/path",
+            "snapshot:tag",
+            "snapshot id",
+        ] {
+            assert!(matches!(
+                ExecutionSnapshotId::new(invalid),
+                Err(ExecutionManagerError::InvalidRequest(_))
+            ));
+        }
+        assert!(ExecutionSnapshotId::new("x".repeat(129)).is_err());
+        assert!(serde_json::from_str::<ExecutionSnapshotId>("\"../snapshot\"").is_err());
+    }
+
+    #[test]
     fn legacy_creation_requests_default_record_policy() {
         let request: CreateExecutionRequest = serde_json::from_value(serde_json::json!({
             "external_sandbox_id": "sandbox-1",
@@ -550,6 +677,7 @@ mod tests {
 
         assert_eq!(request.policy, ExecutionRecordPolicy::default());
         assert_eq!(request.policy.restart_policy, ExecutionRestartPolicy::No);
+        assert!(request.rootfs_snapshot_id.is_none());
     }
 
     #[test]

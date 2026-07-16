@@ -9,8 +9,8 @@ use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
     ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionPortConnector, ExecutionPortStream, ExecutionReservation,
-    ExecutionState, ExecutionStatus, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
-    ResourceConfig,
+    ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, ExecutionStatus, KillOutcome,
+    NetworkMode, OperationId, ReconcileOutcome, ResourceConfig,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
@@ -22,6 +22,8 @@ pub(crate) struct TestHarness {
     pub service: Arc<ControlService>,
     pub executions: Arc<RecordingExecutionManager>,
     pub repository: Arc<MemorySandboxRepository>,
+    pub snapshots: Arc<crate::snapshot::SnapshotService>,
+    pub snapshot_repository: Arc<crate::snapshot::MemorySnapshotRepository>,
     pub clock: Arc<dyn Clock>,
 }
 
@@ -34,20 +36,37 @@ impl TestHarness {
         let repository = Arc::new(MemorySandboxRepository::default());
         let executions = Arc::new(RecordingExecutionManager::new(clock.clone()));
         let tokens = Arc::new(TestTokens);
-        let service = Arc::new(ControlService::new(ControlServiceDependencies {
-            repository: repository.clone(),
-            executions: executions.clone(),
-            ports: executions.clone(),
-            clock: clock.clone(),
-            identities: Arc::new(TestIdentities::default()),
-            templates: Arc::new(TestTemplates),
-            token_issuer: tokens.clone(),
-            token_resolver: tokens,
-        }));
+        let snapshot_repository = Arc::new(crate::snapshot::MemorySnapshotRepository::default());
+        let snapshots = Arc::new(crate::snapshot::SnapshotService::new(
+            crate::snapshot::SnapshotServiceDependencies {
+                repository: snapshot_repository.clone(),
+                executions: executions.clone(),
+                clock: clock.clone(),
+            },
+        ));
+        let templates = Arc::new(crate::snapshot::SnapshotTemplateProvider::new(
+            Arc::new(TestTemplates),
+            snapshot_repository.clone(),
+        ));
+        let service = Arc::new(
+            ControlService::new(ControlServiceDependencies {
+                repository: repository.clone(),
+                executions: executions.clone(),
+                ports: executions.clone(),
+                clock: clock.clone(),
+                identities: Arc::new(TestIdentities::default()),
+                templates,
+                token_issuer: tokens.clone(),
+                token_resolver: tokens,
+            })
+            .with_snapshot_service(snapshots.clone()),
+        );
         Self {
             service,
             executions,
             repository,
+            snapshots,
+            snapshot_repository,
             clock,
         }
     }
@@ -135,7 +154,11 @@ struct TestTemplates;
 
 #[async_trait]
 impl TemplateProvider for TestTemplates {
-    async fn resolve(&self, template_id: &str) -> TemplateProviderResult<ResolvedTemplate> {
+    async fn resolve(
+        &self,
+        _owner_id: &str,
+        template_id: &str,
+    ) -> TemplateProviderResult<ResolvedTemplate> {
         if !matches!(
             template_id,
             "fixture-template" | "code-interpreter-v1" | "runtime-envd-template"
@@ -166,6 +189,7 @@ impl TemplateProvider for TestTemplates {
             } else {
                 crate::routing::SandboxRoutePolicy::default()
             },
+            rootfs_snapshot_id: None,
         })
     }
 }
@@ -211,6 +235,7 @@ fn stored_token(secret: &str) -> StoredToken {
 struct TestExecution {
     lease: ExecutionLease,
     state: ExecutionState,
+    rootfs_snapshot_id: Option<ExecutionSnapshotId>,
 }
 
 pub(crate) struct RecordingExecutionManager {
@@ -223,6 +248,7 @@ pub(crate) struct RecordingExecutionManager {
     requests: Mutex<Vec<CreateExecutionRequest>>,
     operations: Mutex<BTreeMap<String, String>>,
     executions: Mutex<BTreeMap<String, TestExecution>>,
+    snapshots: Mutex<BTreeMap<String, u64>>,
 }
 
 impl RecordingExecutionManager {
@@ -237,6 +263,7 @@ impl RecordingExecutionManager {
             requests: Mutex::new(Vec::new()),
             operations: Mutex::new(BTreeMap::new()),
             executions: Mutex::new(BTreeMap::new()),
+            snapshots: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -271,6 +298,10 @@ impl RecordingExecutionManager {
             .unwrap()
             .get(execution_id)
             .map(|execution| execution.state)
+    }
+
+    pub fn snapshot_ids(&self) -> Vec<String> {
+        self.snapshots.lock().unwrap().keys().cloned().collect()
     }
 
     fn reservation(execution: &TestExecution) -> ExecutionReservation {
@@ -403,6 +434,7 @@ impl ExecutionManager for RecordingExecutionManager {
             TestExecution {
                 lease: lease.clone(),
                 state: ExecutionState::Created,
+                rootfs_snapshot_id: request.rootfs_snapshot_id,
             },
         );
         Ok(ExecutionReservation {
@@ -471,6 +503,71 @@ impl ExecutionManager for RecordingExecutionManager {
             });
         }
         Ok(test_log_entries(self.clock.now()))
+    }
+
+    async fn create_filesystem_snapshot(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<ExecutionSnapshot> {
+        let executions = self.executions.lock().unwrap();
+        let execution = executions
+            .get(execution_id.as_str())
+            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        if execution.lease.generation != generation
+            || !matches!(execution.state, ExecutionState::Running | ExecutionState::Paused)
+        {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "stale test snapshot".to_string(),
+            });
+        }
+        let result = ExecutionSnapshot {
+            snapshot_id: snapshot_id.clone(),
+            size_bytes: 4_096,
+            state: execution.state,
+            lease: execution.lease.clone(),
+        };
+        drop(executions);
+        self.snapshots
+            .lock()
+            .unwrap()
+            .insert(snapshot_id.to_string(), result.size_bytes);
+        Ok(result)
+    }
+
+    async fn filesystem_snapshot_size(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<Option<u64>> {
+        Ok(self
+            .snapshots
+            .lock()
+            .unwrap()
+            .get(snapshot_id.as_str())
+            .copied())
+    }
+
+    async fn delete_filesystem_snapshot(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<bool> {
+        if self.executions.lock().unwrap().values().any(|execution| {
+            !matches!(execution.state, ExecutionState::Stopped | ExecutionState::Failed)
+                && execution.rootfs_snapshot_id.as_ref() == Some(snapshot_id)
+        }) {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: ExecutionId::new(format!("snapshot-{snapshot_id}"))?,
+                message: "test snapshot is in use".to_string(),
+            });
+        }
+        Ok(self
+            .snapshots
+            .lock()
+            .unwrap()
+            .remove(snapshot_id.as_str())
+            .is_some())
     }
 
     async fn pause(

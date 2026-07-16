@@ -6,6 +6,7 @@ mod error;
 mod lifecycle;
 mod logs;
 mod router;
+mod snapshots;
 mod volume_content;
 mod volumes;
 

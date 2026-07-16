@@ -13,6 +13,7 @@ pub mod gateway;
 pub mod http;
 pub mod production;
 pub mod routing;
+pub mod snapshot;
 pub mod volume;
 
 pub use fixture::{generate_fixture, verify_fixture, FixturePaths};

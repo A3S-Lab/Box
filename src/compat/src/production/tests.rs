@@ -135,7 +135,11 @@ async fn parses_acl_into_strict_runtime_credentials_and_template_policy() {
     assert_eq!(config.gateway().max_connections().get(), 1024);
     assert_eq!(config.supervisor().batch_size().get(), 100);
     assert_eq!(config.templates.len(), 1);
-    let template = config.templates.resolve("fixture-template").await.unwrap();
+    let template = config
+        .templates
+        .resolve("fixture-owner", "fixture-template")
+        .await
+        .unwrap();
     assert_eq!(template.config.isolation, ExecutionIsolation::Sandbox);
     assert_eq!(template.config.image, "alpine:3.20");
     assert_eq!(template.config.resources.memory_mb, 512);
@@ -220,7 +224,11 @@ async fn defaults_templates_to_broker_envd_and_rejects_unknown_modes() {
     let input = acl_config(root.path());
     let broker = input.replace("    envd_mode = \"runtime\"\n", "");
     let config = E2bCompatConfig::parse_with_environment(&broker, test_environment).unwrap();
-    let template = config.templates.resolve("fixture-template").await.unwrap();
+    let template = config
+        .templates
+        .resolve("fixture-owner", "fixture-template")
+        .await
+        .unwrap();
     assert_eq!(template.envd_mode, EnvdMode::Broker);
 
     let invalid = input.replace("envd_mode = \"runtime\"", "envd_mode = \"sidecar\"");

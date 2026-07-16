@@ -5,6 +5,7 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::control::{ControlServiceError, RepositoryError, TemplateProviderError};
+use crate::snapshot::SnapshotServiceError;
 use crate::volume::VolumeServiceError;
 
 use super::{AuthenticationError, CursorError};
@@ -34,6 +35,13 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: "Volume not found".to_string(),
+        }
+    }
+
+    pub fn snapshot_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: "Snapshot not found".to_string(),
         }
     }
 
@@ -117,6 +125,18 @@ impl From<ControlServiceError> for ApiError {
             ControlServiceError::Volume(VolumeServiceError::InvalidRequest(message)) => {
                 Self::bad_request(message)
             }
+            ControlServiceError::Snapshot(SnapshotServiceError::InvalidRequest(message)) => {
+                Self::bad_request(message)
+            }
+            ControlServiceError::Snapshot(SnapshotServiceError::NotFound) => {
+                Self::snapshot_not_found()
+            }
+            ControlServiceError::Snapshot(SnapshotServiceError::Duplicate) => {
+                Self::conflict("Snapshot already exists")
+            }
+            ControlServiceError::Snapshot(SnapshotServiceError::Conflict) => {
+                Self::conflict("Snapshot is in use")
+            }
             ControlServiceError::Volume(
                 VolumeServiceError::NotFound
                 | VolumeServiceError::Duplicate
@@ -141,7 +161,22 @@ impl From<ControlServiceError> for ApiError {
             | ControlServiceError::Identity(_)
             | ControlServiceError::Template(_)
             | ControlServiceError::Credential(_)
-            | ControlServiceError::Volume(_) => Self::internal(),
+            | ControlServiceError::Volume(_)
+            | ControlServiceError::Snapshot(_) => Self::internal(),
+        }
+    }
+}
+
+impl From<SnapshotServiceError> for ApiError {
+    fn from(error: SnapshotServiceError) -> Self {
+        match error {
+            SnapshotServiceError::InvalidRequest(message) => Self::bad_request(message),
+            SnapshotServiceError::NotFound => Self::snapshot_not_found(),
+            SnapshotServiceError::Duplicate => Self::conflict("Snapshot already exists"),
+            SnapshotServiceError::Conflict => Self::conflict("Snapshot is in use"),
+            SnapshotServiceError::Repository(_)
+            | SnapshotServiceError::Execution(_)
+            | SnapshotServiceError::Model(_) => Self::internal(),
         }
     }
 }

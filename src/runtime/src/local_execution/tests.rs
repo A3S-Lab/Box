@@ -6,8 +6,8 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionGeneration,
     ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
-    ExecutionState, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
-    RestartExecutionOptions,
+    ExecutionSnapshotId, ExecutionState, KillOutcome, NetworkMode, OperationId,
+    ReconcileOutcome, RestartExecutionOptions,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -229,6 +229,7 @@ fn request(external_id: &str) -> CreateExecutionRequest {
         },
         labels,
         policy: Default::default(),
+        rootfs_snapshot_id: None,
     }
 }
 
@@ -1437,4 +1438,301 @@ async fn failed_restart_start_is_terminal_at_the_new_generation() {
             .outcome,
         crate::ManagedRestartOutcome::Failed
     );
+}
+
+fn populate_rootfs(manager: &LocalExecutionManager, execution_id: &ExecutionId, value: &str) {
+    let rootfs = persisted(manager, execution_id).box_dir.join("rootfs");
+    std::fs::create_dir_all(rootfs.join("workspace")).unwrap();
+    std::fs::write(rootfs.join("workspace/state.txt"), value).unwrap();
+}
+
+#[tokio::test]
+async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation() {
+    let (directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("snapshot-source"), &operation("snapshot-create"))
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "captured-state");
+    let snapshot_id = ExecutionSnapshotId::new("managed-snapshot-1").unwrap();
+
+    let snapshot = manager
+        .create_filesystem_snapshot(
+            &running.execution_id,
+            running.generation,
+            &snapshot_id,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.lease.generation, running.generation);
+    assert_eq!(snapshot.state, ExecutionState::Running);
+    assert!(snapshot.size_bytes > 0);
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    assert_eq!(*backend.last_keep_memory.lock().unwrap(), Some(true));
+    assert_eq!(
+        std::fs::read_to_string(
+            directory
+                .path()
+                .join("home/snapshots/managed-snapshot-1/rootfs/workspace/state.txt")
+        )
+        .unwrap(),
+        "captured-state"
+    );
+    assert_eq!(
+        persisted(&manager, &running.execution_id)
+            .managed_execution
+            .unwrap()
+            .generation,
+        running.generation
+    );
+
+    let retry = manager
+        .create_filesystem_snapshot(
+            &running.execution_id,
+            running.generation,
+            &snapshot_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(retry.size_bytes, snapshot.size_bytes);
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    assert!(manager
+        .delete_filesystem_snapshot(&snapshot_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        manager.filesystem_snapshot_size(&snapshot_id).await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn paused_snapshot_remains_paused_and_does_not_resume() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("paused-source"), &operation("paused-create"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "paused-state");
+    let pauses_before = backend.pauses.load(Ordering::Relaxed);
+    let resumes_before = backend.resumes.load(Ordering::Relaxed);
+
+    let snapshot = manager
+        .create_filesystem_snapshot(
+            &running.execution_id,
+            paused.generation,
+            &ExecutionSnapshotId::new("paused-snapshot").unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.state, ExecutionState::Paused);
+    assert_eq!(snapshot.lease.generation, paused.generation);
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), pauses_before);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), resumes_before);
+}
+
+#[tokio::test]
+async fn snapshot_failure_restores_running_state_at_the_same_generation() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("missing-rootfs"), &operation("missing-rootfs-create"))
+        .await
+        .unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("missing-rootfs-snapshot").unwrap();
+
+    let error = manager
+        .create_filesystem_snapshot(
+            &running.execution_id,
+            running.generation,
+            &snapshot_id,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Running)
+    );
+    assert_eq!(
+        record.managed_execution.unwrap().generation,
+        running.generation
+    );
+    assert_eq!(
+        manager.filesystem_snapshot_size(&snapshot_id).await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn reconcile_recovers_a_crash_after_snapshot_pause() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("recovered-snapshot-create");
+    let running = manager
+        .create_and_start(request("recovered-source"), &create_operation)
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "recovered-state");
+    let snapshot_id = ExecutionSnapshotId::new("recovered-snapshot").unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Running,
+            },
+        )
+        .await
+        .unwrap();
+    backend.pause(&claimed, true).await.unwrap();
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let ReconcileOutcome::Ready(lease) = restarted.reconcile(&create_operation).await.unwrap()
+    else {
+        panic!("expected snapshot reconciliation to return a ready lease");
+    };
+
+    assert_eq!(lease.generation, running.generation);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        persisted(&restarted, &running.execution_id)
+            .managed_state()
+            .unwrap(),
+        Some(ManagedExecutionState::Running)
+    );
+    assert!(restarted
+        .filesystem_snapshot_size(&snapshot_id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
+    let (_directory, manager, _backend) = harness();
+    let running = manager
+        .create_and_start(request("delete-source"), &operation("delete-source-create"))
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "delete-state");
+    let snapshot_id = ExecutionSnapshotId::new("delete-protected-snapshot").unwrap();
+    manager
+        .create_filesystem_snapshot(
+            &running.execution_id,
+            running.generation,
+            &snapshot_id,
+        )
+        .await
+        .unwrap();
+    let mut restored_request = request("restored-reservation");
+    restored_request.rootfs_snapshot_id = Some(snapshot_id.clone());
+    let restored = manager
+        .create(restored_request, &operation("restored-reservation-create"))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        manager.delete_filesystem_snapshot(&snapshot_id).await,
+        Err(ExecutionManagerError::Conflict { .. })
+    ));
+    let record = persisted(&manager, &restored.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Created,
+            ManagedExecutionState::Stopped,
+            RuntimeUpdate::Terminal(None),
+        )
+        .await
+        .unwrap();
+    assert!(manager
+        .delete_filesystem_snapshot(&snapshot_id)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn snapshot_delete_and_restored_reservation_are_atomic() {
+    let (_directory, manager, _backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("atomic-delete-source"),
+            &operation("atomic-delete-source-create"),
+        )
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "atomic-delete-state");
+
+    for index in 0..16 {
+        let snapshot_id =
+            ExecutionSnapshotId::new(format!("atomic-delete-snapshot-{index}")).unwrap();
+        manager
+            .create_filesystem_snapshot(
+                &running.execution_id,
+                running.generation,
+                &snapshot_id,
+            )
+            .await
+            .unwrap();
+        let mut restored_request = request(&format!("atomic-restored-{index}"));
+        restored_request.rootfs_snapshot_id = Some(snapshot_id.clone());
+        let create_operation = operation(&format!("atomic-restored-create-{index}"));
+        let create_manager = manager.clone();
+        let delete_manager = manager.clone();
+        let delete_snapshot_id = snapshot_id.clone();
+
+        let (created, deleted) = tokio::join!(
+            create_manager.create(restored_request, &create_operation),
+            delete_manager.delete_filesystem_snapshot(&delete_snapshot_id),
+        );
+
+        match (created, deleted) {
+            (Ok(restored), Err(ExecutionManagerError::Conflict { .. })) => {
+                let record = persisted(&manager, &restored.execution_id);
+                manager
+                    .transition(
+                        &record,
+                        ManagedExecutionState::Created,
+                        ManagedExecutionState::Stopped,
+                        RuntimeUpdate::Terminal(None),
+                    )
+                    .await
+                    .unwrap();
+                assert!(manager
+                    .delete_filesystem_snapshot(&snapshot_id)
+                    .await
+                    .unwrap());
+            }
+            (Err(ExecutionManagerError::Unavailable(_)), Ok(true)) => {
+                assert!(matches!(
+                    manager.reconcile(&create_operation).await.unwrap(),
+                    ReconcileOutcome::Absent
+                ));
+            }
+            (created, deleted) => {
+                panic!(
+                    "restored reservation and Snapshot deletion were not atomic: \
+                     create={created:?}, delete={deleted:?}"
+                );
+            }
+        }
+    }
 }
