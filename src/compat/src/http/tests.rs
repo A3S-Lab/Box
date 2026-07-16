@@ -103,11 +103,73 @@ async fn router_serves_the_pinned_official_lifecycle_shape() {
     assert_eq!(listed[0]["sandboxID"], "sandbox-1");
     assert_eq!(listed[0]["state"], "running");
 
+    let response = send(
+        &app,
+        Method::GET,
+        "/sandboxes?metadata=team%3Dalpha%252520beta&state=paused",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await.as_array().unwrap().len(), 1);
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/refreshes",
+        Some(json!({"duration": 60})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/refreshes",
+        Some(json!({})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/refreshes",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/refreshes",
+        Some(json!({"duration": 3_600, "futureField": true})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
     let response = send(&app, Method::GET, "/sandboxes/sandbox-1", None, true).await;
     assert_eq!(response.status(), StatusCode::OK);
     let detail = body_json(response).await;
     assert_eq!(detail["allowInternetAccess"], false);
     assert_eq!(detail["lifecycle"]["onTimeout"], "pause");
+    assert_eq!(detail["endAt"], "2026-07-14T13:00:00Z");
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/refreshes",
+        Some(json!({"duration": 3_601})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let response = send(
         &app,
@@ -132,6 +194,90 @@ async fn router_serves_the_pinned_official_lifecycle_shape() {
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(body_json(response).await["code"], 404);
+}
+
+#[tokio::test]
+async fn router_serves_single_and_batch_runtime_metrics() {
+    let app = app();
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes",
+        Some(json!({
+            "templateID": "runtime-envd-template",
+            "timeout": 60
+        })),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = send(
+        &app,
+        Method::GET,
+        "/sandboxes/sandbox-1/metrics",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let metrics = body_json(response).await;
+    assert_eq!(metrics.as_array().unwrap().len(), 1);
+    assert_eq!(metrics[0]["timestamp"], "2026-07-14T12:00:00Z");
+    assert_eq!(metrics[0]["timestampUnix"], test_timestamp());
+    assert_eq!(metrics[0]["cpuCount"], 2);
+    assert_eq!(metrics[0]["memCache"], 0);
+    assert_eq!(metrics[0]["diskTotal"], 1_073_741_824_u64);
+
+    let response = send(
+        &app,
+        Method::GET,
+        "/sandboxes/sandbox-1/metrics?start=0&end=1",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_json(response).await.as_array().unwrap().is_empty());
+
+    let response = send(
+        &app,
+        Method::GET,
+        "/sandboxes/metrics?sandbox_ids=sandbox-1,missing-sandbox",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let batch = body_json(response).await;
+    assert_eq!(batch["sandboxes"]["sandbox-1"]["cpuCount"], 2);
+    assert!(batch["sandboxes"].get("missing-sandbox").is_none());
+
+    let response = send(
+        &app,
+        Method::GET,
+        "/sandboxes/sandbox-1/metrics?start=2&end=1",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = send(
+        &app,
+        Method::GET,
+        "/sandboxes/missing-sandbox/metrics",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+fn test_timestamp() -> i64 {
+    chrono::DateTime::parse_from_rfc3339("2026-07-14T12:00:00Z")
+        .unwrap()
+        .timestamp()
 }
 
 #[tokio::test]

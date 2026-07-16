@@ -305,6 +305,7 @@ impl ExecutionPortConnector for RecordingExecutionManager {
         let (stream, peer) = tokio::io::duplex(64 * 1024);
         let status =
             hyper::StatusCode::from_u16(self.runtime_envd_status.load(Ordering::Relaxed)).unwrap();
+        let metrics_timestamp = self.clock.now().timestamp();
         let requests = self.runtime_envd_requests.clone();
         tokio::spawn(async move {
             let service =
@@ -314,12 +315,36 @@ impl ExecutionPortConnector for RecordingExecutionManager {
                         let method = request.method().to_string();
                         let path = request.uri().path().to_string();
                         let body = hyper::body::to_bytes(request.into_body()).await.unwrap();
-                        let body = serde_json::from_slice(&body).unwrap();
+                        let body = if body.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::from_slice(&body).unwrap()
+                        };
+                        let is_metrics = path == "/metrics";
                         requests.lock().unwrap().push((method, path, body));
+                        let (response_status, response_body) = if is_metrics {
+                            (
+                                hyper::StatusCode::OK,
+                                hyper::Body::from(
+                                    serde_json::to_vec(&serde_json::json!({
+                                        "ts": metrics_timestamp,
+                                        "cpu_count": 2,
+                                        "cpu_used_pct": 12.5,
+                                        "mem_used": 134_217_728_u64,
+                                        "mem_total": 536_870_912_u64,
+                                        "disk_used": 268_435_456_u64,
+                                        "disk_total": 1_073_741_824_u64,
+                                    }))
+                                    .unwrap(),
+                                ),
+                            )
+                        } else {
+                            (status, hyper::Body::empty())
+                        };
                         Ok::<_, Infallible>(
                             hyper::Response::builder()
-                                .status(status)
-                                .body(hyper::Body::empty())
+                                .status(response_status)
+                                .body(response_body)
                                 .unwrap(),
                         )
                     }

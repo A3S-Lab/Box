@@ -18,7 +18,7 @@ unversioned claim.
 | Area | Implemented evidence | Remaining gate |
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
-| Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete templates, snapshots, volumes, metrics, pagination edge cases, and host-reboot recovery |
+| Lifecycle protocol | Owner-scoped create, connect, get, v1/v2 list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete templates, snapshots, volumes, pause/resume, logs, network updates, historical metrics, pagination edge cases, and host-reboot recovery |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
 | Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, reconnect, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery and the unimplemented control-plane surfaces |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
@@ -36,12 +36,16 @@ the same matrix through the A3S Python sync/async and TypeScript packages after
 removing every `E2B_*` connection variable. Both paths cover lifecycle, health,
 Filesystem operations, foreground/background Process operations, stdin, PTY,
 Python execution, interpreter contexts, restart recovery, and cleanup. The
-same production gate validates envd metrics, the initialized environment, and
-metadata-preserving HTTP upload/download. Remaining control, volume-content,
-signed-file, public-port, streaming edge-case, interpreter, and MCP surfaces
-are not covered. This is production evidence for a useful subset, not the full
-black-box compatibility matrix, so `full_compatibility=false` remains
-mandatory.
+same production gate validates current control-plane metrics for every
+official and A3S client, an empty historical range, v1 running-list behavior,
+monotonic refresh, batch metrics, envd metrics, the initialized environment,
+and metadata-preserving HTTP upload/download. Current metrics are read through
+the generation-fenced runtime-envd connection; `memCache` is reported as zero
+because the pinned envd metrics response has no cache-usage field. Historical
+retention remains open. Remaining control, volume-content, signed-file,
+public-port, streaming edge-case, interpreter, and MCP surfaces are not covered.
+This is production evidence for a useful subset, not the full black-box
+compatibility matrix, so `full_compatibility=false` remains mandatory.
 
 ## Executive decision
 
@@ -754,10 +758,11 @@ sockets.
 
 ## Phase 2 implementation architecture
 
-Phase 2 is a single-host control-plane preview. It proves the complete
-create/connect/get/list/timeout/kill path against a real A3S OS runtime before
-introducing multi-host scheduling. The public protocol and internal interfaces
-must not assume that the single-host limit is part of the upstream contract.
+Phase 2 is a single-host control-plane preview. It proves the implemented
+create/connect/get/list/timeout/refresh/current-metrics/kill path against a real
+A3S OS runtime before introducing multi-host scheduling. The public protocol
+and internal interfaces must not assume that the single-host limit is part of
+the upstream contract.
 
 ### Dependency direction
 
@@ -834,7 +839,7 @@ src/compat/src/
     credential.rs     # injected credential and token interfaces
     model.rs          # lifecycle records and public/internal state mapping
     repository.rs     # transactional persistence interface
-    service.rs        # create/connect/list/timeout/kill use cases
+    service.rs        # lifecycle, refresh, and current-metric use cases
     sqlite/           # WAL repository and versioned migrations
     supervisor.rs     # expiry reaping and startup reconciliation
   http/
@@ -984,9 +989,11 @@ Phase 2 is delivered as small, immediately merged changes:
    pass lifecycle and health through the production listeners, then official
    and A3S Python sync/async and TypeScript packages pass Filesystem,
    foreground/background Process, stdin, PTY, Python execution, and context
-   lifecycle against real Sandboxes. Complete the remaining pinned control,
-   envd, signed-file, public-port, streaming edge-case, interpreter, and MCP
-   matrices without broadening this subset into a full compatibility claim.
+   lifecycle plus current metrics against real Sandboxes. The enclosing smoke
+   passes v1 listing, monotonic refresh, and batch metrics. Complete the
+   remaining pinned control, envd, signed-file, public-port, streaming
+   edge-case, interpreter, and MCP matrices without broadening this subset into
+   a full compatibility claim.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
 is the canonical schema shared by the CLI and Rust SDK, preventing either
@@ -1063,9 +1070,10 @@ runtime cleanup through the real Sandbox backend without invoking the CLI.
 Each slice must pass its focused tests and repository CI before merge. The
 durable repository, production execution manager, credentials, routing, and
 lifecycle HTTP router are now composed in one ACL-configured process. The real
-create/connect/list/timeout/kill matrix now passes through that production
-control listener and real Sandbox executions. Returned official-client Sandbox
-objects traverse the production TLS listener for running and post-kill health.
+create/connect/list/timeout/refresh/metrics/kill matrix now passes through that
+production control listener and real Sandbox executions. Returned
+official-client Sandbox objects traverse the production TLS listener for
+running and post-kill health.
 The official and A3S client paths also pass the production Filesystem, Process,
 stdin, PTY, Python execution, and context subset described above. The complete
 compatibility gate remains closed until every remaining control, envd,
@@ -1076,14 +1084,15 @@ complementary evidence, not proof of the missing behavior.
 Slice 2 evidence includes exact recorder drift checks plus live requests from
 the pinned, unmodified clients to the Rust router. The live gate was also run
 on an A3S OS host before merge. It covers authentication, owner isolation,
-create, connect, get, list filtering, timeout replacement, kill, not-found
-mapping, and Code Interpreter creation. It does not change the manifest's
-`full_compatibility=false` value.
+create, connect, get, v1/v2 listing, timeout replacement, monotonic refresh,
+current single/batch metrics, kill, not-found mapping, and Code Interpreter
+creation. It does not change the manifest's `full_compatibility=false` value.
 
 The production lifecycle gate reuses the artifact checksums from
 `upstream.lock.json` and runs the published Python sync, Python async,
 TypeScript, and Code Interpreter packages without source changes. On A3S OS it
-has passed create, reconnect, filtered list, timeout replacement, kill,
+has passed create, reconnect, filtered list, timeout replacement, monotonic
+refresh, current metrics with historical-range filtering, batch metrics, kill,
 not-found mapping, Code Interpreter lifecycle creation, running and post-kill
 `is_running`/`isRunning` over authenticated wildcard TLS, Filesystem operations,
 foreground/background commands, list, stdin send/close, wait, PTY
@@ -1126,15 +1135,16 @@ implementation begins.
 
 ### Phase 2: lifecycle and routing (in progress)
 
-- Implemented authentication, create/connect/get/list/kill/timeout, filtered
-  listing, durable mappings, wildcard routing, and traffic tokens.
+- Implemented authentication, create/connect/get/v1-v2-list/kill/timeout,
+  monotonic refresh, current single/batch metrics, filtered listing, durable
+  mappings, wildcard routing, and traffic tokens.
 - Every create routes through A3S execution resolution and persists its plan.
 - Requested lifetime begins only after runtime and envd readiness, including
-  startup recovery. Full pagination edge cases, host-reboot recovery, and
-  certificate rotation remain open.
+  startup recovery. Historical metrics, full pagination edge cases, host-reboot
+  recovery, and certificate rotation remain open.
 
-Gate: unmodified official SDKs create, reconnect to, list, time out, and kill an
-A3S sandbox.
+Gate: unmodified official SDKs create, reconnect to, list, refresh, read current
+metrics from, time out, and kill an A3S sandbox.
 
 ### Phase 3: commands, files, and PTY (in progress)
 
@@ -1167,8 +1177,8 @@ patches.
 
 ### Phase 5: complete public surface
 
-- Implement templates/builds, snapshots, pause/resume, volumes, metrics,
-  network policy, routed ports, and remaining public helpers.
+- Implement templates/builds, snapshots, pause/resume, volumes, historical
+  metrics, network policy, routed ports, and remaining public helpers.
 - Run compatibility across every supported SDK/version tuple.
 
 Gate: the complete public SDK inventory has an observed passing test or an
