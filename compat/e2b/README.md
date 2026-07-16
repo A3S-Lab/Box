@@ -98,10 +98,11 @@ Invalid tokens remain unauthorized, and no live route lease is reopened.
 The destructive A3S OS integration harness is
 [`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
 requires a dedicated runtime home and explicit acknowledgement, and verifies a
-real Sandbox lifecycle, TLS direct/shared routing, token-scope denial, service
-restart recovery, envd health/metrics/environment, metadata-preserving HTTP
-file upload and download, a traffic-scoped workload service on port `49999`,
-stale-route fencing, and resource cleanup. The default
+real Sandbox lifecycle, v1 running-list behavior, monotonic refresh with an
+optional body, current batch metrics, TLS direct/shared routing, token-scope
+denial, service restart recovery, envd health/metrics/environment,
+metadata-preserving HTTP file upload and download, a traffic-scoped workload
+service on port `49999`, stale-route fencing, and resource cleanup. The default
 `localhost.localdomain` wildcard is DNS- and TLS-preflighted before a Sandbox
 starts. With
 `A3S_BOX_E2B_OFFICIAL_CLIENTS=1`, it additionally runs the checksum-pinned,
@@ -111,13 +112,14 @@ health methods through the TLS gateway before and after kill, and verifies
 cleanup of every real `crun` execution. The clients exercise foreground and
 background commands, process listing, stdin send/close, wait, PTY
 create/resize/input/wait, Filesystem remove/mkdir/write/read/stat/list/rename,
-and Python Code Interpreter execution plus context create/list/run/restart/remove.
+current Sandbox metrics with historical-range filtering, and Python Code
+Interpreter execution plus context create/list/run/restart/remove.
 
 With `A3S_BOX_E2B_NATIVE_SDKS=1`, the harness repeats that matrix through the
 A3S Python sync/async and TypeScript packages after removing every `E2B_*`
 connection variable and configuring only `A3S_BOX_*`. This production subset
 passes on A3S OS with certified `crun`, but it does not establish full protocol
 compatibility. Templates, snapshots, volumes, volume-content, signed files,
-MCP, additional signals, reconnect, cancellation, backpressure, multi-file and
-large-file behavior, and other pinned edge cases remain outside the matrix, so
-`full_compatibility=false` remains mandatory.
+historical metrics, MCP, additional signals, reconnect, cancellation,
+backpressure, multi-file and large-file behavior, and other pinned edge cases
+remain outside the matrix, so `full_compatibility=false` remains mandatory.
