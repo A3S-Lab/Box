@@ -54,7 +54,16 @@ def prepare_native_typescript(temp: Path, client: Path) -> None:
         check=True,
     )
     compiler = environment / "node_modules" / ".bin" / "tsc"
-    subprocess.run([str(compiler), "-p", "tsconfig.json"], cwd=build_source, check=True)
+    dependencies = build_source / "node_modules"
+    dependencies.symlink_to(environment / "node_modules", target_is_directory=True)
+    try:
+        subprocess.run(
+            [str(compiler), "-p", "tsconfig.json"],
+            cwd=build_source,
+            check=True,
+        )
+    finally:
+        dependencies.unlink(missing_ok=True)
     packed = subprocess.run(
         ["npm", "pack", "--ignore-scripts", "--pack-destination", str(temp)],
         cwd=build_source,
