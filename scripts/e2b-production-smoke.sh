@@ -9,7 +9,7 @@ TOKEN_DIGEST="$(printf '08%.0s' {1..32})"
 PORT="${A3S_BOX_E2B_SMOKE_PORT:-38081}"
 GATEWAY_PORT="${A3S_BOX_E2B_GATEWAY_SMOKE_PORT:-38443}"
 GATEWAY_ADDRESS="${A3S_BOX_E2B_GATEWAY_SMOKE_ADDRESS:-127.0.0.1}"
-SANDBOX_DOMAIN="${A3S_BOX_E2B_SANDBOX_DOMAIN:-box.example.com}"
+SANDBOX_DOMAIN="${A3S_BOX_E2B_SANDBOX_DOMAIN:-localhost.localdomain}"
 SANDBOX_PUBLIC_DOMAIN="$SANDBOX_DOMAIN"
 if [[ "$GATEWAY_PORT" != "443" ]]; then
   SANDBOX_PUBLIC_DOMAIN="$SANDBOX_DOMAIN:$GATEWAY_PORT"
@@ -72,6 +72,30 @@ then
 fi
 [[ "$SANDBOX_DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] ||
   fail 'A3S_BOX_E2B_SANDBOX_DOMAIN must be a DNS name'
+DNS_PREFLIGHT_HOST="a3s-e2b-preflight.$SANDBOX_DOMAIN"
+if ! python3 - "$DNS_PREFLIGHT_HOST" "$GATEWAY_ADDRESS" <<'PY'
+import ipaddress
+import socket
+import sys
+
+hostname = sys.argv[1]
+expected = ipaddress.ip_address(sys.argv[2])
+try:
+    addresses = {
+        ipaddress.ip_address(item[4][0])
+        for item in socket.getaddrinfo(hostname, None)
+    }
+except OSError as error:
+    raise SystemExit(f"{hostname} did not resolve: {error}") from error
+if expected not in addresses:
+    rendered = ", ".join(sorted(str(address) for address in addresses))
+    raise SystemExit(
+        f"{hostname} resolved to [{rendered}], not gateway {expected}"
+    )
+PY
+then
+  fail 'Sandbox wildcard DNS does not resolve to the configured loopback gateway'
+fi
 command -v openssl >/dev/null || fail 'openssl is required for the TLS gateway smoke'
 umask 077
 STATE_DIR="$A3S_HOME/e2b-compat-smoke"
@@ -141,18 +165,28 @@ status_request() {
   curl "${arguments[@]}" "$BASE_URL$path"
 }
 
+gateway_request() {
+  local host="$1"
+  local output="$2"
+  local token_header="$3"
+  local token="$4"
+  local path="$5"
+  shift 5
+  curl --silent --show-error --output "$output" --write-out '%{http_code}' \
+    --noproxy '*' \
+    --cacert "$TLS_CERT" \
+    --resolve "$host:$GATEWAY_PORT:$GATEWAY_RESOLVE" \
+    --header "$token_header: $token" \
+    "$@" "https://$host:$GATEWAY_PORT$path"
+}
+
 gateway_status() {
   local host="$1"
   local output="$2"
   local token_header="$3"
   local token="$4"
   shift 4
-  curl --silent --show-error --output "$output" --write-out '%{http_code}' \
-    --noproxy '*' \
-    --cacert "$TLS_CERT" \
-    --resolve "$host:$GATEWAY_PORT:$GATEWAY_RESOLVE" \
-    --header "$token_header: $token" \
-    "$@" "https://$host:$GATEWAY_PORT/health"
+  gateway_request "$host" "$output" "$token_header" "$token" /health "$@"
 }
 
 wait_gateway_ready() {
@@ -279,6 +313,9 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
   -subj "/CN=*.$SANDBOX_DOMAIN" \
   -addext "subjectAltName=DNS:*.$SANDBOX_DOMAIN,DNS:sandbox.$SANDBOX_DOMAIN" \
   -keyout "$TLS_KEY" -out "$TLS_CERT" >/dev/null 2>&1
+openssl verify -CAfile "$TLS_CERT" -verify_hostname "$DNS_PREFLIGHT_HOST" \
+  "$TLS_CERT" >/dev/null ||
+  fail 'generated wildcard TLS certificate does not cover Sandbox routes'
 cat >"$CONFIG" <<EOF
 e2b_compat {
   api_listen = "127.0.0.1:$PORT"
@@ -413,6 +450,84 @@ wait_gateway_ready "$DIRECT_HOST" || fail 'TLS direct route did not become ready
 [[ ! -s "$STATE_DIR/shared-body.txt" ]] ||
   fail 'TLS shared envd health returned an unexpected response body'
 
+if [[ -n "$RUNTIME_IMAGE" ]]; then
+  METRICS_RESPONSE="$STATE_DIR/envd-metrics.json"
+  [[ "$(gateway_request "$DIRECT_HOST" "$METRICS_RESPONSE" X-Access-Token "$ENVD_TOKEN" /metrics)" == "200" ]] ||
+    fail 'runtime envd metrics did not return HTTP 200'
+  if ! python3 - "$METRICS_RESPONSE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    metrics = json.load(source)
+integer_fields = ("ts", "cpu_count", "mem_total", "mem_used", "disk_used", "disk_total")
+for field in integer_fields:
+    if type(metrics.get(field)) is not int or metrics[field] < 0:
+        raise SystemExit(f"invalid non-negative integer metric {field!r}: {metrics.get(field)!r}")
+if type(metrics.get("cpu_used_pct")) not in (int, float) or metrics["cpu_used_pct"] < 0:
+    raise SystemExit(f"invalid cpu_used_pct: {metrics.get('cpu_used_pct')!r}")
+if type(metrics.get("cpu_count")) is not int or metrics["cpu_count"] < 1:
+    raise SystemExit(f"invalid cpu_count: {metrics.get('cpu_count')!r}")
+PY
+  then
+    fail 'runtime envd metrics violated the pinned schema'
+  fi
+
+  ENVS_RESPONSE="$STATE_DIR/envd-envs.json"
+  [[ "$(gateway_request "$DIRECT_HOST" "$ENVS_RESPONSE" X-Access-Token "$ENVD_TOKEN" /envs)" == "200" ]] ||
+    fail 'runtime envd environment did not return HTTP 200'
+  if ! python3 - "$ENVS_RESPONSE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    environment = json.load(source)
+if environment.get("SMOKE") != "true":
+    raise SystemExit(f"unexpected SMOKE value: {environment.get('SMOKE')!r}")
+PY
+  then
+    fail 'runtime envd environment omitted the create-time variable'
+  fi
+
+  ENVD_FILE_PATH='/tmp/a3s-box-envd-http-smoke.txt'
+  ENVD_FILE_QUERY='/files?path=%2Ftmp%2Fa3s-box-envd-http-smoke.txt&username=user'
+  ENVD_FILE_SOURCE="$STATE_DIR/envd-upload.txt"
+  ENVD_UPLOAD_RESPONSE="$STATE_DIR/envd-upload.json"
+  ENVD_DOWNLOAD_RESPONSE="$STATE_DIR/envd-download.txt"
+  printf '%s' 'A3S Box runtime envd HTTP transfer' >"$ENVD_FILE_SOURCE"
+  [[ "$(gateway_request "$DIRECT_HOST" "$ENVD_UPLOAD_RESPONSE" X-Access-Token "$ENVD_TOKEN" \
+    "$ENVD_FILE_QUERY" --request POST \
+    --header 'X-Metadata-A3S-Smoke: envd-http' \
+    --form "file=@$ENVD_FILE_SOURCE;filename=a3s-box-envd-http-smoke.txt")" == "200" ]] ||
+    fail 'runtime envd file upload did not return HTTP 200'
+  if ! python3 - "$ENVD_UPLOAD_RESPONSE" "$ENVD_FILE_PATH" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    entries = json.load(source)
+if not isinstance(entries, list) or len(entries) != 1:
+    raise SystemExit(f"unexpected upload response: {entries!r}")
+entry = entries[0]
+if entry.get("path") != sys.argv[2] or entry.get("name") != "a3s-box-envd-http-smoke.txt":
+    raise SystemExit(f"unexpected uploaded entry: {entry!r}")
+if entry.get("type") != "file":
+    raise SystemExit(f"unexpected uploaded entry type: {entry!r}")
+if entry.get("metadata", {}).get("a3s-smoke") != "envd-http":
+    raise SystemExit(f"uploaded metadata was not preserved: {entry!r}")
+PY
+  then
+    fail 'runtime envd file upload violated the pinned schema'
+  fi
+  [[ "$(gateway_request "$DIRECT_HOST" "$ENVD_DOWNLOAD_RESPONSE" X-Access-Token "$ENVD_TOKEN" \
+    "$ENVD_FILE_QUERY")" == "200" ]] ||
+    fail 'runtime envd file download did not return HTTP 200'
+  cmp --silent "$ENVD_FILE_SOURCE" "$ENVD_DOWNLOAD_RESPONSE" ||
+    fail 'runtime envd file download differed from the uploaded content'
+  [[ "$(gateway_request "$DIRECT_HOST" /dev/null X-Access-Token wrong-token /metrics)" == "401" ]] ||
+    fail 'runtime envd metrics accepted an invalid token'
+fi
+
 TRAFFIC_HOST="49999-$SANDBOX_ID.$SANDBOX_DOMAIN"
 [[ "$(gateway_status "$TRAFFIC_HOST" "$STATE_DIR/traffic-body.txt" E2B-Traffic-Access-Token "$TRAFFIC_TOKEN")" == "200" ]] ||
   fail 'TLS traffic route did not return HTTP 200'
@@ -528,4 +643,4 @@ PY
 fi
 
 stop_service
-printf 'E2B production smoke passed: lifecycle, host envd health, TLS traffic proxy, restart recovery, credentials, official clients when enabled, and cleanup\n'
+printf 'E2B production smoke passed: lifecycle, envd HTTP, TLS traffic proxy, restart recovery, credentials, official clients when enabled, and cleanup\n'
