@@ -148,7 +148,7 @@ async fn router_serves_owner_scoped_volume_control_and_bearer_content() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(body_bytes(response).await, b"hello-volume");
+    assert_eq!(&body_bytes(response).await[..], b"hello-volume");
 
     let response = send_raw(
         &app,
