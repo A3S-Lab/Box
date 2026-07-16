@@ -56,11 +56,11 @@ impl SandboxRoutePolicy {
         if self.ports.get(&ENVD_PORT) != Some(&TokenScope::Envd) {
             return Err(RoutePolicyError::MissingEnvd);
         }
-        if self
-            .ports
-            .iter()
-            .any(|(port, scope)| *port == 0 || (*scope == TokenScope::Envd && *port != ENVD_PORT))
-        {
+        if self.ports.iter().any(|(port, scope)| {
+            *port == 0
+                || (*scope == TokenScope::Envd && *port != ENVD_PORT)
+                || *scope == TokenScope::Volume
+        }) {
             return Err(RoutePolicyError::InvalidScope);
         }
         Ok(())

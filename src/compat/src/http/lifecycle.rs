@@ -25,8 +25,11 @@ pub async fn create(
     Extension(account): Extension<AuthenticatedAccount>,
     body: Result<Json<NewSandboxBody>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let request = body?.0.into_control(account.owner_id)?;
-    let connection = state.service().create(request).await?;
+    let (request, volume_mounts) = body?.0.into_control(account.owner_id)?;
+    let connection = state
+        .service()
+        .create_with_mounts(request, volume_mounts)
+        .await?;
     let (response, _) = SandboxResponse::from_connection(
         connection,
         account.client_id,

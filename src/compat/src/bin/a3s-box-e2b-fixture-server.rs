@@ -9,12 +9,16 @@ use a3s_box_compat::control::{
     Clock, ControlService, ControlServiceDependencies, IdentityProviderResult, IssuedToken,
     MemorySandboxRepository, ResolvedTemplate, SandboxIdentity, SandboxIdentityProvider,
     SecretToken, StoredToken, TemplateProvider, TemplateProviderError, TemplateProviderResult,
-    TokenIssuer, TokenIssuerError, TokenIssuerResult, TokenResolver, TokenScope,
+    TokenIssuer, TokenIssuerError, TokenIssuerResult, TokenResolver, TokenScope, TokenVerifier,
 };
 use a3s_box_compat::http::{
     lifecycle_router, AuthenticatedAccount, AuthenticationError, AuthenticationResult,
     CredentialScheme, CredentialVerifier, CursorDecoder, CursorError, CursorResult,
     LifecycleHttpConfig, LifecycleHttpState, PresentedCredential,
+};
+use a3s_box_compat::volume::{
+    A3sRuntimeVolumeStore, IdentityVolumeIdMapper, MemoryVolumeRepository, VolumeFilesystem,
+    VolumeService, VolumeServiceDependencies,
 };
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
@@ -39,19 +43,34 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let port_file = parse_port_file()?;
+    let volume_home = port_file.with_extension("volume-runtime");
     let clock = Arc::new(FixedClock(fixture_time()?));
     let tokens = Arc::new(FixtureTokens);
     let executions = Arc::new(FixtureExecutionManager::new(clock.clone()));
-    let service = Arc::new(ControlService::new(ControlServiceDependencies {
-        repository: Arc::new(MemorySandboxRepository::default()),
-        executions: executions.clone(),
-        ports: executions,
-        clock,
-        identities: Arc::new(FixtureIdentities::default()),
-        templates: Arc::new(FixtureTemplates),
+    let volumes = Arc::new(VolumeService::new(VolumeServiceDependencies {
+        repository: Arc::new(MemoryVolumeRepository::default()),
+        runtime: Arc::new(A3sRuntimeVolumeStore::new(&volume_home)),
+        clock: clock.clone(),
         token_issuer: tokens.clone(),
-        token_resolver: tokens,
+        token_resolver: tokens.clone(),
+        token_verifier: tokens.clone(),
+        filesystem: Arc::new(VolumeFilesystem::new(Arc::new(
+            IdentityVolumeIdMapper::current(),
+        ))),
     }));
+    let service = Arc::new(
+        ControlService::new(ControlServiceDependencies {
+            repository: Arc::new(MemorySandboxRepository::default()),
+            executions: executions.clone(),
+            ports: executions,
+            clock,
+            identities: Arc::new(FixtureIdentities::default()),
+            templates: Arc::new(FixtureTemplates),
+            token_issuer: tokens.clone(),
+            token_resolver: tokens,
+        })
+        .with_volume_mount_resolver(volumes.clone()),
+    );
     let state = LifecycleHttpState::new(
         service,
         Arc::new(FixtureCredentialVerifier),
@@ -60,7 +79,8 @@ async fn run() -> Result<()> {
             domain: Some("fixture.invalid".to_string()),
             ..LifecycleHttpConfig::default()
         },
-    );
+    )
+    .with_volume_service(volumes);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .context("bind fixture listener")?;
@@ -178,6 +198,7 @@ impl TokenIssuer for FixtureTokens {
         let secret = match scope {
             TokenScope::Envd => "fixture-envd-token",
             TokenScope::Traffic => "fixture-traffic-token",
+            TokenScope::Volume => "fixture-volume-token",
         };
         Ok(IssuedToken {
             secret: SecretToken::new(secret)?,
@@ -200,6 +221,22 @@ impl TokenResolver for FixtureTokens {
         let value = std::str::from_utf8(stored.ciphertext())
             .map_err(|_| TokenIssuerError::InvalidMaterial)?;
         SecretToken::new(value)
+    }
+}
+
+#[async_trait]
+impl TokenVerifier for FixtureTokens {
+    async fn verify(
+        &self,
+        scope: TokenScope,
+        presented: &SecretToken,
+        stored: &StoredToken,
+    ) -> TokenIssuerResult<bool> {
+        if scope != TokenScope::Volume {
+            return Ok(false);
+        }
+        let digest = Sha256::digest(presented.expose_secret().as_bytes());
+        Ok(digest[..] == stored.digest()[..])
     }
 }
 

@@ -6,6 +6,8 @@ mod error;
 mod lifecycle;
 mod logs;
 mod router;
+mod volume_content;
+mod volumes;
 
 pub use account::{
     CredentialHash, CredentialHashError, CredentialHashResult, HashedAccountCredential,

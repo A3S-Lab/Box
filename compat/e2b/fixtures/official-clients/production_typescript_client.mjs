@@ -8,7 +8,7 @@ const baseSdk = await import(nativeSdk ? '@a3s-lab/box' : 'e2b')
 const codeInterpreterSdk = await import(
   nativeSdk ? '@a3s-lab/box/code-interpreter' : '@e2b/code-interpreter'
 )
-const { Sandbox, SandboxNotFoundError } = baseSdk
+const { Sandbox, SandboxNotFoundError, Volume, VolumeError } = baseSdk
 const { Sandbox: CodeInterpreter } = codeInterpreterSdk
 
 const [apiUrl, domain, template] = process.argv.slice(2)
@@ -24,11 +24,16 @@ const connection = nativeSdk
       process.env
     ).typescriptOptions()
   : { apiKey, apiUrl, domain }
+const volumeConnection = nativeSdk
+  ? baseSdk.A3SConnectionConfig.fromEnvironment(process.env).volumeOptions()
+  : { apiUrl }
 const metadata = { client: 'typescript', suite: 'production-official' }
 const clientLabel = `${nativeSdk ? 'a3s' : 'official'}-typescript`
+const volumeName = `${clientLabel}-volume`
 const trace = (stage) => console.log(`${clientLabel}:${stage}`)
 let sandbox
 let interpreter
+let volume
 
 async function exerciseDataPlane(sandbox, label) {
   const root = `a3s-runtime-${label}`
@@ -139,6 +144,37 @@ async function exerciseInterpreter(interpreter, label) {
 }
 
 try {
+  trace('volume.create')
+  volume = await Volume.create(volumeName, connection)
+  assert.equal(volume.name, volumeName)
+  assert.ok(volume.volumeId)
+  assert.ok(volume.token)
+  trace('volume.connect')
+  const connectedVolume = await Volume.connect(volume.volumeId, connection)
+  assert.equal(connectedVolume.name, volumeName)
+  trace('volume.list')
+  assert.ok(
+    (await Volume.list(connection)).some(
+      (item) => item.volumeId === volume.volumeId
+    )
+  )
+  trace('volume.make-dir')
+  await volume.makeDir('/shared', {
+    ...volumeConnection,
+    uid: 1000,
+    gid: 1000,
+    mode: 0o777,
+    force: true,
+  })
+  const apiVolumeContent = 'typescript-api-to-sandbox'
+  trace('volume.api-write')
+  await volume.writeFile('/shared/from-api.txt', apiVolumeContent, {
+    ...volumeConnection,
+    uid: 1000,
+    gid: 1000,
+    mode: 0o644,
+  })
+
   trace('sandbox.create')
   sandbox = await Sandbox.create(template, {
     ...connection,
@@ -147,6 +183,7 @@ try {
     envs: { OFFICIAL_CLIENT: 'typescript' },
     secure: true,
     allowInternetAccess: false,
+    volumeMounts: { '/mnt/data': volume },
   })
   trace('sandbox.connect')
   const connected = await Sandbox.connect(sandbox.sandboxId, {
@@ -185,6 +222,45 @@ try {
   assert.equal(command.stdout, 'typescript:typescript')
   assert.equal(command.stderr, '')
   trace('process.foreground.complete')
+  trace('volume.sandbox-read')
+  const mounted = await sandbox.commands.run(
+    'cat /mnt/data/shared/from-api.txt'
+  )
+  assert.equal(mounted.stdout, apiVolumeContent)
+  assert.equal(mounted.stderr, '')
+  trace('volume.sandbox-stat')
+  const ownership = await sandbox.commands.run(
+    "stat -c '%u:%g' /mnt/data/shared/from-api.txt"
+  )
+  assert.equal(ownership.stdout.trim(), '1000:1000')
+  const identity = await sandbox.commands.run(
+    'printf \'%s:%s\' "$(id -u)" "$(id -g)"'
+  )
+  const [sandboxUid, sandboxGid] = identity.stdout
+    .split(':')
+    .map((value) => Number.parseInt(value, 10))
+  const sandboxVolumeContent = 'typescript-sandbox-to-api'
+  trace('volume.sandbox-write')
+  await sandbox.commands.run(
+    `printf '%s' '${sandboxVolumeContent}' > /mnt/data/shared/from-sandbox.txt`
+  )
+  trace('volume.api-read')
+  assert.equal(
+    await volume.readFile('/shared/from-sandbox.txt', volumeConnection),
+    sandboxVolumeContent
+  )
+  const sandboxEntry = await volume.getInfo(
+    '/shared/from-sandbox.txt',
+    volumeConnection
+  )
+  assert.equal(sandboxEntry.uid, sandboxUid)
+  assert.equal(sandboxEntry.gid, sandboxGid)
+  trace('volume.destroy-in-use')
+  await assert.rejects(
+    Volume.destroy(volume.volumeId, connection),
+    (error) =>
+      error instanceof VolumeError && /in use/i.test(error.message)
+  )
   await exerciseDataPlane(sandbox, 'typescript')
 
   trace('sandbox.pause-process-start')
@@ -222,7 +298,15 @@ try {
     limit: 20,
   })
   const listed = await paginator.nextItems()
-  assert.ok(listed.some((item) => item.sandboxId === sandbox.sandboxId))
+  const listedSandbox = listed.find(
+    (item) => item.sandboxId === sandbox.sandboxId
+  )
+  assert.ok(listedSandbox)
+  assert.ok(
+    listedSandbox.volumeMounts.some(
+      (mount) => mount.name === volumeName && mount.path === '/mnt/data'
+    )
+  )
 
   trace('sandbox.set-timeout')
   await sandbox.setTimeout(30_000)
@@ -230,6 +314,9 @@ try {
   assert.equal(await sandbox.kill(), true)
   trace('sandbox.health-killed')
   assert.equal(await sandbox.isRunning(), false)
+  trace('volume.destroy')
+  assert.equal(await Volume.destroy(volume.volumeId, connection), true)
+  volume = undefined
 
   const missingId = 'missing-production-typescript'
   trace('sandbox.kill-missing')
@@ -255,10 +342,16 @@ try {
   assert.equal(await interpreter.isRunning(), false)
   trace('complete')
 } finally {
-  if (interpreter) {
-    await Sandbox.kill(interpreter.sandboxId, connection)
-  }
-  if (sandbox) {
-    await Sandbox.kill(sandbox.sandboxId, connection)
+  try {
+    if (interpreter) {
+      await Sandbox.kill(interpreter.sandboxId, connection)
+    }
+    if (sandbox) {
+      await Sandbox.kill(sandbox.sandboxId, connection)
+    }
+  } finally {
+    if (volume) {
+      await Volume.destroy(volume.volumeId, connection)
+    }
   }
 }

@@ -24,6 +24,7 @@ use super::{
     TokenResolver, TokenScope,
 };
 use crate::routing::ENVD_PORT;
+use crate::volume::{ResolvedVolumeMount, VolumeMount, VolumeMountResolver, VolumeServiceError};
 
 const RUNTIME_ENVD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const RUNTIME_ENVD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
@@ -106,6 +107,8 @@ pub enum ControlServiceError {
     Template(#[from] TemplateProviderError),
     #[error(transparent)]
     Credential(#[from] TokenIssuerError),
+    #[error(transparent)]
+    Volume(#[from] VolumeServiceError),
     #[error("sandbox lifecycle failed: {0}")]
     Lifecycle(#[from] LifecycleError),
 }
@@ -122,6 +125,7 @@ pub struct ControlService {
     templates: Arc<dyn TemplateProvider>,
     token_issuer: Arc<dyn TokenIssuer>,
     token_resolver: Arc<dyn TokenResolver>,
+    volume_mounts: Option<Arc<dyn VolumeMountResolver>>,
 }
 
 pub struct ControlServiceDependencies {
@@ -146,12 +150,26 @@ impl ControlService {
             templates: dependencies.templates,
             token_issuer: dependencies.token_issuer,
             token_resolver: dependencies.token_resolver,
+            volume_mounts: None,
         }
+    }
+
+    pub fn with_volume_mount_resolver(mut self, resolver: Arc<dyn VolumeMountResolver>) -> Self {
+        self.volume_mounts = Some(resolver);
+        self
     }
 
     pub async fn create(
         &self,
         request: CreateSandboxRequest,
+    ) -> ControlServiceResult<SandboxConnection> {
+        self.create_with_mounts(request, Vec::new()).await
+    }
+
+    pub async fn create_with_mounts(
+        &self,
+        request: CreateSandboxRequest,
+        volume_mounts: Vec<VolumeMount>,
     ) -> ControlServiceResult<SandboxConnection> {
         if request.template_id.trim().is_empty() {
             return Err(ControlServiceError::InvalidRequest(
@@ -162,6 +180,14 @@ impl ControlService {
         let identity = self.identities.next_identity()?;
         let template = self.templates.resolve(&request.template_id).await?;
         let mut config = template.config;
+        let resolved_mounts = self
+            .resolve_volume_mounts(&request.owner_id, &volume_mounts)
+            .await?;
+        config.volumes.extend(
+            resolved_mounts
+                .iter()
+                .map(ResolvedVolumeMount::runtime_spec),
+        );
         config.resources.timeout = u64::from(request.timeout_seconds);
         config.extra_env.extend(request.env_vars);
         let runtime_env_vars = config.extra_env.iter().cloned().collect::<BTreeMap<_, _>>();
@@ -180,34 +206,43 @@ impl ControlService {
         let envd = self.token_issuer.issue(TokenScope::Envd).await?;
         let traffic = self.token_issuer.issue(TokenScope::Traffic).await?;
 
-        let mut record = SandboxRecord::creating(NewSandboxRecord {
-            sandbox_id: identity.sandbox_id,
-            operation_id: identity.operation_id,
-            owner_id: request.owner_id,
-            template_id: request.template_id,
-            plan,
-            resources: config.resources.clone(),
-            lifecycle: request.lifecycle,
-            created_at: now,
-            expires_at,
-            metadata: request.metadata.clone(),
-            envd_version: template.envd_version,
-            envd_mode: template.envd_mode,
-            secure: request.secure,
-            allow_internet_access: request.allow_internet_access,
-            credentials: SandboxCredentials {
-                envd: envd.stored,
-                traffic: traffic.stored,
+        let mut record = SandboxRecord::creating_with_mounts(
+            NewSandboxRecord {
+                sandbox_id: identity.sandbox_id,
+                operation_id: identity.operation_id,
+                owner_id: request.owner_id,
+                template_id: request.template_id,
+                plan,
+                resources: config.resources.clone(),
+                lifecycle: request.lifecycle,
+                created_at: now,
+                expires_at,
+                metadata: request.metadata.clone(),
+                envd_version: template.envd_version,
+                envd_mode: template.envd_mode,
+                secure: request.secure,
+                allow_internet_access: request.allow_internet_access,
+                credentials: SandboxCredentials {
+                    envd: envd.stored,
+                    traffic: traffic.stored,
+                },
+                routing: template.routing,
             },
-            routing: template.routing,
-        })?;
+            volume_mounts,
+        )?;
         self.repository.insert(record.clone()).await?;
 
+        let mut policy = a3s_box_core::ExecutionRecordPolicy::default();
+        for mount in &resolved_mounts {
+            if !policy.volume_names.contains(&mount.runtime_name) {
+                policy.volume_names.push(mount.runtime_name.clone());
+            }
+        }
         let execution_request = CreateExecutionRequest {
             external_sandbox_id: record.sandbox_id().to_string(),
             config,
             labels: request.metadata,
-            policy: Default::default(),
+            policy,
         };
         let lease = match self
             .executions
@@ -282,6 +317,25 @@ impl ControlService {
             traffic_access_token: traffic.secret,
             disposition: ConnectionDisposition::Created,
         })
+    }
+
+    async fn resolve_volume_mounts(
+        &self,
+        owner_id: &str,
+        mounts: &[VolumeMount],
+    ) -> ControlServiceResult<Vec<ResolvedVolumeMount>> {
+        if mounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let resolver = self.volume_mounts.as_ref().ok_or_else(|| {
+            ControlServiceError::InvalidRequest(
+                "volume mounts are unavailable in this service".to_string(),
+            )
+        })?;
+        resolver
+            .resolve_mounts(owner_id, mounts)
+            .await
+            .map_err(Into::into)
     }
 
     async fn initialize_runtime_envd(

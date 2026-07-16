@@ -392,6 +392,7 @@ impl TokenIssuer for FixedTokenIssuer {
         let marker = match scope {
             TokenScope::Envd => 1,
             TokenScope::Traffic => 2,
+            TokenScope::Volume => 3,
         };
         Ok(IssuedToken {
             secret: SecretToken::new(format!("secret-{marker}")).unwrap(),

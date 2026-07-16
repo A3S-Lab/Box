@@ -128,6 +128,7 @@ impl fmt::Debug for IssuedToken {
 pub enum TokenScope {
     Envd,
     Traffic,
+    Volume,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

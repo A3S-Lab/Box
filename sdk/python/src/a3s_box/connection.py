@@ -63,6 +63,11 @@ class A3SConnectionConfig:
             options["sandbox_url"] = self.sandbox_url
         return options
 
+    def volume_options(self) -> dict[str, str]:
+        """Return A3S Box endpoint options for Volume content calls."""
+
+        return {"api_url": self.api_url}
+
 
 def _domain_from_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)

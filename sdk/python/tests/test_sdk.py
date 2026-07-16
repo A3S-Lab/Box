@@ -38,6 +38,10 @@ class SdkTests(unittest.TestCase):
                 "sandbox_url": "https://sandbox.box.example.com",
             },
         )
+        self.assertEqual(
+            connection.volume_options(),
+            {"api_url": "https://api.box.example.com"},
+        )
 
     def test_connection_domain_can_be_overridden_for_self_hosting(self) -> None:
         connection = A3SConnectionConfig.from_environment(

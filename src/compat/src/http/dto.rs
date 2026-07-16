@@ -9,6 +9,7 @@ use crate::control::{
     PublicSandboxState, SandboxConnection, SandboxId, SandboxListFilter, SandboxMetric,
     SandboxRecord,
 };
+use crate::volume::VolumeMount;
 
 use super::cursor::CursorDecoder;
 use super::error::ApiError;
@@ -39,14 +40,17 @@ pub struct NewSandboxBody {
     #[serde(default)]
     mcp: Option<serde_json::Value>,
     #[serde(rename = "volumeMounts", default)]
-    volume_mounts: Vec<serde_json::Value>,
+    volume_mounts: Vec<VolumeMount>,
 }
 
 impl NewSandboxBody {
-    pub fn into_control(self, owner_id: String) -> Result<CreateSandboxRequest, ApiError> {
-        if self.network.is_some() || self.mcp.is_some() || !self.volume_mounts.is_empty() {
+    pub fn into_control(
+        self,
+        owner_id: String,
+    ) -> Result<(CreateSandboxRequest, Vec<VolumeMount>), ApiError> {
+        if self.network.is_some() || self.mcp.is_some() {
             return Err(ApiError::bad_request(
-                "network, MCP, and volume mount overrides are not available in this preview",
+                "network and MCP overrides are not available in this preview",
             ));
         }
         if self.auto_resume.enabled && self.auto_pause && !self.auto_pause_memory {
@@ -54,24 +58,29 @@ impl NewSandboxBody {
                 "auto-resume requires memory-preserving auto-pause",
             ));
         }
-        Ok(CreateSandboxRequest {
-            owner_id,
-            template_id: self.template_id,
-            timeout_seconds: self.timeout,
-            lifecycle: LifecyclePolicy {
-                on_timeout: if self.auto_pause {
-                    OnTimeoutAction::Pause
-                } else {
-                    OnTimeoutAction::Kill
+        crate::volume::validate_mounts(&self.volume_mounts)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        Ok((
+            CreateSandboxRequest {
+                owner_id,
+                template_id: self.template_id,
+                timeout_seconds: self.timeout,
+                lifecycle: LifecyclePolicy {
+                    on_timeout: if self.auto_pause {
+                        OnTimeoutAction::Pause
+                    } else {
+                        OnTimeoutAction::Kill
+                    },
+                    auto_resume: self.auto_resume.enabled,
+                    keep_memory_on_pause: self.auto_pause_memory,
                 },
-                auto_resume: self.auto_resume.enabled,
-                keep_memory_on_pause: self.auto_pause_memory,
+                metadata: self.metadata,
+                env_vars: self.env_vars,
+                secure: self.secure,
+                allow_internet_access: self.allow_internet_access,
             },
-            metadata: self.metadata,
-            env_vars: self.env_vars,
-            secure: self.secure,
-            allow_internet_access: self.allow_internet_access,
-        })
+            self.volume_mounts,
+        ))
     }
 }
 
@@ -309,6 +318,7 @@ pub struct SandboxResponse {
     envd_access_token: String,
     traffic_access_token: Option<String>,
     domain: Option<String>,
+    volume_mounts: Vec<VolumeMountResponse>,
 }
 
 impl SandboxResponse {
@@ -326,6 +336,7 @@ impl SandboxResponse {
             envd_access_token: connection.envd_access_token.expose_secret().to_string(),
             traffic_access_token: Some(connection.traffic_access_token.expose_secret().to_string()),
             domain,
+            volume_mounts: volume_mount_responses(&connection.record),
         };
         (response, disposition)
     }
@@ -367,7 +378,7 @@ impl ListedSandboxResponse {
             metadata: record.metadata().clone(),
             state: record.public_state()?,
             envd_version: record.envd_version().to_string(),
-            volume_mounts: Vec::new(),
+            volume_mounts: volume_mount_responses(record),
         })
     }
 }
@@ -414,6 +425,17 @@ struct LifecycleResponse {
 struct VolumeMountResponse {
     name: String,
     path: String,
+}
+
+fn volume_mount_responses(record: &SandboxRecord) -> Vec<VolumeMountResponse> {
+    record
+        .volume_mounts()
+        .iter()
+        .map(|mount| VolumeMountResponse {
+            name: mount.name.clone(),
+            path: mount.path.clone(),
+        })
+        .collect()
 }
 
 fn default_timeout() -> u32 {

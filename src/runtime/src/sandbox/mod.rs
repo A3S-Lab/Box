@@ -12,8 +12,9 @@ pub mod path_access;
 pub mod rootfs;
 
 pub use capability::{
-    plan_id_mappings, probe_sandbox_capabilities, CertifiedCrun, IdMapping,
-    SandboxCapabilitySnapshot, SandboxIdMappingPlan, CERTIFIED_CRUN_VERSION,
+    map_container_gid, map_container_uid, plan_id_mappings, probe_sandbox_capabilities,
+    unmap_host_gid, unmap_host_uid, CertifiedCrun, IdMapping, SandboxCapabilitySnapshot,
+    SandboxIdMappingPlan, UserNamespaceEvidence, CERTIFIED_CRUN_VERSION,
 };
 pub use controller::{write_bundle, CrunController, SandboxLaunchSpec};
 pub use handler::CrunHandler;

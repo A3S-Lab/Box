@@ -8,6 +8,8 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use crate::control::test_support::TestHarness;
+use crate::volume::tests::support::ServiceHarness as VolumeServiceHarness;
+use crate::volume::VolumeService;
 
 use super::*;
 
@@ -19,13 +21,16 @@ impl CredentialVerifier for TestCredentialVerifier {
         &self,
         credential: &PresentedCredential,
     ) -> AuthenticationResult<AuthenticatedAccount> {
-        if credential.scheme() != CredentialScheme::ApiKey
-            || credential.expose_secret() != "e2b_a1b2c3"
-        {
+        if credential.scheme() != CredentialScheme::ApiKey {
             return Err(AuthenticationError::Invalid);
         }
+        let owner_id = match credential.expose_secret() {
+            "e2b_a1b2c3" => "owner-1",
+            "e2b_b2c3d4" => "owner-2",
+            _ => return Err(AuthenticationError::Invalid),
+        };
         Ok(AuthenticatedAccount {
-            owner_id: "owner-1".to_string(),
+            owner_id: owner_id.to_string(),
             client_id: "fixture-client".to_string(),
         })
     }
@@ -54,6 +59,164 @@ fn app() -> Router {
             ..LifecycleHttpConfig::default()
         },
     ))
+}
+
+fn app_with_volumes(volumes: Arc<VolumeService>) -> Router {
+    let harness = TestHarness::new();
+    lifecycle_router(
+        LifecycleHttpState::new(
+            harness.service,
+            Arc::new(TestCredentialVerifier),
+            Arc::new(TestCursorDecoder),
+            LifecycleHttpConfig {
+                domain: Some("fixture.invalid:3443".to_string()),
+                ..LifecycleHttpConfig::default()
+            },
+        )
+        .with_volume_service(volumes),
+    )
+}
+
+#[tokio::test]
+async fn router_serves_owner_scoped_volume_control_and_bearer_content() {
+    let volumes = VolumeServiceHarness::new();
+    let app = app_with_volumes(Arc::new(volumes.service.clone()));
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/volumes",
+        Some(json!({"name": "data"})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    let volume_id = created["volumeID"].as_str().unwrap();
+    let token = created["token"].as_str().unwrap();
+    assert_eq!(created["name"], "data");
+
+    let response = send(&app, Method::GET, "/volumes", None, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = body_json(response).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["volumeID"], volume_id);
+    assert!(listed[0].get("token").is_none());
+
+    let response = send_raw(
+        &app,
+        Method::GET,
+        &format!("/volumes/{volume_id}"),
+        Body::empty(),
+        &[("x-api-key", "e2b_b2c3d4")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let authorization = format!("Bearer {token}");
+    let response = send_raw(
+        &app,
+        Method::POST,
+        &format!("/volumecontent/{volume_id}/dir?path=%2Fnested%2Fdeep&force=true&mode=493"),
+        Body::empty(),
+        &[("authorization", &authorization)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(body_json(response).await["path"], "/nested/deep");
+
+    let response = send_raw(
+        &app,
+        Method::PUT,
+        &format!("/volumecontent/{volume_id}/file?path=%2Fnested%2Fdeep%2Fvalue.txt"),
+        Body::from("hello-volume"),
+        &[
+            ("authorization", &authorization),
+            ("content-type", "application/octet-stream"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(body_json(response).await["size"], 12);
+
+    let response = send_raw(
+        &app,
+        Method::GET,
+        &format!("/volumecontent/{volume_id}/file?path=%2Fnested%2Fdeep%2Fvalue.txt"),
+        Body::empty(),
+        &[("authorization", &authorization)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(&body_bytes(response).await[..], b"hello-volume");
+
+    let response = send_raw(
+        &app,
+        Method::PATCH,
+        &format!("/volumecontent/{volume_id}/path?path=%2Fnested%2Fdeep%2Fvalue.txt"),
+        Body::from(r#"{"mode":384}"#),
+        &[
+            ("authorization", &authorization),
+            ("content-type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["mode"], 384);
+
+    let response = send_raw(
+        &app,
+        Method::GET,
+        &format!("/volumecontent/{volume_id}/dir?path=%2F&depth=3"),
+        Body::empty(),
+        &[("authorization", &authorization)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let entries = body_json(response).await;
+    assert_eq!(entries.as_array().unwrap().len(), 3);
+    assert_eq!(entries[2]["path"], "/nested/deep/value.txt");
+
+    let response = send_raw(
+        &app,
+        Method::GET,
+        &format!("/volumecontent/{volume_id}/path?path=%2F"),
+        Body::empty(),
+        &[("authorization", "Bearer wrong-token")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(response).await["code"], "forbidden");
+
+    let response = send_raw(
+        &app,
+        Method::GET,
+        &format!("/volumecontent/{volume_id}/path?path=%2F"),
+        Body::empty(),
+        &[("x-api-key", "e2b_a1b2c3")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = send(
+        &app,
+        Method::DELETE,
+        &format!("/volumes/{volume_id}"),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = send_raw(
+        &app,
+        Method::GET,
+        &format!("/volumecontent/{volume_id}/path?path=%2F"),
+        Body::empty(),
+        &[("authorization", &authorization)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -406,6 +569,27 @@ async fn send(
 }
 
 async fn body_json(response: axum::response::Response) -> Value {
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let bytes = body_bytes(response).await;
     serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn body_bytes(response: axum::response::Response) -> hyper::body::Bytes {
+    hyper::body::to_bytes(response.into_body()).await.unwrap()
+}
+
+async fn send_raw(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Body,
+    headers: &[(&str, &str)],
+) -> axum::response::Response {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    app.clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap()
 }
