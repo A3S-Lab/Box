@@ -46,6 +46,10 @@ mod linux {
             OperationId::new(format!("managed-sandbox-smoke-{}", uuid::Uuid::new_v4()))?;
         let restored_operation_id =
             OperationId::new(format!("managed-sandbox-restore-{}", uuid::Uuid::new_v4()))?;
+        let rejected_restore_operation_id = OperationId::new(format!(
+            "managed-sandbox-rejected-restore-{}",
+            uuid::Uuid::new_v4()
+        ))?;
         let snapshot_id =
             ExecutionSnapshotId::new(format!("managed-smoke-{}", uuid::Uuid::new_v4().simple()))?;
         let rejected_snapshot_id = ExecutionSnapshotId::new(format!(
@@ -58,11 +62,16 @@ mod linux {
             &state_path,
             &source_operation_id,
             &restored_operation_id,
+            &rejected_restore_operation_id,
             &snapshot_id,
             &rejected_snapshot_id,
         )
         .await;
-        for operation_id in [&source_operation_id, &restored_operation_id] {
+        for operation_id in [
+            &source_operation_id,
+            &restored_operation_id,
+            &rejected_restore_operation_id,
+        ] {
             if let Err(cleanup_error) = cleanup(&home_dir, &state_path, operation_id).await {
                 if result.is_ok() {
                     return Err(cleanup_error);
@@ -127,6 +136,7 @@ mod linux {
         state_path: &Path,
         source_operation_id: &OperationId,
         restored_operation_id: &OperationId,
+        rejected_restore_operation_id: &OperationId,
         snapshot_id: &ExecutionSnapshotId,
         rejected_snapshot_id: &ExecutionSnapshotId,
     ) -> Result<(), AnyError> {
@@ -273,6 +283,16 @@ mod linux {
             snapshot_elapsed.as_millis()
         );
 
+        validate_failed_restore_cleanup(
+            &restarted,
+            home_dir,
+            state_path,
+            &config,
+            snapshot_id,
+            rejected_restore_operation_id,
+        )
+        .await?;
+
         let outcome = restarted.kill(&execution_id, resumed.generation).await?;
         require(
             outcome == KillOutcome::Killed,
@@ -367,6 +387,59 @@ mod linux {
         Ok(())
     }
 
+    async fn validate_failed_restore_cleanup(
+        manager: &LocalExecutionManager,
+        home_dir: &Path,
+        state_path: &Path,
+        config: &BoxConfig,
+        snapshot_id: &ExecutionSnapshotId,
+        operation_id: &OperationId,
+    ) -> Result<(), AnyError> {
+        let snapshot_file = home_dir
+            .join("snapshots")
+            .join(snapshot_id.as_str())
+            .join("rootfs/state/value");
+        let original = std::fs::read(&snapshot_file)?;
+        let mut corrupted = original.clone();
+        corrupted.extend_from_slice(b"-corrupted");
+        std::fs::write(&snapshot_file, corrupted)?;
+
+        let request = CreateExecutionRequest {
+            external_sandbox_id: "managed-sandbox-rejected-restore-external-id".to_string(),
+            config: config.clone(),
+            labels: BTreeMap::from([(
+                "purpose".to_string(),
+                "managed-sandbox-rejected-restore-smoke".to_string(),
+            )]),
+            policy: Default::default(),
+            rootfs_snapshot_id: Some(snapshot_id.clone()),
+        };
+        let restore = manager.create_and_start(request, operation_id).await;
+        std::fs::write(&snapshot_file, original)?;
+
+        let error = restore
+            .err()
+            .ok_or_else(|| failure("corrupted filesystem Snapshot unexpectedly started"))?;
+        require(
+            error.to_string().contains("rootfs metadata mismatch"),
+            "corrupted filesystem Snapshot failed for an unexpected reason",
+        )?;
+        let record = ManagedExecutionStore::new(state_path)
+            .get_by_operation_id(operation_id)?
+            .ok_or_else(|| failure("failed restore did not persist its managed record"))?;
+        let execution_id = ExecutionId::new(record.id)?;
+        require(
+            manager.inspect(&execution_id).await?.state == ExecutionState::Failed,
+            "failed restore did not enter the failed state",
+        )?;
+        validate_failed_runtime_absent(home_dir, &execution_id)?;
+        println!(
+            "restore-rejection execution={} reason=rootfs-metadata cleanup=ok",
+            execution_id
+        );
+        Ok(())
+    }
+
     async fn validate_special_file_rejection(
         manager: &LocalExecutionManager,
         home_dir: &Path,
@@ -451,6 +524,29 @@ mod linux {
                 .join(execution_id.as_str())
                 .exists(),
             "created Sandbox unexpectedly allocated a socket directory",
+        )
+    }
+
+    fn validate_failed_runtime_absent(
+        home_dir: &Path,
+        execution_id: &ExecutionId,
+    ) -> Result<(), AnyError> {
+        require(
+            !home_dir.join("boxes").join(execution_id.as_str()).exists(),
+            "failed Sandbox restore leaked its box directory or overlay mount",
+        )?;
+        require(
+            !home_dir
+                .join("run/crun")
+                .join(execution_id.as_str())
+                .exists(),
+            "failed Sandbox restore leaked its crun state directory",
+        )?;
+        require(
+            !Path::new("/tmp/a3s-box-sockets")
+                .join(execution_id.as_str())
+                .exists(),
+            "failed Sandbox restore leaked its socket directory",
         )
     }
 
