@@ -2,10 +2,21 @@
 
 All notable changes to A3S Box will be documented in this file.
 
-## [Unreleased]
+## [3.0.10] — 2026-07-17
 
 ### Added
 
+- **Opt-in shared-kernel OCI Sandbox execution.** Linux operators can select
+  `--isolation sandbox` to run workloads through certified `crun` with
+  namespaces, seccomp, capabilities, `no_new_privs`, and cgroup v2. The
+  hardware-backed MicroVM remains the default, and Box never silently falls
+  back to the lower-isolation backend.
+- **E2B-compatible service and native SDK release assets.** The ACL-configured
+  control and TLS data planes now provide durable lifecycle, authenticated
+  routing, current metrics, Filesystem, Process, stdin, PTY, and Python Code
+  Interpreter contexts. Pinned official clients and the A3S Python sync/async
+  and TypeScript packages pass the same real-Sandbox production matrix; native
+  packages connect with `A3S_BOX_*` and do not require `E2B_API_URL`.
 - **Owner-scoped E2B filesystem Snapshots.** The compatibility service now
   provides durable capture, source-filtered listing, restore, and delete with
   startup reconciliation, generation-fenced source quiescing, copy-on-write
@@ -33,8 +44,24 @@ All notable changes to A3S Box will be documented in this file.
   process survives the cycle. Filesystem-only pause remains explicitly
   unsupported.
 
+### Changed
+
+- **Canonical durable execution lifecycle.** CLI create, start, run, and
+  restart paths plus the Rust SDK now share the generation-fenced managed
+  execution manager, complete caller policy, crash-recoverable transitions,
+  startup reconciliation, and terminal resource cleanup.
+
 ### Fixed
 
+- **Sandbox runtime hardening.** Runtime and shim operations now fence process
+  and cgroup identity, clean detached and failed executions, preserve split
+  structured logs and rootfs state across cache transitions, tolerate
+  restrictive service umasks, and emit runnable seccomp architecture data.
+- **Runtime envd and OCI correctness.** Readiness is fail-closed; command
+  sessions inherit the initialized environment and user home; resolver and
+  runtime-managed file modes remain usable; managed pulls load credentials,
+  retry Basic authentication, and replace conflicting hardlink destinations
+  safely.
 - **Legacy filesystem Snapshot restore fails closed.** Snapshot records from
   older builds that lack resolved OCI image defaults remain listable,
   inspectable, and deletable, but restore is rejected before execution
