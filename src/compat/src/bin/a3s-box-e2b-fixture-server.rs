@@ -16,15 +16,15 @@ use a3s_box_compat::http::{
     CredentialScheme, CredentialVerifier, CursorDecoder, CursorError, CursorResult,
     LifecycleHttpConfig, LifecycleHttpState, PresentedCredential,
 };
+use a3s_box_compat::volume::{
+    A3sRuntimeVolumeStore, IdentityVolumeIdMapper, MemoryVolumeRepository, VolumeFilesystem,
+    VolumeService, VolumeServiceDependencies,
+};
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
     ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionPortConnector, ExecutionPortStream, ExecutionReservation,
     ExecutionState, ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome, ResourceConfig,
-};
-use a3s_box_compat::volume::{
-    A3sRuntimeVolumeStore, IdentityVolumeIdMapper, MemoryVolumeRepository, VolumeFilesystem,
-    VolumeService, VolumeServiceDependencies,
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -58,17 +58,19 @@ async fn run() -> Result<()> {
             IdentityVolumeIdMapper::current(),
         ))),
     }));
-    let service = Arc::new(ControlService::new(ControlServiceDependencies {
-        repository: Arc::new(MemorySandboxRepository::default()),
-        executions: executions.clone(),
-        ports: executions,
-        clock,
-        identities: Arc::new(FixtureIdentities::default()),
-        templates: Arc::new(FixtureTemplates),
-        token_issuer: tokens.clone(),
-        token_resolver: tokens,
-    })
-    .with_volume_mount_resolver(volumes.clone()));
+    let service = Arc::new(
+        ControlService::new(ControlServiceDependencies {
+            repository: Arc::new(MemorySandboxRepository::default()),
+            executions: executions.clone(),
+            ports: executions,
+            clock,
+            identities: Arc::new(FixtureIdentities::default()),
+            templates: Arc::new(FixtureTemplates),
+            token_issuer: tokens.clone(),
+            token_resolver: tokens,
+        })
+        .with_volume_mount_resolver(volumes.clone()),
+    );
     let state = LifecycleHttpState::new(
         service,
         Arc::new(FixtureCredentialVerifier),
