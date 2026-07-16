@@ -13,7 +13,7 @@ use hyper::header::{CONTENT_TYPE, HOST};
 use hyper::{Method, Request, StatusCode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, error};
 
 use super::lifetime::ready_lifetime;
 use super::{
@@ -265,6 +265,11 @@ impl ControlService {
         {
             Ok(lease) => lease,
             Err(error) => {
+                error!(
+                    sandbox_id = %record.sandbox_id(),
+                    %error,
+                    "Sandbox runtime creation failed"
+                );
                 let expected = record.generation();
                 record.mark_failed(LifecycleFailure::RuntimeFailed)?;
                 self.replace(expected, record).await?;
@@ -276,6 +281,12 @@ impl ControlService {
                 .initialize_runtime_envd(&lease, record.sandbox_id().as_str(), &runtime_env_vars)
                 .await
             {
+                error!(
+                    sandbox_id = %record.sandbox_id(),
+                    execution_id = %lease.execution_id,
+                    error = %readiness_error,
+                    "Sandbox runtime envd initialization failed"
+                );
                 let cleanup = self
                     .executions
                     .kill(&lease.execution_id, lease.generation)
