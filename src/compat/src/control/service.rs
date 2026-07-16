@@ -24,9 +24,7 @@ use super::{
     TokenResolver, TokenScope,
 };
 use crate::routing::ENVD_PORT;
-use crate::volume::{
-    ResolvedVolumeMount, VolumeMount, VolumeMountResolver, VolumeServiceError,
-};
+use crate::volume::{ResolvedVolumeMount, VolumeMount, VolumeMountResolver, VolumeServiceError};
 
 const RUNTIME_ENVD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const RUNTIME_ENVD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
@@ -185,9 +183,11 @@ impl ControlService {
         let resolved_mounts = self
             .resolve_volume_mounts(&request.owner_id, &volume_mounts)
             .await?;
-        config
-            .volumes
-            .extend(resolved_mounts.iter().map(ResolvedVolumeMount::runtime_spec));
+        config.volumes.extend(
+            resolved_mounts
+                .iter()
+                .map(ResolvedVolumeMount::runtime_spec),
+        );
         config.resources.timeout = u64::from(request.timeout_seconds);
         config.extra_env.extend(request.env_vars);
         let runtime_env_vars = config.extra_env.iter().cloned().collect::<BTreeMap<_, _>>();
@@ -208,24 +208,24 @@ impl ControlService {
 
         let mut record = SandboxRecord::creating_with_mounts(
             NewSandboxRecord {
-            sandbox_id: identity.sandbox_id,
-            operation_id: identity.operation_id,
-            owner_id: request.owner_id,
-            template_id: request.template_id,
-            plan,
-            resources: config.resources.clone(),
-            lifecycle: request.lifecycle,
-            created_at: now,
-            expires_at,
-            metadata: request.metadata.clone(),
-            envd_version: template.envd_version,
-            envd_mode: template.envd_mode,
-            secure: request.secure,
-            allow_internet_access: request.allow_internet_access,
-            credentials: SandboxCredentials {
-                envd: envd.stored,
-                traffic: traffic.stored,
-            },
+                sandbox_id: identity.sandbox_id,
+                operation_id: identity.operation_id,
+                owner_id: request.owner_id,
+                template_id: request.template_id,
+                plan,
+                resources: config.resources.clone(),
+                lifecycle: request.lifecycle,
+                created_at: now,
+                expires_at,
+                metadata: request.metadata.clone(),
+                envd_version: template.envd_version,
+                envd_mode: template.envd_mode,
+                secure: request.secure,
+                allow_internet_access: request.allow_internet_access,
+                credentials: SandboxCredentials {
+                    envd: envd.stored,
+                    traffic: traffic.stored,
+                },
                 routing: template.routing,
             },
             volume_mounts,
@@ -332,7 +332,10 @@ impl ControlService {
                 "volume mounts are unavailable in this service".to_string(),
             )
         })?;
-        resolver.resolve_mounts(owner_id, mounts).await.map_err(Into::into)
+        resolver
+            .resolve_mounts(owner_id, mounts)
+            .await
+            .map_err(Into::into)
     }
 
     async fn initialize_runtime_envd(

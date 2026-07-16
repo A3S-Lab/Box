@@ -60,9 +60,7 @@ impl VolumeRepository for MemoryVolumeRepository {
             .lock()
             .map_err(lock_error)?
             .values()
-            .filter(|record| {
-                record.owner_id() == owner_id && record.state() == VolumeState::Active
-            })
+            .filter(|record| record.owner_id() == owner_id && record.state() == VolumeState::Active)
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by(|left, right| {
@@ -73,10 +71,7 @@ impl VolumeRepository for MemoryVolumeRepository {
         Ok(records)
     }
 
-    async fn list_in_state(
-        &self,
-        state: VolumeState,
-    ) -> VolumeRepositoryResult<Vec<VolumeRecord>> {
+    async fn list_in_state(&self, state: VolumeState) -> VolumeRepositoryResult<Vec<VolumeRecord>> {
         Ok(self
             .records
             .lock()

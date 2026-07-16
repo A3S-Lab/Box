@@ -303,9 +303,7 @@ fn unmap_host_identity(
             return next_container_id
                 .checked_add(host_id - range.start)
                 .ok_or_else(|| {
-                    BoxError::ConfigError(format!(
-                        "Sandbox {kind} reverse mapping overflows u32"
-                    ))
+                    BoxError::ConfigError(format!("Sandbox {kind} reverse mapping overflows u32"))
                 });
         }
         next_container_id = next_container_id.checked_add(range.size).ok_or_else(|| {

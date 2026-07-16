@@ -92,11 +92,7 @@ impl VolumeFilesystem {
         .await
     }
 
-    pub async fn open_file(
-        &self,
-        root: &Path,
-        path: &str,
-    ) -> VolumeContentResult<tokio::fs::File> {
+    pub async fn open_file(&self, root: &Path, path: &str) -> VolumeContentResult<tokio::fs::File> {
         let root = root.to_path_buf();
         let path = path.to_string();
         let file = blocking("open volume file", move || {
@@ -168,10 +164,9 @@ impl PendingVolumeWrite {
             .await
             .map_err(|error| VolumeContentError::Unavailable(format!("sync upload: {error}")))?;
         let file = file.into_std().await;
-        let prepared = self
-            .prepared
-            .take()
-            .ok_or_else(|| VolumeContentError::Unavailable("upload transaction is missing".into()))?;
+        let prepared = self.prepared.take().ok_or_else(|| {
+            VolumeContentError::Unavailable("upload transaction is missing".into())
+        })?;
         blocking("commit volume upload", move || {
             unix_ops::finish_upload(prepared, file)
         })
@@ -185,7 +180,9 @@ where
     T: Send + 'static,
     F: FnOnce() -> VolumeContentResult<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(function).await.map_err(|error| {
-        VolumeContentError::Unavailable(format!("{operation} task failed: {error}"))
-    })?
+    tokio::task::spawn_blocking(function)
+        .await
+        .map_err(|error| {
+            VolumeContentError::Unavailable(format!("{operation} task failed: {error}"))
+        })?
 }

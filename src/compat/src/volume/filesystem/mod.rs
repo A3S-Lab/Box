@@ -194,5 +194,7 @@ pub fn current_volume_id_mapper() -> VolumeContentResult<Arc<dyn VolumeIdMapper>
 }
 
 fn mapping_error(error: impl std::fmt::Display) -> VolumeContentError {
-    VolumeContentError::InvalidPath(format!("volume ownership is outside Sandbox mappings: {error}"))
+    VolumeContentError::InvalidPath(format!(
+        "volume ownership is outside Sandbox mappings: {error}"
+    ))
 }

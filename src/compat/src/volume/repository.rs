@@ -36,10 +36,7 @@ pub trait VolumeRepository: Send + Sync {
 
     async fn list(&self, owner_id: &str) -> VolumeRepositoryResult<Vec<VolumeRecord>>;
 
-    async fn list_in_state(
-        &self,
-        state: VolumeState,
-    ) -> VolumeRepositoryResult<Vec<VolumeRecord>>;
+    async fn list_in_state(&self, state: VolumeState) -> VolumeRepositoryResult<Vec<VolumeRecord>>;
 
     async fn replace(
         &self,

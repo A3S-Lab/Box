@@ -132,10 +132,7 @@ impl VolumeRepository for SqliteVolumeRepository {
             .collect()
     }
 
-    async fn list_in_state(
-        &self,
-        state: VolumeState,
-    ) -> VolumeRepositoryResult<Vec<VolumeRecord>> {
+    async fn list_in_state(&self, state: VolumeState) -> VolumeRepositoryResult<Vec<VolumeRecord>> {
         let state = state.as_str().to_string();
         let records = self
             .call(move |connection| {
@@ -249,9 +246,7 @@ fn unavailable(context: &str, error: impl std::fmt::Display) -> VolumeRepository
     VolumeRepositoryError::Unavailable(format!("{context}: {error}"))
 }
 
-fn map_async_error(
-    error: tokio_rusqlite::Error<VolumeRepositoryError>,
-) -> VolumeRepositoryError {
+fn map_async_error(error: tokio_rusqlite::Error<VolumeRepositoryError>) -> VolumeRepositoryError {
     match error {
         tokio_rusqlite::Error::Error(error) => error,
         tokio_rusqlite::Error::ConnectionClosed => {
