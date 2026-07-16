@@ -233,16 +233,11 @@ impl SnapshotService {
         let Some(_operation) = self.operations.try_claim(&snapshot_id) else {
             return Err(SnapshotServiceError::Conflict);
         };
-        let Some(mut record) = self
-            .repository
-            .get(&snapshot_id)
-            .await?
-            .filter(|current| {
-                current.owner_id() == owner_id
-                    && current.reference() == normalized_reference
-                    && current.state() == SnapshotState::Active
-            })
-        else {
+        let Some(mut record) = self.repository.get(&snapshot_id).await?.filter(|current| {
+            current.owner_id() == owner_id
+                && current.reference() == normalized_reference
+                && current.state() == SnapshotState::Active
+        }) else {
             return Ok(false);
         };
         record.begin_delete()?;
@@ -274,7 +269,8 @@ impl SnapshotService {
         for state in [SnapshotState::Creating, SnapshotState::Deleting] {
             for listed_record in self.repository.list_in_state(state).await? {
                 report.examined += 1;
-                let Some(_operation) = self.operations.try_claim(listed_record.snapshot_id()) else {
+                let Some(_operation) = self.operations.try_claim(listed_record.snapshot_id())
+                else {
                     report.deferred += 1;
                     continue;
                 };
