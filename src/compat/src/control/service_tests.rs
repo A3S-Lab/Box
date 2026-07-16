@@ -11,9 +11,7 @@ use super::test_support::{
     assert_sandbox_request, create_request, test_time, AdvancingClock, TestHarness,
 };
 use super::*;
-use crate::volume::{
-    ResolvedVolumeMount, VolumeMount, VolumeMountResolver, VolumeServiceResult,
-};
+use crate::volume::{ResolvedVolumeMount, VolumeMount, VolumeMountResolver, VolumeServiceResult};
 
 struct TestVolumeMountResolver;
 
@@ -55,10 +53,7 @@ async fn typed_volume_mounts_reach_runtime_policy_and_public_records() {
         requests[0].config.volumes,
         vec!["/var/lib/a3s/volumes/e2b-internal-volume:/mnt/data:rw"]
     );
-    assert_eq!(
-        requests[0].policy.volume_names,
-        vec!["e2b-internal-volume"]
-    );
+    assert_eq!(requests[0].policy.volume_names, vec!["e2b-internal-volume"]);
 }
 
 #[tokio::test]

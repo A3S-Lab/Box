@@ -117,9 +117,7 @@ async fn router_serves_owner_scoped_volume_control_and_bearer_content() {
     let response = send_raw(
         &app,
         Method::POST,
-        &format!(
-            "/volumecontent/{volume_id}/dir?path=%2Fnested%2Fdeep&force=true&mode=493"
-        ),
+        &format!("/volumecontent/{volume_id}/dir?path=%2Fnested%2Fdeep&force=true&mode=493"),
         Body::empty(),
         &[("authorization", &authorization)],
     )
@@ -590,5 +588,8 @@ async fn send_raw(
     for (name, value) in headers {
         builder = builder.header(*name, *value);
     }
-    app.clone().oneshot(builder.body(body).unwrap()).await.unwrap()
+    app.clone()
+        .oneshot(builder.body(body).unwrap())
+        .await
+        .unwrap()
 }
