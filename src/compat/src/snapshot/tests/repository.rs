@@ -62,11 +62,15 @@ async fn exercise_repository(repository: Arc<dyn SnapshotRepository>) {
             .snapshot_id(),
         owner_b.snapshot_id()
     );
-    assert!(repository
-        .get_by_reference("owner-a", owner_b.reference())
-        .await
-        .unwrap()
-        .is_none());
+    assert_eq!(
+        repository
+            .get_by_reference("owner-a", owner_b.reference())
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot_id(),
+        owner_a.snapshot_id()
+    );
     let transitional = repository
         .list_in_state(SnapshotState::Creating)
         .await
