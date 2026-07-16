@@ -152,16 +152,18 @@ fn restart_teardown_preserves_old_runtime_visibility_until_generation_advance() 
 }
 
 #[tokio::test]
-async fn unsupported_pause_modes_fail_before_starting_a_runtime() {
+async fn filesystem_only_pause_fails_before_starting_a_runtime() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let sandbox = record(temporary.path(), ExecutionIsolation::Sandbox);
     let microvm = record(temporary.path(), ExecutionIsolation::Microvm);
 
-    let sandbox_error = backend.pause(&sandbox, true).await.unwrap_err();
+    let sandbox_error = backend.pause(&sandbox, false).await.unwrap_err();
     let memory_error = backend.pause(&microvm, false).await.unwrap_err();
 
-    assert!(sandbox_error.to_string().contains("Sandbox backend"));
+    assert!(sandbox_error
+        .to_string()
+        .contains("pause without memory retention"));
     assert!(memory_error
         .to_string()
         .contains("pause without memory retention"));
