@@ -53,6 +53,69 @@ a3s-box run --rm alpine:latest -- uname -a
 a3s-box run --rm --isolation sandbox alpine:latest -- id
 ```
 
+### E2B-compatible Python and TypeScript SDKs
+
+The A3S Python and TypeScript packages re-export the pinned official E2B
+objects and add typed endpoint configuration. Applications keep the familiar
+`Sandbox`, `AsyncSandbox`, Commands, Filesystem, PTY, and Code Interpreter
+surfaces while A3S Box owns the remote runtime and isolation policy.
+
+Configure either SDK with the standard E2B connection variables:
+
+```bash
+export E2B_API_URL=https://api.box.example.com
+export E2B_DOMAIN=box.example.com
+export E2B_API_KEY=e2b_your_key
+```
+
+Python uses async lifecycle management so the remote Sandbox is always cleaned
+up:
+
+```python
+import asyncio
+
+from a3s_box import A3SConnectionConfig, AsyncSandbox
+
+
+async def main() -> None:
+    connection = A3SConnectionConfig.from_environment()
+    sandbox = await AsyncSandbox.create(
+        "code-interpreter-v1",
+        timeout=60,
+        **connection.python_options(),
+    )
+    async with sandbox:
+        result = await sandbox.commands.run("python -c 'print(6 * 7)'")
+        print(result.stdout)
+
+
+asyncio.run(main())
+```
+
+TypeScript uses the same endpoint and E2B object model:
+
+```typescript
+import { A3SConnectionConfig, Sandbox } from '@a3s-lab/box'
+
+const connection = A3SConnectionConfig.fromEnvironment(process.env)
+const sandbox = await Sandbox.create('code-interpreter-v1', {
+  ...connection.typescriptOptions(),
+  timeoutMs: 60_000,
+})
+
+try {
+  const result = await sandbox.commands.run('node -e "console.log(6 * 7)"')
+  console.log(result.stdout)
+} finally {
+  await sandbox.kill()
+}
+```
+
+Both packages are source-tree previews until the complete official and native
+client matrix passes and the packages are published. The current verified
+surface and remaining compatibility gates are stated under
+[SDKs and Compatibility](#sdks-and-compatibility).
+
 ## Features
 
 - **Two explicit isolation classes**: Hardware-backed MicroVM execution by
