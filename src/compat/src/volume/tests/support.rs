@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 use tempfile::{tempdir, TempDir};
 
 use crate::control::{
-    Clock, IssuedToken, SecretToken, StoredToken, TokenIssuer, TokenIssuerError,
-    TokenIssuerResult, TokenResolver, TokenScope, TokenVerifier,
+    Clock, IssuedToken, SecretToken, StoredToken, TokenIssuer, TokenIssuerError, TokenIssuerResult,
+    TokenResolver, TokenScope, TokenVerifier,
 };
 
 use super::super::*;
