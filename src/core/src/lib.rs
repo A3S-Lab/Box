@@ -56,7 +56,9 @@ pub use scale::{
     InstanceState, ScaleConfig, ScaleRequest, ScaleResponse,
 };
 pub use security::{SeccompMode, SecurityConfig};
-pub use snapshot::{SnapshotConfig, SnapshotMetadata};
+pub use snapshot::{
+    SnapshotConfig, SnapshotImageConfig, SnapshotImageHealthCheck, SnapshotMetadata,
+};
 pub use tee::ATTEST_VSOCK_PORT;
 pub use tee::{detect_tee, is_tee_available, TeeCapability, TeeType};
 pub use traits::{

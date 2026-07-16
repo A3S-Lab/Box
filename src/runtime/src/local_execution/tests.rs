@@ -7,7 +7,7 @@ use a3s_box_core::{
     ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
     ExecutionSnapshotId, ExecutionState, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
-    RestartExecutionOptions,
+    RestartExecutionOptions, SnapshotImageConfig,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -1484,6 +1484,21 @@ fn populate_rootfs(manager: &LocalExecutionManager, execution_id: &ExecutionId, 
     std::fs::write(rootfs.join("workspace/state.txt"), value).unwrap();
 }
 
+fn persist_test_image_config(manager: &LocalExecutionManager, execution_id: &ExecutionId) {
+    let config = SnapshotImageConfig {
+        entrypoint: Some(vec!["/usr/local/bin/envd".to_string()]),
+        cmd: Some(vec!["--port".to_string(), "49983".to_string()]),
+        env: vec![("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string())],
+        working_dir: Some("/home/user".to_string()),
+        user: Some("1000:1000".to_string()),
+        ..Default::default()
+    };
+    let artifact = persisted(manager, execution_id)
+        .box_dir
+        .join(".oci-image-config.json");
+    std::fs::write(artifact, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+}
+
 #[tokio::test]
 async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation() {
     let (directory, manager, backend) = harness();
@@ -1540,6 +1555,50 @@ async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation()
             .unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn filesystem_snapshot_after_manager_restart_keeps_resolved_image_config() {
+    let (directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("snapshot-image-config"),
+            &operation("snapshot-image-config-create"),
+        )
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "captured-state");
+    persist_test_image_config(&manager, &running.execution_id);
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend,
+    );
+    let snapshot_id = ExecutionSnapshotId::new("snapshot-image-config").unwrap();
+    restarted
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+        .await
+        .unwrap();
+
+    let metadata = crate::SnapshotStore::new(&directory.path().join("home/snapshots"))
+        .unwrap()
+        .get(snapshot_id.as_str())
+        .unwrap()
+        .unwrap();
+    let image_config = metadata
+        .image_config
+        .expect("resolved image configuration must survive a control-plane restart");
+    assert_eq!(
+        image_config.entrypoint,
+        Some(vec!["/usr/local/bin/envd".to_string()])
+    );
+    assert_eq!(
+        image_config.cmd,
+        Some(vec!["--port".to_string(), "49983".to_string()])
+    );
+    assert_eq!(image_config.working_dir.as_deref(), Some("/home/user"));
+    assert_eq!(image_config.user.as_deref(), Some("1000:1000"));
 }
 
 #[tokio::test]
