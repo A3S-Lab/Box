@@ -10,6 +10,10 @@ PORT="${A3S_BOX_E2B_SMOKE_PORT:-38081}"
 GATEWAY_PORT="${A3S_BOX_E2B_GATEWAY_SMOKE_PORT:-38443}"
 GATEWAY_ADDRESS="${A3S_BOX_E2B_GATEWAY_SMOKE_ADDRESS:-127.0.0.1}"
 SANDBOX_DOMAIN="${A3S_BOX_E2B_SANDBOX_DOMAIN:-box.example.com}"
+SANDBOX_PUBLIC_DOMAIN="$SANDBOX_DOMAIN"
+if [[ "$GATEWAY_PORT" != "443" ]]; then
+  SANDBOX_PUBLIC_DOMAIN="$SANDBOX_DOMAIN:$GATEWAY_PORT"
+fi
 IMAGE="${A3S_BOX_SMOKE_IMAGE:-alpine:3.20}"
 RUNTIME_IMAGE="${A3S_BOX_E2B_RUNTIME_IMAGE:-}"
 EXPECTED_TRAFFIC_BODY="sandbox-data-plane"
@@ -69,12 +73,6 @@ fi
 [[ "$SANDBOX_DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] ||
   fail 'A3S_BOX_E2B_SANDBOX_DOMAIN must be a DNS name'
 command -v openssl >/dev/null || fail 'openssl is required for the TLS gateway smoke'
-if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" && "$GATEWAY_PORT" != "443" ]]; then
-  EXPECTED_SANDBOX_URL="https://sandbox.$SANDBOX_DOMAIN:$GATEWAY_PORT"
-  [[ "${E2B_SANDBOX_URL:-}" == "$EXPECTED_SANDBOX_URL" ]] ||
-    fail "non-443 official-client smoke requires E2B_SANDBOX_URL=$EXPECTED_SANDBOX_URL"
-fi
-
 umask 077
 STATE_DIR="$A3S_HOME/e2b-compat-smoke"
 CONFIG="$STATE_DIR/service.acl"
@@ -278,6 +276,7 @@ e2b_compat {
   api_listen = "127.0.0.1:$PORT"
   api_public_url = "$BASE_URL"
   sandbox_domain = "$SANDBOX_DOMAIN"
+  sandbox_public_domain = "$SANDBOX_PUBLIC_DOMAIN"
   database_path = "$STATE_DIR/lifecycle.sqlite3"
   runtime_home = "$A3S_HOME"
   runtime_state_path = "$STATE_DIR/managed-executions.json"
@@ -383,7 +382,7 @@ CREATE_STATUS="$(status_request POST /sandboxes "$CREATE_RESPONSE" \
 [[ "$CREATE_STATUS" == "201" ]] || fail "create returned HTTP $CREATE_STATUS"
 SANDBOX_ID="$(json_field "$CREATE_RESPONSE" sandboxID)"
 [[ "$SANDBOX_ID" == sandbox-* ]] || fail 'create returned an invalid sandbox ID'
-[[ "$(json_field "$CREATE_RESPONSE" domain)" == "$SANDBOX_DOMAIN" ]] ||
+[[ "$(json_field "$CREATE_RESPONSE" domain)" == "$SANDBOX_PUBLIC_DOMAIN" ]] ||
   fail 'create returned the wrong sandbox domain'
 ENVD_TOKEN="$(json_field "$CREATE_RESPONSE" envdAccessToken)"
 TRAFFIC_TOKEN="$(json_field "$CREATE_RESPONSE" trafficAccessToken)"

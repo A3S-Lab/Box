@@ -32,6 +32,7 @@ pub struct E2bCompatService {
     gateway_listen: SocketAddr,
     public_url: Url,
     sandbox_domain: String,
+    sandbox_public_domain: String,
     router: Router,
     gateway: DataPlaneGateway,
     supervisor: LifecycleSupervisor,
@@ -81,12 +82,13 @@ impl E2bCompatService {
         let route_leases =
             RouteLeaseService::new(repository as Arc<dyn SandboxRepository>, tokens, clock);
         let sandbox_domain = config.sandbox_domain.as_str().to_string();
+        let sandbox_public_domain = config.sandbox_public_domain.clone();
         let router = lifecycle_router(LifecycleHttpState::new(
             control,
             verifier,
             Arc::new(RejectingCursorDecoder),
             LifecycleHttpConfig {
-                domain: Some(sandbox_domain.clone()),
+                domain: Some(sandbox_public_domain.clone()),
                 max_json_bytes: config.max_json_bytes,
             },
         ));
@@ -105,6 +107,7 @@ impl E2bCompatService {
             gateway_listen: gateway.listen(),
             public_url: config.api_public_url,
             sandbox_domain,
+            sandbox_public_domain,
             router,
             gateway,
             supervisor,
@@ -128,6 +131,10 @@ impl E2bCompatService {
 
     pub fn sandbox_domain(&self) -> &str {
         &self.sandbox_domain
+    }
+
+    pub fn sandbox_public_domain(&self) -> &str {
+        &self.sandbox_public_domain
     }
 
     pub fn router(&self) -> Router {
@@ -197,6 +204,7 @@ impl E2bCompatService {
             listen = %local_address,
             public_url = %self.public_url,
             sandbox_domain = %self.sandbox_domain,
+            sandbox_public_domain = %self.sandbox_public_domain,
             gateway_listen = %self.gateway_listen,
             "E2B compatibility service started"
         );

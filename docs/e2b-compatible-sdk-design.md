@@ -278,6 +278,12 @@ https://sandbox.<domain>             # shared endpoint plus route headers
 https://<port>-<sandbox-id>.<domain> # direct endpoint and arbitrary ports
 ```
 
+Lifecycle responses use the configured public Sandbox authority. It equals the
+routing domain on standard HTTPS deployments and may append a public TLS port,
+for example `box.example.com:38443`. This lets unchanged clients construct
+direct envd, Code Interpreter, MCP, signed-file, and user-service URLs without
+any process-global Sandbox URL override.
+
 The pinned clients automatically select the shared endpoint only for an
 upstream allowlist of domains. With a custom A3S domain they select the direct
 form, which is also required by `getHost()`, Code Interpreter, MCP, signed file
@@ -599,6 +605,7 @@ e2b_compat {
   api_listen        = "127.0.0.1:3000"
   api_public_url    = "https://api.box.example.com"
   sandbox_domain   = "box.example.com"
+  sandbox_public_domain = "box.example.com"
   database_path    = "/var/lib/a3s-box/e2b/lifecycle.sqlite3"
   runtime_home     = "/var/lib/a3s"
   runtime_state_path = "/var/lib/a3s-box/e2b/managed-executions.json"
@@ -651,6 +658,11 @@ e2b_compat {
   }
 }
 ```
+
+`sandbox_domain` is the validated wildcard DNS suffix used by the gateway.
+`sandbox_public_domain` defaults to the same value and may add one non-zero TCP
+port when an external listener cannot use 443; its hostname must remain equal
+to `sandbox_domain`.
 
 The envd port and envd token scope are added when omitted. Runtime paths,
 credentials, key versions, template execution policy, resources, and routed

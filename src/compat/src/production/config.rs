@@ -1,12 +1,14 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroUsize};
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use a3s_acl::{Block, Document, Value};
 use a3s_box_core::{BoxConfig, ExecutionIsolation, NetworkMode, ResourceConfig};
+use axum::http::uri::Authority;
 use thiserror::Error;
 use url::Url;
 
@@ -52,6 +54,7 @@ pub struct E2bCompatConfig {
     pub(crate) api_listen: SocketAddr,
     pub(crate) api_public_url: Url,
     pub(crate) sandbox_domain: SandboxDomain,
+    pub(crate) sandbox_public_domain: String,
     pub(crate) database_path: PathBuf,
     pub(crate) runtime_home: PathBuf,
     pub(crate) runtime_state_path: PathBuf,
@@ -112,6 +115,10 @@ impl E2bCompatConfig {
         self.sandbox_domain.as_str()
     }
 
+    pub fn sandbox_public_domain(&self) -> &str {
+        &self.sandbox_public_domain
+    }
+
     pub fn supervisor(&self) -> SupervisorConfig {
         self.supervisor
     }
@@ -139,6 +146,7 @@ impl fmt::Debug for E2bCompatConfig {
             .field("api_listen", &self.api_listen)
             .field("api_public_url", &self.api_public_url)
             .field("sandbox_domain", &self.sandbox_domain)
+            .field("sandbox_public_domain", &self.sandbox_public_domain)
             .field("database_path", &self.database_path)
             .field("runtime_home", &self.runtime_home)
             .field("runtime_state_path", &self.runtime_state_path)
@@ -188,6 +196,7 @@ where
             "api_listen",
             "api_public_url",
             "sandbox_domain",
+            "sandbox_public_domain",
             "database_path",
             "runtime_home",
             "runtime_state_path",
@@ -212,6 +221,10 @@ where
     let api_public_url = parse_public_url(required_string(root, "api_public_url", "e2b_compat")?)?;
     let sandbox_domain = SandboxDomain::new(required_string(root, "sandbox_domain", "e2b_compat")?)
         .map_err(|error| invalid(format!("e2b_compat.sandbox_domain: {error}")))?;
+    let sandbox_public_domain = parse_sandbox_public_domain(
+        optional_string(root, "sandbox_public_domain", "e2b_compat")?,
+        &sandbox_domain,
+    )?;
     let database_path = required_absolute_path(root, "database_path", "e2b_compat")?;
     let runtime_home = required_absolute_path(root, "runtime_home", "e2b_compat")?;
     let runtime_state_path = required_absolute_path(root, "runtime_state_path", "e2b_compat")?;
@@ -246,6 +259,7 @@ where
         api_listen,
         api_public_url,
         sandbox_domain,
+        sandbox_public_domain,
         database_path,
         runtime_home,
         runtime_state_path,
@@ -345,6 +359,28 @@ fn parse_public_url(value: String) -> E2bConfigResult<Url> {
         ));
     }
     Ok(url)
+}
+
+fn parse_sandbox_public_domain(
+    value: Option<String>,
+    sandbox_domain: &SandboxDomain,
+) -> E2bConfigResult<String> {
+    let value = value.unwrap_or_else(|| sandbox_domain.as_str().to_string());
+    let authority = Authority::from_str(&value).map_err(|_| {
+        invalid(
+            "e2b_compat.sandbox_public_domain must be the sandbox domain with an optional TCP port",
+        )
+    })?;
+    let port_is_valid = authority
+        .port()
+        .map(|port| port.as_str().parse::<NonZeroU16>().is_ok())
+        .unwrap_or(true);
+    if authority.host() != sandbox_domain.as_str() || !port_is_valid {
+        return Err(invalid(
+            "e2b_compat.sandbox_public_domain must match sandbox_domain and may include one non-zero TCP port",
+        ));
+    }
+    Ok(value)
 }
 
 fn parse_supervisor(block: &Block) -> E2bConfigResult<SupervisorConfig> {

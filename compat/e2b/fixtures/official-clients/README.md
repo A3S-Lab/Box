@@ -75,13 +75,14 @@ and is not installed into the host Python environment.
 Official-client data-plane calls use HTTPS, so the configured wildcard sandbox
 domain must resolve to the gateway listener. Port `443` is the default. On a
 host where another data plane reserves that port, set
-`A3S_BOX_E2B_GATEWAY_SMOKE_PORT` and set `E2B_SANDBOX_URL` to the matching
-`https://sandbox.<domain>:<port>` URL. A domain beneath `localhost`, such as
-`box.localhost`, keeps wildcard smoke hosts on loopback while preserving normal
-TLS hostname validation.
+`A3S_BOX_E2B_GATEWAY_SMOKE_PORT`; the smoke service advertises
+`<domain>:<port>` in lifecycle responses, so envd, Code Interpreter, MCP, and
+user-service URLs keep direct wildcard routing without `E2B_SANDBOX_URL`. A
+domain beneath `localhost`, such as `box.localhost`, keeps wildcard smoke hosts
+on loopback while preserving normal TLS hostname validation.
 
-This gate proves production lifecycle behavior, running and post-kill envd
-health, one foreground non-PTY `commands.run` for each base Python sync/async
-and TypeScript client, and cleanup through the public clients. It does not
-claim full Process, Filesystem, PTY, or Code Interpreter execution
-compatibility; those require their complete data-plane suites.
+This gate covers production lifecycle behavior, envd health, Filesystem,
+foreground and background Process operations, stdin, PTY resize, Code
+Interpreter execution and contexts, and cleanup through the public clients.
+The repository compatibility manifest remains the source of truth for the
+versions and matrix that have passed in production.

@@ -35,8 +35,10 @@ The synchronous and asynchronous Code Interpreter exports are available from
 
 `A3SConnectionConfig` reads `A3S_BOX_ENDPOINT` and `A3S_BOX_API_KEY` without
 changing process-global environment variables. It derives the Sandbox domain
-from conventional `https://api.<domain>` endpoints. Set `A3S_BOX_DOMAIN` or
-`A3S_BOX_SANDBOX_URL` only for non-standard self-hosted routing. The A3S
+from conventional `https://api.<domain>` endpoints. Set `A3S_BOX_DOMAIN` only
+when that convention does not apply. The A3S service returns the public direct
+Sandbox authority, including a non-standard TLS port when configured.
+`A3S_BOX_SANDBOX_URL` is retained only for single-Sandbox fixtures. The A3S
 endpoint decides the execution template and isolation policy; the SDK never
 invokes a local runtime. Standard `E2B_*` variables remain available to users
 who intentionally run the unchanged official SDK instead of this package.

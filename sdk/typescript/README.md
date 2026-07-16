@@ -28,8 +28,9 @@ try {
 
 Code Interpreter exports are available from `@a3s-lab/box/code-interpreter`.
 `A3SConnectionConfig` derives the Sandbox domain from conventional
-`https://api.<domain>` endpoints. Set `A3S_BOX_DOMAIN` or
-`A3S_BOX_SANDBOX_URL` only for non-standard self-hosted routing. The A3S
-service owns template and isolation selection; this package never starts a
-local container or runtime. Standard `E2B_*` variables are only for running an
-unchanged official SDK directly.
+`https://api.<domain>` endpoints. Set `A3S_BOX_DOMAIN` only when that convention
+does not apply. The service returns the public direct Sandbox authority,
+including a configured non-standard TLS port. `A3S_BOX_SANDBOX_URL` is retained
+only for single-Sandbox fixtures. The A3S service owns template and isolation
+selection; this package never starts a local container or runtime. Standard
+`E2B_*` variables are only for running an unchanged official SDK directly.

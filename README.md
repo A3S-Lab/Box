@@ -70,9 +70,12 @@ export A3S_BOX_ENDPOINT=https://api.box.example.com
 export A3S_BOX_API_KEY=a3s_your_key
 ```
 
-Non-standard self-hosted routing can additionally set `A3S_BOX_DOMAIN` and
-`A3S_BOX_SANDBOX_URL`. The `E2B_*` variables are needed only when an unchanged
-official E2B SDK is used directly for protocol compatibility.
+Set `A3S_BOX_DOMAIN` only when the control endpoint does not follow the
+conventional `api.<domain>` form. The service advertises the direct Sandbox
+authority, including a non-standard public TLS port, so normal deployments do
+not need a client-side Sandbox URL override. `A3S_BOX_SANDBOX_URL` remains a
+single-Sandbox fixture escape hatch. The `E2B_*` variables are needed only
+when an unchanged official E2B SDK is used directly for protocol compatibility.
 
 Python uses async lifecycle management so the remote Sandbox is always cleaned
 up:

@@ -30,6 +30,7 @@ e2b_compat {{
   api_listen = "127.0.0.1:3001"
   api_public_url = "https://api.box.example.com"
   sandbox_domain = "box.example.com"
+  sandbox_public_domain = "box.example.com:3443"
   database_path = "{database}"
   runtime_home = "{runtime_home}"
   runtime_state_path = "{runtime_state}"
@@ -129,6 +130,7 @@ async fn parses_acl_into_strict_runtime_credentials_and_template_policy() {
         "https://api.box.example.com/"
     );
     assert_eq!(config.sandbox_domain(), "box.example.com");
+    assert_eq!(config.sandbox_public_domain(), "box.example.com:3443");
     assert_eq!(config.gateway().listen().to_string(), "127.0.0.1:3002");
     assert_eq!(config.gateway().max_connections().get(), 1024);
     assert_eq!(config.supervisor().batch_size().get(), 100);
@@ -183,6 +185,33 @@ fn rejects_plaintext_token_keys_missing_environment_and_unknown_fields() {
             .to_string()
             .contains("unknown attribute accidental_backend")
     );
+
+    let mismatched_domain = input.replace(
+        "sandbox_public_domain = \"box.example.com:3443\"",
+        "sandbox_public_domain = \"other.example.com:3443\"",
+    );
+    assert!(
+        E2bCompatConfig::parse_with_environment(&mismatched_domain, test_environment)
+            .unwrap_err()
+            .to_string()
+            .contains("must match sandbox_domain")
+    );
+
+    let zero_port = input.replace(
+        "sandbox_public_domain = \"box.example.com:3443\"",
+        "sandbox_public_domain = \"box.example.com:0\"",
+    );
+    assert!(
+        E2bCompatConfig::parse_with_environment(&zero_port, test_environment)
+            .unwrap_err()
+            .to_string()
+            .contains("non-zero TCP port")
+    );
+
+    let default_domain = input.replace("  sandbox_public_domain = \"box.example.com:3443\"\n", "");
+    let defaulted =
+        E2bCompatConfig::parse_with_environment(&default_domain, test_environment).unwrap();
+    assert_eq!(defaulted.sandbox_public_domain(), "box.example.com");
 }
 
 #[tokio::test]
@@ -281,6 +310,7 @@ async fn production_composition_wires_auth_sqlite_routing_and_supervision_withou
     assert_eq!(service.listen().to_string(), "127.0.0.1:3001");
     assert_eq!(service.gateway_listen().to_string(), "127.0.0.1:3002");
     assert_eq!(service.sandbox_domain(), "box.example.com");
+    assert_eq!(service.sandbox_public_domain(), "box.example.com:3443");
     assert!(service
         .route_parser()
         .parse_host(
