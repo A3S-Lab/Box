@@ -88,9 +88,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
             with self.capture_lock:
                 already_paused = self.__class__.sandbox_paused
                 self.__class__.sandbox_paused = True
-            self._empty(
-                HTTPStatus.CONFLICT if already_paused else HTTPStatus.NO_CONTENT
-            )
+            if already_paused:
+                self._json(
+                    HTTPStatus.CONFLICT,
+                    {"code": 409, "message": "Sandbox lifecycle conflict"},
+                )
+            else:
+                self._empty(HTTPStatus.NO_CONTENT)
         elif self.command == "POST" and path == f"/sandboxes/{SANDBOX_ID}/connect":
             with self.capture_lock:
                 was_paused = self.__class__.sandbox_paused
