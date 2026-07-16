@@ -6,6 +6,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Owner-scoped E2B Volumes.** The compatibility service now provides durable
+  create, connect, list, and delete operations plus authenticated
+  volume-content directory, file, path, and metadata routes, with startup
+  reconciliation for interrupted transitions. Official and A3S Python
+  sync/async and TypeScript clients prove bidirectional Sandbox mounts, UID/GID
+  mapping, in-use deletion conflicts, and cleanup against real `crun`
+  executions on A3S OS.
 - **Runtime-backed E2B Sandbox logs.** The compatibility service now exposes
   generation-fenced v1 and v2 Sandbox log routes over the canonical structured
   runtime logs, including cursor, direction, level, search, and limit
