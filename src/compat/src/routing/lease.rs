@@ -195,6 +195,7 @@ impl RouteLeaseService {
         let stored = match token_scope {
             TokenScope::Envd => &record.credentials().envd,
             TokenScope::Traffic => &record.credentials().traffic,
+            TokenScope::Volume => return Err(RouteLeaseError::PortDenied),
         };
         if !self.tokens.verify(token_scope, &presented, stored).await? {
             return Err(RouteLeaseError::Unauthorized);
@@ -207,6 +208,7 @@ fn presented_token(headers: &HeaderMap, scope: TokenScope) -> RouteLeaseResult<S
     let name = HeaderName::from_static(match scope {
         TokenScope::Envd => ENVD_ACCESS_TOKEN_HEADER,
         TokenScope::Traffic => TRAFFIC_ACCESS_TOKEN_HEADER,
+        TokenScope::Volume => return Err(RouteLeaseError::PortDenied),
     });
     let mut values = headers.get_all(name).iter();
     let value = values.next().ok_or(RouteLeaseError::MissingToken)?;

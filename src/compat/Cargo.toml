@@ -20,6 +20,7 @@ clap = { workspace = true }
 futures = { workspace = true }
 hex = { workspace = true }
 hyper = { workspace = true }
+libc = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 ring = { workspace = true }

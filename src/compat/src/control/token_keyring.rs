@@ -243,6 +243,7 @@ const fn scope_marker(scope: TokenScope) -> u8 {
     match scope {
         TokenScope::Envd => 1,
         TokenScope::Traffic => 2,
+        TokenScope::Volume => 3,
     }
 }
 

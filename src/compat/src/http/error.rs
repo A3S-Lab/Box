@@ -5,6 +5,7 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::control::{ControlServiceError, RepositoryError, TemplateProviderError};
+use crate::volume::VolumeServiceError;
 
 use super::{AuthenticationError, CursorError};
 
@@ -26,6 +27,20 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: "Sandbox not found".to_string(),
+        }
+    }
+
+    pub fn volume_not_found() -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: "Volume not found".to_string(),
+        }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
         }
     }
 
@@ -99,6 +114,14 @@ impl From<ControlServiceError> for ApiError {
             ControlServiceError::Template(TemplateProviderError::Invalid(message)) => {
                 Self::bad_request(message)
             }
+            ControlServiceError::Volume(
+                VolumeServiceError::InvalidRequest(message),
+            ) => Self::bad_request(message),
+            ControlServiceError::Volume(
+                VolumeServiceError::NotFound
+                | VolumeServiceError::Duplicate
+                | VolumeServiceError::Conflict,
+            ) => Self::bad_request("Volume mount is unavailable"),
             ControlServiceError::Repository(RepositoryError::Duplicate(_)) => Self {
                 status: StatusCode::CONFLICT,
                 message: "Sandbox already exists".to_string(),
@@ -117,7 +140,25 @@ impl From<ControlServiceError> for ApiError {
             | ControlServiceError::Execution(_)
             | ControlServiceError::Identity(_)
             | ControlServiceError::Template(_)
-            | ControlServiceError::Credential(_) => Self::internal(),
+            | ControlServiceError::Credential(_)
+            | ControlServiceError::Volume(_) => Self::internal(),
+        }
+    }
+}
+
+impl From<VolumeServiceError> for ApiError {
+    fn from(error: VolumeServiceError) -> Self {
+        match error {
+            VolumeServiceError::InvalidRequest(message) => Self::bad_request(message),
+            VolumeServiceError::NotFound => Self::volume_not_found(),
+            VolumeServiceError::Duplicate => Self::conflict("Volume already exists"),
+            VolumeServiceError::Conflict => Self::conflict("Volume is in use"),
+            VolumeServiceError::Forbidden => Self::unauthorized("Invalid volume token"),
+            VolumeServiceError::Repository(_)
+            | VolumeServiceError::Runtime(_)
+            | VolumeServiceError::Credential(_)
+            | VolumeServiceError::Model(_)
+            | VolumeServiceError::Content(_) => Self::internal(),
         }
     }
 }

@@ -23,6 +23,10 @@ use crate::http::{
     LifecycleHttpState, RejectingCursorDecoder,
 };
 use crate::routing::{RouteLeaseService, SandboxRouteParser};
+use crate::volume::{
+    current_volume_id_mapper, A3sRuntimeVolumeStore, SqliteVolumeRepository,
+    VolumeFilesystem, VolumeReconciliationReport, VolumeService, VolumeServiceDependencies,
+};
 
 use super::{E2bCompatConfig, SupervisorConfig, UuidSandboxIdentityProvider};
 
@@ -39,6 +43,7 @@ pub struct E2bCompatService {
     supervisor_config: SupervisorConfig,
     route_parser: SandboxRouteParser,
     route_leases: RouteLeaseService,
+    volumes: Arc<VolumeService>,
 }
 
 impl E2bCompatService {
@@ -63,16 +68,31 @@ impl E2bCompatService {
         let verifier = Arc::new(HashedCredentialVerifier::new(config.credentials)?);
         let templates = Arc::new(config.templates);
 
-        let control = Arc::new(ControlService::new(ControlServiceDependencies {
-            repository: repository.clone(),
-            executions: executions.clone(),
-            ports: port_connector.clone(),
+        let volume_repository = Arc::new(SqliteVolumeRepository::new(repository.connection()));
+        let volume_filesystem = Arc::new(VolumeFilesystem::new(current_volume_id_mapper()?));
+        let volumes = Arc::new(VolumeService::new(VolumeServiceDependencies {
+            repository: volume_repository,
+            runtime: Arc::new(A3sRuntimeVolumeStore::new(&config.runtime_home)),
             clock: clock.clone(),
-            identities: Arc::new(UuidSandboxIdentityProvider),
-            templates,
             token_issuer: tokens.clone(),
             token_resolver: tokens.clone(),
+            token_verifier: tokens.clone(),
+            filesystem: volume_filesystem,
         }));
+
+        let control = Arc::new(
+            ControlService::new(ControlServiceDependencies {
+                repository: repository.clone(),
+                executions: executions.clone(),
+                ports: port_connector.clone(),
+                clock: clock.clone(),
+                identities: Arc::new(UuidSandboxIdentityProvider),
+                templates,
+                token_issuer: tokens.clone(),
+                token_resolver: tokens.clone(),
+            })
+            .with_volume_mount_resolver(volumes.clone()),
+        );
         let supervisor = LifecycleSupervisor::new(LifecycleSupervisorDependencies {
             repository: repository.clone(),
             executions: executions.clone(),
@@ -83,15 +103,18 @@ impl E2bCompatService {
             RouteLeaseService::new(repository as Arc<dyn SandboxRepository>, tokens, clock);
         let sandbox_domain = config.sandbox_domain.as_str().to_string();
         let sandbox_public_domain = config.sandbox_public_domain.clone();
-        let router = lifecycle_router(LifecycleHttpState::new(
-            control,
-            verifier,
-            Arc::new(RejectingCursorDecoder),
-            LifecycleHttpConfig {
-                domain: Some(sandbox_public_domain.clone()),
-                max_json_bytes: config.max_json_bytes,
-            },
-        ));
+        let router = lifecycle_router(
+            LifecycleHttpState::new(
+                control,
+                verifier,
+                Arc::new(RejectingCursorDecoder),
+                LifecycleHttpConfig {
+                    domain: Some(sandbox_public_domain.clone()),
+                    max_json_bytes: config.max_json_bytes,
+                },
+            )
+            .with_volume_service(volumes.clone()),
+        );
         let gateway = DataPlaneGateway::build(
             config.gateway.clone(),
             route_parser.clone(),
@@ -114,6 +137,7 @@ impl E2bCompatService {
             supervisor_config: config.supervisor,
             route_parser,
             route_leases,
+            volumes,
         })
     }
 
@@ -150,6 +174,8 @@ impl E2bCompatService {
     }
 
     pub async fn reconcile_startup(&self) -> E2bServiceResult<LifecycleMaintenanceReport> {
+        let volume_report = self.volumes.reconcile_startup().await?;
+        log_volume_report("startup reconciliation", &volume_report);
         Ok(self
             .supervisor
             .reconcile_startup(self.supervisor_config.reconciliation_page_size())
@@ -183,9 +209,11 @@ impl E2bCompatService {
             })?;
         let (shutdown_sender, shutdown_receiver) = watch::channel(false);
         let supervisor = self.supervisor.clone();
+        let volumes = self.volumes.clone();
         let supervisor_config = self.supervisor_config;
         let mut maintenance = tokio::spawn(run_maintenance(
             supervisor,
+            volumes,
             supervisor_config,
             shutdown_receiver.clone(),
         ));
@@ -273,9 +301,12 @@ enum Termination {
 
 async fn run_maintenance(
     supervisor: LifecycleSupervisor,
+    volumes: Arc<VolumeService>,
     config: SupervisorConfig,
     mut shutdown: watch::Receiver<bool>,
 ) -> E2bServiceResult<()> {
+    let volume_report = volumes.reconcile_startup().await?;
+    log_volume_report("startup reconciliation", &volume_report);
     let report = supervisor
         .reconcile_startup(config.reconciliation_page_size())
         .await?;
@@ -296,6 +327,30 @@ async fn run_maintenance(
                 log_report("expiry maintenance", &report);
             }
         }
+    }
+}
+
+fn log_volume_report(operation: &str, report: &VolumeReconciliationReport) {
+    if report.failures.is_empty() {
+        info!(
+            operation,
+            examined = report.examined,
+            completed = report.completed,
+            deferred = report.deferred,
+            "volume maintenance completed"
+        );
+        return;
+    }
+    warn!(
+        operation,
+        examined = report.examined,
+        completed = report.completed,
+        deferred = report.deferred,
+        failures = report.failures.len(),
+        "volume maintenance completed with isolated record failures"
+    );
+    for message in &report.failures {
+        error!(operation, message, "volume record maintenance failed");
     }
 }
 
@@ -415,6 +470,10 @@ pub enum E2bServiceError {
     Supervisor(#[from] LifecycleSupervisorError),
     #[error(transparent)]
     Gateway(#[from] DataPlaneGatewayError),
+    #[error(transparent)]
+    Volume(#[from] crate::volume::VolumeServiceError),
+    #[error(transparent)]
+    VolumeContent(#[from] crate::volume::VolumeContentError),
 }
 
 pub type E2bServiceResult<T> = std::result::Result<T, E2bServiceError>;
