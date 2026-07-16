@@ -119,11 +119,12 @@ impl VolumeRepository for SqliteVolumeRepository {
                          ORDER BY julianday(created_at), volume_id",
                     )
                     .map_err(|error| unavailable("prepare SQLite volume list", error))?;
-                statement
+                let records = statement
                     .query_map([owner_id], |row| row.get::<_, String>(0))
                     .map_err(|error| unavailable("query SQLite volume list", error))?
                     .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|error| unavailable("read SQLite volume list", error))
+                    .map_err(|error| unavailable("read SQLite volume list", error))?;
+                Ok(records)
             })
             .await?;
         records
@@ -142,11 +143,12 @@ impl VolumeRepository for SqliteVolumeRepository {
                          ORDER BY julianday(created_at), volume_id",
                     )
                     .map_err(|error| unavailable("prepare SQLite volume reconciliation", error))?;
-                statement
+                let records = statement
                     .query_map([state], |row| row.get::<_, String>(0))
                     .map_err(|error| unavailable("query SQLite volume reconciliation", error))?
                     .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|error| unavailable("read SQLite volume reconciliation", error))
+                    .map_err(|error| unavailable("read SQLite volume reconciliation", error))?;
+                Ok(records)
             })
             .await?;
         records
