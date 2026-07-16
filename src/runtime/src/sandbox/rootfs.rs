@@ -210,6 +210,132 @@ pub fn prepare_rootfs_ownership(
     Ok(())
 }
 
+/// Capture authoritative guest-visible metadata for a quiesced Sandbox rootfs.
+///
+/// The host sees user-namespace IDs, so every UID/GID is translated back
+/// through the exact OCI mappings before the manifest is stored in a
+/// filesystem Snapshot. The walk never follows symlinks and rejects special
+/// files, preventing a FIFO or device node from entering the copy path.
+#[cfg(target_os = "linux")]
+pub(crate) fn capture_snapshot_rootfs_metadata(
+    root: &Path,
+    plan: &SandboxIdMappingPlan,
+) -> Result<RootfsMetadataManifest> {
+    ensure_no_nested_mounts(root)?;
+    let mut entries = Vec::new();
+    collect_snapshot_rootfs_metadata(root, root, Path::new("."), plan, &mut entries)?;
+    entries.sort_by(|left, right| left.path_base64.cmp(&right.path_base64));
+    Ok(RootfsMetadataManifest::new(entries))
+}
+
+#[cfg(target_os = "linux")]
+fn collect_snapshot_rootfs_metadata(
+    root: &Path,
+    source: &Path,
+    manifest_path: &Path,
+    plan: &SandboxIdMappingPlan,
+    entries: &mut Vec<RootfsMetadataEntry>,
+) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let relative = source
+        .strip_prefix(root)
+        .map_err(|_| BoxError::OciImageError("Sandbox Snapshot walk escaped its root".into()))?;
+    if matches!(
+        relative.to_str(),
+        Some(".a3s_rootfs_metadata_v1.json")
+            | Some(".a3s_rootfs_metadata_v1.json.tmp")
+            | Some(".a3s_image_metadata_v1.json")
+            | Some(".a3s_image_metadata_v1.json.tmp")
+            | Some(".a3s_exit_code")
+            | Some("init.trace.log")
+    ) {
+        return Ok(());
+    }
+
+    let metadata = std::fs::symlink_metadata(source).map_err(BoxError::IoError)?;
+    let file_type = metadata.file_type();
+    let (kind, link_target_base64) = if file_type.is_dir() {
+        (RootfsEntryKind::Directory, None)
+    } else if file_type.is_file() {
+        (RootfsEntryKind::Regular, None)
+    } else if file_type.is_symlink() {
+        let target = std::fs::read_link(source).map_err(BoxError::IoError)?;
+        (
+            RootfsEntryKind::Symlink,
+            Some(base64::engine::general_purpose::STANDARD.encode(target.as_os_str().as_bytes())),
+        )
+    } else {
+        let kind = if file_type.is_fifo() {
+            "fifo"
+        } else if file_type.is_socket() {
+            "socket"
+        } else if file_type.is_char_device() {
+            "character device"
+        } else if file_type.is_block_device() {
+            "block device"
+        } else {
+            "unknown"
+        };
+        return Err(BoxError::OciImageError(format!(
+            "Sandbox Snapshot rootfs contains unsupported special file {} ({kind})",
+            source.display()
+        )));
+    };
+    entries.push(RootfsMetadataEntry {
+        path_base64: base64::engine::general_purpose::STANDARD
+            .encode(manifest_path.as_os_str().as_bytes()),
+        kind,
+        mode: metadata.mode(),
+        uid: unmap_host_id(&plan.uid_mappings, metadata.uid(), "UID")? as u64,
+        gid: unmap_host_id(&plan.gid_mappings, metadata.gid(), "GID")? as u64,
+        mtime: metadata.mtime().max(0) as u64,
+        size: metadata.size(),
+        link_target_base64,
+    });
+
+    if file_type.is_dir() {
+        let mut children: Vec<_> = std::fs::read_dir(source)
+            .map_err(BoxError::IoError)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(BoxError::IoError)?;
+        children.sort_by_key(std::fs::DirEntry::file_name);
+        for child in children {
+            collect_snapshot_rootfs_metadata(
+                root,
+                &child.path(),
+                &manifest_path.join(child.file_name()),
+                plan,
+                entries,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unmap_host_id(mappings: &[IdMapping], id: u32, kind: &str) -> Result<u32> {
+    for mapping in mappings {
+        let Some(end) = mapping.host_id.checked_add(mapping.size) else {
+            continue;
+        };
+        if mapping.host_id <= id && id < end {
+            return mapping
+                .container_id
+                .checked_add(id - mapping.host_id)
+                .ok_or_else(|| {
+                    BoxError::ConfigError(format!(
+                        "Sandbox Snapshot {kind} reverse mapping overflows u32"
+                    ))
+                });
+        }
+    }
+    Err(BoxError::ConfigError(format!(
+        "Sandbox Snapshot host {kind} {id} is outside the OCI mappings"
+    )))
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn prepare_rootfs_ownership(
     _root: &Path,

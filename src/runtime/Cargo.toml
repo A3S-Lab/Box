@@ -97,6 +97,10 @@ windows-sys = { version = "0.48", features = [
 ] }
 
 [target.'cfg(unix)'.dependencies]
+# Filesystem Snapshot fidelity
+filetime = "0.2"
+xattr = "1.6"
+
 # TEE attestation verification
 p384 = { workspace = true }
 ecdsa = { workspace = true }

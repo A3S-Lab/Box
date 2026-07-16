@@ -27,9 +27,10 @@ mod linux {
     use std::path::{Path, PathBuf};
 
     use a3s_box_core::{
-        BoxConfig, CreateExecutionRequest, ExecutionBackend, ExecutionId, ExecutionIsolation,
-        ExecutionManager, ExecutionManagerError, ExecutionSnapshotId, ExecutionState,
-        IsolationClass, KillOutcome, NetworkMode, OperationId, ReconcileOutcome, ResourceConfig,
+        BoxConfig, CreateExecutionRequest, ExecutionBackend, ExecutionGeneration, ExecutionId,
+        ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionSnapshotId,
+        ExecutionState, IsolationClass, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
+        ResourceConfig,
     };
     use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionStore};
 
@@ -47,6 +48,10 @@ mod linux {
             OperationId::new(format!("managed-sandbox-restore-{}", uuid::Uuid::new_v4()))?;
         let snapshot_id =
             ExecutionSnapshotId::new(format!("managed-smoke-{}", uuid::Uuid::new_v4().simple()))?;
+        let rejected_snapshot_id = ExecutionSnapshotId::new(format!(
+            "managed-smoke-rejected-{}",
+            uuid::Uuid::new_v4().simple()
+        ))?;
 
         let result = exercise(
             &home_dir,
@@ -54,6 +59,7 @@ mod linux {
             &source_operation_id,
             &restored_operation_id,
             &snapshot_id,
+            &rejected_snapshot_id,
         )
         .await;
         for operation_id in [&source_operation_id, &restored_operation_id] {
@@ -65,14 +71,16 @@ mod linux {
             }
         }
         let cleanup_manager = LocalExecutionManager::with_vm_backend(&state_path, &home_dir);
-        if let Err(cleanup_error) = cleanup_manager
-            .delete_filesystem_snapshot(&snapshot_id)
-            .await
-        {
-            if result.is_ok() {
-                return Err(cleanup_error.into());
+        for cleanup_snapshot_id in [&snapshot_id, &rejected_snapshot_id] {
+            if let Err(cleanup_error) = cleanup_manager
+                .delete_filesystem_snapshot(cleanup_snapshot_id)
+                .await
+            {
+                if result.is_ok() {
+                    return Err(cleanup_error.into());
+                }
+                eprintln!("managed snapshot cleanup also failed: {cleanup_error}");
             }
-            eprintln!("managed snapshot cleanup also failed: {cleanup_error}");
         }
         result
     }
@@ -120,6 +128,7 @@ mod linux {
         source_operation_id: &OperationId,
         restored_operation_id: &OperationId,
         snapshot_id: &ExecutionSnapshotId,
+        rejected_snapshot_id: &ExecutionSnapshotId,
     ) -> Result<(), AnyError> {
         let image =
             std::env::var("A3S_BOX_SMOKE_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_string());
@@ -230,6 +239,16 @@ mod linux {
             execution_id,
             resumed.generation.get()
         );
+
+        validate_special_file_rejection(
+            &restarted,
+            home_dir,
+            &box_dir,
+            &execution_id,
+            resumed.generation,
+            rejected_snapshot_id,
+        )
+        .await?;
 
         let snapshot_started = std::time::Instant::now();
         let snapshot = restarted
@@ -344,6 +363,67 @@ mod linux {
         println!(
             "killed restored_execution={} snapshot_delete=ok cleanup=ok",
             restored_id
+        );
+        Ok(())
+    }
+
+    async fn validate_special_file_rejection(
+        manager: &LocalExecutionManager,
+        home_dir: &Path,
+        box_dir: &Path,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> Result<(), AnyError> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let fifo = box_dir.join("merged/state/snapshot-blocker");
+        let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes())?;
+        if unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let started = std::time::Instant::now();
+        let capture = manager
+            .create_filesystem_snapshot(execution_id, generation, snapshot_id)
+            .await;
+        let elapsed = started.elapsed();
+        std::fs::remove_file(&fifo)?;
+        let error = capture
+            .err()
+            .ok_or_else(|| failure("managed Snapshot accepted a FIFO"))?;
+        require(
+            matches!(
+                &error,
+                ExecutionManagerError::Unavailable(message)
+                    if message.contains("unsupported special file") && message.contains("fifo")
+            ),
+            "managed Snapshot did not fail closed on a FIFO",
+        )?;
+        require(
+            elapsed <= std::time::Duration::from_secs(5),
+            "managed Snapshot special-file rejection was not bounded",
+        )?;
+        require(
+            manager.inspect(execution_id).await?.state == ExecutionState::Running,
+            "managed Snapshot failure did not restore the running source",
+        )?;
+        require(
+            manager.filesystem_snapshot_size(snapshot_id).await?.is_none(),
+            "rejected managed Snapshot was published",
+        )?;
+        require(
+            std::fs::read_dir(home_dir.join("snapshots"))?.all(|entry| {
+                entry.is_ok_and(|entry| {
+                    !entry.file_name().to_string_lossy().starts_with(".staging-")
+                })
+            }),
+            "rejected managed Snapshot leaked a staging tree",
+        )?;
+        let _ = validate_runtime_record(home_dir, box_dir, execution_id)?;
+        println!(
+            "snapshot-rejection execution={} kind=fifo source=running elapsed_ms={}",
+            execution_id,
+            elapsed.as_millis()
         );
         Ok(())
     }
