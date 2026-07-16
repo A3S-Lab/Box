@@ -55,6 +55,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
     client_name: ClassVar[str]
     capture_lock: ClassVar[threading.Lock] = threading.Lock()
     create_count: ClassVar[int] = 0
+    sandbox_paused: ClassVar[bool] = False
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         self._handle()
@@ -83,8 +84,21 @@ class FixtureHandler(BaseHTTPRequestHandler):
                     else INTERPRETER_SANDBOX_ID
                 )
             self._json(HTTPStatus.CREATED, sandbox_response(sandbox_id))
+        elif self.command == "POST" and path == f"/sandboxes/{SANDBOX_ID}/pause":
+            with self.capture_lock:
+                already_paused = self.__class__.sandbox_paused
+                self.__class__.sandbox_paused = True
+            self._empty(
+                HTTPStatus.CONFLICT if already_paused else HTTPStatus.NO_CONTENT
+            )
         elif self.command == "POST" and path == f"/sandboxes/{SANDBOX_ID}/connect":
-            self._json(HTTPStatus.OK, sandbox_response(SANDBOX_ID))
+            with self.capture_lock:
+                was_paused = self.__class__.sandbox_paused
+                self.__class__.sandbox_paused = False
+            self._json(
+                HTTPStatus.CREATED if was_paused else HTTPStatus.OK,
+                sandbox_response(SANDBOX_ID),
+            )
         elif self.command == "GET" and path == "/v2/sandboxes":
             self._json(HTTPStatus.OK, [listed_sandbox()])
         elif self.command == "POST" and path == f"/sandboxes/{SANDBOX_ID}/timeout":

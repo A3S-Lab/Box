@@ -79,6 +79,8 @@ pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
             get(lifecycle::get).delete(lifecycle::kill),
         )
         .route("/sandboxes/:sandbox_id/connect", post(lifecycle::connect))
+        .route("/sandboxes/:sandbox_id/pause", post(lifecycle::pause))
+        .route("/sandboxes/:sandbox_id/resume", post(lifecycle::resume))
         .route(
             "/sandboxes/:sandbox_id/metrics",
             get(lifecycle::get_metrics),

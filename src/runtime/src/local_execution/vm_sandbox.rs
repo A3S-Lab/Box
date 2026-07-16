@@ -36,6 +36,22 @@ impl VmLocalExecutionBackend {
                 let manager = self.attach_sandbox(record, state).await?;
                 self.inspect_registered(record, manager).await
             }
+            "paused" => {
+                if state.pid == 0 {
+                    return Err(ExecutionManagerError::Internal(format!(
+                        "Sandbox runtime returned PID zero for {}",
+                        record.id
+                    )));
+                }
+                let manager = self.attach_sandbox(record, state).await?;
+                let manager = manager.lock().await;
+                let handle = self.handle_from_manager(record, &manager).await?;
+                Ok(LocalExecutionObservation {
+                    state: ExecutionState::Paused,
+                    handle: Some(handle),
+                    exit_code: None,
+                })
+            }
             "stopped" => {
                 self.cleanup_detached_sandbox(record).await?;
                 Ok(LocalExecutionObservation {
@@ -49,6 +65,96 @@ impl VmLocalExecutionBackend {
                 record.id
             ))),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) async fn pause_sandbox(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionHandle> {
+        self.transition_sandbox(record, true).await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) async fn resume_sandbox(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionHandle> {
+        self.transition_sandbox(record, false).await
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(super) async fn pause_sandbox(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionHandle> {
+        Err(unsupported(record, "pause", "the Sandbox backend on this host"))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(super) async fn resume_sandbox(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionHandle> {
+        Err(unsupported(record, "resume", "the Sandbox backend on this host"))
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn transition_sandbox(
+        &self,
+        record: &BoxRecord,
+        pause: bool,
+    ) -> ExecutionManagerResult<LocalExecutionHandle> {
+        self.metadata(record)?;
+        let home_dir = self.home_dir.clone();
+        let box_dir = record.box_dir.clone();
+        let box_id = record.id.clone();
+        let operation = if pause { "pause" } else { "resume" };
+        let inspection = tokio::task::spawn_blocking(move || {
+            let inspection = inspect_recorded_sandbox(&home_dir, &box_dir, &box_id)?
+                .ok_or_else(|| {
+                    a3s_box_core::BoxError::StateError(format!(
+                        "Sandbox runtime record is missing for {box_id}"
+                    ))
+                })?;
+            if pause {
+                crate::sandbox::handler::CrunHandler::pause_at(
+                    &inspection.runtime.runtime_path,
+                    &inspection.runtime.runtime_root,
+                    &box_id,
+                )?;
+            } else {
+                crate::sandbox::handler::CrunHandler::resume_at(
+                    &inspection.runtime.runtime_path,
+                    &inspection.runtime.runtime_root,
+                    &box_id,
+                )?;
+            }
+            inspect_recorded_sandbox(&home_dir, &box_dir, &box_id)?.ok_or_else(|| {
+                a3s_box_core::BoxError::StateError(format!(
+                    "Sandbox runtime record disappeared after {operation} for {box_id}"
+                ))
+            })
+        })
+        .await
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "Sandbox {operation} task failed for {}: {error}",
+                record.id
+            ))
+        })?
+        .map_err(|error| runtime_error(operation, record, error))?;
+
+        let expected = if pause { "paused" } else { "running" };
+        if inspection.status != expected {
+            return Err(ExecutionManagerError::Internal(format!(
+                "Sandbox runtime returned state {} after {operation} for {}",
+                inspection.status, record.id
+            )));
+        }
+        let manager = self.attach_sandbox(record, inspection).await?;
+        let manager = manager.lock().await;
+        self.handle_from_manager(record, &manager).await
     }
 
     #[cfg(target_os = "linux")]
@@ -176,7 +282,9 @@ fn inspect_recorded_sandbox(
         Some(state) => (state.status, state.pid),
         None => ("stopped".to_string(), 0),
     };
-    if matches!(status.as_str(), "created" | "running") && pid != runtime.init_pid {
+    if matches!(status.as_str(), "created" | "running" | "paused")
+        && pid != runtime.init_pid
+    {
         return Err(a3s_box_core::BoxError::StateError(format!(
             "Sandbox runtime PID disagrees with its durable record for {box_id}"
         )));

@@ -48,7 +48,33 @@ async fn lifecycle_service_runs_the_official_control_flow() {
     assert_eq!(connected.disposition, ConnectionDisposition::AlreadyRunning);
     assert_eq!(
         connected.record.expires_at(),
-        test_time() + Duration::seconds(222)
+        test_time() + Duration::seconds(321)
+    );
+
+    harness
+        .service
+        .pause("owner-1", &sandbox_id, true)
+        .await
+        .unwrap();
+    let paused = harness.service.get("owner-1", &sandbox_id).await.unwrap();
+    assert_eq!(paused.state(), LifecycleState::Paused);
+    assert_eq!(paused.execution_generation().unwrap().get(), 2);
+    assert!(matches!(
+        harness.service.pause("owner-1", &sandbox_id, true).await,
+        Err(ControlServiceError::Conflict(_))
+    ));
+
+    let resumed = harness
+        .service
+        .resume("owner-1", &sandbox_id, 600, true)
+        .await
+        .unwrap();
+    assert_eq!(resumed.disposition, ConnectionDisposition::Resumed);
+    assert_eq!(resumed.record.state(), LifecycleState::Running);
+    assert_eq!(resumed.record.execution_generation().unwrap().get(), 3);
+    assert_eq!(
+        resumed.record.expires_at(),
+        test_time() + Duration::seconds(600)
     );
 
     let page = harness

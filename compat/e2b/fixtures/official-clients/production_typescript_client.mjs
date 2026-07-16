@@ -187,6 +187,34 @@ try {
   trace('process.foreground.complete')
   await exerciseDataPlane(sandbox, 'typescript')
 
+  trace('sandbox.pause-process-start')
+  const survivor = await sandbox.commands.run('cat', {
+    background: true,
+    stdin: true,
+    timeoutMs: 20_000,
+  })
+  trace('sandbox.pause')
+  assert.equal(await sandbox.pause({ keepMemory: true }), true)
+  trace('sandbox.pause-idempotent')
+  assert.equal(await sandbox.pause({ keepMemory: true }), false)
+  trace('sandbox.list-paused')
+  const pausedPaginator = Sandbox.list({
+    ...connection,
+    query: { metadata, state: ['paused'] },
+    limit: 20,
+  })
+  const paused = await pausedPaginator.nextItems()
+  assert.ok(paused.some((item) => item.sandboxId === sandbox.sandboxId))
+  trace('sandbox.resume-connect')
+  const resumed = await sandbox.connect({ timeoutMs: 45_000 })
+  assert.equal(resumed.sandboxId, sandbox.sandboxId)
+  trace('sandbox.pause-process-survived')
+  await survivor.sendStdin('typescript-pause')
+  await survivor.closeStdin()
+  const survivorResult = await survivor.wait()
+  assert.equal(survivorResult.exitCode, 0)
+  assert.equal(survivorResult.stdout, 'typescript-pause')
+
   trace('sandbox.list')
   const paginator = Sandbox.list({
     ...connection,
