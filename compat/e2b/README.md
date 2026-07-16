@@ -70,6 +70,11 @@ reconciliation, and periodic expiry maintenance. It requires a `.acl` file
 parsed by `a3s-acl`; literal sandbox token keys are rejected in favor of
 `env("VARIABLE")` references.
 
+Sandbox expiry is measured from the later of runtime start and observed envd
+readiness, so cold startup does not consume the caller's requested usable
+timeout. Startup reconciliation applies the same lifetime rule when it recovers
+a creating record whose execution was committed before the service restarted.
+
 Run it from the Rust workspace:
 
 ```bash

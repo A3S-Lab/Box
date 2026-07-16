@@ -542,7 +542,7 @@ compatibility:
 
 | Surface | Implemented preview | Not yet a release claim |
 | --- | --- | --- |
-| Control plane | Owner-scoped create, connect, get, list, timeout replacement, and kill with SQLite WAL persistence, restart reconciliation, and cleanup | Template, snapshot, volume, metrics, full pagination/recovery semantics, and cold-start lifetime handling tracked by #112 |
+| Control plane | Owner-scoped create, connect, get, list, timeout replacement, and kill with SQLite WAL persistence, restart reconciliation, cleanup, and a complete requested timeout measured from runtime and envd readiness | Template, snapshot, volume, metrics, full pagination, and host-reboot recovery semantics |
 | Credentials and routing | PBKDF2 account-key hashes, encrypted scope-bound Sandbox tokens, generation-fenced leases, wildcard TLS, direct/shared routes, CORS, HTTP/2, and PID-fenced Sandbox access | Certificate rotation and the complete streaming, upgrade, signed-file, and public-port route matrix |
 | envd | Authenticated running/terminal health plus fail-closed runtime initialization with lifecycle ID, environment, timestamp, and default user | `/metrics`, `/envs`, HTTP content transfer, volume-content endpoints, and the remaining envd semantic matrix |
 | Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground and background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output on real Sandboxes | Additional signals, binary framing, reconnect, cancellation, backpressure, and adversarial concurrent-stream coverage |
