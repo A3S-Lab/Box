@@ -202,8 +202,8 @@ impl CrunHandler {
         source_states: &[&str],
         target_state: &str,
     ) -> Result<()> {
-        let state = Self::query_state_at(runtime_path, runtime_root, container_id)?
-            .ok_or_else(|| {
+        let state =
+            Self::query_state_at(runtime_path, runtime_root, container_id)?.ok_or_else(|| {
                 BoxError::StateError(format!(
                     "Sandbox runtime {container_id} does not exist for {operation}"
                 ))
@@ -511,9 +511,7 @@ impl VmHandler for CrunHandler {
         self.query_state()
             .ok()
             .flatten()
-            .is_some_and(|state| {
-                matches!(state.status.as_str(), "created" | "running" | "paused")
-            })
+            .is_some_and(|state| matches!(state.status.as_str(), "created" | "running" | "paused"))
     }
 
     fn has_exited(&self) -> bool {

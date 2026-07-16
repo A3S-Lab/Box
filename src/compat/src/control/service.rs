@@ -3,8 +3,8 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use a3s_box_core::{
-    resolve_execution, CreateExecutionRequest, ExecutionBackend, ExecutionLease,
-    ExecutionManager, ExecutionManagerError, ExecutionPortConnector, NetworkMode,
+    resolve_execution, CreateExecutionRequest, ExecutionBackend, ExecutionLease, ExecutionManager,
+    ExecutionManagerError, ExecutionPortConnector, NetworkMode,
 };
 use chrono::{DateTime, Utc};
 use hyper::body::{Body, HttpBody};
@@ -410,8 +410,7 @@ impl ControlService {
             )
         {
             return Err(ControlServiceError::InvalidRequest(
-                "filesystem-only pause is not implemented for this execution backend"
-                    .to_string(),
+                "filesystem-only pause is not implemented for this execution backend".to_string(),
             ));
         }
         let execution_id = record

@@ -88,7 +88,11 @@ impl VmLocalExecutionBackend {
         &self,
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionHandle> {
-        Err(unsupported(record, "pause", "the Sandbox backend on this host"))
+        Err(unsupported(
+            record,
+            "pause",
+            "the Sandbox backend on this host",
+        ))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -96,7 +100,11 @@ impl VmLocalExecutionBackend {
         &self,
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionHandle> {
-        Err(unsupported(record, "resume", "the Sandbox backend on this host"))
+        Err(unsupported(
+            record,
+            "resume",
+            "the Sandbox backend on this host",
+        ))
     }
 
     #[cfg(target_os = "linux")]
@@ -111,8 +119,8 @@ impl VmLocalExecutionBackend {
         let box_id = record.id.clone();
         let operation = if pause { "pause" } else { "resume" };
         let inspection = tokio::task::spawn_blocking(move || {
-            let inspection = inspect_recorded_sandbox(&home_dir, &box_dir, &box_id)?
-                .ok_or_else(|| {
+            let inspection =
+                inspect_recorded_sandbox(&home_dir, &box_dir, &box_id)?.ok_or_else(|| {
                     a3s_box_core::BoxError::StateError(format!(
                         "Sandbox runtime record is missing for {box_id}"
                     ))
@@ -282,9 +290,7 @@ fn inspect_recorded_sandbox(
         Some(state) => (state.status, state.pid),
         None => ("stopped".to_string(), 0),
     };
-    if matches!(status.as_str(), "created" | "running" | "paused")
-        && pid != runtime.init_pid
-    {
+    if matches!(status.as_str(), "created" | "running" | "paused") && pid != runtime.init_pid {
         return Err(a3s_box_core::BoxError::StateError(format!(
             "Sandbox runtime PID disagrees with its durable record for {box_id}"
         )));
