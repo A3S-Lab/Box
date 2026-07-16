@@ -233,10 +233,10 @@ fn special_file_kind(file_type: &std::fs::FileType) -> &'static str {
 }
 
 #[cfg(unix)]
-fn snapshot_copy_error(
-    path: &Path,
+fn snapshot_copy_error<'a>(
+    path: &'a Path,
     operation: &'static str,
-) -> impl FnOnce(std::io::Error) -> BoxError + '_ {
+) -> impl FnOnce(std::io::Error) -> BoxError + 'a {
     move |error| {
         BoxError::CacheError(format!(
             "Failed to {operation} Snapshot path {}: {error}",
