@@ -1,5 +1,6 @@
 //! Generation-fenced command, PTY, and file sessions.
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use a3s_box_core::pty::PtyRequest;
@@ -25,7 +26,8 @@ impl ExecutionSessionManager for LocalExecutionManager {
         mut request: ExecRequest,
     ) -> ExecutionManagerResult<ExecOutput> {
         request.streaming = false;
-        let (client, stream) = self.bind_exec(execution_id, generation).await?;
+        let (record, client, stream) = self.bind_exec(execution_id, generation).await?;
+        inherit_container_environment(&record.env, &mut request.env);
         client
             .exec_command_on_stream(stream, &request)
             .await
@@ -36,9 +38,10 @@ impl ExecutionSessionManager for LocalExecutionManager {
         &self,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
-        request: ExecRequest,
+        mut request: ExecRequest,
     ) -> ExecutionManagerResult<ExecutionProcess> {
-        let (client, stream) = self.bind_exec(execution_id, generation).await?;
+        let (record, client, stream) = self.bind_exec(execution_id, generation).await?;
+        inherit_container_environment(&record.env, &mut request.env);
         let stream = client
             .exec_stream_on_stream(stream, &request)
             .await
@@ -54,11 +57,12 @@ impl ExecutionSessionManager for LocalExecutionManager {
         &self,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
-        request: PtyRequest,
+        mut request: PtyRequest,
     ) -> ExecutionManagerResult<ExecutionProcess> {
         let record = self
             .require_running_record(execution_id, generation)
             .await?;
+        inherit_container_environment(&record.env, &mut request.env);
         let socket_path = record.exec_socket_path.with_file_name("pty.sock");
         let client = PtyClient::connect(&socket_path)
             .await
@@ -82,7 +86,7 @@ impl ExecutionSessionManager for LocalExecutionManager {
         generation: ExecutionGeneration,
         request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse> {
-        let (client, stream) = self.bind_exec(execution_id, generation).await?;
+        let (_record, client, stream) = self.bind_exec(execution_id, generation).await?;
         client
             .file_transfer_on_stream(stream, &request)
             .await
@@ -95,7 +99,7 @@ impl LocalExecutionManager {
         &self,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
-    ) -> ExecutionManagerResult<(ExecClient, tokio::net::UnixStream)> {
+    ) -> ExecutionManagerResult<(BoxRecord, ExecClient, tokio::net::UnixStream)> {
         let record = self
             .require_running_record(execution_id, generation)
             .await?;
@@ -106,7 +110,7 @@ impl LocalExecutionManager {
             .map_err(|error| session_error(execution_id, "connect exec", error))?;
         self.require_same_runtime(&record, execution_id, generation)
             .await?;
-        Ok((client, stream))
+        Ok((record, client, stream))
     }
 
     async fn require_same_runtime(
@@ -130,6 +134,32 @@ impl LocalExecutionManager {
         }
         Ok(())
     }
+}
+
+/// Merge the environment fixed at Sandbox creation into an exec/PTY request.
+///
+/// The guest normally inherits these values from guest-init, but the execution
+/// contract must not depend on which user a later request selects. Per-request
+/// values remain authoritative, matching OCI/Docker exec environment semantics.
+fn inherit_container_environment(container: &HashMap<String, String>, request: &mut Vec<String>) {
+    let mut merged: BTreeMap<String, String> = container
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let mut malformed = Vec::new();
+    for entry in std::mem::take(request) {
+        if let Some((key, value)) = entry.split_once('=') {
+            merged.insert(key.to_string(), value.to_string());
+        } else {
+            malformed.push(entry);
+        }
+    }
+    request.extend(
+        merged
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}")),
+    );
+    request.extend(malformed);
 }
 
 struct ExecInput {
@@ -240,4 +270,36 @@ fn session_error(
     ExecutionManagerError::Unavailable(format!(
         "failed to {operation} for execution {execution_id}: {error}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inherit_container_environment;
+    use std::collections::HashMap;
+
+    #[test]
+    fn request_environment_overrides_inherited_container_values() {
+        let container = HashMap::from([
+            ("ALPHA".to_string(), "container".to_string()),
+            ("BETA".to_string(), "container".to_string()),
+        ]);
+        let mut request = vec!["BETA=request".to_string(), "GAMMA=request".to_string()];
+
+        inherit_container_environment(&container, &mut request);
+
+        assert_eq!(
+            request,
+            ["ALPHA=container", "BETA=request", "GAMMA=request"]
+        );
+    }
+
+    #[test]
+    fn malformed_request_entries_are_preserved_after_inherited_values() {
+        let container = HashMap::from([("ALPHA".to_string(), "container".to_string())]);
+        let mut request = vec!["MALFORMED".to_string()];
+
+        inherit_container_environment(&container, &mut request);
+
+        assert_eq!(request, ["ALPHA=container", "MALFORMED"]);
+    }
 }
