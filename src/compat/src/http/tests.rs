@@ -81,6 +81,30 @@ async fn router_serves_the_pinned_official_lifecycle_shape() {
 
     let response = send(
         &app,
+        Method::GET,
+        "/sandboxes/sandbox-1/logs?start=0&limit=2",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let logs = body_json(response).await;
+    assert!(logs["logs"].is_array());
+    assert!(logs["logEntries"].is_array());
+
+    let response = send(
+        &app,
+        Method::GET,
+        "/v2/sandboxes/sandbox-1/logs?direction=backward&limit=1",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_json(response).await["logs"].is_array());
+
+    let response = send(
+        &app,
         Method::POST,
         "/sandboxes/sandbox-1/connect",
         Some(json!({"timeout": 222})),
