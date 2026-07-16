@@ -27,3 +27,6 @@ pub use service::{
     VolumeServiceDependencies, VolumeServiceError, VolumeServiceResult,
 };
 pub use sqlite::SqliteVolumeRepository;
+
+#[cfg(test)]
+mod tests;
