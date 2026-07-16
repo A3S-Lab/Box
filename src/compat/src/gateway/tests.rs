@@ -20,6 +20,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use hyper::body::{to_bytes, Bytes, HttpBody};
 use hyper::service::service_fn;
 use rustls::pki_types::ServerName;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::control::{
@@ -33,7 +34,9 @@ use crate::routing::{
     SANDBOX_PORT_HEADER, TRAFFIC_ACCESS_TOKEN_HEADER,
 };
 
-use super::{DataPlaneGateway, DataPlaneGatewayConfig, DataPlaneProxy};
+use super::{
+    DataPlaneGateway, DataPlaneGatewayConfig, DataPlaneProxy, HTTP2_MAX_CONCURRENT_STREAMS,
+};
 
 struct FixedClock(DateTime<Utc>);
 
@@ -730,6 +733,32 @@ async fn http2_connection_multiplexes_unary_request_while_stream_is_open() {
     client_config.alpn_protocols = vec![b"h2".to_vec()];
     let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
     let host = format!("{}-{}.box.example.com", ENVD_PORT, harness.sandbox_id);
+
+    let probe_tcp = TcpStream::connect(address).await.unwrap();
+    let mut probe_tls = tls_connector
+        .connect(ServerName::try_from(host.clone()).unwrap(), probe_tcp)
+        .await
+        .unwrap();
+    probe_tls
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0")
+        .await
+        .unwrap();
+    let mut frame_header = [0_u8; 9];
+    probe_tls.read_exact(&mut frame_header).await.unwrap();
+    let payload_length = usize::from(frame_header[0]) << 16
+        | usize::from(frame_header[1]) << 8
+        | usize::from(frame_header[2]);
+    assert_eq!(frame_header[3], 0x04, "first HTTP/2 frame was not SETTINGS");
+    assert_eq!(frame_header[4] & 0x01, 0, "first SETTINGS frame was an ACK");
+    let mut settings = vec![0_u8; payload_length];
+    probe_tls.read_exact(&mut settings).await.unwrap();
+    let advertised_limit = settings.chunks_exact(6).find_map(|setting| {
+        (u16::from_be_bytes([setting[0], setting[1]]) == 0x03)
+            .then(|| u32::from_be_bytes([setting[2], setting[3], setting[4], setting[5]]))
+    });
+    assert_eq!(advertised_limit, Some(HTTP2_MAX_CONCURRENT_STREAMS));
+    drop(probe_tls);
+
     let tcp = TcpStream::connect(address).await.unwrap();
     let tls = tls_connector
         .connect(ServerName::try_from(host.clone()).unwrap(), tcp)

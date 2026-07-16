@@ -23,6 +23,12 @@ use crate::routing::{RouteLeaseService, SandboxRouteParser};
 
 pub use proxy::DataPlaneProxy;
 
+// httpcore starts HTTP/2 connections with a single stream and only raises the
+// limit after receiving an explicit SETTINGS_MAX_CONCURRENT_STREAMS value.
+// Advertising the limit keeps long-lived Connect streams from blocking unary
+// requests made through the official E2B Python SDK.
+const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 128;
+
 /// Startup-validated TLS listener and bounded proxy settings.
 #[derive(Debug, Clone)]
 pub struct DataPlaneGatewayConfig {
@@ -179,7 +185,8 @@ async fn serve_connection(
     let mut http = Http::new();
     http.http1_keep_alive(true)
         .http1_half_close(true)
-        .http2_adaptive_window(true);
+        .http2_adaptive_window(true)
+        .http2_max_concurrent_streams(HTTP2_MAX_CONCURRENT_STREAMS);
     let connection = http.serve_connection(tls, service).with_upgrades();
     tokio::pin!(connection);
     tokio::select! {
