@@ -7,6 +7,22 @@ from unittest import mock
 import run_production
 
 
+class NativeEnvironmentTests(unittest.TestCase):
+    def test_removes_every_official_connection_override(self) -> None:
+        self.assertEqual(
+            set(run_production.E2B_CONNECTION_ENVIRONMENT),
+            {
+                "E2B_API_KEY",
+                "E2B_API_URL",
+                "E2B_DEBUG",
+                "E2B_DOMAIN",
+                "E2B_SANDBOX_URL",
+                "E2B_VALIDATE_API_KEY",
+                "E2B_VOLUME_API_URL",
+            },
+        )
+
+
 class PrepareNativeTypescriptTests(unittest.TestCase):
     def test_compiler_resolves_pinned_official_dependencies(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

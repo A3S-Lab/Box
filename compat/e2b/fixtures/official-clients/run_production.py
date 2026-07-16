@@ -22,9 +22,11 @@ SDK_ROOT = COMPAT_ROOT.parent.parent / "sdk"
 E2B_CONNECTION_ENVIRONMENT = (
     "E2B_API_KEY",
     "E2B_API_URL",
+    "E2B_DEBUG",
     "E2B_DOMAIN",
     "E2B_SANDBOX_URL",
     "E2B_VALIDATE_API_KEY",
+    "E2B_VOLUME_API_URL",
 )
 
 
@@ -179,8 +181,9 @@ def main() -> None:
     print(
         "Official production clients passed: Python sync, Python async, and "
         "TypeScript lifecycle, envd health, Filesystem operations, foreground "
-        "and background commands, stdin, PTY resize, and Code Interpreter "
-        "execution and contexts"
+        "and background commands, stdin, PTY resize, Volume control/content, "
+        "bidirectional Sandbox mounts, in-use deletion conflicts, and Code "
+        "Interpreter execution and contexts"
         + (" through both official and A3S SDK packages" if args.native_sdks else "")
     )
 
