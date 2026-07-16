@@ -17,10 +17,13 @@ if NATIVE_SDK:
     from a3s_box import (  # type: ignore[import-not-found]
         A3SConnectionConfig,
         AsyncSandbox,
+        AsyncVolume,
         Sandbox,
         SandboxNotFoundException,
         SandboxQuery,
         SandboxState,
+        Volume,
+        VolumeException,
     )
     from a3s_box.code_interpreter import (  # type: ignore[import-not-found]
         AsyncSandbox as AsyncCodeInterpreter,
@@ -31,10 +34,13 @@ if NATIVE_SDK:
 else:
     from e2b import (
         AsyncSandbox,
+        AsyncVolume,
         Sandbox,
         SandboxNotFoundException,
         SandboxQuery,
         SandboxState,
+        Volume,
+        VolumeException,
     )
     from e2b_code_interpreter import AsyncSandbox as AsyncCodeInterpreter
     from e2b_code_interpreter import Sandbox as CodeInterpreter
@@ -49,9 +55,27 @@ def connection(api_url: str, domain: str) -> dict[str, Any]:
     return {"api_key": api_key, "api_url": api_url, "domain": domain}
 
 
-def assert_listed(items: list[Any], sandbox_id: str) -> None:
-    if not any(item.sandbox_id == sandbox_id for item in items):
-        raise AssertionError(f"sandbox {sandbox_id} was absent from the filtered list")
+def volume_connection(api_url: str) -> dict[str, Any]:
+    if NATIVE_SDK:
+        return A3SConnectionConfig.from_environment().volume_options()  # type: ignore[name-defined]
+    return {"api_url": api_url}
+
+
+def assert_listed(items: list[Any], sandbox_id: str) -> Any:
+    for item in items:
+        if item.sandbox_id == sandbox_id:
+            return item
+    raise AssertionError(f"sandbox {sandbox_id} was absent from the filtered list")
+
+
+def assert_volume_mount(item: Any, name: str, path: str) -> None:
+    mounts = item.volume_mounts or []
+    if not any(
+        mount.get("name") == name and mount.get("path") == path for mount in mounts
+    ):
+        raise AssertionError(
+            f"sandbox list omitted volume mount {name}:{path}: {mounts!r}"
+        )
 
 
 def trace(label: str, stage: str) -> None:
@@ -298,10 +322,44 @@ async def exercise_async_interpreter(
 def run_sync(api_url: str, domain: str, template: str) -> None:
     label = "python-sync"
     options = connection(api_url, domain)
+    volume_options = volume_connection(api_url)
+    volume_name = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-volume"
     metadata = {"client": "python-sync", "suite": "production-official"}
     sandbox: Sandbox | None = None
     interpreter: CodeInterpreter | None = None
+    volume: Volume | None = None
     try:
+        trace(label, "volume.create")
+        volume = Volume.create(volume_name, **options)
+        if volume.name != volume_name or not volume.volume_id or not volume.token:
+            raise AssertionError(f"unexpected created Volume: {volume!r}")
+        trace(label, "volume.connect")
+        connected_volume = Volume.connect(volume.volume_id, **options)
+        if connected_volume.name != volume_name:
+            raise AssertionError(f"unexpected connected Volume: {connected_volume!r}")
+        trace(label, "volume.list")
+        if not any(item.volume_id == volume.volume_id for item in Volume.list(**options)):
+            raise AssertionError("created Volume was absent from the owner-scoped list")
+        trace(label, "volume.make-dir")
+        volume.make_dir(
+            "/shared",
+            uid=1000,
+            gid=1000,
+            mode=0o777,
+            force=True,
+            **volume_options,
+        )
+        api_content = f"{label}-api-to-sandbox"
+        trace(label, "volume.api-write")
+        volume.write_file(
+            "/shared/from-api.txt",
+            api_content,
+            uid=1000,
+            gid=1000,
+            mode=0o644,
+            **volume_options,
+        )
+
         trace(label, "sandbox.create")
         sandbox = Sandbox.create(
             template,
@@ -310,6 +368,7 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
             envs={"OFFICIAL_CLIENT": "python-sync"},
             secure=True,
             allow_internet_access=False,
+            volume_mounts={"/mnt/data": volume},
             **options,
         )
         trace(label, "sandbox.connect")
@@ -334,6 +393,45 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         if result.stdout != "python-sync:python-sync" or result.stderr:
             raise AssertionError(f"unexpected sync command result: {result!r}")
         trace(label, "process.foreground.complete")
+        trace(label, "volume.sandbox-read")
+        mounted = sandbox.commands.run("cat /mnt/data/shared/from-api.txt")
+        if mounted.stdout != api_content or mounted.stderr:
+            raise AssertionError(f"Sandbox did not read API Volume content: {mounted!r}")
+        trace(label, "volume.sandbox-stat")
+        ownership = sandbox.commands.run(
+            "stat -c '%u:%g' /mnt/data/shared/from-api.txt"
+        )
+        if ownership.stdout.strip() != "1000:1000":
+            raise AssertionError(f"API Volume ownership was not mapped: {ownership!r}")
+        identity = sandbox.commands.run("printf '%s:%s' \"$(id -u)\" \"$(id -g)\"")
+        sandbox_uid, sandbox_gid = (int(value) for value in identity.stdout.split(":"))
+        sandbox_content = f"{label}-sandbox-to-api"
+        trace(label, "volume.sandbox-write")
+        sandbox.commands.run(
+            f"printf '%s' '{sandbox_content}' > /mnt/data/shared/from-sandbox.txt"
+        )
+        trace(label, "volume.api-read")
+        if (
+            volume.read_file("/shared/from-sandbox.txt", **volume_options)
+            != sandbox_content
+        ):
+            raise AssertionError("Volume API did not read Sandbox-written content")
+        sandbox_entry = volume.get_info(
+            "/shared/from-sandbox.txt", **volume_options
+        )
+        if sandbox_entry.uid != sandbox_uid or sandbox_entry.gid != sandbox_gid:
+            raise AssertionError(
+                "Sandbox Volume ownership did not round trip through the API: "
+                f"{sandbox_entry!r} versus {sandbox_uid}:{sandbox_gid}"
+            )
+        trace(label, "volume.destroy-in-use")
+        try:
+            Volume.destroy(volume.volume_id, **options)
+        except VolumeException as error:
+            if "in use" not in str(error).lower():
+                raise AssertionError(f"unexpected in-use Volume error: {error}") from error
+        else:
+            raise AssertionError("mounted Volume was destroyed while Sandbox was running")
         exercise_sync_data_plane(sandbox, label)
 
         trace(label, "sandbox.pause-process-start")
@@ -370,7 +468,8 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
             limit=20,
             **options,
         )
-        assert_listed(paginator.next_items(), sandbox.sandbox_id)
+        listed = assert_listed(paginator.next_items(), sandbox.sandbox_id)
+        assert_volume_mount(listed, volume_name, "/mnt/data")
         trace(label, "sandbox.set-timeout")
         sandbox.set_timeout(30)
         trace(label, "sandbox.kill")
@@ -379,6 +478,10 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         trace(label, "sandbox.health-killed")
         if sandbox.is_running():
             raise AssertionError("envd health reported the killed sandbox as running")
+        trace(label, "volume.destroy")
+        if not Volume.destroy(volume.volume_id, **options):
+            raise AssertionError("detached Volume was not destroyed")
+        volume = None
 
         missing_id = "missing-production-python-sync"
         trace(label, "sandbox.kill-missing")
@@ -410,19 +513,60 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
             raise AssertionError("Code Interpreter remained running after kill")
         trace(label, "complete")
     finally:
-        if interpreter is not None:
-            Sandbox.kill(interpreter.sandbox_id, **options)
-        if sandbox is not None:
-            Sandbox.kill(sandbox.sandbox_id, **options)
+        try:
+            if interpreter is not None:
+                Sandbox.kill(interpreter.sandbox_id, **options)
+            if sandbox is not None:
+                Sandbox.kill(sandbox.sandbox_id, **options)
+        finally:
+            if volume is not None:
+                Volume.destroy(volume.volume_id, **options)
 
 
 async def run_async(api_url: str, domain: str, template: str) -> None:
     label = "python-async"
     options = connection(api_url, domain)
+    volume_options = volume_connection(api_url)
+    volume_name = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-volume"
     metadata = {"client": "python-async", "suite": "production-official"}
     sandbox: AsyncSandbox | None = None
     interpreter: AsyncCodeInterpreter | None = None
+    volume: AsyncVolume | None = None
     try:
+        trace(label, "volume.create")
+        volume = await AsyncVolume.create(volume_name, **options)
+        if volume.name != volume_name or not volume.volume_id or not volume.token:
+            raise AssertionError(f"unexpected created Volume: {volume!r}")
+        trace(label, "volume.connect")
+        connected_volume = await AsyncVolume.connect(volume.volume_id, **options)
+        if connected_volume.name != volume_name:
+            raise AssertionError(f"unexpected connected Volume: {connected_volume!r}")
+        trace(label, "volume.list")
+        if not any(
+            item.volume_id == volume.volume_id
+            for item in await AsyncVolume.list(**options)
+        ):
+            raise AssertionError("created Volume was absent from the owner-scoped list")
+        trace(label, "volume.make-dir")
+        await volume.make_dir(
+            "/shared",
+            uid=1000,
+            gid=1000,
+            mode=0o777,
+            force=True,
+            **volume_options,
+        )
+        api_content = f"{label}-api-to-sandbox"
+        trace(label, "volume.api-write")
+        await volume.write_file(
+            "/shared/from-api.txt",
+            api_content,
+            uid=1000,
+            gid=1000,
+            mode=0o644,
+            **volume_options,
+        )
+
         trace(label, "sandbox.create")
         sandbox = await AsyncSandbox.create(
             template,
@@ -431,6 +575,7 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
             envs={"OFFICIAL_CLIENT": "python-async"},
             secure=True,
             allow_internet_access=False,
+            volume_mounts={"/mnt/data": volume},
             **options,
         )
         trace(label, "sandbox.connect")
@@ -457,6 +602,47 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         if result.stdout != "python-async:python-async" or result.stderr:
             raise AssertionError(f"unexpected async command result: {result!r}")
         trace(label, "process.foreground.complete")
+        trace(label, "volume.sandbox-read")
+        mounted = await sandbox.commands.run("cat /mnt/data/shared/from-api.txt")
+        if mounted.stdout != api_content or mounted.stderr:
+            raise AssertionError(f"Sandbox did not read API Volume content: {mounted!r}")
+        trace(label, "volume.sandbox-stat")
+        ownership = await sandbox.commands.run(
+            "stat -c '%u:%g' /mnt/data/shared/from-api.txt"
+        )
+        if ownership.stdout.strip() != "1000:1000":
+            raise AssertionError(f"API Volume ownership was not mapped: {ownership!r}")
+        identity = await sandbox.commands.run(
+            "printf '%s:%s' \"$(id -u)\" \"$(id -g)\""
+        )
+        sandbox_uid, sandbox_gid = (int(value) for value in identity.stdout.split(":"))
+        sandbox_content = f"{label}-sandbox-to-api"
+        trace(label, "volume.sandbox-write")
+        await sandbox.commands.run(
+            f"printf '%s' '{sandbox_content}' > /mnt/data/shared/from-sandbox.txt"
+        )
+        trace(label, "volume.api-read")
+        if (
+            await volume.read_file("/shared/from-sandbox.txt", **volume_options)
+            != sandbox_content
+        ):
+            raise AssertionError("Volume API did not read Sandbox-written content")
+        sandbox_entry = await volume.get_info(
+            "/shared/from-sandbox.txt", **volume_options
+        )
+        if sandbox_entry.uid != sandbox_uid or sandbox_entry.gid != sandbox_gid:
+            raise AssertionError(
+                "Sandbox Volume ownership did not round trip through the API: "
+                f"{sandbox_entry!r} versus {sandbox_uid}:{sandbox_gid}"
+            )
+        trace(label, "volume.destroy-in-use")
+        try:
+            await AsyncVolume.destroy(volume.volume_id, **options)
+        except VolumeException as error:
+            if "in use" not in str(error).lower():
+                raise AssertionError(f"unexpected in-use Volume error: {error}") from error
+        else:
+            raise AssertionError("mounted Volume was destroyed while Sandbox was running")
         await exercise_async_data_plane(sandbox, label)
 
         trace(label, "sandbox.pause-process-start")
@@ -495,7 +681,8 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
             limit=20,
             **options,
         )
-        assert_listed(await paginator.next_items(), sandbox.sandbox_id)
+        listed = assert_listed(await paginator.next_items(), sandbox.sandbox_id)
+        assert_volume_mount(listed, volume_name, "/mnt/data")
         trace(label, "sandbox.set-timeout")
         await sandbox.set_timeout(30)
         trace(label, "sandbox.kill")
@@ -504,6 +691,10 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         trace(label, "sandbox.health-killed")
         if await sandbox.is_running():
             raise AssertionError("envd health reported the killed sandbox as running")
+        trace(label, "volume.destroy")
+        if not await AsyncVolume.destroy(volume.volume_id, **options):
+            raise AssertionError("detached Volume was not destroyed")
+        volume = None
 
         missing_id = "missing-production-python-async"
         trace(label, "sandbox.kill-missing")
@@ -535,10 +726,14 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
             raise AssertionError("async Code Interpreter remained running after kill")
         trace(label, "complete")
     finally:
-        if interpreter is not None:
-            await AsyncSandbox.kill(interpreter.sandbox_id, **options)
-        if sandbox is not None:
-            await AsyncSandbox.kill(sandbox.sandbox_id, **options)
+        try:
+            if interpreter is not None:
+                await AsyncSandbox.kill(interpreter.sandbox_id, **options)
+            if sandbox is not None:
+                await AsyncSandbox.kill(sandbox.sandbox_id, **options)
+        finally:
+            if volume is not None:
+                await AsyncVolume.destroy(volume.volume_id, **options)
 
 
 def main() -> None:

@@ -96,9 +96,12 @@ production lifecycle behavior, running and post-kill envd health, Filesystem
 create/read/stat/list/rename/remove, foreground and background commands,
 process listing, stdin close, one PTY resize flow, memory-preserving pause,
 paused-state listing, connect-based resume, survival of the same background
-process, Code Interpreter execution and context lifecycle, and cleanup. The
-enclosing smoke gate also validates envd metrics/environment and HTTP file
-transfer directly through the authenticated production data-plane route.
-Filesystem-only pause remains outside this matrix. It does not claim exhaustive
-Process, Filesystem, PTY, rich-result, multi-language, or MCP compatibility;
-those require the complete data-plane suites.
+process, Volume control and content operations, bidirectional Sandbox mounts,
+UID/GID mapping, in-use deletion conflicts, Code Interpreter execution and
+context lifecycle, and cleanup. The enclosing smoke gate also validates envd
+metrics/environment and HTTP file transfer directly through the authenticated
+production data-plane route. Filesystem-only pause remains outside this matrix.
+It does not claim exhaustive Process, Filesystem, PTY, rich-result,
+multi-language, or MCP compatibility; those require the complete data-plane
+suites. The repository compatibility manifest remains the source of truth for
+the versions and matrix that have passed in production.
