@@ -2,7 +2,8 @@
 
 `@a3s-lab/box` re-exports the official `e2b` 2.33.0 TypeScript API and the
 pinned `@e2b/code-interpreter` 2.6.1 package. It does not fork or translate the
-public protocol.
+public protocol. A3S Box provides the runtime; this native package does not
+read `E2B_API_URL` or contact E2B Cloud.
 
 ```bash
 export A3S_BOX_ENDPOINT=https://api.box.example.com
@@ -52,4 +53,15 @@ import { A3SConnectionConfig, Volume } from '@a3s-lab/box'
 const connection = A3SConnectionConfig.fromEnvironment(process.env)
 const volume = await Volume.create('data', connection.typescriptOptions())
 await volume.writeFile('/input.txt', 'hello', connection.volumeOptions())
+```
+
+Filesystem Snapshots use the same Sandbox connection. They capture rootfs
+state, preserve the source Sandbox state, and restore into a writable private
+copy-on-write layer:
+
+```typescript
+const snapshot = await sandbox.createSnapshot({ name: 'checkpoint' })
+const restored = await Sandbox.create(snapshot.snapshotId, {
+  ...connection.typescriptOptions(),
+})
 ```

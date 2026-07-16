@@ -106,6 +106,8 @@ TLS_KEY="$STATE_DIR/gateway-key.pem"
 BASE_URL="http://127.0.0.1:$PORT"
 SERVICE_PID=""
 SANDBOX_ID=""
+RESTORED_SANDBOX_ID=""
+SNAPSHOT_ID=""
 ENVD_TOKEN=""
 TRAFFIC_TOKEN=""
 
@@ -291,11 +293,19 @@ cleanup() {
   if [[ "$exit_code" -ne 0 && "${A3S_BOX_E2B_KEEP_STATE_ON_FAILURE:-}" == "1" ]]; then
     preserve_failure_diagnostics
   fi
-  if [[ -n "$SANDBOX_ID" ]]; then
+  if [[ -n "$SANDBOX_ID" || -n "$RESTORED_SANDBOX_ID" || -n "$SNAPSHOT_ID" ]]; then
     if [[ -z "$SERVICE_PID" ]] || ! kill -0 "$SERVICE_PID" 2>/dev/null; then
       start_service >/dev/null 2>&1
     fi
+  fi
+  if [[ -n "$RESTORED_SANDBOX_ID" ]]; then
+    status_request DELETE "/sandboxes/$RESTORED_SANDBOX_ID" /dev/null >/dev/null 2>&1
+  fi
+  if [[ -n "$SANDBOX_ID" ]]; then
     status_request DELETE "/sandboxes/$SANDBOX_ID" /dev/null >/dev/null 2>&1
+  fi
+  if [[ -n "$SNAPSHOT_ID" ]]; then
+    status_request DELETE "/templates/$SNAPSHOT_ID" /dev/null >/dev/null 2>&1
   fi
   stop_service
   if [[ "$exit_code" -ne 0 && "${A3S_BOX_E2B_KEEP_STATE_ON_FAILURE:-}" == "1" ]]; then
@@ -597,8 +607,11 @@ PY
     fail 'runtime envd environment omitted the create-time variable'
   fi
 
-  ENVD_FILE_PATH='/tmp/a3s-box-envd-http-smoke.txt'
-  ENVD_FILE_QUERY='/files?path=%2Ftmp%2Fa3s-box-envd-http-smoke.txt&username=user'
+  # `/tmp` is an OCI tmpfs mount and is intentionally outside a filesystem
+  # Snapshot. Exercise envd transfer and Snapshot persistence on the writable
+  # rootfs instead.
+  ENVD_FILE_PATH='/home/user/a3s-box-envd-http-smoke.txt'
+  ENVD_FILE_QUERY='/files?path=%2Fhome%2Fuser%2Fa3s-box-envd-http-smoke.txt&username=user'
   ENVD_FILE_SOURCE="$STATE_DIR/envd-upload.txt"
   ENVD_UPLOAD_RESPONSE="$STATE_DIR/envd-upload.json"
   ENVD_DOWNLOAD_RESPONSE="$STATE_DIR/envd-download.txt"
@@ -678,6 +691,44 @@ DETAIL_RESPONSE="$STATE_DIR/detail.json"
 [[ "$(json_field "$DETAIL_RESPONSE" state)" == "running" ]] ||
   fail 'new sandbox is not running'
 
+SNAPSHOT_RESPONSE="$STATE_DIR/snapshot-create.json"
+[[ "$(status_request POST "/sandboxes/$SANDBOX_ID/snapshots" "$SNAPSHOT_RESPONSE" '{}')" == "201" ]] ||
+  fail 'filesystem Snapshot creation did not return HTTP 201'
+SNAPSHOT_ID="$(json_field "$SNAPSHOT_RESPONSE" snapshotID)"
+[[ "$SNAPSHOT_ID" == snap-*:default ]] ||
+  fail 'filesystem Snapshot creation returned an invalid reference'
+if ! python3 - "$SNAPSHOT_RESPONSE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    snapshot = json.load(source)
+if snapshot.get("names") != []:
+    raise SystemExit(f"unnamed Snapshot returned names: {snapshot!r}")
+PY
+then
+  fail 'unnamed filesystem Snapshot violated the pinned response schema'
+fi
+SNAPSHOT_LIST_RESPONSE="$STATE_DIR/snapshot-list.json"
+[[ "$(status_request GET "/snapshots?sandboxID=$SANDBOX_ID&limit=1" "$SNAPSHOT_LIST_RESPONSE")" == "200" ]] ||
+  fail 'filesystem Snapshot list did not return HTTP 200'
+if ! python3 - "$SNAPSHOT_LIST_RESPONSE" "$SNAPSHOT_ID" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    snapshots = json.load(source)
+if [item.get("snapshotID") for item in snapshots] != [sys.argv[2]]:
+    raise SystemExit(f"created Snapshot was absent from its source list: {snapshots!r}")
+PY
+then
+  fail 'filesystem Snapshot list omitted the created Snapshot'
+fi
+[[ "$(status_request GET "/sandboxes/$SANDBOX_ID" "$DETAIL_RESPONSE")" == "200" ]] ||
+  fail 'source Sandbox was unavailable after Snapshot creation'
+[[ "$(json_field "$DETAIL_RESPONSE" state)" == "running" ]] ||
+  fail 'Snapshot creation did not restore the source running state'
+
 stop_service
 start_service
 
@@ -686,6 +737,20 @@ start_service
 [[ "$(json_field "$DETAIL_RESPONSE" state)" == "running" ]] ||
   fail 'startup reconciliation did not preserve the running sandbox'
 wait_gateway_ready "$DIRECT_HOST" || fail 'TLS route was unavailable after service restart'
+[[ "$(status_request GET "/snapshots?sandboxID=$SANDBOX_ID&limit=1" "$SNAPSHOT_LIST_RESPONSE")" == "200" ]] ||
+  fail 'filesystem Snapshot list failed after service restart'
+if ! python3 - "$SNAPSHOT_LIST_RESPONSE" "$SNAPSHOT_ID" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    snapshots = json.load(source)
+if not any(item.get("snapshotID") == sys.argv[2] for item in snapshots):
+    raise SystemExit("persisted Snapshot was absent after service restart")
+PY
+then
+  fail 'filesystem Snapshot did not survive service restart reconciliation'
+fi
 
 CONNECT_RESPONSE="$STATE_DIR/connect.json"
 [[ "$(status_request POST "/sandboxes/$SANDBOX_ID/connect" "$CONNECT_RESPONSE" '{"timeout":45}')" == "200" ]] ||
@@ -725,6 +790,87 @@ PY
 [[ ! -e "$A3S_HOME/run/crun/$EXECUTION_ID" ]] || fail 'crun state leaked after kill'
 [[ ! -e "/tmp/a3s-box-sockets/$EXECUTION_ID" ]] || fail 'runtime socket directory leaked after kill'
 
+RESTORE_BODY="$(python3 - "$SNAPSHOT_ID" <<'PY'
+import json
+import sys
+
+print(json.dumps({"templateID": sys.argv[1], "timeout": 60}))
+PY
+)"
+RESTORE_RESPONSE="$STATE_DIR/snapshot-restore.json"
+[[ "$(status_request POST /sandboxes "$RESTORE_RESPONSE" "$RESTORE_BODY")" == "201" ]] ||
+  fail 'filesystem Snapshot restore did not return HTTP 201'
+RESTORED_SANDBOX_ID="$(json_field "$RESTORE_RESPONSE" sandboxID)"
+[[ "$RESTORED_SANDBOX_ID" == sandbox-* ]] ||
+  fail 'filesystem Snapshot restore returned an invalid Sandbox ID'
+ENVD_TOKEN="$(json_field "$RESTORE_RESPONSE" envdAccessToken)"
+TRAFFIC_TOKEN="$(json_field "$RESTORE_RESPONSE" trafficAccessToken)"
+RESTORED_DIRECT_HOST="49983-$RESTORED_SANDBOX_ID.$SANDBOX_DOMAIN"
+RESTORED_TRAFFIC_HOST="49999-$RESTORED_SANDBOX_ID.$SANDBOX_DOMAIN"
+wait_gateway_ready "$RESTORED_DIRECT_HOST" ||
+  fail 'restored Sandbox envd route did not become ready'
+[[ "$(gateway_status "$RESTORED_TRAFFIC_HOST" "$STATE_DIR/restored-traffic-body.txt" E2B-Traffic-Access-Token "$TRAFFIC_TOKEN")" == "200" ]] ||
+  fail 'restored Sandbox traffic route did not return HTTP 200'
+[[ "$(cat "$STATE_DIR/restored-traffic-body.txt")" == "$EXPECTED_TRAFFIC_BODY" ]] ||
+  fail 'restored Sandbox traffic route returned the wrong response body'
+if [[ -n "$RUNTIME_IMAGE" ]]; then
+  RESTORED_FILE="$STATE_DIR/restored-envd-download.txt"
+  [[ "$(gateway_request "$RESTORED_DIRECT_HOST" "$RESTORED_FILE" X-Access-Token "$ENVD_TOKEN" "$ENVD_FILE_QUERY")" == "200" ]] ||
+    fail 'restored Sandbox did not expose the captured filesystem file'
+  cmp --silent "$ENVD_FILE_SOURCE" "$RESTORED_FILE" ||
+    fail 'restored Sandbox filesystem content differed from the Snapshot source'
+fi
+[[ "$(status_request DELETE "/templates/$SNAPSHOT_ID" /dev/null)" == "409" ]] ||
+  fail 'active restored Sandbox did not protect its filesystem Snapshot'
+[[ "$(status_request DELETE "/sandboxes/$RESTORED_SANDBOX_ID" /dev/null)" == "204" ]] ||
+  fail 'restored Sandbox kill did not return HTTP 204'
+
+RESTORED_EXECUTION_ID="$(python3 - "$STATE_DIR/managed-executions.json" "$RESTORED_SANDBOX_ID" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    records = json.load(source)
+matches = [
+    record for record in records
+    if record.get("managed_execution", {}).get("request", {}).get("external_sandbox_id") == sys.argv[2]
+]
+if len(matches) != 1 or matches[0].get("status") != "stopped":
+    raise SystemExit("restored managed execution did not persist stopped state")
+print(matches[0]["id"])
+PY
+)"
+[[ ! -e "$A3S_HOME/boxes/$RESTORED_EXECUTION_ID" ]] ||
+  fail 'restored box directory leaked after kill'
+[[ ! -e "$A3S_HOME/run/crun/$RESTORED_EXECUTION_ID" ]] ||
+  fail 'restored crun state leaked after kill'
+[[ ! -e "/tmp/a3s-box-sockets/$RESTORED_EXECUTION_ID" ]] ||
+  fail 'restored runtime socket directory leaked after kill'
+RESTORED_SANDBOX_ID=""
+
+[[ "$(status_request DELETE "/templates/$SNAPSHOT_ID" /dev/null)" == "204" ]] ||
+  fail 'detached filesystem Snapshot deletion did not return HTTP 204'
+[[ "$(status_request DELETE "/templates/$SNAPSHOT_ID" /dev/null)" == "404" ]] ||
+  fail 'repeated filesystem Snapshot deletion did not return HTTP 404'
+[[ "$(status_request GET "/snapshots?sandboxID=$SANDBOX_ID" "$SNAPSHOT_LIST_RESPONSE")" == "200" ]] ||
+  fail 'filesystem Snapshot list failed after deletion'
+if ! python3 - "$SNAPSHOT_LIST_RESPONSE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    snapshots = json.load(source)
+if snapshots:
+    raise SystemExit(f"deleted Snapshot remained listed: {snapshots!r}")
+PY
+then
+  fail 'deleted filesystem Snapshot remained visible'
+fi
+if [[ -d "$A3S_HOME/snapshots" ]] &&
+  find "$A3S_HOME/snapshots" -name metadata.json -print -quit | grep -q .; then
+  fail 'filesystem Snapshot content leaked after deletion'
+fi
+SNAPSHOT_ID=""
 SANDBOX_ID=""
 
 if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" ]]; then
@@ -779,4 +925,4 @@ PY
 fi
 
 stop_service
-printf 'E2B production smoke passed: lifecycle, Sandbox logs, envd HTTP, TLS traffic proxy, restart recovery, credentials, official clients when enabled, and cleanup\n'
+printf 'E2B production smoke passed: lifecycle, filesystem Snapshot restart/restore/delete, Sandbox logs, envd HTTP, TLS traffic proxy, credentials, official clients when enabled, and cleanup\n'

@@ -281,6 +281,14 @@ impl ManagedExecutionStore {
                     _ => Some(ManagedExecutionOperation::Pause { keep_memory: false }),
                 },
                 ManagedExecutionState::Resuming => Some(ManagedExecutionOperation::Resume),
+                ManagedExecutionState::Snapshotting => match metadata.pending_operation.take() {
+                    Some(operation @ ManagedExecutionOperation::Snapshot { .. }) => Some(operation),
+                    _ => {
+                        return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                        "snapshot transition for {execution_id} has no persisted snapshot intent"
+                    )))
+                    }
+                },
                 ManagedExecutionState::Killing => Some(ManagedExecutionOperation::Kill),
                 ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => {
                     match metadata.pending_operation.take() {
@@ -353,7 +361,7 @@ fn transition_generation(
 ) -> ManagedExecutionStoreResult<ExecutionGeneration> {
     use ManagedExecutionState::{
         Created, Creating, Failed, Killing, Paused, Pausing, RestartStarting, RestartStopping,
-        Resuming, Running, Starting, Stopped,
+        Resuming, Running, Snapshotting, Starting, Stopped,
     };
 
     let legal = matches!(
@@ -369,14 +377,15 @@ fn transition_generation(
             )
             | (
                 Running,
-                Pausing | Killing | RestartStopping | Stopped | Failed
+                Pausing | Snapshotting | Killing | RestartStopping | Stopped | Failed
             )
             | (Pausing, Paused | Running | Killing | Stopped | Failed)
             | (
                 Paused,
-                Resuming | Killing | RestartStopping | Stopped | Failed
+                Resuming | Snapshotting | Killing | RestartStopping | Stopped | Failed
             )
             | (Resuming, Running | Paused | Killing | Stopped | Failed)
+            | (Snapshotting, Running | Paused | Stopped | Failed)
             | (Killing, Stopped | Failed)
             | (Stopped | Failed, RestartStopping)
             | (RestartStopping, RestartStarting)
@@ -409,7 +418,7 @@ fn transition_generation(
 mod tests {
     use std::sync::{Arc, Barrier};
 
-    use a3s_box_core::{CreateExecutionRequest, ExecutionIsolation};
+    use a3s_box_core::{CreateExecutionRequest, ExecutionIsolation, ExecutionSnapshotId};
 
     use super::*;
     use crate::ManagedExecutionMetadata;
@@ -449,6 +458,7 @@ mod tests {
                     config,
                     labels: Default::default(),
                     policy: Default::default(),
+                    rootfs_snapshot_id: None,
                 },
             )
             .unwrap(),
@@ -565,6 +575,91 @@ mod tests {
             resumed.managed_execution.unwrap().generation,
             ExecutionGeneration::new(3).unwrap()
         );
+    }
+
+    #[test]
+    fn snapshot_intent_is_durable_and_preserves_runtime_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ManagedExecutionStore::new(directory.path().join("boxes.json"));
+        let id = ExecutionId::new("execution-1").unwrap();
+        store
+            .reserve(managed_record(id.as_str(), "operation-1"))
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Created,
+                ManagedExecutionState::Starting,
+            )
+            .unwrap();
+        store
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Starting,
+                ManagedExecutionState::Running,
+            )
+            .unwrap();
+        let snapshot_id = ExecutionSnapshotId::new("snapshot-1").unwrap();
+        let claimed = store
+            .transition_with(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Running,
+                ManagedExecutionState::Snapshotting,
+                |record| {
+                    record.managed_execution.as_mut().unwrap().pending_operation =
+                        Some(ManagedExecutionOperation::Snapshot {
+                            snapshot_id: snapshot_id.clone(),
+                            source_state: ManagedExecutionState::Running,
+                        });
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            claimed.managed_execution.as_ref().unwrap().generation,
+            ExecutionGeneration::INITIAL
+        );
+        assert!(matches!(
+            claimed
+                .managed_execution
+                .as_ref()
+                .unwrap()
+                .pending_operation
+                .as_ref(),
+            Some(ManagedExecutionOperation::Snapshot {
+                snapshot_id,
+                source_state: ManagedExecutionState::Running,
+            }) if snapshot_id.as_str() == "snapshot-1"
+        ));
+
+        let reopened = ManagedExecutionStore::new(store.path().to_path_buf());
+        let persisted = reopened.get(&id).unwrap().unwrap();
+        assert_eq!(
+            persisted.managed_state().unwrap(),
+            Some(ManagedExecutionState::Snapshotting)
+        );
+        let completed = reopened
+            .transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Snapshotting,
+                ManagedExecutionState::Running,
+            )
+            .unwrap();
+        let metadata = completed.managed_execution.unwrap();
+        assert_eq!(metadata.generation, ExecutionGeneration::INITIAL);
+        assert!(metadata.pending_operation.is_none());
+        assert!(matches!(
+            reopened.transition(
+                &id,
+                ExecutionGeneration::INITIAL,
+                ManagedExecutionState::Running,
+                ManagedExecutionState::Snapshotting,
+            ),
+            Err(ManagedExecutionStoreError::InvalidRecord(_))
+        ));
     }
 
     #[test]

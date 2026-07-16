@@ -136,6 +136,38 @@
     }
 
     #[test]
+    fn restore_rejects_snapshot_without_resolved_image_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_for(&dir);
+        let source = dir.path().join("rootfs-source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("app.txt"), "snapshot-data").unwrap();
+        SnapshotStore::new(&client.paths().snapshots_dir)
+            .unwrap()
+            .save(
+                SnapshotMetadata::new(
+                    "legacy-snapshot".to_string(),
+                    "legacy-snapshot".to_string(),
+                    "source-box".to_string(),
+                    "alpine:3.20".to_string(),
+                ),
+                &source,
+            )
+            .unwrap();
+
+        let error = client
+            .restore_snapshot("legacy-snapshot", RestoreSnapshot::new())
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ClientError::Validation(message)
+                if message.contains("resolved OCI image configuration")
+        ));
+        assert!(client.list_boxes(ListBoxesOptions::all()).unwrap().is_empty());
+    }
+
+    #[test]
     fn restores_snapshot_into_created_box_record_via_runtime_store() {
         let dir = tempfile::tempdir().unwrap();
         let client = client_for(&dir);
@@ -164,6 +196,7 @@
             .labels
             .insert("tier".to_string(), "api".to_string());
         metadata.network_mode = Some("bridge".to_string());
+        metadata.image_config = Some(a3s_box_core::SnapshotImageConfig::default());
         store.save(metadata, &source).unwrap();
 
         let restored = client
@@ -225,16 +258,15 @@
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("file"), "snapshot-data").unwrap();
         let store = SnapshotStore::new(&client.paths().snapshots_dir).unwrap();
+        let mut metadata = SnapshotMetadata::new(
+            "snap-by-name".to_string(),
+            "after-migration".to_string(),
+            "box-1".to_string(),
+            "alpine:latest".to_string(),
+        );
+        metadata.image_config = Some(a3s_box_core::SnapshotImageConfig::default());
         store
-            .save(
-                SnapshotMetadata::new(
-                    "snap-by-name".to_string(),
-                    "after-migration".to_string(),
-                    "box-1".to_string(),
-                    "alpine:latest".to_string(),
-                ),
-                &source,
-            )
+            .save(metadata, &source)
             .unwrap();
 
         let restored = client

@@ -160,6 +160,7 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
             oom_kill_disable: true,
             oom_score_adj: Some(100),
         },
+        rootfs_snapshot_id: None,
     };
     let request_json = serde_json::to_value(&request).unwrap();
     let execution_id = ExecutionId::new("sdk-execution-id").unwrap();

@@ -1,4 +1,4 @@
-use a3s_box_core::{BoxConfig, OperationId};
+use a3s_box_core::{BoxConfig, ExecutionSnapshotId, OperationId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -46,12 +46,16 @@ pub enum EnvdMode {
     Runtime,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedTemplate {
     pub config: BoxConfig,
     pub envd_version: String,
     pub envd_mode: EnvdMode,
     pub routing: SandboxRoutePolicy,
+    /// Validated runtime-managed filesystem lower for a dynamic snapshot
+    /// template. Static configured templates leave this unset.
+    #[serde(default)]
+    pub rootfs_snapshot_id: Option<ExecutionSnapshotId>,
 }
 
 #[derive(Debug, Error)]
@@ -68,5 +72,9 @@ pub type TemplateProviderResult<T> = std::result::Result<T, TemplateProviderErro
 
 #[async_trait]
 pub trait TemplateProvider: Send + Sync {
-    async fn resolve(&self, template_id: &str) -> TemplateProviderResult<ResolvedTemplate>;
+    async fn resolve(
+        &self,
+        owner_id: &str,
+        template_id: &str,
+    ) -> TemplateProviderResult<ResolvedTemplate>;
 }

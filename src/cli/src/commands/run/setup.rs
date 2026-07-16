@@ -317,6 +317,7 @@ pub(super) fn build_execution_request(
             oom_kill_disable: args.common.oom_kill_disable,
             oom_score_adj: args.common.oom_score_adj,
         },
+        rootfs_snapshot_id: None,
     }
 }
 

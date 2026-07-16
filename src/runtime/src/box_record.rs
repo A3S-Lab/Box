@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use a3s_box_core::config::ResourceLimits;
 use a3s_box_core::log::LogConfig;
 use a3s_box_core::{
-    CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, NetworkMode, OperationId,
-    ResolvedExecutionPlan,
+    CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation, ExecutionSnapshotId,
+    NetworkMode, OperationId, ResolvedExecutionPlan,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -255,6 +255,7 @@ pub enum ManagedExecutionState {
     Pausing,
     Paused,
     Resuming,
+    Snapshotting,
     Killing,
     RestartStopping,
     RestartStarting,
@@ -273,6 +274,7 @@ impl ManagedExecutionState {
             Self::Pausing => "pausing",
             Self::Paused => "paused",
             Self::Resuming => "resuming",
+            Self::Snapshotting => "snapshotting",
             Self::Killing => "killing",
             Self::RestartStopping => "restart_stopping",
             Self::RestartStarting => "restart_starting",
@@ -291,6 +293,7 @@ impl ManagedExecutionState {
             "pausing" => Ok(Self::Pausing),
             "paused" => Ok(Self::Paused),
             "resuming" => Ok(Self::Resuming),
+            "snapshotting" => Ok(Self::Snapshotting),
             "killing" => Ok(Self::Killing),
             "restart_stopping" => Ok(Self::RestartStopping),
             "restart_starting" => Ok(Self::RestartStarting),
@@ -352,6 +355,10 @@ pub enum ManagedExecutionOperation {
         keep_memory: bool,
     },
     Resume,
+    Snapshot {
+        snapshot_id: ExecutionSnapshotId,
+        source_state: ManagedExecutionState,
+    },
     Kill,
     Restart {
         operation_id: OperationId,
@@ -448,6 +455,9 @@ fn validate_pending_operation(
             ManagedExecutionState::Resuming,
             Some(ManagedExecutionOperation::Resume)
         ) | (
+            ManagedExecutionState::Snapshotting,
+            Some(ManagedExecutionOperation::Snapshot { .. })
+        ) | (
             ManagedExecutionState::Killing,
             Some(ManagedExecutionOperation::Kill)
         ) | (
@@ -505,6 +515,18 @@ fn validate_pending_operation(
             )));
         }
         validate_restart_timeout(*stop_timeout_secs)?;
+    }
+    if let Some(ManagedExecutionOperation::Snapshot { source_state, .. }) = operation {
+        if state != ManagedExecutionState::Snapshotting
+            || !matches!(
+                source_state,
+                ManagedExecutionState::Running | ManagedExecutionState::Paused
+            )
+        {
+            return Err(a3s_box_core::BoxError::StateError(
+                "snapshot operation has an invalid source state".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -595,6 +617,7 @@ mod tests {
                 config,
                 labels: Default::default(),
                 policy: Default::default(),
+                rootfs_snapshot_id: None,
             },
         )
         .unwrap();
@@ -635,6 +658,7 @@ mod tests {
                 config,
                 labels: Default::default(),
                 policy: Default::default(),
+                rootfs_snapshot_id: None,
             },
         )
         .unwrap();

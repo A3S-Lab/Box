@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 pub const ROOTFS_METADATA_PATH: &str = "/.a3s_rootfs_metadata_v1.json";
 /// Location used to carry OCI header ownership across a rootless host extraction.
 pub const IMAGE_ROOTFS_METADATA_PATH: &str = "/.a3s_image_metadata_v1.json";
+/// Runtime-staged container environment consumed by guest-init before exec.
+pub const RUNTIME_ENV_PATH: &str = "/.a3s-box-env";
 /// Stable manifest schema identifier.
 pub const ROOTFS_METADATA_SCHEMA: &str = "a3s.box.rootfs-metadata.v1";
 
@@ -22,6 +24,7 @@ pub fn runtime_managed_rootfs_mode(path: &Path) -> Option<u32> {
     match path.to_str() {
         Some("etc/hostname" | "etc/hosts" | "etc/resolv.conf") => Some(0o644),
         Some("sbin/init" | "usr/sbin/init") => Some(0o755),
+        Some(".a3s-box-env") => Some(0o600),
         _ => None,
     }
 }
@@ -87,6 +90,10 @@ mod tests {
         for path in ["sbin/init", "usr/sbin/init"] {
             assert_eq!(runtime_managed_rootfs_mode(Path::new(path)), Some(0o755));
         }
+        assert_eq!(
+            runtime_managed_rootfs_mode(Path::new(".a3s-box-env")),
+            Some(0o600)
+        );
         assert_eq!(runtime_managed_rootfs_mode(Path::new("etc/passwd")), None);
     }
 }

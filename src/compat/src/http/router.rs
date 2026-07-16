@@ -8,6 +8,7 @@ use axum::routing::{get, post};
 use axum::Router;
 
 use crate::control::ControlService;
+use crate::snapshot::SnapshotService;
 use crate::volume::VolumeService;
 
 use super::auth::{CredentialVerifier, PresentedCredential};
@@ -15,6 +16,7 @@ use super::cursor::CursorDecoder;
 use super::error::ApiError;
 use super::lifecycle;
 use super::logs;
+use super::snapshots;
 use super::volume_content;
 use super::volumes;
 
@@ -40,6 +42,7 @@ pub struct LifecycleHttpState {
     cursors: Arc<dyn CursorDecoder>,
     config: LifecycleHttpConfig,
     volumes: Option<Arc<VolumeService>>,
+    snapshots: Option<Arc<SnapshotService>>,
 }
 
 impl LifecycleHttpState {
@@ -55,11 +58,17 @@ impl LifecycleHttpState {
             cursors,
             config,
             volumes: None,
+            snapshots: None,
         }
     }
 
     pub fn with_volume_service(mut self, volumes: Arc<VolumeService>) -> Self {
         self.volumes = Some(volumes);
+        self
+    }
+
+    pub fn with_snapshot_service(mut self, snapshots: Arc<SnapshotService>) -> Self {
+        self.snapshots = Some(snapshots);
         self
     }
 
@@ -77,6 +86,10 @@ impl LifecycleHttpState {
 
     pub(crate) fn volume_service(&self) -> Result<&VolumeService, ApiError> {
         self.volumes.as_deref().ok_or_else(ApiError::internal)
+    }
+
+    pub(crate) fn snapshot_service(&self) -> Result<&SnapshotService, ApiError> {
+        self.snapshots.as_deref().ok_or_else(ApiError::internal)
     }
 }
 
@@ -102,6 +115,7 @@ pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
             get(lifecycle::get_metrics),
         )
         .route("/sandboxes/:sandbox_id/refreshes", post(lifecycle::refresh))
+        .route("/sandboxes/:sandbox_id/snapshots", post(snapshots::create))
         .route(
             "/sandboxes/:sandbox_id/timeout",
             post(lifecycle::set_timeout),
@@ -111,6 +125,11 @@ pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
         .route(
             "/volumes/:volume_id",
             get(volumes::get).delete(volumes::delete),
+        )
+        .route("/snapshots", get(snapshots::list))
+        .route(
+            "/templates/*template_id",
+            axum::routing::delete(snapshots::delete),
         )
         .fallback(fallback)
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));

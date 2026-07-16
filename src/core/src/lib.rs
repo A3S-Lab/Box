@@ -56,7 +56,9 @@ pub use scale::{
     InstanceState, ScaleConfig, ScaleRequest, ScaleResponse,
 };
 pub use security::{SeccompMode, SecurityConfig};
-pub use snapshot::{SnapshotConfig, SnapshotMetadata};
+pub use snapshot::{
+    SnapshotConfig, SnapshotImageConfig, SnapshotImageHealthCheck, SnapshotMetadata,
+};
 pub use tee::ATTEST_VSOCK_PORT;
 pub use tee::{detect_tee, is_tee_available, TeeCapability, TeeType};
 pub use traits::{
@@ -65,10 +67,10 @@ pub use traits::{
     ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
     ExecutionPortIo, ExecutionPortStream, ExecutionProcess, ExecutionProcessInput,
     ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation, ExecutionRestartPolicy,
-    ExecutionSessionManager, ExecutionState, ExecutionStatus, ImageRegistry, ImageStoreBackend,
-    KillOutcome, MetricsCollector, NetworkStoreBackend, NoopMetrics, OperationId, PulledImage,
-    ReconcileOutcome, RestartExecutionOptions, SnapshotStoreBackend, StoredImage,
-    VolumeStoreBackend,
+    ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
+    ExecutionStatus, ImageRegistry, ImageStoreBackend, KillOutcome, MetricsCollector,
+    NetworkStoreBackend, NoopMetrics, OperationId, PulledImage, ReconcileOutcome,
+    RestartExecutionOptions, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
 };
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmHandler,

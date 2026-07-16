@@ -9,6 +9,7 @@
         let rootfs = record.box_dir.join("rootfs");
         std::fs::create_dir_all(rootfs.join("etc")).unwrap();
         std::fs::write(rootfs.join("etc").join("hostname"), "api").unwrap();
+        write_resolved_image_config(&record);
         write_boxes(&client, &[record.clone()]);
 
         let snapshot = client
@@ -39,6 +40,18 @@
             "api"
         );
         assert!(client.get_snapshot(&snapshot.id).unwrap().is_some());
+        let metadata = client
+            .snapshot_store()
+            .unwrap()
+            .get(&snapshot.id)
+            .unwrap()
+            .unwrap();
+        let image_config = metadata.image_config.unwrap();
+        assert_eq!(
+            image_config.entrypoint,
+            Some(vec!["/usr/local/bin/envd".to_string()])
+        );
+        assert_eq!(image_config.working_dir.as_deref(), Some("/home/user"));
     }
 
     #[tokio::test]

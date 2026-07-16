@@ -310,6 +310,7 @@ mod tests {
                     config,
                     labels: Default::default(),
                     policy: Default::default(),
+                    rootfs_snapshot_id: None,
                 },
             )
             .unwrap(),

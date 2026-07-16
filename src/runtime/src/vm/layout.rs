@@ -90,6 +90,10 @@ impl VmManager {
         // result, slower). This mirrors the rootfs cache-hit path below.
         if let Some(lower) = snapshot_lower_dir(&box_dir) {
             if lower.is_dir() {
+                let oci_config = Some(crate::resolved_image::load_snapshot_oci_config(
+                    &lower,
+                    &self.config.image,
+                )?);
                 tracing::info!(
                     lower = %lower.display(),
                     "Restoring snapshot via copy-on-write overlay lower"
@@ -106,6 +110,9 @@ impl VmManager {
                         tracing::warn!(error = %e, "Failed to refresh guest init on restored overlay");
                     }
                 }
+                if let Some(config) = oci_config.as_ref() {
+                    crate::resolved_image::persist_resolved_image_config(&box_dir, config)?;
+                }
                 let tee_instance_config = self.generate_tee_config(&box_dir)?;
                 return Ok(BoxLayout {
                     rootfs_path,
@@ -115,7 +122,7 @@ impl VmManager {
                     port_forward_socket_path: socket_dir.join("portfwd.sock"),
                     workspace_path,
                     console_output: Some(logs_dir.join("console.log")),
-                    oci_config: None,
+                    oci_config,
                     tee_instance_config,
                 });
             }
@@ -142,6 +149,8 @@ impl VmManager {
                 .map(|mut it| it.next().is_some())
                 .unwrap_or(false);
         if prebuilt_is_populated {
+            let oci_config = crate::resolved_image::load_resolved_image_config(&box_dir)?
+                .map(crate::oci::OciImageConfig::from);
             tracing::info!(
                 rootfs = %prebuilt_rootfs.display(),
                 "Booting from pre-populated rootfs (snapshot restore)"
@@ -165,7 +174,7 @@ impl VmManager {
                 port_forward_socket_path: socket_dir.join("portfwd.sock"),
                 workspace_path,
                 console_output: Some(logs_dir.join("console.log")),
-                oci_config: None,
+                oci_config,
                 tee_instance_config,
             });
         }
@@ -306,6 +315,10 @@ impl VmManager {
                     (rootfs_path, Some(config))
                 }
             };
+
+        if let Some(config) = oci_config.as_ref() {
+            crate::resolved_image::persist_resolved_image_config(&box_dir, config)?;
+        }
 
         // Generate TEE configuration if enabled
         let tee_instance_config = self.generate_tee_config(&box_dir)?;
@@ -885,6 +898,7 @@ mod tests {
     use super::*;
     use crate::cache::RootfsCache;
     use a3s_box_core::config::BoxConfig;
+    use a3s_box_core::{SnapshotImageConfig, SnapshotMetadata};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
@@ -964,6 +978,74 @@ mod tests {
             snapshot_lower_dir(box_dir),
             Some(PathBuf::from("/root/.a3s/snapshots/snap-1/rootfs"))
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_lower_layout_restores_the_resolved_image_entrypoint() {
+        let home = TempDir::new().unwrap();
+        let snapshot_id = "snapshot-with-image-config";
+        let snapshot_dir = home.path().join("snapshots").join(snapshot_id);
+        let lower = snapshot_dir.join("rootfs");
+        std::fs::create_dir_all(lower.join("usr/local/bin")).unwrap();
+        std::fs::write(lower.join("usr/local/bin/envd"), b"envd").unwrap();
+
+        let mut metadata = SnapshotMetadata::new(
+            snapshot_id.to_string(),
+            snapshot_id.to_string(),
+            "source-box".to_string(),
+            "example.invalid/runtime:latest".to_string(),
+        );
+        metadata.image_config = Some(SnapshotImageConfig {
+            entrypoint: Some(vec!["/usr/local/bin/envd".to_string()]),
+            cmd: Some(vec!["--port".to_string(), "49983".to_string()]),
+            env: vec![("RUNTIME".to_string(), "a3s".to_string())],
+            working_dir: Some("/home/user".to_string()),
+            user: Some("1000:1000".to_string()),
+            ..Default::default()
+        });
+        std::fs::write(
+            snapshot_dir.join("metadata.json"),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let box_dir = home.path().join("boxes/test-box");
+        std::fs::create_dir_all(&box_dir).unwrap();
+        std::fs::write(
+            box_dir.join(".snapshot-lower"),
+            lower.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let mut vm = make_vm_manager_with_home(home.path());
+        vm.config.image = "example.invalid/runtime:latest".to_string();
+        vm.rootfs_provider = Box::new(crate::rootfs::CopyProvider);
+
+        let layout = vm.prepare_layout().await.unwrap();
+        let image_config = layout
+            .oci_config
+            .as_ref()
+            .expect("snapshot layout must restore the resolved image configuration");
+        assert_eq!(
+            image_config.entrypoint,
+            Some(vec!["/usr/local/bin/envd".to_string()])
+        );
+        assert_eq!(
+            image_config.cmd,
+            Some(vec!["--port".to_string(), "49983".to_string()])
+        );
+
+        // Keep the assertion independent of whether a guest-init test artifact is
+        // available next to the test binary on this host.
+        let _ = std::fs::remove_file(layout.rootfs_path.join("sbin/init"));
+        let spec = vm.build_instance_spec(&layout).unwrap();
+        assert_eq!(spec.entrypoint.executable, "/usr/local/bin/envd");
+        assert_eq!(spec.entrypoint.args, vec!["--port", "49983"]);
+        assert!(spec
+            .entrypoint
+            .env
+            .iter()
+            .any(|(key, value)| key == "RUNTIME" && value == "a3s"));
+        assert_eq!(spec.workdir, "/home/user");
     }
 
     #[test]

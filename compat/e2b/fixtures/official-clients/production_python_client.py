@@ -19,6 +19,7 @@ if NATIVE_SDK:
         AsyncSandbox,
         AsyncVolume,
         Sandbox,
+        SandboxException,
         SandboxNotFoundException,
         SandboxQuery,
         SandboxState,
@@ -36,6 +37,7 @@ else:
         AsyncSandbox,
         AsyncVolume,
         Sandbox,
+        SandboxException,
         SandboxNotFoundException,
         SandboxQuery,
         SandboxState,
@@ -326,8 +328,10 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
     volume_name = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-volume"
     metadata = {"client": "python-sync", "suite": "production-official"}
     sandbox: Sandbox | None = None
+    restored: Sandbox | None = None
     interpreter: CodeInterpreter | None = None
     volume: Volume | None = None
+    snapshot_id: str | None = None
     try:
         trace(label, "volume.create")
         volume = Volume.create(volume_name, **options)
@@ -470,6 +474,28 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         )
         listed = assert_listed(paginator.next_items(), sandbox.sandbox_id)
         assert_volume_mount(listed, volume_name, "/mnt/data")
+
+        snapshot_content = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-snapshot"
+        trace(label, "snapshot.write-state")
+        sandbox.files.write("a3s-snapshot-state.txt", snapshot_content)
+        snapshot_metadata = sandbox.commands.run(
+            "stat -c '%u:%g:%a' /home/user/a3s-snapshot-state.txt"
+        ).stdout.strip()
+        trace(label, "snapshot.create")
+        snapshot = sandbox.create_snapshot(
+            name=f"{'a3s' if NATIVE_SDK else 'official'}-{label}-state"
+        )
+        snapshot_id = snapshot.snapshot_id
+        if not snapshot_id or snapshot.names != [snapshot_id]:
+            raise AssertionError(f"unexpected created Snapshot: {snapshot!r}")
+        trace(label, "snapshot.list")
+        snapshots = sandbox.list_snapshots(limit=20).next_items()
+        if not any(item.snapshot_id == snapshot_id for item in snapshots):
+            raise AssertionError("created Snapshot was absent from the source-scoped list")
+        trace(label, "snapshot.source-running")
+        if not sandbox.is_running():
+            raise AssertionError("Snapshot did not restore the running source state")
+
         trace(label, "sandbox.set-timeout")
         sandbox.set_timeout(30)
         trace(label, "sandbox.kill")
@@ -478,6 +504,45 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         trace(label, "sandbox.health-killed")
         if sandbox.is_running():
             raise AssertionError("envd health reported the killed sandbox as running")
+
+        trace(label, "snapshot.restore-after-source-kill")
+        restored = Sandbox.create(snapshot_id, timeout=60, **options)
+        trace(label, "snapshot.read-restored-state")
+        if restored.files.read("a3s-snapshot-state.txt") != snapshot_content:
+            raise AssertionError("restored Sandbox lost the captured filesystem state")
+        restored_metadata = restored.commands.run(
+            "stat -c '%u:%g:%a' /home/user/a3s-snapshot-state.txt"
+        ).stdout.strip()
+        if restored_metadata != snapshot_metadata:
+            raise AssertionError(
+                "restored Snapshot changed file ownership or mode: "
+                f"{snapshot_metadata!r} -> {restored_metadata!r}"
+            )
+        restored.commands.run(
+            "printf '%s' '-writable' >> /home/user/a3s-snapshot-state.txt"
+        )
+        trace(label, "snapshot.delete-in-use")
+        try:
+            Sandbox.delete_snapshot(snapshot_id, **options)
+        except SandboxException as error:
+            if "409" not in str(error):
+                raise AssertionError(
+                    f"unexpected in-use Snapshot error: {error}"
+                ) from error
+        else:
+            raise AssertionError("Snapshot was deleted while a restored Sandbox used it")
+        trace(label, "snapshot.restored-kill")
+        if not restored.kill():
+            raise AssertionError("restored Sandbox did not terminate")
+        restored = None
+        trace(label, "snapshot.delete")
+        if not Sandbox.delete_snapshot(snapshot_id, **options):
+            raise AssertionError("detached Snapshot was not deleted")
+        trace(label, "snapshot.delete-missing")
+        if Sandbox.delete_snapshot(snapshot_id, **options):
+            raise AssertionError("missing Snapshot deletion reported success")
+        snapshot_id = None
+
         trace(label, "volume.destroy")
         if not Volume.destroy(volume.volume_id, **options):
             raise AssertionError("detached Volume was not destroyed")
@@ -516,8 +581,12 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         try:
             if interpreter is not None:
                 Sandbox.kill(interpreter.sandbox_id, **options)
+            if restored is not None:
+                Sandbox.kill(restored.sandbox_id, **options)
             if sandbox is not None:
                 Sandbox.kill(sandbox.sandbox_id, **options)
+            if snapshot_id is not None:
+                Sandbox.delete_snapshot(snapshot_id, **options)
         finally:
             if volume is not None:
                 Volume.destroy(volume.volume_id, **options)
@@ -530,8 +599,10 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
     volume_name = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-volume"
     metadata = {"client": "python-async", "suite": "production-official"}
     sandbox: AsyncSandbox | None = None
+    restored: AsyncSandbox | None = None
     interpreter: AsyncCodeInterpreter | None = None
     volume: AsyncVolume | None = None
+    snapshot_id: str | None = None
     try:
         trace(label, "volume.create")
         volume = await AsyncVolume.create(volume_name, **options)
@@ -683,6 +754,30 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         )
         listed = assert_listed(await paginator.next_items(), sandbox.sandbox_id)
         assert_volume_mount(listed, volume_name, "/mnt/data")
+
+        snapshot_content = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-snapshot"
+        trace(label, "snapshot.write-state")
+        await sandbox.files.write("a3s-snapshot-state.txt", snapshot_content)
+        snapshot_metadata = (
+            await sandbox.commands.run(
+                "stat -c '%u:%g:%a' /home/user/a3s-snapshot-state.txt"
+            )
+        ).stdout.strip()
+        trace(label, "snapshot.create")
+        snapshot = await sandbox.create_snapshot(
+            name=f"{'a3s' if NATIVE_SDK else 'official'}-{label}-state"
+        )
+        snapshot_id = snapshot.snapshot_id
+        if not snapshot_id or snapshot.names != [snapshot_id]:
+            raise AssertionError(f"unexpected created Snapshot: {snapshot!r}")
+        trace(label, "snapshot.list")
+        snapshots = await sandbox.list_snapshots(limit=20).next_items()
+        if not any(item.snapshot_id == snapshot_id for item in snapshots):
+            raise AssertionError("created Snapshot was absent from the source-scoped list")
+        trace(label, "snapshot.source-running")
+        if not await sandbox.is_running():
+            raise AssertionError("Snapshot did not restore the running source state")
+
         trace(label, "sandbox.set-timeout")
         await sandbox.set_timeout(30)
         trace(label, "sandbox.kill")
@@ -691,6 +786,47 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         trace(label, "sandbox.health-killed")
         if await sandbox.is_running():
             raise AssertionError("envd health reported the killed sandbox as running")
+
+        trace(label, "snapshot.restore-after-source-kill")
+        restored = await AsyncSandbox.create(snapshot_id, timeout=60, **options)
+        trace(label, "snapshot.read-restored-state")
+        if await restored.files.read("a3s-snapshot-state.txt") != snapshot_content:
+            raise AssertionError("restored Sandbox lost the captured filesystem state")
+        restored_metadata = (
+            await restored.commands.run(
+                "stat -c '%u:%g:%a' /home/user/a3s-snapshot-state.txt"
+            )
+        ).stdout.strip()
+        if restored_metadata != snapshot_metadata:
+            raise AssertionError(
+                "restored Snapshot changed file ownership or mode: "
+                f"{snapshot_metadata!r} -> {restored_metadata!r}"
+            )
+        await restored.commands.run(
+            "printf '%s' '-writable' >> /home/user/a3s-snapshot-state.txt"
+        )
+        trace(label, "snapshot.delete-in-use")
+        try:
+            await AsyncSandbox.delete_snapshot(snapshot_id, **options)
+        except SandboxException as error:
+            if "409" not in str(error):
+                raise AssertionError(
+                    f"unexpected in-use Snapshot error: {error}"
+                ) from error
+        else:
+            raise AssertionError("Snapshot was deleted while a restored Sandbox used it")
+        trace(label, "snapshot.restored-kill")
+        if not await restored.kill():
+            raise AssertionError("restored Sandbox did not terminate")
+        restored = None
+        trace(label, "snapshot.delete")
+        if not await AsyncSandbox.delete_snapshot(snapshot_id, **options):
+            raise AssertionError("detached Snapshot was not deleted")
+        trace(label, "snapshot.delete-missing")
+        if await AsyncSandbox.delete_snapshot(snapshot_id, **options):
+            raise AssertionError("missing Snapshot deletion reported success")
+        snapshot_id = None
+
         trace(label, "volume.destroy")
         if not await AsyncVolume.destroy(volume.volume_id, **options):
             raise AssertionError("detached Volume was not destroyed")
@@ -729,8 +865,12 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         try:
             if interpreter is not None:
                 await AsyncSandbox.kill(interpreter.sandbox_id, **options)
+            if restored is not None:
+                await AsyncSandbox.kill(restored.sandbox_id, **options)
             if sandbox is not None:
                 await AsyncSandbox.kill(sandbox.sandbox_id, **options)
+            if snapshot_id is not None:
+                await AsyncSandbox.delete_snapshot(snapshot_id, **options)
         finally:
             if volume is not None:
                 await AsyncVolume.destroy(volume.volume_id, **options)

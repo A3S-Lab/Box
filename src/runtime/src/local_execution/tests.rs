@@ -6,8 +6,8 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionGeneration,
     ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
-    ExecutionState, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
-    RestartExecutionOptions,
+    ExecutionSnapshotId, ExecutionState, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
+    RestartExecutionOptions, SnapshotImageConfig,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -88,6 +88,9 @@ impl LocalExecutionBackend for FakeBackend {
                 "fake start is unavailable".to_string(),
             ));
         }
+        #[cfg(target_os = "linux")]
+        write_fake_sandbox_bundle(record)?;
+        write_fake_resolved_image_config(record)?;
         let handle = Self::handle(record);
         executions.insert(
             record.id.clone(),
@@ -199,6 +202,71 @@ impl LocalExecutionBackend for FakeBackend {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn write_fake_sandbox_bundle(record: &BoxRecord) -> ExecutionManagerResult<()> {
+    let bundle = record.box_dir.join("sandbox/bundle");
+    std::fs::create_dir_all(&bundle).map_err(|error| {
+        ExecutionManagerError::Internal(format!("failed to create fake OCI bundle: {error}"))
+    })?;
+    let config = serde_json::json!({
+        "ociVersion": "1.1.0",
+        "root": {
+            "path": record.box_dir.join("rootfs"),
+            "readonly": false
+        },
+        "linux": {
+            "uidMappings": [{
+                "containerID": 0,
+                "hostID": unsafe { libc::geteuid() },
+                "size": 1
+            }],
+            "gidMappings": [{
+                "containerID": 0,
+                "hostID": unsafe { libc::getegid() },
+                "size": 1
+            }]
+        }
+    });
+    std::fs::write(
+        bundle.join("config.json"),
+        serde_json::to_vec(&config).map_err(|error| {
+            ExecutionManagerError::Internal(format!("failed to encode fake OCI bundle: {error}"))
+        })?,
+    )
+    .map_err(|error| {
+        ExecutionManagerError::Internal(format!("failed to write fake OCI bundle: {error}"))
+    })
+}
+
+fn write_fake_resolved_image_config(record: &BoxRecord) -> ExecutionManagerResult<()> {
+    let config = SnapshotImageConfig {
+        entrypoint: Some(vec!["/usr/local/bin/envd".to_string()]),
+        cmd: Some(vec!["--port".to_string(), "49983".to_string()]),
+        env: vec![("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string())],
+        working_dir: Some("/home/user".to_string()),
+        user: Some("1000:1000".to_string()),
+        ..Default::default()
+    };
+    std::fs::create_dir_all(&record.box_dir).map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to create fake resolved image configuration directory: {error}"
+        ))
+    })?;
+    std::fs::write(
+        record.box_dir.join(crate::RESOLVED_IMAGE_CONFIG_FILE),
+        serde_json::to_vec_pretty(&config).map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "failed to encode fake resolved image configuration: {error}"
+            ))
+        })?,
+    )
+    .map_err(|error| {
+        ExecutionManagerError::Internal(format!(
+            "failed to write fake resolved image configuration: {error}"
+        ))
+    })
+}
+
 fn harness() -> (tempfile::TempDir, LocalExecutionManager, Arc<FakeBackend>) {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(FakeBackend::default());
@@ -229,6 +297,7 @@ fn request(external_id: &str) -> CreateExecutionRequest {
         },
         labels,
         policy: Default::default(),
+        rootfs_snapshot_id: None,
     }
 }
 
@@ -1437,4 +1506,421 @@ async fn failed_restart_start_is_terminal_at_the_new_generation() {
             .outcome,
         crate::ManagedRestartOutcome::Failed
     );
+}
+
+fn populate_rootfs(manager: &LocalExecutionManager, execution_id: &ExecutionId, value: &str) {
+    let rootfs = persisted(manager, execution_id).box_dir.join("rootfs");
+    std::fs::create_dir_all(rootfs.join("workspace")).unwrap();
+    std::fs::write(rootfs.join("workspace/state.txt"), value).unwrap();
+}
+
+#[tokio::test]
+async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation() {
+    let (directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("snapshot-source"), &operation("snapshot-create"))
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "captured-state");
+    let snapshot_id = ExecutionSnapshotId::new("managed-snapshot-1").unwrap();
+
+    let snapshot = manager
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.lease.generation, running.generation);
+    assert_eq!(snapshot.state, ExecutionState::Running);
+    assert!(snapshot.size_bytes > 0);
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    assert_eq!(*backend.last_keep_memory.lock().unwrap(), Some(true));
+    assert_eq!(
+        std::fs::read_to_string(
+            directory
+                .path()
+                .join("home/snapshots/managed-snapshot-1/rootfs/workspace/state.txt")
+        )
+        .unwrap(),
+        "captured-state"
+    );
+    assert_eq!(
+        persisted(&manager, &running.execution_id)
+            .managed_execution
+            .unwrap()
+            .generation,
+        running.generation
+    );
+
+    let retry = manager
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+        .await
+        .unwrap();
+    assert_eq!(retry.size_bytes, snapshot.size_bytes);
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    assert!(manager
+        .delete_filesystem_snapshot(&snapshot_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        manager
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn filesystem_snapshot_after_manager_restart_keeps_resolved_image_config() {
+    let (directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("snapshot-image-config"),
+            &operation("snapshot-image-config-create"),
+        )
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "captured-state");
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend,
+    );
+    let snapshot_id = ExecutionSnapshotId::new("snapshot-image-config").unwrap();
+    restarted
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+        .await
+        .unwrap();
+
+    let metadata = crate::SnapshotStore::new(&directory.path().join("home/snapshots"))
+        .unwrap()
+        .get(snapshot_id.as_str())
+        .unwrap()
+        .unwrap();
+    let image_config = metadata
+        .image_config
+        .expect("resolved image configuration must survive a control-plane restart");
+    assert_eq!(
+        image_config.entrypoint,
+        Some(vec!["/usr/local/bin/envd".to_string()])
+    );
+    assert_eq!(
+        image_config.cmd,
+        Some(vec!["--port".to_string(), "49983".to_string()])
+    );
+    assert_eq!(image_config.working_dir.as_deref(), Some("/home/user"));
+    assert_eq!(image_config.user.as_deref(), Some("1000:1000"));
+}
+
+#[tokio::test]
+async fn paused_snapshot_remains_paused_and_does_not_resume() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("paused-source"), &operation("paused-create"))
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, true)
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "paused-state");
+    let pauses_before = backend.pauses.load(Ordering::Relaxed);
+    let resumes_before = backend.resumes.load(Ordering::Relaxed);
+
+    let snapshot = manager
+        .create_filesystem_snapshot(
+            &running.execution_id,
+            paused.generation,
+            &ExecutionSnapshotId::new("paused-snapshot").unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.state, ExecutionState::Paused);
+    assert_eq!(snapshot.lease.generation, paused.generation);
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), pauses_before);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), resumes_before);
+}
+
+#[tokio::test]
+async fn snapshot_failure_restores_running_state_at_the_same_generation() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("missing-rootfs"),
+            &operation("missing-rootfs-create"),
+        )
+        .await
+        .unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("missing-rootfs-snapshot").unwrap();
+
+    let error = manager
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Running)
+    );
+    assert_eq!(
+        record.managed_execution.unwrap().generation,
+        running.generation
+    );
+    assert_eq!(
+        manager
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn special_file_snapshot_failure_resumes_running_source() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let (directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("special-file-source"),
+            &operation("special-file-create"),
+        )
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "still-running");
+    let rootfs = persisted(&manager, &running.execution_id)
+        .box_dir
+        .join("rootfs");
+    let fifo = rootfs.join("workspace/blocking-fifo");
+    let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+    let snapshot_id = ExecutionSnapshotId::new("special-file-snapshot").unwrap();
+
+    let error = manager
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("unsupported special file") && message.contains("fifo")
+    ));
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Running
+    );
+    assert_eq!(
+        manager
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(std::fs::read_dir(directory.path().join("home/snapshots"))
+        .unwrap()
+        .flatten()
+        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-")));
+}
+
+#[tokio::test]
+async fn reconcile_recovers_a_crash_after_snapshot_pause() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("recovered-snapshot-create");
+    let running = manager
+        .create_and_start(request("recovered-source"), &create_operation)
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "recovered-state");
+    let snapshot_id = ExecutionSnapshotId::new("recovered-snapshot").unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Snapshotting,
+            RuntimeUpdate::SnapshotClaim {
+                snapshot_id: snapshot_id.clone(),
+                source_state: ManagedExecutionState::Running,
+            },
+        )
+        .await
+        .unwrap();
+    backend.pause(&claimed, true).await.unwrap();
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let ReconcileOutcome::Ready(lease) = restarted.reconcile(&create_operation).await.unwrap()
+    else {
+        panic!("expected snapshot reconciliation to return a ready lease");
+    };
+
+    assert_eq!(lease.generation, running.generation);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        persisted(&restarted, &running.execution_id)
+            .managed_state()
+            .unwrap(),
+        Some(ManagedExecutionState::Running)
+    );
+    assert!(restarted
+        .filesystem_snapshot_size(&snapshot_id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn legacy_snapshot_without_image_config_is_rejected_before_reservation() {
+    let (directory, manager, _backend) = harness();
+    let source = directory.path().join("legacy-snapshot-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("state.txt"), "captured").unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("legacy-snapshot").unwrap();
+    crate::SnapshotStore::new(&directory.path().join("home/snapshots"))
+        .unwrap()
+        .save(
+            a3s_box_core::SnapshotMetadata::new(
+                snapshot_id.to_string(),
+                snapshot_id.to_string(),
+                "source-execution".to_string(),
+                "alpine:3.20".to_string(),
+            ),
+            &source,
+        )
+        .unwrap();
+    let mut restore = request("legacy-snapshot-restore");
+    restore.rootfs_snapshot_id = Some(snapshot_id);
+    let operation_id = operation("legacy-snapshot-restore-create");
+
+    let error = manager.create(restore, &operation_id).await.unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("resolved OCI image configuration")
+    ));
+    assert!(manager
+        .get_by_operation(&operation_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
+    let (_directory, manager, _backend) = harness();
+    let running = manager
+        .create_and_start(request("delete-source"), &operation("delete-source-create"))
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "delete-state");
+    let snapshot_id = ExecutionSnapshotId::new("delete-protected-snapshot").unwrap();
+    manager
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+        .await
+        .unwrap();
+    let mut restored_request = request("restored-reservation");
+    restored_request.rootfs_snapshot_id = Some(snapshot_id.clone());
+    let restored = manager
+        .create(restored_request, &operation("restored-reservation-create"))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        manager.delete_filesystem_snapshot(&snapshot_id).await,
+        Err(ExecutionManagerError::Conflict { .. })
+    ));
+    let record = persisted(&manager, &restored.execution_id);
+    manager
+        .transition(
+            &record,
+            ManagedExecutionState::Created,
+            ManagedExecutionState::Stopped,
+            RuntimeUpdate::Terminal(None),
+        )
+        .await
+        .unwrap();
+    assert!(manager
+        .delete_filesystem_snapshot(&snapshot_id)
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
+async fn snapshot_delete_and_restored_reservation_are_atomic() {
+    let (_directory, manager, _backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("atomic-delete-source"),
+            &operation("atomic-delete-source-create"),
+        )
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "atomic-delete-state");
+
+    for index in 0..16 {
+        let snapshot_id =
+            ExecutionSnapshotId::new(format!("atomic-delete-snapshot-{index}")).unwrap();
+        manager
+            .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+            .await
+            .unwrap();
+        let mut restored_request = request(&format!("atomic-restored-{index}"));
+        restored_request.rootfs_snapshot_id = Some(snapshot_id.clone());
+        let create_operation = operation(&format!("atomic-restored-create-{index}"));
+        let create_manager = manager.clone();
+        let delete_manager = manager.clone();
+        let delete_snapshot_id = snapshot_id.clone();
+
+        let (created, deleted) = tokio::join!(
+            create_manager.create(restored_request, &create_operation),
+            delete_manager.delete_filesystem_snapshot(&delete_snapshot_id),
+        );
+
+        match (created, deleted) {
+            (Ok(restored), Err(ExecutionManagerError::Conflict { .. })) => {
+                let record = persisted(&manager, &restored.execution_id);
+                manager
+                    .transition(
+                        &record,
+                        ManagedExecutionState::Created,
+                        ManagedExecutionState::Stopped,
+                        RuntimeUpdate::Terminal(None),
+                    )
+                    .await
+                    .unwrap();
+                assert!(manager
+                    .delete_filesystem_snapshot(&snapshot_id)
+                    .await
+                    .unwrap());
+            }
+            (Err(ExecutionManagerError::Unavailable(_)), Ok(true)) => {
+                assert!(matches!(
+                    manager.reconcile(&create_operation).await.unwrap(),
+                    ReconcileOutcome::Absent
+                ));
+            }
+            (created, deleted) => {
+                panic!(
+                    "restored reservation and Snapshot deletion were not atomic: \
+                     create={created:?}, delete={deleted:?}"
+                );
+            }
+        }
+    }
 }

@@ -22,6 +22,7 @@ from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 API_KEY = "e2b_a1b2c3"
 SANDBOX_ID = "fixture-sandbox"
+RESTORED_SANDBOX_ID = "fixture-restored"
 INTERPRETER_SANDBOX_ID = "fixture-interpreter"
 MISSING_SANDBOX_ID = "missing-sandbox"
 
@@ -99,6 +100,18 @@ def run_sync(api_url: str) -> None:
     assert listed[0].volume_mounts[0]["name"] == "fixture-data"
     assert listed[0].volume_mounts[0]["path"] == "/mnt/data"
 
+    snapshot = sandbox.create_snapshot(name="fixture-state")
+    assert snapshot.snapshot_id
+    assert snapshot.names == [snapshot.snapshot_id]
+    snapshots = sandbox.list_snapshots(limit=1).next_items()
+    assert len(snapshots) == 1
+    assert snapshots[0].snapshot_id == snapshot.snapshot_id
+    restored = Sandbox.create(snapshot.snapshot_id, **connection(api_url))
+    assert restored.sandbox_id == RESTORED_SANDBOX_ID
+    assert restored.kill()
+    assert Sandbox.delete_snapshot(snapshot.snapshot_id, **connection(api_url))
+    assert not Sandbox.delete_snapshot(snapshot.snapshot_id, **connection(api_url))
+
     sandbox.set_timeout(123)
     assert sandbox.kill()
     assert not Sandbox.kill(MISSING_SANDBOX_ID, **connection(api_url))
@@ -175,6 +188,22 @@ async def run_async(api_url: str) -> None:
     assert len(listed) == 1
     assert listed[0].volume_mounts[0]["name"] == "fixture-data"
     assert listed[0].volume_mounts[0]["path"] == "/mnt/data"
+
+    snapshot = await sandbox.create_snapshot(name="fixture-state")
+    assert snapshot.snapshot_id
+    assert snapshot.names == [snapshot.snapshot_id]
+    snapshots = await sandbox.list_snapshots(limit=1).next_items()
+    assert len(snapshots) == 1
+    assert snapshots[0].snapshot_id == snapshot.snapshot_id
+    restored = await AsyncSandbox.create(snapshot.snapshot_id, **connection(api_url))
+    assert restored.sandbox_id == RESTORED_SANDBOX_ID
+    assert await restored.kill()
+    assert await AsyncSandbox.delete_snapshot(
+        snapshot.snapshot_id, **connection(api_url)
+    )
+    assert not await AsyncSandbox.delete_snapshot(
+        snapshot.snapshot_id, **connection(api_url)
+    )
 
     await sandbox.set_timeout(123)
     assert await sandbox.kill()

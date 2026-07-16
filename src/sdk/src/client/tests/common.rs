@@ -11,6 +11,25 @@
         .unwrap();
     }
 
+    fn write_resolved_image_config(record: &BoxRecord) {
+        let config = a3s_box_core::SnapshotImageConfig {
+            entrypoint: Some(vec!["/usr/local/bin/envd".to_string()]),
+            cmd: Some(vec!["--port".to_string(), "49983".to_string()]),
+            env: vec![("IMAGE_ENV".to_string(), "preserved".to_string())],
+            working_dir: Some("/home/user".to_string()),
+            user: Some("1000:1000".to_string()),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&record.box_dir).unwrap();
+        std::fs::write(
+            record
+                .box_dir
+                .join(a3s_box_runtime::RESOLVED_IMAGE_CONFIG_FILE),
+            serde_json::to_vec_pretty(&config).unwrap(),
+        )
+        .unwrap();
+    }
+
     fn write_minimal_oci_layout(path: &Path) {
         let blobs = path.join("blobs").join("sha256");
         std::fs::create_dir_all(&blobs).unwrap();

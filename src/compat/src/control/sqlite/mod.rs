@@ -19,6 +19,9 @@ const TEMPORAL_INDEX_MIGRATION: &str =
     include_str!("../../../migrations/0002_temporal_indexes.sql");
 const VOLUME_RECORDS_MIGRATION_NAME: &str = "volume_records";
 const VOLUME_RECORDS_MIGRATION: &str = include_str!("../../../migrations/0003_volume_records.sql");
+const SNAPSHOT_RECORDS_MIGRATION_NAME: &str = "snapshot_records";
+const SNAPSHOT_RECORDS_MIGRATION: &str =
+    include_str!("../../../migrations/0004_snapshot_records.sql");
 
 #[derive(Clone)]
 pub struct SqliteSandboxRepository {
@@ -101,6 +104,12 @@ impl SqliteSandboxRepository {
                         VOLUME_RECORDS_MIGRATION_NAME,
                         VOLUME_RECORDS_MIGRATION,
                     )?;
+                    apply_migration(
+                        connection,
+                        4,
+                        SNAPSHOT_RECORDS_MIGRATION_NAME,
+                        SNAPSHOT_RECORDS_MIGRATION,
+                    )?;
                 }
                 [(1, name)] if name == INITIAL_MIGRATION_NAME => {
                     apply_migration(
@@ -115,6 +124,12 @@ impl SqliteSandboxRepository {
                         VOLUME_RECORDS_MIGRATION_NAME,
                         VOLUME_RECORDS_MIGRATION,
                     )?;
+                    apply_migration(
+                        connection,
+                        4,
+                        SNAPSHOT_RECORDS_MIGRATION_NAME,
+                        SNAPSHOT_RECORDS_MIGRATION,
+                    )?;
                 }
                 [(1, first), (2, second)]
                     if first == INITIAL_MIGRATION_NAME
@@ -126,11 +141,30 @@ impl SqliteSandboxRepository {
                         VOLUME_RECORDS_MIGRATION_NAME,
                         VOLUME_RECORDS_MIGRATION,
                     )?;
+                    apply_migration(
+                        connection,
+                        4,
+                        SNAPSHOT_RECORDS_MIGRATION_NAME,
+                        SNAPSHOT_RECORDS_MIGRATION,
+                    )?;
                 }
                 [(1, first), (2, second), (3, third)]
                     if first == INITIAL_MIGRATION_NAME
                         && second == TEMPORAL_INDEX_MIGRATION_NAME
-                        && third == VOLUME_RECORDS_MIGRATION_NAME => {}
+                        && third == VOLUME_RECORDS_MIGRATION_NAME =>
+                {
+                    apply_migration(
+                        connection,
+                        4,
+                        SNAPSHOT_RECORDS_MIGRATION_NAME,
+                        SNAPSHOT_RECORDS_MIGRATION,
+                    )?;
+                }
+                [(1, first), (2, second), (3, third), (4, fourth)]
+                    if first == INITIAL_MIGRATION_NAME
+                        && second == TEMPORAL_INDEX_MIGRATION_NAME
+                        && third == VOLUME_RECORDS_MIGRATION_NAME
+                        && fourth == SNAPSHOT_RECORDS_MIGRATION_NAME => {}
                 _ => {
                     return Err(RepositoryError::Corrupt(format!(
                         "unsupported SQLite migration history: {applied:?}"

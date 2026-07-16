@@ -4,10 +4,73 @@
 //! can be reconstructed from the saved spec. Combined with rootfs caching,
 //! restore achieves sub-500ms cold start.
 
+use crate::error::{BoxError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Resolved OCI image defaults required to reproduce a captured rootfs.
+///
+/// These values are distinct from [`SnapshotMetadata`] command, environment,
+/// and working-directory fields: those fields are user overrides, while this
+/// structure records the immutable defaults resolved from the source image.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotImageConfig {
+    /// Image entrypoint.
+    #[serde(default)]
+    pub entrypoint: Option<Vec<String>>,
+    /// Image command arguments.
+    #[serde(default)]
+    pub cmd: Option<Vec<String>>,
+    /// Image environment in declaration order.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// Image working directory.
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    /// Image user.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Ports declared by the image.
+    #[serde(default)]
+    pub exposed_ports: Vec<String>,
+    /// Image labels.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
+    /// Volumes declared by the image.
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    /// Image stop signal.
+    #[serde(default)]
+    pub stop_signal: Option<String>,
+    /// Image health check.
+    #[serde(default)]
+    pub health_check: Option<SnapshotImageHealthCheck>,
+    /// Image ONBUILD triggers.
+    #[serde(default)]
+    pub onbuild: Vec<String>,
+}
+
+/// Health-check defaults embedded in a resolved OCI image configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotImageHealthCheck {
+    /// Health-check command.
+    #[serde(default)]
+    pub test: Vec<String>,
+    /// Interval in seconds.
+    #[serde(default)]
+    pub interval: Option<u64>,
+    /// Timeout in seconds.
+    #[serde(default)]
+    pub timeout: Option<u64>,
+    /// Retry count.
+    #[serde(default)]
+    pub retries: Option<u32>,
+    /// Start period in seconds.
+    #[serde(default)]
+    pub start_period: Option<u64>,
+}
 
 /// Metadata for a saved VM snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +99,9 @@ pub struct SnapshotMetadata {
     /// Working directory inside the box
     #[serde(default)]
     pub workdir: Option<String>,
+    /// Resolved defaults from the source OCI image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_config: Option<SnapshotImageConfig>,
     /// Port mappings
     #[serde(default)]
     pub port_map: Vec<String>,
@@ -82,6 +148,7 @@ impl SnapshotMetadata {
             cmd: Vec::new(),
             entrypoint: None,
             workdir: None,
+            image_config: None,
             port_map: Vec::new(),
             labels: HashMap::new(),
             network_mode: None,
@@ -103,6 +170,20 @@ impl SnapshotMetadata {
         self.vcpus = vcpus;
         self.memory_mb = memory_mb;
         self
+    }
+
+    /// Return the captured OCI image defaults required for a safe restore.
+    ///
+    /// Snapshot records created before this field existed remain readable so
+    /// operators can inspect and delete them, but restoring one would lose
+    /// image entrypoint, environment, user, and working-directory semantics.
+    pub fn require_image_config(&self) -> Result<&SnapshotImageConfig> {
+        self.image_config.as_ref().ok_or_else(|| {
+            BoxError::ConfigError(format!(
+                "Snapshot '{}' does not contain resolved OCI image configuration and cannot be restored safely; recreate it with the current A3S Box version",
+                self.id
+            ))
+        })
     }
 }
 
@@ -151,6 +232,7 @@ mod tests {
         assert!(meta.volumes.is_empty());
         assert!(meta.env.is_empty());
         assert!(meta.description.is_empty());
+        assert!(meta.image_config.is_none());
     }
 
     #[test]
@@ -201,6 +283,7 @@ mod tests {
         assert_eq!(parsed.id, "snap-old");
         assert_eq!(parsed.size_bytes, 0);
         assert_eq!(parsed.created_at, DateTime::<Utc>::UNIX_EPOCH);
+        assert!(parsed.require_image_config().is_err());
     }
 
     #[test]
@@ -218,6 +301,28 @@ mod tests {
         meta.cmd = vec!["nginx".to_string(), "-g".to_string()];
         meta.entrypoint = Some(vec!["/docker-entrypoint.sh".to_string()]);
         meta.workdir = Some("/app".to_string());
+        meta.image_config = Some(SnapshotImageConfig {
+            entrypoint: Some(vec!["/usr/bin/envd".to_string()]),
+            cmd: Some(vec!["--listen".to_string(), "0.0.0.0:49983".to_string()]),
+            env: vec![
+                ("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string()),
+                ("HOME".to_string(), "/home/user".to_string()),
+            ],
+            working_dir: Some("/home/user".to_string()),
+            user: Some("1000:1000".to_string()),
+            exposed_ports: vec!["49983/tcp".to_string()],
+            labels: HashMap::from([("runtime".to_string(), "envd".to_string())]),
+            volumes: vec!["/home/user".to_string()],
+            stop_signal: Some("SIGTERM".to_string()),
+            health_check: Some(SnapshotImageHealthCheck {
+                test: vec!["CMD".to_string(), "envd-health".to_string()],
+                interval: Some(10),
+                timeout: Some(2),
+                retries: Some(3),
+                start_period: Some(5),
+            }),
+            onbuild: vec!["RUN prepare-runtime".to_string()],
+        });
         meta.port_map = vec!["8080:80".to_string()];
         meta.labels.insert("env".to_string(), "prod".to_string());
         meta.network_mode = Some("bridge".to_string());
@@ -242,6 +347,7 @@ mod tests {
             Some(vec!["/docker-entrypoint.sh".to_string()])
         );
         assert_eq!(parsed.workdir, Some("/app".to_string()));
+        assert_eq!(parsed.image_config, meta.image_config);
         assert_eq!(parsed.port_map, vec!["8080:80"]);
         assert_eq!(parsed.labels.get("env").unwrap(), "prod");
         assert_eq!(parsed.network_mode, Some("bridge".to_string()));
@@ -270,6 +376,7 @@ mod tests {
         assert_eq!(meta.id, "snap-min");
         assert!(meta.entrypoint.is_none());
         assert!(meta.workdir.is_none());
+        assert!(meta.image_config.is_none());
         assert!(meta.port_map.is_empty());
         assert!(meta.labels.is_empty());
         assert!(meta.network_mode.is_none());

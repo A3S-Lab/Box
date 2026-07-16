@@ -1,6 +1,6 @@
 use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult, OperationId,
-    RestartExecutionOptions,
+    ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
+    ExecutionSnapshotId, OperationId, RestartExecutionOptions,
 };
 
 use super::record::{
@@ -10,7 +10,7 @@ use super::support::{generation, managed_state};
 use super::{LocalExecutionHandle, LocalExecutionManager};
 use crate::{
     BoxRecord, ManagedExecutionOperation, ManagedExecutionReservation, ManagedExecutionState,
-    ManagedExecutionStoreError,
+    ManagedExecutionStoreError, SnapshotStore,
 };
 
 impl LocalExecutionManager {
@@ -19,7 +19,55 @@ impl LocalExecutionManager {
         record: BoxRecord,
     ) -> ExecutionManagerResult<ManagedExecutionReservation> {
         let store = self.store.clone();
-        run_store(move || store.reserve(record)).await
+        let Some(snapshot_id) = record
+            .managed_execution
+            .as_ref()
+            .and_then(|metadata| metadata.request.rootfs_snapshot_id.clone())
+        else {
+            return run_store(move || store.reserve(record)).await;
+        };
+        let home_dir = self.home_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let snapshots = SnapshotStore::new(&home_dir.join("snapshots")).map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "failed to open filesystem snapshot store: {error}"
+                ))
+            })?;
+            let _snapshot_lock = snapshots.acquire_exclusive_lock().map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "failed to lock filesystem snapshot store: {error}"
+                ))
+            })?;
+            let metadata = snapshots
+                .get(snapshot_id.as_str())
+                .map_err(|error| {
+                    ExecutionManagerError::Unavailable(format!(
+                        "failed to inspect filesystem snapshot {snapshot_id}: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ExecutionManagerError::Unavailable(format!(
+                        "filesystem snapshot {snapshot_id} is unavailable"
+                    ))
+                })?;
+            if metadata.id != snapshot_id.as_str()
+                || !snapshots.rootfs_path(snapshot_id.as_str()).is_dir()
+            {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "filesystem snapshot {snapshot_id} is not a valid published snapshot"
+                )));
+            }
+            metadata.require_image_config().map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "filesystem snapshot {snapshot_id} cannot be restored: {error}"
+                ))
+            })?;
+            store.reserve(record).map_err(map_store_error)
+        })
+        .await
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!("managed state task failed: {error}"))
+        })?
     }
 
     pub(super) async fn get(
@@ -60,6 +108,17 @@ impl LocalExecutionManager {
                     if let Some(metadata) = record.managed_execution.as_mut() {
                         metadata.pending_operation =
                             Some(ManagedExecutionOperation::Pause { keep_memory });
+                    }
+                }
+                RuntimeUpdate::SnapshotClaim {
+                    snapshot_id,
+                    source_state,
+                } => {
+                    if let Some(metadata) = record.managed_execution.as_mut() {
+                        metadata.pending_operation = Some(ManagedExecutionOperation::Snapshot {
+                            snapshot_id,
+                            source_state,
+                        });
                     }
                 }
                 RuntimeUpdate::RestartClaim {
@@ -141,6 +200,10 @@ pub(super) enum RuntimeUpdate {
     StartHandle(LocalExecutionHandle),
     Terminal(Option<i32>),
     PauseClaim(bool),
+    SnapshotClaim {
+        snapshot_id: ExecutionSnapshotId,
+        source_state: ManagedExecutionState,
+    },
     RestartClaim {
         operation_id: OperationId,
         options: RestartExecutionOptions,

@@ -158,6 +158,14 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     meta.workdir = record.workdir.clone();
     meta.port_map = record.port_map.clone();
     meta.labels = record.labels.clone();
+    meta.image_config = a3s_box_runtime::load_resolved_image_config(&record.box_dir)?;
+    if meta.image_config.is_none() {
+        return Err(format!(
+            "resolved image configuration is missing for box '{}'; restart it before creating a filesystem snapshot",
+            record.name
+        )
+        .into());
+    }
     if let Some(ref desc) = args.description {
         meta.description = desc.clone();
     }
@@ -207,6 +215,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
 
     // Find snapshot by ID or name
     let meta = resolve_snapshot(&store, &args.snapshot)?;
+    meta.require_image_config()?;
 
     // Create a new box record from snapshot metadata
     let box_id = uuid::Uuid::new_v4().to_string();
