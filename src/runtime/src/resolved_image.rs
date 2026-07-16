@@ -4,9 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 use a3s_box_core::error::{BoxError, Result};
-use a3s_box_core::{
-    SnapshotImageConfig, SnapshotImageHealthCheck, SnapshotMetadata,
-};
+use a3s_box_core::{SnapshotImageConfig, SnapshotImageHealthCheck, SnapshotMetadata};
 use serde::de::DeserializeOwned;
 
 use crate::oci::{OciHealthCheck, OciImageConfig};
@@ -33,10 +31,7 @@ pub fn load_resolved_image_config(box_dir: &Path) -> Result<Option<SnapshotImage
     }
 }
 
-pub(crate) fn persist_resolved_image_config(
-    box_dir: &Path,
-    config: &OciImageConfig,
-) -> Result<()> {
+pub(crate) fn persist_resolved_image_config(box_dir: &Path, config: &OciImageConfig) -> Result<()> {
     let config = SnapshotImageConfig::from(config);
     let mut encoded = serde_json::to_vec_pretty(&config).map_err(|error| {
         BoxError::SerializationError(format!(
