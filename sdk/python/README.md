@@ -33,6 +33,12 @@ asyncio.run(main())
 The synchronous and asynchronous Code Interpreter exports are available from
 `a3s_box.code_interpreter`.
 
+The production-tested Sandbox backend supports memory-preserving pause through
+the unchanged SDK methods: `await sandbox.pause(keep_memory=True)` followed by
+`await sandbox.connect(timeout=60)`. The A3S OS matrix proves that a process
+started before pause continues after resume. `keep_memory=False` remains
+explicitly unsupported until filesystem-only pause is implemented.
+
 `A3SConnectionConfig` reads `A3S_BOX_ENDPOINT` and `A3S_BOX_API_KEY` without
 changing process-global environment variables. It derives the Sandbox domain
 from conventional `https://api.<domain>` endpoints. Set `A3S_BOX_DOMAIN` only
