@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Runtime-backed E2B Sandbox logs.** The compatibility service now exposes
+  generation-fenced v1 and v2 Sandbox log routes over the canonical structured
+  runtime logs, including cursor, direction, level, search, and limit
+  semantics. Rotated gzip files are read oldest-first with decompression
+  bounds, live partial tails are ignored safely, and responses are stably
+  ordered by timestamp across concurrent stdout/stderr writers.
 - **Memory-preserving E2B Sandbox pause and resume.** The compatibility service
   now exposes generation-fenced pause/resume transitions backed by certified
   `crun`, preserves paused state across listing and reconciliation, and resumes
