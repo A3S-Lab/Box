@@ -52,6 +52,15 @@ impl ExecutionManager for LocalExecutionManager {
         status_from_record(&record, state)
     }
 
+    async fn read_logs(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<Vec<a3s_box_core::log::LogEntry>> {
+        self.read_structured_logs(execution_id, expected_generation)
+            .await
+    }
+
     async fn pause(
         &self,
         execution_id: &ExecutionId,
