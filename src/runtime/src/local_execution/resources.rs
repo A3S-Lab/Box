@@ -421,10 +421,10 @@ mod tests {
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("state.txt"), "safe-state").unwrap();
         let metadata = SnapshotMetadata::new(
-            snapshot_id,
-            snapshot_id,
-            "source-execution",
-            "alpine:latest",
+            snapshot_id.to_string(),
+            snapshot_id.to_string(),
+            "source-execution".to_string(),
+            "alpine:latest".to_string(),
         );
         crate::SnapshotStore::new(&home_dir.join("snapshots"))
             .unwrap()
@@ -580,10 +580,10 @@ mod tests {
         std::fs::create_dir_all(&snapshot_dir).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         let metadata = SnapshotMetadata::new(
-            snapshot_id,
-            snapshot_id,
-            "source-execution",
-            "alpine:latest",
+            snapshot_id.to_string(),
+            snapshot_id.to_string(),
+            "source-execution".to_string(),
+            "alpine:latest".to_string(),
         );
         std::fs::write(
             snapshot_dir.join("metadata.json"),
