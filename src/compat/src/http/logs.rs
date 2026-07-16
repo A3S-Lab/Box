@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Extension, Path, RawQuery, State};
 use axum::Json;
-use chrono::{SecondsFormat, Utc};
+use chrono::SecondsFormat;
 use serde::Serialize;
 
 use crate::control::{SandboxId, SandboxLog};
@@ -272,7 +272,7 @@ pub struct SandboxLogsV2Response {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
 
     use super::*;
 
