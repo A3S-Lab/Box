@@ -41,3 +41,15 @@ only for single-Sandbox fixtures. The A3S service owns template and isolation
 selection; this package never starts a local container or runtime.
 `E2B_API_URL` is not read by this package; that name is used only when an
 unchanged official SDK is connected directly to the same A3S Box endpoint.
+
+Volume control requests use `connection.typescriptOptions()`. Volume content
+requests use `connection.volumeOptions()` so they reach that same A3S Box
+endpoint without `E2B_VOLUME_API_URL`:
+
+```typescript
+import { A3SConnectionConfig, Volume } from '@a3s-lab/box'
+
+const connection = A3SConnectionConfig.fromEnvironment(process.env)
+const volume = await Volume.create('data', connection.typescriptOptions())
+await volume.writeFile('/input.txt', 'hello', connection.volumeOptions())
+```

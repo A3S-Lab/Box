@@ -20,6 +20,9 @@ assert.deepEqual(connection.typescriptOptions(), {
   apiKey: 'a3s_a1b2c3',
   sandboxUrl: 'https://sandbox.box.example.com',
 })
+assert.deepEqual(connection.volumeOptions(), {
+  apiUrl: 'https://api.box.example.com',
+})
 
 const selfHosted = A3SConnectionConfig.fromEnvironment({
   A3S_BOX_ENDPOINT: 'https://gateway.internal.example',

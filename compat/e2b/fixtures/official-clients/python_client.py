@@ -8,11 +8,13 @@ import asyncio
 from typing import Any
 
 from e2b import (
+    AsyncVolume,
     AsyncSandbox,
     Sandbox,
     SandboxNotFoundException,
     SandboxQuery,
     SandboxState,
+    Volume,
 )
 from e2b_code_interpreter import AsyncSandbox as AsyncCodeInterpreter
 from e2b_code_interpreter import Sandbox as CodeInterpreter
@@ -44,7 +46,37 @@ def create_options(api_url: str) -> dict[str, Any]:
 
 
 def run_sync(api_url: str) -> None:
-    sandbox = Sandbox.create("fixture-template", **create_options(api_url))
+    volume = Volume.create("fixture-data", **connection(api_url))
+    assert volume.volume_id
+    assert volume.token == "fixture-volume-token"
+    connected_volume = Volume.connect(volume.volume_id, **connection(api_url))
+    assert connected_volume.name == "fixture-data"
+    assert any(
+        item.volume_id == volume.volume_id
+        for item in Volume.list(**connection(api_url))
+    )
+    directory = volume.make_dir(
+        "/nested", force=True, mode=0o755, api_url=api_url
+    )
+    assert directory.path == "/nested"
+    written = volume.write_file(
+        "/nested/value.txt", "volume-value", mode=0o644, api_url=api_url
+    )
+    assert written.size == len("volume-value")
+    assert volume.exists("/nested/value.txt", api_url=api_url)
+    updated = volume.update_metadata(
+        "/nested/value.txt", mode=0o600, api_url=api_url
+    )
+    assert updated.mode == 0o600
+    assert len(volume.list("/", depth=2, api_url=api_url)) == 2
+    assert volume.read_file("/nested/value.txt", api_url=api_url) == "volume-value"
+    volume.remove("/nested", api_url=api_url)
+
+    sandbox = Sandbox.create(
+        "fixture-template",
+        volume_mounts={"/mnt/data": volume},
+        **create_options(api_url),
+    )
     assert sandbox.sandbox_id == SANDBOX_ID
 
     assert sandbox.pause(keep_memory=True)
@@ -62,7 +94,10 @@ def run_sync(api_url: str) -> None:
         next_token="cursor-0",
         **connection(api_url),
     )
-    assert len(paginator.next_items()) == 1
+    listed = paginator.next_items()
+    assert len(listed) == 1
+    assert listed[0].volume_mounts[0]["name"] == "fixture-data"
+    assert listed[0].volume_mounts[0]["path"] == "/mnt/data"
 
     sandbox.set_timeout(123)
     assert sandbox.kill()
@@ -77,10 +112,46 @@ def run_sync(api_url: str) -> None:
     interpreter = CodeInterpreter.create(**connection(api_url))
     assert interpreter.sandbox_id == INTERPRETER_SANDBOX_ID
     assert interpreter.kill()
+    assert Volume.destroy(volume.volume_id, **connection(api_url))
 
 
 async def run_async(api_url: str) -> None:
-    sandbox = await AsyncSandbox.create("fixture-template", **create_options(api_url))
+    volume = await AsyncVolume.create("fixture-data", **connection(api_url))
+    assert volume.volume_id
+    assert volume.token == "fixture-volume-token"
+    connected_volume = await AsyncVolume.connect(
+        volume.volume_id, **connection(api_url)
+    )
+    assert connected_volume.name == "fixture-data"
+    assert any(
+        item.volume_id == volume.volume_id
+        for item in await AsyncVolume.list(**connection(api_url))
+    )
+    directory = await volume.make_dir(
+        "/nested", force=True, mode=0o755, api_url=api_url
+    )
+    assert directory.path == "/nested"
+    written = await volume.write_file(
+        "/nested/value.txt", "volume-value", mode=0o644, api_url=api_url
+    )
+    assert written.size == len("volume-value")
+    assert await volume.exists("/nested/value.txt", api_url=api_url)
+    updated = await volume.update_metadata(
+        "/nested/value.txt", mode=0o600, api_url=api_url
+    )
+    assert updated.mode == 0o600
+    assert len(await volume.list("/", depth=2, api_url=api_url)) == 2
+    assert (
+        await volume.read_file("/nested/value.txt", api_url=api_url)
+        == "volume-value"
+    )
+    await volume.remove("/nested", api_url=api_url)
+
+    sandbox = await AsyncSandbox.create(
+        "fixture-template",
+        volume_mounts={"/mnt/data": volume},
+        **create_options(api_url),
+    )
     assert sandbox.sandbox_id == SANDBOX_ID
 
     assert await sandbox.pause(keep_memory=True)
@@ -100,7 +171,10 @@ async def run_async(api_url: str) -> None:
         next_token="cursor-0",
         **connection(api_url),
     )
-    assert len(await paginator.next_items()) == 1
+    listed = await paginator.next_items()
+    assert len(listed) == 1
+    assert listed[0].volume_mounts[0]["name"] == "fixture-data"
+    assert listed[0].volume_mounts[0]["path"] == "/mnt/data"
 
     await sandbox.set_timeout(123)
     assert await sandbox.kill()
@@ -115,6 +189,7 @@ async def run_async(api_url: str) -> None:
     interpreter = await AsyncCodeInterpreter.create(**connection(api_url))
     assert interpreter.sandbox_id == INTERPRETER_SANDBOX_ID
     assert await interpreter.kill()
+    assert await AsyncVolume.destroy(volume.volume_id, **connection(api_url))
 
 
 def main() -> None:
