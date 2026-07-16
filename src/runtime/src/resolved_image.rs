@@ -283,11 +283,8 @@ mod tests {
             )
             .unwrap();
 
-        let error = load_snapshot_oci_config(
-            &store.rootfs_path("legacy-snapshot"),
-            "alpine:3.20",
-        )
-        .unwrap_err();
+        let error = load_snapshot_oci_config(&store.rootfs_path("legacy-snapshot"), "alpine:3.20")
+            .unwrap_err();
 
         assert!(format!("{error}").contains("resolved OCI image configuration"));
     }
