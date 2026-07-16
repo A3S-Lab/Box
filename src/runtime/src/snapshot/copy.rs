@@ -322,7 +322,7 @@ pub(super) fn dir_size(path: &Path) -> Result<u64> {
     #[cfg(unix)]
     {
         let mut seen = std::collections::HashSet::new();
-        return dir_size_unix(path, &mut seen);
+        dir_size_unix(path, &mut seen)
     }
     #[cfg(not(unix))]
     {
