@@ -28,6 +28,13 @@ impl ExecutionSessionManager for LocalExecutionManager {
         request.streaming = false;
         let (record, client, stream) = self.bind_exec(execution_id, generation).await?;
         inherit_container_environment(&record.env, &mut request.env);
+        debug_session_environment(
+            execution_id,
+            generation,
+            "execute",
+            &record.env,
+            &request.env,
+        );
         client
             .exec_command_on_stream(stream, &request)
             .await
@@ -42,6 +49,13 @@ impl ExecutionSessionManager for LocalExecutionManager {
     ) -> ExecutionManagerResult<ExecutionProcess> {
         let (record, client, stream) = self.bind_exec(execution_id, generation).await?;
         inherit_container_environment(&record.env, &mut request.env);
+        debug_session_environment(
+            execution_id,
+            generation,
+            "start_process",
+            &record.env,
+            &request.env,
+        );
         let stream = client
             .exec_stream_on_stream(stream, &request)
             .await
@@ -63,6 +77,13 @@ impl ExecutionSessionManager for LocalExecutionManager {
             .require_running_record(execution_id, generation)
             .await?;
         inherit_container_environment(&record.env, &mut request.env);
+        debug_session_environment(
+            execution_id,
+            generation,
+            "start_pty",
+            &record.env,
+            &request.env,
+        );
         let socket_path = record.exec_socket_path.with_file_name("pty.sock");
         let client = PtyClient::connect(&socket_path)
             .await
@@ -160,6 +181,41 @@ fn inherit_container_environment(container: &HashMap<String, String>, request: &
             .map(|(key, value)| format!("{key}={value}")),
     );
     request.extend(malformed);
+}
+
+/// Record only environment key names at the final host-to-runtime boundary.
+///
+/// Values are deliberately never included because creation and per-request
+/// environments may contain credentials. This log is useful when diagnosing a
+/// persisted lifecycle record that reaches a later exec or PTY generation.
+fn debug_session_environment(
+    execution_id: &ExecutionId,
+    generation: ExecutionGeneration,
+    operation: &str,
+    container: &HashMap<String, String>,
+    request: &[String],
+) {
+    let mut container_keys: Vec<&str> = container.keys().map(String::as_str).collect();
+    container_keys.sort_unstable();
+    let mut request_keys: Vec<&str> = request
+        .iter()
+        .filter_map(|entry| entry.split_once('=').map(|(key, _)| key))
+        .collect();
+    request_keys.sort_unstable();
+    request_keys.dedup();
+    let malformed_request_entries = request.iter().filter(|entry| !entry.contains('=')).count();
+
+    tracing::debug!(
+        %execution_id,
+        generation = generation.get(),
+        operation,
+        container_env_count = container.len(),
+        container_env_keys = ?container_keys,
+        merged_request_env_count = request.len(),
+        merged_request_env_keys = ?request_keys,
+        malformed_request_entries,
+        "Prepared managed execution session environment"
+    );
 }
 
 struct ExecInput {
