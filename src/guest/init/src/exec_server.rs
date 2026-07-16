@@ -390,26 +390,23 @@ fn run_accept_loop(sock_fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::err
 #[cfg(target_os = "linux")]
 fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
     use a3s_box_core::exec::ExecRequest;
-    use std::os::fd::{AsRawFd, FromRawFd};
     use tracing::debug;
 
-    let raw_fd = fd.as_raw_fd();
-    let mut stream = unsafe { std::fs::File::from_raw_fd(raw_fd) };
+    // Transfer ownership into File. Constructing a second owner with
+    // `File::from_raw_fd(fd.as_raw_fd())` aborts on any early error because both
+    // values then close the same descriptor under Rust's IO-safety checks.
+    let mut stream = std::fs::File::from(fd);
 
     // Read request frame
     let (frame_type, payload) = match read_frame(&mut stream)? {
         Some(f) => f,
-        None => {
-            std::mem::forget(fd);
-            return Ok(());
-        }
+        None => return Ok(()),
     };
 
     if frame_type != FrameType::Data as u8 {
         // Heartbeat: respond with Heartbeat frame (health check)
         if frame_type == FrameType::Heartbeat as u8 {
             write_frame(&mut stream, FrameType::Heartbeat as u8, &payload)?;
-            std::mem::forget(fd);
             return Ok(());
         }
         // Graceful-stop control: deliver a signal to the container main process.
@@ -421,7 +418,6 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
                 .unwrap_or(libc::SIGTERM);
             signal_main_process(sig);
             write_frame(&mut stream, FrameType::Control as u8, EXEC_SIGNAL_MAIN_ACK)?;
-            std::mem::forget(fd);
             return Ok(());
         }
         // Deferred-main control: spawn the container main on demand (IDLE boot).
@@ -449,7 +445,6 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
                     write_frame(&mut stream, FrameType::Control as u8, &nack)?;
                 }
             }
-            std::mem::forget(fd);
             return Ok(());
         }
         if frame_type == FrameType::Control as u8
@@ -461,11 +456,9 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
             if let Err(error) = result {
                 send_error_frame(&mut stream, &format!("rootfs archive failed: {error}"))?;
             }
-            std::mem::forget(fd);
             return Ok(());
         }
         send_error_frame(&mut stream, "Expected Data frame")?;
-        std::mem::forget(fd);
         return Ok(());
     }
 
@@ -476,7 +469,6 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
         Ok(req) => req,
         Err(e) => {
             send_error_frame(&mut stream, &format!("Invalid JSON: {}", e))?;
-            std::mem::forget(fd);
             return Ok(());
         }
     };
@@ -514,7 +506,6 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
         write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
     }
 
-    std::mem::forget(fd);
     Ok(())
 }
 
@@ -2020,6 +2011,21 @@ fn truncate_output(mut data: Vec<u8>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn truncated_exec_frame_returns_error_without_double_closing_fd() {
+        use std::io::Write;
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(&[FrameType::Heartbeat as u8]).unwrap();
+        drop(client);
+
+        let server = OwnedFd::from(server);
+        assert!(handle_connection(server).is_err());
+    }
 
     #[test]
     fn test_drain_exec_input_disconnected_requests_cancel() {

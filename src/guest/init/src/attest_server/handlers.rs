@@ -37,10 +37,8 @@ pub(super) fn handle_tls_connection(
     snp_report: std::sync::Arc<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use a3s_box_core::tee::{AttestRequest, AttestRoute};
-    use std::os::fd::{AsRawFd, FromRawFd};
 
-    let raw_fd = fd.as_raw_fd();
-    let tcp_stream = unsafe { std::net::TcpStream::from_raw_fd(raw_fd) };
+    let tcp_stream = std::net::TcpStream::from(fd);
 
     let conn = rustls::ServerConnection::new(config)
         .map_err(|e| format!("TLS connection init failed: {}", e))?;
@@ -92,8 +90,6 @@ pub(super) fn handle_tls_connection(
         }
     }
 
-    // Prevent double-close: OwnedFd and TcpStream both own the fd
-    std::mem::forget(fd);
     Ok(())
 }
 
