@@ -22,9 +22,9 @@ unversioned claim.
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
 | Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, reconnect, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery and the unimplemented control-plane surfaces |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
-| envd HTTP | The host-side broker implements authenticated running/terminal health and fail-closed runtime initialization; official and A3S clients reach it through production TLS routing | Implement `/metrics`, `/envs`, HTTP content transfer, volume-content endpoints, and the remaining envd matrix |
+| envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete volume-content plus multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
 | Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground/background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output against real `crun` Sandboxes | Complete additional signals, binary framing, reconnect, cancellation, backpressure, and adversarial concurrent-stream cases |
-| Filesystem | The same client matrix passes remove, make-directory, write, read, stat, list, rename, exists, and cleanup through production TLS routing | Complete watches, multi-file and ownership edge cases, signed URLs, HTTP content transfer, and negative-path breadth |
+| Filesystem | The same client matrix passes remove, make-directory, write, read, stat, list, rename, exists, and cleanup through production TLS routing; the envd HTTP path separately passes upload/download with metadata | Complete watches, multi-file and ownership edge cases, signed URLs, large-file behavior, and negative-path breadth |
 | Code Interpreter | Official and A3S Python sync/async and TypeScript clients execute Python and pass context create/list/run/restart/remove | Complete other languages, rich MIME/error/cancellation breadth, MCP, and the rest of the pinned interpreter contract |
 | A3S SDKs | Typed Python and TypeScript packages re-export the pinned public objects and pass the production matrix using only `A3S_BOX_*` connection variables | Publish to PyPI/npm and complete conformance for the protocol surfaces above |
 
@@ -36,9 +36,11 @@ the same matrix through the A3S Python sync/async and TypeScript packages after
 removing every `E2B_*` connection variable. Both paths cover lifecycle, health,
 Filesystem operations, foreground/background Process operations, stdin, PTY,
 Python execution, interpreter contexts, restart recovery, and cleanup. The
-remaining control, envd, signed-file, public-port, streaming edge-case, and MCP
-surfaces are not covered. This is production evidence for a useful subset, not
-the full black-box compatibility matrix, so `full_compatibility=false` remains
+same production gate validates envd metrics, the initialized environment, and
+metadata-preserving HTTP upload/download. Remaining control, volume-content,
+signed-file, public-port, streaming edge-case, interpreter, and MCP surfaces
+are not covered. This is production evidence for a useful subset, not the full
+black-box compatibility matrix, so `full_compatibility=false` remains
 mandatory.
 
 ## Executive decision
@@ -332,9 +334,12 @@ separate format outside this compatibility surface.
 
 ### envd-compatible broker
 
-The envd-compatible service is a host-side broker backed by the existing A3S
-control protocols. Keeping it outside the workload prevents the workload from
-replacing the compatibility endpoint or stealing its access token.
+The envd-compatible path has two explicit modes. The host-side broker is backed
+by existing A3S control protocols and provides generation-fenced health for
+templates without an embedded envd. Production compatibility templates run the
+pinned envd inside the Sandbox; the authenticated gateway connects to its
+loopback port through the execution network namespace and strips edge
+credentials before forwarding requests.
 
 The gateway authenticates a `49983` `GET /health` request against the durable
 lifecycle record before disclosing state. For a running record it issues a
@@ -350,10 +355,13 @@ without issuing a live lease or opening a connector; an invalid token remains
 Before create becomes visible, the runtime image receives a fail-closed
 `POST /init` carrying the lifecycle ID, merged environment, timestamp, and
 default user. The initialized runtime service implements the production-tested
-Process, PTY, Filesystem, and Code Interpreter subset. Unimplemented envd
-metrics, environment, HTTP content-transfer, volume-content, and edge-case
-semantics remain explicit release gates. Workload traffic continues through
-the generation- and PID-fenced network-namespace connector.
+Process, PTY, Filesystem, and Code Interpreter subset. A3S OS production tests
+also validate the pinned `/metrics` schema, create-time environment, multipart
+file upload with metadata, octet-stream download, invalid-token rejection, and
+cleanup. Volume-content, multi-file and large-file behavior, signed access,
+negative paths, and remaining edge semantics stay explicit release gates.
+Workload traffic continues through the generation- and PID-fenced
+network-namespace connector.
 
 It translates:
 
@@ -487,11 +495,12 @@ TLS routing against real Sandboxes. The complete target contract also covers:
   space.
 
 The remaining gate includes multi-file behavior, watches, ownership edge cases,
-HTTP content transfer, signed URLs, large files, insufficient-space behavior,
-and adversarial path tests. All paths must remain beneath the workload rootfs;
-string-prefix checks are not sufficient. Symlink traversal and rename races
-must be covered by negative tests. The broker must not expose the host bundle,
-state directory, runtime sockets, or rootfs lower layers.
+signed URLs, large files, insufficient-space behavior, and adversarial path
+tests. The production envd HTTP gate already covers a single metadata-bearing
+multipart upload and byte-identical download. All paths must remain beneath the
+workload rootfs; string-prefix checks are not sufficient. Symlink traversal and
+rename races must be covered by negative tests. The broker must not expose the
+host bundle, state directory, runtime sockets, or rootfs lower layers.
 
 ## Code Interpreter compatibility
 
@@ -1079,10 +1088,11 @@ not-found mapping, Code Interpreter lifecycle creation, running and post-kill
 `is_running`/`isRunning` over authenticated wildcard TLS, Filesystem operations,
 foreground/background commands, list, stdin send/close, wait, PTY
 create/resize/input/wait, Python execution, context create/list/run/restart/remove,
-and cleanup for every real `crun` execution. The gate repeats the matrix through
-the A3S packages after removing every `E2B_*` connection variable and supplying
-only `A3S_BOX_*`. It does not cover the remaining protocol surfaces listed in
-the current evidence table.
+envd metrics/environment/HTTP upload/download, and cleanup for every real
+`crun` execution. The gate repeats the client matrix through the A3S packages
+after removing every `E2B_*` connection variable and supplying only
+`A3S_BOX_*`. It does not cover the remaining protocol surfaces listed in the
+current evidence table.
 
 The Slice 3 persistence batch uses a bundled SQLite build through a dedicated
 asynchronous connection thread. Versioned migrations create a STRICT table in
@@ -1119,8 +1129,9 @@ implementation begins.
 - Implemented authentication, create/connect/get/list/kill/timeout, filtered
   listing, durable mappings, wildcard routing, and traffic tokens.
 - Every create routes through A3S execution resolution and persists its plan.
-- Full pagination edge cases, host-reboot recovery, certificate rotation, and
-  cold-start lifetime semantics remain open.
+- Requested lifetime begins only after runtime and envd readiness, including
+  startup recovery. Full pagination edge cases, host-reboot recovery, and
+  certificate rotation remain open.
 
 Gate: unmodified official SDKs create, reconnect to, list, time out, and kill an
 A3S sandbox.
@@ -1132,9 +1143,11 @@ A3S sandbox.
   and A3S Python sync/async and TypeScript clients.
 - The production-tested Filesystem subset covers remove, make directory, write,
   read, stat, list, rename, exists, and cleanup across the same clients.
+- The production envd HTTP gate covers metrics, initialized environment, a
+  metadata-bearing multipart upload, and byte-identical download.
 - Remaining gates include binary framing, additional signals, reconnect,
-  cancellation/backpressure, durable process recovery, watches, HTTP content
-  transfer, signed URLs, and edge-case breadth.
+  cancellation/backpressure, durable process recovery, watches, multi-file and
+  large-file behavior, signed URLs, and edge-case breadth.
 
 Gate: upstream command/filesystem contract suites pass in Python sync, Python
 async, and TypeScript clients on both A3S backends where supported.

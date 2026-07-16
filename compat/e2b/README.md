@@ -88,20 +88,22 @@ This process exposes the lifecycle control subset plus an authenticated
 wildcard TLS data-plane edge. The edge supports direct and shared route forms,
 HTTP/1.1 and HTTP/2 streaming proxying, CORS preflight, upgrades, bounded
 connections, and generation-fenced access to real Sandbox loopback ports. A
-host-side broker now implements authenticated envd `GET /health`; it returns
-`204` only after the runtime manager confirms the leased execution ID and
-generation are still running, and returns the official-client terminal `502`
-for a killed lifecycle record only after validating its envd token. Invalid
-tokens remain unauthorized, and no live route lease is reopened. The remaining
-pinned envd HTTP and ConnectRPC protocols are still required before the manifest
-can set `full_compatibility=true`.
+host-side broker implements authenticated envd `GET /health`; it returns `204`
+only after the runtime manager confirms the leased execution ID and generation
+are still running, and returns the official-client terminal `502` for a killed
+lifecycle record only after validating its envd token. Runtime-envd templates
+proxy the remaining data plane into the Sandbox after fail-closed initialization.
+Invalid tokens remain unauthorized, and no live route lease is reopened.
 
 The destructive A3S OS integration harness is
 [`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
 requires a dedicated runtime home and explicit acknowledgement, and verifies a
 real Sandbox lifecycle, TLS direct/shared routing, token-scope denial, service
-restart recovery, host envd health, a traffic-scoped workload service on port
-`49999`, stale-route fencing, and resource cleanup. With
+restart recovery, envd health/metrics/environment, metadata-preserving HTTP
+file upload and download, a traffic-scoped workload service on port `49999`,
+stale-route fencing, and resource cleanup. The default
+`localhost.localdomain` wildcard is DNS- and TLS-preflighted before a Sandbox
+starts. With
 `A3S_BOX_E2B_OFFICIAL_CLIENTS=1`, it additionally runs the checksum-pinned,
 unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
 through the production lifecycle listener, calls their official running-state
@@ -115,6 +117,7 @@ With `A3S_BOX_E2B_NATIVE_SDKS=1`, the harness repeats that matrix through the
 A3S Python sync/async and TypeScript packages after removing every `E2B_*`
 connection variable and configuring only `A3S_BOX_*`. This production subset
 passes on A3S OS with certified `crun`, but it does not establish full protocol
-compatibility. Templates, snapshots, volumes, signed files, MCP, additional
-signals, reconnect, cancellation, backpressure, and other pinned edge cases
-remain outside the matrix, so `full_compatibility=false` remains mandatory.
+compatibility. Templates, snapshots, volumes, volume-content, signed files,
+MCP, additional signals, reconnect, cancellation, backpressure, multi-file and
+large-file behavior, and other pinned edge cases remain outside the matrix, so
+`full_compatibility=false` remains mandatory.
