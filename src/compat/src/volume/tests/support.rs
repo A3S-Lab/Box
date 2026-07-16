@@ -109,7 +109,7 @@ impl TokenVerifier for TestTokens {
             return Ok(false);
         }
         let digest = Sha256::digest(presented.expose_secret().as_bytes());
-        Ok(digest.as_ref() == stored.digest())
+        Ok(digest[..] == stored.digest()[..])
     }
 }
 
