@@ -146,6 +146,16 @@ async fn runtime_envd_is_ready_before_the_sandbox_is_published() {
             crate::routing::ENVD_PORT,
         )]
     );
+    let requests = harness.executions.runtime_envd_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "POST");
+    assert_eq!(requests[0].1, "/init");
+    assert_eq!(requests[0].2["lifecycleID"], "sandbox-1");
+    assert_eq!(requests[0].2["defaultUser"], "user");
+    assert_eq!(requests[0].2["envVars"]["ALPHA"], "one");
+    assert_eq!(requests[0].2["envVars"]["BETA"], "two");
+    assert_eq!(requests[0].2["timestamp"], "2026-07-14T12:00:00Z");
+    assert!(requests[0].2.get("accessToken").is_none());
 }
 
 #[tokio::test]
@@ -169,6 +179,31 @@ async fn permanent_runtime_envd_failure_stops_and_hides_the_execution() {
             crate::routing::ENVD_PORT,
         )]
     );
+    assert_eq!(
+        harness.executions.execution_state("execution-operation-1"),
+        Some(ExecutionState::Stopped)
+    );
+    let sandbox_id = SandboxId::new("sandbox-1").unwrap();
+    assert!(matches!(
+        harness.service.get("owner-1", &sandbox_id).await,
+        Err(ControlServiceError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn rejected_runtime_envd_initialization_stops_and_hides_the_execution() {
+    let harness = TestHarness::new();
+    harness.executions.fail_runtime_envd_init();
+    let mut request = create_request("owner-1");
+    request.template_id = "runtime-envd-template".to_string();
+
+    assert!(matches!(
+        harness.service.create(request).await,
+        Err(ControlServiceError::Execution(
+            ExecutionManagerError::Internal(message)
+        )) if message.contains("HTTP 400 Bad Request")
+    ));
+    assert_eq!(harness.executions.runtime_envd_requests().len(), 1);
     assert_eq!(
         harness.executions.execution_state("execution-operation-1"),
         Some(ExecutionState::Stopped)

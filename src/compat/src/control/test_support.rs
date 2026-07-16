@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::num::NonZeroU16;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -182,6 +183,8 @@ pub(crate) struct RecordingExecutionManager {
     fail_create: AtomicBool,
     fail_ports: AtomicBool,
     port_requests: Mutex<Vec<(String, u64, u16)>>,
+    runtime_envd_status: AtomicU16,
+    runtime_envd_requests: Arc<Mutex<Vec<(String, String, serde_json::Value)>>>,
     requests: Mutex<Vec<CreateExecutionRequest>>,
     operations: Mutex<BTreeMap<String, String>>,
     executions: Mutex<BTreeMap<String, TestExecution>>,
@@ -194,6 +197,8 @@ impl RecordingExecutionManager {
             fail_create: AtomicBool::new(false),
             fail_ports: AtomicBool::new(false),
             port_requests: Mutex::new(Vec::new()),
+            runtime_envd_status: AtomicU16::new(hyper::StatusCode::NO_CONTENT.as_u16()),
+            runtime_envd_requests: Arc::new(Mutex::new(Vec::new())),
             requests: Mutex::new(Vec::new()),
             operations: Mutex::new(BTreeMap::new()),
             executions: Mutex::new(BTreeMap::new()),
@@ -212,8 +217,17 @@ impl RecordingExecutionManager {
         self.fail_ports.store(true, Ordering::Relaxed);
     }
 
+    pub fn fail_runtime_envd_init(&self) {
+        self.runtime_envd_status
+            .store(hyper::StatusCode::BAD_REQUEST.as_u16(), Ordering::Relaxed);
+    }
+
     pub fn port_requests(&self) -> Vec<(String, u64, u16)> {
         self.port_requests.lock().unwrap().clone()
+    }
+
+    pub fn runtime_envd_requests(&self) -> Vec<(String, String, serde_json::Value)> {
+        self.runtime_envd_requests.lock().unwrap().clone()
     }
 
     pub fn execution_state(&self, execution_id: &str) -> Option<ExecutionState> {
@@ -254,8 +268,34 @@ impl ExecutionPortConnector for RecordingExecutionManager {
                 "test runtime envd is unavailable".to_string(),
             ));
         }
-        let (stream, peer) = tokio::io::duplex(64);
-        drop(peer);
+        let (stream, peer) = tokio::io::duplex(64 * 1024);
+        let status =
+            hyper::StatusCode::from_u16(self.runtime_envd_status.load(Ordering::Relaxed)).unwrap();
+        let requests = self.runtime_envd_requests.clone();
+        tokio::spawn(async move {
+            let service =
+                hyper::service::service_fn(move |request: hyper::Request<hyper::Body>| {
+                    let requests = requests.clone();
+                    async move {
+                        let method = request.method().to_string();
+                        let path = request.uri().path().to_string();
+                        let body = hyper::body::to_bytes(request.into_body()).await.unwrap();
+                        let body = serde_json::from_slice(&body).unwrap();
+                        requests.lock().unwrap().push((method, path, body));
+                        Ok::<_, Infallible>(
+                            hyper::Response::builder()
+                                .status(status)
+                                .body(hyper::Body::empty())
+                                .unwrap(),
+                        )
+                    }
+                });
+            hyper::server::conn::Http::new()
+                .http1_only(true)
+                .serve_connection(peer, service)
+                .await
+                .unwrap();
+        });
         Ok(Box::pin(stream))
     }
 }

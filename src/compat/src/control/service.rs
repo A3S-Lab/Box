@@ -7,7 +7,13 @@ use a3s_box_core::{
     ExecutionManagerError, ExecutionPortConnector, NetworkMode,
 };
 use chrono::{DateTime, Duration, Utc};
+use hyper::body::Body;
+use hyper::client::conn;
+use hyper::header::{CONTENT_TYPE, HOST};
+use hyper::{Method, Request, StatusCode};
+use serde::Serialize;
 use thiserror::Error;
+use tracing::debug;
 
 use super::{
     Clock, CompareAndSwapResult, EnvdMode, IdentityProviderError, LifecycleError, LifecycleFailure,
@@ -20,7 +26,9 @@ use crate::routing::ENVD_PORT;
 
 const RUNTIME_ENVD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const RUNTIME_ENVD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const RUNTIME_ENVD_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const RUNTIME_ENVD_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+const RUNTIME_ENVD_DEFAULT_USER: &str = "user";
 
 #[derive(Debug, Clone)]
 pub struct CreateSandboxRequest {
@@ -136,6 +144,7 @@ impl ControlService {
         let mut config = template.config;
         config.resources.timeout = u64::from(request.timeout_seconds);
         config.extra_env.extend(request.env_vars);
+        let runtime_env_vars = config.extra_env.iter().cloned().collect::<BTreeMap<_, _>>();
         match request.allow_internet_access {
             Some(false) => config.network = NetworkMode::None,
             Some(true) if matches!(config.network, NetworkMode::None) => {
@@ -193,7 +202,10 @@ impl ControlService {
             }
         };
         if template.envd_mode == EnvdMode::Runtime {
-            if let Err(readiness_error) = self.wait_for_runtime_envd(&lease).await {
+            if let Err(readiness_error) = self
+                .initialize_runtime_envd(&lease, record.sandbox_id().as_str(), &runtime_env_vars)
+                .await
+            {
                 let cleanup = self
                     .executions
                     .kill(&lease.execution_id, lease.generation)
@@ -227,9 +239,11 @@ impl ControlService {
         })
     }
 
-    async fn wait_for_runtime_envd(
+    async fn initialize_runtime_envd(
         &self,
         lease: &ExecutionLease,
+        lifecycle_id: &str,
+        env_vars: &BTreeMap<String, String>,
     ) -> Result<(), ExecutionManagerError> {
         let port = NonZeroU16::new(ENVD_PORT).ok_or_else(|| {
             ExecutionManagerError::Internal("envd port must be non-zero".to_string())
@@ -246,13 +260,38 @@ impl ControlService {
                 )
                 .await
             {
-                Ok(stream) => {
-                    drop(stream);
-                    return Ok(());
-                }
+                Ok(stream) => match tokio::time::timeout(
+                    RUNTIME_ENVD_REQUEST_TIMEOUT,
+                    send_runtime_envd_init(
+                        stream,
+                        RuntimeEnvdInitRequest {
+                            lifecycle_id,
+                            env_vars,
+                            timestamp: self.clock.now(),
+                            default_user: RUNTIME_ENVD_DEFAULT_USER,
+                        },
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(StatusCode::NO_CONTENT)) => return Ok(()),
+                    Ok(Ok(status)) if status.is_client_error() => {
+                        return Err(ExecutionManagerError::Internal(format!(
+                            "runtime envd initialization returned HTTP {status}"
+                        )))
+                    }
+                    Ok(Ok(status)) => {
+                        format!("runtime envd initialization returned HTTP {status}")
+                    }
+                    Ok(Err(error)) => error,
+                    Err(_) => format!(
+                        "runtime envd initialization timed out after {} ms",
+                        RUNTIME_ENVD_REQUEST_TIMEOUT.as_millis()
+                    ),
+                },
                 Err(error @ ExecutionManagerError::InvalidRequest(_))
                 | Err(error @ ExecutionManagerError::Internal(_)) => return Err(error),
-                Err(error) => error,
+                Err(error) => error.to_string(),
             };
             if tokio::time::Instant::now() >= deadline {
                 return Err(ExecutionManagerError::Unavailable(format!(
@@ -420,6 +459,45 @@ impl ControlService {
             CompareAndSwapResult::Conflict { .. } => Err(ControlServiceError::Conflict(sandbox_id)),
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeEnvdInitRequest<'a> {
+    #[serde(rename = "lifecycleID")]
+    lifecycle_id: &'a str,
+    env_vars: &'a BTreeMap<String, String>,
+    timestamp: DateTime<Utc>,
+    default_user: &'a str,
+}
+
+async fn send_runtime_envd_init(
+    stream: a3s_box_core::ExecutionPortStream,
+    init: RuntimeEnvdInitRequest<'_>,
+) -> Result<StatusCode, String> {
+    let payload = serde_json::to_vec(&init)
+        .map_err(|error| format!("failed to encode runtime envd initialization: {error}"))?;
+    let (mut sender, connection) = conn::Builder::new()
+        .handshake(stream)
+        .await
+        .map_err(|error| format!("runtime envd HTTP handshake failed: {error}"))?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            debug!(%error, "runtime envd initialization connection closed");
+        }
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/init")
+        .header(HOST, "127.0.0.1")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(payload))
+        .map_err(|error| format!("failed to build runtime envd initialization: {error}"))?;
+    sender
+        .send_request(request)
+        .await
+        .map(|response| response.status())
+        .map_err(|error| format!("runtime envd initialization request failed: {error}"))
 }
 
 fn expiry_from(now: DateTime<Utc>, timeout_seconds: u32) -> ControlServiceResult<DateTime<Utc>> {
