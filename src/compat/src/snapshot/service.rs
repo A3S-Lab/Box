@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::control::{Clock, PublicSandboxState, ResolvedTemplate, SandboxId, SandboxRecord};
 
 use super::{
+    coordination::{SnapshotOperationClaim, SnapshotOperations},
     validate_snapshot_name, SnapshotId, SnapshotModelError, SnapshotRecord, SnapshotReplaceResult,
     SnapshotRepository, SnapshotRepositoryError, SnapshotState,
 };
@@ -18,6 +19,7 @@ use super::{
 pub struct PendingSnapshot {
     pub record: SnapshotRecord,
     pub execution: ExecutionSnapshot,
+    _operation: SnapshotOperationClaim,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -65,6 +67,7 @@ pub struct SnapshotService {
     repository: Arc<dyn SnapshotRepository>,
     executions: Arc<dyn ExecutionManager>,
     clock: Arc<dyn Clock>,
+    operations: Arc<SnapshotOperations>,
 }
 
 pub struct SnapshotServiceDependencies {
@@ -79,6 +82,7 @@ impl SnapshotService {
             repository: dependencies.repository,
             executions: dependencies.executions,
             clock: dependencies.clock,
+            operations: Arc::new(SnapshotOperations::default()),
         }
     }
 
@@ -105,6 +109,10 @@ impl SnapshotService {
             .execution_generation()
             .ok_or(SnapshotServiceError::Conflict)?;
         let snapshot_id = SnapshotId::new(format!("snap-{}", Uuid::new_v4().simple()))?;
+        let operation = self
+            .operations
+            .try_claim(&snapshot_id)
+            .ok_or(SnapshotServiceError::Conflict)?;
         let content_id =
             a3s_box_core::ExecutionSnapshotId::new(format!("e2bsnap-{}", Uuid::new_v4().simple()))?;
         let record = SnapshotRecord::creating(
@@ -157,7 +165,11 @@ impl SnapshotService {
                 ),
             ));
         }
-        Ok(PendingSnapshot { record, execution })
+        Ok(PendingSnapshot {
+            record,
+            execution,
+            _operation: operation,
+        })
     }
 
     pub async fn publish(
@@ -208,11 +220,28 @@ impl SnapshotService {
     }
 
     pub async fn delete(&self, owner_id: &str, reference: &str) -> SnapshotServiceResult<bool> {
-        let Some(mut record) = self
+        let normalized_reference = normalize_reference(reference);
+        let Some(record) = self
             .repository
-            .get_by_reference(owner_id, &normalize_reference(reference))
+            .get_by_reference(owner_id, &normalized_reference)
             .await?
             .filter(|record| record.state() == SnapshotState::Active)
+        else {
+            return Ok(false);
+        };
+        let snapshot_id = record.snapshot_id().clone();
+        let Some(_operation) = self.operations.try_claim(&snapshot_id) else {
+            return Err(SnapshotServiceError::Conflict);
+        };
+        let Some(mut record) = self
+            .repository
+            .get(&snapshot_id)
+            .await?
+            .filter(|current| {
+                current.owner_id() == owner_id
+                    && current.reference() == normalized_reference
+                    && current.state() == SnapshotState::Active
+            })
         else {
             return Ok(false);
         };
@@ -243,8 +272,21 @@ impl SnapshotService {
     pub async fn reconcile_startup(&self) -> SnapshotServiceResult<SnapshotReconciliationReport> {
         let mut report = SnapshotReconciliationReport::default();
         for state in [SnapshotState::Creating, SnapshotState::Deleting] {
-            for mut record in self.repository.list_in_state(state).await? {
+            for listed_record in self.repository.list_in_state(state).await? {
                 report.examined += 1;
+                let Some(_operation) = self.operations.try_claim(listed_record.snapshot_id()) else {
+                    report.deferred += 1;
+                    continue;
+                };
+                let Some(mut record) = self.repository.get(listed_record.snapshot_id()).await?
+                else {
+                    report.completed += 1;
+                    continue;
+                };
+                if record.state() != state {
+                    report.deferred += 1;
+                    continue;
+                }
                 let outcome = match state {
                     SnapshotState::Creating => {
                         self.reconcile_creating(&mut record, &mut report).await?

@@ -214,6 +214,7 @@ async fn startup_reconciliation_publishes_or_removes_creating_records() {
         .unwrap();
     let pending_id = pending.record.snapshot_id().clone();
     assert_eq!(pending.record.state(), SnapshotState::Creating);
+    drop(pending);
 
     let report = harness.snapshots.reconcile_startup().await.unwrap();
     assert_eq!(report.examined, 1);
