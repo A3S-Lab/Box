@@ -46,14 +46,6 @@ pub(crate) fn validate_persisted_record(record: &SandboxRecord) -> Result<(), Li
             "sandbox start timestamp precedes creation".to_string(),
         ));
     }
-    if record
-        .started_at()
-        .is_some_and(|started_at| record.expires_at() < started_at)
-    {
-        return Err(LifecycleError::InvalidPersistedState(
-            "sandbox expiry precedes readiness".to_string(),
-        ));
-    }
     if record.state() == LifecycleState::Failed && record.failure().is_none() {
         return Err(LifecycleError::InvalidPersistedState(
             "failed sandbox is missing its failure category".to_string(),
