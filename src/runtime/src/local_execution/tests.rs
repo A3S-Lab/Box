@@ -1785,6 +1785,43 @@ async fn reconcile_recovers_a_crash_after_snapshot_pause() {
 }
 
 #[tokio::test]
+async fn legacy_snapshot_without_image_config_is_rejected_before_reservation() {
+    let (directory, manager, _backend) = harness();
+    let source = directory.path().join("legacy-snapshot-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("state.txt"), "captured").unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("legacy-snapshot").unwrap();
+    crate::SnapshotStore::new(&directory.path().join("home/snapshots"))
+        .unwrap()
+        .save(
+            a3s_box_core::SnapshotMetadata::new(
+                snapshot_id.to_string(),
+                snapshot_id.to_string(),
+                "source-execution".to_string(),
+                "alpine:3.20".to_string(),
+            ),
+            &source,
+        )
+        .unwrap();
+    let mut restore = request("legacy-snapshot-restore");
+    restore.rootfs_snapshot_id = Some(snapshot_id);
+    let operation_id = operation("legacy-snapshot-restore-create");
+
+    let error = manager.create(restore, &operation_id).await.unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("resolved OCI image configuration")
+    ));
+    assert!(manager
+        .get_by_operation(&operation_id)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
 async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
     let (_directory, manager, _backend) = harness();
     let running = manager

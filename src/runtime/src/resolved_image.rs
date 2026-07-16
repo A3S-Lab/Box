@@ -261,4 +261,32 @@ mod tests {
 
         assert_eq!(loaded, SnapshotImageConfig::from(&original));
     }
+
+    #[test]
+    fn legacy_snapshot_without_image_config_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("state.txt"), "captured").unwrap();
+        let store = crate::SnapshotStore::new(&directory.path().join("snapshots")).unwrap();
+        store
+            .save(
+                SnapshotMetadata::new(
+                    "legacy-snapshot".to_string(),
+                    "legacy-snapshot".to_string(),
+                    "source-execution".to_string(),
+                    "alpine:3.20".to_string(),
+                ),
+                &source,
+            )
+            .unwrap();
+
+        let error = load_snapshot_oci_config(
+            &store.rootfs_path("legacy-snapshot"),
+            "alpine:3.20",
+        )
+        .unwrap_err();
+
+        assert!(format!("{error}").contains("resolved OCI image configuration"));
+    }
 }
