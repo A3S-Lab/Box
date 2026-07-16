@@ -21,18 +21,24 @@ use super::*;
 pub(crate) struct TestHarness {
     pub service: Arc<ControlService>,
     pub executions: Arc<RecordingExecutionManager>,
+    pub repository: Arc<MemorySandboxRepository>,
+    pub clock: Arc<dyn Clock>,
 }
 
 impl TestHarness {
     pub fn new() -> Self {
-        let clock = Arc::new(FixedClock(test_time()));
+        Self::with_clock(Arc::new(FixedClock(test_time())))
+    }
+
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        let repository = Arc::new(MemorySandboxRepository::default());
         let executions = Arc::new(RecordingExecutionManager::new(clock.clone()));
         let tokens = Arc::new(TestTokens);
         let service = Arc::new(ControlService::new(ControlServiceDependencies {
-            repository: Arc::new(MemorySandboxRepository::default()),
+            repository: repository.clone(),
             executions: executions.clone(),
             ports: executions.clone(),
-            clock,
+            clock: clock.clone(),
             identities: Arc::new(TestIdentities::default()),
             templates: Arc::new(TestTemplates),
             token_issuer: tokens.clone(),
@@ -41,6 +47,34 @@ impl TestHarness {
         Self {
             service,
             executions,
+            repository,
+            clock,
+        }
+    }
+}
+
+pub(crate) struct AdvancingClock {
+    initial: DateTime<Utc>,
+    advanced: DateTime<Utc>,
+    calls: AtomicU64,
+}
+
+impl AdvancingClock {
+    pub fn new(initial: DateTime<Utc>, advanced: DateTime<Utc>) -> Self {
+        Self {
+            initial,
+            advanced,
+            calls: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Clock for AdvancingClock {
+    fn now(&self) -> DateTime<Utc> {
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.initial
+        } else {
+            self.advanced
         }
     }
 }

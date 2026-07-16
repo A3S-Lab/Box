@@ -2,6 +2,15 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **E2B Sandbox timeout starts at readiness.** A cold-starting Sandbox now
+  receives its complete requested usable lifetime after both the runtime and
+  envd control path are ready. Startup recovery applies the same rule, while
+  preserving reconciliation of historical records that are already expired.
+
 ## [3.0.9] — 2026-07-11
 
 ### Added
