@@ -106,6 +106,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build Rust lifecycle fixture server
         run: cd src && cargo build -p a3s-box-compat --bin a3s-box-e2b-fixture-server
+      - name: Test production client harness
+        run: python3 compat/e2b/fixtures/official-clients/test_run_production.py -v
       - name: Verify official client lifecycle requests
         run: >-
           python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify
@@ -184,6 +186,7 @@ jobs:
           cargo check --release -p a3s-box-cli -p a3s-box-shim
           if [ "${{ runner.os }}" = "Linux" ]; then
             cargo check --release -p a3s-box-cri
+            cargo check --release -p a3s-box-compat --bin a3s-box-e2b
           fi
 
   # ── Windows native WHPX build check ────────────────────────────

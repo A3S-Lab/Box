@@ -1,8 +1,6 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 6 complete;
-the production official-client lifecycle, authenticated envd health, and first
-foreground Process command gates complete)**
+Status: **Production-tested protocol subset; full compatibility remains gated**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -20,47 +18,51 @@ unversioned claim.
 | Area | Implemented evidence | Remaining gate |
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
-| Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions | Extend the unchanged-client matrix through command, filesystem, PTY, public-port, and interpreter operations |
+| Lifecycle protocol | Owner-scoped create, connect, get, list, timeout, and kill routes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions | Complete templates, snapshots, volumes, metrics, pagination edge cases, host-reboot recovery, and cold-start lifetime semantics |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
-| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, reconnect, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery and the official-client data-plane matrices |
+| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, reconnect, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery and the unimplemented control-plane surfaces |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
-| envd HTTP | A host-side broker implements authenticated `GET /health`; after route/token validation it re-inspects the exact execution ID and generation and returns `204` only for `Running`; a valid envd token receives terminal `502` after kill without reopening a route lease, while invalid tokens remain unauthorized; unchanged official Python sync/async, TypeScript, and Code Interpreter objects pass `is_running`/`isRunning` before and after kill over production TLS | Implement `/metrics`, `/init`, `/envs`, and file-content routes |
-| Commands and SDK surface | The Process broker has generation-scoped synthetic IDs plus Start, JSON-framed Connect, List, SendInput, CloseStdin, SIGKILL, PTY Start/resize, and ordered event streams; pinned official Python sync/async and TypeScript clients each pass a foreground non-PTY `commands.run` against real `crun` | Complete binary Connect framing, `StreamInput`, SIGTERM and other signals, the PTY/reconnect/backpressure matrix, Filesystem and signed URLs, Code Interpreter/MCP execution, the remaining public surface, and native convenience packages |
+| envd HTTP | The host-side broker implements authenticated running/terminal health and fail-closed runtime initialization; official and A3S clients reach it through production TLS routing | Implement `/metrics`, `/envs`, HTTP content transfer, volume-content endpoints, and the remaining envd matrix |
+| Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground/background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output against real `crun` Sandboxes | Complete additional signals, binary framing, reconnect, cancellation, backpressure, and adversarial concurrent-stream cases |
+| Filesystem | The same client matrix passes remove, make-directory, write, read, stat, list, rename, exists, and cleanup through production TLS routing | Complete watches, multi-file and ownership edge cases, signed URLs, HTTP content transfer, and negative-path breadth |
+| Code Interpreter | Official and A3S Python sync/async and TypeScript clients execute Python and pass context create/list/run/restart/remove | Complete other languages, rich MIME/error/cancellation breadth, MCP, and the rest of the pinned interpreter contract |
+| A3S SDKs | Typed Python and TypeScript packages re-export the pinned public objects and pass the production matrix using only `A3S_BOX_*` connection variables | Publish to PyPI/npm and complete conformance for the protocol surfaces above |
 
 The lifecycle control path and authenticated wildcard/shared TLS routes are
-composed and exercised against a real Sandbox on A3S OS. The smoke reaches a
-traffic-scoped service on Sandbox loopback port `49999`, while envd health on
-port `49983` stays in the host broker. It rejects invalid and scope-swapped
-tokens, survives a compatibility-service restart, fences workload traffic after
-kill, and preserves authenticated terminal health without reopening a live
-lease. A separate production gate now runs the checksum-pinned official Python
-sync, Python async, TypeScript, and Code Interpreter packages unchanged against
-the ACL-configured service and real `crun` Sandboxes. Their running and
-post-kill health methods traverse the wildcard TLS gateway and host envd broker,
-the three base clients each verify one foreground `commands.run` through the
-ConnectRPC JSON transport, and the gate verifies complete cleanup. Code
-Interpreter is covered only for lifecycle and health, not code execution. The
-fixture gate still uses an in-memory repository and fake execution manager,
-and the remaining envd, Process, Filesystem, PTY, interpreter, and MCP matrices
-are not covered. These are complementary results rather than the full
-black-box compatibility matrix, so `full_compatibility=false` remains
+composed and exercised against real Sandboxes on A3S OS. The production gate
+runs the checksum-pinned official Python sync/async, TypeScript, and Code
+Interpreter packages unchanged against the ACL-configured service, then repeats
+the same matrix through the A3S Python sync/async and TypeScript packages after
+removing every `E2B_*` connection variable. Both paths cover lifecycle, health,
+Filesystem operations, foreground/background Process operations, stdin, PTY,
+Python execution, interpreter contexts, restart recovery, and cleanup. The
+remaining control, envd, signed-file, public-port, streaming edge-case, and MCP
+surfaces are not covered. This is production evidence for a useful subset, not
+the full black-box compatibility matrix, so `full_compatibility=false` remains
 mandatory.
 
 ## Executive decision
 
-A3S Box should provide an E2B-compatible control plane and sandbox endpoint so
-the official E2B Python and JavaScript SDKs can connect to A3S by changing only
-connection configuration such as `E2B_API_URL`, `E2B_DOMAIN`, and credentials.
+A3S Box provides the remote runtime, control plane, and Sandbox data plane. The
+native A3S Python and TypeScript SDKs connect with `A3S_BOX_ENDPOINT`,
+`A3S_BOX_API_KEY`, and, only for non-conventional deployments,
+`A3S_BOX_DOMAIN`. They do not require `E2B_API_URL` or an E2B-hosted service.
 
-A3S should also publish native Python and TypeScript packages with the same
-public object model and behavior. Those packages are convenience clients, not
-the proof of compatibility. The compatibility gate is an unmodified upstream
-SDK running its contract suite against an A3S deployment.
+Unmodified official E2B Python and JavaScript SDKs can also connect to that same
+A3S Box deployment. Only this zero-source-change compatibility path uses the
+official clients' existing `E2B_API_URL`, `E2B_DOMAIN`, and `E2B_API_KEY`
+configuration names; the URL still points to A3S Box.
 
-Delivery is protocol-first. A3S must implement the server contracts before it
-implements native convenience SDKs. Forking an upstream SDK, replacing its
-transport, adding an A3S-only constructor argument, or requiring application
-source changes does not satisfy compatibility.
+A3S also builds native Python and TypeScript packages with the same public
+object model and behavior. Those packages are convenience clients, not the
+proof of compatibility, and public registry publication is still pending. The
+compatibility gate remains an unmodified upstream SDK running its contract
+suite against an A3S deployment.
+
+Delivery is protocol-first: A3S implements server contracts before native
+convenience wrappers. Forking an upstream SDK, replacing its transport, adding
+an A3S-only constructor argument, or requiring application source changes does
+not satisfy compatibility.
 
 `E2B-compatible` is a release-level claim, not a description of an endpoint.
 A release may expose an explicitly named preview subset while it is being
@@ -290,21 +292,37 @@ form, which is also required by `getHost()`, Code Interpreter, MCP, signed file
 URLs, and user services. Route parsing must validate the port and sandbox ID
 before DNS-derived input reaches the internal router.
 
-`E2B_SANDBOX_URL` is a fixed URL, not a hostname template. It must not point to
-a multi-sandbox shared endpoint in the production compatibility profile:
+`A3S_BOX_SANDBOX_URL` and the official SDK's `E2B_SANDBOX_URL` escape hatch are
+fixed URLs, not hostname templates. They must not point to a multi-sandbox
+shared endpoint in the production compatibility profile:
 upload and download URLs produced by the pinned SDK do not carry the route
 headers and would lose their sandbox identity. It remains useful for local
 single-sandbox fixtures. Shared-endpoint behavior is tested directly with the
 route headers, while the official-client production gate uses wildcard direct
 routing.
 
-An official-client smoke test uses configuration only, for example:
+Normal A3S SDK applications use the A3S Box names:
+
+```text
+A3S_BOX_ENDPOINT=https://api.box.example.com
+A3S_BOX_API_KEY=<a3s-api-key>
+```
+
+`A3S_BOX_DOMAIN` is needed only when the endpoint does not follow the
+conventional `https://api.<domain>` form. The A3S SDKs do not read `E2B_*`
+connection variables.
+
+The separate zero-source-change official-client smoke uses the names already
+defined by the official SDK, for example:
 
 ```text
 E2B_API_URL=https://api.box.example.com
 E2B_DOMAIN=box.example.com
 E2B_API_KEY=<compatibility-api-key>
 ```
+
+`E2B_API_URL` points to the A3S Box control endpoint. It neither selects nor
+contacts an E2B-hosted runtime.
 
 Compatibility API keys must use the lexical form accepted by the pinned
 clients' default validation: `e2b_` followed by one or more lowercase
@@ -318,18 +336,24 @@ The envd-compatible service is a host-side broker backed by the existing A3S
 control protocols. Keeping it outside the workload prevents the workload from
 replacing the compatibility endpoint or stealing its access token.
 
-The first broker route is implemented: the gateway authenticates a `49983`
-`GET /health` request against the durable lifecycle record before disclosing
-state. For a running record it issues a generation-fenced lease, calls
+The gateway authenticates a `49983` `GET /health` request against the durable
+lifecycle record before disclosing state. For a running record it issues a
+generation-fenced lease, calls
 `ExecutionManager::inspect`, and compares the returned execution ID, generation,
 and `Running` state with that lease. Exact live evidence returns an empty `204`;
 runtime evidence that becomes missing, stopped, or generation-stale returns
 `502`, while an unavailable inspector returns `503`. For a killed record, a
 valid envd token receives the terminal `502` expected by the official clients
 without issuing a live lease or opening a connector; an invalid token remains
-`401`. Other envd routes currently return `404` and remain explicit release
-gates. Workload traffic on every non-envd route continues through the existing
-generation- and PID-fenced network-namespace connector.
+`401`.
+
+Before create becomes visible, the runtime image receives a fail-closed
+`POST /init` carrying the lifecycle ID, merged environment, timestamp, and
+default user. The initialized runtime service implements the production-tested
+Process, PTY, Filesystem, and Code Interpreter subset. Unimplemented envd
+metrics, environment, HTTP content-transfer, volume-content, and edge-case
+semantics remain explicit release gates. Workload traffic continues through
+the generation- and PID-fenced network-namespace connector.
 
 It translates:
 
@@ -427,26 +451,30 @@ The target process service contract includes:
 - enforce request timeout independently from process timeout;
 - preserve detached process handles after the initiating client disconnects.
 
-The implemented preview is a strict subset. The broker allocates synthetic
-process IDs within one execution generation and currently supports Start,
-JSON-framed Process Connect, List, SendInput, CloseStdin, SIGKILL, PTY
-Start/resize, and ordered start, stdout, stderr, PTY, keepalive, and end events.
-The production A3S OS gate proves only one foreground non-PTY `commands.run`
-per pinned official Python sync, Python async, and TypeScript client on a real
-`crun` Sandbox. That evidence covers command launch, streamed output, and a
-successful exit as the image's default non-root user.
+The broker allocates synthetic process IDs within one execution generation and
+supports Start, JSON-framed Process Connect, List, SendInput, CloseStdin,
+SIGKILL, PTY Start/resize, and ordered start, stdout, stderr, PTY, keepalive,
+and end events. On real `crun` Sandboxes, the production A3S OS gate proves
+foreground and background commands, process listing, stdin send/close, wait,
+PTY create/resize/input/wait, observable terminal sizing, ordered output, and
+successful exit as the image's default non-root user. It runs this matrix
+through the pinned official Python sync/async and TypeScript clients and the
+corresponding A3S packages.
 
 This is not full Process compatibility. Client-streaming `StreamInput`, binary
-Connect framing, SIGTERM and other signals, the complete PTY, reconnect,
-backpressure, cancellation, and detached-process matrices, and durable process
-recovery across a compatibility-service restart remain open. The internal
+Connect framing, SIGTERM and other signals, reconnect, backpressure,
+cancellation, adversarial concurrent streams, and durable process recovery
+across a compatibility-service restart remain open. The internal
 session layer must eventually provide independent stdin, stdout, stderr,
 signal, wait, and PTY channels on every advertised backend; the compatibility
 broker must continue to depend only on that backend-neutral interface.
 
 ## Filesystem compatibility
 
-The Filesystem service is not implemented yet. Its target contract must cover:
+The production-tested Filesystem subset implements remove, make directory,
+write, read, stat, list, rename, exists, and cleanup. Official and A3S Python
+sync/async and TypeScript clients exercise those operations through wildcard
+TLS routing against real Sandboxes. The complete target contract also covers:
 
 - read and write one or multiple files;
 - octet-stream and multipart upload modes;
@@ -458,17 +486,18 @@ The Filesystem service is not implemented yet. Its target contract must cover:
 - stable errors for invalid path, invalid user, not found, and insufficient
   space.
 
-When implemented, all paths must be resolved beneath the workload rootfs with
-descriptor-relative operations. String-prefix checks are not sufficient. Symlink traversal and
-rename races must be covered by negative tests. The broker must not expose the
-host bundle, state directory, runtime sockets, or rootfs lower layers.
+The remaining gate includes multi-file behavior, watches, ownership edge cases,
+HTTP content transfer, signed URLs, large files, insufficient-space behavior,
+and adversarial path tests. All paths must remain beneath the workload rootfs;
+string-prefix checks are not sufficient. Symlink traversal and rename races
+must be covered by negative tests. The broker must not expose the host bundle,
+state directory, runtime sockets, or rootfs lower layers.
 
 ## Code Interpreter compatibility
 
-Code Interpreter execution is not implemented yet; only official-client
-lifecycle and envd health have passed. The planned code-interpreter template
-must contain a versioned kernel service reached through the standard sandbox
-port router and implement:
+The versioned code-interpreter runtime is reached through the standard Sandbox
+port router and implements the production-tested Python execution and context
+routes:
 
 ```text
 GET    /health
@@ -479,8 +508,10 @@ DELETE /contexts/{id}
 POST   /contexts/{id}/restart
 ```
 
-`/execute` must return the pinned newline-delimited streaming format. The
-adapter must preserve:
+Official and A3S Python sync/async and TypeScript clients execute Python,
+validate stdout and results, and pass context create/list/run/restart/remove on
+real Sandboxes. `/execute` returns the pinned newline-delimited streaming
+format. Full compatibility still requires the adapter to preserve:
 
 - Python, JavaScript, R, Java, Bash, and explicitly advertised languages;
 - persistent named contexts;
@@ -498,57 +529,72 @@ credentials.
 
 ## Python SDK
 
-The native A3S Python distribution is not implemented yet. It is planned to
-provide synchronous and asynchronous surfaces matching the pinned SDK; the
-following is a target API, not a currently working example:
+The native A3S Python distribution re-exports the pinned synchronous and
+asynchronous objects and adds typed A3S connection configuration. It is built
+as a release artifact but is not yet published to PyPI. A working source-tree
+example is:
 
 ```python
-from a3s_box import AsyncSandbox, Sandbox
+from a3s_box import A3SConnectionConfig, AsyncSandbox
 
-sandbox = await AsyncSandbox.create("code-interpreter")
-result = await sandbox.commands.run("python -V")
-await sandbox.files.write("/tmp/input.txt", "hello")
-await sandbox.kill()
+connection = A3SConnectionConfig.from_environment()
+sandbox = await AsyncSandbox.create(
+    "code-interpreter-v1",
+    **connection.python_options(),
+)
+async with sandbox:
+    result = await sandbox.commands.run("python -V")
+    await sandbox.files.write("/tmp/input.txt", "hello")
 ```
 
-Required modules include sandbox lifecycle, commands, PTY, filesystem, git,
-network, templates, snapshots, volumes, pagination, and code interpreter.
-Public types use complete annotations and ship `py.typed`. Async operations use
-`async`/`await`, streaming uses async iterators, and resource-owning helpers
-support `async with` cleanup without changing the behavior of explicit
-`kill()`.
+`A3SConnectionConfig.from_environment()` requires `A3S_BOX_ENDPOINT`, accepts
+`A3S_BOX_API_KEY`, and derives the Sandbox domain for conventional
+`https://api.<domain>` deployments. `A3S_BOX_DOMAIN` is an explicit override.
+It does not read or mutate `E2B_*` connection variables. Public types ship
+`py.typed`; async operations use `async`/`await`, and resource-owning helpers
+support `async with` cleanup without changing explicit `kill()` behavior.
 
-The first compatibility proof uses the published `e2b` and
-`e2b-code-interpreter` wheels unchanged. A future A3S package will expose the
-same call shapes with A3S endpoint defaults and typed A3S-only diagnostics in a
-separate namespace. It must not add required parameters or inject A3S fields
-into upstream-compatible response types.
+The independent compatibility proof still uses the published `e2b` and
+`e2b-code-interpreter` wheels unchanged, configured with their own `E2B_*`
+names but pointed at A3S Box. The A3S package must not add required parameters
+or inject A3S fields into upstream-compatible response types. Templates,
+snapshots, volumes, watches, signed files, and the other unimplemented protocol
+surfaces are not implied by re-exporting their client objects.
 
 ## TypeScript SDK
 
-The native A3S TypeScript distribution is not implemented yet. It is planned
-to export the pinned class and type surface in the Node.js, edge, and browser
-environments supported by the upstream SDK; the following is a target API:
+The native A3S TypeScript distribution re-exports the pinned class and type
+surface and adds typed A3S connection configuration. It is built as a release
+artifact but is not yet published to npm. A working source-tree example is:
 
 ```typescript
-import { Sandbox } from '@a3s-lab/box'
+import { A3SConnectionConfig, Sandbox } from '@a3s-lab/box'
 
-const sandbox = await Sandbox.create('code-interpreter')
-const result = await sandbox.commands.run('node --version')
-await sandbox.files.write('/tmp/input.txt', 'hello')
-await sandbox.kill()
+const connection = A3SConnectionConfig.fromEnvironment(process.env)
+const sandbox = await Sandbox.create('code-interpreter-v1', {
+  ...connection.typescriptOptions(),
+  timeoutMs: 60_000,
+})
+
+try {
+  const result = await sandbox.commands.run('node --version')
+  await sandbox.files.write('/tmp/input.txt', 'hello')
+} finally {
+  await sandbox.kill()
+}
 ```
 
-It must provide `Sandbox`, `Commands`, command handles, `Pty`, `Filesystem`, watch
-handles, templates, snapshots, volumes, paginators, and code-interpreter result
-types. Cancellation uses `AbortSignal`; timeouts remain milliseconds; binary
-stdin and file content remain `Uint8Array`-compatible.
+`A3SConnectionConfig.fromEnvironment()` requires `A3S_BOX_ENDPOINT`, accepts
+`A3S_BOX_API_KEY`, derives the conventional Sandbox domain, and accepts
+`A3S_BOX_DOMAIN` as an override. It does not read `E2B_*` connection variables.
+The package exposes the pinned `Sandbox`, Commands, command handles, PTY,
+Filesystem, paginator, and Code Interpreter objects. Exposed client types for
+unimplemented server surfaces do not constitute compatibility evidence.
 
-The first compatibility proof uses the published `e2b` and
-`@e2b/code-interpreter` packages unchanged. A future A3S package will use the
-same wire clients and expose A3S-only diagnostics through an additive namespace. Public
-export snapshots and TypeScript compile fixtures prevent accidental source API
-drift.
+The independent compatibility proof uses the published `e2b` and
+`@e2b/code-interpreter` packages unchanged and points them at A3S Box with the
+official clients' `E2B_*` configuration names. Public export snapshots and
+TypeScript compile fixtures prevent accidental source API drift.
 
 Generated wire clients come from the pinned OpenAPI and Protobuf sources.
 Hand-written ergonomic classes are kept small and covered by cross-language
@@ -925,14 +971,13 @@ Phase 2 is delivered as small, immediately merged changes:
    namespace on a disposable OS thread. Pull the merge commit on an A3S OS
    server and prove direct/shared routing, restart recovery, scope denial, and
    stale-route fencing against a real `--isolation sandbox` execution.
-7. **In progress:** the unmodified official clients now pass their lifecycle
-   flows through the production control listener and real Sandbox runtime,
-   their running and post-kill health methods pass through the production TLS
-   listener and host envd broker, and the Python sync/async and TypeScript base
-   clients each pass one foreground `commands.run`. Complete the remaining
-   pinned envd HTTP, Process, Filesystem, PTY, public-port, interpreter, and MCP
-   matrices without broadening this first command result into a full
-   compatibility claim.
+7. **Complete for the production-tested subset:** unmodified official clients
+   pass lifecycle and health through the production listeners, then official
+   and A3S Python sync/async and TypeScript packages pass Filesystem,
+   foreground/background Process, stdin, PTY, Python execution, and context
+   lifecycle against real Sandboxes. Complete the remaining pinned control,
+   envd, signed-file, public-port, streaming edge-case, interpreter, and MCP
+   matrices without broadening this subset into a full compatibility claim.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
 is the canonical schema shared by the CLI and Rust SDK, preventing either
@@ -1011,13 +1056,13 @@ durable repository, production execution manager, credentials, routing, and
 lifecycle HTTP router are now composed in one ACL-configured process. The real
 create/connect/list/timeout/kill matrix now passes through that production
 control listener and real Sandbox executions. Returned official-client Sandbox
-objects now traverse the production TLS listener for running and post-kill envd
-health, and the three base clients pass one foreground command over ConnectRPC
-JSON. The Phase 2 gate remains closed until the remaining envd, Process,
-Filesystem, PTY, public-port, interpreter, and MCP matrices pass. Passing the
-fake manager in slice 2, the direct runtime smoke in slice 4, and the production
-health/command clients are complementary evidence, not proof of the missing
-data-plane behavior.
+objects traverse the production TLS listener for running and post-kill health.
+The official and A3S client paths also pass the production Filesystem, Process,
+stdin, PTY, Python execution, and context subset described above. The complete
+compatibility gate remains closed until every remaining control, envd,
+signed-file, public-port, streaming edge-case, interpreter, and MCP matrix
+passes. Fixture, direct-runtime, and production-client results are
+complementary evidence, not proof of the missing behavior.
 
 Slice 2 evidence includes exact recorder drift checks plus live requests from
 the pinned, unmodified clients to the Rust router. The live gate was also run
@@ -1031,11 +1076,13 @@ The production lifecycle gate reuses the artifact checksums from
 TypeScript, and Code Interpreter packages without source changes. On A3S OS it
 has passed create, reconnect, filtered list, timeout replacement, kill,
 not-found mapping, Code Interpreter lifecycle creation, running and post-kill
-`is_running`/`isRunning` over authenticated wildcard TLS, one foreground
-`commands.run` from each base Python sync/async and TypeScript client, and
-cleanup for every real `crun` execution. It intentionally does not count Code
-Interpreter object creation or health as interpreter execution compatibility,
-and it does not cover the remaining Process or Filesystem operations.
+`is_running`/`isRunning` over authenticated wildcard TLS, Filesystem operations,
+foreground/background commands, list, stdin send/close, wait, PTY
+create/resize/input/wait, Python execution, context create/list/run/restart/remove,
+and cleanup for every real `crun` execution. The gate repeats the matrix through
+the A3S packages after removing every `E2B_*` connection variable and supplying
+only `A3S_BOX_*`. It does not cover the remaining protocol surfaces listed in
+the current evidence table.
 
 The Slice 3 persistence batch uses a bundled SQLite build through a dedicated
 asynchronous connection thread. Versioned migrations create a STRICT table in
@@ -1069,30 +1116,38 @@ implementation begins.
 
 ### Phase 2: lifecycle and routing (in progress)
 
-- Implement authentication, create/connect/get/list/kill/timeout, pagination,
-  durable mappings, wildcard routing, and traffic tokens.
-- Route every create through A3S execution resolution and persist its plan.
+- Implemented authentication, create/connect/get/list/kill/timeout, filtered
+  listing, durable mappings, wildcard routing, and traffic tokens.
+- Every create routes through A3S execution resolution and persists its plan.
+- Full pagination edge cases, host-reboot recovery, certificate rotation, and
+  cold-start lifetime semantics remain open.
 
 Gate: unmodified official SDKs create, reconnect to, list, time out, and kill an
 A3S sandbox.
 
 ### Phase 3: commands, files, and PTY (in progress)
 
-- Complete the ConnectRPC Process service; the first foreground JSON command
-  path is implemented and production-validated, but the full stream, signal,
-  reconnect, and PTY matrix is not.
-- Implement the Filesystem service plus HTTP file transfer.
-- Add durable process handles, PTY resize, streaming, watch, and signed URLs.
+- The production-tested Process subset covers foreground/background commands,
+  list, stdin send/close, wait, and PTY create/resize/input/wait across official
+  and A3S Python sync/async and TypeScript clients.
+- The production-tested Filesystem subset covers remove, make directory, write,
+  read, stat, list, rename, exists, and cleanup across the same clients.
+- Remaining gates include binary framing, additional signals, reconnect,
+  cancellation/backpressure, durable process recovery, watches, HTTP content
+  transfer, signed URLs, and edge-case breadth.
 
 Gate: upstream command/filesystem contract suites pass in Python sync, Python
 async, and TypeScript clients on both A3S backends where supported.
 
-### Phase 4: code interpreter
+### Phase 4: code interpreter (in progress)
 
-- Publish the versioned interpreter template and kernel service.
-- Implement contexts, NDJSON execution streaming, rich results, and callbacks.
-- Publish the versioned MCP template and verify its standard port, token, and
-  streaming behavior through the generic SDK.
+- The production runtime and router pass Python execution and context
+  create/list/run/restart/remove through official and A3S Python sync/async and
+  TypeScript clients.
+- Rich MIME/error/callback/cancellation breadth, other advertised languages,
+  and concurrency edge cases remain open.
+- MCP execution and its standard port, token, and streaming behavior remain
+  open.
 
 Gate: upstream code-interpreter and MCP client suites pass without source
 patches.

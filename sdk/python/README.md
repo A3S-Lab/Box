@@ -40,5 +40,6 @@ when that convention does not apply. The A3S service returns the public direct
 Sandbox authority, including a non-standard TLS port when configured.
 `A3S_BOX_SANDBOX_URL` is retained only for single-Sandbox fixtures. The A3S
 endpoint decides the execution template and isolation policy; the SDK never
-invokes a local runtime. Standard `E2B_*` variables remain available to users
-who intentionally run the unchanged official SDK instead of this package.
+invokes a local runtime. `E2B_API_URL` is not read by this package. It is used
+only when the unchanged official SDK is intentionally connected to the same
+A3S Box endpoint.

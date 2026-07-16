@@ -53,13 +53,13 @@ a3s-box run --rm alpine:latest -- uname -a
 a3s-box run --rm --isolation sandbox alpine:latest -- id
 ```
 
-### E2B-compatible Python and TypeScript SDKs
+### A3S SDKs with E2B-compatible APIs
 
-The A3S Python and TypeScript packages re-export the pinned official E2B
-objects and add typed A3S endpoint configuration. Applications keep the
-familiar `Sandbox`, `AsyncSandbox`, Commands, Filesystem, PTY, and Code
-Interpreter surfaces while `a3s-box-e2b` owns the remote runtime and isolation
-policy. No E2B-hosted service is involved.
+A3S Box implements the remote runtime and protocol service. The A3S Python and
+TypeScript packages re-export the pinned official E2B objects and add typed A3S
+endpoint configuration, so applications keep the familiar `Sandbox`,
+`AsyncSandbox`, Commands, Filesystem, PTY, and Code Interpreter surfaces. No
+E2B-hosted service is involved.
 
 Point the native SDK at the deployed A3S Box service. A conventional
 `https://api.<domain>` endpoint automatically derives `<domain>` for Sandbox
@@ -74,8 +74,10 @@ Set `A3S_BOX_DOMAIN` only when the control endpoint does not follow the
 conventional `api.<domain>` form. The service advertises the direct Sandbox
 authority, including a non-standard public TLS port, so normal deployments do
 not need a client-side Sandbox URL override. `A3S_BOX_SANDBOX_URL` remains a
-single-Sandbox fixture escape hatch. The `E2B_*` variables are needed only
-when an unchanged official E2B SDK is used directly for protocol compatibility.
+single-Sandbox fixture escape hatch. `E2B_API_URL` is not an A3S SDK setting.
+It is used only when an unchanged official E2B SDK is connected directly to
+A3S Box, because that is the endpoint variable exposed by the official client;
+its value still points to A3S Box.
 
 Python uses async lifecycle management so the remote Sandbox is always cleaned
 up:
@@ -120,10 +122,10 @@ try {
 }
 ```
 
-Both packages are source-tree previews until the complete official and native
-client matrix passes and the packages are published. The current verified
-surface and remaining compatibility gates are stated under
-[SDKs and Compatibility](#sdks-and-compatibility).
+Both packages pass the production matrix described below. The release workflow
+builds wheel and npm tarball artifacts, but the packages are not yet published
+to PyPI or npm. The verified subset and remaining full-compatibility gates are
+stated under [SDKs and Compatibility](#sdks-and-compatibility).
 
 ## Features
 
@@ -146,8 +148,8 @@ surface and remaining compatibility gates are stated under
   resource and syscall controls, audit records, AMD SEV-SNP-oriented
   attestation, RA-TLS, sealing, and secret injection
 - **Typed SDKs and protocols**: Direct runtime-backed Rust management APIs,
-  an optional programmable pipeline runner, and an E2B protocol compatibility
-  preview with official-client fixtures plus Python and TypeScript source packages
+  an optional programmable pipeline runner, and a production-tested E2B
+  protocol subset with Python and TypeScript packages
 - **Operations and cluster integration**: Structured logs, stats, events,
   Prometheus endpoints, health monitoring, CRI, and containerd RuntimeClass
 
@@ -164,7 +166,7 @@ surface and remaining compatibility gates are stated under
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
 | Rust SDK | Typed, direct runtime-backed management and guest-control APIs | Implemented in `a3s-box-sdk`. The optional `pipeline-cli` feature retains the CLI-driven programmable pipeline. |
-| E2B protocol and language SDKs | Pinned contracts, durable lifecycle, TLS routing, runtime envd initialization, foreground Process commands, and core Filesystem operations | Preview only. Production evidence covers lifecycle and foreground commands across the pinned base clients, plus environment propagation and core Filesystem operations through the official Python sync client. Concurrent Process/PTY, the extended async Python and TypeScript matrix, Code Interpreter execution, MCP, signed files, and full unchanged-client conformance remain release gates. Python/npm packages are not published. |
+| E2B protocol and language SDKs | Pinned contracts, durable lifecycle, TLS routing, envd initialization, Filesystem, foreground/background Process, stdin, PTY, and Python Code Interpreter contexts | Production-tested preview subset on A3S OS with certified `crun`: pinned official Python sync/async and TypeScript clients, plus A3S Python sync/async and TypeScript packages, pass the same matrix. Templates, snapshots, volumes, signed files, public-port breadth, MCP, cancellation/backpressure, and the rest of the pinned contract remain gates; `full_compatibility=false`. PyPI/npm publication is also pending. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
 | Windows | Native x86_64 WHPX/libkrun code paths | Integration surface requiring host-specific validation. Current standard release automation focuses on Linux and macOS; Windows CRI is out of scope. |
@@ -519,7 +521,7 @@ The historical programmable CI pipeline remains behind the optional
 yet exposed by its pipeline abstraction. See
 [the SDK README](src/sdk/README.md) for the current API coverage.
 
-### E2B protocol preview
+### E2B-compatible protocol preview
 
 A3S Box pins the public control, envd, volume-content, Process, Filesystem, MCP,
 Python, TypeScript, and Code Interpreter contracts under
@@ -535,18 +537,18 @@ The current pin targets:
 | Python `e2b-code-interpreter` | 2.8.1 |
 | TypeScript `@e2b/code-interpreter` | 2.6.1 |
 
-Current implementation evidence is intentionally narrower than full
+The production-tested subset remains intentionally narrower than full
 compatibility:
 
 | Surface | Implemented preview | Not yet a release claim |
 | --- | --- | --- |
-| Control plane | Owner-scoped create, connect, get, list, timeout replacement, and kill with SQLite WAL persistence and reconciliation | Complete template, snapshot, volume, metrics, pagination, and recovery semantics |
-| Credentials and routing | PBKDF2 account-key hashes, encrypted scope-bound Sandbox tokens, generation-fenced leases, wildcard TLS, direct/shared routes, CORS, and PID-fenced Sandbox network access | Complete certificate rotation and every streaming/upgrade/public-port route |
-| envd | Authenticated `GET /health` has running and terminal behavior. Runtime templates receive a fail-closed `POST /init` with the lifecycle ID, merged environment, timestamp, and default user before create succeeds. | `/metrics`, `/envs`, HTTP file transfer, volume-content endpoints, and the complete envd semantic matrix |
-| Process | Start/connect/list/input/close/SIGKILL and PTY primitives exist. Pinned Python sync/async and TypeScript clients pass a foreground non-PTY command on production; the extended Python sync path also proves environment propagation and background Start. | Concurrent streaming plus unary Process calls, full signals, binary framing, stdin/close completion, PTY, reconnect, cancellation, ordering, and backpressure |
-| Filesystem | Runtime-backed remove, make-directory, write, read, stat, list, rename, exists, and cleanup operations pass through the production TLS route with the pinned official Python sync client. | Async Python and TypeScript evidence, watch and edge-case semantics, signed URLs, and HTTP file transfer |
-| Code Interpreter and MCP | Contracts, generated inventories, official package artifacts, and black-box fixtures are pinned. | Code execution, context lifecycle, rich results, MCP execution, and the complete unchanged-client matrix |
-| Python and TypeScript packages | Typed source packages re-export the pinned official SDK surfaces, add endpoint configuration helpers, and are included in the native-package production harness. | PyPI/npm publication and a passing complete native-package conformance matrix |
+| Control plane | Owner-scoped create, connect, get, list, timeout replacement, and kill with SQLite WAL persistence, restart reconciliation, and cleanup | Template, snapshot, volume, metrics, full pagination/recovery semantics, and cold-start lifetime handling tracked by #112 |
+| Credentials and routing | PBKDF2 account-key hashes, encrypted scope-bound Sandbox tokens, generation-fenced leases, wildcard TLS, direct/shared routes, CORS, HTTP/2, and PID-fenced Sandbox access | Certificate rotation and the complete streaming, upgrade, signed-file, and public-port route matrix |
+| envd | Authenticated running/terminal health plus fail-closed runtime initialization with lifecycle ID, environment, timestamp, and default user | `/metrics`, `/envs`, HTTP content transfer, volume-content endpoints, and the remaining envd semantic matrix |
+| Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground and background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output on real Sandboxes | Additional signals, binary framing, reconnect, cancellation, backpressure, and adversarial concurrent-stream coverage |
+| Filesystem | The same six clients pass remove, make-directory, write, read, stat, list, rename, exists, and cleanup through production TLS routing | Watch, multi-file and ownership edge cases, signed URLs, HTTP content transfer, and negative-path breadth |
+| Code Interpreter and MCP | Official and A3S Python sync/async and TypeScript clients execute Python, validate stdout/results, and pass context create/list/run/restart/remove | Other languages, rich MIME/error/cancellation breadth, MCP execution, and the rest of the pinned interpreter contract |
+| Python and TypeScript packages | Typed packages re-export the pinned official surfaces, use `A3S_BOX_*` connection configuration, and pass the production matrix with all `E2B_*` connection variables removed | PyPI/npm publication and conformance for the unimplemented protocol surfaces above |
 
 The production `a3s-box-e2b` process accepts only `.acl` configuration parsed
 by `a3s-acl`. For runtime-envd templates, create does not become visible until
@@ -561,10 +563,11 @@ cargo run --locked -p a3s-box-compat --bin a3s-box-e2b -- \
 ```
 
 The Python package under [`sdk/python`](sdk/python/README.md) and the TypeScript
-package under [`sdk/typescript`](sdk/typescript/README.md) are source-tree
-previews and are not published to PyPI or npm. Their existence is not evidence
-of full protocol compatibility. Until the complete black-box matrix passes,
-the generated manifest must continue to report `full_compatibility=false`.
+package under [`sdk/typescript`](sdk/typescript/README.md) pass the production
+matrix and are built as GitHub Release assets. They are not yet published to
+PyPI or npm. Passing this subset is not evidence for unimplemented protocol
+surfaces, so the generated manifest continues to report
+`full_compatibility=false`.
 
 See [E2B Protocol Compatibility and SDK Design](docs/e2b-compatible-sdk-design.md)
 for the release definition, architecture, ACL schema, and remaining gates.
@@ -681,7 +684,7 @@ Main components:
 | `containerd-shim` | containerd runtime-v2 adapter for RuntimeClass |
 | `src/sdk` | Direct runtime-backed Rust SDK and optional pipeline runner |
 | `src/lambda` | Workload-execution integration retained for higher-level runtimes |
-| `sdk/python`, `sdk/typescript` | Unpublished E2B-oriented language SDK previews |
+| `sdk/python`, `sdk/typescript` | Production-tested A3S language SDK packages; public registry publication pending |
 
 MicroVM guest control uses vsock-backed channels for control/health, exec, PTY,
 attestation, and optional sidecars. These are guest-to-host control channels,

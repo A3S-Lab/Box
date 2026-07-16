@@ -32,5 +32,6 @@ Code Interpreter exports are available from `@a3s-lab/box/code-interpreter`.
 does not apply. The service returns the public direct Sandbox authority,
 including a configured non-standard TLS port. `A3S_BOX_SANDBOX_URL` is retained
 only for single-Sandbox fixtures. The A3S service owns template and isolation
-selection; this package never starts a local container or runtime. Standard
-`E2B_*` variables are only for running an unchanged official SDK directly.
+selection; this package never starts a local container or runtime.
+`E2B_API_URL` is not read by this package; that name is used only when an
+unchanged official SDK is connected directly to the same A3S Box endpoint.

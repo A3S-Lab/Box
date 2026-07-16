@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a3s-box"
-version = "0.1.0"
+version = "3.0.10"
 description = "Typed Python convenience package for the A3S Box E2B-compatible endpoint"
 readme = "README.md"
 requires-python = ">=3.10"

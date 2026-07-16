@@ -101,8 +101,15 @@ restart recovery, host envd health, a traffic-scoped workload service on port
 unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
 through the production lifecycle listener, calls their official running-state
 health methods through the TLS gateway before and after kill, and verifies
-cleanup of every real `crun` execution. The three base clients also execute and
-validate one foreground non-PTY `commands.run` through the ConnectRPC JSON
-transport. This does not establish full Process compatibility, and the matrix
-does not exercise Filesystem, the complete PTY/input/signal/reconnect surface,
-or Code Interpreter execution.
+cleanup of every real `crun` execution. The clients exercise foreground and
+background commands, process listing, stdin send/close, wait, PTY
+create/resize/input/wait, Filesystem remove/mkdir/write/read/stat/list/rename,
+and Python Code Interpreter execution plus context create/list/run/restart/remove.
+
+With `A3S_BOX_E2B_NATIVE_SDKS=1`, the harness repeats that matrix through the
+A3S Python sync/async and TypeScript packages after removing every `E2B_*`
+connection variable and configuring only `A3S_BOX_*`. This production subset
+passes on A3S OS with certified `crun`, but it does not establish full protocol
+compatibility. Templates, snapshots, volumes, signed files, MCP, additional
+signals, reconnect, cancellation, backpressure, and other pinned edge cases
+remain outside the matrix, so `full_compatibility=false` remains mandatory.

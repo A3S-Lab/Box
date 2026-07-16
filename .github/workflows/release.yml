@@ -133,6 +133,7 @@ jobs:
           cargo build --release -p a3s-box-cli -p a3s-box-shim
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             cargo build --release -p a3s-box-cri
+            cargo build --release -p a3s-box-compat --bin a3s-box-e2b
           fi
 
       - name: Build guest binaries
@@ -159,6 +160,7 @@ jobs:
 
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             cp src/target/release/a3s-box-cri "$DIR/"
+            cp src/target/release/a3s-box-e2b "$DIR/"
           fi
 
           cp "src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" "$DIR/"
@@ -185,6 +187,7 @@ jobs:
             done
             if [ "${{ matrix.build_cri }}" = "true" ]; then
               patchelf --set-rpath '$ORIGIN/lib' "$DIR/a3s-box-cri" 2>/dev/null || true
+              patchelf --set-rpath '$ORIGIN/lib' "$DIR/a3s-box-e2b" 2>/dev/null || true
             fi
           fi
 
@@ -357,6 +360,7 @@ jobs:
               bin.install "a3s-box-shim"
               bin.install "a3s-box-guest-init"
               bin.install "a3s-box-cri" if File.exist?("a3s-box-cri")
+              bin.install "a3s-box-e2b" if File.exist?("a3s-box-e2b")
               lib.install Dir["lib/*"] if Dir.exist?("lib")
             end
 

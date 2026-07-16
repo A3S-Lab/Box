@@ -23,5 +23,5 @@
     "typescript-code-interpreter-tarball": "sha256:df9350312e46f6f6c4f62004da528fd15176078b3027b4507f7358a6eab0fe57",
     "typescript-e2b-tarball": "sha256:53581eae5f11efb4b1020b64c05d7e8fc46fe3e14b5172322b5feb35c262e579"
   },
-  "a3s_compat_version": "0.1.0-preview.1"
+  "a3s_compat_version": "3.0.10-preview.1"
 }

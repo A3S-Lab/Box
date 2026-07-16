@@ -222,9 +222,17 @@ preserve_failure_diagnostics() {
           "$execution_diagnostics/$relative_path" || true
       fi
     done
-    "$A3S_BOX_CRUN_PATH" --root "$runtime_root" state "$execution_id" \
-      >"$execution_diagnostics/crun-state.json" \
-      2>"$execution_diagnostics/crun-state.stderr" || true
+    # crun materializes a missing --root directory even for an absent
+    # container. Keep failure diagnostics side-effect free when startup did
+    # not reach the runtime.
+    if [[ -e "$runtime_root" ]]; then
+      "$A3S_BOX_CRUN_PATH" --root "$runtime_root" state "$execution_id" \
+        >"$execution_diagnostics/crun-state.json" \
+        2>"$execution_diagnostics/crun-state.stderr" || true
+    else
+      printf 'runtime root was absent; crun state probe skipped\n' \
+        >"$execution_diagnostics/crun-state.stderr"
+    fi
   done < <(python3 - "$records" <<'PY'
 import json
 import sys
