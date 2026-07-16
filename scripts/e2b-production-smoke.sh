@@ -607,8 +607,11 @@ PY
     fail 'runtime envd environment omitted the create-time variable'
   fi
 
-  ENVD_FILE_PATH='/tmp/a3s-box-envd-http-smoke.txt'
-  ENVD_FILE_QUERY='/files?path=%2Ftmp%2Fa3s-box-envd-http-smoke.txt&username=user'
+  # `/tmp` is an OCI tmpfs mount and is intentionally outside a filesystem
+  # Snapshot. Exercise envd transfer and Snapshot persistence on the writable
+  # rootfs instead.
+  ENVD_FILE_PATH='/home/user/a3s-box-envd-http-smoke.txt'
+  ENVD_FILE_QUERY='/files?path=%2Fhome%2Fuser%2Fa3s-box-envd-http-smoke.txt&username=user'
   ENVD_FILE_SOURCE="$STATE_DIR/envd-upload.txt"
   ENVD_UPLOAD_RESPONSE="$STATE_DIR/envd-upload.json"
   ENVD_DOWNLOAD_RESPONSE="$STATE_DIR/envd-download.txt"
