@@ -6,8 +6,8 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionGeneration,
     ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
-    ExecutionSnapshotId, ExecutionState, KillOutcome, NetworkMode, OperationId,
-    ReconcileOutcome, RestartExecutionOptions,
+    ExecutionSnapshotId, ExecutionState, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
+    RestartExecutionOptions,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -1457,11 +1457,7 @@ async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation()
     let snapshot_id = ExecutionSnapshotId::new("managed-snapshot-1").unwrap();
 
     let snapshot = manager
-        .create_filesystem_snapshot(
-            &running.execution_id,
-            running.generation,
-            &snapshot_id,
-        )
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
         .await
         .unwrap();
 
@@ -1489,11 +1485,7 @@ async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation()
     );
 
     let retry = manager
-        .create_filesystem_snapshot(
-            &running.execution_id,
-            running.generation,
-            &snapshot_id,
-        )
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
         .await
         .unwrap();
     assert_eq!(retry.size_bytes, snapshot.size_bytes);
@@ -1504,7 +1496,10 @@ async fn filesystem_snapshot_quiesces_and_restores_without_changing_generation()
         .await
         .unwrap());
     assert_eq!(
-        manager.filesystem_snapshot_size(&snapshot_id).await.unwrap(),
+        manager
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap(),
         None
     );
 }
@@ -1543,17 +1538,16 @@ async fn paused_snapshot_remains_paused_and_does_not_resume() {
 async fn snapshot_failure_restores_running_state_at_the_same_generation() {
     let (_directory, manager, backend) = harness();
     let running = manager
-        .create_and_start(request("missing-rootfs"), &operation("missing-rootfs-create"))
+        .create_and_start(
+            request("missing-rootfs"),
+            &operation("missing-rootfs-create"),
+        )
         .await
         .unwrap();
     let snapshot_id = ExecutionSnapshotId::new("missing-rootfs-snapshot").unwrap();
 
     let error = manager
-        .create_filesystem_snapshot(
-            &running.execution_id,
-            running.generation,
-            &snapshot_id,
-        )
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
         .await
         .unwrap_err();
 
@@ -1570,7 +1564,10 @@ async fn snapshot_failure_restores_running_state_at_the_same_generation() {
         running.generation
     );
     assert_eq!(
-        manager.filesystem_snapshot_size(&snapshot_id).await.unwrap(),
+        manager
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap(),
         None
     );
 }
@@ -1635,11 +1632,7 @@ async fn snapshot_delete_refuses_an_unstarted_restored_execution() {
     populate_rootfs(&manager, &running.execution_id, "delete-state");
     let snapshot_id = ExecutionSnapshotId::new("delete-protected-snapshot").unwrap();
     manager
-        .create_filesystem_snapshot(
-            &running.execution_id,
-            running.generation,
-            &snapshot_id,
-        )
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
         .await
         .unwrap();
     let mut restored_request = request("restored-reservation");
@@ -1685,11 +1678,7 @@ async fn snapshot_delete_and_restored_reservation_are_atomic() {
         let snapshot_id =
             ExecutionSnapshotId::new(format!("atomic-delete-snapshot-{index}")).unwrap();
         manager
-            .create_filesystem_snapshot(
-                &running.execution_id,
-                running.generation,
-                &snapshot_id,
-            )
+            .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
             .await
             .unwrap();
         let mut restored_request = request(&format!("atomic-restored-{index}"));

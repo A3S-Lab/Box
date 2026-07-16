@@ -43,14 +43,10 @@ mod linux {
         let state_path = home_dir.join("managed-executions.json");
         let source_operation_id =
             OperationId::new(format!("managed-sandbox-smoke-{}", uuid::Uuid::new_v4()))?;
-        let restored_operation_id = OperationId::new(format!(
-            "managed-sandbox-restore-{}",
-            uuid::Uuid::new_v4()
-        ))?;
-        let snapshot_id = ExecutionSnapshotId::new(format!(
-            "managed-smoke-{}",
-            uuid::Uuid::new_v4().simple()
-        ))?;
+        let restored_operation_id =
+            OperationId::new(format!("managed-sandbox-restore-{}", uuid::Uuid::new_v4()))?;
+        let snapshot_id =
+            ExecutionSnapshotId::new(format!("managed-smoke-{}", uuid::Uuid::new_v4().simple()))?;
 
         let result = exercise(
             &home_dir,
@@ -223,9 +219,7 @@ mod linux {
             restarted.inspect(&execution_id).await?.state == ExecutionState::Paused,
             "managed Sandbox did not enter the paused state",
         )?;
-        let resumed = restarted
-            .resume(&execution_id, paused.generation)
-            .await?;
+        let resumed = restarted.resume(&execution_id, paused.generation).await?;
         require(
             resumed.generation.get() == paused.generation.get() + 1
                 && restarted.inspect(&execution_id).await?.state == ExecutionState::Running,
@@ -260,9 +254,7 @@ mod linux {
             snapshot_elapsed.as_millis()
         );
 
-        let outcome = restarted
-            .kill(&execution_id, resumed.generation)
-            .await?;
+        let outcome = restarted.kill(&execution_id, resumed.generation).await?;
         require(
             outcome == KillOutcome::Killed,
             "managed Sandbox kill did not own runtime cleanup",
@@ -398,7 +390,10 @@ mod linux {
             .canonicalize()?;
         let marker = box_dir.join(".snapshot-lower");
         let actual = PathBuf::from(std::fs::read_to_string(&marker)?.trim());
-        require(actual == expected, "restored Sandbox has the wrong CoW lower")?;
+        require(
+            actual == expected,
+            "restored Sandbox has the wrong CoW lower",
+        )?;
         require(
             std::fs::symlink_metadata(marker)?.file_type().is_file(),
             "restored Sandbox snapshot marker is not a regular file",
@@ -461,11 +456,9 @@ mod linux {
                     .lines()
                     .filter_map(|line| serde_json::from_str(line).ok())
                     .collect();
-                let stdout = entries
-                    .iter()
-                    .any(|entry| {
-                        entry.stream == "stdout" && entry.log == "sandbox-state=captured\n"
-                    });
+                let stdout = entries.iter().any(|entry| {
+                    entry.stream == "stdout" && entry.log == "sandbox-state=captured\n"
+                });
                 let stderr = entries
                     .iter()
                     .any(|entry| entry.stream == "stderr" && entry.log == "sandbox-stderr\n");

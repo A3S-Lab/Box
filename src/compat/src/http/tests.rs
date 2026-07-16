@@ -262,11 +262,11 @@ async fn router_serves_owner_scoped_snapshot_restore_pagination_and_delete() {
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let unnamed = body_json(response).await;
+    assert!(unnamed["snapshotID"].as_str().unwrap().starts_with("snap-"));
     assert!(unnamed["snapshotID"]
         .as_str()
         .unwrap()
-        .starts_with("snap-"));
-    assert!(unnamed["snapshotID"].as_str().unwrap().ends_with(":default"));
+        .ends_with(":default"));
     assert_eq!(unnamed["names"], json!([]));
 
     let response = send_raw(

@@ -7,13 +7,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::control::{
-    Clock, PublicSandboxState, ResolvedTemplate, SandboxId, SandboxRecord,
-};
+use crate::control::{Clock, PublicSandboxState, ResolvedTemplate, SandboxId, SandboxRecord};
 
 use super::{
-    validate_snapshot_name, SnapshotId, SnapshotModelError, SnapshotRecord,
-    SnapshotReplaceResult, SnapshotRepository, SnapshotRepositoryError, SnapshotState,
+    validate_snapshot_name, SnapshotId, SnapshotModelError, SnapshotRecord, SnapshotReplaceResult,
+    SnapshotRepository, SnapshotRepositoryError, SnapshotState,
 };
 
 #[derive(Debug)]
@@ -97,7 +95,9 @@ impl SnapshotService {
         if let Some(name) = name {
             validate_snapshot_name(name)?;
         }
-        let source_state = source.public_state().ok_or(SnapshotServiceError::NotFound)?;
+        let source_state = source
+            .public_state()
+            .ok_or(SnapshotServiceError::NotFound)?;
         let execution_id = source
             .execution_id()
             .ok_or(SnapshotServiceError::Conflict)?;
@@ -105,10 +105,8 @@ impl SnapshotService {
             .execution_generation()
             .ok_or(SnapshotServiceError::Conflict)?;
         let snapshot_id = SnapshotId::new(format!("snap-{}", Uuid::new_v4().simple()))?;
-        let content_id = a3s_box_core::ExecutionSnapshotId::new(format!(
-            "e2bsnap-{}",
-            Uuid::new_v4().simple()
-        ))?;
+        let content_id =
+            a3s_box_core::ExecutionSnapshotId::new(format!("e2bsnap-{}", Uuid::new_v4().simple()))?;
         let record = SnapshotRecord::creating(
             snapshot_id,
             content_id.clone(),
@@ -124,9 +122,7 @@ impl SnapshotService {
         )?;
         match self.repository.insert(record.clone()).await {
             Ok(()) => {}
-            Err(SnapshotRepositoryError::Duplicate) => {
-                return Err(SnapshotServiceError::Duplicate)
-            }
+            Err(SnapshotRepositoryError::Duplicate) => return Err(SnapshotServiceError::Duplicate),
             Err(error) => return Err(error.into()),
         }
 
@@ -183,8 +179,7 @@ impl SnapshotService {
     ) -> SnapshotServiceResult<SnapshotPage> {
         let records = self.repository.list(owner_id).await?;
         let mut eligible = records.into_iter().filter(|record| {
-            source_sandbox_id
-                .is_none_or(|source| record.source_sandbox_id() == source)
+            source_sandbox_id.is_none_or(|source| record.source_sandbox_id() == source)
                 && after.is_none_or(|cursor| {
                     (record.created_at(), record.snapshot_id())
                         > (cursor.created_at, &cursor.snapshot_id)
@@ -245,28 +240,23 @@ impl SnapshotService {
         Ok(true)
     }
 
-    pub async fn reconcile_startup(
-        &self,
-    ) -> SnapshotServiceResult<SnapshotReconciliationReport> {
+    pub async fn reconcile_startup(&self) -> SnapshotServiceResult<SnapshotReconciliationReport> {
         let mut report = SnapshotReconciliationReport::default();
         for state in [SnapshotState::Creating, SnapshotState::Deleting] {
             for mut record in self.repository.list_in_state(state).await? {
                 report.examined += 1;
                 let outcome = match state {
-                    SnapshotState::Creating => self
-                        .reconcile_creating(&mut record, &mut report)
-                        .await?,
+                    SnapshotState::Creating => {
+                        self.reconcile_creating(&mut record, &mut report).await?
+                    }
                     SnapshotState::Deleting => match self
                         .executions
                         .delete_filesystem_snapshot(record.content_id())
                         .await
                     {
                         Ok(_) => {
-                            self.delete_record(
-                                record.snapshot_id(),
-                                SnapshotState::Deleting,
-                            )
-                            .await?;
+                            self.delete_record(record.snapshot_id(), SnapshotState::Deleting)
+                                .await?;
                             ReconciliationOutcome::Completed
                         }
                         Err(a3s_box_core::ExecutionManagerError::Conflict { .. }) => {
@@ -387,9 +377,9 @@ impl SnapshotService {
                 Ok(ReconciliationOutcome::Deferred)
             }
             Err(inspect_error) => {
-                report
-                    .failures
-                    .push(format!("{error}; snapshot inspection failed: {inspect_error}"));
+                report.failures.push(format!(
+                    "{error}; snapshot inspection failed: {inspect_error}"
+                ));
                 Ok(ReconciliationOutcome::Deferred)
             }
         }

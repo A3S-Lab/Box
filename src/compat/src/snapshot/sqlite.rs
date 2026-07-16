@@ -3,8 +3,8 @@ use tokio_rusqlite::rusqlite::{params, ErrorCode, OptionalExtension};
 use tokio_rusqlite::Connection;
 
 use super::{
-    SnapshotId, SnapshotRecord, SnapshotReplaceResult, SnapshotRepository,
-    SnapshotRepositoryError, SnapshotRepositoryResult, SnapshotState,
+    SnapshotId, SnapshotRecord, SnapshotReplaceResult, SnapshotRepository, SnapshotRepositoryError,
+    SnapshotRepositoryResult, SnapshotState,
 };
 
 #[derive(Clone)]
@@ -148,7 +148,9 @@ impl SnapshotRepository for SqliteSnapshotRepository {
                         "SELECT record_json FROM snapshot_records WHERE state = ?1 \
                          ORDER BY julianday(created_at), snapshot_id",
                     )
-                    .map_err(|error| unavailable("prepare SQLite snapshot reconciliation", error))?;
+                    .map_err(|error| {
+                        unavailable("prepare SQLite snapshot reconciliation", error)
+                    })?;
                 let records = statement
                     .query_map([state], |row| row.get::<_, String>(0))
                     .map_err(|error| unavailable("query SQLite snapshot reconciliation", error))?

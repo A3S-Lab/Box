@@ -13,8 +13,8 @@ pub use repository::{
     SnapshotReplaceResult, SnapshotRepository, SnapshotRepositoryError, SnapshotRepositoryResult,
 };
 pub use service::{
-    PendingSnapshot, SnapshotCursor, SnapshotPage, SnapshotReconciliationReport,
-    SnapshotService, SnapshotServiceDependencies, SnapshotServiceError, SnapshotServiceResult,
+    PendingSnapshot, SnapshotCursor, SnapshotPage, SnapshotReconciliationReport, SnapshotService,
+    SnapshotServiceDependencies, SnapshotServiceError, SnapshotServiceResult,
 };
 pub use sqlite::SqliteSnapshotRepository;
 pub use template::SnapshotTemplateProvider;

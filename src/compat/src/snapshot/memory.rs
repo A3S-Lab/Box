@@ -4,8 +4,8 @@ use std::sync::{Mutex, MutexGuard};
 use async_trait::async_trait;
 
 use super::{
-    SnapshotId, SnapshotRecord, SnapshotReplaceResult, SnapshotRepository,
-    SnapshotRepositoryError, SnapshotRepositoryResult, SnapshotState,
+    SnapshotId, SnapshotRecord, SnapshotReplaceResult, SnapshotRepository, SnapshotRepositoryError,
+    SnapshotRepositoryResult, SnapshotState,
 };
 
 #[derive(Debug, Default)]

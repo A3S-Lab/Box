@@ -18,7 +18,10 @@ async fn sqlite_repository_enforces_the_snapshot_contract() {
     let control = SqliteSandboxRepository::open(directory.path().join("control.db"))
         .await
         .unwrap();
-    exercise_repository(Arc::new(SqliteSnapshotRepository::new(control.connection()))).await;
+    exercise_repository(Arc::new(SqliteSnapshotRepository::new(
+        control.connection(),
+    )))
+    .await;
 }
 
 async fn exercise_repository(repository: Arc<dyn SnapshotRepository>) {
@@ -117,5 +120,9 @@ async fn exercise_repository(repository: Arc<dyn SnapshotRepository>) {
             .unwrap(),
         SnapshotReplaceResult::Updated
     );
-    assert!(repository.get(active.snapshot_id()).await.unwrap().is_none());
+    assert!(repository
+        .get(active.snapshot_id())
+        .await
+        .unwrap()
+        .is_none());
 }

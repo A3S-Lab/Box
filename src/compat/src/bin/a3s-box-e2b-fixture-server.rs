@@ -482,7 +482,10 @@ impl ExecutionManager for FixtureExecutionManager {
             .get_mut(execution_id.as_str())
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
         if execution.lease.generation != generation
-            || !matches!(execution.state, ExecutionState::Running | ExecutionState::Paused)
+            || !matches!(
+                execution.state,
+                ExecutionState::Running | ExecutionState::Paused
+            )
         {
             return Err(ExecutionManagerError::Conflict {
                 execution_id: execution_id.clone(),

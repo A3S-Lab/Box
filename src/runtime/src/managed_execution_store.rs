@@ -282,14 +282,10 @@ impl ManagedExecutionStore {
                 },
                 ManagedExecutionState::Resuming => Some(ManagedExecutionOperation::Resume),
                 ManagedExecutionState::Snapshotting => match metadata.pending_operation.take() {
-                    Some(operation @ ManagedExecutionOperation::Snapshot { .. }) => {
-                        Some(operation)
-                    }
-                    _ => {
-                        return Err(ManagedExecutionStoreError::InvalidRecord(format!(
-                            "snapshot transition for {execution_id} has no persisted snapshot intent"
-                        )))
-                    }
+                    Some(operation @ ManagedExecutionOperation::Snapshot { .. }) => Some(operation),
+                    _ => return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                        "snapshot transition for {execution_id} has no persisted snapshot intent"
+                    ))),
                 },
                 ManagedExecutionState::Killing => Some(ManagedExecutionOperation::Kill),
                 ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => {
@@ -403,9 +399,7 @@ fn transition_generation(
 
     if matches!(
         (from, to),
-        (Pausing, Paused)
-            | (Resuming, Running)
-            | (RestartStopping, RestartStarting)
+        (Pausing, Paused) | (Resuming, Running) | (RestartStopping, RestartStarting)
     ) {
         let value = current.get().checked_add(1).ok_or_else(|| {
             ManagedExecutionStoreError::InvalidRecord(format!(

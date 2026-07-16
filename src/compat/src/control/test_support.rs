@@ -516,7 +516,10 @@ impl ExecutionManager for RecordingExecutionManager {
             .get(execution_id.as_str())
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
         if execution.lease.generation != generation
-            || !matches!(execution.state, ExecutionState::Running | ExecutionState::Paused)
+            || !matches!(
+                execution.state,
+                ExecutionState::Running | ExecutionState::Paused
+            )
         {
             return Err(ExecutionManagerError::Conflict {
                 execution_id: execution_id.clone(),
@@ -554,8 +557,10 @@ impl ExecutionManager for RecordingExecutionManager {
         snapshot_id: &ExecutionSnapshotId,
     ) -> ExecutionManagerResult<bool> {
         if self.executions.lock().unwrap().values().any(|execution| {
-            !matches!(execution.state, ExecutionState::Stopped | ExecutionState::Failed)
-                && execution.rootfs_snapshot_id.as_ref() == Some(snapshot_id)
+            !matches!(
+                execution.state,
+                ExecutionState::Stopped | ExecutionState::Failed
+            ) && execution.rootfs_snapshot_id.as_ref() == Some(snapshot_id)
         }) {
             return Err(ExecutionManagerError::Conflict {
                 execution_id: ExecutionId::new(format!("snapshot-{snapshot_id}"))?,

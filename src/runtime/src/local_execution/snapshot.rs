@@ -47,8 +47,7 @@ impl LocalExecutionManager {
         if metadata.plan.backend != ExecutionBackend::Crun {
             return Err(ExecutionManagerError::Conflict {
                 execution_id: execution_id.clone(),
-                message: "filesystem snapshots currently require the Sandbox backend"
-                    .to_string(),
+                message: "filesystem snapshots currently require the Sandbox backend".to_string(),
             });
         }
         if let Some(existing) = self.load_snapshot(snapshot_id).await? {
@@ -86,7 +85,9 @@ impl LocalExecutionManager {
         &self,
         record: BoxRecord,
     ) -> ExecutionManagerResult<ExecutionLease> {
-        self.drive_snapshot(record).await.map(|snapshot| snapshot.lease)
+        self.drive_snapshot(record)
+            .await
+            .map(|snapshot| snapshot.lease)
     }
 
     pub(super) async fn stabilize_snapshot(
@@ -103,10 +104,7 @@ impl LocalExecutionManager {
             .ok_or(ExecutionManagerError::NotFound(execution_id))
     }
 
-    async fn drive_snapshot(
-        &self,
-        record: BoxRecord,
-    ) -> ExecutionManagerResult<ExecutionSnapshot> {
+    async fn drive_snapshot(&self, record: BoxRecord) -> ExecutionManagerResult<ExecutionSnapshot> {
         let (snapshot_id, source_state) = snapshot_operation(&record)?;
         let execution_id = ExecutionId::new(record.id.clone())?;
         let observation = self.backend.inspect(&record).await?;
@@ -297,7 +295,8 @@ impl LocalExecutionManager {
                 ExecutionManagerError::Unavailable(format!(
                     "failed to inspect filesystem snapshot {snapshot_id}: {error}"
                 ))
-            })? else {
+            })?
+            else {
                 return Ok(None);
             };
             if metadata.id != snapshot_id.as_str()
@@ -360,13 +359,11 @@ impl LocalExecutionManager {
                     message: "filesystem snapshot is in use by an active execution".to_string(),
                 });
             }
-            store
-                .delete_locked(snapshot_id.as_str())
-                .map_err(|error| {
-                    ExecutionManagerError::Unavailable(format!(
-                        "failed to delete filesystem snapshot {snapshot_id}: {error}"
-                    ))
-                })
+            store.delete_locked(snapshot_id.as_str()).map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "failed to delete filesystem snapshot {snapshot_id}: {error}"
+                ))
+            })
         })
         .await
         .map_err(|error| {
@@ -389,7 +386,10 @@ fn snapshot_operation(
         }) if matches!(
             source_state,
             ManagedExecutionState::Running | ManagedExecutionState::Paused
-        ) => Ok((snapshot_id.clone(), *source_state)),
+        ) =>
+        {
+            Ok((snapshot_id.clone(), *source_state))
+        }
         _ => Err(ExecutionManagerError::Internal(format!(
             "execution {} has invalid snapshot recovery metadata",
             record.id

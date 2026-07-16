@@ -239,9 +239,9 @@ impl SnapshotRecord {
 pub fn validate_snapshot_name(value: &str) -> Result<(), SnapshotModelError> {
     if value.is_empty()
         || value.len() > 128
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
         return Err(SnapshotModelError::InvalidName);
     }

@@ -160,9 +160,9 @@ impl ExecutionResourceGuard {
             return Ok(());
         };
         let snapshots_root = self.home_dir.join("snapshots");
-        let canonical_root = snapshots_root.canonicalize().map_err(|error| {
-            resource_error(record, "canonicalize managed snapshot root", error)
-        })?;
+        let canonical_root = snapshots_root
+            .canonicalize()
+            .map_err(|error| resource_error(record, "canonicalize managed snapshot root", error))?;
         let snapshot_dir = snapshots_root.join(snapshot_id.as_str());
         let canonical_snapshot = snapshot_dir
             .canonicalize()
@@ -182,18 +182,18 @@ impl ExecutionResourceGuard {
                 "filesystem snapshot '{snapshot_id}' has unsafe metadata"
             )));
         }
-        let metadata_file = metadata_path.canonicalize().map_err(|error| {
-            resource_error(record, "resolve managed snapshot metadata", error)
-        })?;
-        let metadata: a3s_box_core::snapshot::SnapshotMetadata = serde_json::from_slice(
-            &std::fs::read(&metadata_file)
-                .map_err(|error| resource_error(record, "read managed snapshot metadata", error))?,
-        )
-        .map_err(|error| {
-            ExecutionManagerError::Unavailable(format!(
-                "filesystem snapshot '{snapshot_id}' has invalid metadata: {error}"
-            ))
-        })?;
+        let metadata_file = metadata_path
+            .canonicalize()
+            .map_err(|error| resource_error(record, "resolve managed snapshot metadata", error))?;
+        let metadata: a3s_box_core::snapshot::SnapshotMetadata =
+            serde_json::from_slice(&std::fs::read(&metadata_file).map_err(|error| {
+                resource_error(record, "read managed snapshot metadata", error)
+            })?)
+            .map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "filesystem snapshot '{snapshot_id}' has invalid metadata: {error}"
+                ))
+            })?;
         if metadata_file.parent() != Some(canonical_snapshot.as_path())
             || metadata.id != snapshot_id.as_str()
         {

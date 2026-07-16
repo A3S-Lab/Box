@@ -643,10 +643,7 @@ mod tests {
     #[test]
     fn snapshot_identifiers_are_safe_managed_directory_names() {
         for valid in ["snapshot-1", "SNAPSHOT_2", "a"] {
-            assert_eq!(
-                ExecutionSnapshotId::new(valid).unwrap().as_str(),
-                valid
-            );
+            assert_eq!(ExecutionSnapshotId::new(valid).unwrap().as_str(), valid);
         }
         for invalid in [
             "",

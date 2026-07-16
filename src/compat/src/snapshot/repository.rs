@@ -26,8 +26,10 @@ pub type SnapshotRepositoryResult<T> = std::result::Result<T, SnapshotRepository
 pub trait SnapshotRepository: Send + Sync {
     async fn insert(&self, record: SnapshotRecord) -> SnapshotRepositoryResult<()>;
 
-    async fn get(&self, snapshot_id: &SnapshotId)
-        -> SnapshotRepositoryResult<Option<SnapshotRecord>>;
+    async fn get(
+        &self,
+        snapshot_id: &SnapshotId,
+    ) -> SnapshotRepositoryResult<Option<SnapshotRecord>>;
 
     async fn get_by_reference(
         &self,

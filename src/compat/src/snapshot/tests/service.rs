@@ -16,11 +16,7 @@ async fn capture_restores_after_source_deletion_and_enforces_owner_and_active_us
         .unwrap();
     let snapshot = harness
         .service
-        .create_snapshot(
-            "owner-a",
-            source.record.sandbox_id(),
-            Some("fixture-state"),
-        )
+        .create_snapshot("owner-a", source.record.sandbox_id(), Some("fixture-state"))
         .await
         .unwrap();
     assert_eq!(snapshot.state(), SnapshotState::Active);
@@ -30,20 +26,20 @@ async fn capture_restores_after_source_deletion_and_enforces_owner_and_active_us
     assert!(matches!(
         harness
             .service
-            .create_snapshot(
-                "owner-a",
-                source.record.sandbox_id(),
-                Some("fixture-state"),
-            )
+            .create_snapshot("owner-a", source.record.sandbox_id(), Some("fixture-state"),)
             .await,
-        Err(ControlServiceError::Snapshot(SnapshotServiceError::Duplicate))
+        Err(ControlServiceError::Snapshot(
+            SnapshotServiceError::Duplicate
+        ))
     ));
 
     let mut forbidden = create_request("owner-b");
     forbidden.template_id = snapshot.reference().to_string();
     assert!(matches!(
         harness.service.create(forbidden).await,
-        Err(ControlServiceError::Template(TemplateProviderError::NotFound(_)))
+        Err(ControlServiceError::Template(
+            TemplateProviderError::NotFound(_)
+        ))
     ));
 
     assert!(harness
@@ -164,11 +160,7 @@ async fn snapshot_of_snapshot_has_independent_content() {
     let restored = harness.service.create(restore_request).await.unwrap();
     let second = harness
         .service
-        .create_snapshot(
-            "owner-a",
-            restored.record.sandbox_id(),
-            Some("second"),
-        )
+        .create_snapshot("owner-a", restored.record.sandbox_id(), Some("second"))
         .await
         .unwrap();
     assert_ne!(first.content_id(), second.content_id());
@@ -245,11 +237,7 @@ async fn startup_reconciliation_publishes_or_removes_creating_records() {
         10,
     );
     let orphan_id = orphan.snapshot_id().clone();
-    harness
-        .snapshot_repository
-        .insert(orphan)
-        .await
-        .unwrap();
+    harness.snapshot_repository.insert(orphan).await.unwrap();
     let report = harness.snapshots.reconcile_startup().await.unwrap();
     assert_eq!(report.completed, 1);
     assert!(harness

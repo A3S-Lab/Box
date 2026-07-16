@@ -115,10 +115,7 @@ pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
             get(lifecycle::get_metrics),
         )
         .route("/sandboxes/:sandbox_id/refreshes", post(lifecycle::refresh))
-        .route(
-            "/sandboxes/:sandbox_id/snapshots",
-            post(snapshots::create),
-        )
+        .route("/sandboxes/:sandbox_id/snapshots", post(snapshots::create))
         .route(
             "/sandboxes/:sandbox_id/timeout",
             post(lifecycle::set_timeout),
@@ -130,7 +127,10 @@ pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
             get(volumes::get).delete(volumes::delete),
         )
         .route("/snapshots", get(snapshots::list))
-        .route("/templates/*template_id", axum::routing::delete(snapshots::delete))
+        .route(
+            "/templates/*template_id",
+            axum::routing::delete(snapshots::delete),
+        )
         .fallback(fallback)
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
     let content = Router::new()

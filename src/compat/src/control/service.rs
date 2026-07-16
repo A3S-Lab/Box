@@ -560,9 +560,7 @@ impl ControlService {
                 "filesystem snapshots are unavailable in this service".to_string(),
             )
         })?;
-        let pending = snapshots
-            .capture(owner_id, &source, name, template)
-            .await?;
+        let pending = snapshots.capture(owner_id, &source, name, template).await?;
         Ok(snapshots.publish(pending).await?)
     }
 
