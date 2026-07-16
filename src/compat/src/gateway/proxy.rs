@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +41,7 @@ const PROXY_AUTHORIZATION: &str = "proxy-authorization";
 const KEEP_ALIVE: &str = "keep-alive";
 const EXPOSED_HEADERS: &str =
     "Grpc-Status, Grpc-Message, Grpc-Status-Details-Bin, Connect-Content-Encoding, Trailer";
+static NEXT_PROXY_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct DataPlaneProxy {
@@ -69,6 +71,14 @@ impl DataPlaneProxy {
     }
 
     pub async fn handle(&self, mut request: Request<Body>) -> Response<Body> {
+        let request_id = NEXT_PROXY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            request_id,
+            method = %request.method(),
+            path = request.uri().path(),
+            version = ?request.version(),
+            "sandbox data-plane request received"
+        );
         let cors = request.headers().contains_key(ORIGIN);
         let route = match self.parser.parse_uri(request.uri(), request.headers()) {
             Ok(route) => route,
@@ -90,7 +100,10 @@ impl DataPlaneProxy {
             let response = match resolution {
                 EnvdHealthResolution::Running(lease) => {
                     if lease.envd_mode() == EnvdMode::Runtime {
-                        return with_cors(self.proxy_runtime(&mut request, &lease).await, cors);
+                        return with_cors(
+                            self.proxy_runtime(&mut request, &lease, request_id).await,
+                            cors,
+                        );
                     }
                     self.envd.handle(request, &lease).await
                 }
@@ -106,14 +119,25 @@ impl DataPlaneProxy {
         if lease.port().get() == ENVD_PORT && lease.envd_mode() == EnvdMode::Broker {
             return with_cors(self.envd.handle(request, &lease).await, cors);
         }
-        with_cors(self.proxy_runtime(&mut request, &lease).await, cors)
+        with_cors(
+            self.proxy_runtime(&mut request, &lease, request_id).await,
+            cors,
+        )
     }
 
     async fn proxy_runtime(
         &self,
         request: &mut Request<Body>,
         lease: &crate::routing::RouteLease,
+        request_id: u64,
     ) -> Response<Body> {
+        debug!(
+            request_id,
+            execution_id = %lease.execution_id(),
+            execution_generation = lease.execution_generation().get(),
+            port = lease.port().get(),
+            "sandbox data-plane route resolved"
+        );
         let stream = match self
             .connector
             .connect_port(
@@ -124,14 +148,24 @@ impl DataPlaneProxy {
             )
             .await
         {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                debug!(request_id, "sandbox data-plane upstream connected");
+                stream
+            }
             Err(error) => return error_response(ProxyFailure::Connect(error)),
         };
 
         match proxy_upstream(request, stream).await {
-            Ok(response) => response,
+            Ok(response) => {
+                debug!(
+                    request_id,
+                    status = %response.status(),
+                    "sandbox data-plane upstream response headers received"
+                );
+                response
+            }
             Err(error) => {
-                debug!(%error, "sandbox data-plane upstream request failed");
+                debug!(request_id, %error, "sandbox data-plane upstream request failed");
                 error_response(error)
             }
         }

@@ -17,7 +17,7 @@ use axum::body::Body;
 use axum::http::header::{HOST, ORIGIN};
 use axum::http::{HeaderValue, Method, Request, Response, StatusCode, Version};
 use chrono::{DateTime, TimeZone, Utc};
-use hyper::body::to_bytes;
+use hyper::body::{to_bytes, Bytes, HttpBody};
 use hyper::service::service_fn;
 use rustls::pki_types::ServerName;
 use tokio::net::{TcpListener, TcpStream};
@@ -355,6 +355,35 @@ async fn upstream_response(
     Ok(response)
 }
 
+async fn concurrent_stream_upstream_response(
+    request: Request<Body>,
+    open_streams: Arc<Mutex<Vec<hyper::body::Sender>>>,
+) -> Result<Response<Body>, std::convert::Infallible> {
+    let path = request.uri().path().to_string();
+    let _ = to_bytes(request.into_body()).await.unwrap();
+    match path.as_str() {
+        "/process.Process/Start" => {
+            let (mut sender, body) = Body::channel();
+            tokio::spawn(async move {
+                if sender
+                    .send_data(Bytes::from_static(b"open-start-stream"))
+                    .await
+                    .is_ok()
+                {
+                    open_streams.lock().unwrap().push(sender);
+                }
+            });
+            Ok(Response::new(body))
+        }
+        "/process.Process/List" => Ok(Response::new(Body::from("list-response"))),
+        _ => {
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::NOT_FOUND;
+            Ok(response)
+        }
+    }
+}
+
 #[tokio::test]
 async fn translates_downstream_http2_to_plaintext_http1_upstream() {
     let harness = Harness::new().await;
@@ -627,4 +656,134 @@ async fn wildcard_tls_listener_serves_an_authenticated_route() {
     client_task.await.unwrap().unwrap();
     shutdown_sender.send(true).unwrap();
     gateway_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn http2_connection_multiplexes_unary_request_while_stream_is_open() {
+    let harness = Harness::new_with_envd_mode(EnvdMode::Runtime).await;
+    let open_streams = Arc::new(Mutex::new(Vec::new()));
+    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_address = upstream_listener.local_addr().unwrap();
+    let upstream_streams = open_streams.clone();
+    let upstream_task = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = upstream_listener.accept().await else {
+                return;
+            };
+            let connection_streams = upstream_streams.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |request| {
+                    concurrent_stream_upstream_response(request, connection_streams.clone())
+                });
+                let mut http = hyper::server::conn::Http::new();
+                http.http1_only(true);
+                let _ = http.serve_connection(socket, service).await;
+            });
+        }
+    });
+    let connector = Arc::new(TcpConnector {
+        address: upstream_address,
+        calls: Arc::new(Mutex::new(Vec::new())),
+    });
+
+    let temporary = tempfile::tempdir().unwrap();
+    let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(vec![
+        "*.box.example.com".to_string(),
+        "sandbox.box.example.com".to_string(),
+    ])
+    .unwrap();
+    let certificate_path = temporary.path().join("certificate.pem");
+    let private_key_path = temporary.path().join("private-key.pem");
+    std::fs::write(&certificate_path, cert.pem()).unwrap();
+    std::fs::write(&private_key_path, key_pair.serialize_pem()).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let config = DataPlaneGatewayConfig {
+        listen: address,
+        certificate_path,
+        private_key_path,
+        max_connections: NonZeroUsize::new(16).unwrap(),
+        handshake_timeout: Duration::from_secs(2),
+        connect_timeout: Duration::from_secs(2),
+        drain_timeout: Duration::from_secs(2),
+    };
+    let gateway = DataPlaneGateway::build(
+        config,
+        harness.parser.clone(),
+        harness.leases.clone(),
+        harness.executions.clone(),
+        harness.executions.clone(),
+        connector.clone(),
+    )
+    .await
+    .unwrap();
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::watch::channel(false);
+    let gateway_task = tokio::spawn(gateway.serve(listener, shutdown_receiver));
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h2".to_vec()];
+    let tls_connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let host = format!("{}-{}.box.example.com", ENVD_PORT, harness.sandbox_id);
+    let tcp = TcpStream::connect(address).await.unwrap();
+    let tls = tls_connector
+        .connect(ServerName::try_from(host.clone()).unwrap(), tcp)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+    let mut builder = hyper::client::conn::Builder::new();
+    builder.http2_only(true);
+    let (mut sender, connection) = builder.handshake(tls).await.unwrap();
+    let client_task = tokio::spawn(connection);
+
+    let start_request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("https://{host}/process.Process/Start"))
+        .header(ENVD_ACCESS_TOKEN_HEADER, harness.envd_token.expose_secret())
+        .body(Body::from("start"))
+        .unwrap();
+    let mut start_response =
+        tokio::time::timeout(Duration::from_secs(2), sender.send_request(start_request))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(start_response.status(), StatusCode::OK);
+    let first_chunk =
+        tokio::time::timeout(Duration::from_secs(2), start_response.body_mut().data())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    assert_eq!(first_chunk, Bytes::from_static(b"open-start-stream"));
+
+    let list_request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("https://{host}/process.Process/List"))
+        .header(ENVD_ACCESS_TOKEN_HEADER, harness.envd_token.expose_secret())
+        .body(Body::from("list"))
+        .unwrap();
+    let list_response =
+        tokio::time::timeout(Duration::from_secs(2), sender.send_request(list_request))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(list_response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(list_response.into_body()).await.unwrap(),
+        Bytes::from_static(b"list-response")
+    );
+    assert_eq!(connector.calls.lock().unwrap().len(), 2);
+
+    open_streams.lock().unwrap().clear();
+    drop(start_response);
+    drop(sender);
+    client_task.abort();
+    shutdown_sender.send(true).unwrap();
+    gateway_task.await.unwrap().unwrap();
+    upstream_task.abort();
 }
