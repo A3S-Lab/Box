@@ -87,6 +87,10 @@ mod tests {
         for path in ["sbin/init", "usr/sbin/init"] {
             assert_eq!(runtime_managed_rootfs_mode(Path::new(path)), Some(0o755));
         }
+        assert_eq!(
+            runtime_managed_rootfs_mode(Path::new(".a3s-box-env")),
+            Some(0o600)
+        );
         assert_eq!(runtime_managed_rootfs_mode(Path::new("etc/passwd")), None);
     }
 }
