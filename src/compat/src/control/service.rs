@@ -241,11 +241,11 @@ impl ControlService {
                 self.replace(expected, record).await?;
                 return Err(match cleanup {
                     Ok(_) => ControlServiceError::InvalidRequest(error.to_string()),
-                    Err(cleanup_error) => ControlServiceError::Execution(
-                        ExecutionManagerError::Internal(format!(
+                    Err(cleanup_error) => {
+                        ControlServiceError::Execution(ExecutionManagerError::Internal(format!(
                             "{error}; runtime cleanup failed: {cleanup_error}"
-                        )),
-                    ),
+                        )))
+                    }
                 });
             }
         };
