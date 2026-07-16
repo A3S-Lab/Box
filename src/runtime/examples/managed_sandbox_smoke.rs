@@ -408,7 +408,10 @@ mod linux {
             "managed Snapshot failure did not restore the running source",
         )?;
         require(
-            manager.filesystem_snapshot_size(snapshot_id).await?.is_none(),
+            manager
+                .filesystem_snapshot_size(snapshot_id)
+                .await?
+                .is_none(),
             "rejected managed Snapshot was published",
         )?;
         require(

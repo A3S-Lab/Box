@@ -283,9 +283,11 @@ impl ManagedExecutionStore {
                 ManagedExecutionState::Resuming => Some(ManagedExecutionOperation::Resume),
                 ManagedExecutionState::Snapshotting => match metadata.pending_operation.take() {
                     Some(operation @ ManagedExecutionOperation::Snapshot { .. }) => Some(operation),
-                    _ => return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                    _ => {
+                        return Err(ManagedExecutionStoreError::InvalidRecord(format!(
                         "snapshot transition for {execution_id} has no persisted snapshot intent"
-                    ))),
+                    )))
+                    }
                 },
                 ManagedExecutionState::Killing => Some(ManagedExecutionOperation::Kill),
                 ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => {

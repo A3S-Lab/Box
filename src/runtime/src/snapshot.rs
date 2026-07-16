@@ -134,11 +134,12 @@ impl SnapshotStore {
             .prefix(&staging_prefix)
             .tempdir_in(&self.base_dir)
             .map_err(|e| {
-            BoxError::CacheError(format!(
-                "Failed to create snapshot staging directory in {}: {}",
-                self.base_dir.display(), e
-            ))
-        })?;
+                BoxError::CacheError(format!(
+                    "Failed to create snapshot staging directory in {}: {}",
+                    self.base_dir.display(),
+                    e
+                ))
+            })?;
 
         // Copy rootfs if source exists
         let rootfs_dest = staging.path().join("rootfs");
@@ -735,7 +736,10 @@ mod tests {
             .save(make_metadata("symlink-size", "symlink-size"), &rootfs)
             .unwrap();
 
-        assert_eq!(saved.size_bytes, outside.as_os_str().as_bytes().len() as u64);
+        assert_eq!(
+            saved.size_bytes,
+            outside.as_os_str().as_bytes().len() as u64
+        );
     }
 
     #[cfg(unix)]

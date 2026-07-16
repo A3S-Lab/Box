@@ -1655,12 +1655,10 @@ async fn special_file_snapshot_failure_resumes_running_source() {
             .unwrap(),
         None
     );
-    assert!(
-        std::fs::read_dir(directory.path().join("home/snapshots"))
-            .unwrap()
-            .flatten()
-            .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-"))
-    );
+    assert!(std::fs::read_dir(directory.path().join("home/snapshots"))
+        .unwrap()
+        .flatten()
+        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-")));
 }
 
 #[tokio::test]

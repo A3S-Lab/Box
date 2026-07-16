@@ -151,7 +151,10 @@ fn finish_snapshot_copy(
     let current = std::fs::symlink_metadata(dst).map_err(snapshot_copy_error(dst, "inspect"))?;
     if current.uid() != metadata.uid() || current.gid() != metadata.gid() {
         let path = std::ffi::CString::new(dst.as_os_str().as_bytes()).map_err(|_| {
-            BoxError::CacheError(format!("Snapshot path contains a NUL byte: {}", dst.display()))
+            BoxError::CacheError(format!(
+                "Snapshot path contains a NUL byte: {}",
+                dst.display()
+            ))
         })?;
         if unsafe { libc::lchown(path.as_ptr(), metadata.uid(), metadata.gid()) } != 0 {
             return Err(BoxError::CacheError(format!(
@@ -328,10 +331,7 @@ pub(super) fn dir_size(path: &Path) -> Result<u64> {
 }
 
 #[cfg(unix)]
-fn dir_size_unix(
-    path: &Path,
-    seen: &mut std::collections::HashSet<(u64, u64)>,
-) -> Result<u64> {
+fn dir_size_unix(path: &Path, seen: &mut std::collections::HashSet<(u64, u64)>) -> Result<u64> {
     use std::os::unix::fs::MetadataExt;
 
     let metadata = std::fs::symlink_metadata(path).map_err(snapshot_copy_error(path, "size"))?;
@@ -387,7 +387,9 @@ fn dir_size_portable(path: &Path) -> Result<u64> {
             path.display()
         ))
     })? {
-        total = total.saturating_add(dir_size_portable(&entry.map_err(BoxError::IoError)?.path())?);
+        total = total.saturating_add(dir_size_portable(
+            &entry.map_err(BoxError::IoError)?.path(),
+        )?);
     }
     Ok(total)
 }
