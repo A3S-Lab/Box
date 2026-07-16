@@ -56,17 +56,23 @@ a3s-box run --rm --isolation sandbox alpine:latest -- id
 ### E2B-compatible Python and TypeScript SDKs
 
 The A3S Python and TypeScript packages re-export the pinned official E2B
-objects and add typed endpoint configuration. Applications keep the familiar
-`Sandbox`, `AsyncSandbox`, Commands, Filesystem, PTY, and Code Interpreter
-surfaces while A3S Box owns the remote runtime and isolation policy.
+objects and add typed A3S endpoint configuration. Applications keep the
+familiar `Sandbox`, `AsyncSandbox`, Commands, Filesystem, PTY, and Code
+Interpreter surfaces while `a3s-box-e2b` owns the remote runtime and isolation
+policy. No E2B-hosted service is involved.
 
-Configure either SDK with the standard E2B connection variables:
+Point the native SDK at the deployed A3S Box service. A conventional
+`https://api.<domain>` endpoint automatically derives `<domain>` for Sandbox
+routing:
 
 ```bash
-export E2B_API_URL=https://api.box.example.com
-export E2B_DOMAIN=box.example.com
-export E2B_API_KEY=e2b_your_key
+export A3S_BOX_ENDPOINT=https://api.box.example.com
+export A3S_BOX_API_KEY=a3s_your_key
 ```
+
+Non-standard self-hosted routing can additionally set `A3S_BOX_DOMAIN` and
+`A3S_BOX_SANDBOX_URL`. The `E2B_*` variables are needed only when an unchanged
+official E2B SDK is used directly for protocol compatibility.
 
 Python uses async lifecycle management so the remote Sandbox is always cleaned
 up:

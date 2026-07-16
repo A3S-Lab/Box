@@ -4,6 +4,11 @@
 pinned `@e2b/code-interpreter` 2.6.1 package. It does not fork or translate the
 public protocol.
 
+```bash
+export A3S_BOX_ENDPOINT=https://api.box.example.com
+export A3S_BOX_API_KEY=a3s_your_key
+```
+
 ```typescript
 import { A3SConnectionConfig, Sandbox } from '@a3s-lab/box'
 
@@ -22,5 +27,9 @@ try {
 ```
 
 Code Interpreter exports are available from `@a3s-lab/box/code-interpreter`.
-The A3S service owns template and isolation selection; this package never
-starts a local container or runtime.
+`A3SConnectionConfig` derives the Sandbox domain from conventional
+`https://api.<domain>` endpoints. Set `A3S_BOX_DOMAIN` or
+`A3S_BOX_SANDBOX_URL` only for non-standard self-hosted routing. The A3S
+service owns template and isolation selection; this package never starts a
+local container or runtime. Standard `E2B_*` variables are only for running an
+unchanged official SDK directly.

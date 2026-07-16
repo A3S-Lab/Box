@@ -40,15 +40,11 @@ else:
 
 
 def connection(api_url: str, domain: str) -> dict[str, Any]:
+    if NATIVE_SDK:
+        return A3SConnectionConfig.from_environment().python_options()  # type: ignore[name-defined]
     api_key = os.environ.get("E2B_API_KEY")
     if not api_key:
         raise RuntimeError("E2B_API_KEY is required")
-    if NATIVE_SDK:
-        return A3SConnectionConfig(  # type: ignore[name-defined]
-            api_url=api_url,
-            domain=domain,
-            api_key=api_key,
-        ).python_options()
     return {"api_key": api_key, "api_url": api_url, "domain": domain}
 
 

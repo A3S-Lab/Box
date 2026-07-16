@@ -12,13 +12,17 @@ const { Sandbox, SandboxNotFoundError } = baseSdk
 const { Sandbox: CodeInterpreter } = codeInterpreterSdk
 
 const [apiUrl, domain, template] = process.argv.slice(2)
-const apiKey = process.env.E2B_API_KEY
+const apiKey = nativeSdk
+  ? process.env.A3S_BOX_API_KEY
+  : process.env.E2B_API_KEY
 if (!apiUrl || !domain || !template || !apiKey) {
-  throw new Error('API URL, domain, template, and E2B_API_KEY are required')
+  throw new Error('API URL, domain, template, and API key are required')
 }
 
 const connection = nativeSdk
-  ? new baseSdk.A3SConnectionConfig({ apiKey, apiUrl, domain }).typescriptOptions()
+  ? baseSdk.A3SConnectionConfig.fromEnvironment(
+      process.env
+    ).typescriptOptions()
   : { apiKey, apiUrl, domain }
 const metadata = { client: 'typescript', suite: 'production-official' }
 const clientLabel = `${nativeSdk ? 'a3s' : 'official'}-typescript`

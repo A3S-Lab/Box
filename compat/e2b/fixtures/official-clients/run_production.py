@@ -19,6 +19,13 @@ from run_fixtures import (
 )
 
 SDK_ROOT = COMPAT_ROOT.parent.parent / "sdk"
+E2B_CONNECTION_ENVIRONMENT = (
+    "E2B_API_KEY",
+    "E2B_API_URL",
+    "E2B_DOMAIN",
+    "E2B_SANDBOX_URL",
+    "E2B_VALIDATE_API_KEY",
+)
 
 
 def prepare_native_typescript(temp: Path, client: Path) -> None:
@@ -117,6 +124,19 @@ def main() -> None:
 
         if args.native_sdks:
             python_env = os.environ.copy()
+            api_key = python_env["E2B_API_KEY"]
+            sandbox_url = python_env.get("E2B_SANDBOX_URL")
+            for name in E2B_CONNECTION_ENVIRONMENT:
+                python_env.pop(name, None)
+            python_env.update(
+                {
+                    "A3S_BOX_ENDPOINT": args.api_url,
+                    "A3S_BOX_DOMAIN": args.domain,
+                    "A3S_BOX_API_KEY": api_key,
+                }
+            )
+            if sandbox_url:
+                python_env["A3S_BOX_SANDBOX_URL"] = sandbox_url
             python_source = SDK_ROOT / "python" / "src"
             if not python_source.is_dir():
                 raise FileNotFoundError(f"Python SDK source not found: {python_source}")
@@ -139,7 +159,7 @@ def main() -> None:
             )
 
             prepare_native_typescript(temp, typescript_client)
-            typescript_env = os.environ.copy()
+            typescript_env = python_env.copy()
             typescript_env["A3S_BOX_NATIVE_SDK"] = "1"
             subprocess.run(
                 ["node", str(typescript_client), *common],

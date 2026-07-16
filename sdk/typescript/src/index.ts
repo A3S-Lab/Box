@@ -5,4 +5,5 @@ export {
   A3SConnectionConfig,
   type A3SConnectionEnvironment,
   type A3SConnectionOptions,
+  type A3SSandboxConnectionOptions,
 } from './connection.js'

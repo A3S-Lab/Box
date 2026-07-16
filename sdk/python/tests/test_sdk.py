@@ -23,9 +23,9 @@ class SdkTests(unittest.TestCase):
     def test_connection_options_use_standard_e2b_names(self) -> None:
         connection = A3SConnectionConfig.from_environment(
             {
-                "E2B_API_URL": "https://api.box.example.com",
-                "E2B_DOMAIN": "box.example.com",
-                "E2B_API_KEY": "e2b_a1b2c3",
+                "A3S_BOX_ENDPOINT": "https://api.box.example.com",
+                "A3S_BOX_API_KEY": "a3s_a1b2c3",
+                "A3S_BOX_SANDBOX_URL": "https://sandbox.box.example.com",
             }
         )
         self.assertEqual(
@@ -33,9 +33,36 @@ class SdkTests(unittest.TestCase):
             {
                 "api_url": "https://api.box.example.com",
                 "domain": "box.example.com",
-                "api_key": "e2b_a1b2c3",
+                "validate_api_key": False,
+                "api_key": "a3s_a1b2c3",
+                "sandbox_url": "https://sandbox.box.example.com",
             },
         )
+
+    def test_connection_domain_can_be_overridden_for_self_hosting(self) -> None:
+        connection = A3SConnectionConfig.from_environment(
+            {
+                "A3S_BOX_ENDPOINT": "https://gateway.internal.example",
+                "A3S_BOX_DOMAIN": "sandboxes.internal.example",
+            }
+        )
+        self.assertEqual(connection.domain, "sandboxes.internal.example")
+
+    def test_native_config_does_not_require_e2b_environment_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "A3S_BOX_ENDPOINT is required"):
+            A3SConnectionConfig.from_environment(
+                {
+                    "E2B_API_URL": "https://api.box.example.com",
+                    "E2B_DOMAIN": "box.example.com",
+                }
+            )
+
+    def test_connection_rejects_a_non_http_endpoint(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "api_url must be an absolute HTTP or HTTPS URL",
+        ):
+            A3SConnectionConfig(api_url="unix:///run/a3s-box.sock")
 
 
 if __name__ == "__main__":
