@@ -593,8 +593,11 @@ fn remove_entry(parent: &OwnedFd, name: &CString) -> VolumeContentResult<()> {
 
 fn create_temporary_file(parent: &OwnedFd) -> VolumeContentResult<(CString, OwnedFd)> {
     for _ in 0..16 {
-        let name = CString::new(format!("{INTERNAL_UPLOAD_PREFIX}{}", Uuid::new_v4().simple()))
-            .map_err(|_| VolumeContentError::Unavailable("invalid upload name".to_string()))?;
+        let name = CString::new(format!(
+            "{INTERNAL_UPLOAD_PREFIX}{}",
+            Uuid::new_v4().simple()
+        ))
+        .map_err(|_| VolumeContentError::Unavailable("invalid upload name".to_string()))?;
         match open_at(
             parent,
             &name,
