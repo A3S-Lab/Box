@@ -249,6 +249,40 @@ async fn startup_reconciliation_publishes_or_removes_creating_records() {
 }
 
 #[tokio::test]
+async fn periodic_reconciliation_defers_a_snapshot_owned_by_live_capture() {
+    let harness = TestHarness::new();
+    let source = harness
+        .service
+        .create(create_request("owner-a"))
+        .await
+        .unwrap();
+    let pending = harness
+        .snapshots
+        .capture("owner-a", &source.record, Some("live"), template())
+        .await
+        .unwrap();
+    let pending_id = pending.record.snapshot_id().clone();
+
+    let report = harness.snapshots.reconcile_startup().await.unwrap();
+    assert_eq!(report.examined, 1);
+    assert_eq!(report.completed, 0);
+    assert_eq!(report.deferred, 1);
+    assert_eq!(
+        harness
+            .snapshot_repository
+            .get(&pending_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state(),
+        SnapshotState::Creating
+    );
+
+    let published = harness.snapshots.publish(pending).await.unwrap();
+    assert_eq!(published.state(), SnapshotState::Active);
+}
+
+#[tokio::test]
 async fn startup_reconciliation_rolls_an_in_use_delete_back_to_active() {
     let harness = TestHarness::new();
     let source = harness
