@@ -17,6 +17,8 @@ const INITIAL_MIGRATION: &str = include_str!("../../../migrations/0001_lifecycle
 const TEMPORAL_INDEX_MIGRATION_NAME: &str = "temporal_indexes";
 const TEMPORAL_INDEX_MIGRATION: &str =
     include_str!("../../../migrations/0002_temporal_indexes.sql");
+const VOLUME_RECORDS_MIGRATION_NAME: &str = "volume_records";
+const VOLUME_RECORDS_MIGRATION: &str = include_str!("../../../migrations/0003_volume_records.sql");
 
 #[derive(Clone)]
 pub struct SqliteSandboxRepository {
@@ -93,16 +95,42 @@ impl SqliteSandboxRepository {
                         TEMPORAL_INDEX_MIGRATION_NAME,
                         TEMPORAL_INDEX_MIGRATION,
                     )?;
+                    apply_migration(
+                        connection,
+                        3,
+                        VOLUME_RECORDS_MIGRATION_NAME,
+                        VOLUME_RECORDS_MIGRATION,
+                    )?;
                 }
-                [(1, name)] if name == INITIAL_MIGRATION_NAME => apply_migration(
-                    connection,
-                    2,
-                    TEMPORAL_INDEX_MIGRATION_NAME,
-                    TEMPORAL_INDEX_MIGRATION,
-                )?,
+                [(1, name)] if name == INITIAL_MIGRATION_NAME => {
+                    apply_migration(
+                        connection,
+                        2,
+                        TEMPORAL_INDEX_MIGRATION_NAME,
+                        TEMPORAL_INDEX_MIGRATION,
+                    )?;
+                    apply_migration(
+                        connection,
+                        3,
+                        VOLUME_RECORDS_MIGRATION_NAME,
+                        VOLUME_RECORDS_MIGRATION,
+                    )?;
+                }
                 [(1, first), (2, second)]
                     if first == INITIAL_MIGRATION_NAME
-                        && second == TEMPORAL_INDEX_MIGRATION_NAME => {}
+                        && second == TEMPORAL_INDEX_MIGRATION_NAME =>
+                {
+                    apply_migration(
+                        connection,
+                        3,
+                        VOLUME_RECORDS_MIGRATION_NAME,
+                        VOLUME_RECORDS_MIGRATION,
+                    )?;
+                }
+                [(1, first), (2, second), (3, third)]
+                    if first == INITIAL_MIGRATION_NAME
+                        && second == TEMPORAL_INDEX_MIGRATION_NAME
+                        && third == VOLUME_RECORDS_MIGRATION_NAME => {}
                 _ => {
                     return Err(RepositoryError::Corrupt(format!(
                         "unsupported SQLite migration history: {applied:?}"
@@ -112,6 +140,10 @@ impl SqliteSandboxRepository {
             Ok(())
         })
         .await
+    }
+
+    pub(crate) fn connection(&self) -> Connection {
+        self.connection.clone()
     }
 
     async fn call<F, R>(&self, function: F) -> RepositoryResult<R>

@@ -226,6 +226,117 @@ pub fn plan_id_mappings(
     })
 }
 
+/// Translate one container UID through the same mapping allocation used by
+/// Sandbox OCI specifications.
+pub fn map_container_uid(evidence: &UserNamespaceEvidence, uid: u32) -> Result<u32> {
+    map_container_identity(
+        evidence.effective_uid,
+        &evidence.subordinate_uids,
+        uid,
+        "UID",
+    )
+}
+
+/// Translate one container GID through the same mapping allocation used by
+/// Sandbox OCI specifications.
+pub fn map_container_gid(evidence: &UserNamespaceEvidence, gid: u32) -> Result<u32> {
+    map_container_identity(
+        evidence.effective_gid,
+        &evidence.subordinate_gids,
+        gid,
+        "GID",
+    )
+}
+
+/// Recover the container UID represented by a mapped host UID.
+pub fn unmap_host_uid(evidence: &UserNamespaceEvidence, uid: u32) -> Result<u32> {
+    unmap_host_identity(
+        evidence.effective_uid,
+        &evidence.subordinate_uids,
+        uid,
+        "UID",
+    )
+}
+
+/// Recover the container GID represented by a mapped host GID.
+pub fn unmap_host_gid(evidence: &UserNamespaceEvidence, gid: u32) -> Result<u32> {
+    unmap_host_identity(
+        evidence.effective_gid,
+        &evidence.subordinate_gids,
+        gid,
+        "GID",
+    )
+}
+
+fn map_container_identity(
+    effective_id: u32,
+    subordinate_ranges: &[SubordinateIdRange],
+    container_id: u32,
+    kind: &str,
+) -> Result<u32> {
+    let mappings = allocate_id_mappings(effective_id, subordinate_ranges, container_id, kind)?;
+    translate_container_id(&mappings, container_id, kind)
+}
+
+fn unmap_host_identity(
+    effective_id: u32,
+    subordinate_ranges: &[SubordinateIdRange],
+    host_id: u32,
+    kind: &str,
+) -> Result<u32> {
+    if effective_id != 0 && host_id == effective_id {
+        return Ok(0);
+    }
+
+    let mut next_container_id = u32::from(effective_id != 0);
+    for range in subordinate_ranges {
+        if range.size == 0 || range.start == 0 {
+            continue;
+        }
+        let Some(host_end) = range.start.checked_add(range.size) else {
+            continue;
+        };
+        if effective_id != 0 && range.start <= effective_id && effective_id < host_end {
+            continue;
+        }
+        if range.start <= host_id && host_id < host_end {
+            return next_container_id
+                .checked_add(host_id - range.start)
+                .ok_or_else(|| {
+                    BoxError::ConfigError(format!(
+                        "Sandbox {kind} reverse mapping overflows u32"
+                    ))
+                });
+        }
+        next_container_id = next_container_id.checked_add(range.size).ok_or_else(|| {
+            BoxError::ConfigError(format!("Sandbox {kind} mapping range overflows u32"))
+        })?;
+    }
+
+    Err(BoxError::ConfigError(format!(
+        "Sandbox host {kind} {host_id} is outside the configured mappings"
+    )))
+}
+
+fn translate_container_id(mappings: &[IdMapping], container_id: u32, kind: &str) -> Result<u32> {
+    for mapping in mappings {
+        let Some(end) = mapping.container_id.checked_add(mapping.size) else {
+            continue;
+        };
+        if mapping.container_id <= container_id && container_id < end {
+            return mapping
+                .host_id
+                .checked_add(container_id - mapping.container_id)
+                .ok_or_else(|| {
+                    BoxError::ConfigError(format!("Sandbox {kind} mapping overflows u32"))
+                });
+        }
+    }
+    Err(BoxError::ConfigError(format!(
+        "Sandbox mappings do not cover container {kind} {container_id}"
+    )))
+}
+
 fn allocate_id_mappings(
     effective_id: u32,
     subordinate_ranges: &[SubordinateIdRange],
@@ -792,6 +903,45 @@ mod tests {
         assert_eq!(plan.uid_mappings[0].container_id, 0);
         assert_eq!(plan.uid_mappings[0].host_id, 100000);
         assert_eq!(plan.gid_mappings[0].host_id, 200000);
+        assert_eq!(map_container_uid(&evidence, 0).unwrap(), 100000);
+        assert_eq!(map_container_uid(&evidence, 1000).unwrap(), 101000);
+        assert_eq!(unmap_host_uid(&evidence, 100000).unwrap(), 0);
+        assert_eq!(unmap_host_uid(&evidence, 101000).unwrap(), 1000);
+    }
+
+    #[test]
+    fn identity_translation_matches_multi_range_allocation() {
+        let evidence = UserNamespaceEvidence {
+            effective_uid: 1000,
+            effective_gid: 2000,
+            username: None,
+            max_user_namespaces: Some(1024),
+            subordinate_uids: vec![
+                SubordinateIdRange {
+                    start: 100000,
+                    size: 2,
+                },
+                SubordinateIdRange {
+                    start: 200000,
+                    size: 3,
+                },
+            ],
+            subordinate_gids: vec![SubordinateIdRange {
+                start: 300000,
+                size: 8,
+            }],
+        };
+
+        assert_eq!(map_container_uid(&evidence, 0).unwrap(), 1000);
+        assert_eq!(map_container_uid(&evidence, 1).unwrap(), 100000);
+        assert_eq!(map_container_uid(&evidence, 2).unwrap(), 100001);
+        assert_eq!(map_container_uid(&evidence, 3).unwrap(), 200000);
+        assert_eq!(unmap_host_uid(&evidence, 1000).unwrap(), 0);
+        assert_eq!(unmap_host_uid(&evidence, 200002).unwrap(), 5);
+        assert!(map_container_uid(&evidence, 6).is_err());
+        assert!(unmap_host_uid(&evidence, 42).is_err());
+        assert_eq!(map_container_gid(&evidence, 1).unwrap(), 300000);
+        assert_eq!(unmap_host_gid(&evidence, 300000).unwrap(), 1);
     }
 
     #[test]

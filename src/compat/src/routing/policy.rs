@@ -59,7 +59,11 @@ impl SandboxRoutePolicy {
         if self
             .ports
             .iter()
-            .any(|(port, scope)| *port == 0 || (*scope == TokenScope::Envd && *port != ENVD_PORT))
+            .any(|(port, scope)| {
+                *port == 0
+                    || (*scope == TokenScope::Envd && *port != ENVD_PORT)
+                    || *scope == TokenScope::Volume
+            })
         {
             return Err(RoutePolicyError::InvalidScope);
         }

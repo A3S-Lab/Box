@@ -8,12 +8,15 @@ use axum::routing::{get, post};
 use axum::Router;
 
 use crate::control::ControlService;
+use crate::volume::VolumeService;
 
 use super::auth::{CredentialVerifier, PresentedCredential};
 use super::cursor::CursorDecoder;
 use super::error::ApiError;
 use super::lifecycle;
 use super::logs;
+use super::volume_content;
+use super::volumes;
 
 #[derive(Debug, Clone)]
 pub struct LifecycleHttpConfig {
@@ -36,6 +39,7 @@ pub struct LifecycleHttpState {
     verifier: Arc<dyn CredentialVerifier>,
     cursors: Arc<dyn CursorDecoder>,
     config: LifecycleHttpConfig,
+    volumes: Option<Arc<VolumeService>>,
 }
 
 impl LifecycleHttpState {
@@ -50,7 +54,13 @@ impl LifecycleHttpState {
             verifier,
             cursors,
             config,
+            volumes: None,
         }
+    }
+
+    pub fn with_volume_service(mut self, volumes: Arc<VolumeService>) -> Self {
+        self.volumes = Some(volumes);
+        self
     }
 
     pub(crate) fn service(&self) -> &ControlService {
@@ -64,11 +74,15 @@ impl LifecycleHttpState {
     pub(crate) fn domain(&self) -> Option<&str> {
         self.config.domain.as_deref()
     }
+
+    pub(crate) fn volume_service(&self) -> Result<&VolumeService, ApiError> {
+        self.volumes.as_deref().ok_or_else(ApiError::internal)
+    }
 }
 
 pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
     let max_json_bytes = state.config.max_json_bytes;
-    Router::new()
+    let control = Router::new()
         .route(
             "/sandboxes",
             get(lifecycle::list_running).post(lifecycle::create),
@@ -93,8 +107,30 @@ pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
             post(lifecycle::set_timeout),
         )
         .route("/v2/sandboxes/:sandbox_id/logs", get(logs::v2))
+        .route("/volumes", get(volumes::list).post(volumes::create))
+        .route(
+            "/volumes/:volume_id",
+            get(volumes::get).delete(volumes::delete),
+        )
         .fallback(fallback)
-        .route_layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
+    let content = Router::new()
+        .route(
+            "/volumecontent/:volume_id/path",
+            get(volume_content::stat)
+                .patch(volume_content::update_metadata)
+                .delete(volume_content::remove),
+        )
+        .route(
+            "/volumecontent/:volume_id/dir",
+            get(volume_content::list).post(volume_content::make_dir),
+        )
+        .route(
+            "/volumecontent/:volume_id/file",
+            get(volume_content::read_file).put(volume_content::write_file),
+        );
+    control
+        .merge(content)
         .layer(DefaultBodyLimit::max(max_json_bytes))
         .with_state(state)
 }

@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use super::{credential::SandboxCredentials, EnvdMode};
 use crate::routing::SandboxRoutePolicy;
+use crate::volume::VolumeMount;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -193,11 +194,23 @@ pub struct SandboxRecord {
     credentials: SandboxCredentials,
     #[serde(default)]
     routing: SandboxRoutePolicy,
+    #[serde(default)]
+    volume_mounts: Vec<VolumeMount>,
     failure: Option<LifecycleFailure>,
 }
 
 impl SandboxRecord {
     pub fn creating(new: NewSandboxRecord) -> Result<Self, LifecycleError> {
+        Self::creating_with_mounts(new, Vec::new())
+    }
+
+    pub fn creating_with_mounts(
+        new: NewSandboxRecord,
+        volume_mounts: Vec<VolumeMount>,
+    ) -> Result<Self, LifecycleError> {
+        crate::volume::validate_mounts(&volume_mounts).map_err(|error| {
+            LifecycleError::InvalidIdentity(format!("invalid volume mounts: {error}"))
+        })?;
         if new.owner_id.trim().is_empty()
             || new.template_id.trim().is_empty()
             || new.envd_version.trim().is_empty()
@@ -231,6 +244,7 @@ impl SandboxRecord {
             allow_internet_access: new.allow_internet_access,
             credentials: new.credentials,
             routing: new.routing,
+            volume_mounts,
             failure: None,
         })
     }
@@ -317,6 +331,10 @@ impl SandboxRecord {
 
     pub fn routing(&self) -> &SandboxRoutePolicy {
         &self.routing
+    }
+
+    pub fn volume_mounts(&self) -> &[VolumeMount] {
+        &self.volume_mounts
     }
 
     pub const fn failure(&self) -> Option<LifecycleFailure> {

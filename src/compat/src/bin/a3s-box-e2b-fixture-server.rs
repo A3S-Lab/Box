@@ -178,6 +178,7 @@ impl TokenIssuer for FixtureTokens {
         let secret = match scope {
             TokenScope::Envd => "fixture-envd-token",
             TokenScope::Traffic => "fixture-traffic-token",
+            TokenScope::Volume => "fixture-volume-token",
         };
         Ok(IssuedToken {
             secret: SecretToken::new(secret)?,

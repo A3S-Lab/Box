@@ -15,6 +15,9 @@ pub(crate) fn validate_persisted_record(record: &SandboxRecord) -> Result<(), Li
     record.routing().validate().map_err(|error| {
         LifecycleError::InvalidPersistedState(format!("invalid route policy: {error}"))
     })?;
+    crate::volume::validate_mounts(record.volume_mounts()).map_err(|error| {
+        LifecycleError::InvalidPersistedState(format!("invalid volume mounts: {error}"))
+    })?;
     if record.execution_id().is_some() != record.execution_generation().is_some() {
         return Err(LifecycleError::InvalidPersistedState(
             "execution ID and generation must be present together".to_string(),
