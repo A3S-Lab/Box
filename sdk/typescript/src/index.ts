@@ -6,4 +6,5 @@ export {
   type A3SConnectionEnvironment,
   type A3SConnectionOptions,
   type A3SSandboxConnectionOptions,
+  type A3SVolumeConnectionOptions,
 } from './connection.js'

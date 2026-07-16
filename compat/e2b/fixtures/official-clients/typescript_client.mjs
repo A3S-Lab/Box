@@ -2,7 +2,7 @@
 /** Exercise pinned official TypeScript lifecycle clients against the recorder. */
 
 import assert from 'node:assert/strict'
-import { Sandbox, SandboxNotFoundError } from 'e2b'
+import { Sandbox, SandboxNotFoundError, Volume } from 'e2b'
 import { Sandbox as CodeInterpreter } from '@e2b/code-interpreter'
 
 const apiUrl = process.argv[2]
@@ -14,6 +14,37 @@ const connection = {
   apiKey: 'e2b_a1b2c3',
   apiUrl,
 }
+const volumeApi = { apiUrl }
+const volume = await Volume.create('fixture-data', connection)
+assert.equal(volume.token, 'fixture-volume-token')
+const connectedVolume = await Volume.connect(volume.volumeId, connection)
+assert.equal(connectedVolume.name, 'fixture-data')
+assert.ok((await Volume.list(connection)).some((item) => item.volumeId === volume.volumeId))
+const directory = await volume.makeDir('/nested', {
+  ...volumeApi,
+  force: true,
+  mode: 0o755,
+})
+assert.equal(directory.path, '/nested')
+const written = await volume.writeFile('/nested/value.txt', 'volume-value', {
+  ...volumeApi,
+  mode: 0o644,
+})
+assert.equal(written.size, 'volume-value'.length)
+assert.equal(await volume.exists('/nested/value.txt', volumeApi), true)
+const updated = await volume.updateMetadata(
+  '/nested/value.txt',
+  { mode: 0o600 },
+  volumeApi
+)
+assert.equal(updated.mode, 0o600)
+assert.equal((await volume.list('/', { ...volumeApi, depth: 2 })).length, 2)
+assert.equal(
+  await volume.readFile('/nested/value.txt', volumeApi),
+  'volume-value'
+)
+await volume.remove('/nested', volumeApi)
+
 const sandbox = await Sandbox.create('fixture-template', {
   ...connection,
   allowInternetAccess: false,
@@ -25,6 +56,7 @@ const sandbox = await Sandbox.create('fixture-template', {
   metadata: { team: 'alpha beta', purpose: 'fixture' },
   secure: true,
   timeoutMs: 321_000,
+  volumeMounts: { '/mnt/data': volume },
 })
 assert.equal(sandbox.sandboxId, 'fixture-sandbox')
 
@@ -46,7 +78,10 @@ const paginator = Sandbox.list({
     state: ['running', 'paused'],
   },
 })
-assert.equal((await paginator.nextItems()).length, 1)
+const listed = await paginator.nextItems()
+assert.equal(listed.length, 1)
+assert.equal(listed[0].volumeMounts[0].name, 'fixture-data')
+assert.equal(listed[0].volumeMounts[0].path, '/mnt/data')
 
 await sandbox.setTimeout(123_000)
 assert.equal(await sandbox.kill(), true)
@@ -59,3 +94,4 @@ await assert.rejects(
 const interpreter = await CodeInterpreter.create(connection)
 assert.equal(interpreter.sandboxId, 'fixture-interpreter')
 assert.equal(await interpreter.kill(), true)
+assert.equal(await Volume.destroy(volume.volumeId, connection), true)

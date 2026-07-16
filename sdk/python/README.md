@@ -49,3 +49,15 @@ endpoint decides the execution template and isolation policy; the SDK never
 invokes a local runtime. `E2B_API_URL` is not read by this package. It is used
 only when the unchanged official SDK is intentionally connected to the same
 A3S Box endpoint.
+
+Volume control requests use `connection.python_options()`. Volume content
+requests use `connection.volume_options()` so they reach that same A3S Box
+endpoint without `E2B_VOLUME_API_URL`:
+
+```python
+from a3s_box import A3SConnectionConfig, Volume
+
+connection = A3SConnectionConfig.from_environment()
+volume = Volume.create("data", **connection.python_options())
+volume.write_file("/input.txt", "hello", **connection.volume_options())
+```

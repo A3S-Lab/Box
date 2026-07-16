@@ -23,7 +23,7 @@ from typing import Any
 FIXTURE_DIR = Path(__file__).resolve().parent
 COMPAT_ROOT = FIXTURE_DIR.parent.parent
 SOURCE_LOCK = COMPAT_ROOT / "upstream.lock.json"
-EXPECTED_REQUESTS = 11
+EXPECTED_REQUESTS = 22
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 120
 

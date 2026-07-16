@@ -17,6 +17,10 @@ from typing import Any, ClassVar
 SANDBOX_ID = "fixture-sandbox"
 INTERPRETER_SANDBOX_ID = "fixture-interpreter"
 MISSING_SANDBOX_ID = "missing-sandbox"
+VOLUME_ID = "fixture-volume"
+VOLUME_NAME = "fixture-data"
+VOLUME_TOKEN = "fixture-volume-token"
+VOLUME_CONTENT = "volume-value"
 
 
 def sandbox_response(sandbox_id: str) -> dict[str, Any]:
@@ -44,7 +48,22 @@ def listed_sandbox() -> dict[str, Any]:
         "startedAt": "2026-07-14T12:00:00Z",
         "state": "running",
         "templateID": "fixture-template",
-        "volumeMounts": [],
+        "volumeMounts": [{"name": VOLUME_NAME, "path": "/mnt/data"}],
+    }
+
+
+def volume_entry(path: str, entry_type: str, size: int, mode: int) -> dict[str, Any]:
+    return {
+        "name": path.rsplit("/", 1)[-1] or "/",
+        "type": entry_type,
+        "path": path,
+        "size": size,
+        "mode": mode,
+        "uid": 0,
+        "gid": 0,
+        "atime": "2026-07-14T12:00:00Z",
+        "mtime": "2026-07-14T12:00:00Z",
+        "ctime": "2026-07-14T12:00:00Z",
     }
 
 
@@ -66,6 +85,12 @@ class FixtureHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         self._handle()
 
+    def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._handle()
+
+    def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        self._handle()
+
     def log_message(self, _format: str, *args: object) -> None:
         del args
 
@@ -75,7 +100,75 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self._capture(parsed, body)
 
         path = parsed.path
-        if self.command == "POST" and path == "/sandboxes":
+        query = urllib.parse.parse_qs(parsed.query)
+        requested_path = query.get("path", [None])[0]
+        if self.command == "POST" and path == "/volumes":
+            self._json(
+                HTTPStatus.CREATED,
+                {"volumeID": VOLUME_ID, "name": VOLUME_NAME, "token": VOLUME_TOKEN},
+            )
+        elif self.command == "GET" and path == "/volumes":
+            self._json(HTTPStatus.OK, [{"volumeID": VOLUME_ID, "name": VOLUME_NAME}])
+        elif self.command == "GET" and path == f"/volumes/{VOLUME_ID}":
+            self._json(
+                HTTPStatus.OK,
+                {"volumeID": VOLUME_ID, "name": VOLUME_NAME, "token": VOLUME_TOKEN},
+            )
+        elif self.command == "DELETE" and path == f"/volumes/{VOLUME_ID}":
+            self._empty(HTTPStatus.NO_CONTENT)
+        elif self.command == "POST" and path == f"/volumecontent/{VOLUME_ID}/dir":
+            self._json(
+                HTTPStatus.CREATED,
+                volume_entry(requested_path or "/nested", "directory", 0, 0o755),
+            )
+        elif self.command == "PUT" and path == f"/volumecontent/{VOLUME_ID}/file":
+            self._json(
+                HTTPStatus.CREATED,
+                volume_entry(
+                    requested_path or "/nested/value.txt",
+                    "file",
+                    len(VOLUME_CONTENT),
+                    0o644,
+                ),
+            )
+        elif self.command == "GET" and path == f"/volumecontent/{VOLUME_ID}/path":
+            self._json(
+                HTTPStatus.OK,
+                volume_entry(
+                    requested_path or "/nested/value.txt",
+                    "file",
+                    len(VOLUME_CONTENT),
+                    0o644,
+                ),
+            )
+        elif self.command == "PATCH" and path == f"/volumecontent/{VOLUME_ID}/path":
+            self._json(
+                HTTPStatus.OK,
+                volume_entry(
+                    requested_path or "/nested/value.txt",
+                    "file",
+                    len(VOLUME_CONTENT),
+                    0o600,
+                ),
+            )
+        elif self.command == "GET" and path == f"/volumecontent/{VOLUME_ID}/dir":
+            self._json(
+                HTTPStatus.OK,
+                [
+                    volume_entry("/nested", "directory", 0, 0o755),
+                    volume_entry(
+                        "/nested/value.txt",
+                        "file",
+                        len(VOLUME_CONTENT),
+                        0o600,
+                    ),
+                ],
+            )
+        elif self.command == "GET" and path == f"/volumecontent/{VOLUME_ID}/file":
+            self._bytes(HTTPStatus.OK, VOLUME_CONTENT.encode())
+        elif self.command == "DELETE" and path == f"/volumecontent/{VOLUME_ID}/path":
+            self._empty(HTTPStatus.NO_CONTENT)
+        elif self.command == "POST" and path == "/sandboxes":
             with self.capture_lock:
                 self.__class__.create_count += 1
                 sandbox_id = (
@@ -203,6 +296,13 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _bytes(self, status: HTTPStatus, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def main() -> None:

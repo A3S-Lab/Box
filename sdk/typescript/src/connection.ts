@@ -20,6 +20,10 @@ export interface A3SSandboxConnectionOptions {
   sandboxUrl?: string
 }
 
+export interface A3SVolumeConnectionOptions {
+  apiUrl: string
+}
+
 /** Typed connection values accepted by the pinned official E2B SDK. */
 export class A3SConnectionConfig {
   readonly apiUrl: string
@@ -68,6 +72,10 @@ export class A3SConnectionConfig {
         ? {}
         : { sandboxUrl: this.sandboxUrl }),
     }
+  }
+
+  volumeOptions(): A3SVolumeConnectionOptions {
+    return { apiUrl: this.apiUrl }
   }
 }
 
