@@ -74,11 +74,8 @@ Set `A3S_BOX_DOMAIN` only when the control endpoint does not follow the
 conventional `api.<domain>` form. The service advertises the direct Sandbox
 authority, including a non-standard public TLS port, so normal deployments do
 not need a client-side Sandbox URL override. `A3S_BOX_SANDBOX_URL` remains a
-single-Sandbox fixture escape hatch. Normal A3S SDK applications do not set
-`E2B_API_URL`. That name appears only when an unchanged official E2B SDK is
-connected directly to A3S Box, because it is the endpoint variable exposed by
-the official client; its value still points to A3S Box, not an E2B-hosted
-service.
+single-Sandbox fixture escape hatch. Normal A3S SDK applications use only the
+`A3S_BOX_*` connection settings; the endpoint is always an A3S Box deployment.
 
 Python uses async lifecycle management so the remote Sandbox is always cleaned
 up:
@@ -576,6 +573,23 @@ matrix and are built as GitHub Release assets. They are not yet published to
 PyPI or npm. Passing this subset is not evidence for unimplemented protocol
 surfaces, so the generated manifest continues to report
 `full_compatibility=false`.
+
+#### Zero-source-change migration from an official E2B SDK
+
+An application that deliberately keeps the unmodified official `e2b` package
+can point that client at A3S Box with the configuration names already defined
+by the official SDK:
+
+```bash
+export E2B_API_URL=https://api.box.example.com
+export E2B_DOMAIN=box.example.com
+export E2B_API_KEY=e2b_a1b2c3
+```
+
+These are client-side compatibility names only. `E2B_API_URL` points to the
+A3S Box control endpoint; A3S Box does not depend on or contact an E2B-hosted
+service. New A3S integrations should use the A3S SDK example at the beginning
+of this README and its `A3S_BOX_*` settings.
 
 See [E2B Protocol Compatibility and SDK Design](docs/e2b-compatible-sdk-design.md)
 for the release definition, architecture, ACL schema, and remaining gates.
