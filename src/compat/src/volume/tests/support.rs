@@ -108,7 +108,8 @@ impl TokenVerifier for TestTokens {
         if scope != TokenScope::Volume {
             return Ok(false);
         }
-        Ok(Sha256::digest(presented.expose_secret().as_bytes()).as_slice() == stored.digest())
+        let digest = Sha256::digest(presented.expose_secret().as_bytes());
+        Ok(digest.as_ref() == stored.digest())
     }
 }
 

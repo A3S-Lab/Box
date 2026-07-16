@@ -42,6 +42,16 @@ impl VolumeMount {
                 "volume mount path must be an absolute non-root path".to_string(),
             ));
         }
+        if self
+            .path
+            .split('/')
+            .skip(1)
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            return Err(VolumeServiceError::InvalidRequest(
+                "volume mount path must be lexically normalized".to_string(),
+            ));
+        }
         for component in path.components() {
             if matches!(
                 component,

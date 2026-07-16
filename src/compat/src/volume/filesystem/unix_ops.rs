@@ -17,6 +17,7 @@ const MAX_PATH_BYTES: usize = 4096;
 const MAX_COMPONENT_BYTES: usize = 255;
 const DEFAULT_DIRECTORY_MODE: u32 = 0o755;
 const DEFAULT_FILE_MODE: u32 = 0o644;
+const INTERNAL_UPLOAD_PREFIX: &str = ".a3s-upload-";
 
 pub struct PreparedUpload {
     parent: OwnedFd,
@@ -327,6 +328,11 @@ impl NormalizedPath {
                     "path traversal components are forbidden".to_string(),
                 ));
             }
+            if component.starts_with(INTERNAL_UPLOAD_PREFIX) {
+                return Err(VolumeContentError::InvalidPath(
+                    "path uses a reserved volume component".to_string(),
+                ));
+            }
             if component.len() > MAX_COMPONENT_BYTES {
                 return Err(VolumeContentError::InvalidPath(
                     "path component exceeds 255 bytes".to_string(),
@@ -489,6 +495,9 @@ fn list_directory(
     output: &mut Vec<VolumeEntry>,
 ) -> VolumeContentResult<()> {
     for (name, display_name) in read_directory_names(directory)? {
+        if display_name.starts_with(INTERNAL_UPLOAD_PREFIX) {
+            continue;
+        }
         let path = if base == "/" {
             format!("/{display_name}")
         } else {
@@ -584,7 +593,7 @@ fn remove_entry(parent: &OwnedFd, name: &CString) -> VolumeContentResult<()> {
 
 fn create_temporary_file(parent: &OwnedFd) -> VolumeContentResult<(CString, OwnedFd)> {
     for _ in 0..16 {
-        let name = CString::new(format!(".a3s-upload-{}", Uuid::new_v4().simple()))
+        let name = CString::new(format!("{INTERNAL_UPLOAD_PREFIX}{}", Uuid::new_v4().simple()))
             .map_err(|_| VolumeContentError::Unavailable("invalid upload name".to_string()))?;
         match open_at(
             parent,
