@@ -75,7 +75,7 @@ pub(crate) fn persist_resolved_image_config(box_dir: &Path, config: &OciImageCon
 pub(crate) fn load_snapshot_oci_config(
     rootfs: &Path,
     expected_image: &str,
-) -> Result<Option<OciImageConfig>> {
+) -> Result<OciImageConfig> {
     if rootfs.file_name().is_none_or(|name| name != "rootfs") {
         return Err(BoxError::ConfigError(format!(
             "Snapshot lower must end in rootfs: {}",
@@ -104,7 +104,9 @@ pub(crate) fn load_snapshot_oci_config(
             metadata.image
         )));
     }
-    Ok(metadata.image_config.map(OciImageConfig::from))
+    Ok(OciImageConfig::from(
+        metadata.require_image_config()?.clone(),
+    ))
 }
 
 fn read_regular_json<T: DeserializeOwned>(path: &Path, description: &str) -> Result<T> {

@@ -215,6 +215,7 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
 
     // Find snapshot by ID or name
     let meta = resolve_snapshot(&store, &args.snapshot)?;
+    meta.require_image_config()?;
 
     // Create a new box record from snapshot metadata
     let box_id = uuid::Uuid::new_v4().to_string();

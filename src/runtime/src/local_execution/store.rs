@@ -57,6 +57,11 @@ impl LocalExecutionManager {
                     "filesystem snapshot {snapshot_id} is not a valid published snapshot"
                 )));
             }
+            metadata.require_image_config().map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "filesystem snapshot {snapshot_id} cannot be restored: {error}"
+                ))
+            })?;
             store.reserve(record).map_err(map_store_error)
         })
         .await

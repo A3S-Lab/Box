@@ -702,6 +702,9 @@ impl A3sBoxClient {
         request.validate()?;
         let store = self.snapshot_store()?;
         let metadata = resolve_snapshot_metadata(&store, snapshot_query)?;
+        metadata
+            .require_image_config()
+            .map_err(|error| ClientError::Validation(error.to_string()))?;
         let state = self.load_state()?;
         let box_name = request
             .name

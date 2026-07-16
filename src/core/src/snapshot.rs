@@ -4,6 +4,7 @@
 //! can be reconstructed from the saved spec. Combined with rootfs caching,
 //! restore achieves sub-500ms cold start.
 
+use crate::error::{BoxError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -170,6 +171,20 @@ impl SnapshotMetadata {
         self.memory_mb = memory_mb;
         self
     }
+
+    /// Return the captured OCI image defaults required for a safe restore.
+    ///
+    /// Snapshot records created before this field existed remain readable so
+    /// operators can inspect and delete them, but restoring one would lose
+    /// image entrypoint, environment, user, and working-directory semantics.
+    pub fn require_image_config(&self) -> Result<&SnapshotImageConfig> {
+        self.image_config.as_ref().ok_or_else(|| {
+            BoxError::ConfigError(format!(
+                "Snapshot '{}' does not contain resolved OCI image configuration and cannot be restored safely; recreate it with the current A3S Box version",
+                self.id
+            ))
+        })
+    }
 }
 
 /// Configuration for snapshot operations.
@@ -268,6 +283,7 @@ mod tests {
         assert_eq!(parsed.id, "snap-old");
         assert_eq!(parsed.size_bytes, 0);
         assert_eq!(parsed.created_at, DateTime::<Utc>::UNIX_EPOCH);
+        assert!(parsed.require_image_config().is_err());
     }
 
     #[test]

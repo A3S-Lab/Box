@@ -196,6 +196,7 @@
             .labels
             .insert("tier".to_string(), "api".to_string());
         metadata.network_mode = Some("bridge".to_string());
+        metadata.image_config = Some(a3s_box_core::SnapshotImageConfig::default());
         store.save(metadata, &source).unwrap();
 
         let restored = client
@@ -257,16 +258,15 @@
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("file"), "snapshot-data").unwrap();
         let store = SnapshotStore::new(&client.paths().snapshots_dir).unwrap();
+        let mut metadata = SnapshotMetadata::new(
+            "snap-by-name".to_string(),
+            "after-migration".to_string(),
+            "box-1".to_string(),
+            "alpine:latest".to_string(),
+        );
+        metadata.image_config = Some(a3s_box_core::SnapshotImageConfig::default());
         store
-            .save(
-                SnapshotMetadata::new(
-                    "snap-by-name".to_string(),
-                    "after-migration".to_string(),
-                    "box-1".to_string(),
-                    "alpine:latest".to_string(),
-                ),
-                &source,
-            )
+            .save(metadata, &source)
             .unwrap();
 
         let restored = client
