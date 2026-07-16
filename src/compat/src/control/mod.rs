@@ -1,4 +1,5 @@
 mod credential;
+mod lifetime;
 mod memory;
 mod model;
 mod ports;

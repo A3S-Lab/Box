@@ -7,6 +7,7 @@ use a3s_box_core::{
 };
 use thiserror::Error;
 
+use super::lifetime::ready_lifetime;
 use super::{
     Clock, CompareAndSwapResult, LifecycleError, LifecycleFailure, LifecycleState, RepositoryError,
     SandboxGeneration, SandboxId, SandboxRecord, SandboxRepository,
@@ -367,7 +368,17 @@ impl LifecycleSupervisor {
         lease: ExecutionLease,
     ) -> MaintenanceItemResult<MaintenanceDisposition> {
         let expected = record.generation();
-        record.mark_running(lease)?;
+        if record.state() == LifecycleState::Creating {
+            let (ready_at, expires_at) = ready_lifetime(
+                self.clock.now(),
+                lease.started_at,
+                record.resources().timeout,
+            )
+            .map_err(|error| MaintenanceItemError::Inconsistent(error.to_string()))?;
+            record.mark_ready(lease, ready_at, expires_at)?;
+        } else {
+            record.mark_running(lease)?;
+        }
         self.replace(expected, record).await
     }
 
