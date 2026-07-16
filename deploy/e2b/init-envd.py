@@ -5,6 +5,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 
 
 ENVD_URL = "http://127.0.0.1:49983"
@@ -18,6 +19,22 @@ INTERNAL_ENVIRONMENT = {
     "SHLVL",
     "_",
 }
+DEFAULT_USER_ENVIRONMENT = {
+    "HOME": "/home/user",
+    "LOGNAME": "user",
+    "SHELL": "/bin/bash",
+    "USER": "user",
+}
+
+
+def build_environment(source: Mapping[str, str]) -> dict[str, str]:
+    environment = {
+        key: value
+        for key, value in source.items()
+        if key not in INTERNAL_ENVIRONMENT and key not in DEFAULT_USER_ENVIRONMENT
+    }
+    environment.update(DEFAULT_USER_ENVIRONMENT)
+    return environment
 
 
 def wait_for_envd() -> None:
@@ -34,11 +51,7 @@ def wait_for_envd() -> None:
 
 
 def initialize_envd() -> None:
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in INTERNAL_ENVIRONMENT
-    }
+    environment = build_environment(os.environ)
     body = json.dumps(
         {
             "defaultUser": "user",

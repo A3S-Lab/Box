@@ -25,6 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Test envd initialization
+        run: python3 -m unittest discover -s deploy/e2b -p 'test_*.py'
+
       - uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
