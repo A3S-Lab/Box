@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::{
     ConnectionDisposition, CreateSandboxRequest, LifecyclePolicy, OnTimeoutAction,
-    PublicSandboxState, SandboxConnection, SandboxListFilter, SandboxRecord,
+    PublicSandboxState, SandboxConnection, SandboxId, SandboxListFilter, SandboxMetric,
+    SandboxRecord,
 };
 
 use super::cursor::CursorDecoder;
@@ -85,6 +86,127 @@ struct AutoResumeBody {
 #[serde(deny_unknown_fields)]
 pub struct TimeoutBody {
     pub timeout: u32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RefreshBody {
+    #[serde(default)]
+    duration: Option<u32>,
+}
+
+impl RefreshBody {
+    pub fn duration(self) -> Result<u32, ApiError> {
+        let duration = self.duration.unwrap_or_else(default_timeout);
+        if duration > 3_600 {
+            return Err(ApiError::bad_request(
+                "refresh duration must be between 0 and 3600 seconds",
+            ));
+        }
+        Ok(duration.max(default_timeout()))
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MetricRange {
+    start: Option<i64>,
+    end: Option<i64>,
+}
+
+impl MetricRange {
+    pub fn contains(self, timestamp: i64) -> bool {
+        self.start.is_none_or(|start| timestamp >= start)
+            && self.end.is_none_or(|end| timestamp <= end)
+    }
+}
+
+pub fn parse_metric_range(raw_query: Option<&str>) -> Result<MetricRange, ApiError> {
+    let mut range = MetricRange::default();
+    for (name, value) in url::form_urlencoded::parse(raw_query.unwrap_or_default().as_bytes()) {
+        let parsed = value
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value >= 0)
+            .ok_or_else(|| ApiError::bad_request("metric timestamps must be non-negative"))?;
+        match name.as_ref() {
+            "start" if range.start.replace(parsed).is_none() => {}
+            "end" if range.end.replace(parsed).is_none() => {}
+            "start" | "end" => {
+                return Err(ApiError::bad_request(
+                    "metric timestamp parameters must not be repeated",
+                ))
+            }
+            _ => return Err(ApiError::bad_request("unknown sandbox metrics parameter")),
+        }
+    }
+    if matches!((range.start, range.end), (Some(start), Some(end)) if start > end) {
+        return Err(ApiError::bad_request(
+            "metric start timestamp must not exceed end timestamp",
+        ));
+    }
+    Ok(range)
+}
+
+pub fn parse_metric_sandbox_ids(raw_query: Option<&str>) -> Result<Vec<SandboxId>, ApiError> {
+    let mut values = None;
+    for (name, value) in url::form_urlencoded::parse(raw_query.unwrap_or_default().as_bytes()) {
+        if name != "sandbox_ids" || values.replace(value.into_owned()).is_some() {
+            return Err(ApiError::bad_request(
+                "sandbox_ids must be provided exactly once",
+            ));
+        }
+    }
+    let values = values.ok_or_else(|| ApiError::bad_request("sandbox_ids is required"))?;
+    let mut unique = BTreeSet::new();
+    let mut sandbox_ids = Vec::new();
+    for value in values.split(',') {
+        let sandbox_id = SandboxId::new(value.to_string())
+            .map_err(|_| ApiError::bad_request("sandbox_ids contains an invalid Sandbox ID"))?;
+        if !unique.insert(sandbox_id.to_string()) {
+            return Err(ApiError::bad_request("sandbox_ids must be unique"));
+        }
+        sandbox_ids.push(sandbox_id);
+    }
+    if sandbox_ids.is_empty() || sandbox_ids.len() > 100 {
+        return Err(ApiError::bad_request(
+            "sandbox_ids must contain between 1 and 100 IDs",
+        ));
+    }
+    Ok(sandbox_ids)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxMetricResponse {
+    timestamp: String,
+    timestamp_unix: i64,
+    cpu_count: u32,
+    cpu_used_pct: f32,
+    mem_used: u64,
+    mem_total: u64,
+    mem_cache: u64,
+    disk_used: u64,
+    disk_total: u64,
+}
+
+impl From<SandboxMetric> for SandboxMetricResponse {
+    fn from(metric: SandboxMetric) -> Self {
+        Self {
+            timestamp: format_time(metric.timestamp),
+            timestamp_unix: metric.timestamp.timestamp(),
+            cpu_count: metric.cpu_count,
+            cpu_used_pct: metric.cpu_used_pct,
+            mem_used: metric.mem_used,
+            mem_total: metric.mem_total,
+            mem_cache: metric.mem_cache,
+            disk_used: metric.disk_used,
+            disk_total: metric.disk_total,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SandboxesWithMetricsResponse {
+    pub sandboxes: BTreeMap<String, SandboxMetricResponse>,
 }
 
 pub fn parse_list_filter(

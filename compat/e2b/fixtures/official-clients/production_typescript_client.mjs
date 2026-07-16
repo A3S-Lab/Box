@@ -156,6 +156,28 @@ try {
   assert.equal(connected.sandboxId, sandbox.sandboxId)
   trace('sandbox.health')
   assert.equal(await sandbox.isRunning(), true)
+  trace('sandbox.metrics')
+  const metrics = await sandbox.getMetrics()
+  assert.ok(metrics.length > 0)
+  for (const field of [
+    'timestamp',
+    'cpuCount',
+    'cpuUsedPct',
+    'memUsed',
+    'memTotal',
+    'diskUsed',
+    'diskTotal',
+  ]) {
+    assert.notEqual(metrics[0][field], undefined)
+  }
+  trace('sandbox.metrics-past-range')
+  assert.deepEqual(
+    await sandbox.getMetrics({
+      start: new Date('1970-01-01T00:00:00Z'),
+      end: new Date('1970-01-02T00:00:00Z'),
+    }),
+    []
+  )
   trace('process.foreground')
   const command = await sandbox.commands.run(
     'printf \'typescript:%s\' "$OFFICIAL_CLIENT"'

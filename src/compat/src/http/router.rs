@@ -68,13 +68,22 @@ impl LifecycleHttpState {
 pub fn lifecycle_router(state: LifecycleHttpState) -> Router {
     let max_json_bytes = state.config.max_json_bytes;
     Router::new()
-        .route("/sandboxes", post(lifecycle::create))
+        .route(
+            "/sandboxes",
+            get(lifecycle::list_running).post(lifecycle::create),
+        )
+        .route("/sandboxes/metrics", get(lifecycle::get_metrics_batch))
         .route("/v2/sandboxes", get(lifecycle::list))
         .route(
             "/sandboxes/:sandbox_id",
             get(lifecycle::get).delete(lifecycle::kill),
         )
         .route("/sandboxes/:sandbox_id/connect", post(lifecycle::connect))
+        .route(
+            "/sandboxes/:sandbox_id/metrics",
+            get(lifecycle::get_metrics),
+        )
+        .route("/sandboxes/:sandbox_id/refreshes", post(lifecycle::refresh))
         .route(
             "/sandboxes/:sandbox_id/timeout",
             post(lifecycle::set_timeout),

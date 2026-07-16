@@ -78,6 +78,38 @@ async fn lifecycle_service_runs_the_official_control_flow() {
             .expires_at(),
         test_time() + Duration::seconds(123)
     );
+
+    let generation = harness
+        .service
+        .get("owner-1", &sandbox_id)
+        .await
+        .unwrap()
+        .generation();
+    harness
+        .service
+        .refresh_timeout("owner-1", &sandbox_id, 60)
+        .await
+        .unwrap();
+    let unchanged = harness.service.get("owner-1", &sandbox_id).await.unwrap();
+    assert_eq!(unchanged.expires_at(), test_time() + Duration::seconds(123));
+    assert_eq!(unchanged.generation(), generation);
+
+    harness
+        .service
+        .refresh_timeout("owner-1", &sandbox_id, 600)
+        .await
+        .unwrap();
+    let refreshed = harness.service.get("owner-1", &sandbox_id).await.unwrap();
+    assert_eq!(refreshed.expires_at(), test_time() + Duration::seconds(600));
+    assert!(refreshed.generation() > generation);
+    assert!(matches!(
+        harness
+            .service
+            .refresh_timeout("owner-2", &sandbox_id, 900)
+            .await,
+        Err(ControlServiceError::NotFound(_))
+    ));
+
     assert!(harness.service.kill("owner-1", &sandbox_id).await.unwrap());
     assert!(!harness.service.kill("owner-1", &sandbox_id).await.unwrap());
     assert!(matches!(
@@ -198,6 +230,55 @@ async fn runtime_envd_is_ready_before_the_sandbox_is_published() {
     assert_eq!(requests[0].2["envVars"]["BETA"], "two");
     assert_eq!(requests[0].2["timestamp"], "2026-07-14T12:00:00Z");
     assert!(requests[0].2.get("accessToken").is_none());
+}
+
+#[tokio::test]
+async fn runtime_envd_metrics_are_generation_fenced_and_typed() {
+    let harness = TestHarness::new();
+    let mut request = create_request("owner-1");
+    request.template_id = "runtime-envd-template".to_string();
+    let created = harness.service.create(request).await.unwrap();
+
+    let metric = harness
+        .service
+        .current_metric("owner-1", created.record.sandbox_id())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(metric.timestamp, test_time());
+    assert_eq!(metric.cpu_count, 2);
+    assert_eq!(metric.cpu_used_pct, 12.5);
+    assert_eq!(metric.mem_used, 134_217_728);
+    assert_eq!(metric.mem_total, 536_870_912);
+    assert_eq!(metric.mem_cache, 0);
+    assert_eq!(metric.disk_used, 268_435_456);
+    assert_eq!(metric.disk_total, 1_073_741_824);
+    assert_eq!(
+        harness.executions.port_requests(),
+        vec![
+            (
+                "execution-operation-1".to_string(),
+                1,
+                crate::routing::ENVD_PORT,
+            ),
+            (
+                "execution-operation-1".to_string(),
+                1,
+                crate::routing::ENVD_PORT,
+            ),
+        ]
+    );
+    let requests = harness.executions.runtime_envd_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1],
+        (
+            "GET".to_string(),
+            "/metrics".to_string(),
+            serde_json::Value::Null
+        )
+    );
 }
 
 #[tokio::test]

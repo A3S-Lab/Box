@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import os
 from typing import Any
 
@@ -55,6 +56,23 @@ def assert_listed(items: list[Any], sandbox_id: str) -> None:
 
 def trace(label: str, stage: str) -> None:
     print(f"{label}:{stage}", flush=True)
+
+
+def assert_metrics(metrics: list[Any], label: str) -> None:
+    if not metrics:
+        raise AssertionError(f"{label} metrics were empty")
+    metric = metrics[0]
+    for field in (
+        "timestamp",
+        "cpu_count",
+        "cpu_used_pct",
+        "mem_used",
+        "mem_total",
+        "disk_used",
+        "disk_total",
+    ):
+        if getattr(metric, field, None) is None:
+            raise AssertionError(f"{label} metric omitted {field}: {metric!r}")
 
 
 def exercise_sync_data_plane(sandbox: Sandbox, label: str) -> None:
@@ -301,6 +319,14 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         trace(label, "sandbox.health")
         if not sandbox.is_running():
             raise AssertionError("envd health reported the running sandbox as stopped")
+        trace(label, "sandbox.metrics")
+        assert_metrics(sandbox.get_metrics(), label)
+        trace(label, "sandbox.metrics-past-range")
+        if sandbox.get_metrics(
+            start=datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc),
+            end=datetime.datetime(1970, 1, 2, tzinfo=datetime.timezone.utc),
+        ):
+            raise AssertionError("past metrics range returned current samples")
         trace(label, "process.foreground")
         result = sandbox.commands.run(
             "printf 'python-sync:%s' \"$OFFICIAL_CLIENT\""
@@ -388,6 +414,14 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         trace(label, "sandbox.health")
         if not await sandbox.is_running():
             raise AssertionError("envd health reported the running sandbox as stopped")
+        trace(label, "sandbox.metrics")
+        assert_metrics(await sandbox.get_metrics(), label)
+        trace(label, "sandbox.metrics-past-range")
+        if await sandbox.get_metrics(
+            start=datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc),
+            end=datetime.datetime(1970, 1, 2, tzinfo=datetime.timezone.utc),
+        ):
+            raise AssertionError("past metrics range returned current samples")
         trace(label, "process.foreground")
         result = await sandbox.commands.run(
             "printf 'python-async:%s' \"$OFFICIAL_CLIENT\""

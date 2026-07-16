@@ -17,6 +17,7 @@ axum = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+futures = { workspace = true }
 hex = { workspace = true }
 hyper = { workspace = true }
 prost = { workspace = true }
