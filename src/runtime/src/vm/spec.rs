@@ -226,17 +226,14 @@ impl VmManager {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(
-                        &host_path,
-                        std::fs::Permissions::from_mode(0o600),
-                    )
-                    .map_err(|error| BoxError::BoxBootError {
-                        message: format!(
-                            "failed to secure guest env file {}: {error}",
-                            host_path.display()
-                        ),
-                        hint: None,
-                    })?;
+                    std::fs::set_permissions(&host_path, std::fs::Permissions::from_mode(0o600))
+                        .map_err(|error| BoxError::BoxBootError {
+                            message: format!(
+                                "failed to secure guest env file {}: {error}",
+                                host_path.display()
+                            ),
+                            hint: None,
+                        })?;
                 }
                 env.push((
                     "BOX_EXEC_ENV_FILE".to_string(),

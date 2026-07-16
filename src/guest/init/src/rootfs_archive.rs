@@ -483,11 +483,7 @@ mod tests {
             0o755
         );
         assert_eq!(
-            std::fs::metadata(environment)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o7777,
+            std::fs::metadata(environment).unwrap().permissions().mode() & 0o7777,
             0o600
         );
     }
