@@ -75,7 +75,7 @@ a3s-box run --rm --isolation sandbox alpine:latest -- id
   attestation, RA-TLS, sealing, and secret injection
 - **Typed SDKs and protocols**: Direct runtime-backed Rust management APIs,
   an optional programmable pipeline runner, and an E2B protocol compatibility
-  preview with Python and TypeScript source packages
+  preview with official-client fixtures plus Python and TypeScript source packages
 - **Operations and cluster integration**: Structured logs, stats, events,
   Prometheus endpoints, health monitoring, CRI, and containerd RuntimeClass
 
@@ -92,7 +92,7 @@ a3s-box run --rm --isolation sandbox alpine:latest -- id
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
 | Rust SDK | Typed, direct runtime-backed management and guest-control APIs | Implemented in `a3s-box-sdk`. The optional `pipeline-cli` feature retains the CLI-driven programmable pipeline. |
-| E2B protocol and language SDKs | Pinned contracts, lifecycle service, TLS routing, authenticated health, and an initial Process command slice | Preview only. `full_compatibility=false` remains mandatory; Filesystem, full PTY/Process, Code Interpreter execution, MCP, and the complete unchanged-client matrix are release gates. Python/npm packages are not published. |
+| E2B protocol and language SDKs | Pinned contracts, durable lifecycle, TLS routing, runtime envd initialization, foreground Process commands, and core Filesystem operations | Preview only. Production evidence covers lifecycle and foreground commands across the pinned base clients, plus environment propagation and core Filesystem operations through the official Python sync client. Concurrent Process/PTY, the extended async Python and TypeScript matrix, Code Interpreter execution, MCP, signed files, and full unchanged-client conformance remain release gates. Python/npm packages are not published. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
 | Windows | Native x86_64 WHPX/libkrun code paths | Integration surface requiring host-specific validation. Current standard release automation focuses on Linux and macOS; Windows CRI is out of scope. |
@@ -470,13 +470,17 @@ compatibility:
 | --- | --- | --- |
 | Control plane | Owner-scoped create, connect, get, list, timeout replacement, and kill with SQLite WAL persistence and reconciliation | Complete template, snapshot, volume, metrics, pagination, and recovery semantics |
 | Credentials and routing | PBKDF2 account-key hashes, encrypted scope-bound Sandbox tokens, generation-fenced leases, wildcard TLS, direct/shared routes, CORS, and PID-fenced Sandbox network access | Complete certificate rotation and every streaming/upgrade/public-port route |
-| envd | Authenticated `GET /health` with running and terminal behavior | Remaining envd HTTP and volume-content endpoints |
-| Process | Start/connect/list/input/close/SIGKILL and PTY primitives exist; production evidence covers only a narrow foreground non-PTY command path | Full signals, binary framing, PTY, reconnect, cancellation, ordering, and backpressure matrix |
-| Filesystem, interpreter, MCP | Contracts and fixtures are pinned | Production Filesystem operations, signed URLs, Code Interpreter execution, and MCP execution |
-| Python and TypeScript packages | Typed source packages re-export the pinned official SDK surfaces and add endpoint configuration helpers | PyPI/npm publication and the complete unchanged-client conformance matrix |
+| envd | Authenticated `GET /health` has running and terminal behavior. Runtime templates receive a fail-closed `POST /init` with the lifecycle ID, merged environment, timestamp, and default user before create succeeds. | `/metrics`, `/envs`, HTTP file transfer, volume-content endpoints, and the complete envd semantic matrix |
+| Process | Start/connect/list/input/close/SIGKILL and PTY primitives exist. Pinned Python sync/async and TypeScript clients pass a foreground non-PTY command on production; the extended Python sync path also proves environment propagation and background Start. | Concurrent streaming plus unary Process calls, full signals, binary framing, stdin/close completion, PTY, reconnect, cancellation, ordering, and backpressure |
+| Filesystem | Runtime-backed remove, make-directory, write, read, stat, list, rename, exists, and cleanup operations pass through the production TLS route with the pinned official Python sync client. | Async Python and TypeScript evidence, watch and edge-case semantics, signed URLs, and HTTP file transfer |
+| Code Interpreter and MCP | Contracts, generated inventories, official package artifacts, and black-box fixtures are pinned. | Code execution, context lifecycle, rich results, MCP execution, and the complete unchanged-client matrix |
+| Python and TypeScript packages | Typed source packages re-export the pinned official SDK surfaces, add endpoint configuration helpers, and are included in the native-package production harness. | PyPI/npm publication and a passing complete native-package conformance matrix |
 
 The production `a3s-box-e2b` process accepts only `.acl` configuration parsed
-by `a3s-acl`:
+by `a3s-acl`. For runtime-envd templates, create does not become visible until
+envd accepts initialization; failed initialization kills the execution and
+marks its lifecycle as failed and keeps it hidden instead of returning a
+partially usable Sandbox.
 
 ```bash
 cd src
