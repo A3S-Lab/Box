@@ -42,11 +42,7 @@ impl Drop for PreparedUpload {
         if stat.st_dev as u64 == self.temporary_device && stat.st_ino as u64 == self.temporary_inode
         {
             unsafe {
-                libc::unlinkat(
-                    self.parent.as_raw_fd(),
-                    self.temporary_name.as_ptr(),
-                    0,
-                );
+                libc::unlinkat(self.parent.as_raw_fd(), self.temporary_name.as_ptr(), 0);
             }
         }
     }
@@ -75,14 +71,7 @@ pub fn stat_path(
     }
     let (parent, name) = open_parent(root, &path.components)?;
     let stat = stat_at(&parent, name)?;
-    entry_from_stat(
-        &parent,
-        Some(name),
-        path.name(),
-        &path.display,
-        &stat,
-        ids,
-    )
+    entry_from_stat(&parent, Some(name), path.name(), &path.display, &stat, ids)
 }
 
 pub fn list_path(
@@ -101,13 +90,7 @@ pub fn list_path(
     let directory = open_directory_path(root, &path.components)?;
     let mut entries = Vec::new();
     if depth > 0 {
-        list_directory(
-            &directory,
-            &path.display,
-            depth,
-            ids,
-            &mut entries,
-        )?;
+        list_directory(&directory, &path.display, depth, ids, &mut entries)?;
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
@@ -142,14 +125,7 @@ pub fn make_dir(
             requested_mode,
         )?;
         let stat = fstat(&directory)?;
-        return entry_from_stat(
-            &directory,
-            None,
-            path.name(),
-            &path.display,
-            &stat,
-            ids,
-        );
+        return entry_from_stat(&directory, None, path.name(), &path.display, &stat, ids);
     }
 
     for (index, name) in path.components.iter().enumerate() {
@@ -172,14 +148,7 @@ pub fn make_dir(
     }
 
     let stat = fstat(&current)?;
-    entry_from_stat(
-        &current,
-        None,
-        path.name(),
-        &path.display,
-        &stat,
-        ids,
-    )
+    entry_from_stat(&current, None, path.name(), &path.display, &stat, ids)
 }
 
 pub fn update_metadata(
@@ -240,14 +209,7 @@ pub fn update_metadata(
     }
 
     let stat = stat_at(&parent, name)?;
-    entry_from_stat(
-        &parent,
-        Some(name),
-        path.name(),
-        &path.display,
-        &stat,
-        ids,
-    )
+    entry_from_stat(&parent, Some(name), path.name(), &path.display, &stat, ids)
 }
 
 pub fn remove_path(root: &Path, path: &str) -> VolumeContentResult<()> {
@@ -315,10 +277,7 @@ pub fn prepare_upload(
     Ok((prepared, File::from(file)))
 }
 
-pub fn finish_upload(
-    mut prepared: PreparedUpload,
-    file: File,
-) -> VolumeContentResult<()> {
+pub fn finish_upload(mut prepared: PreparedUpload, file: File) -> VolumeContentResult<()> {
     let stat = fstat_file(&file)?;
     if stat.st_dev as u64 != prepared.temporary_device
         || stat.st_ino as u64 != prepared.temporary_inode
@@ -421,10 +380,7 @@ fn open_root(path: &Path) -> VolumeContentResult<OwnedFd> {
     )
 }
 
-fn open_parent(
-    root: OwnedFd,
-    components: &[CString],
-) -> VolumeContentResult<(OwnedFd, &CString)> {
+fn open_parent(root: OwnedFd, components: &[CString]) -> VolumeContentResult<(OwnedFd, &CString)> {
     let (name, parents) = components
         .split_last()
         .ok_or_else(|| VolumeContentError::InvalidPath("path identifies the root".to_string()))?;
@@ -474,13 +430,7 @@ fn open_raw(
 }
 
 fn mkdir_at(parent: &OwnedFd, name: &CString, mode: u32) -> VolumeContentResult<()> {
-    let result = unsafe {
-        libc::mkdirat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            mode as libc::mode_t,
-        )
-    };
+    let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), mode as libc::mode_t) };
     cvt(result, "create volume directory").map(|_| ())
 }
 
@@ -554,14 +504,7 @@ fn list_directory(
             Err(VolumeContentError::NotFound) => continue,
             Err(error) => return Err(error),
         };
-        let entry = entry_from_stat(
-            directory,
-            Some(&name),
-            &display_name,
-            &path,
-            &stat,
-            ids,
-        )?;
+        let entry = entry_from_stat(directory, Some(&name), &display_name, &path, &stat, ids)?;
         let recurse = depth > 1 && entry.entry_type == VolumeEntryType::Directory;
         output.push(entry);
         if recurse {
@@ -634,13 +577,8 @@ fn remove_entry(parent: &OwnedFd, name: &CString) -> VolumeContentResult<()> {
                 Err(error) => return Err(error),
             }
         }
-        let result = unsafe {
-            libc::unlinkat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::AT_REMOVEDIR,
-            )
-        };
+        let result =
+            unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
         cvt(result, "remove volume directory")?;
     } else {
         let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
@@ -656,11 +594,7 @@ fn create_temporary_file(parent: &OwnedFd) -> VolumeContentResult<(CString, Owne
         match open_at(
             parent,
             &name,
-            libc::O_WRONLY
-                | libc::O_CREAT
-                | libc::O_EXCL
-                | libc::O_CLOEXEC
-                | libc::O_NOFOLLOW,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
             0o600,
         ) {
             Ok(file) => return Ok((name, file)),
@@ -687,7 +621,11 @@ fn rename_at(
             source.as_ptr(),
             parent.as_raw_fd(),
             destination.as_ptr(),
-            if no_replace { libc::RENAME_NOREPLACE } else { 0 },
+            if no_replace {
+                libc::RENAME_NOREPLACE
+            } else {
+                0
+            },
         ) as libc::c_int
     };
 
@@ -776,10 +714,7 @@ fn read_link(parent: &OwnedFd, name: &CString) -> VolumeContentResult<String> {
             )
         };
         if length < 0 {
-            return Err(io_error(
-                "read volume symlink",
-                io::Error::last_os_error(),
-            ));
+            return Err(io_error("read volume symlink", io::Error::last_os_error()));
         }
         let length = length as usize;
         if length < buffer.len() {
@@ -823,17 +758,26 @@ fn ctime(stat: &libc::stat) -> (i64, i64) {
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn atime(stat: &libc::stat) -> (i64, i64) {
-    (stat.st_atimespec.tv_sec as i64, stat.st_atimespec.tv_nsec as i64)
+    (
+        stat.st_atimespec.tv_sec as i64,
+        stat.st_atimespec.tv_nsec as i64,
+    )
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn mtime(stat: &libc::stat) -> (i64, i64) {
-    (stat.st_mtimespec.tv_sec as i64, stat.st_mtimespec.tv_nsec as i64)
+    (
+        stat.st_mtimespec.tv_sec as i64,
+        stat.st_mtimespec.tv_nsec as i64,
+    )
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 fn ctime(stat: &libc::stat) -> (i64, i64) {
-    (stat.st_ctimespec.tv_sec as i64, stat.st_ctimespec.tv_nsec as i64)
+    (
+        stat.st_ctimespec.tv_sec as i64,
+        stat.st_ctimespec.tv_nsec as i64,
+    )
 }
 
 #[cfg(not(any(
@@ -881,10 +825,7 @@ fn io_error(operation: &str, error: io::Error) -> VolumeContentError {
             VolumeContentError::Conflict
         }
         Some(libc::EACCES) | Some(libc::EPERM) => VolumeContentError::PermissionDenied,
-        Some(libc::ELOOP)
-        | Some(libc::ENOTDIR)
-        | Some(libc::EINVAL)
-        | Some(libc::ENAMETOOLONG) => {
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) | Some(libc::EINVAL) | Some(libc::ENAMETOOLONG) => {
             VolumeContentError::InvalidPath(format!("{operation}: {error}"))
         }
         _ => unavailable(operation, error),

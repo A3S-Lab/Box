@@ -114,9 +114,9 @@ impl From<ControlServiceError> for ApiError {
             ControlServiceError::Template(TemplateProviderError::Invalid(message)) => {
                 Self::bad_request(message)
             }
-            ControlServiceError::Volume(
-                VolumeServiceError::InvalidRequest(message),
-            ) => Self::bad_request(message),
+            ControlServiceError::Volume(VolumeServiceError::InvalidRequest(message)) => {
+                Self::bad_request(message)
+            }
             ControlServiceError::Volume(
                 VolumeServiceError::NotFound
                 | VolumeServiceError::Duplicate

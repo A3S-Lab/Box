@@ -10,8 +10,8 @@ use crate::control::{
 
 use super::{
     validate_mounts, ResolvedVolumeMount, RuntimeVolumeError, RuntimeVolumeRemoveResult,
-    RuntimeVolumeStore, VolumeId, VolumeModelError, VolumeMount, VolumeMountResolver, VolumeRecord,
-    VolumeContentError, VolumeFilesystem, VolumeReplaceResult, VolumeRepository,
+    RuntimeVolumeStore, VolumeContentError, VolumeFilesystem, VolumeId, VolumeModelError,
+    VolumeMount, VolumeMountResolver, VolumeRecord, VolumeReplaceResult, VolumeRepository,
     VolumeRepositoryError, VolumeState,
 };
 
@@ -99,7 +99,11 @@ impl VolumeService {
         &self.filesystem
     }
 
-    pub async fn create(&self, owner_id: &str, name: &str) -> VolumeServiceResult<VolumeConnection> {
+    pub async fn create(
+        &self,
+        owner_id: &str,
+        name: &str,
+    ) -> VolumeServiceResult<VolumeConnection> {
         if owner_id.trim().is_empty() || !super::valid_volume_name(name) {
             return Err(VolumeServiceError::InvalidRequest(
                 "volume name must match [A-Za-z0-9_-]+".to_string(),
@@ -245,7 +249,9 @@ impl VolumeService {
         mut record: VolumeRecord,
     ) -> VolumeServiceResult<ReconciliationOutcome> {
         let runtime = self.runtime.materialize(record.runtime_name()).await?;
-        self.filesystem.initialize_root(&runtime.mount_point).await?;
+        self.filesystem
+            .initialize_root(&runtime.mount_point)
+            .await?;
         record.mark_active()?;
         self.replace(VolumeState::Creating, record).await?;
         Ok(ReconciliationOutcome::Completed)
@@ -278,9 +284,7 @@ impl VolumeService {
         self.repository
             .get(volume_id)
             .await?
-            .filter(|record| {
-                record.owner_id() == owner_id && record.state() == VolumeState::Active
-            })
+            .filter(|record| record.owner_id() == owner_id && record.state() == VolumeState::Active)
             .ok_or(VolumeServiceError::NotFound)
     }
 

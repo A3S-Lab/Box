@@ -55,6 +55,7 @@ dependencies = [
  "futures",
  "hex",
  "hyper 0.14.32",
+ "libc",
  "prost",
  "prost-types",
  "rcgen",

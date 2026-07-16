@@ -60,24 +60,27 @@ impl NewSandboxBody {
         }
         crate::volume::validate_mounts(&self.volume_mounts)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
-        Ok((CreateSandboxRequest {
-            owner_id,
-            template_id: self.template_id,
-            timeout_seconds: self.timeout,
-            lifecycle: LifecyclePolicy {
-                on_timeout: if self.auto_pause {
-                    OnTimeoutAction::Pause
-                } else {
-                    OnTimeoutAction::Kill
+        Ok((
+            CreateSandboxRequest {
+                owner_id,
+                template_id: self.template_id,
+                timeout_seconds: self.timeout,
+                lifecycle: LifecyclePolicy {
+                    on_timeout: if self.auto_pause {
+                        OnTimeoutAction::Pause
+                    } else {
+                        OnTimeoutAction::Kill
+                    },
+                    auto_resume: self.auto_resume.enabled,
+                    keep_memory_on_pause: self.auto_pause_memory,
                 },
-                auto_resume: self.auto_resume.enabled,
-                keep_memory_on_pause: self.auto_pause_memory,
+                metadata: self.metadata,
+                env_vars: self.env_vars,
+                secure: self.secure,
+                allow_internet_access: self.allow_internet_access,
             },
-            metadata: self.metadata,
-            env_vars: self.env_vars,
-            secure: self.secure,
-            allow_internet_access: self.allow_internet_access,
-        }, self.volume_mounts))
+            self.volume_mounts,
+        ))
     }
 }
 

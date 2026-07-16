@@ -43,8 +43,10 @@ impl VolumeMount {
             ));
         }
         for component in path.components() {
-            if matches!(component, Component::ParentDir | Component::CurDir | Component::Prefix(_))
-            {
+            if matches!(
+                component,
+                Component::ParentDir | Component::CurDir | Component::Prefix(_)
+            ) {
                 return Err(VolumeServiceError::InvalidRequest(
                     "volume mount path cannot contain traversal components".to_string(),
                 ));

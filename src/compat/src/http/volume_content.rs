@@ -102,10 +102,7 @@ pub async fn make_dir(
     headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> Result<impl IntoResponse, VolumeApiError> {
-    let query = ContentQuery::parse(
-        query.as_deref(),
-        &["path", "uid", "gid", "mode", "force"],
-    )?;
+    let query = ContentQuery::parse(query.as_deref(), &["path", "uid", "gid", "mode", "force"])?;
     let path = query.path()?.to_string();
     let metadata = query.metadata()?;
     let force = query.optional_bool("force")?.unwrap_or(false);
@@ -166,10 +163,7 @@ pub async fn write_file(
     RawQuery(query): RawQuery,
     mut body: BodyStream,
 ) -> Result<impl IntoResponse, VolumeApiError> {
-    let query = ContentQuery::parse(
-        query.as_deref(),
-        &["path", "uid", "gid", "mode", "force"],
-    )?;
+    let query = ContentQuery::parse(query.as_deref(), &["path", "uid", "gid", "mode", "force"])?;
     if headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -214,8 +208,8 @@ async fn authorize(
         .and_then(|value| value.strip_prefix("Bearer "))
         .filter(|value| !value.is_empty())
         .ok_or_else(VolumeApiError::unauthorized)?;
-    let token = SecretToken::new(authorization.to_string())
-        .map_err(|_| VolumeApiError::unauthorized())?;
+    let token =
+        SecretToken::new(authorization.to_string()).map_err(|_| VolumeApiError::unauthorized())?;
     state
         .volume_service()
         .map_err(|_| VolumeApiError::internal())?
@@ -255,7 +249,10 @@ impl ContentQuery {
                     "unknown volume query parameter: {name}"
                 )));
             }
-            if values.insert(name.into_owned(), value.into_owned()).is_some() {
+            if values
+                .insert(name.into_owned(), value.into_owned())
+                .is_some()
+            {
                 return Err(VolumeApiError::bad_request(
                     "volume query parameters must not be repeated",
                 ));

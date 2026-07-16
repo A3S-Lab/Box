@@ -106,9 +106,9 @@ impl RuntimeVolumeStore for A3sRuntimeVolumeStore {
                 Some(_) => match store.remove(&name, false) {
                     Ok(_) => RuntimeVolumeRemoveResult::Removed,
                     Err(error) => {
-                        let current = store
-                            .get(&name)
-                            .map_err(|load_error| unavailable("reload volume after removal", load_error))?;
+                        let current = store.get(&name).map_err(|load_error| {
+                            unavailable("reload volume after removal", load_error)
+                        })?;
                         if current.as_ref().is_some_and(VolumeConfig::is_in_use) {
                             return Err(RuntimeVolumeError::InUse);
                         }
@@ -129,10 +129,7 @@ impl RuntimeVolumeStore for A3sRuntimeVolumeStore {
     }
 }
 
-fn runtime_volume(
-    volume: VolumeConfig,
-    volume_root: &Path,
-) -> RuntimeVolumeResult<RuntimeVolume> {
+fn runtime_volume(volume: VolumeConfig, volume_root: &Path) -> RuntimeVolumeResult<RuntimeVolume> {
     let canonical_root = volume_root
         .canonicalize()
         .map_err(|error| unavailable("canonicalize volume root", error))?;
