@@ -73,7 +73,6 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
     driver
         .provider_build
         .set("a3s-box/test crun/test sha256:0123456789abcdef".into())
-        .await
         .unwrap();
 
     let capabilities = driver.capabilities().await.unwrap();
