@@ -93,7 +93,10 @@ pub use network::NetworkStore;
 // OCI images
 pub use a3s_box_core::StoredImage;
 pub use oci::{CredentialStore, PushResult, RegistryProtocol, RegistryPusher};
-pub use oci::{ImagePuller, ImageReference, ImageStore, RegistryAuth};
+pub use oci::{
+    ImagePuller, ImageReference, ImageStore, PullProgress, PullProgressEventFn, PullProgressState,
+    RegistryAuth, RegistryPullPolicy,
+};
 pub use oci::{OciImage, SignResult, SignaturePolicy};
 
 // Metrics

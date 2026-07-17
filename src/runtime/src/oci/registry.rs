@@ -17,14 +17,20 @@ use oci_reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use super::credentials::CredentialStore;
 use super::reference::ImageReference;
 use super::signing::{verify_image_signature, SignaturePolicy, VerifyResult};
+use super::store::ImageStore;
 
 mod basic_pull;
 mod blob_pull;
+mod content;
+mod policy;
+mod progress;
+
+pub use policy::RegistryPullPolicy;
+pub use progress::{PullProgress, PullProgressEventFn, PullProgressState};
 
 use basic_pull::{BasicImageManifest, BasicPullClient};
 #[cfg(test)]
 use blob_pull::HashingFileWriter;
-use blob_pull::{stream_and_verify_blob, BlobPullTransport};
 
 const REGISTRY_PROTOCOL_ENV: &str = "A3S_REGISTRY_PROTOCOL";
 const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json";
@@ -202,6 +208,12 @@ pub(crate) struct RegistryPuller {
     signature_policy: SignaturePolicy,
     /// Optional layer progress callback: (current, total, digest, size_bytes).
     progress_fn: Option<PullProgressFn>,
+    /// Optional structured progress callback with actual downloaded bytes.
+    progress_event_fn: Option<PullProgressEventFn>,
+    /// Bounded retry, timeout, and concurrency settings for blob transfers.
+    pull_policy: RegistryPullPolicy,
+    /// Shared HTTP connection pool for resumable blob requests.
+    blob_http: oci_reqwest::Client,
 }
 
 impl Default for RegistryPuller {
@@ -255,6 +267,9 @@ impl RegistryPuller {
             target_arch,
             signature_policy: SignaturePolicy::default(),
             progress_fn: None,
+            progress_event_fn: None,
+            pull_policy: RegistryPullPolicy::from_env(),
+            blob_http: oci_reqwest::Client::new(),
         }
     }
 
@@ -270,13 +285,30 @@ impl RegistryPuller {
         self
     }
 
+    /// Set a structured progress callback that reports actual downloaded bytes.
+    pub fn with_progress_event_fn(mut self, f: PullProgressEventFn) -> Self {
+        self.progress_event_fn = Some(f);
+        self
+    }
+
+    /// Override bounded registry transfer settings.
+    pub fn with_pull_policy(mut self, policy: RegistryPullPolicy) -> Self {
+        self.pull_policy = policy;
+        self
+    }
+
     /// Pull an image and write it as an OCI image layout to `target_dir`.
     ///
     /// The resulting directory will contain:
     /// - `oci-layout`
     /// - `index.json`
     /// - `blobs/sha256/...`
-    pub async fn pull(&self, reference: &ImageReference, target_dir: &Path) -> Result<PathBuf> {
+    pub(crate) async fn pull_with_store(
+        &self,
+        reference: &ImageReference,
+        target_dir: &Path,
+        blob_store: Option<&ImageStore>,
+    ) -> Result<PathBuf> {
         let oci_ref = self.to_oci_reference(reference)?;
 
         tracing::info!(
@@ -350,6 +382,7 @@ impl RegistryPuller {
             &image_manifest,
             &blobs_dir,
             pulled_manifest.used_basic,
+            blob_store,
         )
         .await?;
 
@@ -508,84 +541,6 @@ impl RegistryPuller {
                 registry_error_summary(fallback_error, &self.auth)
             ),
         }
-    }
-
-    /// Pull config and layers for an image manifest, writing blobs to disk.
-    async fn pull_image_content(
-        &self,
-        reference: &ImageReference,
-        oci_ref: &Reference,
-        manifest: &OciImageManifest,
-        blobs_dir: &Path,
-        force_basic: bool,
-    ) -> Result<()> {
-        let basic_client = if self.auth.basic_credentials().is_some() {
-            Some(
-                self.basic_pull_client(reference)
-                    .map_err(|error| BoxError::RegistryError {
-                        registry: reference.registry.clone(),
-                        message: format!(
-                            "Failed to prepare authenticated blob pull: {}",
-                            registry_error_summary(&error, &self.auth)
-                        ),
-                    })?,
-            )
-        } else {
-            None
-        };
-        let transport = BlobPullTransport {
-            client: &self.client,
-            oci_ref,
-            basic_client: basic_client.as_ref(),
-            force_basic,
-            auth: &self.auth,
-            registry: &reference.registry,
-        };
-
-        // Stream the config blob to disk, verifying its digest on the fly.
-        // pull_blob delivers raw bytes without validation, so the streaming
-        // hasher both bounds memory and guards against a buggy/malicious
-        // registry or a corrupted transfer being stored content-addressed and
-        // later extracted into the guest.
-        let config_descriptor = &manifest.config;
-        let config_digest_hex = validated_digest_hex(&config_descriptor.digest)?;
-        stream_and_verify_blob(
-            &transport,
-            config_descriptor,
-            &blobs_dir.join(config_digest_hex),
-            "config blob",
-        )
-        .await?;
-
-        // Pull layer blobs
-        let total = manifest.layers.len();
-        for (idx, layer) in manifest.layers.iter().enumerate() {
-            tracing::debug!(
-                digest = %layer.digest,
-                size = layer.size,
-                "Pulling layer"
-            );
-
-            if let Some(ref f) = self.progress_fn {
-                f(idx + 1, total, &layer.digest, layer.size);
-            }
-
-            let layer_digest_hex = validated_digest_hex(&layer.digest)?;
-            stream_and_verify_blob(
-                &transport,
-                layer,
-                &blobs_dir.join(layer_digest_hex),
-                "layer",
-            )
-            .await?;
-
-            // Call progress callback again with negative size to signal completion
-            if let Some(ref f) = self.progress_fn {
-                f(idx + 1, total, &layer.digest, -(layer.size));
-            }
-        }
-
-        Ok(())
     }
 
     /// Convert an ImageReference to an oci-distribution Reference.
@@ -1818,3 +1773,5 @@ mod tests {
 
 #[cfg(test)]
 mod basic_pull_tests;
+#[cfg(test)]
+mod resilient_pull_tests;

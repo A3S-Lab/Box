@@ -12,7 +12,7 @@ use a3s_box_core::StoredImage;
 
 use super::image::OciImage;
 use super::reference::ImageReference;
-use super::registry::{RegistryAuth, RegistryPuller};
+use super::registry::{PullProgressEventFn, RegistryAuth, RegistryPullPolicy, RegistryPuller};
 use super::store::ImageStore;
 
 /// Callback type for layer pull progress: `(current, total, digest, size_bytes)`.
@@ -114,6 +114,18 @@ impl ImagePuller {
     /// Set a layer progress callback: `(current, total, digest, size_bytes)`.
     pub fn with_progress_fn(mut self, f: PullProgressFn) -> Self {
         self.puller = self.puller.with_progress_fn(f);
+        self
+    }
+
+    /// Set a structured layer progress callback with actual downloaded bytes.
+    pub fn with_progress_event_fn(mut self, f: PullProgressEventFn) -> Self {
+        self.puller = self.puller.with_progress_event_fn(f);
+        self
+    }
+
+    /// Override bounded registry retry, timeout, and concurrency settings.
+    pub fn with_pull_policy(mut self, policy: RegistryPullPolicy) -> Self {
+        self.puller = self.puller.with_pull_policy(policy);
         self
     }
 
@@ -261,7 +273,11 @@ impl ImagePuller {
         // pulls (network error, signature failure, disk error) don't accumulate
         // under store_dir/tmp — each can be hundreds of MB and is never counted
         // toward the cache size or evicted by the LRU.
-        if let Err(e) = self.puller.pull(&fetch, &tmp_dir).await {
+        if let Err(e) = self
+            .puller
+            .pull_with_store(&fetch, &tmp_dir, Some(&self.store))
+            .await
+        {
             let _ = std::fs::remove_dir_all(&tmp_dir);
             return Err(e);
         }

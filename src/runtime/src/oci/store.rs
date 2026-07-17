@@ -15,6 +15,8 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+mod blob_reuse;
+
 /// Per-process counter for unique staging-dir names in `put`.
 static PUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
