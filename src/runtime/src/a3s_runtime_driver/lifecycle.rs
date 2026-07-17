@@ -134,13 +134,8 @@ impl BoxRuntimeDriver {
             record = self.load_record(&unit.spec, &execution_id).await?;
         }
 
-        self.observation(
-            &unit.spec,
-            &record,
-            Some(RuntimeUnitState::Stopped),
-            None,
-        )
-        .await
+        self.observation(&unit.spec, &record, Some(RuntimeUnitState::Stopped), None)
+            .await
     }
 
     pub(super) async fn remove_unit(
@@ -359,11 +354,7 @@ impl BoxRuntimeDriver {
         validate_record_for_spec(&remaining[0], spec)
     }
 
-    async fn retire_record(
-        &self,
-        mut record: BoxRecord,
-        unit_id: &str,
-    ) -> RuntimeResult<()> {
+    async fn retire_record(&self, mut record: BoxRecord, unit_id: &str) -> RuntimeResult<()> {
         let (execution_id, mut generation, mut state) = local_identity(&record)?;
         if matches!(
             state,

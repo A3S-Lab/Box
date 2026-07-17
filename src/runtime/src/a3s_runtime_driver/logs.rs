@@ -1,9 +1,7 @@
 //! Ordered Runtime log cursors over Box's structured json-file projection.
 
 use a3s_box_core::ExecutionManager;
-use a3s_runtime::contract::{
-    RuntimeLogChunk, RuntimeLogQuery, RuntimeLogStream,
-};
+use a3s_runtime::contract::{RuntimeLogChunk, RuntimeLogQuery, RuntimeLogStream};
 use a3s_runtime::{RuntimeError, RuntimeResult, RuntimeUnitRecord};
 use chrono::DateTime;
 use sha2::{Digest, Sha256};
@@ -25,12 +23,12 @@ impl BoxRuntimeDriver {
                 "Runtime log query identity does not match its unit record".into(),
             ));
         }
-        let record = self
-            .find_generation(&unit.spec)
-            .await?
-            .ok_or_else(|| RuntimeError::NotFound {
-                unit_id: unit.spec.unit_id.clone(),
-            })?;
+        let record =
+            self.find_generation(&unit.spec)
+                .await?
+                .ok_or_else(|| RuntimeError::NotFound {
+                    unit_id: unit.spec.unit_id.clone(),
+                })?;
         provider_identity_matches(&unit.observation, &record)?;
         let (execution_id, local_generation, _) = local_identity(&record)?;
         let entries = self
@@ -46,11 +44,7 @@ fn project_logs(
     entries: Vec<a3s_box_core::log::LogEntry>,
     query: &RuntimeLogQuery,
 ) -> RuntimeResult<Vec<RuntimeLogChunk>> {
-    let requested_cursor = query
-        .cursor
-        .as_deref()
-        .map(LogCursor::parse)
-        .transpose()?;
+    let requested_cursor = query.cursor.as_deref().map(LogCursor::parse).transpose()?;
     if requested_cursor
         .as_ref()
         .is_some_and(|cursor| cursor.generation != query.generation)

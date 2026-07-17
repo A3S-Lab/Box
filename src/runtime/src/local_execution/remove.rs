@@ -39,17 +39,15 @@ impl LocalExecutionManager {
     ) -> ExecutionManagerResult<bool> {
         let store = self.store.clone();
         let claimed_id = execution_id.clone();
-        let claimed = run_store(move || store.begin_remove(&claimed_id, expected_generation)).await?;
+        let claimed =
+            run_store(move || store.begin_remove(&claimed_id, expected_generation)).await?;
         let Some(record) = claimed else {
             return Ok(false);
         };
         self.finish_remove(record).await
     }
 
-    pub(super) async fn finish_remove(
-        &self,
-        record: BoxRecord,
-    ) -> ExecutionManagerResult<bool> {
+    pub(super) async fn finish_remove(&self, record: BoxRecord) -> ExecutionManagerResult<bool> {
         let execution_id = execution_id(&record)?;
         let expected_generation = generation(&record, &execution_id)?;
 
@@ -77,12 +75,8 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
     validate_owned_paths(home_dir, record)?;
 
     if record.isolation.is_sandbox() {
-        crate::vm::reap::cleanup_recorded_sandbox_runtime_in(
-            home_dir,
-            &record.box_dir,
-            &record.id,
-        )
-        .map_err(|error| cleanup_error(record, "delete the recorded crun runtime", error))?;
+        crate::vm::reap::cleanup_recorded_sandbox_runtime_in(home_dir, &record.box_dir, &record.id)
+            .map_err(|error| cleanup_error(record, "delete the recorded crun runtime", error))?;
     }
 
     remove_anonymous_volumes(home_dir, record)?;
@@ -142,10 +136,7 @@ fn validate_owned_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionManager
     Ok(())
 }
 
-fn remove_anonymous_volumes(
-    home_dir: &Path,
-    record: &BoxRecord,
-) -> ExecutionManagerResult<()> {
+fn remove_anonymous_volumes(home_dir: &Path, record: &BoxRecord) -> ExecutionManagerResult<()> {
     if record.anonymous_volumes.is_empty() {
         return Ok(());
     }
@@ -185,11 +176,7 @@ fn remove_host_cgroup(record: &BoxRecord) -> ExecutionManagerResult<()> {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(error) => {
-                    return Err(cleanup_error(
-                        record,
-                        "remove the host cgroup",
-                        error,
-                    ));
+                    return Err(cleanup_error(record, "remove the host cgroup", error));
                 }
             }
         }

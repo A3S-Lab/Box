@@ -6,9 +6,7 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecutionIsolation, ExecutionRecordPolicy,
     ExecutionRestartPolicy, LogConfig, NetworkMode, ResourceConfig, ResourceLimits,
 };
-use a3s_runtime::contract::{
-    ArtifactRef, RestartPolicy, RuntimeUnitClass, RuntimeUnitSpec,
-};
+use a3s_runtime::contract::{ArtifactRef, RestartPolicy, RuntimeUnitClass, RuntimeUnitSpec};
 use a3s_runtime::{RuntimeError, RuntimeResult};
 use url::Position;
 
@@ -34,7 +32,9 @@ pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateEx
         .cpu_millis
         .checked_mul(CPU_PERIOD_US / 1_000)
         .and_then(|value| i64::try_from(value).ok())
-        .ok_or_else(|| RuntimeError::InvalidRequest("Box Sandbox CPU quota overflows i64".into()))?;
+        .ok_or_else(|| {
+            RuntimeError::InvalidRequest("Box Sandbox CPU quota overflows i64".into())
+        })?;
     let memory_swap = i64::try_from(spec.resources.memory_bytes).map_err(|_| {
         RuntimeError::InvalidRequest("Box Sandbox memory limit overflows i64".into())
     })?;
@@ -45,7 +45,10 @@ pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateEx
     let (entrypoint_override, cmd) = if spec.process.command.is_empty() {
         (None, spec.process.args.clone())
     } else {
-        (Some(spec.process.command.clone()), spec.process.args.clone())
+        (
+            Some(spec.process.command.clone()),
+            spec.process.args.clone(),
+        )
     };
 
     let config = BoxConfig {

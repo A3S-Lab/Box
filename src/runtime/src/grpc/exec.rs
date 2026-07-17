@@ -640,7 +640,8 @@ impl StreamingExec {
                         a3s_box_core::exec::StreamType::Stdout => &mut stdout,
                         a3s_box_core::exec::StreamType::Stderr => &mut stderr,
                     };
-                    let remaining = a3s_box_core::exec::MAX_OUTPUT_BYTES.saturating_sub(target.len());
+                    let remaining =
+                        a3s_box_core::exec::MAX_OUTPUT_BYTES.saturating_sub(target.len());
                     if chunk.data.len() > remaining {
                         truncated = true;
                     }

@@ -1116,10 +1116,7 @@ mod tests {
         assert_eq!(parsed.cpu_period, Some(100000));
         assert_eq!(parsed.memory_reservation, Some(256 * 1024 * 1024));
         assert_eq!(parsed.memory_swap, Some(1024 * 1024 * 1024));
-        assert_eq!(
-            parsed.sandbox_memory_limit_bytes,
-            Some(256 * 1024 * 1024)
-        );
+        assert_eq!(parsed.sandbox_memory_limit_bytes, Some(256 * 1024 * 1024));
     }
 
     #[test]

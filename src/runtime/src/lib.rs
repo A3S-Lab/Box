@@ -14,9 +14,9 @@
 #![allow(clippy::result_large_err)]
 
 // -- Core modules (always compiled) --
-pub mod audit;
 #[cfg(all(feature = "vm", target_os = "linux"))]
 pub mod a3s_runtime_driver;
+pub mod audit;
 pub mod box_record;
 pub mod box_state;
 pub mod cache;

@@ -3,9 +3,7 @@
 use std::time::Duration;
 
 use a3s_box_core::{ExecRequest, ExecutionManager, ExecutionSessionManager};
-use a3s_runtime::contract::{
-    RuntimeExecRequest, RuntimeExecResult, RuntimeUnitState,
-};
+use a3s_runtime::contract::{RuntimeExecRequest, RuntimeExecResult, RuntimeUnitState};
 use a3s_runtime::{RuntimeError, RuntimeResult, RuntimeUnitRecord};
 
 use crate::ManagedExecutionState;
@@ -34,12 +32,12 @@ impl BoxRuntimeDriver {
             )));
         }
 
-        let record = self
-            .find_generation(&unit.spec)
-            .await?
-            .ok_or_else(|| RuntimeError::NotFound {
-                unit_id: unit.spec.unit_id.clone(),
-            })?;
+        let record =
+            self.find_generation(&unit.spec)
+                .await?
+                .ok_or_else(|| RuntimeError::NotFound {
+                    unit_id: unit.spec.unit_id.clone(),
+                })?;
         provider_identity_matches(&unit.observation, &record)?;
         validate_record_for_spec(&record, &unit.spec)?;
         let (execution_id, generation, _) = local_identity(&record)?;
@@ -79,8 +77,9 @@ impl BoxRuntimeDriver {
         }
 
         let timeout = effective_timeout(request)?;
-        let timeout_ns = u64::try_from(timeout.as_nanos())
-            .map_err(|_| RuntimeError::InvalidRequest("Runtime exec timeout overflows u64".into()))?;
+        let timeout_ns = u64::try_from(timeout.as_nanos()).map_err(|_| {
+            RuntimeError::InvalidRequest("Runtime exec timeout overflows u64".into())
+        })?;
         let output = self
             .manager
             .execute(

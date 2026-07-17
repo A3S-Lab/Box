@@ -15,9 +15,7 @@ use a3s_runtime::contract::{
     RuntimeExecRequest, RuntimeExecResult, RuntimeFeature, RuntimeInspection, RuntimeLogChunk,
     RuntimeLogQuery, RuntimeObservation, RuntimeRemoval, RuntimeUnitClass, RuntimeUnitSpec,
 };
-use a3s_runtime::{
-    ProviderId, RuntimeDriver, RuntimeError, RuntimeResult, RuntimeUnitRecord,
-};
+use a3s_runtime::{ProviderId, RuntimeDriver, RuntimeError, RuntimeResult, RuntimeUnitRecord};
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
@@ -119,11 +117,7 @@ impl BoxRuntimeDriver {
             .cloned()
     }
 
-    pub(super) async fn bounded<T, F>(
-        &self,
-        operation: &'static str,
-        future: F,
-    ) -> RuntimeResult<T>
+    pub(super) async fn bounded<T, F>(&self, operation: &'static str, future: F) -> RuntimeResult<T>
     where
         F: Future<Output = RuntimeResult<T>>,
     {
@@ -211,7 +205,8 @@ impl RuntimeDriver for BoxRuntimeDriver {
         unit: &RuntimeUnitRecord,
         request: &RuntimeActionRequest,
     ) -> RuntimeResult<RuntimeRemoval> {
-        self.bounded("remove", self.remove_unit(unit, request)).await
+        self.bounded("remove", self.remove_unit(unit, request))
+            .await
     }
 
     async fn logs(

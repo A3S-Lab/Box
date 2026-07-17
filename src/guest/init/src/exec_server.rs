@@ -9,9 +9,9 @@ use std::io::Read;
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use a3s_box_core::exec::{
@@ -320,9 +320,9 @@ impl ExecReplayCache {
         loop {
             let existing = state.entries.get(request_id).map(|entry| match entry {
                 ExecReplayEntry::InFlight { digest } => ExistingReplay::InFlight(*digest),
-                ExecReplayEntry::Ready {
-                    digest, output, ..
-                } => ExistingReplay::Ready(*digest, Arc::clone(output)),
+                ExecReplayEntry::Ready { digest, output, .. } => {
+                    ExistingReplay::Ready(*digest, Arc::clone(output))
+                }
             });
             match existing {
                 Some(ExistingReplay::Ready(existing_digest, output)) => {
@@ -341,9 +341,10 @@ impl ExecReplayCache {
                             "exec request ID {request_id:?} conflicts with in-flight content"
                         ));
                     }
-                    let remaining = wait_timeout.checked_sub(started.elapsed()).ok_or_else(|| {
-                        format!("timed out waiting for exec request {request_id:?} to complete")
-                    })?;
+                    let remaining =
+                        wait_timeout.checked_sub(started.elapsed()).ok_or_else(|| {
+                            format!("timed out waiting for exec request {request_id:?} to complete")
+                        })?;
                     if remaining.is_zero() {
                         return Err(format!(
                             "timed out waiting for exec request {request_id:?} to complete"
@@ -371,10 +372,9 @@ impl ExecReplayCache {
                     if state.in_flight >= self.max_in_flight {
                         return Err("exec replay in-flight limit reached".to_string());
                     }
-                    state.entries.insert(
-                        request_id.to_string(),
-                        ExecReplayEntry::InFlight { digest },
-                    );
+                    state
+                        .entries
+                        .insert(request_id.to_string(), ExecReplayEntry::InFlight { digest });
                     state.in_flight += 1;
                     return Ok(ExecReplayAcquire::Execute(ExecReplayClaim {
                         cache: self,
@@ -501,9 +501,7 @@ struct ExecReplayClaim<'a> {
 
 impl ExecReplayClaim<'_> {
     fn complete(mut self, output: ExecOutput) -> Result<Arc<ExecOutput>, String> {
-        let result = self
-            .cache
-            .complete(&self.request_id, self.digest, output);
+        let result = self.cache.complete(&self.request_id, self.digest, output);
         if result.is_ok() {
             self.completed = true;
         }
@@ -785,11 +783,7 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
                 return Ok(());
             }
         };
-        match exec_replay_cache().acquire(
-            request_id,
-            digest,
-            exec_replay_wait_timeout(&exec_req),
-        ) {
+        match exec_replay_cache().acquire(request_id, digest, exec_replay_wait_timeout(&exec_req)) {
             Ok(ExecReplayAcquire::Execute(claim)) => Some(claim),
             Ok(ExecReplayAcquire::Replay(output)) => {
                 // The original result was cached before its response write, so
@@ -2539,9 +2533,7 @@ mod tests {
             done_tx.send(replayed).unwrap();
         });
         started_rx.recv().unwrap();
-        assert!(done_rx
-            .recv_timeout(Duration::from_millis(20))
-            .is_err());
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
 
         let expected = ExecOutput {
             stdout: b"completed\n".to_vec(),
@@ -2551,7 +2543,10 @@ mod tests {
         };
         claim.complete(expected.clone()).unwrap();
         assert_eq!(
-            done_rx.recv_timeout(Duration::from_secs(1)).unwrap().as_ref(),
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .as_ref(),
             &expected
         );
         waiter.join().unwrap();

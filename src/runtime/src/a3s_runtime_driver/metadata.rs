@@ -62,8 +62,7 @@ impl BoxRuntimeDriver {
             .into_iter()
             .filter(|record| {
                 record.labels.get(UNIT_LABEL) == Some(&spec.unit_id)
-                    && record.labels.get(GENERATION_LABEL)
-                        == Some(&spec.generation.to_string())
+                    && record.labels.get(GENERATION_LABEL) == Some(&spec.generation.to_string())
             })
             .collect::<Vec<_>>();
         if matches.len() > 1 {
@@ -87,7 +86,12 @@ impl BoxRuntimeDriver {
             .map_err(|error| map_execution_error(unit_id, error))?;
         let mut matches = records
             .into_iter()
-            .filter(|record| record.labels.get(UNIT_LABEL).is_some_and(|value| value == unit_id))
+            .filter(|record| {
+                record
+                    .labels
+                    .get(UNIT_LABEL)
+                    .is_some_and(|value| value == unit_id)
+            })
             .collect::<Vec<_>>();
         for record in &matches {
             validate_owned_record(record, unit_id)?;
@@ -185,7 +189,9 @@ pub(super) fn local_identity(
     let state = record
         .managed_state()
         .map_err(|error| RuntimeError::Protocol(error.to_string()))?
-        .ok_or_else(|| RuntimeError::Protocol(format!("Box execution {} is unmanaged", record.id)))?;
+        .ok_or_else(|| {
+            RuntimeError::Protocol(format!("Box execution {} is unmanaged", record.id))
+        })?;
     Ok((execution_id, metadata.generation, state))
 }
 

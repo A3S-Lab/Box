@@ -240,7 +240,8 @@ impl ManagedExecutionStore {
                 .managed_execution
                 .as_ref()
                 .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
-            if metadata.generation != expected_generation || state != ManagedExecutionState::Removing
+            if metadata.generation != expected_generation
+                || state != ManagedExecutionState::Removing
             {
                 return Err(ManagedExecutionStoreError::Conflict {
                     execution_id: execution_id.clone(),
