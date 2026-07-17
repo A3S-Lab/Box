@@ -161,7 +161,7 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | MicroVM runtime | libkrun-backed OCI execution on Linux/KVM and Apple Silicon/HVF | Primary local runtime. Each box has its own guest kernel. Host-backed validation is required for releases. |
 | OCI Sandbox | Explicit `--isolation sandbox` execution through certified `crun 1.28` on Linux | Preview. Shares the host kernel, never replaces or emulates MicroVM isolation, and still has open security-negative and performance release gates. |
 | Lifecycle and exec | Foreground/detached runs, managed create/start/restart/kill, exec, PTY, logs, health, wait, and cleanup | Implemented for MicroVM. The managed Sandbox path and its structured logs are implemented, while complete parity and adversarial validation remain in progress. |
-| OCI images | Registry pull/push, credentials, digest verification, optional cosign verification/signing, local cache, archive and tag operations | Implemented. Registry-dependent paths still require end-to-end validation against the target registry. |
+| OCI images | Registry pull/push, credentials, digest verification, optional cosign verification/signing, local cache, indexed archive selection, and tag operations | Implemented. `load` selects one Linux platform from direct or nested OCI indexes and verifies the selected manifest, config, and layers before publishing it. Registry-dependent paths still require end-to-end validation against the target registry. |
 | Dockerfile builds | Built-in Dockerfile subset, layer cache, BuildKit-in-MicroVM, and warm-pool `RUN` execution | Implemented subset, not a full Buildx replacement. One target platform is recorded per build. |
 | Storage | Bind mounts, named volumes, tmpfs, `cp`, `diff`, `export`, `commit`, filesystem snapshots, and CoW restore | Implemented. Filesystem snapshots do not contain live VM RAM or device state. |
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
@@ -356,7 +356,7 @@ a3s-box pull --verify-key cosign.pub ghcr.io/example/app:v1
 a3s-box image-inspect alpine:latest
 a3s-box tag alpine:latest local/alpine:dev
 a3s-box save -o alpine.tar alpine:latest
-a3s-box load -i alpine.tar --tag local/alpine:dev
+a3s-box load -i alpine.tar --tag local/alpine:dev --platform linux/amd64
 a3s-box push registry.example/app:v1
 ```
 
@@ -365,6 +365,12 @@ configuration, or explicit registry environment credentials. Manifest,
 configuration, and layer digests are checked during pull. Authentication is
 retained only across same-origin redirects, and decompression limits protect
 image and build extraction.
+
+`load` accepts direct manifests and nested OCI or Docker image indexes. It
+selects `--platform OS/ARCH[/VARIANT]`, defaulting to Linux on the host
+architecture, and normalizes the stored layout to the selected manifest.
+Declared sizes and SHA-256 digests for the selected index path, manifest,
+configuration, and layers are verified before the tag becomes visible.
 
 The built-in builder supports a documented subset of Dockerfile and
 Containerfile behavior:
@@ -392,8 +398,9 @@ a3s-box build --run-pool --run-pool-socket /tmp/a3s-build.sock -t app:dev .
 
 Linux host `RUN` uses the isolated root-capable build path. macOS automatically
 uses the BuildKit VM path for Dockerfiles containing `RUN` unless a warm-pool
-path is selected. A3S Box does not claim complete Dockerfile, Buildx, or
-multi-platform-index compatibility.
+path is selected. A3S Box does not claim complete Dockerfile or Buildx
+compatibility and does not build multi-platform indexes; archive loading can
+import one selected platform from an existing index.
 
 ### Filesystems, volumes, and snapshots
 
