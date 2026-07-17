@@ -54,21 +54,23 @@ impl RegistryPuller {
             .cloned()
             .collect::<Vec<_>>();
         let total = layers.len();
-        let concurrency = self.pull_policy.max_concurrent_downloads().min(total.max(1));
+        let concurrency = self
+            .pull_policy
+            .max_concurrent_downloads()
+            .min(total.max(1));
 
         stream::iter(layers.into_iter().enumerate())
             .map(|(index, layer)| {
                 let transport = transport;
                 async move {
-                    let expected_size = u64::try_from(layer.size).map_err(|_| {
-                        BoxError::RegistryError {
+                    let expected_size =
+                        u64::try_from(layer.size).map_err(|_| BoxError::RegistryError {
                             registry: reference.registry.clone(),
                             message: format!(
                                 "layer {} has a negative declared size ({})",
                                 layer.digest, layer.size
                             ),
-                        }
-                    })?;
+                        })?;
                     let current = index + 1;
                     tracing::debug!(
                         digest = %layer.digest,

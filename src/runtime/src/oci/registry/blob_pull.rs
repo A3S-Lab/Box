@@ -54,12 +54,16 @@ impl HashingFileWriter {
                     path.display()
                 ))
             })?;
-        let mut bytes_written = file.metadata().await.map_err(|error| {
-            BoxError::OciImageError(format!(
-                "Failed to inspect registry partial blob {}: {error}",
-                path.display()
-            ))
-        })?.len();
+        let mut bytes_written = file
+            .metadata()
+            .await
+            .map_err(|error| {
+                BoxError::OciImageError(format!(
+                    "Failed to inspect registry partial blob {}: {error}",
+                    path.display()
+                ))
+            })?
+            .len();
         if bytes_written > expected_size {
             file.set_len(0).await.map_err(|error| {
                 BoxError::OciImageError(format!(
@@ -185,10 +189,12 @@ pub(super) async fn stream_and_verify_blob(
     what: &str,
     mut progress: Option<ProgressReporter>,
 ) -> Result<()> {
-    let expected_size = u64::try_from(descriptor.size).map_err(|_| blob_validation_error(
-        transport.registry,
-        format!("{what} has a negative declared size ({})", descriptor.size),
-    ))?;
+    let expected_size = u64::try_from(descriptor.size).map_err(|_| {
+        blob_validation_error(
+            transport.registry,
+            format!("{what} has a negative declared size ({})", descriptor.size),
+        )
+    })?;
     let expected_hex = descriptor
         .digest
         .strip_prefix("sha256:")
@@ -245,12 +251,12 @@ pub(super) async fn stream_and_verify_blob(
         .await;
 
         let failure = match attempt_result {
-            Ok(()) if writer.bytes_written() < expected_size => Some(http::AttemptFailure::retryable(
-                format!(
+            Ok(()) if writer.bytes_written() < expected_size => {
+                Some(http::AttemptFailure::retryable(format!(
                     "response ended after {} of {expected_size} bytes",
                     writer.bytes_written()
-                ),
-            )),
+                )))
+            }
             Ok(()) if writer.bytes_written() > expected_size => Some(http::AttemptFailure::fatal(
                 format!(
                     "response exceeded declared size {expected_size} bytes (received {})",

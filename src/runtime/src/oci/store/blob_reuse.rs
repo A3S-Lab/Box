@@ -33,13 +33,7 @@ impl ImageStore {
             let index = self.index.read().await;
             index
                 .values()
-                .map(|image| {
-                    image
-                        .path
-                        .join("blobs")
-                        .join("sha256")
-                        .join(&expected_hex)
-                })
+                .map(|image| image.path.join("blobs").join("sha256").join(&expected_hex))
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>()
@@ -75,7 +69,10 @@ fn reuse_from_candidates(
         });
     }
     let parent = dest.parent().ok_or_else(|| {
-        BoxError::OciImageError(format!("Blob destination has no parent: {}", dest.display()))
+        BoxError::OciImageError(format!(
+            "Blob destination has no parent: {}",
+            dest.display()
+        ))
     })?;
     std::fs::create_dir_all(parent).map_err(|error| {
         BoxError::OciImageError(format!(
@@ -305,8 +302,11 @@ mod tests {
         let blob_digest = digest(bytes);
         let blob_hex = blob_digest.strip_prefix("sha256:").unwrap();
         std::fs::create_dir_all(source.join("blobs/sha256")).unwrap();
-        std::fs::write(source.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#)
-            .unwrap();
+        std::fs::write(
+            source.join("oci-layout"),
+            r#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
         std::fs::write(source.join("index.json"), r#"{"manifests":[]}"#).unwrap();
         std::fs::write(source.join("blobs/sha256").join(blob_hex), bytes).unwrap();
         let store = ImageStore::new(&root.path().join("images"), u64::MAX).unwrap();
@@ -338,7 +338,11 @@ mod tests {
         let (root, store, blob_digest) = seeded_store(b"shared-layer").await;
         let blob_hex = blob_digest.strip_prefix("sha256:").unwrap();
         let stored = store.get("seed:latest").await.unwrap();
-        std::fs::write(stored.path.join("blobs/sha256").join(blob_hex), b"corrupt-data").unwrap();
+        std::fs::write(
+            stored.path.join("blobs/sha256").join(blob_hex),
+            b"corrupt-data",
+        )
+        .unwrap();
         let dest = root.path().join("target/blobs/sha256/blob");
 
         assert!(!store

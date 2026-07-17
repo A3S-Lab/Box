@@ -80,12 +80,7 @@ impl ProgressReporter {
         );
     }
 
-    pub(super) fn retrying(
-        &mut self,
-        downloaded_bytes: u64,
-        next_attempt: usize,
-        delay: Duration,
-    ) {
+    pub(super) fn retrying(&mut self, downloaded_bytes: u64, next_attempt: usize, delay: Duration) {
         self.emit(
             PullProgressState::Retrying,
             downloaded_bytes,
@@ -95,21 +90,11 @@ impl ProgressReporter {
     }
 
     pub(super) fn reused(&mut self) {
-        self.emit(
-            PullProgressState::Reused,
-            self.total_bytes,
-            0,
-            None,
-        );
+        self.emit(PullProgressState::Reused, self.total_bytes, 0, None);
     }
 
     pub(super) fn complete(&mut self, downloaded_bytes: u64, attempt: usize) {
-        self.emit(
-            PullProgressState::Complete,
-            downloaded_bytes,
-            attempt,
-            None,
-        );
+        self.emit(PullProgressState::Complete, downloaded_bytes, attempt, None);
     }
 
     fn emit(

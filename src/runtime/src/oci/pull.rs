@@ -12,9 +12,7 @@ use a3s_box_core::StoredImage;
 
 use super::image::OciImage;
 use super::reference::ImageReference;
-use super::registry::{
-    PullProgressEventFn, RegistryAuth, RegistryPullPolicy, RegistryPuller,
-};
+use super::registry::{PullProgressEventFn, RegistryAuth, RegistryPullPolicy, RegistryPuller};
 use super::store::ImageStore;
 
 /// Callback type for layer pull progress: `(current, total, digest, size_bytes)`.

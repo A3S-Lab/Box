@@ -5,9 +5,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::{BlobPullTransport, HashingFileWriter};
 use crate::oci::registry::progress::ProgressReporter;
-use crate::oci::registry::{
-    registry_base_url, registry_blob_url, registry_error_summary,
-};
+use crate::oci::registry::{registry_base_url, registry_blob_url, registry_error_summary};
 
 pub(super) struct AttemptFailure {
     pub(super) message: String,
@@ -55,17 +53,14 @@ pub(super) async fn transfer_attempt(
 
     let mut stream = response.bytes_stream();
     loop {
-        let next = tokio::time::timeout(
-            transport.policy.no_progress_timeout(),
-            stream.next(),
-        )
-        .await
-        .map_err(|_| {
-            AttemptFailure::retryable(format!(
-                "no byte progress for {:?}",
-                transport.policy.no_progress_timeout()
-            ))
-        })?;
+        let next = tokio::time::timeout(transport.policy.no_progress_timeout(), stream.next())
+            .await
+            .map_err(|_| {
+                AttemptFailure::retryable(format!(
+                    "no byte progress for {:?}",
+                    transport.policy.no_progress_timeout()
+                ))
+            })?;
         let Some(chunk) = next else {
             break;
         };
@@ -83,7 +78,9 @@ pub(super) async fn transfer_attempt(
                 transport.policy.no_progress_timeout()
             ))
         })?
-        .map_err(|error| AttemptFailure::fatal(format!("blob file write failed: {error}"), false))?;
+        .map_err(|error| {
+            AttemptFailure::fatal(format!("blob file write failed: {error}"), false)
+        })?;
 
         if writer.bytes_written() > expected_size {
             return Err(AttemptFailure::fatal(
@@ -123,7 +120,9 @@ async fn request_blob(
                     .auth(transport.oci_ref, &auth, RegistryOperation::Pull),
             )
             .await
-            .map_err(|_| AttemptFailure::retryable("registry authentication timed out".to_string()))?
+            .map_err(|_| {
+                AttemptFailure::retryable("registry authentication timed out".to_string())
+            })?
             .map_err(|error| {
                 AttemptFailure::retryable(format!(
                     "registry authentication failed: {}",
@@ -208,9 +207,7 @@ fn classify_response(
     offset: u64,
 ) -> std::result::Result<oci_reqwest::Response, AttemptFailure> {
     let status = response.status();
-    if status == oci_reqwest::StatusCode::OK
-        || status == oci_reqwest::StatusCode::PARTIAL_CONTENT
-    {
+    if status == oci_reqwest::StatusCode::OK || status == oci_reqwest::StatusCode::PARTIAL_CONTENT {
         return Ok(response);
     }
     if status == oci_reqwest::StatusCode::RANGE_NOT_SATISFIABLE && offset > 0 {
@@ -236,10 +233,9 @@ async fn prepare_response(
     expected_size: u64,
 ) -> std::result::Result<(), AttemptFailure> {
     if requested_offset > 0 && response.status() == oci_reqwest::StatusCode::OK {
-        writer
-            .reset()
-            .await
-            .map_err(|error| AttemptFailure::fatal(format!("failed to restart blob file: {error}"), true))?;
+        writer.reset().await.map_err(|error| {
+            AttemptFailure::fatal(format!("failed to restart blob file: {error}"), true)
+        })?;
     } else if response.status() == oci_reqwest::StatusCode::PARTIAL_CONTENT {
         validate_content_range(response, requested_offset, expected_size)?;
     }
@@ -267,27 +263,31 @@ fn validate_content_range(
     let value = response
         .headers()
         .get(oci_reqwest::header::CONTENT_RANGE)
-        .ok_or_else(|| AttemptFailure::fatal("206 response omitted Content-Range".to_string(), false))?
+        .ok_or_else(|| {
+            AttemptFailure::fatal("206 response omitted Content-Range".to_string(), false)
+        })?
         .to_str()
-        .map_err(|error| AttemptFailure::fatal(format!("invalid Content-Range header: {error}"), false))?;
-    let value = value
-        .strip_prefix("bytes ")
-        .ok_or_else(|| AttemptFailure::fatal(format!("invalid Content-Range header: {value}"), false))?;
-    let (range, total) = value
-        .split_once('/')
-        .ok_or_else(|| AttemptFailure::fatal(format!("invalid Content-Range header: {value}"), false))?;
-    let (start, end) = range
-        .split_once('-')
-        .ok_or_else(|| AttemptFailure::fatal(format!("invalid Content-Range header: {value}"), false))?;
-    let start = start
-        .parse::<u64>()
-        .map_err(|_| AttemptFailure::fatal(format!("invalid Content-Range start: {value}"), false))?;
+        .map_err(|error| {
+            AttemptFailure::fatal(format!("invalid Content-Range header: {error}"), false)
+        })?;
+    let value = value.strip_prefix("bytes ").ok_or_else(|| {
+        AttemptFailure::fatal(format!("invalid Content-Range header: {value}"), false)
+    })?;
+    let (range, total) = value.split_once('/').ok_or_else(|| {
+        AttemptFailure::fatal(format!("invalid Content-Range header: {value}"), false)
+    })?;
+    let (start, end) = range.split_once('-').ok_or_else(|| {
+        AttemptFailure::fatal(format!("invalid Content-Range header: {value}"), false)
+    })?;
+    let start = start.parse::<u64>().map_err(|_| {
+        AttemptFailure::fatal(format!("invalid Content-Range start: {value}"), false)
+    })?;
     let end = end
         .parse::<u64>()
         .map_err(|_| AttemptFailure::fatal(format!("invalid Content-Range end: {value}"), false))?;
-    let total = total
-        .parse::<u64>()
-        .map_err(|_| AttemptFailure::fatal(format!("invalid Content-Range total: {value}"), false))?;
+    let total = total.parse::<u64>().map_err(|_| {
+        AttemptFailure::fatal(format!("invalid Content-Range total: {value}"), false)
+    })?;
     if start != requested_offset || end < start || total != expected_size || end >= total {
         return Err(AttemptFailure::fatal(
             format!(

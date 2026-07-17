@@ -108,7 +108,10 @@ fn format_pull_progress_line(progress: &a3s_box_runtime::PullProgress) -> String
             progress.retry_delay_ms.unwrap_or(0)
         ),
         PullProgressState::Reused => {
-            format!("{prefix}: {} reused ✓", format_layer_size(progress.total_bytes))
+            format!(
+                "{prefix}: {} reused ✓",
+                format_layer_size(progress.total_bytes)
+            )
         }
         PullProgressState::Complete => format!(
             "{prefix}: {} / {} downloaded ✓",

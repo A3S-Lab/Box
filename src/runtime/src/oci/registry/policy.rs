@@ -134,7 +134,12 @@ fn positive_usize_env(name: &str, default: usize) -> usize {
         Ok(value) => match value.parse::<usize>() {
             Ok(parsed) if parsed > 0 => parsed,
             _ => {
-                tracing::warn!(variable = name, value, default, "Ignoring invalid registry pull setting");
+                tracing::warn!(
+                    variable = name,
+                    value,
+                    default,
+                    "Ignoring invalid registry pull setting"
+                );
                 default
             }
         },
@@ -147,7 +152,12 @@ fn positive_u64_env(name: &str, default: u64) -> u64 {
         Ok(value) => match value.parse::<u64>() {
             Ok(parsed) if parsed > 0 => parsed,
             _ => {
-                tracing::warn!(variable = name, value, default, "Ignoring invalid registry pull setting");
+                tracing::warn!(
+                    variable = name,
+                    value,
+                    default,
+                    "Ignoring invalid registry pull setting"
+                );
                 default
             }
         },
