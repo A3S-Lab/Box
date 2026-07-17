@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 const IMAGE_REF_ANNOTATION: &str = "org.opencontainers.image.ref.name";
 const OCI_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
+#[cfg(test)]
 const OCI_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 const DOCKER_IMAGE_INDEX: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
 const DOCKER_IMAGE_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+json";
