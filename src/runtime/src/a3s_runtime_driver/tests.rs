@@ -66,6 +66,24 @@ fn driver(directory: &tempfile::TempDir) -> BoxRuntimeDriver {
     .unwrap()
 }
 
+fn mutate_record(
+    driver: &BoxRuntimeDriver,
+    execution_id: &str,
+    mutation: impl FnOnce(&mut crate::BoxRecord),
+) {
+    crate::BoxStateStore::modify(driver.manager.state_path(), move |store| {
+        let record = store.find_by_id_mut(execution_id).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("missing managed execution {execution_id}"),
+            )
+        })?;
+        mutation(record);
+        Ok(())
+    })
+    .unwrap();
+}
+
 #[tokio::test]
 async fn capabilities_claim_only_the_mapped_box_surface() {
     let directory = tempfile::tempdir().unwrap();
@@ -203,5 +221,56 @@ async fn metadata_tamper_is_rejected_fail_closed() {
     assert!(matches!(
         validate_record_for_spec(&record, &spec),
         Err(RuntimeError::Protocol(message)) if message.contains("identity") || message.contains("intent")
+    ));
+}
+
+#[tokio::test]
+async fn discovery_rejects_a_runtime_record_hidden_by_unit_label_tamper() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = driver(&directory);
+    let spec = spec(RuntimeUnitClass::Service);
+    let reservation = driver
+        .manager
+        .create(creation_request(&spec).unwrap(), &operation(&spec).unwrap())
+        .await
+        .unwrap();
+
+    mutate_record(&driver, reservation.execution_id.as_str(), |record| {
+        record
+            .labels
+            .insert(super::metadata::UNIT_LABEL.into(), "hidden-unit".into());
+    });
+
+    assert!(matches!(
+        driver.find_generation(&spec).await,
+        Err(RuntimeError::Protocol(message)) if message.contains("ownership")
+    ));
+}
+
+#[tokio::test]
+async fn discovery_rejects_a_runtime_operation_that_lost_all_labels() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = driver(&directory);
+    let spec = spec(RuntimeUnitClass::Service);
+    let reservation = driver
+        .manager
+        .create(creation_request(&spec).unwrap(), &operation(&spec).unwrap())
+        .await
+        .unwrap();
+
+    mutate_record(&driver, reservation.execution_id.as_str(), |record| {
+        record.labels.clear();
+        record
+            .managed_execution
+            .as_mut()
+            .unwrap()
+            .request
+            .labels
+            .clear();
+    });
+
+    assert!(matches!(
+        driver.find_generation(&spec).await,
+        Err(RuntimeError::Protocol(message)) if message.contains("no unit identity")
     ));
 }

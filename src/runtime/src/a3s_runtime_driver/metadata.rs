@@ -19,6 +19,14 @@ pub(super) const UNIT_LABEL: &str = "a3s.runtime.unit-id";
 pub(super) const GENERATION_LABEL: &str = "a3s.runtime.generation";
 pub(super) const SPEC_DIGEST_LABEL: &str = "a3s.runtime.spec-digest";
 const PROVIDER_VALUE: &str = "a3s-box";
+const OPERATION_PREFIX: &str = "a3s-runtime-box-v1:";
+const RUNTIME_LABELS: [&str; 5] = [
+    MANAGED_LABEL,
+    PROVIDER_LABEL,
+    UNIT_LABEL,
+    GENERATION_LABEL,
+    SPEC_DIGEST_LABEL,
+];
 
 pub(super) fn managed_labels(
     spec: &RuntimeUnitSpec,
@@ -44,7 +52,7 @@ pub(super) fn operation_id(
     digest.update(unit_id.as_bytes());
     digest.update(generation.to_be_bytes());
     digest.update(spec_digest.as_bytes());
-    OperationId::new(format!("a3s-runtime-box-v1:{:x}", digest.finalize()))
+    OperationId::new(format!("{OPERATION_PREFIX}{:x}", digest.finalize()))
         .map_err(|error| RuntimeError::InvalidRequest(error.to_string()))
 }
 
@@ -58,7 +66,7 @@ impl BoxRuntimeDriver {
             .managed_records()
             .await
             .map_err(|error| map_execution_error(&spec.unit_id, error))?;
-        let matches = records
+        let matches = runtime_owned_records(records)?
             .into_iter()
             .filter(|record| {
                 record.labels.get(UNIT_LABEL) == Some(&spec.unit_id)
@@ -84,7 +92,7 @@ impl BoxRuntimeDriver {
             .managed_records()
             .await
             .map_err(|error| map_execution_error(unit_id, error))?;
-        let mut matches = records
+        let mut matches = runtime_owned_records(records)?
             .into_iter()
             .filter(|record| {
                 record
@@ -93,12 +101,49 @@ impl BoxRuntimeDriver {
                     .is_some_and(|value| value == unit_id)
             })
             .collect::<Vec<_>>();
-        for record in &matches {
-            validate_owned_record(record, unit_id)?;
-        }
         matches.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(matches)
     }
+}
+
+fn runtime_owned_records(records: Vec<BoxRecord>) -> RuntimeResult<Vec<BoxRecord>> {
+    let mut owned = Vec::new();
+    for record in records {
+        if !has_runtime_ownership_marker(&record) {
+            continue;
+        }
+        let unit_id = record
+            .labels
+            .get(UNIT_LABEL)
+            .or_else(|| {
+                record
+                    .managed_execution
+                    .as_ref()
+                    .and_then(|metadata| metadata.request.labels.get(UNIT_LABEL))
+            })
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeError::Protocol(format!(
+                    "Box execution {} has Runtime ownership markers but no unit identity",
+                    record.id
+                ))
+            })?;
+        validate_owned_record(&record, &unit_id)?;
+        owned.push(record);
+    }
+    Ok(owned)
+}
+
+fn has_runtime_ownership_marker(record: &BoxRecord) -> bool {
+    let Some(metadata) = record.managed_execution.as_ref() else {
+        return RUNTIME_LABELS
+            .iter()
+            .any(|key| record.labels.contains_key(*key));
+    };
+    metadata.operation_id.as_str().starts_with(OPERATION_PREFIX)
+        || RUNTIME_LABELS.iter().any(|key| {
+            record.labels.contains_key(*key) || metadata.request.labels.contains_key(*key)
+        })
 }
 
 pub(super) fn validate_record_for_spec(
@@ -146,6 +191,13 @@ pub(super) fn validate_owned_record(record: &BoxRecord, unit_id: &str) -> Runtim
         }
     }
     let generation = label_generation(record)?;
+    let expected_external_id = format!("{unit_id}:{generation}");
+    if metadata.request.external_sandbox_id != expected_external_id {
+        return Err(RuntimeError::Protocol(format!(
+            "Box execution {} external identity does not match Runtime ownership",
+            record.id
+        )));
+    }
     let spec_digest = record.labels.get(SPEC_DIGEST_LABEL).ok_or_else(|| {
         RuntimeError::Protocol(format!(
             "Box execution {} has no Runtime specification digest",
