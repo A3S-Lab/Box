@@ -193,11 +193,7 @@ async fn registry_handler(
         return empty_response(StatusCode::NOT_FOUND);
     };
     if blob_digest == state.config.digest {
-        return complete_response(
-            StatusCode::OK,
-            "application/octet-stream",
-            &state.config,
-        );
+        return complete_response(StatusCode::OK, "application/octet-stream", &state.config);
     }
     let Some(layer) = state.layers.get(blob_digest) else {
         return empty_response(StatusCode::NOT_FOUND);
@@ -250,11 +246,7 @@ async fn registry_handler(
 
 fn ranged_response(layer: &BlobFixture, range: Option<&str>) -> Response<Body> {
     let Some(range) = range else {
-        return complete_response(
-            StatusCode::OK,
-            "application/octet-stream",
-            layer,
-        );
+        return complete_response(StatusCode::OK, "application/octet-stream", layer);
     };
     let Some(offset) = range
         .strip_prefix("bytes=")
@@ -386,10 +378,11 @@ async fn interrupted_body_resumes_with_exact_range_and_reports_actual_bytes() {
     .await;
     let events = Arc::new(Mutex::new(Vec::<PullProgress>::new()));
     let recorded_events = Arc::clone(&events);
-    let puller = puller(pull_policy(3, Duration::from_millis(100), 1))
-        .with_progress_event_fn(Arc::new(move |event| {
+    let puller = puller(pull_policy(3, Duration::from_millis(100), 1)).with_progress_event_fn(
+        Arc::new(move |event| {
             recorded_events.lock().unwrap().push(event);
-        }));
+        }),
+    );
     let target = tempfile::tempdir().unwrap();
 
     puller
@@ -398,7 +391,10 @@ async fn interrupted_body_resumes_with_exact_range_and_reports_actual_bytes() {
         .unwrap();
 
     let layer = &fixture.layers[0];
-    assert_eq!(std::fs::read(blob_path(target.path(), &layer.digest)).unwrap(), layer_bytes);
+    assert_eq!(
+        std::fs::read(blob_path(target.path(), &layer.digest)).unwrap(),
+        layer_bytes
+    );
     assert!(!blob_path(target.path(), &layer.digest)
         .with_extension("partial")
         .exists());
@@ -426,11 +422,9 @@ async fn interrupted_body_resumes_with_exact_range_and_reports_actual_bytes() {
 
 #[tokio::test]
 async fn no_progress_timeout_stops_after_the_configured_attempt_bound() {
-    let fixture = ResilientRegistryFixture::start(
-        vec![b"stalled-layer".repeat(1024)],
-        LayerFault::Stall,
-    )
-    .await;
+    let fixture =
+        ResilientRegistryFixture::start(vec![b"stalled-layer".repeat(1024)], LayerFault::Stall)
+            .await;
     let target = tempfile::tempdir().unwrap();
 
     let error = puller(pull_policy(3, Duration::from_millis(30), 1))
@@ -469,11 +463,8 @@ async fn layer_downloads_reach_but_never_exceed_the_concurrency_bound() {
     let layers = (0..5)
         .map(|index| vec![b'a' + index as u8; 16 * 1024 + index])
         .collect::<Vec<_>>();
-    let fixture = ResilientRegistryFixture::start(
-        layers,
-        LayerFault::Delay(Duration::from_millis(60)),
-    )
-    .await;
+    let fixture =
+        ResilientRegistryFixture::start(layers, LayerFault::Delay(Duration::from_millis(60))).await;
     let target = tempfile::tempdir().unwrap();
 
     puller(pull_policy(1, Duration::from_secs(1), 2))
@@ -495,11 +486,8 @@ async fn layer_downloads_reach_but_never_exceed_the_concurrency_bound() {
 #[tokio::test]
 async fn verified_cross_image_layer_reuse_avoids_network_and_is_copy_safe() {
     let layer_bytes = b"verified-shared-layer".repeat(1024);
-    let fixture = ResilientRegistryFixture::start(
-        vec![layer_bytes.clone()],
-        LayerFault::Normal,
-    )
-    .await;
+    let fixture =
+        ResilientRegistryFixture::start(vec![layer_bytes.clone()], LayerFault::Normal).await;
     let root = tempfile::tempdir().unwrap();
     let store = ImageStore::new(&root.path().join("images"), u64::MAX).unwrap();
     let source_blob = seed_blob(&store, &fixture.layers[0].digest, &layer_bytes).await;
@@ -520,11 +508,8 @@ async fn verified_cross_image_layer_reuse_avoids_network_and_is_copy_safe() {
 #[tokio::test]
 async fn same_size_corrupt_cross_image_layer_is_rejected_and_downloaded() {
     let layer_bytes = b"network-fallback-layer".repeat(1024);
-    let fixture = ResilientRegistryFixture::start(
-        vec![layer_bytes.clone()],
-        LayerFault::Normal,
-    )
-    .await;
+    let fixture =
+        ResilientRegistryFixture::start(vec![layer_bytes.clone()], LayerFault::Normal).await;
     let mut corrupt_bytes = layer_bytes.clone();
     corrupt_bytes[0] ^= 0xff;
     let root = tempfile::tempdir().unwrap();
