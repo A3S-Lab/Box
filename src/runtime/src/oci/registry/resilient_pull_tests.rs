@@ -220,11 +220,17 @@ async fn registry_handler(
     match state.fault {
         LayerFault::DropFirst { prefix_bytes } if request_number == 1 => {
             let prefix_bytes = prefix_bytes.min(layer.bytes.len());
+            let prefix = layer.bytes[..prefix_bytes].to_vec();
+            let (mut sender, body) = Body::channel();
+            tokio::spawn(async move {
+                let _ = sender.send_data(prefix.into()).await;
+                sender.abort();
+            });
             Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, "application/octet-stream")
                 .header(CONTENT_LENGTH, layer.bytes.len().to_string())
-                .body(Body::from(layer.bytes[..prefix_bytes].to_vec()))
+                .body(body)
                 .unwrap()
         }
         LayerFault::Stall => stalled_response(layer.bytes.len()),
