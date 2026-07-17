@@ -228,6 +228,8 @@ impl RuntimeDriver for BoxRuntimeDriver {
 }
 
 #[cfg(test)]
+mod exec_integration_tests;
+#[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
 mod test_support;
