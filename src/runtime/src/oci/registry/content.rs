@@ -60,50 +60,48 @@ impl RegistryPuller {
             .min(total.max(1));
 
         stream::iter(layers.into_iter().enumerate())
-            .map(|(index, layer)| {
-                async move {
-                    let expected_size =
-                        u64::try_from(layer.size).map_err(|_| BoxError::RegistryError {
-                            registry: reference.registry.clone(),
-                            message: format!(
-                                "layer {} has a negative declared size ({})",
-                                layer.digest, layer.size
-                            ),
-                        })?;
-                    let current = index + 1;
-                    tracing::debug!(
-                        digest = %layer.digest,
-                        size = layer.size,
-                        current,
-                        total,
-                        "Scheduling registry layer pull"
-                    );
-                    if let Some(callback) = &self.progress_fn {
-                        callback(current, total, &layer.digest, layer.size);
-                    }
-                    let reporter = ProgressReporter::new(
-                        self.progress_event_fn.clone(),
-                        current,
-                        total,
-                        layer.digest.clone(),
-                        expected_size,
-                        self.pull_policy.max_attempts(),
-                    );
-                    let digest_hex = validated_digest_hex(&layer.digest)?;
-                    self.materialize_blob(
-                        &transport,
-                        &layer,
-                        &blobs_dir.join(digest_hex),
-                        "layer",
-                        blob_store,
-                        Some(reporter),
-                    )
-                    .await?;
-                    if let Some(callback) = &self.progress_fn {
-                        callback(current, total, &layer.digest, -layer.size);
-                    }
-                    Ok::<(), BoxError>(())
+            .map(|(index, layer)| async move {
+                let expected_size =
+                    u64::try_from(layer.size).map_err(|_| BoxError::RegistryError {
+                        registry: reference.registry.clone(),
+                        message: format!(
+                            "layer {} has a negative declared size ({})",
+                            layer.digest, layer.size
+                        ),
+                    })?;
+                let current = index + 1;
+                tracing::debug!(
+                    digest = %layer.digest,
+                    size = layer.size,
+                    current,
+                    total,
+                    "Scheduling registry layer pull"
+                );
+                if let Some(callback) = &self.progress_fn {
+                    callback(current, total, &layer.digest, layer.size);
                 }
+                let reporter = ProgressReporter::new(
+                    self.progress_event_fn.clone(),
+                    current,
+                    total,
+                    layer.digest.clone(),
+                    expected_size,
+                    self.pull_policy.max_attempts(),
+                );
+                let digest_hex = validated_digest_hex(&layer.digest)?;
+                self.materialize_blob(
+                    &transport,
+                    &layer,
+                    &blobs_dir.join(digest_hex),
+                    "layer",
+                    blob_store,
+                    Some(reporter),
+                )
+                .await?;
+                if let Some(callback) = &self.progress_fn {
+                    callback(current, total, &layer.digest, -layer.size);
+                }
+                Ok::<(), BoxError>(())
             })
             .buffer_unordered(concurrency)
             .try_collect::<Vec<_>>()
