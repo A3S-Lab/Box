@@ -354,7 +354,11 @@ impl BoxRuntimeDriver {
         validate_record_for_spec(&remaining[0], spec)
     }
 
-    async fn retire_record(&self, mut record: BoxRecord, unit_id: &str) -> RuntimeResult<()> {
+    pub(super) async fn retire_record(
+        &self,
+        mut record: BoxRecord,
+        unit_id: &str,
+    ) -> RuntimeResult<()> {
         let (execution_id, mut generation, mut state) = local_identity(&record)?;
         if matches!(
             state,
