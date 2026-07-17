@@ -303,10 +303,6 @@ impl RegistryPuller {
     /// - `oci-layout`
     /// - `index.json`
     /// - `blobs/sha256/...`
-    pub async fn pull(&self, reference: &ImageReference, target_dir: &Path) -> Result<PathBuf> {
-        self.pull_with_store(reference, target_dir, None).await
-    }
-
     pub(crate) async fn pull_with_store(
         &self,
         reference: &ImageReference,

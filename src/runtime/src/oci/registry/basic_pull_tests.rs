@@ -477,7 +477,7 @@ async fn basic_challenge_pull_resolves_index_streams_blobs_and_follows_redirect(
         fixture.index_digest
     );
     puller
-        .pull(&fixture.reference, target.path())
+        .pull_with_store(&fixture.reference, target.path(), None)
         .await
         .unwrap();
 
@@ -556,7 +556,7 @@ async fn cross_origin_blob_redirect_does_not_forward_basic_credentials() {
     let target = tempfile::tempdir().unwrap();
 
     puller
-        .pull(&fixture.reference, target.path())
+        .pull_with_store(&fixture.reference, target.path(), None)
         .await
         .unwrap();
 
@@ -578,7 +578,7 @@ async fn blob_unauthorized_after_public_manifest_retries_with_basic() {
     let target = tempfile::tempdir().unwrap();
 
     puller
-        .pull(&fixture.reference, target.path())
+        .pull_with_store(&fixture.reference, target.path(), None)
         .await
         .unwrap();
 
@@ -690,7 +690,7 @@ async fn basic_pull_rejects_corrupted_layer_and_removes_partial_blob() {
     let target = tempfile::tempdir().unwrap();
 
     let message = puller
-        .pull(&fixture.reference, target.path())
+        .pull_with_store(&fixture.reference, target.path(), None)
         .await
         .unwrap_err()
         .to_string();
