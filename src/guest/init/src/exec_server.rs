@@ -2444,6 +2444,7 @@ fn truncate_output(mut data: Vec<u8>) -> Vec<u8> {
     data
 }
 
+#[cfg(test)]
 fn bounded_exec_output(stdout: Vec<u8>, stderr: Vec<u8>, exit_code: i32) -> ExecOutput {
     bounded_exec_output_with_truncation(stdout, stderr, exit_code, false)
 }
