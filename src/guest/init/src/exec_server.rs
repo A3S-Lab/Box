@@ -1605,9 +1605,7 @@ fn execute_command(
 
                     stderr.extend_from_slice(b"\nProcess killed: timeout exceeded");
 
-                    return bounded_exec_output_with_truncation(
-                        stdout, stderr, 137, truncated,
-                    );
+                    return bounded_exec_output_with_truncation(stdout, stderr, 137, truncated);
                 }
                 std::thread::sleep(poll_interval);
             }
