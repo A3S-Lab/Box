@@ -2,6 +2,17 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Multi-platform OCI archive loading.** `load` now resolves direct and nested
+  OCI or Docker image indexes to an explicit `--platform`, defaulting to Linux
+  on the host architecture. It verifies declared sizes and SHA-256 digests for
+  the selected index path, manifest, config, and layers, validates the config
+  platform, and proves the normalized layout is consumable before publishing
+  the tag.
+
 ## [3.0.10] — 2026-07-17
 
 ### Added

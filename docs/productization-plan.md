@@ -266,8 +266,12 @@ Current notes:
   digest references as sources. `rmi` resolves the same aliases before removal,
   refuses ambiguous digest matches, and refuses to remove any reference still
   protected by an existing box even when the user asks to ignore missing images.
-  `load` now rejects empty explicit tags and falls back from OCI ref annotations
-  to digest-only dangling references deterministically.
+  `load` rejects empty explicit tags and falls back from OCI ref annotations to
+  digest-only dangling references deterministically. Direct and nested OCI or
+  Docker image indexes are resolved to one requested Linux platform, defaulting
+  to the host architecture. The selected descriptor chain, manifest, config,
+  and layers must pass declared-size and SHA-256 verification, and the
+  normalized image must be consumable before its tag is published.
 - Read-only image commands now use the same resolver. `image-inspect`, `save`,
   and `history` accept exact references, normalized Docker Hub aliases, and
   unambiguous digest references. `push` resolves aliases for the local source,
