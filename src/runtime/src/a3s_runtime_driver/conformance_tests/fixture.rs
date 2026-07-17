@@ -28,7 +28,6 @@ struct SeenResource {
 
 pub(super) struct BoxRuntimeConformanceFixture {
     pub(super) home_dir: PathBuf,
-    pub(super) state_root: PathBuf,
     pub(super) driver: Arc<BoxRuntimeDriver>,
     pub(super) state: Arc<FileRuntimeStateStore>,
     pub(super) cases: CaseFactory,
@@ -80,7 +79,6 @@ impl BoxRuntimeConformanceFixture {
         let state = Arc::new(FileRuntimeStateStore::new(&state_root));
         Ok(Self {
             home_dir,
-            state_root: state_root.clone(),
             driver: driver.clone(),
             state,
             cases,
