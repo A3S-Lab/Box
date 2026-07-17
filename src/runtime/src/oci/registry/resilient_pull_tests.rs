@@ -223,7 +223,9 @@ async fn registry_handler(
             let prefix = layer.bytes[..prefix_bytes].to_vec();
             let (mut sender, body) = Body::channel();
             tokio::spawn(async move {
-                let _ = sender.send_data(prefix.into()).await;
+                if sender.send_data(prefix.into()).await.is_ok() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
                 sender.abort();
             });
             Response::builder()
