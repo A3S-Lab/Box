@@ -32,6 +32,7 @@ a3s-transport = { workspace = true }
 # Async runtime
 tokio = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
