@@ -25,6 +25,7 @@ const REPOSITORY: &str = "a3s/resilient";
 enum LayerFault {
     Normal,
     DropFirst { prefix_bytes: usize },
+    IgnoreRange,
     Stall,
     ServiceUnavailable,
     Delay(Duration),
@@ -246,6 +247,9 @@ async fn registry_handler(
             state.active_layer_requests.fetch_sub(1, Ordering::SeqCst);
             ranged_response(layer, range.as_deref())
         }
+        LayerFault::IgnoreRange => {
+            complete_response(StatusCode::OK, "application/octet-stream", layer)
+        }
         LayerFault::Normal | LayerFault::DropFirst { .. } => {
             ranged_response(layer, range.as_deref())
         }
@@ -426,6 +430,32 @@ async fn interrupted_body_resumes_with_exact_range_and_reports_actual_bytes() {
     assert_eq!(complete.downloaded_bytes, layer_bytes.len() as u64);
     assert_eq!(complete.total_bytes, layer_bytes.len() as u64);
     assert_eq!(complete.attempt, 2);
+}
+
+#[tokio::test]
+async fn full_response_to_range_request_resets_partial_before_writing() {
+    let layer_bytes = b"registry-does-not-support-range".repeat(4096);
+    let prefix_bytes = 4096;
+    let fixture =
+        ResilientRegistryFixture::start(vec![layer_bytes.clone()], LayerFault::IgnoreRange).await;
+    let target = tempfile::tempdir().unwrap();
+    let partial = blob_path(target.path(), &fixture.layers[0].digest).with_extension("partial");
+    std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+    std::fs::write(&partial, &layer_bytes[..prefix_bytes]).unwrap();
+
+    puller(pull_policy(1, Duration::from_secs(1), 1))
+        .pull_with_store(&fixture.reference, target.path(), None)
+        .await
+        .unwrap();
+
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].range.as_deref(), Some("bytes=4096-"));
+    assert_eq!(
+        std::fs::read(blob_path(target.path(), &fixture.layers[0].digest)).unwrap(),
+        layer_bytes
+    );
+    assert!(!partial.exists());
 }
 
 #[tokio::test]
