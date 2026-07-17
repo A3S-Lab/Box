@@ -44,6 +44,7 @@ impl HashingFileWriter {
 
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)

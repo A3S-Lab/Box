@@ -61,7 +61,6 @@ impl RegistryPuller {
 
         stream::iter(layers.into_iter().enumerate())
             .map(|(index, layer)| {
-                let transport = transport;
                 async move {
                     let expected_size =
                         u64::try_from(layer.size).map_err(|_| BoxError::RegistryError {

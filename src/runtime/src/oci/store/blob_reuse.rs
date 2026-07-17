@@ -221,14 +221,7 @@ fn try_reflink(source: &File, destination: &File) -> std::io::Result<bool> {
     } else {
         let error = std::io::Error::last_os_error();
         match error.raw_os_error() {
-            Some(code)
-                if matches!(
-                    code,
-                    libc::EOPNOTSUPP | libc::ENOTTY | libc::EXDEV | libc::EINVAL
-                ) =>
-            {
-                Ok(false)
-            }
+            Some(libc::EOPNOTSUPP | libc::ENOTTY | libc::EXDEV | libc::EINVAL) => Ok(false),
             _ => Err(error),
         }
     }
