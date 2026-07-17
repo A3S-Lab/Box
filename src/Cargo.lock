@@ -201,6 +201,7 @@ dependencies = [
  "ecdsa",
  "filetime",
  "flate2",
+ "futures",
  "hex",
  "libc",
  "oci-distribution",
