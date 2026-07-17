@@ -7,9 +7,9 @@ use a3s_box_core::{
     ExecutionId, ExecutionManagerError, ExecutionManagerResult, ExecutionState, KillOutcome,
 };
 use a3s_runtime::contract::{
-    ArtifactRef, IsolationLevel, NetworkMode, ResourceLimits, RestartPolicy,
-    RuntimeActionRequest, RuntimeNetworkSpec, RuntimeObservation, RuntimeProcessSpec,
-    RuntimeUnitClass, RuntimeUnitSpec, RuntimeUnitState,
+    ArtifactRef, IsolationLevel, NetworkMode, ResourceLimits, RestartPolicy, RuntimeActionRequest,
+    RuntimeNetworkSpec, RuntimeObservation, RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
+    RuntimeUnitState,
 };
 use a3s_runtime::RuntimeUnitRecord;
 use async_trait::async_trait;
@@ -111,7 +111,10 @@ impl LocalExecutionBackend for DriverFakeBackend {
         let handle = Self::handle(record)?;
         let mut executions = self.executions.lock().unwrap();
         if let Some(execution) = executions.get(&record.id) {
-            if matches!(execution.state, ExecutionState::Running | ExecutionState::Paused) {
+            if matches!(
+                execution.state,
+                ExecutionState::Running | ExecutionState::Paused
+            ) {
                 return Ok(execution.handle.clone());
             }
         }
@@ -146,8 +149,11 @@ impl LocalExecutionBackend for DriverFakeBackend {
             .ok_or_else(|| ExecutionManagerError::NotFound(Self::execution_id(record)))?;
         Ok(LocalExecutionObservation {
             state: execution.state,
-            handle: matches!(execution.state, ExecutionState::Running | ExecutionState::Paused)
-                .then(|| execution.handle.clone()),
+            handle: matches!(
+                execution.state,
+                ExecutionState::Running | ExecutionState::Paused
+            )
+            .then(|| execution.handle.clone()),
             exit_code: execution.exit_code,
         })
     }
@@ -175,7 +181,10 @@ impl LocalExecutionBackend for DriverFakeBackend {
         let Some(execution) = self.executions.lock().unwrap().remove(&record.id) else {
             return Err(ExecutionManagerError::NotFound(Self::execution_id(record)));
         };
-        if matches!(execution.state, ExecutionState::Stopped | ExecutionState::Failed) {
+        if matches!(
+            execution.state,
+            ExecutionState::Stopped | ExecutionState::Failed
+        ) {
             Ok(KillOutcome::AlreadyStopped)
         } else {
             Ok(KillOutcome::Killed)
@@ -196,11 +205,8 @@ pub(super) fn fake_driver_with_backend(
     backend: Arc<DriverFakeBackend>,
 ) -> BoxRuntimeDriver {
     let home_dir = directory.path().join("home");
-    let manager = LocalExecutionManager::new(
-        home_dir.join("boxes.json"),
-        &home_dir,
-        backend.clone(),
-    );
+    let manager =
+        LocalExecutionManager::new(home_dir.join("boxes.json"), &home_dir, backend.clone());
     let driver = BoxRuntimeDriver::with_manager(
         BoxRuntimeDriverConfig {
             home_dir,

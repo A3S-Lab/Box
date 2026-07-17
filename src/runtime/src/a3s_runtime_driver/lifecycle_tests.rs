@@ -1,7 +1,5 @@
 use a3s_box_core::ExecutionManager;
-use a3s_runtime::contract::{
-    RuntimeInspection, RuntimeUnitClass, RuntimeUnitState,
-};
+use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitClass, RuntimeUnitState};
 use a3s_runtime::RuntimeDriver;
 
 use super::metadata::GENERATION_LABEL;
@@ -22,7 +20,10 @@ async fn service_replay_reopens_the_same_identity_and_stop_remove_are_idempotent
 
     let reopened = fake_driver_with_backend(&directory, backend.clone());
     let replayed = reopened.apply(&spec, &running).await.unwrap();
-    assert_eq!(replayed.provider_resource_id.as_deref(), Some(provider_id.as_str()));
+    assert_eq!(
+        replayed.provider_resource_id.as_deref(),
+        Some(provider_id.as_str())
+    );
     assert_eq!(backend.starts(), 1);
     assert_eq!(reopened.manager.managed_records().await.unwrap().len(), 1);
 
@@ -79,7 +80,10 @@ async fn generation_handoff_leaves_exactly_one_current_execution() {
     );
 
     let replayed = driver.apply(&second, &second_running).await.unwrap();
-    assert_eq!(replayed.provider_resource_id, second_running.provider_resource_id);
+    assert_eq!(
+        replayed.provider_resource_id,
+        second_running.provider_resource_id
+    );
     assert_eq!(backend.starts(), 2);
     assert_eq!(driver.manager.managed_records().await.unwrap().len(), 1);
 }
@@ -136,15 +140,15 @@ async fn service_failure_restarts_the_same_durable_execution() {
     let provider_id = running.provider_resource_id.clone().unwrap();
     backend.finish(&provider_id, 9);
 
-    let inspection = driver
-        .inspect(&unit(spec.clone(), running))
-        .await
-        .unwrap();
+    let inspection = driver.inspect(&unit(spec.clone(), running)).await.unwrap();
     let RuntimeInspection::Found { observation, .. } = inspection else {
         panic!("restartable Service disappeared")
     };
     assert_eq!(observation.state, RuntimeUnitState::Running);
-    assert_eq!(observation.provider_resource_id.as_deref(), Some(provider_id.as_str()));
+    assert_eq!(
+        observation.provider_resource_id.as_deref(),
+        Some(provider_id.as_str())
+    );
     assert_eq!(backend.starts(), 2);
     assert_eq!(driver.manager.managed_records().await.unwrap().len(), 1);
 }
@@ -153,8 +157,7 @@ async fn service_failure_restarts_the_same_durable_execution() {
 async fn response_loss_reattaches_and_confirmed_provider_loss_replaces_once() {
     let response_loss_directory = tempfile::tempdir().unwrap();
     let (response_loss_driver, response_loss_backend) = fake_driver(&response_loss_directory);
-    let response_loss_spec =
-        runtime_spec("start-response-loss", 1, RuntimeUnitClass::Service);
+    let response_loss_spec = runtime_spec("start-response-loss", 1, RuntimeUnitClass::Service);
     response_loss_backend.fail_next_start_response();
     let recovered = response_loss_driver
         .apply(&response_loss_spec, &accepted(&response_loss_spec))
@@ -197,10 +200,19 @@ async fn response_loss_reattaches_and_confirmed_provider_loss_replaces_once() {
         Some(lost_provider_id.as_str())
     );
     assert_eq!(loss_backend.starts(), 2);
-    assert_eq!(loss_driver.manager.managed_records().await.unwrap().len(), 1);
+    assert_eq!(
+        loss_driver.manager.managed_records().await.unwrap().len(),
+        1
+    );
 
     let replayed = loss_driver.apply(&loss_spec, &replacement).await.unwrap();
-    assert_eq!(replayed.provider_resource_id, replacement.provider_resource_id);
+    assert_eq!(
+        replayed.provider_resource_id,
+        replacement.provider_resource_id
+    );
     assert_eq!(loss_backend.starts(), 2);
-    assert_eq!(loss_driver.manager.managed_records().await.unwrap().len(), 1);
+    assert_eq!(
+        loss_driver.manager.managed_records().await.unwrap().len(),
+        1
+    );
 }
