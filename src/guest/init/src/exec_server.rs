@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use a3s_box_core::exec::{
     ExecChunk, ExecExit, ExecOutput, ExecRequest, StreamType, DEFAULT_EXEC_TIMEOUT_NS,
-    EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES, MAX_OUTPUT_BYTES,
+    EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES,
 };
 use a3s_transport::{FrameType, MAX_PAYLOAD_SIZE};
 use sha2::{Digest, Sha256};
