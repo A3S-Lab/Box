@@ -134,8 +134,10 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
   default and opt-in shared-kernel Sandbox execution through certified `crun`
 - **Docker-like lifecycle**: Create, start, stop, restart, kill, pause, wait,
   remove, inspect, exec, PTY, attach, logs, health checks, and restart policies
-- **OCI image workflow**: Pull, push, authenticate, verify digests and optional
-  cosign signatures, tag, inspect, save, load, import, remove, and cache images
+- **OCI image workflow**: Pull with bounded retry, Range resume, concurrent
+  layers, and verified cross-image blob reuse; push, authenticate, verify
+  digests and optional cosign signatures, tag, inspect, save, load, import,
+  remove, and cache images
 - **Image builds**: Build a documented Dockerfile/Containerfile subset with
   multi-stage builds, layer caching, selected `RUN --mount` forms, BuildKit VM
   execution on macOS, and warm-pool execution
@@ -161,7 +163,7 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | MicroVM runtime | libkrun-backed OCI execution on Linux/KVM and Apple Silicon/HVF | Primary local runtime. Each box has its own guest kernel. Host-backed validation is required for releases. |
 | OCI Sandbox | Explicit `--isolation sandbox` execution through certified `crun 1.28` on Linux | Preview. Shares the host kernel, never replaces or emulates MicroVM isolation, and still has open security-negative and performance release gates. |
 | Lifecycle and exec | Foreground/detached runs, managed create/start/restart/kill, exec, PTY, logs, health, wait, and cleanup | Implemented for MicroVM. The managed Sandbox path and its structured logs are implemented, while complete parity and adversarial validation remain in progress. |
-| OCI images | Registry pull/push, credentials, digest verification, optional cosign verification/signing, local cache, indexed archive selection, and tag operations | Implemented. `load` selects one Linux platform from direct or nested OCI indexes and verifies the selected manifest, config, and layers before publishing it. Registry-dependent paths still require end-to-end validation against the target registry. |
+| OCI images | Resumable bounded registry pulls, concurrent layers, verified cross-image blob reuse, push, credentials, digest verification, optional cosign verification/signing, indexed archive selection, and tag operations | Implemented. `pull` validates declared size and SHA-256 before atomic blob publication; `load` selects one Linux platform from direct or nested OCI indexes and verifies the selected manifest, config, and layers before publishing it. Registry throughput and redirect behavior still require validation against each production registry. |
 | Dockerfile builds | Built-in Dockerfile subset, layer cache, BuildKit-in-MicroVM, and warm-pool `RUN` execution | Implemented subset, not a full Buildx replacement. One target platform is recorded per build. |
 | Storage | Bind mounts, named volumes, tmpfs, `cp`, `diff`, `export`, `commit`, filesystem snapshots, and CoW restore | Implemented. Filesystem snapshots do not contain live VM RAM or device state. |
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
@@ -365,6 +367,35 @@ configuration, or explicit registry environment credentials. Manifest,
 configuration, and layer digests are checked during pull. Authentication is
 retained only across same-origin redirects, and decompression limits protect
 image and build extraction.
+
+Registry configuration and layer transfers use a bounded retry policy. A
+partial blob is resumed with `Range: bytes=<offset>-` when the registry returns
+`206 Partial Content`; a registry that ignores Range and returns `200 OK`
+causes the partial file to be reset before the full response is written. Each
+authentication, response-header, body-chunk, and file-write wait has a
+no-progress deadline. Independent layers are downloaded concurrently up to the
+configured bound, and `a3s-box pull` reports actual downloaded bytes, retry
+attempts, backoff delays, cache reuse, and completion.
+
+Before any blob becomes visible, its declared size and canonical SHA-256 digest
+must match. The image store also searches indexed image layouts for matching
+configuration and layer blobs. A candidate is materialized through a Linux
+reflink when supported or a private byte copy otherwise, verified again, and
+published atomically without linking the destination directly to the source
+cache entry.
+
+| Registry pull setting | Default | Meaning |
+| --- | ---: | --- |
+| `A3S_REGISTRY_PULL_MAX_ATTEMPTS` | `4` | Total attempts per config or layer, including the first request |
+| `A3S_REGISTRY_PULL_RETRY_INITIAL_MS` | `250` | Initial transient-failure backoff |
+| `A3S_REGISTRY_PULL_RETRY_MAX_MS` | `4000` | Exponential-backoff cap |
+| `A3S_REGISTRY_PULL_NO_PROGRESS_TIMEOUT_SECS` | `30` | Maximum wait without header, body, or file-write progress |
+| `A3S_REGISTRY_PULL_MAX_CONCURRENT` | `4` | Maximum simultaneous layer downloads |
+
+All overrides must be positive, and the maximum retry delay must not be lower
+than the initial delay. Invalid overrides are ignored in favor of safe
+defaults. Rust callers can supply the same validated policy explicitly with
+`RegistryPullPolicy::try_new` and `ImagePuller::with_pull_policy`.
 
 `load` accepts direct manifests and nested OCI or Docker image indexes. It
 selects `--platform OS/ARCH[/VARIANT]`, defaulting to Linux on the host

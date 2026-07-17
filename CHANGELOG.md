@@ -6,6 +6,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Resilient and observable registry blob pulls.** Configuration and layer
+  transfers now use bounded capped-exponential retries, exact HTTP Range resume,
+  configurable no-progress deadlines, and bounded concurrent layer downloads.
+  Structured progress reports actual bytes, attempts, and retry delays. Before
+  atomic publication, declared size and SHA-256 remain mandatory; verified
+  blobs can be reused across indexed image layouts through safe reflink/copy
+  staging, while same-size corrupt candidates are rejected and downloaded.
 - **Multi-platform OCI archive loading.** `load` now resolves direct and nested
   OCI or Docker image indexes to an explicit `--platform`, defaulting to Linux
   on the host architecture. It verifies declared sizes and SHA-256 digests for

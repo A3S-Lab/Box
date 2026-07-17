@@ -188,7 +188,7 @@ Run this matrix on a canary cohort first, then on the full selected cohort.
 | Kubernetes lifecycle | create/delete 100 `runtimeClassName: a3s-box` Jobs | all Jobs complete; no kubelet or shim crash loop |
 | Exec | `kubectl exec` and `a3s-box exec` against long-lived boxes | stdout, stderr, TTY, and exit code are correct |
 | Logs | high-volume stdout and log rotation | logs are ordered enough for diagnosis and no writer deadlock occurs |
-| Images | pull from mirror, load offline archive, cache reuse | no unbounded image-store growth after prune |
+| Images | bounded live pull with retry/Range resume, cross-image blob reuse, mirror pull, offline load, and prune | pulls complete or fail inside policy bounds with actual-byte evidence; shared verified layers are not downloaded again; no unbounded image-store growth after prune |
 | Networking | in-pod localhost where bridge is expected; service reachability where Kubernetes provides it | documented networking mode behavior matches reality |
 | Volumes | emptyDir/hostPath-style CRI mounts plus CLI named volumes | data is visible for the intended lifetime and removed after cleanup |
 | Restart | box restart policy and kubelet pod restart | state transitions are visible and cleanup remains bounded |

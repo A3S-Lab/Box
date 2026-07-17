@@ -86,6 +86,41 @@ new login session:
 sudo usermod -aG kvm "$USER"
 ```
 
+## Resilient registry pull validation
+
+The deterministic fault-injection suite proves interrupted-body Range resume,
+no-progress timeout, the exact retry bound, layer concurrency, actual-byte
+progress, verified cross-image reuse, and corrupt-candidate fallback without
+depending on an external registry:
+
+```bash
+cargo test -p a3s-box-runtime resilient_pull_tests
+```
+
+Run a separate live-registry smoke on an enrolled Linux host before release.
+Use a dedicated state directory so the result cannot be satisfied by an
+unrelated cached manifest:
+
+```bash
+export A3S_HOME=/var/tmp/a3s-box-registry-smoke
+export A3S_BOX_REGISTRY_SMOKE_IMAGE=ghcr.io/example/large-image:release-candidate
+export A3S_REGISTRY_PULL_MAX_ATTEMPTS=4
+export A3S_REGISTRY_PULL_RETRY_INITIAL_MS=250
+export A3S_REGISTRY_PULL_RETRY_MAX_MS=4000
+export A3S_REGISTRY_PULL_NO_PROGRESS_TIMEOUT_SECS=30
+export A3S_REGISTRY_PULL_MAX_CONCURRENT=4
+
+timeout 900 a3s-box pull "$A3S_BOX_REGISTRY_SMOKE_IMAGE"
+```
+
+The command must either finish with verified content or fail within the
+configured attempt and no-progress bounds with the downloaded offset in its
+error. Progress output must show actual transferred bytes rather than only the
+declared layer size. If the registry interrupts a response, the next request
+must use the persisted offset; if it does not support Range, the client must
+restart that blob safely. Keep authentication and redirect checks in the
+fixture suite because credentials must never be forwarded to another origin.
+
 ## Linux Dockerfile `RUN` smoke
 
 Dockerfile `RUN` uses an isolated Linux chroot path. It is intentionally
