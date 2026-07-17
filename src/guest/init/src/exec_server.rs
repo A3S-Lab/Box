@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use a3s_box_core::exec::{
     ExecChunk, ExecExit, ExecOutput, ExecRequest, StreamType, DEFAULT_EXEC_TIMEOUT_NS,
-    EXEC_VSOCK_PORT, MAX_OUTPUT_BYTES,
+    EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES, MAX_OUTPUT_BYTES,
 };
-use a3s_transport::FrameType;
+use a3s_transport::{FrameType, MAX_PAYLOAD_SIZE};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
@@ -829,6 +829,12 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
             exec_req.stdin.as_deref(),
             exec_req.user.as_deref(),
         );
+        let output = bounded_exec_output_with_truncation(
+            output.stdout,
+            output.stderr,
+            output.exit_code,
+            output.truncated,
+        );
 
         // Publish the result to the replay cache before the first response
         // byte. A lost connection after this point is therefore recoverable by
@@ -975,6 +981,15 @@ impl<W: Write> Write for ArchiveFrameWriter<'_, W> {
 /// Write a frame: [type:u8][length:u32 BE][payload].
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn write_frame(w: &mut impl Write, frame_type: u8, payload: &[u8]) -> std::io::Result<()> {
+    if payload.len() > MAX_PAYLOAD_SIZE as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Frame too large: {} bytes (max {MAX_PAYLOAD_SIZE})",
+                payload.len()
+            ),
+        ));
+    }
     let len = payload.len() as u32;
     w.write_all(&[frame_type])?;
     w.write_all(&len.to_be_bytes())?;
@@ -995,10 +1010,10 @@ fn read_frame(r: &mut impl Read) -> std::io::Result<Option<(u8, Vec<u8>)>> {
     let frame_type = header[0];
     let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
 
-    if len > 16 * 1024 * 1024 {
+    if len > MAX_PAYLOAD_SIZE as usize {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Frame too large: {} bytes", len),
+            format!("Frame too large: {len} bytes (max {MAX_PAYLOAD_SIZE})"),
         ));
     }
 
@@ -1440,17 +1455,83 @@ fn write_child_stdin(child: &mut std::process::Child, stdin_data: Option<&[u8]>,
     }
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn read_child_output(child: &mut std::process::Child) -> (Vec<u8>, Vec<u8>) {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(ref mut out) = child.stdout {
-        let _ = out.read_to_end(&mut stdout);
+#[derive(Default)]
+struct BoundedPipeOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+    read_error: Option<String>,
+}
+
+type PipeReader = std::thread::JoinHandle<BoundedPipeOutput>;
+
+struct ChildOutputReaders {
+    stdout: Option<PipeReader>,
+    stderr: Option<PipeReader>,
+}
+
+impl ChildOutputReaders {
+    fn start(child: &mut std::process::Child) -> Self {
+        Self {
+            stdout: child.stdout.take().map(|pipe| {
+                std::thread::spawn(move || read_bounded_pipe(pipe, MAX_ONE_SHOT_OUTPUT_BYTES))
+            }),
+            stderr: child.stderr.take().map(|pipe| {
+                std::thread::spawn(move || read_bounded_pipe(pipe, MAX_ONE_SHOT_OUTPUT_BYTES))
+            }),
+        }
     }
-    if let Some(ref mut err) = child.stderr {
-        let _ = err.read_to_end(&mut stderr);
+
+    fn finish(self) -> (Vec<u8>, Vec<u8>, bool) {
+        let stdout = finish_pipe_reader(self.stdout, "stdout");
+        let mut stderr = finish_pipe_reader(self.stderr, "stderr");
+        let mut truncated = stdout.truncated || stderr.truncated;
+        for error in [stdout.read_error.as_deref(), stderr.read_error.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            stderr
+                .bytes
+                .extend_from_slice(format!("\nFailed to read command output: {error}").as_bytes());
+        }
+        if stderr.bytes.len() > MAX_ONE_SHOT_OUTPUT_BYTES {
+            truncated = true;
+        }
+        (stdout.bytes, stderr.bytes, truncated)
     }
-    (stdout, stderr)
+}
+
+fn finish_pipe_reader(reader: Option<PipeReader>, stream: &'static str) -> BoundedPipeOutput {
+    let Some(reader) = reader else {
+        return BoundedPipeOutput::default();
+    };
+    reader.join().unwrap_or_else(|_| BoundedPipeOutput {
+        read_error: Some(format!("{stream} reader thread panicked")),
+        ..Default::default()
+    })
+}
+
+fn read_bounded_pipe(mut pipe: impl Read, limit: usize) -> BoundedPipeOutput {
+    let mut output = BoundedPipeOutput {
+        bytes: Vec::with_capacity(limit.min(64 * 1024)),
+        ..Default::default()
+    };
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => return output,
+            Ok(read) => {
+                let retained = read.min(limit.saturating_sub(output.bytes.len()));
+                output.bytes.extend_from_slice(&buffer[..retained]);
+                if retained < read {
+                    output.truncated = true;
+                }
+            }
+            Err(error) => {
+                output.read_error = Some(error.to_string());
+                return output;
+            }
+        }
+    }
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -1496,6 +1577,7 @@ fn execute_command(
         }
     };
 
+    let output_readers = ChildOutputReaders::start(&mut child);
     write_child_stdin(&mut child, stdin_data, false);
 
     // Wait with timeout using a polling loop
@@ -1505,35 +1587,40 @@ fn execute_command(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let (stdout, stderr) = read_child_output(&mut child);
+                let (stdout, stderr, truncated) = output_readers.finish();
 
-                return bounded_exec_output(stdout, stderr, status.code().unwrap_or(1));
+                return bounded_exec_output_with_truncation(
+                    stdout,
+                    stderr,
+                    status.code().unwrap_or(1),
+                    truncated,
+                );
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     warn!("Exec command timed out after {:?}, killing", timeout);
                     kill_child_process_group(&mut child);
 
-                    let (stdout, mut stderr) = read_child_output(&mut child);
+                    let (stdout, mut stderr, truncated) = output_readers.finish();
 
                     stderr.extend_from_slice(b"\nProcess killed: timeout exceeded");
 
-                    return bounded_exec_output(stdout, stderr, 137);
+                    return bounded_exec_output_with_truncation(
+                        stdout, stderr, 137, truncated,
+                    );
                 }
                 std::thread::sleep(poll_interval);
             }
             Err(ref e) if e.raw_os_error() == Some(libc::ECHILD) => {
                 // Child already reaped (timing race in microVM PID 1 context).
-                let (stdout, stderr) = read_child_output(&mut child);
-                return bounded_exec_output(stdout, stderr, 0);
+                let (stdout, stderr, truncated) = output_readers.finish();
+                return bounded_exec_output_with_truncation(stdout, stderr, 0, truncated);
             }
             Err(e) => {
-                return ExecOutput {
-                    stdout: vec![],
-                    stderr: format!("Failed to wait for command: {}", e).into_bytes(),
-                    exit_code: 1,
-                    truncated: false,
-                };
+                kill_child_process_group(&mut child);
+                let (stdout, mut stderr, truncated) = output_readers.finish();
+                stderr.extend_from_slice(format!("\nFailed to wait for command: {e}").as_bytes());
+                return bounded_exec_output_with_truncation(stdout, stderr, 1, truncated);
             }
         }
     }
@@ -2350,17 +2437,28 @@ fn kill_child_process_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Truncate output to MAX_OUTPUT_BYTES if it exceeds the limit.
+/// Truncate one-shot output to its wire-safe bound.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn truncate_output(mut data: Vec<u8>) -> Vec<u8> {
-    if data.len() > MAX_OUTPUT_BYTES {
-        data.truncate(MAX_OUTPUT_BYTES);
+    if data.len() > MAX_ONE_SHOT_OUTPUT_BYTES {
+        data.truncate(MAX_ONE_SHOT_OUTPUT_BYTES);
     }
     data
 }
 
 fn bounded_exec_output(stdout: Vec<u8>, stderr: Vec<u8>, exit_code: i32) -> ExecOutput {
-    let truncated = stdout.len() > MAX_OUTPUT_BYTES || stderr.len() > MAX_OUTPUT_BYTES;
+    bounded_exec_output_with_truncation(stdout, stderr, exit_code, false)
+}
+
+fn bounded_exec_output_with_truncation(
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_code: i32,
+    already_truncated: bool,
+) -> ExecOutput {
+    let truncated = already_truncated
+        || stdout.len() > MAX_ONE_SHOT_OUTPUT_BYTES
+        || stderr.len() > MAX_ONE_SHOT_OUTPUT_BYTES;
     ExecOutput {
         stdout: truncate_output(stdout),
         stderr: truncate_output(stderr),
@@ -2437,16 +2535,16 @@ mod tests {
 
     #[test]
     fn test_truncate_output_exceeds_limit() {
-        let data = vec![0u8; MAX_OUTPUT_BYTES + 1000];
+        let data = vec![0u8; MAX_ONE_SHOT_OUTPUT_BYTES + 1000];
         let result = truncate_output(data);
-        assert_eq!(result.len(), MAX_OUTPUT_BYTES);
+        assert_eq!(result.len(), MAX_ONE_SHOT_OUTPUT_BYTES);
     }
 
     #[test]
     fn test_truncate_output_at_limit() {
-        let data = vec![0u8; MAX_OUTPUT_BYTES];
+        let data = vec![0u8; MAX_ONE_SHOT_OUTPUT_BYTES];
         let result = truncate_output(data);
-        assert_eq!(result.len(), MAX_OUTPUT_BYTES);
+        assert_eq!(result.len(), MAX_ONE_SHOT_OUTPUT_BYTES);
     }
 
     #[test]
@@ -2459,17 +2557,35 @@ mod tests {
     #[test]
     fn bounded_exec_output_reports_real_truncation() {
         let output = bounded_exec_output(
-            vec![b'o'; MAX_OUTPUT_BYTES + 1],
-            vec![b'e'; MAX_OUTPUT_BYTES],
+            vec![b'o'; MAX_ONE_SHOT_OUTPUT_BYTES + 1],
+            vec![b'e'; MAX_ONE_SHOT_OUTPUT_BYTES],
             17,
         );
-        assert_eq!(output.stdout.len(), MAX_OUTPUT_BYTES);
-        assert_eq!(output.stderr.len(), MAX_OUTPUT_BYTES);
+        assert_eq!(output.stdout.len(), MAX_ONE_SHOT_OUTPUT_BYTES);
+        assert_eq!(output.stderr.len(), MAX_ONE_SHOT_OUTPUT_BYTES);
         assert_eq!(output.exit_code, 17);
         assert!(output.truncated);
 
         let exact = bounded_exec_output(vec![b'o'; 4], vec![b'e'; 4], 0);
         assert!(!exact.truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_pipe_reader_drains_excess_without_blocking_the_writer() {
+        use std::os::unix::net::UnixStream;
+
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let produced = MAX_ONE_SHOT_OUTPUT_BYTES + 128 * 1024;
+        let writer = std::thread::spawn(move || {
+            writer.write_all(&vec![b'x'; produced]).unwrap();
+        });
+
+        let output = read_bounded_pipe(reader, MAX_ONE_SHOT_OUTPUT_BYTES);
+        writer.join().unwrap();
+        assert_eq!(output.bytes.len(), MAX_ONE_SHOT_OUTPUT_BYTES);
+        assert!(output.truncated);
+        assert!(output.read_error.is_none());
     }
 
     #[test]

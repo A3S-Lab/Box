@@ -14,8 +14,16 @@ pub const PORT_FWD_VSOCK_PORT: u32 = 4093;
 /// Default exec timeout: 5 seconds.
 pub const DEFAULT_EXEC_TIMEOUT_NS: u64 = 5_000_000_000;
 
-/// Maximum output size per stream (stdout/stderr): 16 MiB.
+/// Maximum buffered streaming output size per stream (stdout/stderr): 16 MiB.
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum captured one-shot output size per stream: 1 MiB.
+///
+/// One-shot responses retain the legacy JSON `Vec<u8>` representation, whose
+/// worst-case encoding uses four bytes per input byte. Bounding both streams
+/// at 1 MiB guarantees the complete response fits the transport's 16 MiB
+/// frame without breaking older host or guest binaries.
+pub const MAX_ONE_SHOT_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Frame type byte for streaming exec chunks.
 pub const FRAME_EXEC_CHUNK: u8 = 0x01;
@@ -294,6 +302,19 @@ mod tests {
     #[test]
     fn test_max_output_bytes_constant() {
         assert_eq!(MAX_OUTPUT_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MAX_ONE_SHOT_OUTPUT_BYTES, 1024 * 1024);
+    }
+
+    #[test]
+    fn maximum_one_shot_output_fits_one_transport_frame() {
+        let output = ExecOutput {
+            stdout: vec![u8::MAX; MAX_ONE_SHOT_OUTPUT_BYTES],
+            stderr: vec![u8::MAX; MAX_ONE_SHOT_OUTPUT_BYTES],
+            exit_code: i32::MIN,
+            truncated: true,
+        };
+        let encoded = serde_json::to_vec(&output).unwrap();
+        assert!(encoded.len() <= a3s_transport::MAX_PAYLOAD_SIZE as usize);
     }
 
     #[test]
