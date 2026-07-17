@@ -266,7 +266,7 @@ pub(super) async fn stream_and_verify_blob(
             )),
             Ok(()) if !writer.current_hex().eq_ignore_ascii_case(expected_hex) => {
                 Some(http::AttemptFailure::retryable_reset(format!(
-                    "digest mismatch after receiving {expected_size} bytes"
+                    "{what} digest mismatch after receiving {expected_size} bytes"
                 )))
             }
             Ok(()) => {
@@ -290,21 +290,26 @@ pub(super) async fn stream_and_verify_blob(
                 format!("Failed to pull {what}: transfer ended without a terminal result"),
             ));
         };
+        let failed_downloaded_bytes = writer.bytes_written();
+        if !failure.retryable || attempt == transport.policy.max_attempts() {
+            if failure.reset_partial {
+                drop(writer);
+                let _ = tokio::fs::remove_file(&tmp).await;
+            }
+            return Err(blob_validation_error(
+                transport.registry,
+                format!(
+                    "Failed to pull {what} after {attempt} attempt(s); downloaded {} of {expected_size} bytes: {}",
+                    failed_downloaded_bytes,
+                    failure.message
+                ),
+            ));
+        }
         if failure.reset_partial {
             writer
                 .reset()
                 .await
                 .map_err(|error| blob_io_error(transport.registry, what, "reset", error))?;
-        }
-        if !failure.retryable || attempt == transport.policy.max_attempts() {
-            return Err(blob_validation_error(
-                transport.registry,
-                format!(
-                    "Failed to pull {what} after {attempt} attempt(s); downloaded {} of {expected_size} bytes: {}",
-                    writer.bytes_written(),
-                    failure.message
-                ),
-            ));
         }
 
         writer
@@ -321,6 +326,7 @@ pub(super) async fn stream_and_verify_blob(
             attempt,
             next_attempt = attempt + 1,
             downloaded_bytes = writer.bytes_written(),
+            failed_downloaded_bytes,
             retry_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             error = %failure.message,
             "Retrying registry blob transfer"
