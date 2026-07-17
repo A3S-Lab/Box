@@ -1271,6 +1271,7 @@ mod tests {
         *vm.state.write().await = BoxState::Ready;
 
         let request = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec![],
             timeout_ns: 0,
             env: vec!["ENV=test".to_string()],
@@ -1295,6 +1296,7 @@ mod tests {
         *vm.state.write().await = BoxState::Ready;
 
         let request = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec!["printenv".to_string()],
             timeout_ns: 123,
             env: vec!["ENV=test".to_string()],

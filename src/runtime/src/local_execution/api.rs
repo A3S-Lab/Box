@@ -229,6 +229,10 @@ impl ExecutionManager for LocalExecutionManager {
                 self.finish_kill(record).await?;
                 Ok(ReconcileOutcome::Failed)
             }
+            ManagedExecutionState::Removing => {
+                self.finish_remove(record).await?;
+                Ok(ReconcileOutcome::Absent)
+            }
             ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => self
                 .resume_restart(record)
                 .await

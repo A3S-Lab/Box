@@ -57,6 +57,7 @@ base64 = { workspace = true }
 
 # HTTP client
 reqwest = { workspace = true }
+url = { workspace = true }
 oci-reqwest = { package = "reqwest", version = "0.12", default-features = false, features = ["json", "stream"] }
 
 # Time
@@ -119,6 +120,9 @@ ring = { workspace = true }
 # stay off Windows where .tar/.tar.gz remain supported without a C toolchain.
 bzip2 = "0.5"
 xz2 = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+a3s-runtime = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

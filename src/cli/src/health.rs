@@ -273,6 +273,7 @@ pub(crate) async fn run_probe(
     };
 
     let request = ExecRequest {
+        request_id: None,
         cmd: cmd.to_vec(),
         timeout_ns,
         env: vec![],

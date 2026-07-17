@@ -8,6 +8,7 @@ mod operations;
 mod port;
 mod record;
 mod recovery;
+mod remove;
 mod resources;
 mod restart;
 #[cfg(unix)]

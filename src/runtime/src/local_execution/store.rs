@@ -213,7 +213,7 @@ pub(super) enum RuntimeUpdate {
     RestartFailed(Option<i32>),
 }
 
-async fn run_store<T>(
+pub(super) async fn run_store<T>(
     operation: impl FnOnce() -> Result<T, ManagedExecutionStoreError> + Send + 'static,
 ) -> ExecutionManagerResult<T>
 where
@@ -227,7 +227,7 @@ where
         .map_err(map_store_error)
 }
 
-fn map_store_error(error: ManagedExecutionStoreError) -> ExecutionManagerError {
+pub(super) fn map_store_error(error: ManagedExecutionStoreError) -> ExecutionManagerError {
     match error {
         ManagedExecutionStoreError::Io(error) => {
             ExecutionManagerError::Unavailable(error.to_string())

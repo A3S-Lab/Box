@@ -53,11 +53,12 @@ impl VmLocalExecutionBackend {
                 })
             }
             "stopped" => {
+                let exit_code = crate::rootfs::read_persisted_exit_code(&record.box_dir);
                 self.cleanup_detached_sandbox(record).await?;
                 Ok(LocalExecutionObservation {
                     state: ExecutionState::Stopped,
                     handle: None,
-                    exit_code: None,
+                    exit_code,
                 })
             }
             status => Err(ExecutionManagerError::Internal(format!(

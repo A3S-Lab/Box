@@ -276,6 +276,14 @@ pub struct ResourceLimits {
     /// Applied via cgroup v2 memory.swap.max (Linux only).
     #[serde(default)]
     pub memory_swap: Option<i64>,
+
+    /// Exact hard memory limit for the shared-kernel Sandbox backend.
+    ///
+    /// `None` preserves the CLI's historical MiB-based `resources.memory_mb`
+    /// value. Provider adapters use this field when their public contract is
+    /// byte-granular and must not silently round the requested limit.
+    #[serde(default)]
+    pub sandbox_memory_limit_bytes: Option<u64>,
 }
 
 /// Box configuration
@@ -1080,6 +1088,7 @@ mod tests {
         assert!(limits.cpu_period.is_none());
         assert!(limits.memory_reservation.is_none());
         assert!(limits.memory_swap.is_none());
+        assert!(limits.sandbox_memory_limit_bytes.is_none());
     }
 
     #[test]
@@ -1093,6 +1102,7 @@ mod tests {
             cpu_period: Some(100000),
             memory_reservation: Some(256 * 1024 * 1024),
             memory_swap: Some(1024 * 1024 * 1024),
+            sandbox_memory_limit_bytes: Some(256 * 1024 * 1024),
         };
 
         let json = serde_json::to_string(&limits).unwrap();
@@ -1106,6 +1116,10 @@ mod tests {
         assert_eq!(parsed.cpu_period, Some(100000));
         assert_eq!(parsed.memory_reservation, Some(256 * 1024 * 1024));
         assert_eq!(parsed.memory_swap, Some(1024 * 1024 * 1024));
+        assert_eq!(
+            parsed.sandbox_memory_limit_bytes,
+            Some(256 * 1024 * 1024)
+        );
     }
 
     #[test]

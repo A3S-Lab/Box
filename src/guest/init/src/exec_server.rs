@@ -4,19 +4,22 @@
 //! Each connection: read a Data frame (JSON ExecRequest), execute,
 //! then send either a one-shot `ExecOutput` or streaming chunk/exit frames.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::path::Path;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use a3s_box_core::exec::{
-    ExecChunk, ExecExit, ExecOutput, StreamType, DEFAULT_EXEC_TIMEOUT_NS, EXEC_VSOCK_PORT,
-    MAX_OUTPUT_BYTES,
+    ExecChunk, ExecExit, ExecOutput, ExecRequest, StreamType, DEFAULT_EXEC_TIMEOUT_NS,
+    EXEC_VSOCK_PORT, MAX_OUTPUT_BYTES,
 };
 use a3s_transport::FrameType;
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::user::{parse_process_user, ProcessUser};
@@ -260,6 +263,300 @@ const EXEC_CONTROL_FLUSH: &[u8] = b"flush";
 /// match the host's `EXEC_FLUSH_ACK` in `runtime/src/grpc/exec.rs`.
 const EXEC_FLUSH_ACK: &[u8] = b"flush-ack";
 
+/// Guest-local ambiguity window for one-shot exec requests. Runtime persists
+/// the final receipt on the host; this cache closes the smaller window where a
+/// command completed in the guest but its response was lost before that host
+/// receipt could be committed.
+const EXEC_REPLAY_MAX_ENTRIES: usize = 128;
+const EXEC_REPLAY_MAX_IN_FLIGHT: usize = 32;
+const EXEC_REPLAY_MAX_RESULT_BYTES: usize = 64 * 1024 * 1024;
+const EXEC_REPLAY_WAIT_SLACK: Duration = Duration::from_secs(10);
+
+static EXEC_REPLAY_CACHE: OnceLock<ExecReplayCache> = OnceLock::new();
+
+fn exec_replay_cache() -> &'static ExecReplayCache {
+    EXEC_REPLAY_CACHE.get_or_init(ExecReplayCache::default)
+}
+
+struct ExecReplayCache {
+    state: Mutex<ExecReplayState>,
+    changed: Condvar,
+    max_entries: usize,
+    max_in_flight: usize,
+    max_result_bytes: usize,
+}
+
+impl Default for ExecReplayCache {
+    fn default() -> Self {
+        Self::with_limits(
+            EXEC_REPLAY_MAX_ENTRIES,
+            EXEC_REPLAY_MAX_IN_FLIGHT,
+            EXEC_REPLAY_MAX_RESULT_BYTES,
+        )
+    }
+}
+
+impl ExecReplayCache {
+    fn with_limits(max_entries: usize, max_in_flight: usize, max_result_bytes: usize) -> Self {
+        Self {
+            state: Mutex::new(ExecReplayState::default()),
+            changed: Condvar::new(),
+            max_entries,
+            max_in_flight,
+            max_result_bytes,
+        }
+    }
+
+    fn acquire(
+        &self,
+        request_id: &str,
+        digest: [u8; 32],
+        wait_timeout: Duration,
+    ) -> Result<ExecReplayAcquire<'_>, String> {
+        validate_exec_request_id(request_id)?;
+        let started = std::time::Instant::now();
+        let mut state = self.lock_state();
+
+        loop {
+            let existing = state.entries.get(request_id).map(|entry| match entry {
+                ExecReplayEntry::InFlight { digest } => ExistingReplay::InFlight(*digest),
+                ExecReplayEntry::Ready {
+                    digest, output, ..
+                } => ExistingReplay::Ready(*digest, Arc::clone(output)),
+            });
+            match existing {
+                Some(ExistingReplay::Ready(existing_digest, output)) => {
+                    if existing_digest != digest {
+                        return Err(format!(
+                            "exec request ID {request_id:?} conflicts with cached content"
+                        ));
+                    }
+                    state.completed_order.retain(|value| value != request_id);
+                    state.completed_order.push_back(request_id.to_string());
+                    return Ok(ExecReplayAcquire::Replay(output));
+                }
+                Some(ExistingReplay::InFlight(existing_digest)) => {
+                    if existing_digest != digest {
+                        return Err(format!(
+                            "exec request ID {request_id:?} conflicts with in-flight content"
+                        ));
+                    }
+                    let remaining = wait_timeout.checked_sub(started.elapsed()).ok_or_else(|| {
+                        format!("timed out waiting for exec request {request_id:?} to complete")
+                    })?;
+                    if remaining.is_zero() {
+                        return Err(format!(
+                            "timed out waiting for exec request {request_id:?} to complete"
+                        ));
+                    }
+                    let waited = self
+                        .changed
+                        .wait_timeout(state, remaining)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state = waited.0;
+                    if waited.1.timed_out() {
+                        return Err(format!(
+                            "timed out waiting for exec request {request_id:?} to complete"
+                        ));
+                    }
+                }
+                None => {
+                    while state.entries.len() >= self.max_entries {
+                        if !evict_oldest_completed(&mut state) {
+                            return Err(
+                                "exec replay cache is full of in-flight requests".to_string()
+                            );
+                        }
+                    }
+                    if state.in_flight >= self.max_in_flight {
+                        return Err("exec replay in-flight limit reached".to_string());
+                    }
+                    state.entries.insert(
+                        request_id.to_string(),
+                        ExecReplayEntry::InFlight { digest },
+                    );
+                    state.in_flight += 1;
+                    return Ok(ExecReplayAcquire::Execute(ExecReplayClaim {
+                        cache: self,
+                        request_id: request_id.to_string(),
+                        digest,
+                        completed: false,
+                    }));
+                }
+            }
+        }
+    }
+
+    fn complete(
+        &self,
+        request_id: &str,
+        digest: [u8; 32],
+        output: ExecOutput,
+    ) -> Result<Arc<ExecOutput>, String> {
+        let result_bytes = output
+            .stdout
+            .len()
+            .checked_add(output.stderr.len())
+            .and_then(|value| value.checked_add(std::mem::size_of::<ExecOutput>()))
+            .ok_or_else(|| "exec replay result size overflowed".to_string())?;
+        if result_bytes > self.max_result_bytes {
+            return Err("exec result exceeds the replay cache byte bound".to_string());
+        }
+
+        let mut state = self.lock_state();
+        match state.entries.get(request_id) {
+            Some(ExecReplayEntry::InFlight {
+                digest: existing_digest,
+            }) if *existing_digest == digest => {}
+            Some(_) => {
+                return Err(format!(
+                    "exec replay claim for {request_id:?} changed before completion"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "exec replay claim for {request_id:?} disappeared before completion"
+                ))
+            }
+        }
+
+        let output = Arc::new(output);
+        state.entries.insert(
+            request_id.to_string(),
+            ExecReplayEntry::Ready {
+                digest,
+                output: Arc::clone(&output),
+                result_bytes,
+            },
+        );
+        state.in_flight = state.in_flight.saturating_sub(1);
+        state.completed_bytes = state.completed_bytes.saturating_add(result_bytes);
+        state.completed_order.retain(|value| value != request_id);
+        state.completed_order.push_back(request_id.to_string());
+        while state.completed_bytes > self.max_result_bytes {
+            if !evict_oldest_completed(&mut state) {
+                break;
+            }
+        }
+        self.changed.notify_all();
+        Ok(output)
+    }
+
+    fn abort(&self, request_id: &str, digest: [u8; 32]) {
+        let mut state = self.lock_state();
+        if matches!(
+            state.entries.get(request_id),
+            Some(ExecReplayEntry::InFlight {
+                digest: existing_digest
+            }) if *existing_digest == digest
+        ) {
+            state.entries.remove(request_id);
+            state.in_flight = state.in_flight.saturating_sub(1);
+            self.changed.notify_all();
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ExecReplayState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[derive(Default)]
+struct ExecReplayState {
+    entries: HashMap<String, ExecReplayEntry>,
+    completed_order: VecDeque<String>,
+    completed_bytes: usize,
+    in_flight: usize,
+}
+
+enum ExecReplayEntry {
+    InFlight {
+        digest: [u8; 32],
+    },
+    Ready {
+        digest: [u8; 32],
+        output: Arc<ExecOutput>,
+        result_bytes: usize,
+    },
+}
+
+enum ExistingReplay {
+    InFlight([u8; 32]),
+    Ready([u8; 32], Arc<ExecOutput>),
+}
+
+enum ExecReplayAcquire<'a> {
+    Execute(ExecReplayClaim<'a>),
+    Replay(Arc<ExecOutput>),
+}
+
+struct ExecReplayClaim<'a> {
+    cache: &'a ExecReplayCache,
+    request_id: String,
+    digest: [u8; 32],
+    completed: bool,
+}
+
+impl ExecReplayClaim<'_> {
+    fn complete(mut self, output: ExecOutput) -> Result<Arc<ExecOutput>, String> {
+        let result = self
+            .cache
+            .complete(&self.request_id, self.digest, output);
+        if result.is_ok() {
+            self.completed = true;
+        }
+        result
+    }
+}
+
+impl Drop for ExecReplayClaim<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cache.abort(&self.request_id, self.digest);
+        }
+    }
+}
+
+fn evict_oldest_completed(state: &mut ExecReplayState) -> bool {
+    while let Some(request_id) = state.completed_order.pop_front() {
+        let result_bytes = match state.entries.get(&request_id) {
+            Some(ExecReplayEntry::Ready { result_bytes, .. }) => *result_bytes,
+            _ => continue,
+        };
+        state.entries.remove(&request_id);
+        state.completed_bytes = state.completed_bytes.saturating_sub(result_bytes);
+        return true;
+    }
+    false
+}
+
+fn validate_exec_request_id(request_id: &str) -> Result<(), String> {
+    if request_id.is_empty() || request_id.len() > 512 || request_id.contains('\0') {
+        return Err("exec request ID is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn exec_request_digest(request: &ExecRequest) -> Result<[u8; 32], String> {
+    let payload = serde_json::to_vec(request)
+        .map_err(|error| format!("could not encode exec request identity: {error}"))?;
+    let digest = Sha256::digest(payload);
+    let mut output = [0_u8; 32];
+    output.copy_from_slice(&digest);
+    Ok(output)
+}
+
+fn exec_replay_wait_timeout(request: &ExecRequest) -> Duration {
+    let timeout_ns = if request.timeout_ns == 0 {
+        DEFAULT_EXEC_TIMEOUT_NS
+    } else {
+        request.timeout_ns
+    };
+    Duration::from_nanos(timeout_ns).saturating_add(EXEC_REPLAY_WAIT_SLACK)
+}
+
 /// A bound, listening exec-server socket — produced by [`bind_exec_server`] and
 /// consumed by [`serve_exec_server`].
 ///
@@ -389,7 +686,6 @@ fn run_accept_loop(sock_fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::err
 /// 3. Send either a one-shot ExecOutput frame or streaming exec frames
 #[cfg(target_os = "linux")]
 fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error::Error>> {
-    use a3s_box_core::exec::ExecRequest;
     use tracing::debug;
 
     // Transfer ownership into File. Constructing a second owner with
@@ -473,6 +769,45 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
         }
     };
 
+    if exec_req.streaming && exec_req.request_id.is_some() {
+        send_error_frame(
+            &mut stream,
+            "Idempotent request IDs are supported only for one-shot exec",
+        )?;
+        return Ok(());
+    }
+
+    let replay_claim = if let Some(request_id) = exec_req.request_id.as_deref() {
+        let digest = match exec_request_digest(&exec_req) {
+            Ok(digest) => digest,
+            Err(error) => {
+                send_error_frame(&mut stream, &error)?;
+                return Ok(());
+            }
+        };
+        match exec_replay_cache().acquire(
+            request_id,
+            digest,
+            exec_replay_wait_timeout(&exec_req),
+        ) {
+            Ok(ExecReplayAcquire::Execute(claim)) => Some(claim),
+            Ok(ExecReplayAcquire::Replay(output)) => {
+                // The original result was cached before its response write, so
+                // this is the exact logical result even when that write was
+                // the ambiguous failure that triggered this retry.
+                let response_payload = serde_json::to_vec(output.as_ref())?;
+                write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
+                return Ok(());
+            }
+            Err(error) => {
+                send_error_frame(&mut stream, &error)?;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
     if exec_req.streaming {
         let input_rx = spawn_exec_input_monitor(&stream)?;
         execute_command_streaming(
@@ -501,8 +836,22 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
             exec_req.user.as_deref(),
         );
 
+        // Publish the result to the replay cache before the first response
+        // byte. A lost connection after this point is therefore recoverable by
+        // an exact retry without executing the command again.
+        let output = match replay_claim {
+            Some(claim) => match claim.complete(output) {
+                Ok(output) => output,
+                Err(error) => {
+                    send_error_frame(&mut stream, &error)?;
+                    return Ok(());
+                }
+            },
+            None => Arc::new(output),
+        };
+
         // Send response as Data frame with JSON payload
-        let response_payload = serde_json::to_vec(&output)?;
+        let response_payload = serde_json::to_vec(output.as_ref())?;
         write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
     }
 
@@ -829,6 +1178,7 @@ fn build_command(
             stdout: vec![],
             stderr: b"Empty command".to_vec(),
             exit_code: 1,
+            truncated: false,
         });
     }
 
@@ -854,6 +1204,7 @@ fn build_command(
                 stdout: vec![],
                 stderr: error.into_bytes(),
                 exit_code: 1,
+                truncated: false,
             });
         }
     };
@@ -878,6 +1229,7 @@ fn build_command(
                 stdout: vec![],
                 stderr: format!("Invalid rootfs path: {rootfs}").into_bytes(),
                 exit_code: 1,
+                truncated: false,
             });
         }
 
@@ -887,6 +1239,7 @@ fn build_command(
                 stdout: vec![],
                 stderr: b"Rootfs execution requires a Linux guest".to_vec(),
                 exit_code: 1,
+                truncated: false,
             });
         }
 
@@ -925,6 +1278,7 @@ fn build_command(
                     stdout: vec![],
                     stderr: format!("Rootfs path is not a directory: {rootfs}").into_bytes(),
                     exit_code: 1,
+                    truncated: false,
                 });
             }
             Err(e) => {
@@ -932,6 +1286,7 @@ fn build_command(
                     stdout: vec![],
                     stderr: format!("Rootfs path is unavailable: {rootfs} ({e})").into_bytes(),
                     exit_code: 1,
+                    truncated: false,
                 });
             }
         }
@@ -1142,6 +1497,7 @@ fn execute_command(
                 stdout: vec![],
                 stderr: format!("Failed to spawn command '{}': {}", cmd[0], e).into_bytes(),
                 exit_code: 127,
+                truncated: false,
             };
         }
     };
@@ -1157,11 +1513,7 @@ fn execute_command(
             Ok(Some(status)) => {
                 let (stdout, stderr) = read_child_output(&mut child);
 
-                return ExecOutput {
-                    stdout: truncate_output(stdout),
-                    stderr: truncate_output(stderr),
-                    exit_code: status.code().unwrap_or(1),
-                };
+                return bounded_exec_output(stdout, stderr, status.code().unwrap_or(1));
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
@@ -1172,28 +1524,21 @@ fn execute_command(
 
                     stderr.extend_from_slice(b"\nProcess killed: timeout exceeded");
 
-                    return ExecOutput {
-                        stdout: truncate_output(stdout),
-                        stderr: truncate_output(stderr),
-                        exit_code: 137,
-                    };
+                    return bounded_exec_output(stdout, stderr, 137);
                 }
                 std::thread::sleep(poll_interval);
             }
             Err(ref e) if e.raw_os_error() == Some(libc::ECHILD) => {
                 // Child already reaped (timing race in microVM PID 1 context).
                 let (stdout, stderr) = read_child_output(&mut child);
-                return ExecOutput {
-                    stdout: truncate_output(stdout),
-                    stderr: truncate_output(stderr),
-                    exit_code: 0,
-                };
+                return bounded_exec_output(stdout, stderr, 0);
             }
             Err(e) => {
                 return ExecOutput {
                     stdout: vec![],
                     stderr: format!("Failed to wait for command: {}", e).into_bytes(),
                     exit_code: 1,
+                    truncated: false,
                 };
             }
         }
@@ -1447,6 +1792,7 @@ fn execute_command_streaming(
                 stdout: vec![],
                 stderr: format!("Failed to spawn command '{}': {}", spec.cmd[0], e).into_bytes(),
                 exit_code: 127,
+                truncated: false,
             };
             write_exec_stream_response(writer, &output)?;
             return Ok(());
@@ -2019,6 +2365,16 @@ fn truncate_output(mut data: Vec<u8>) -> Vec<u8> {
     data
 }
 
+fn bounded_exec_output(stdout: Vec<u8>, stderr: Vec<u8>, exit_code: i32) -> ExecOutput {
+    let truncated = stdout.len() > MAX_OUTPUT_BYTES || stderr.len() > MAX_OUTPUT_BYTES;
+    ExecOutput {
+        stdout: truncate_output(stdout),
+        stderr: truncate_output(stderr),
+        exit_code,
+        truncated,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2104,6 +2460,116 @@ mod tests {
         let data = vec![];
         let result = truncate_output(data);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn bounded_exec_output_reports_real_truncation() {
+        let output = bounded_exec_output(
+            vec![b'o'; MAX_OUTPUT_BYTES + 1],
+            vec![b'e'; MAX_OUTPUT_BYTES],
+            17,
+        );
+        assert_eq!(output.stdout.len(), MAX_OUTPUT_BYTES);
+        assert_eq!(output.stderr.len(), MAX_OUTPUT_BYTES);
+        assert_eq!(output.exit_code, 17);
+        assert!(output.truncated);
+
+        let exact = bounded_exec_output(vec![b'o'; 4], vec![b'e'; 4], 0);
+        assert!(!exact.truncated);
+    }
+
+    #[test]
+    fn exec_replay_cache_replays_exact_result_and_rejects_conflicting_content() {
+        let cache = ExecReplayCache::with_limits(4, 2, 1024);
+        let digest = [7_u8; 32];
+        let claim = match cache
+            .acquire("request-1", digest, Duration::from_secs(1))
+            .unwrap()
+        {
+            ExecReplayAcquire::Execute(claim) => claim,
+            ExecReplayAcquire::Replay(_) => panic!("first request must own execution"),
+        };
+        assert!(cache
+            .acquire("request-1", [8_u8; 32], Duration::from_secs(1))
+            .err()
+            .unwrap()
+            .contains("conflicts"));
+
+        let expected = ExecOutput {
+            stdout: b"once\n".to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+            truncated: false,
+        };
+        claim.complete(expected.clone()).unwrap();
+        let replayed = match cache
+            .acquire("request-1", digest, Duration::from_secs(1))
+            .unwrap()
+        {
+            ExecReplayAcquire::Replay(output) => output,
+            ExecReplayAcquire::Execute(_) => panic!("completed request must replay"),
+        };
+        assert_eq!(replayed.as_ref(), &expected);
+    }
+
+    #[test]
+    fn exec_replay_cache_waits_for_in_flight_owner_and_claim_drop_is_retryable() {
+        let cache = Arc::new(ExecReplayCache::with_limits(4, 2, 1024));
+        let digest = [9_u8; 32];
+        let claim = match cache
+            .acquire("request-2", digest, Duration::from_secs(1))
+            .unwrap()
+        {
+            ExecReplayAcquire::Execute(claim) => claim,
+            ExecReplayAcquire::Replay(_) => panic!("first request must own execution"),
+        };
+
+        let waiter_cache = Arc::clone(&cache);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let replayed = match waiter_cache
+                .acquire("request-2", digest, Duration::from_secs(1))
+                .unwrap()
+            {
+                ExecReplayAcquire::Replay(output) => output,
+                ExecReplayAcquire::Execute(_) => panic!("waiter must not execute twice"),
+            };
+            done_tx.send(replayed).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx
+            .recv_timeout(Duration::from_millis(20))
+            .is_err());
+
+        let expected = ExecOutput {
+            stdout: b"completed\n".to_vec(),
+            stderr: Vec::new(),
+            exit_code: 0,
+            truncated: false,
+        };
+        claim.complete(expected.clone()).unwrap();
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(1)).unwrap().as_ref(),
+            &expected
+        );
+        waiter.join().unwrap();
+
+        let abandoned = match cache
+            .acquire("request-3", [3_u8; 32], Duration::from_secs(1))
+            .unwrap()
+        {
+            ExecReplayAcquire::Execute(claim) => claim,
+            ExecReplayAcquire::Replay(_) => panic!("new request must own execution"),
+        };
+        drop(abandoned);
+        assert!(matches!(
+            cache
+                .acquire("request-3", [3_u8; 32], Duration::from_secs(1))
+                .unwrap(),
+            ExecReplayAcquire::Execute(_)
+        ));
     }
 
     #[test]
@@ -2340,6 +2806,7 @@ mod tests {
             stdout: b"hello".to_vec(),
             stderr: b"warn".to_vec(),
             exit_code: 42,
+            truncated: false,
         };
 
         let mut buf = Vec::new();
@@ -2373,6 +2840,7 @@ mod tests {
             stdout: vec![b'a'; STREAM_CHUNK_BYTES + 7],
             stderr: vec![],
             exit_code: 0,
+            truncated: false,
         };
 
         let mut buf = Vec::new();

@@ -363,6 +363,7 @@ async fn handle_exec_oneshot(
     }
 
     let exec_req = a3s_box_core::exec::ExecRequest {
+        request_id: None,
         cmd: session.cmd.clone(),
         timeout_ns: a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],
@@ -401,6 +402,7 @@ async fn handle_exec_stdin_stream(
     session: &StreamingSession,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let exec_req = a3s_box_core::exec::ExecRequest {
+        request_id: None,
         cmd: session.cmd.clone(),
         timeout_ns: a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],
@@ -1292,6 +1294,7 @@ mod tests {
                 stdout: b"hello\n".to_vec(),
                 stderr: b"warn\n".to_vec(),
                 exit_code: 23,
+                truncated: false,
             };
             writer
                 .write_data(&serde_json::to_vec(&output).unwrap())
@@ -1624,6 +1627,7 @@ mod tests {
             .await
             .unwrap();
         let exec_req = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec!["cat".to_string()],
             timeout_ns: a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS,
             env: vec![],

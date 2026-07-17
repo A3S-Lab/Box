@@ -93,6 +93,22 @@ impl ManagedExecutionStore {
         Ok(Some(record))
     }
 
+    /// Return every managed record without reconciling provider state.
+    ///
+    /// Legacy CLI records share the same state file and are deliberately
+    /// excluded. Loading remains strict: one malformed managed record fails the
+    /// complete snapshot instead of letting provider discovery skip corrupt
+    /// ownership metadata.
+    pub fn list(&self) -> ManagedExecutionStoreResult<Vec<BoxRecord>> {
+        let store = BoxStateStore::load_readonly(&self.path)?;
+        Ok(store
+            .records()
+            .iter()
+            .filter(|record| record.managed_execution.is_some())
+            .cloned()
+            .collect())
+    }
+
     /// Return the record reserved by an idempotent creation operation.
     pub fn get_by_operation_id(
         &self,
@@ -152,6 +168,90 @@ impl ManagedExecutionStore {
 
             store.records_mut().push(record.clone());
             Ok(ManagedExecutionReservation::Reserved(record))
+        })
+    }
+
+    /// Claim terminal-record removal before deleting host resources.
+    ///
+    /// The durable `removing` state prevents another lifecycle operation from
+    /// reviving the execution while cleanup is in progress. A retry observes
+    /// the same claim and can resume cleanup after a process crash.
+    pub fn begin_remove(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+    ) -> ManagedExecutionStoreResult<Option<BoxRecord>> {
+        let execution_id = execution_id.clone();
+        BoxStateStore::transact(&self.path, move |store| {
+            let Some(record) = store.find_by_id_mut(execution_id.as_str()) else {
+                return Ok(None);
+            };
+            let state = record
+                .managed_state()
+                .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            let metadata = record
+                .managed_execution
+                .as_mut()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            if metadata.generation != expected_generation {
+                return Err(ManagedExecutionStoreError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!(
+                        "expected generation {}, found {}",
+                        expected_generation.get(),
+                        metadata.generation.get()
+                    ),
+                });
+            }
+            match state {
+                ManagedExecutionState::Removing => Ok(Some(record.clone())),
+                ManagedExecutionState::Created
+                | ManagedExecutionState::Stopped
+                | ManagedExecutionState::Failed => {
+                    record.status = ManagedExecutionState::Removing.as_status().to_string();
+                    metadata.pending_operation = Some(ManagedExecutionOperation::Remove);
+                    Ok(Some(record.clone()))
+                }
+                _ => Err(ManagedExecutionStoreError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!("cannot remove execution in state {state}"),
+                }),
+            }
+        })
+    }
+
+    /// Forget a generation only after its durable removal claim has completed.
+    pub fn finish_remove(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+    ) -> ManagedExecutionStoreResult<bool> {
+        let execution_id = execution_id.clone();
+        BoxStateStore::transact(&self.path, move |store| {
+            let Some(record) = store.find_by_id(execution_id.as_str()) else {
+                return Ok(false);
+            };
+            let state = record
+                .managed_state()
+                .map_err(|error| ManagedExecutionStoreError::InvalidRecord(error.to_string()))?
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            let metadata = record
+                .managed_execution
+                .as_ref()
+                .ok_or_else(|| ManagedExecutionStoreError::Unmanaged(execution_id.clone()))?;
+            if metadata.generation != expected_generation || state != ManagedExecutionState::Removing
+            {
+                return Err(ManagedExecutionStoreError::Conflict {
+                    execution_id: execution_id.clone(),
+                    message: format!(
+                        "expected removing generation {}, found {state} generation {}",
+                        expected_generation.get(),
+                        metadata.generation.get()
+                    ),
+                });
+            }
+            Ok(store.remove_by_id(execution_id.as_str()))
         })
     }
 
@@ -290,6 +390,7 @@ impl ManagedExecutionStore {
                     }
                 },
                 ManagedExecutionState::Killing => Some(ManagedExecutionOperation::Kill),
+                ManagedExecutionState::Removing => Some(ManagedExecutionOperation::Remove),
                 ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => {
                     match metadata.pending_operation.take() {
                         Some(operation @ ManagedExecutionOperation::Restart { .. }) => {
@@ -506,6 +607,56 @@ mod tests {
             BoxStateStore::load(store.path()).unwrap().records().len(),
             1
         );
+    }
+
+    #[test]
+    fn removal_claim_is_generation_fenced_durable_and_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ManagedExecutionStore::new(directory.path().join("boxes.json"));
+        let id = ExecutionId::new("execution-1").unwrap();
+        store
+            .reserve(managed_record(id.as_str(), "operation-1"))
+            .unwrap();
+
+        let claimed = store
+            .begin_remove(&id, ExecutionGeneration::INITIAL)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claimed.managed_state().unwrap(),
+            Some(ManagedExecutionState::Removing)
+        );
+        assert!(matches!(
+            claimed
+                .managed_execution
+                .as_ref()
+                .unwrap()
+                .pending_operation,
+            Some(ManagedExecutionOperation::Remove)
+        ));
+
+        let reopened = ManagedExecutionStore::new(store.path().to_path_buf());
+        assert_eq!(
+            reopened
+                .begin_remove(&id, ExecutionGeneration::INITIAL)
+                .unwrap()
+                .unwrap()
+                .managed_state()
+                .unwrap(),
+            Some(ManagedExecutionState::Removing)
+        );
+        assert!(matches!(
+            reopened.begin_remove(&id, ExecutionGeneration::new(2).unwrap()),
+            Err(ManagedExecutionStoreError::Conflict { .. })
+        ));
+
+        assert!(reopened
+            .finish_remove(&id, ExecutionGeneration::INITIAL)
+            .unwrap());
+        assert!(!reopened
+            .finish_remove(&id, ExecutionGeneration::INITIAL)
+            .unwrap());
+        assert!(reopened.get(&id).unwrap().is_none());
     }
 
     #[test]

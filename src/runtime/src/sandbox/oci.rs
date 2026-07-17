@@ -70,11 +70,21 @@ impl SandboxResources {
             ));
         }
 
-        let memory_limit = i64::from(config.resources.memory_mb)
-            .checked_mul(1024 * 1024)
-            .ok_or_else(|| {
+        let memory_limit = match config.resource_limits.sandbox_memory_limit_bytes {
+            Some(0) => {
+                return Err(BoxError::ConfigError(
+                    "Sandbox memory limit must be greater than zero".to_string(),
+                ))
+            }
+            Some(bytes) => i64::try_from(bytes).map_err(|_| {
                 BoxError::ConfigError("Sandbox memory limit overflows i64".to_string())
-            })?;
+            })?,
+            None => i64::from(config.resources.memory_mb)
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| {
+                    BoxError::ConfigError("Sandbox memory limit overflows i64".to_string())
+                })?,
+        };
         let memory_reservation = config
             .resource_limits
             .memory_reservation

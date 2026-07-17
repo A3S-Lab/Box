@@ -247,6 +247,7 @@ async fn collect_guest_process_count(record: &BoxRecord) -> Option<u64> {
         crate::socket_paths::runtime_socket(record, crate::socket_paths::RuntimeSocket::Exec);
     let client = ExecClient::connect(&exec_socket_path).await.ok()?;
     let request = ExecRequest {
+        request_id: None,
         cmd: vec!["ps".to_string(), "-eo".to_string(), "pid,args".to_string()],
         timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],

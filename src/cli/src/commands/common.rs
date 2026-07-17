@@ -655,6 +655,7 @@ pub(crate) fn build_resource_limits(
         cpu_period: args.cpu_period,
         memory_reservation,
         memory_swap,
+        sandbox_memory_limit_bytes: None,
     })
 }
 

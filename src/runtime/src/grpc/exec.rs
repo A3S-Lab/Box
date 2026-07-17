@@ -631,13 +631,21 @@ impl StreamingExec {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_code = -1;
+        let mut truncated = false;
 
         while let Some(event) = self.next_event().await? {
             match event {
-                ExecEvent::Chunk(chunk) => match chunk.stream {
-                    a3s_box_core::exec::StreamType::Stdout => stdout.extend_from_slice(&chunk.data),
-                    a3s_box_core::exec::StreamType::Stderr => stderr.extend_from_slice(&chunk.data),
-                },
+                ExecEvent::Chunk(chunk) => {
+                    let target = match chunk.stream {
+                        a3s_box_core::exec::StreamType::Stdout => &mut stdout,
+                        a3s_box_core::exec::StreamType::Stderr => &mut stderr,
+                    };
+                    let remaining = a3s_box_core::exec::MAX_OUTPUT_BYTES.saturating_sub(target.len());
+                    if chunk.data.len() > remaining {
+                        truncated = true;
+                    }
+                    target.extend_from_slice(&chunk.data[..chunk.data.len().min(remaining)]);
+                }
                 ExecEvent::FlushAck => {}
                 ExecEvent::Exit(exit) => {
                     exit_code = exit.exit_code;
@@ -656,6 +664,7 @@ impl StreamingExec {
             stdout,
             stderr,
             exit_code,
+            truncated,
         };
 
         Ok((output, metrics))
@@ -908,6 +917,7 @@ mod tests {
                 stdout: b"hello\n".to_vec(),
                 stderr: vec![],
                 exit_code: 0,
+                truncated: false,
             };
             let payload = serde_json::to_vec(&output).unwrap();
             writer.write_data(&payload).await.unwrap();
@@ -917,6 +927,7 @@ mod tests {
 
         let client = ExecClient::connect(&sock_path).await.unwrap();
         let req = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec!["echo".to_string(), "hello".to_string()],
             env: vec![],
             working_dir: None,
@@ -987,6 +998,7 @@ mod tests {
 
         let client = ExecClient::connect(&sock_path).await.unwrap();
         let req = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec!["echo".to_string(), "hello".to_string()],
             env: vec![],
             working_dir: None,
@@ -1047,6 +1059,7 @@ mod tests {
 
         let client = ExecClient::connect(&sock_path).await.unwrap();
         let req = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec!["sleep".to_string(), "60".to_string()],
             env: vec![],
             working_dir: None,
@@ -1111,6 +1124,7 @@ mod tests {
 
         let client = ExecClient::connect(&sock_path).await.unwrap();
         let req = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec!["cat".to_string()],
             env: vec![],
             working_dir: None,
@@ -1180,6 +1194,7 @@ mod tests {
 
         let client = ExecClient::connect(&sock_path).await.unwrap();
         let req = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec!["sh".to_string()],
             env: vec![],
             working_dir: None,
@@ -1234,6 +1249,7 @@ mod tests {
 
         let client = ExecClient::connect(&sock_path).await.unwrap();
         let req = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: vec!["test".to_string()],
             env: vec![],
             working_dir: None,

@@ -259,6 +259,7 @@ pub enum ManagedExecutionState {
     Killing,
     RestartStopping,
     RestartStarting,
+    Removing,
     Stopped,
     Failed,
 }
@@ -278,6 +279,7 @@ impl ManagedExecutionState {
             Self::Killing => "killing",
             Self::RestartStopping => "restart_stopping",
             Self::RestartStarting => "restart_starting",
+            Self::Removing => "removing",
             Self::Stopped => "stopped",
             Self::Failed => "failed",
         }
@@ -297,6 +299,7 @@ impl ManagedExecutionState {
             "killing" => Ok(Self::Killing),
             "restart_stopping" => Ok(Self::RestartStopping),
             "restart_starting" => Ok(Self::RestartStarting),
+            "removing" => Ok(Self::Removing),
             "stopped" => Ok(Self::Stopped),
             "dead" | "failed" => Ok(Self::Failed),
             other => Err(a3s_box_core::BoxError::StateError(format!(
@@ -344,6 +347,9 @@ pub struct ManagedExecutionMetadata {
     /// Most recent completed restart retained for idempotent response replay.
     #[serde(default)]
     pub last_restart: Option<ManagedRestartCompletion>,
+    /// Provider terminal timestamp retained for deterministic observation replay.
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
 }
 
 /// Recoverable backend operation associated with a transitional state.
@@ -360,6 +366,7 @@ pub enum ManagedExecutionOperation {
         source_state: ManagedExecutionState,
     },
     Kill,
+    Remove,
     Restart {
         operation_id: OperationId,
         source_generation: ExecutionGeneration,
@@ -408,6 +415,7 @@ impl ManagedExecutionMetadata {
             plan,
             pending_operation: None,
             last_restart: None,
+            finished_at: None,
         })
     }
 
@@ -460,6 +468,9 @@ fn validate_pending_operation(
         ) | (
             ManagedExecutionState::Killing,
             Some(ManagedExecutionOperation::Kill)
+        ) | (
+            ManagedExecutionState::Removing,
+            Some(ManagedExecutionOperation::Remove)
         ) | (
             ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting,
             Some(ManagedExecutionOperation::Restart { .. })

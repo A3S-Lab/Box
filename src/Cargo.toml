@@ -126,6 +126,7 @@ ring = "0.17"
 
 # Shared types (transport protocol, privacy, tools)
 a3s-transport = { version = "0.1.1", package = "a3s-common" }
+a3s-runtime = { git = "https://github.com/A3S-Lab/Runtime.git", rev = "f1161b2e8a14c73b22af6c6fc10ebc8814631f41" }
 
 # Metrics
 prometheus = "0.13"
