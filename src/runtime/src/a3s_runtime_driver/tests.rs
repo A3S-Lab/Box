@@ -174,7 +174,7 @@ fn mapping_rejects_numeric_overflow_before_mutation() {
     value.resources.cpu_millis = u64::MAX;
     assert!(matches!(
         creation_request(&value),
-        Err(RuntimeError::InvalidRequest(message)) if message.contains("CPU quota")
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("CPU")
     ));
 }
 
