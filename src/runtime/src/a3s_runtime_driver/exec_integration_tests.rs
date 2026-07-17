@@ -54,7 +54,10 @@ async fn exec_binds_identity_timeout_replay_and_truncation_to_the_running_genera
     let first = driver.exec(&running_unit, &request).await.unwrap();
     let replayed = driver.exec(&running_unit, &request).await.unwrap();
     assert_eq!(first.request_id, request.request_id);
-    assert_eq!(first.observation.provider_resource_id.as_deref(), Some(provider_id.as_str()));
+    assert_eq!(
+        first.observation.provider_resource_id.as_deref(),
+        Some(provider_id.as_str())
+    );
     assert_eq!(first.exit_code, 23);
     assert_eq!(first.stdout, "replayed stdout\n");
     assert_eq!(first.stderr, "bounded stderr\n");
