@@ -1,15 +1,14 @@
 use oci_distribution::errors::OciDistributionError;
 use oci_distribution::manifest::{
-    OciDescriptor, OciImageManifest, OciManifest, IMAGE_MANIFEST_LIST_MEDIA_TYPE,
-    IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_INDEX_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE,
+    OciImageManifest, OciManifest, IMAGE_MANIFEST_LIST_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE,
+    OCI_IMAGE_INDEX_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE,
 };
 use oci_reqwest::header::ACCEPT;
 use sha2::Digest as _;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::{
-    registry_base_url, registry_blob_url, registry_manifest_url, ImageReference, RegistryAuth,
-    RegistryProtocol, MANIFEST_ACCEPT,
+    registry_base_url, registry_manifest_url, ImageReference, RegistryAuth, RegistryProtocol,
+    MANIFEST_ACCEPT,
 };
 
 pub(super) struct BasicImageManifest {
@@ -119,30 +118,6 @@ impl BasicPullClient {
                 }
             }
         }
-    }
-
-    pub(super) async fn pull_blob<W>(
-        &self,
-        descriptor: &OciDescriptor,
-        writer: &mut W,
-    ) -> std::result::Result<(), OciDistributionError>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        validate_sha256_digest(&descriptor.digest)?;
-        let url = registry_blob_url(&self.base, &self.repository, &descriptor.digest)?;
-        let response = self
-            .http
-            .get(url.clone())
-            .basic_auth(&self.username, Some(&self.password))
-            .send()
-            .await?;
-        let mut response = ensure_pull_status(response, url.as_str())?;
-
-        while let Some(chunk) = response.chunk().await? {
-            writer.write_all(&chunk).await?;
-        }
-        Ok(())
     }
 
     async fn fetch_manifest(

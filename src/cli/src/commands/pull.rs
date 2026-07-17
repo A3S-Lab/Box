@@ -46,11 +46,8 @@ pub async fn execute(args: PullArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     if !args.quiet {
         println!("Pulling {}...", args.image);
-        puller = puller.with_progress_fn(std::sync::Arc::new(|current, total, digest, size| {
-            println!(
-                "{}",
-                format_pull_progress_line(current, total, digest, size)
-            );
+        puller = puller.with_progress_event_fn(std::sync::Arc::new(|progress| {
+            println!("{}", format_pull_progress_line(&progress));
         }));
     }
     let image = puller.pull(&args.image).await?;
@@ -87,22 +84,41 @@ fn signature_policy_from_args(args: &PullArgs) -> a3s_box_runtime::SignaturePoli
     }
 }
 
-fn format_pull_progress_line(current: usize, total: usize, digest: &str, size: i64) -> String {
+fn format_pull_progress_line(progress: &a3s_box_runtime::PullProgress) -> String {
+    use a3s_box_runtime::PullProgressState;
+
+    let digest = &progress.digest;
     let short = &digest[digest.len().saturating_sub(12)..];
-    if size < 0 {
-        format!(
-            "  [{current}/{total}] {short}: {} ✓",
-            format_layer_size(-size)
-        )
-    } else {
-        format!(
-            "  [{current}/{total}] {short}: Pulling {}...",
-            format_layer_size(size)
-        )
+    let prefix = format!(
+        "  [{}/{}] {short}",
+        progress.current_layer, progress.total_layers
+    );
+    match progress.state {
+        PullProgressState::Downloading => format!(
+            "{prefix}: {} / {} downloaded",
+            format_layer_size(progress.downloaded_bytes),
+            format_layer_size(progress.total_bytes)
+        ),
+        PullProgressState::Retrying => format!(
+            "{prefix}: retry {}/{} from {} / {} after {} ms",
+            progress.attempt,
+            progress.max_attempts,
+            format_layer_size(progress.downloaded_bytes),
+            format_layer_size(progress.total_bytes),
+            progress.retry_delay_ms.unwrap_or(0)
+        ),
+        PullProgressState::Reused => {
+            format!("{prefix}: {} reused ✓", format_layer_size(progress.total_bytes))
+        }
+        PullProgressState::Complete => format!(
+            "{prefix}: {} / {} downloaded ✓",
+            format_layer_size(progress.downloaded_bytes),
+            format_layer_size(progress.total_bytes)
+        ),
     }
 }
 
-fn format_layer_size(size: i64) -> String {
+fn format_layer_size(size: u64) -> String {
     if size >= 1_048_576 {
         format!("{:.1} MB", size as f64 / 1_048_576.0)
     } else if size >= 1024 {
@@ -186,12 +202,32 @@ mod tests {
     #[test]
     fn format_pull_progress_line_truncates_digest_and_marks_completion() {
         assert_eq!(
-            format_pull_progress_line(2, 5, "sha256:0123456789abcdef", 2048),
-            "  [2/5] 456789abcdef: Pulling 2.0 KB..."
+            format_pull_progress_line(&a3s_box_runtime::PullProgress {
+                current_layer: 2,
+                total_layers: 5,
+                digest: "sha256:0123456789abcdef".to_string(),
+                downloaded_bytes: 2048,
+                total_bytes: 4096,
+                attempt: 1,
+                max_attempts: 4,
+                retry_delay_ms: None,
+                state: a3s_box_runtime::PullProgressState::Downloading,
+            }),
+            "  [2/5] 456789abcdef: 2.0 KB / 4.0 KB downloaded"
         );
         assert_eq!(
-            format_pull_progress_line(2, 5, "abc", -512),
-            "  [2/5] abc: 512 B ✓"
+            format_pull_progress_line(&a3s_box_runtime::PullProgress {
+                current_layer: 2,
+                total_layers: 5,
+                digest: "abc".to_string(),
+                downloaded_bytes: 512,
+                total_bytes: 512,
+                attempt: 2,
+                max_attempts: 4,
+                retry_delay_ms: None,
+                state: a3s_box_runtime::PullProgressState::Complete,
+            }),
+            "  [2/5] abc: 512 B / 512 B downloaded ✓"
         );
     }
 }
