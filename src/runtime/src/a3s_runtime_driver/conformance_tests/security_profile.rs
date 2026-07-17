@@ -20,9 +20,12 @@ pub(super) async fn run(
         "security-service",
         "printf 'r17-security-ready\\n'; exec sleep 3600",
     );
-    let before = fixture.driver.manager.managed_records().await.map_err(|error| {
-        super::external("load security pre-mutation provider inventory", error)
-    })?;
+    let before = fixture
+        .driver
+        .manager
+        .managed_records()
+        .await
+        .map_err(|error| super::external("load security pre-mutation provider inventory", error))?;
     reject_hostile_inputs(fixture, client, &service, before.len()).await?;
 
     let running = client.apply(&service).await?;
@@ -59,10 +62,8 @@ async fn reject_hostile_inputs(
     let mut mismatch = template.clone();
     mismatch.request_id = fixture.cases.request_id("security-digest-mismatch");
     mismatch.spec.unit_id = fixture.cases.unit_id("security-digest-mismatch");
-    mismatch.spec.artifact.uri = format!(
-        "oci://docker.io/library/alpine@sha256:{}",
-        "0".repeat(64)
-    );
+    mismatch.spec.artifact.uri =
+        format!("oci://docker.io/library/alpine@sha256:{}", "0".repeat(64));
     require(
         client.apply(&mismatch).await.is_err(),
         "Box accepted an artifact URI/digest mismatch",
@@ -71,11 +72,12 @@ async fn reject_hostile_inputs(
     let mut credentials = template.clone();
     credentials.request_id = fixture.cases.request_id("security-uri-credentials");
     credentials.spec.unit_id = fixture.cases.unit_id("security-uri-credentials");
-    credentials.spec.artifact.uri = credentials
-        .spec
-        .artifact
-        .uri
-        .replacen("oci://", "oci://user:secret@", 1);
+    credentials.spec.artifact.uri =
+        credentials
+            .spec
+            .artifact
+            .uri
+            .replacen("oci://", "oci://user:secret@", 1);
     require(
         client.apply(&credentials).await.is_err(),
         "Box accepted registry credentials in an artifact URI",
@@ -89,9 +91,14 @@ async fn reject_hostile_inputs(
         "Box accepted a path-like Runtime unit identity",
     )?;
 
-    let after = fixture.driver.manager.managed_records().await.map_err(|error| {
-        super::external("load security post-mutation provider inventory", error)
-    })?;
+    let after = fixture
+        .driver
+        .manager
+        .managed_records()
+        .await
+        .map_err(|error| {
+            super::external("load security post-mutation provider inventory", error)
+        })?;
     require(
         after.len() == baseline_records,
         "hostile input mutated provider inventory before rejection",
@@ -110,8 +117,7 @@ fn verify_digest_pin(
         .config
         .image;
     require(
-        image.ends_with(&format!("@{}", spec.artifact.digest))
-            && image.matches('@').count() == 1,
+        image.ends_with(&format!("@{}", spec.artifact.digest)) && image.matches('@').count() == 1,
         "provider creation was not bound to the requested image digest",
     )
 }
@@ -124,10 +130,19 @@ fn verify_least_privilege(record: &crate::BoxRecord) -> Result<()> {
     )
     .map_err(|error| super::external("decode Sandbox OCI configuration", error))?;
     require(
-        config.pointer("/process/noNewPrivileges").and_then(|v| v.as_bool()) == Some(true),
+        config
+            .pointer("/process/noNewPrivileges")
+            .and_then(|v| v.as_bool())
+            == Some(true),
         "Sandbox OCI process did not enable no-new-privileges",
     )?;
-    for set in ["bounding", "effective", "inheritable", "permitted", "ambient"] {
+    for set in [
+        "bounding",
+        "effective",
+        "inheritable",
+        "permitted",
+        "ambient",
+    ] {
         require(
             config
                 .pointer(&format!("/process/capabilities/{set}"))
@@ -164,7 +179,9 @@ fn verify_least_privilege(record: &crate::BoxRecord) -> Result<()> {
         "Sandbox container root maps to host root",
     )?;
     require(
-        config.pointer("/linux/cgroupsPath").and_then(|value| value.as_str())
+        config
+            .pointer("/linux/cgroupsPath")
+            .and_then(|value| value.as_str())
             == Some(format!("a3s-box/{}", record.id).as_str()),
         "Sandbox OCI cgroup path is not execution-scoped",
     )?;

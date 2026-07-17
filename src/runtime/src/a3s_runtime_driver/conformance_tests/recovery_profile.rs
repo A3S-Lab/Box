@@ -136,11 +136,7 @@ async fn external_deletion_and_single_replacement(
     let box_dir = record.box_dir.clone();
     let cleanup_id = record.id.clone();
     tokio::task::spawn_blocking(move || {
-        crate::vm::reap::cleanup_recorded_sandbox_runtime_in(
-            &home,
-            &box_dir,
-            &cleanup_id,
-        )
+        crate::vm::reap::cleanup_recorded_sandbox_runtime_in(&home, &box_dir, &cleanup_id)
     })
     .await
     .map_err(|error| super::external("join external deletion", error))?
@@ -204,11 +200,9 @@ async fn duplicate_resource_detection(
     );
     client.apply(&request).await?;
 
-    let injection_operation = OperationId::new(format!(
-        "r17-duplicate-injection:{}",
-        uuid::Uuid::new_v4()
-    ))
-    .map_err(|error| super::invalid(error.to_string()))?;
+    let injection_operation =
+        OperationId::new(format!("r17-duplicate-injection:{}", uuid::Uuid::new_v4()))
+            .map_err(|error| super::invalid(error.to_string()))?;
     let reservation = fixture
         .driver
         .manager
@@ -244,10 +238,7 @@ async fn duplicate_resource_detection(
         .driver
         .retire_record(injected, &request.spec.unit_id)
         .await?;
-    let remaining = fixture
-        .driver
-        .unit_records(&request.spec.unit_id)
-        .await?;
+    let remaining = fixture.driver.unit_records(&request.spec.unit_id).await?;
     require(
         remaining.len() == 1,
         "duplicate cleanup did not preserve exactly one original resource",

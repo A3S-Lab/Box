@@ -20,7 +20,9 @@ pub(super) async fn run(
     client.apply(&service).await?;
     let initial = wait_for_initial_logs(fixture, client, &service.spec).await?;
     require(
-        initial.windows(2).all(|pair| pair[0].sequence < pair[1].sequence),
+        initial
+            .windows(2)
+            .all(|pair| pair[0].sequence < pair[1].sequence),
         "Box logs are not in strict total order",
     )?;
     let stdout = initial
@@ -32,18 +34,16 @@ pub(super) async fn run(
         .find(|chunk| chunk.data.contains("r17-log-stderr"))
         .ok_or_else(|| super::protocol("Box logs omitted stderr"))?;
     require(
-        stdout.stream == RuntimeLogStream::Stdout
-            && stderr.stream == RuntimeLogStream::Stderr,
+        stdout.stream == RuntimeLogStream::Stdout && stderr.stream == RuntimeLogStream::Stderr,
         "Box log streams were mislabeled",
     )?;
 
     let stderr_only = client
-        .logs(&fixture.cases.logs(
-            &service.spec,
-            None,
-            100,
-            Some(RuntimeLogStream::Stderr),
-        ))
+        .logs(
+            &fixture
+                .cases
+                .logs(&service.spec, None, 100, Some(RuntimeLogStream::Stderr)),
+        )
         .await?;
     require(
         !stderr_only.is_empty()
@@ -57,12 +57,11 @@ pub(super) async fn run(
         .await?;
     require(limited.len() == 1, "Box log limit was not enforced")?;
     let resumed = client
-        .logs(&fixture.cases.logs(
-            &service.spec,
-            Some(initial[0].cursor.clone()),
-            100,
-            None,
-        ))
+        .logs(
+            &fixture
+                .cases
+                .logs(&service.spec, Some(initial[0].cursor.clone()), 100, None),
+        )
         .await?;
     require(
         resumed.first().map(|chunk| chunk.cursor.as_str())
@@ -76,7 +75,9 @@ pub(super) async fn run(
         .logs(&fixture.cases.logs(&service.spec, None, 100, None))
         .await?;
     require(
-        retained.iter().any(|chunk| chunk.data.contains("r17-log-stdout")),
+        retained
+            .iter()
+            .any(|chunk| chunk.data.contains("r17-log-stdout")),
         "stopped Service did not retain its logs",
     )?;
 
@@ -119,12 +120,11 @@ pub(super) async fn run(
         }],
     )?;
     let gap = client
-        .logs(&fixture.cases.logs(
-            &service.spec,
-            Some(rotation_cursor),
-            100,
-            None,
-        ))
+        .logs(
+            &fixture
+                .cases
+                .logs(&service.spec, Some(rotation_cursor), 100, None),
+        )
         .await
         .unwrap_err();
     require(
@@ -171,8 +171,12 @@ async fn wait_for_initial_logs(
         let chunks = client
             .logs(&fixture.cases.logs(spec, None, 100, None))
             .await?;
-        if chunks.iter().any(|chunk| chunk.data.contains("r17-log-stdout"))
-            && chunks.iter().any(|chunk| chunk.data.contains("r17-log-stderr"))
+        if chunks
+            .iter()
+            .any(|chunk| chunk.data.contains("r17-log-stdout"))
+            && chunks
+                .iter()
+                .any(|chunk| chunk.data.contains("r17-log-stderr"))
         {
             return Ok(chunks);
         }

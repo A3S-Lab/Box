@@ -125,13 +125,13 @@ impl BoxRuntimeConformanceFixture {
     }
 
     pub(super) async fn record_for(&self, spec: &RuntimeUnitSpec) -> Result<crate::BoxRecord> {
-        let record = self
-            .driver
-            .find_generation(spec)
-            .await?
-            .ok_or_else(|| RuntimeError::NotFound {
-                unit_id: spec.unit_id.clone(),
-            })?;
+        let record =
+            self.driver
+                .find_generation(spec)
+                .await?
+                .ok_or_else(|| RuntimeError::NotFound {
+                    unit_id: spec.unit_id.clone(),
+                })?;
         self.remember(&self.home_dir, &record);
         Ok(record)
     }
@@ -198,11 +198,9 @@ impl BoxRuntimeConformanceFixture {
         entry.pid = record.pid;
         entry.pid_start_time = record.pid_start_time;
         #[cfg(target_os = "linux")]
-        if let Ok(Some(runtime)) = crate::vm::reap::load_recorded_sandbox_runtime(
-            home,
-            &record.box_dir,
-            &record.id,
-        ) {
+        if let Ok(Some(runtime)) =
+            crate::vm::reap::load_recorded_sandbox_runtime(home, &record.box_dir, &record.id)
+        {
             entry.log_worker_pid = runtime.log_worker_pid;
             entry.log_worker_pid_start_time = runtime.log_worker_pid_start_time;
         }
@@ -221,11 +219,7 @@ impl BoxRuntimeConformanceFixture {
                 self.remember(&driver.config.home_dir, &record);
                 let (_, generation, state) = local_identity(&record)?;
                 entries.insert(
-                    format!(
-                        "record:{}:{}",
-                        driver.config.home_dir.display(),
-                        record.id
-                    ),
+                    format!("record:{}:{}", driver.config.home_dir.display(), record.id),
                     format!("generation={} state={state}", generation.get()),
                 );
             }
@@ -241,10 +235,7 @@ impl BoxRuntimeConformanceFixture {
                     "socket-dir",
                     PathBuf::from("/tmp/a3s-box-sockets").join(&id),
                 ),
-                (
-                    "cgroup",
-                    PathBuf::from("/sys/fs/cgroup/a3s-box").join(&id),
-                ),
+                ("cgroup", PathBuf::from("/sys/fs/cgroup/a3s-box").join(&id)),
             ] {
                 if path.exists() {
                     entries.insert(
@@ -254,10 +245,7 @@ impl BoxRuntimeConformanceFixture {
                 }
             }
             if mountinfo.lines().any(|line| line.contains(&id)) {
-                entries.insert(
-                    format!("mount:{}:{id}", home.display()),
-                    "present".into(),
-                );
+                entries.insert(format!("mount:{}:{id}", home.display()), "present".into());
             }
             for (kind, pid, start_time) in [
                 ("init", resource.pid, resource.pid_start_time),
@@ -395,12 +383,8 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Resources => {
                 super::resources_profile::run(self, client).await?
             }
-            RuntimeConformanceProfile::Logs => {
-                super::logs_profile::run(self, client).await?
-            }
-            RuntimeConformanceProfile::Exec => {
-                super::exec_profile::run(self, client).await?
-            }
+            RuntimeConformanceProfile::Logs => super::logs_profile::run(self, client).await?,
+            RuntimeConformanceProfile::Exec => super::exec_profile::run(self, client).await?,
             RuntimeConformanceProfile::Security => {
                 super::security_profile::run(self, client).await?
             }

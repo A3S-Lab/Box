@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use a3s_runtime::contract::{
-    ArtifactRef, IsolationLevel, NetworkMode, ResourceLimits, RestartPolicy,
-    RuntimeActionRequest, RuntimeApplyRequest, RuntimeExecRequest, RuntimeLogQuery,
-    RuntimeLogStream, RuntimeNetworkSpec, RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
+    ArtifactRef, IsolationLevel, NetworkMode, ResourceLimits, RestartPolicy, RuntimeActionRequest,
+    RuntimeApplyRequest, RuntimeExecRequest, RuntimeLogQuery, RuntimeLogStream, RuntimeNetworkSpec,
+    RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
 };
 use a3s_runtime::{RuntimeBaseConformanceCase, RuntimeConformanceCase};
 
@@ -77,7 +77,10 @@ impl CaseFactory {
         let media_type = std::env::var("A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE")
             .unwrap_or_else(|_| DOCKER_IMAGE_MANIFEST.to_string());
         require(
-            matches!(media_type.as_str(), OCI_IMAGE_MANIFEST | DOCKER_IMAGE_MANIFEST),
+            matches!(
+                media_type.as_str(),
+                OCI_IMAGE_MANIFEST | DOCKER_IMAGE_MANIFEST
+            ),
             "A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE is not a supported image manifest",
         )?;
         let digest = format!("sha256:{digest_hex}");
@@ -105,11 +108,7 @@ impl CaseFactory {
             "printf 'r17-base-task-failure\\n' >&2; exit 17",
             DEFAULT_TASK_TIMEOUT_MS,
         );
-        let task_timeout_apply = self.task(
-            "base-task-timeout",
-            "exec sleep 3600",
-            500,
-        );
+        let task_timeout_apply = self.task("base-task-timeout", "exec sleep 3600", 500);
         let generation_apply = self.service(
             "base-generation",
             "printf 'r17-base-generation\\n'; exec sleep 3600",
@@ -130,18 +129,9 @@ impl CaseFactory {
                 task_apply,
                 service_apply,
             },
-            task_failure_remove: self.action(
-                "base-task-failure-remove",
-                &task_failure_apply.spec,
-            ),
-            task_timeout_remove: self.action(
-                "base-task-timeout-remove",
-                &task_timeout_apply.spec,
-            ),
-            generation_remove: self.action(
-                "base-generation-remove",
-                &generation_apply.spec,
-            ),
+            task_failure_remove: self.action("base-task-failure-remove", &task_failure_apply.spec),
+            task_timeout_remove: self.action("base-task-timeout-remove", &task_timeout_apply.spec),
+            generation_remove: self.action("base-generation-remove", &generation_apply.spec),
             task_failure_apply,
             task_timeout_apply,
             generation_apply,
@@ -149,12 +139,7 @@ impl CaseFactory {
         }
     }
 
-    pub(super) fn task(
-        &self,
-        label: &str,
-        script: &str,
-        timeout_ms: u64,
-    ) -> RuntimeApplyRequest {
+    pub(super) fn task(&self, label: &str, script: &str, timeout_ms: u64) -> RuntimeApplyRequest {
         self.apply(
             label,
             RuntimeUnitClass::Task,

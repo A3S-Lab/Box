@@ -60,8 +60,7 @@ pub(super) async fn run(
     let cgroup = Path::new("/sys/fs/cgroup/a3s-box").join(&record.id);
     require(cgroup.is_dir(), "Sandbox cgroup was not created")?;
     require(
-        read_trimmed(&cgroup.join("cpu.max"))?
-            == format!("{CPU_QUOTA_US} {CPU_PERIOD_US}"),
+        read_trimmed(&cgroup.join("cpu.max"))? == format!("{CPU_QUOTA_US} {CPU_PERIOD_US}"),
         "cpu.max does not match the Runtime CPU request",
     )?;
     require(
@@ -87,7 +86,9 @@ pub(super) async fn run(
         ))
         .await?;
     require(
-        visible.stdout.contains(&format!("{CPU_QUOTA_US} {CPU_PERIOD_US}"))
+        visible
+            .stdout
+            .contains(&format!("{CPU_QUOTA_US} {CPU_PERIOD_US}"))
             && visible.stdout.contains(&MEMORY_BYTES.to_string())
             && visible.stdout.contains(&PIDS.to_string()),
         "workload did not observe its configured cgroup limits",
@@ -124,8 +125,7 @@ pub(super) async fn run(
             vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "i=0; while [ \"$i\" -lt 96 ]; do sleep 1 & i=$((i + 1)); done; wait"
-                    .into(),
+                "i=0; while [ \"$i\" -lt 96 ]; do sleep 1 & i=$((i + 1)); done; wait".into(),
             ],
             15_000,
         ))
@@ -174,9 +174,10 @@ pub(super) async fn run(
     let timed_out = client.apply(&timeout).await?;
     require(
         timed_out.state == RuntimeUnitState::Failed
-            && timed_out.failure.as_ref().is_some_and(|failure| {
-                failure.code == "execution_timeout" && !failure.retryable
-            })
+            && timed_out
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.code == "execution_timeout" && !failure.retryable)
             && started.elapsed() < Duration::from_secs(5),
         "Task execution timeout was not behaviorally enforced",
     )?;
