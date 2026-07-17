@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use a3s_box_core::log::LogConfig;
 use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecutionIsolation, ExecutionRecordPolicy,
-    ExecutionRestartPolicy, LogConfig, NetworkMode, ResourceConfig, ResourceLimits,
+    ExecutionRestartPolicy, NetworkMode, ResourceConfig, ResourceLimits,
 };
 use a3s_runtime::contract::{ArtifactRef, RestartPolicy, RuntimeUnitClass, RuntimeUnitSpec};
 use a3s_runtime::{RuntimeError, RuntimeResult};
