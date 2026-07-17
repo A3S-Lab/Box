@@ -111,15 +111,16 @@ fn resolve_index(
     let descriptor = choose_descriptor(index.manifests(), target)?;
     let digest = descriptor.digest().to_string();
     if !visited.insert(digest.clone()) {
-        return Err(format!("OCI image index contains a descriptor cycle at {digest}"));
+        return Err(format!(
+            "OCI image index contains a descriptor cycle at {digest}"
+        ));
     }
 
     let bytes = read_verified_blob(root, &descriptor)?;
     match payload_kind(descriptor.media_type(), &bytes)? {
         PayloadKind::ImageIndex => {
-            let nested: ImageIndex = serde_json::from_slice(&bytes).map_err(|error| {
-                format!("Failed to parse image index blob {digest}: {error}")
-            })?;
+            let nested: ImageIndex = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("Failed to parse image index blob {digest}: {error}"))?;
             validate_index_schema(&nested, &format!("image index blob {digest}"))?;
             resolve_index(root, &nested, target, visited, depth + 1)
         }
@@ -254,8 +255,7 @@ fn payload_kind(media_type: &MediaType, bytes: &[u8]) -> Result<PayloadKind, Str
 }
 
 fn is_index_media_type(media_type: &MediaType) -> bool {
-    matches!(media_type, MediaType::ImageIndex)
-        || media_type.to_string() == DOCKER_IMAGE_INDEX
+    matches!(media_type, MediaType::ImageIndex) || media_type.to_string() == DOCKER_IMAGE_INDEX
 }
 
 fn is_manifest_media_type(media_type: &MediaType) -> bool {
@@ -285,12 +285,9 @@ fn validate_manifest_content(
     let config = read_verified_blob(root, manifest.config())?;
     let config: ImageConfiguration = serde_json::from_slice(&config)
         .map_err(|error| format!("Failed to parse selected image config: {error}"))?;
-    let mut config_platform = Platform::parse(&format!(
-        "{}/{}",
-        config.os(),
-        config.architecture()
-    ))
-    .map_err(|error| format!("Invalid selected image config platform: {error}"))?;
+    let mut config_platform =
+        Platform::parse(&format!("{}/{}", config.os(), config.architecture()))
+            .map_err(|error| format!("Invalid selected image config platform: {error}"))?;
     config_platform.variant = config.variant().clone();
     if config_platform.os != target.os
         || config_platform.architecture != target.architecture
@@ -321,7 +318,10 @@ fn verify_blob(root: &Path, descriptor: &Descriptor) -> Result<PathBuf, String> 
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| format!("Missing OCI blob {}: {error}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(format!("OCI blob is not a regular file: {}", path.display()));
+        return Err(format!(
+            "OCI blob is not a regular file: {}",
+            path.display()
+        ));
     }
     if descriptor.size() < 0 || metadata.len() != descriptor.size() as u64 {
         return Err(format!(
@@ -332,15 +332,12 @@ fn verify_blob(root: &Path, descriptor: &Descriptor) -> Result<PathBuf, String> 
         ));
     }
 
-    let expected = descriptor
-        .digest()
-        .strip_prefix("sha256:")
-        .ok_or_else(|| {
-            format!(
-                "Unsupported OCI blob digest {}: expected sha256",
-                descriptor.digest()
-            )
-        })?;
+    let expected = descriptor.digest().strip_prefix("sha256:").ok_or_else(|| {
+        format!(
+            "Unsupported OCI blob digest {}: expected sha256",
+            descriptor.digest()
+        )
+    })?;
     let mut file = File::open(&path)
         .map_err(|error| format!("Failed to open OCI blob {}: {error}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -366,7 +363,9 @@ fn verify_blob(root: &Path, descriptor: &Descriptor) -> Result<PathBuf, String> 
 
 fn descriptor_blob_path(root: &Path, digest: &str) -> Result<PathBuf, String> {
     let Some(hex) = digest.strip_prefix("sha256:") else {
-        return Err(format!("Unsupported OCI blob digest {digest}: expected sha256"));
+        return Err(format!(
+            "Unsupported OCI blob digest {digest}: expected sha256"
+        ));
     };
     if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(format!("Invalid OCI sha256 digest: {digest}"));
@@ -392,9 +391,7 @@ fn load_reference(
         .as_ref()
         .and_then(|annotations| annotations.get(IMAGE_REF_ANNOTATION))
         .map(String::as_str)
-        .or_else(|| {
-            index["manifests"][0]["annotations"][IMAGE_REF_ANNOTATION].as_str()
-        })
+        .or_else(|| index["manifests"][0]["annotations"][IMAGE_REF_ANNOTATION].as_str())
         .map(str::trim)
         .filter(|reference| !reference.is_empty())
         .map(str::to_string)
