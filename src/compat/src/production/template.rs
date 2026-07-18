@@ -49,7 +49,11 @@ impl StaticTemplateProvider {
 
 #[async_trait]
 impl TemplateProvider for StaticTemplateProvider {
-    async fn resolve(&self, template_id: &str) -> TemplateProviderResult<ResolvedTemplate> {
+    async fn resolve(
+        &self,
+        _owner_id: &str,
+        template_id: &str,
+    ) -> TemplateProviderResult<ResolvedTemplate> {
         self.templates
             .get(template_id)
             .cloned()

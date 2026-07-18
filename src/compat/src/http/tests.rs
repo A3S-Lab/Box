@@ -50,15 +50,18 @@ impl CursorDecoder for TestCursorDecoder {
 
 fn app() -> Router {
     let harness = TestHarness::new();
-    lifecycle_router(LifecycleHttpState::new(
-        harness.service,
-        Arc::new(TestCredentialVerifier),
-        Arc::new(TestCursorDecoder),
-        LifecycleHttpConfig {
-            domain: Some("fixture.invalid:3443".to_string()),
-            ..LifecycleHttpConfig::default()
-        },
-    ))
+    lifecycle_router(
+        LifecycleHttpState::new(
+            harness.service,
+            Arc::new(TestCredentialVerifier),
+            Arc::new(TestCursorDecoder),
+            LifecycleHttpConfig {
+                domain: Some("fixture.invalid:3443".to_string()),
+                ..LifecycleHttpConfig::default()
+            },
+        )
+        .with_snapshot_service(harness.snapshots),
+    )
 }
 
 fn app_with_volumes(volumes: Arc<VolumeService>) -> Router {
@@ -73,7 +76,8 @@ fn app_with_volumes(volumes: Arc<VolumeService>) -> Router {
                 ..LifecycleHttpConfig::default()
             },
         )
-        .with_volume_service(volumes),
+        .with_volume_service(volumes)
+        .with_snapshot_service(harness.snapshots),
     )
 }
 
@@ -216,6 +220,132 @@ async fn router_serves_owner_scoped_volume_control_and_bearer_content() {
         &[("authorization", &authorization)],
     )
     .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn router_serves_owner_scoped_snapshot_restore_pagination_and_delete() {
+    let app = app();
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes",
+        Some(json!({"templateID": "fixture-template", "timeout": 300})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(body_json(response).await["sandboxID"], "sandbox-1");
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/snapshots",
+        Some(json!({"name": "fixture-state"})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let named = body_json(response).await;
+    let named_id = named["snapshotID"].as_str().unwrap().to_string();
+    assert!(named_id.starts_with("a3s-"));
+    assert!(named_id.ends_with("/fixture-state:default"));
+    assert_eq!(named["names"], json!([named_id.clone()]));
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/snapshots",
+        Some(json!({})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let unnamed = body_json(response).await;
+    assert!(unnamed["snapshotID"].as_str().unwrap().starts_with("snap-"));
+    assert!(unnamed["snapshotID"]
+        .as_str()
+        .unwrap()
+        .ends_with(":default"));
+    assert_eq!(unnamed["names"], json!([]));
+
+    let response = send_raw(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/snapshots",
+        Body::from(r#"{"name":"stolen"}"#),
+        &[
+            ("x-api-key", "e2b_b2c3d4"),
+            ("content-type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = send_raw(
+        &app,
+        Method::GET,
+        "/snapshots",
+        Body::empty(),
+        &[("x-api-key", "e2b_b2c3d4")],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_json(response).await.as_array().unwrap().is_empty());
+
+    let response = send(
+        &app,
+        Method::GET,
+        "/snapshots?sandboxID=sandbox-1&limit=1",
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let next = response
+        .headers()
+        .get("x-next-token")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let first_page = body_json(response).await;
+    assert_eq!(first_page.as_array().unwrap().len(), 1);
+    let response = send(
+        &app,
+        Method::GET,
+        &format!("/snapshots?sandboxID=sandbox-1&limit=1&nextToken={next}"),
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("x-next-token").is_none());
+    let second_page = body_json(response).await;
+    assert_eq!(second_page.as_array().unwrap().len(), 1);
+    assert_ne!(first_page[0]["snapshotID"], second_page[0]["snapshotID"]);
+
+    let response = send(&app, Method::DELETE, "/sandboxes/sandbox-1", None, true).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes",
+        Some(json!({"templateID": named_id.clone(), "timeout": 300})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(body_json(response).await["sandboxID"], "sandbox-2");
+
+    let encoded_id = url::form_urlencoded::byte_serialize(named_id.as_bytes()).collect::<String>();
+    let delete_uri = format!("/templates/{encoded_id}");
+    let response = send(&app, Method::DELETE, &delete_uri, None, true).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = send(&app, Method::DELETE, "/sandboxes/sandbox-2", None, true).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = send(&app, Method::DELETE, &delete_uri, None, true).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = send(&app, Method::DELETE, &delete_uri, None, true).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 

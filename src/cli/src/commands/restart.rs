@@ -260,6 +260,7 @@ mod tests {
                 },
                 labels: BTreeMap::new(),
                 policy: Default::default(),
+                rootfs_snapshot_id: None,
             },
         )
         .unwrap();

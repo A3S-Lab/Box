@@ -1,7 +1,8 @@
 use a3s_box_core::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
-    ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionState,
-    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome, RestartExecutionOptions,
+    ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionSnapshot,
+    ExecutionSnapshotId, ExecutionState, ExecutionStatus, KillOutcome, OperationId,
+    ReconcileOutcome, RestartExecutionOptions,
 };
 use async_trait::async_trait;
 
@@ -48,6 +49,7 @@ impl ExecutionManager for LocalExecutionManager {
             .get(execution_id)
             .await?
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        let record = self.stabilize_snapshot(record).await?;
         let (record, state) = self.observe_record(record).await?;
         status_from_record(&record, state)
     }
@@ -61,6 +63,30 @@ impl ExecutionManager for LocalExecutionManager {
             .await
     }
 
+    async fn create_filesystem_snapshot(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<ExecutionSnapshot> {
+        self.create_snapshot(execution_id, expected_generation, snapshot_id)
+            .await
+    }
+
+    async fn filesystem_snapshot_size(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<Option<u64>> {
+        self.snapshot_size(snapshot_id).await
+    }
+
+    async fn delete_filesystem_snapshot(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<bool> {
+        self.delete_snapshot(snapshot_id).await
+    }
+
     async fn pause(
         &self,
         execution_id: &ExecutionId,
@@ -71,6 +97,7 @@ impl ExecutionManager for LocalExecutionManager {
             .get(execution_id)
             .await?
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        let record = self.stabilize_snapshot(record).await?;
         require_generation(&record, execution_id, expected_generation)?;
         if managed_state(&record)? != ManagedExecutionState::Running {
             return Err(state_conflict(&record, execution_id, "pause"));
@@ -95,6 +122,7 @@ impl ExecutionManager for LocalExecutionManager {
             .get(execution_id)
             .await?
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        let record = self.stabilize_snapshot(record).await?;
         require_generation(&record, execution_id, expected_generation)?;
         if managed_state(&record)? != ManagedExecutionState::Paused {
             return Err(state_conflict(&record, execution_id, "resume"));
@@ -134,6 +162,7 @@ impl ExecutionManager for LocalExecutionManager {
             .get(execution_id)
             .await?
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        let record = self.stabilize_snapshot(record).await?;
         require_generation(&record, execution_id, expected_generation)?;
         let state = managed_state(&record)?;
         if state.is_terminal() {
@@ -192,6 +221,10 @@ impl ExecutionManager for LocalExecutionManager {
                 }
                 outcome_from_record(record, state)
             }
+            ManagedExecutionState::Snapshotting => self
+                .recover_snapshot(record)
+                .await
+                .map(ReconcileOutcome::Ready),
             ManagedExecutionState::Killing => {
                 self.finish_kill(record).await?;
                 Ok(ReconcileOutcome::Failed)

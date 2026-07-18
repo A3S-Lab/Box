@@ -666,6 +666,7 @@ fn parse_templates(blocks: Vec<&Block>) -> E2bConfigResult<Vec<(String, Resolved
                 envd_version,
                 envd_mode,
                 routing,
+                rootfs_snapshot_id: None,
             },
         ));
     }

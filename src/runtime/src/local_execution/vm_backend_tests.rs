@@ -29,6 +29,7 @@ fn record(home_dir: &Path, isolation: ExecutionIsolation) -> BoxRecord {
             config,
             labels: BTreeMap::new(),
             policy: Default::default(),
+            rootfs_snapshot_id: None,
         },
         chrono::Utc::now(),
     )

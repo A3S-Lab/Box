@@ -15,12 +15,14 @@ from typing import Any, ClassVar
 
 
 SANDBOX_ID = "fixture-sandbox"
+RESTORED_SANDBOX_ID = "fixture-restored"
 INTERPRETER_SANDBOX_ID = "fixture-interpreter"
 MISSING_SANDBOX_ID = "missing-sandbox"
 VOLUME_ID = "fixture-volume"
 VOLUME_NAME = "fixture-data"
 VOLUME_TOKEN = "fixture-volume-token"
 VOLUME_CONTENT = "volume-value"
+SNAPSHOT_ID = "fixture-team/fixture-state:default"
 
 
 def sandbox_response(sandbox_id: str) -> dict[str, Any]:
@@ -75,6 +77,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
     capture_lock: ClassVar[threading.Lock] = threading.Lock()
     create_count: ClassVar[int] = 0
     sandbox_paused: ClassVar[bool] = False
+    snapshot_exists: ClassVar[bool] = False
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
         self._handle()
@@ -99,7 +102,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
         body = self._read_body()
         self._capture(parsed, body)
 
-        path = parsed.path
+        path = urllib.parse.unquote(parsed.path)
         query = urllib.parse.parse_qs(parsed.query)
         requested_path = query.get("path", [None])[0]
         if self.command == "POST" and path == "/volumes":
@@ -174,9 +177,38 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 sandbox_id = (
                     SANDBOX_ID
                     if self.create_count == 1
+                    else RESTORED_SANDBOX_ID
+                    if self.create_count == 2
                     else INTERPRETER_SANDBOX_ID
                 )
             self._json(HTTPStatus.CREATED, sandbox_response(sandbox_id))
+        elif self.command == "POST" and path == f"/sandboxes/{SANDBOX_ID}/snapshots":
+            with self.capture_lock:
+                self.__class__.snapshot_exists = True
+            self._json(
+                HTTPStatus.CREATED,
+                {"snapshotID": SNAPSHOT_ID, "names": [SNAPSHOT_ID]},
+            )
+        elif self.command == "GET" and path == "/snapshots":
+            with self.capture_lock:
+                exists = self.__class__.snapshot_exists
+            self._json(
+                HTTPStatus.OK,
+                [{"snapshotID": SNAPSHOT_ID, "names": [SNAPSHOT_ID]}]
+                if exists
+                else [],
+            )
+        elif self.command == "DELETE" and path == f"/templates/{SNAPSHOT_ID}":
+            with self.capture_lock:
+                exists = self.__class__.snapshot_exists
+                self.__class__.snapshot_exists = False
+            if exists:
+                self._empty(HTTPStatus.NO_CONTENT)
+            else:
+                self._json(
+                    HTTPStatus.NOT_FOUND,
+                    {"code": 404, "message": "Snapshot not found"},
+                )
         elif self.command == "POST" and path == f"/sandboxes/{SANDBOX_ID}/pause":
             with self.capture_lock:
                 already_paused = self.__class__.sandbox_paused
@@ -202,6 +234,7 @@ class FixtureHandler(BaseHTTPRequestHandler):
             self._empty(HTTPStatus.NO_CONTENT)
         elif self.command == "DELETE" and path in {
             f"/sandboxes/{SANDBOX_ID}",
+            f"/sandboxes/{RESTORED_SANDBOX_ID}",
             f"/sandboxes/{INTERPRETER_SANDBOX_ID}",
         }:
             self._empty(HTTPStatus.NO_CONTENT)

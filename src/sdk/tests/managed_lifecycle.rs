@@ -113,6 +113,7 @@ fn request(image: &str, suffix: &str) -> CreateExecutionRequest {
             name: Some(format!("sdk-managed-smoke-{suffix}")),
             ..ExecutionRecordPolicy::default()
         },
+        rootfs_snapshot_id: None,
     }
 }
 

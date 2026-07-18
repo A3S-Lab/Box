@@ -654,6 +654,24 @@ fn visible_active_state(record: &BoxRecord) -> ExecutionManagerResult<ExecutionS
         | ManagedExecutionState::Running
         | ManagedExecutionState::Pausing
         | ManagedExecutionState::Killing => Ok(ExecutionState::Running),
+        ManagedExecutionState::Snapshotting => match record
+            .managed_execution
+            .as_ref()
+            .and_then(|metadata| metadata.pending_operation.as_ref())
+        {
+            Some(ManagedExecutionOperation::Snapshot {
+                source_state: ManagedExecutionState::Running,
+                ..
+            }) => Ok(ExecutionState::Running),
+            Some(ManagedExecutionOperation::Snapshot {
+                source_state: ManagedExecutionState::Paused,
+                ..
+            }) => Ok(ExecutionState::Paused),
+            _ => Err(ExecutionManagerError::Internal(format!(
+                "execution {} has invalid snapshot metadata",
+                record.id
+            ))),
+        },
         ManagedExecutionState::RestartStopping => match record
             .managed_execution
             .as_ref()

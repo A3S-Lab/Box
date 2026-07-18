@@ -22,8 +22,8 @@ pub use execution::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
     ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
     ExecutionPortIo, ExecutionPortStream, ExecutionRecordPolicy, ExecutionReservation,
-    ExecutionRestartPolicy, ExecutionState, ExecutionStatus, KillOutcome, OperationId,
-    ReconcileOutcome, RestartExecutionOptions,
+    ExecutionRestartPolicy, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
+    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome, RestartExecutionOptions,
 };
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};

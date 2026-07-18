@@ -8,7 +8,8 @@ const baseSdk = await import(nativeSdk ? '@a3s-lab/box' : 'e2b')
 const codeInterpreterSdk = await import(
   nativeSdk ? '@a3s-lab/box/code-interpreter' : '@e2b/code-interpreter'
 )
-const { Sandbox, SandboxNotFoundError, Volume, VolumeError } = baseSdk
+const { Sandbox, SandboxError, SandboxNotFoundError, Volume, VolumeError } =
+  baseSdk
 const { Sandbox: CodeInterpreter } = codeInterpreterSdk
 
 const [apiUrl, domain, template] = process.argv.slice(2)
@@ -32,8 +33,10 @@ const clientLabel = `${nativeSdk ? 'a3s' : 'official'}-typescript`
 const volumeName = `${clientLabel}-volume`
 const trace = (stage) => console.log(`${clientLabel}:${stage}`)
 let sandbox
+let restored
 let interpreter
 let volume
+let snapshotId
 
 async function exerciseDataPlane(sandbox, label) {
   const root = `a3s-runtime-${label}`
@@ -308,12 +311,67 @@ try {
     )
   )
 
+  const snapshotContent = `${clientLabel}-snapshot`
+  trace('snapshot.write-state')
+  await sandbox.files.write('a3s-snapshot-state.txt', snapshotContent)
+  const snapshotMetadata = (
+    await sandbox.commands.run(
+      "stat -c '%u:%g:%a' /home/user/a3s-snapshot-state.txt"
+    )
+  ).stdout.trim()
+  trace('snapshot.create')
+  const snapshot = await sandbox.createSnapshot({
+    name: `${clientLabel}-state`,
+  })
+  snapshotId = snapshot.snapshotId
+  assert.ok(snapshotId)
+  assert.deepEqual(snapshot.names, [snapshotId])
+  trace('snapshot.list')
+  const snapshots = await sandbox.listSnapshots({ limit: 20 }).nextItems()
+  assert.ok(snapshots.some((item) => item.snapshotId === snapshotId))
+  trace('snapshot.source-running')
+  assert.equal(await sandbox.isRunning(), true)
+
   trace('sandbox.set-timeout')
   await sandbox.setTimeout(30_000)
   trace('sandbox.kill')
   assert.equal(await sandbox.kill(), true)
   trace('sandbox.health-killed')
   assert.equal(await sandbox.isRunning(), false)
+
+  trace('snapshot.restore-after-source-kill')
+  restored = await Sandbox.create(snapshotId, {
+    ...connection,
+    timeoutMs: 60_000,
+  })
+  trace('snapshot.read-restored-state')
+  assert.equal(
+    await restored.files.read('a3s-snapshot-state.txt'),
+    snapshotContent
+  )
+  const restoredMetadata = (
+    await restored.commands.run(
+      "stat -c '%u:%g:%a' /home/user/a3s-snapshot-state.txt"
+    )
+  ).stdout.trim()
+  assert.equal(restoredMetadata, snapshotMetadata)
+  await restored.commands.run(
+    "printf '%s' '-writable' >> /home/user/a3s-snapshot-state.txt"
+  )
+  trace('snapshot.delete-in-use')
+  await assert.rejects(
+    Sandbox.deleteSnapshot(snapshotId, connection),
+    (error) => error instanceof SandboxError && /^409:/.test(error.message)
+  )
+  trace('snapshot.restored-kill')
+  assert.equal(await restored.kill(), true)
+  restored = undefined
+  trace('snapshot.delete')
+  assert.equal(await Sandbox.deleteSnapshot(snapshotId, connection), true)
+  trace('snapshot.delete-missing')
+  assert.equal(await Sandbox.deleteSnapshot(snapshotId, connection), false)
+  snapshotId = undefined
+
   trace('volume.destroy')
   assert.equal(await Volume.destroy(volume.volumeId, connection), true)
   volume = undefined
@@ -346,8 +404,14 @@ try {
     if (interpreter) {
       await Sandbox.kill(interpreter.sandboxId, connection)
     }
+    if (restored) {
+      await Sandbox.kill(restored.sandboxId, connection)
+    }
     if (sandbox) {
       await Sandbox.kill(sandbox.sandboxId, connection)
+    }
+    if (snapshotId) {
+      await Sandbox.deleteSnapshot(snapshotId, connection)
     }
   } finally {
     if (volume) {

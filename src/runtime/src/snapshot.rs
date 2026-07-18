@@ -14,6 +14,8 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::snapshot::SnapshotMetadata;
 use a3s_box_core::SnapshotStoreBackend;
 
+use crate::file_lock::FileLock;
+
 /// Persistent store for VM snapshots.
 pub struct SnapshotStore {
     /// Root directory for all snapshots
@@ -21,11 +23,27 @@ pub struct SnapshotStore {
 }
 
 impl SnapshotStore {
+    pub(crate) fn acquire_exclusive_lock(&self) -> Result<FileLock> {
+        FileLock::acquire(&self.base_dir.join(".snapshot-store")).map_err(|error| {
+            BoxError::CacheError(format!(
+                "Failed to lock snapshot directory {}: {error}",
+                self.base_dir.display()
+            ))
+        })
+    }
+
     /// Create a new snapshot store at the given directory.
     pub fn new(base_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(base_dir).map_err(|e| {
             BoxError::CacheError(format!(
                 "Failed to create snapshot directory {}: {}",
+                base_dir.display(),
+                e
+            ))
+        })?;
+        let _lock = FileLock::acquire(&base_dir.join(".snapshot-store")).map_err(|e| {
+            BoxError::CacheError(format!(
+                "Failed to lock snapshot directory {}: {}",
                 base_dir.display(),
                 e
             ))
@@ -64,6 +82,13 @@ impl SnapshotStore {
         mut metadata: SnapshotMetadata,
         rootfs_source: &Path,
     ) -> Result<SnapshotMetadata> {
+        let _lock = FileLock::acquire(&self.base_dir.join(".snapshot-store")).map_err(|e| {
+            BoxError::CacheError(format!(
+                "Failed to lock snapshot directory {}: {}",
+                self.base_dir.display(),
+                e
+            ))
+        })?;
         let snap_dir = self.base_dir.join(&metadata.id);
         if snap_dir.exists() {
             return Err(BoxError::CacheError(format!(
@@ -209,6 +234,15 @@ impl SnapshotStore {
 
     /// Delete a snapshot by ID.
     pub fn delete(&self, id: &str) -> Result<bool> {
+        let _lock = self.acquire_exclusive_lock()?;
+        self.delete_locked(id)
+    }
+
+    /// Delete while the caller holds [`Self::acquire_exclusive_lock`].
+    ///
+    /// This is crate-visible so managed execution reservation can validate and
+    /// persist a Snapshot reference under the same lock used by deletion.
+    pub(crate) fn delete_locked(&self, id: &str) -> Result<bool> {
         let snap_dir = self.base_dir.join(id);
         if !snap_dir.exists() {
             return Ok(false);
@@ -299,7 +333,16 @@ impl SnapshotStore {
     }
 }
 
-/// Recursively copy a directory.
+/// Recursively clone a directory while preserving rootfs ownership and modes.
+#[cfg(not(windows))]
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    crate::cache::layer_cache::copy_dir_recursive(src, dst)
+}
+
+/// Windows keeps the portable snapshot copy because the rootfs cache helper
+/// intentionally rejects Windows symlinks. Managed Sandbox snapshots are
+/// Linux-only, but the pre-existing VM Snapshot store remains cross-platform.
+#[cfg(windows)]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst).map_err(|e| {
         BoxError::CacheError(format!(
@@ -343,49 +386,26 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     let target = std::fs::read_link(src).map_err(|e| {
         BoxError::CacheError(format!("Failed to read symlink {}: {}", src.display(), e))
     })?;
 
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&target, dst).map_err(|e| {
-            BoxError::CacheError(format!(
-                "Failed to create symlink {} → {}: {}",
-                dst.display(),
-                target.display(),
-                e
-            ))
-        })?;
-    }
-
-    #[cfg(windows)]
-    {
-        let is_dir = src.metadata().map(|m| m.is_dir()).unwrap_or(false);
-        let result = if is_dir {
-            std::os::windows::fs::symlink_dir(&target, dst)
-        } else {
-            std::os::windows::fs::symlink_file(&target, dst)
-        };
-        result.map_err(|e| {
-            BoxError::CacheError(format!(
-                "Failed to create symlink {} → {}: {}",
-                dst.display(),
-                target.display(),
-                e
-            ))
-        })?;
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = target;
-        return Err(BoxError::CacheError(format!(
-            "Symlink copy is not supported on this platform: {}",
-            src.display()
-        )));
-    }
+    let is_dir = src.metadata().map(|m| m.is_dir()).unwrap_or(false);
+    let result = if is_dir {
+        std::os::windows::fs::symlink_dir(&target, dst)
+    } else {
+        std::os::windows::fs::symlink_file(&target, dst)
+    };
+    result.map_err(|e| {
+        BoxError::CacheError(format!(
+            "Failed to create symlink {} → {}: {}",
+            dst.display(),
+            target.display(),
+            e
+        ))
+    })?;
 
     Ok(())
 }

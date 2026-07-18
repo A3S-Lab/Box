@@ -77,6 +77,7 @@ async fn start_runtime(
                 config,
                 labels: BTreeMap::new(),
                 policy: Default::default(),
+                rootfs_snapshot_id: None,
             },
             record.operation_id(),
         )
@@ -96,6 +97,7 @@ async fn create_runtime(
                 config,
                 labels: BTreeMap::new(),
                 policy: Default::default(),
+                rootfs_snapshot_id: None,
             },
             record.operation_id(),
         )

@@ -36,6 +36,7 @@ impl LocalExecutionManager {
         operation_id: &OperationId,
         options: RestartExecutionOptions,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        let record = self.stabilize_snapshot(record).await?;
         if let Some(result) =
             completed_restart_result(&record, expected_generation, operation_id, options)?
         {
