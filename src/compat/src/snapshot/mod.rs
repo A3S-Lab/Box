@@ -1,3 +1,4 @@
+mod coordination;
 mod memory;
 mod model;
 mod repository;
