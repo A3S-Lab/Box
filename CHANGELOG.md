@@ -74,6 +74,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- Started E2B Sandbox expiry after both the runtime and envd control path are
+  ready, so cold startup no longer consumes the requested usable timeout.
+  Startup reconciliation applies the same rule while preserving recovery of
+  historical records that are already expired.
 - Normalized generated resolver/account files and cached standalone
   `/etc/hosts` to `0644`, so non-root Sandbox users can resolve names and read
   essential identity files even after restrictive image or host umasks.

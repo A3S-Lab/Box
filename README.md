@@ -455,6 +455,11 @@ generation-fenced Sandbox. A runtime-mode sandbox remains unpublished until
 that port accepts a fenced connection; readiness failure stops the execution
 and leaves its lifecycle record hidden.
 
+Sandbox expiry is measured from the later of runtime start and observed envd
+readiness, so cold startup does not consume the caller's requested usable
+timeout. Startup reconciliation applies the same rule when recovering a
+creating record whose execution was committed before the service restarted.
+
 The production wildcard TLS gateway supports HTTP/1.1 and HTTP/2 clients over
 both direct and shared sandbox routes. It validates each lease, applies CORS,
 strips edge credentials, and enters the real `crun` network namespace through a

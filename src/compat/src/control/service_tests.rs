@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
 use a3s_box_core::{ExecutionManagerError, ExecutionState};
 use chrono::Duration;
 
-use super::test_support::{assert_sandbox_request, create_request, test_time, TestHarness};
+use super::test_support::{
+    assert_sandbox_request, create_request, test_time, AdvancingClock, TestHarness,
+};
 use super::*;
 
 #[tokio::test]
@@ -81,6 +84,45 @@ async fn lifecycle_service_runs_the_official_control_flow() {
         harness.service.connect("owner-1", &sandbox_id, 300).await,
         Err(ControlServiceError::NotFound(_))
     ));
+}
+
+#[tokio::test]
+async fn cold_start_gets_the_full_usable_timeout_after_readiness() {
+    let ready_at = test_time() + Duration::seconds(120);
+    let clock = Arc::new(AdvancingClock::new(test_time(), ready_at));
+    let harness = TestHarness::with_clock(clock);
+    let mut request = create_request("owner-1");
+    request.timeout_seconds = 60;
+    request.lifecycle.on_timeout = OnTimeoutAction::Kill;
+
+    let created = harness.service.create(request).await.unwrap();
+
+    assert_eq!(created.record.started_at(), Some(ready_at));
+    assert_eq!(created.record.resources().timeout, 60);
+    assert_eq!(
+        created.record.expires_at(),
+        ready_at + Duration::seconds(60)
+    );
+
+    let supervisor = LifecycleSupervisor::new(LifecycleSupervisorDependencies {
+        repository: harness.repository.clone(),
+        executions: harness.executions.clone(),
+        clock: harness.clock.clone(),
+    });
+    let report = supervisor
+        .reap_expired(NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(report.examined, 0);
+    assert_eq!(
+        harness
+            .service
+            .get("owner-1", created.record.sandbox_id())
+            .await
+            .unwrap()
+            .state(),
+        LifecycleState::Running
+    );
 }
 
 #[tokio::test]

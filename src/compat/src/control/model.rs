@@ -356,6 +356,29 @@ impl SandboxRecord {
         Ok(next)
     }
 
+    pub fn mark_ready(
+        &mut self,
+        lease: ExecutionLease,
+        ready_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> Result<SandboxGeneration, LifecycleError> {
+        self.require_state(&[LifecycleState::Creating])?;
+        self.validate_execution_lease(&lease)?;
+        if ready_at < self.created_at || expires_at < ready_at {
+            return Err(LifecycleError::InvalidExpiry);
+        }
+        let next = self.generation.next()?;
+        self.execution_id = Some(lease.execution_id);
+        self.execution_generation = Some(lease.generation);
+        self.resources = lease.resources;
+        self.started_at = Some(ready_at);
+        self.expires_at = expires_at;
+        self.state = LifecycleState::Running;
+        self.failure = None;
+        self.generation = next;
+        Ok(next)
+    }
+
     pub fn begin_pause(&mut self) -> Result<SandboxGeneration, LifecycleError> {
         self.transition(&[LifecycleState::Running], LifecycleState::Pausing)
     }

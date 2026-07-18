@@ -6,7 +6,7 @@ use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionIsolation,
     ExecutionManager, ExecutionState, OperationId,
 };
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use tempfile::tempdir;
 
 use super::test_support::RecordingExecutionManager;
@@ -226,6 +226,11 @@ async fn startup_recovers_create_committed_only_in_runtime() {
     let recovered = repository.get(record.sandbox_id()).await.unwrap().unwrap();
     assert_eq!(recovered.state(), LifecycleState::Running);
     assert_eq!(recovered.execution_id(), Some(&lease.execution_id));
+    assert_eq!(recovered.started_at(), Some(instant(20)));
+    assert_eq!(
+        recovered.expires_at(),
+        instant(20) + Duration::seconds(3600)
+    );
     assert_eq!(
         recovered.execution_generation(),
         Some(ExecutionGeneration::INITIAL)
@@ -252,6 +257,11 @@ async fn startup_starts_a_durable_runtime_reservation_before_publishing_running(
     let recovered = repository.get(record.sandbox_id()).await.unwrap().unwrap();
     assert_eq!(recovered.state(), LifecycleState::Running);
     assert_eq!(recovered.execution_id(), Some(&reservation.execution_id));
+    assert_eq!(recovered.started_at(), Some(instant(20)));
+    assert_eq!(
+        recovered.expires_at(),
+        instant(20) + Duration::seconds(3600)
+    );
     assert_eq!(
         executions
             .inspect(&reservation.execution_id)

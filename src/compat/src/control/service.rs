@@ -6,7 +6,7 @@ use a3s_box_core::{
     resolve_execution, CreateExecutionRequest, ExecutionLease, ExecutionManager,
     ExecutionManagerError, ExecutionPortConnector, NetworkMode,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use hyper::body::Body;
 use hyper::client::conn;
 use hyper::header::{CONTENT_TYPE, HOST};
@@ -15,6 +15,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tracing::debug;
 
+use super::lifetime::ready_lifetime;
 use super::{
     Clock, CompareAndSwapResult, EnvdMode, IdentityProviderError, LifecycleError, LifecycleFailure,
     LifecyclePolicy, LifecycleState, NewSandboxRecord, RepositoryError, SandboxCredentials,
@@ -155,7 +156,8 @@ impl ControlService {
         let plan = resolve_execution(&config)
             .map_err(|error| ControlServiceError::InvalidRequest(error.to_string()))?;
         let now = self.clock.now();
-        let expires_at = expiry_from(now, request.timeout_seconds)?;
+        let (_, expires_at) = ready_lifetime(now, now, u64::from(request.timeout_seconds))
+            .map_err(|error| ControlServiceError::InvalidRequest(error.to_string()))?;
         let envd = self.token_issuer.issue(TokenScope::Envd).await?;
         let traffic = self.token_issuer.issue(TokenScope::Traffic).await?;
 
@@ -223,8 +225,32 @@ impl ControlService {
             }
         }
 
+        let (ready_at, expires_at) = match ready_lifetime(
+            self.clock.now(),
+            lease.started_at,
+            u64::from(request.timeout_seconds),
+        ) {
+            Ok(lifetime) => lifetime,
+            Err(error) => {
+                let cleanup = self
+                    .executions
+                    .kill(&lease.execution_id, lease.generation)
+                    .await;
+                let expected = record.generation();
+                record.mark_failed(LifecycleFailure::RuntimeFailed)?;
+                self.replace(expected, record).await?;
+                return Err(match cleanup {
+                    Ok(_) => ControlServiceError::InvalidRequest(error.to_string()),
+                    Err(cleanup_error) => {
+                        ControlServiceError::Execution(ExecutionManagerError::Internal(format!(
+                            "{error}; runtime cleanup failed: {cleanup_error}"
+                        )))
+                    }
+                });
+            }
+        };
         let expected = record.generation();
-        if let Err(error) = record.mark_running(lease) {
+        if let Err(error) = record.mark_ready(lease, ready_at, expires_at) {
             record.mark_failed(LifecycleFailure::RuntimeFailed)?;
             self.replace(expected, record).await?;
             return Err(error.into());
@@ -501,6 +527,7 @@ async fn send_runtime_envd_init(
 }
 
 fn expiry_from(now: DateTime<Utc>, timeout_seconds: u32) -> ControlServiceResult<DateTime<Utc>> {
-    now.checked_add_signed(Duration::seconds(i64::from(timeout_seconds)))
-        .ok_or_else(|| ControlServiceError::InvalidRequest("sandbox timeout is too large".into()))
+    ready_lifetime(now, now, u64::from(timeout_seconds))
+        .map(|(_, expires_at)| expires_at)
+        .map_err(|error| ControlServiceError::InvalidRequest(error.to_string()))
 }
