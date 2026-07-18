@@ -195,6 +195,7 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
 
                     for cmd_str in &commands {
                         let request = ExecRequest {
+                            request_id: None,
                             cmd: vec!["sh".to_string(), "-c".to_string(), cmd_str.clone()],
                             timeout_ns: 5_000_000_000,
                             env: vec![],

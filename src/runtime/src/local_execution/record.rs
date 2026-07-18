@@ -112,6 +112,9 @@ pub(crate) fn apply_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle
     record.started_at = Some(handle.started_at);
     record.anonymous_volumes = handle.anonymous_volumes.clone();
     record.exit_code = None;
+    if let Some(metadata) = record.managed_execution.as_mut() {
+        metadata.finished_at = None;
+    }
 }
 
 pub(crate) fn apply_start_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle) {
@@ -142,6 +145,9 @@ pub(crate) fn clear_live_runtime(record: &mut BoxRecord, exit_code: Option<i32>)
     record.exit_code = exit_code;
     record.health_status = "none".to_string();
     record.health_retries = 0;
+    if let Some(metadata) = record.managed_execution.as_mut() {
+        metadata.finished_at = Some(Utc::now());
+    }
 }
 
 pub(crate) fn reservation_from_record(

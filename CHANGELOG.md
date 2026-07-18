@@ -4,8 +4,29 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **A3S Runtime recovery fault fixtures.** The real-provider R17 Recovery
+  profile now cancels a Task apply after its Sandbox is running and seeds a
+  provider reservation without starting it. Exact retries must reattach to
+  those original identities, finish the pending work, and leave one resource
+  before complete removal. The opt-in test provisions bounded runner and Tokio
+  worker stacks instead of depending on an external `RUST_MIN_STACK`.
+- **A3S Runtime tmpfs conformance.** The Sandbox-backed Runtime provider now
+  advertises bounded tmpfs mounts, preserves `ro`/`rw` intent through guest and
+  OCI paths, rejects protected destinations and unsupported mount kinds before
+  mutation, and passes the real-provider R17 Mounts profile for read-only
+  enforcement, restart isolation, and complete removal.
+
 ### Fixed
 
+- **A3S Runtime recovery and certification stability.** Terminal Sandbox
+  owners and recovered log workers are reaped with PID identity fencing,
+  naturally exited in-process owners are reclaimed, exec reserves time to
+  return replayable timeout results, and structured log timestamps remain
+  ordered across concurrent writers and host clock regression. The R17 suite
+  now reports case-level exec failures and validates the exact bootstrap versus
+  workload capability boundary.
 - **Resilient and observable registry blob pulls.** Configuration and layer
   transfers now use bounded capped-exponential retries, exact HTTP Range resume,
   configurable no-progress deadlines, and bounded concurrent layer downloads.

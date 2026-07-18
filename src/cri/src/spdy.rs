@@ -320,6 +320,7 @@ pub async fn serve_exec(mut stream: TcpStream, session: &StreamingSession) -> Re
     let error_id = ids.get(&Channel::Error).copied();
 
     let request = a3s_box_core::exec::ExecRequest {
+        request_id: None,
         cmd: session.cmd.clone(),
         timeout_ns: a3s_box_core::exec::DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],

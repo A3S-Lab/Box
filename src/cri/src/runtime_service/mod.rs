@@ -2280,6 +2280,7 @@ impl RuntimeService for BoxRuntimeService {
         };
 
         let exec_request = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd: req.cmd,
             timeout_ns,
             // Inherit the container's security envelope (A3S_SEC_*, e.g.

@@ -131,6 +131,7 @@ impl ProcessBroker {
                     &key.execution_id,
                     key.generation(),
                     ExecRequest {
+                        request_id: None,
                         cmd: config.argv(),
                         timeout_ns,
                         env: config.environment(),

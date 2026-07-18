@@ -8,6 +8,13 @@ impl VmLocalExecutionBackend {
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
         self.metadata(record)?;
+        // The registered manager owns the live `crun` and log-worker child
+        // handles. Let it observe and reap terminal children so a subsequent
+        // managed restart can claim the same execution ID. Durable inspection
+        // below is only for a control plane that has no in-process owner.
+        if let Some(manager) = self.manager(&record.id) {
+            return self.inspect_registered(record, manager).await;
+        }
         let home_dir = self.home_dir.clone();
         let box_dir = record.box_dir.clone();
         let box_id = record.id.clone();
@@ -53,11 +60,12 @@ impl VmLocalExecutionBackend {
                 })
             }
             "stopped" => {
+                let exit_code = crate::rootfs::read_persisted_exit_code(&record.box_dir);
                 self.cleanup_detached_sandbox(record).await?;
                 Ok(LocalExecutionObservation {
                     state: ExecutionState::Stopped,
                     handle: None,
-                    exit_code: None,
+                    exit_code,
                 })
             }
             status => Err(ExecutionManagerError::Internal(format!(

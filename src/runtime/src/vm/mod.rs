@@ -714,10 +714,15 @@ impl VmManager {
         if stderr.is_empty() {
             stderr = Self::read_file_from_offset(&console_err_path, console_err_start);
         }
+        let truncated = stdout.len() > a3s_box_core::exec::MAX_OUTPUT_BYTES
+            || stderr.len() > a3s_box_core::exec::MAX_OUTPUT_BYTES;
+        stdout.truncate(a3s_box_core::exec::MAX_OUTPUT_BYTES);
+        stderr.truncate(a3s_box_core::exec::MAX_OUTPUT_BYTES);
         Ok(a3s_box_core::exec::ExecOutput {
             stdout,
             stderr,
             exit_code,
+            truncated,
         })
     }
 
@@ -828,6 +833,7 @@ impl VmManager {
         timeout_ns: u64,
     ) -> Result<a3s_box_core::exec::ExecOutput> {
         let request = a3s_box_core::exec::ExecRequest {
+            request_id: None,
             cmd,
             timeout_ns,
             env: vec![],

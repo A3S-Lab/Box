@@ -424,6 +424,18 @@ impl CrunHandler {
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        if !crate::process::wait_for_process_exit_with_identity(
+            pid,
+            start_time,
+            LOG_WORKER_EXIT_TIMEOUT,
+        ) {
+            tracing::warn!(
+                container_id = %self.container_id,
+                log_worker_pid = pid,
+                "Recovered Sandbox log worker remained present after cleanup"
+            );
+        }
     }
 
     fn delete_runtime_state(&mut self) -> Result<()> {

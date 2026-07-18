@@ -131,6 +131,7 @@ async fn is_directory_in_box(
     box_path: &str,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let request = ExecRequest {
+        request_id: None,
         cmd: vec!["test".to_string(), "-d".to_string(), box_path.to_string()],
         timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],
@@ -159,6 +160,7 @@ async fn copy_file_from_box(
     host_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = ExecRequest {
+        request_id: None,
         cmd: vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -216,6 +218,7 @@ async fn copy_file_to_box(
     // (Docker `cp` preserves permissions).
     let dst = shell_escape(box_path);
     let request = ExecRequest {
+        request_id: None,
         cmd: vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -273,6 +276,7 @@ async fn copy_dir_from_box(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Archive the directory inside the box and base64-encode it
     let request = ExecRequest {
+        request_id: None,
         cmd: vec![
             "sh".to_string(),
             "-c".to_string(),
@@ -339,6 +343,7 @@ async fn copy_dir_to_box(
 
     // Create destination directory and extract inside the box
     let request = ExecRequest {
+        request_id: None,
         cmd: vec![
             "sh".to_string(),
             "-c".to_string(),
