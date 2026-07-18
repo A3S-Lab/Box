@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use a3s_box_core::config::BoxConfig;
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
 use oci_spec::runtime::{
     Arch, Capabilities, Capability, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxCpuBuilder,
     LinuxDeviceBuilder, LinuxDeviceCgroupBuilder, LinuxDeviceType, LinuxIdMappingBuilder,
@@ -779,7 +780,7 @@ fn validate_user_mount(mount: &SandboxMount) -> Result<()> {
         "/run/a3s-box",
         "/sbin/init",
         "/sys",
-        "/.a3s-box-env",
+        RUNTIME_ENV_PATH,
         "/.a3s_image_metadata_v1.json",
         "/.a3s_rootfs_metadata_v1.json",
     ];

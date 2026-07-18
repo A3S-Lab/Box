@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use a3s_box_core::config::TeeConfig;
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
 
 use crate::oci::OciImageConfig;
 use crate::rootfs::GUEST_WORKDIR;
@@ -211,7 +212,9 @@ impl VmManager {
                 .map(|(key, value)| format!("{}={}\n", key, b64(value)))
                 .collect();
             if !env_file_body.is_empty() {
-                let host_path = layout.rootfs_path.join(".a3s-box-env");
+                let host_path = layout
+                    .rootfs_path
+                    .join(RUNTIME_ENV_PATH.trim_start_matches('/'));
                 std::fs::write(&host_path, env_file_body).map_err(|e| BoxError::BoxBootError {
                     message: format!(
                         "failed to stage guest env file {}: {}",
@@ -220,7 +223,22 @@ impl VmManager {
                     ),
                     hint: None,
                 })?;
-                env.push(("BOX_EXEC_ENV_FILE".to_string(), "/.a3s-box-env".to_string()));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&host_path, std::fs::Permissions::from_mode(0o600))
+                        .map_err(|error| BoxError::BoxBootError {
+                            message: format!(
+                                "failed to secure guest env file {}: {error}",
+                                host_path.display()
+                            ),
+                            hint: None,
+                        })?;
+                }
+                env.push((
+                    "BOX_EXEC_ENV_FILE".to_string(),
+                    RUNTIME_ENV_PATH.to_string(),
+                ));
             }
 
             // Pass user volume mounts to guest init for mounting inside the VM.

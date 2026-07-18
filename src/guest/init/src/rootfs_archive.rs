@@ -423,11 +423,13 @@ mod tests {
         std::fs::create_dir(&etc).unwrap();
         let hosts = etc.join("hosts");
         let probe = etc.join("probe");
+        let environment = directory.path().join(".a3s-box-env");
         let init = directory.path().join("usr/sbin/init");
         std::fs::create_dir_all(init.parent().unwrap()).unwrap();
         std::fs::write(&hosts, "127.0.0.1 localhost\n").unwrap();
         std::fs::write(&probe, "probe\n").unwrap();
-        for path in [&hosts, &probe] {
+        std::fs::write(&environment, "PATH=L3Vzci9iaW4=\nSMOKE=dHJ1ZQ\n").unwrap();
+        for path in [&hosts, &probe, &environment] {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
         std::fs::write(&init, "guest init\n").unwrap();
@@ -449,6 +451,7 @@ mod tests {
             entry("./etc/hosts", 1),
             entry("./etc/probe", 6),
             entry("./usr/sbin/init", 1),
+            entry("./.a3s-box-env", 1),
         ]);
         std::fs::write(
             directory
@@ -477,6 +480,10 @@ mod tests {
         assert_eq!(
             std::fs::metadata(init).unwrap().permissions().mode() & 0o7777,
             0o755
+        );
+        assert_eq!(
+            std::fs::metadata(environment).unwrap().permissions().mode() & 0o7777,
+            0o600
         );
     }
 
