@@ -427,20 +427,43 @@ fn parse_sandbox_tmpfs(value: &str) -> Result<SandboxTmpfs> {
     let (destination, options) = value
         .split_once(':')
         .map_or((value, None), |(path, options)| (path, Some(options)));
-    let size_bytes = match options {
-        None | Some("") => DEFAULT_SIZE,
-        Some(option) => option
-            .strip_prefix("size=")
-            .ok_or_else(|| {
-                BoxError::ConfigError(format!(
-                    "Invalid Sandbox tmpfs option {option:?}; only size=<bytes> is supported"
-                ))
-            })
-            .and_then(parse_byte_size)?,
-    };
+    let mut size_bytes = DEFAULT_SIZE;
+    let mut size_seen = false;
+    let mut read_only = None;
+    for option in options
+        .into_iter()
+        .flat_map(|options| options.split(','))
+        .filter(|option| !option.is_empty())
+    {
+        match option {
+            "ro" | "rw" => {
+                let requested = option == "ro";
+                if read_only.replace(requested).is_some() {
+                    return Err(BoxError::ConfigError(format!(
+                        "Sandbox tmpfs has duplicate or conflicting access modes: {value:?}"
+                    )));
+                }
+            }
+            _ if option.starts_with("size=") => {
+                if size_seen {
+                    return Err(BoxError::ConfigError(format!(
+                        "Sandbox tmpfs has duplicate size options: {value:?}"
+                    )));
+                }
+                size_seen = true;
+                size_bytes = parse_byte_size(&option["size=".len()..])?;
+            }
+            _ => {
+                return Err(BoxError::ConfigError(format!(
+                    "Invalid Sandbox tmpfs option {option:?}; only size=<bytes>, ro, and rw are supported"
+                )));
+            }
+        }
+    }
     Ok(SandboxTmpfs {
         destination: normalized_container_path(destination, "tmpfs destination")?,
         size_bytes,
+        read_only: read_only.unwrap_or(false),
     })
 }
 
@@ -645,6 +668,14 @@ mod tests {
 
         let tmpfs = parse_sandbox_tmpfs("/scratch:size=128m").unwrap();
         assert_eq!(tmpfs.size_bytes, 128 * 1024 * 1024);
+        assert!(!tmpfs.read_only);
+
+        let read_only = parse_sandbox_tmpfs("/sealed:size=4m,ro").unwrap();
+        assert_eq!(read_only.size_bytes, 4 * 1024 * 1024);
+        assert!(read_only.read_only);
+
+        assert!(parse_sandbox_tmpfs("/scratch:size=1m,ro,rw").is_err());
+        assert!(parse_sandbox_tmpfs("/scratch:exec").is_err());
     }
 
     #[test]

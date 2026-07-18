@@ -11,9 +11,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use a3s_runtime::contract::{
-    IsolationLevel, NetworkMode, ResourceControl, RuntimeActionRequest, RuntimeCapabilities,
-    RuntimeExecRequest, RuntimeExecResult, RuntimeFeature, RuntimeInspection, RuntimeLogChunk,
-    RuntimeLogQuery, RuntimeObservation, RuntimeRemoval, RuntimeUnitClass, RuntimeUnitSpec,
+    IsolationLevel, MountKind, NetworkMode, ResourceControl, RuntimeActionRequest,
+    RuntimeCapabilities, RuntimeExecRequest, RuntimeExecResult, RuntimeFeature, RuntimeInspection,
+    RuntimeLogChunk, RuntimeLogQuery, RuntimeObservation, RuntimeRemoval, RuntimeUnitClass,
+    RuntimeUnitSpec,
 };
 use a3s_runtime::{ProviderId, RuntimeDriver, RuntimeError, RuntimeResult, RuntimeUnitRecord};
 use async_trait::async_trait;
@@ -160,7 +161,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
             artifact_media_types: vec![OCI_IMAGE_MANIFEST.into(), DOCKER_IMAGE_MANIFEST.into()],
             isolation_levels: vec![IsolationLevel::Sandbox],
             network_modes: vec![NetworkMode::None],
-            mount_kinds: Vec::new(),
+            mount_kinds: vec![MountKind::Tmpfs],
             health_check_kinds: Vec::new(),
             resource_controls: vec![
                 ResourceControl::Cpu,

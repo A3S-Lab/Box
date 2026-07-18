@@ -1,8 +1,11 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitState};
+use a3s_runtime::contract::{
+    RuntimeInspection, RuntimeMount, RuntimeMountSource, RuntimeUnitState,
+};
 use a3s_runtime::{
     FileRuntimeStateStore, RuntimeClient, RuntimeDriver, RuntimeError, RuntimeStateStore,
 };
@@ -36,6 +39,7 @@ pub(super) async fn run(
     let record = fixture.record_for(&service.spec).await?;
     verify_digest_pin(&record, &service.spec)?;
     verify_least_privilege(&record)?;
+    verify_workload_least_privilege(fixture, client, &service.spec).await?;
     metadata_tamper_fails_closed(fixture, client, &service.spec, &record.id).await?;
     namespace_separation(fixture).await?;
 
@@ -91,6 +95,22 @@ async fn reject_hostile_inputs(
         "Box accepted a path-like Runtime unit identity",
     )?;
 
+    let mut protected_mount = template.clone();
+    protected_mount.request_id = fixture.cases.request_id("security-protected-mount");
+    protected_mount.spec.unit_id = fixture.cases.unit_id("security-protected-mount");
+    protected_mount.spec.mounts = vec![RuntimeMount {
+        name: "host-proc".into(),
+        source: RuntimeMountSource::Tmpfs {
+            size_bytes: 1024 * 1024,
+        },
+        target: "/proc/r17-escape".into(),
+        read_only: false,
+    }];
+    require(
+        client.apply(&protected_mount).await.is_err(),
+        "Box accepted a tmpfs mount below a protected host interface",
+    )?;
+
     let after = fixture
         .driver
         .manager
@@ -123,6 +143,21 @@ fn verify_digest_pin(
 }
 
 fn verify_least_privilege(record: &crate::BoxRecord) -> Result<()> {
+    const BOOTSTRAP_CAPABILITIES: [&str; 11] = [
+        "CAP_CHOWN",
+        "CAP_DAC_OVERRIDE",
+        "CAP_FOWNER",
+        "CAP_FSETID",
+        "CAP_KILL",
+        "CAP_NET_ADMIN",
+        "CAP_NET_BIND_SERVICE",
+        "CAP_SETGID",
+        "CAP_SETPCAP",
+        "CAP_SETUID",
+        "CAP_SYS_CHROOT",
+    ];
+    const BOOTSTRAP_CAPABILITY_MASK: u64 = 0x415fb;
+
     let path = record.box_dir.join("sandbox/bundle/config.json");
     let config: serde_json::Value = serde_json::from_slice(
         &std::fs::read(&path)
@@ -136,13 +171,23 @@ fn verify_least_privilege(record: &crate::BoxRecord) -> Result<()> {
             == Some(true),
         "Sandbox OCI process did not enable no-new-privileges",
     )?;
-    for set in [
-        "bounding",
-        "effective",
-        "inheritable",
-        "permitted",
-        "ambient",
-    ] {
+    let expected = BOOTSTRAP_CAPABILITIES.into_iter().collect::<BTreeSet<_>>();
+    for set in ["bounding", "effective", "permitted"] {
+        let actual = config
+            .pointer(&format!("/process/capabilities/{set}"))
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .collect::<BTreeSet<_>>()
+            });
+        require(
+            actual.as_ref() == Some(&expected),
+            format!("Sandbox OCI bootstrap capability set {set} changed: actual={actual:?}"),
+        )?;
+    }
+    for set in ["inheritable", "ambient"] {
         require(
             config
                 .pointer(&format!("/process/capabilities/{set}"))
@@ -199,9 +244,11 @@ fn verify_least_privilege(record: &crate::BoxRecord) -> Result<()> {
         .lines()
         .find_map(|line| line.strip_prefix("CapEff:\t"))
         .ok_or_else(|| super::protocol("Sandbox init process has no CapEff evidence"))?;
+    let effective = u64::from_str_radix(effective, 16)
+        .map_err(|error| super::external("decode Sandbox init CapEff", error))?;
     require(
-        effective.bytes().all(|byte| byte == b'0'),
-        "Sandbox init process retained an effective capability",
+        effective & !BOOTSTRAP_CAPABILITY_MASK == 0,
+        format!("Sandbox init process escaped its bootstrap capability set: {effective:#x}"),
     )?;
     let host_uid = status
         .lines()
@@ -210,6 +257,47 @@ fn verify_least_privilege(record: &crate::BoxRecord) -> Result<()> {
         .and_then(|value| value.parse::<u32>().ok())
         .ok_or_else(|| super::protocol("Sandbox init process has no host UID evidence"))?;
     require(host_uid != 0, "Sandbox init process runs as host root")
+}
+
+async fn verify_workload_least_privilege(
+    fixture: &BoxRuntimeConformanceFixture,
+    client: &dyn RuntimeClient,
+    spec: &a3s_runtime::contract::RuntimeUnitSpec,
+) -> Result<()> {
+    let output = client
+        .exec(&fixture.cases.exec(
+            "security-workload-capabilities",
+            spec,
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "awk '$1 == \"CapInh:\" || $1 == \"CapPrm:\" || \
+                 $1 == \"CapEff:\" || $1 == \"CapBnd:\" || $1 == \"CapAmb:\" \
+                 { print $1 \"=\" $2 }' /proc/self/status"
+                    .into(),
+            ],
+            5_000,
+        ))
+        .await
+        .map_err(|error| super::external("execute workload capability probe", error))?;
+    let capabilities = output
+        .stdout
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect::<Vec<_>>();
+    require(
+        output.exit_code == 0
+            && output.stderr.is_empty()
+            && !output.truncated
+            && capabilities.len() == 5
+            && capabilities
+                .iter()
+                .all(|(_, value)| value.bytes().all(|byte| byte == b'0')),
+        format!(
+            "Sandbox workload retained capabilities: exit_code={} stdout={:?} stderr={:?}",
+            output.exit_code, output.stdout, output.stderr
+        ),
+    )
 }
 
 async fn metadata_tamper_fails_closed(

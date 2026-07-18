@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use a3s_box_core::ExecutionManager;
 use a3s_runtime::contract::{
-    ArtifactRef, IsolationLevel, NetworkMode, ResourceControl, ResourceLimits, RestartPolicy,
-    RuntimeFeature, RuntimeNetworkSpec, RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
+    ArtifactRef, IsolationLevel, MountKind, NetworkMode, ResourceControl, ResourceLimits,
+    RestartPolicy, RuntimeFeature, RuntimeMount, RuntimeMountSource, RuntimeNetworkSpec,
+    RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
 };
 use a3s_runtime::RuntimeDriver;
 
@@ -101,7 +102,7 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
     );
     assert_eq!(capabilities.isolation_levels, vec![IsolationLevel::Sandbox]);
     assert_eq!(capabilities.network_modes, vec![NetworkMode::None]);
-    assert!(capabilities.mount_kinds.is_empty());
+    assert_eq!(capabilities.mount_kinds, vec![MountKind::Tmpfs]);
     assert!(capabilities.health_check_kinds.is_empty());
     assert_eq!(
         capabilities.resource_controls,
@@ -149,6 +150,118 @@ fn mapping_preserves_digest_resources_timeout_and_hardening() {
     assert!(request.config.persistent);
     assert_eq!(request.config.cap_drop, vec!["ALL"]);
     assert_eq!(request.config.security_opt, vec!["no-new-privileges"]);
+}
+
+#[test]
+fn mapping_rejects_path_like_unit_identity_before_mutation() {
+    for unit_id in [
+        "../provider-escape",
+        "/absolute-provider-id",
+        "tenant/../provider-escape",
+        "tenant//provider-id",
+    ] {
+        let mut spec = spec(RuntimeUnitClass::Service);
+        spec.unit_id = unit_id.into();
+        assert!(matches!(
+            creation_request(&spec),
+            Err(RuntimeError::InvalidRequest(message))
+                if message.contains("path traversal")
+        ));
+    }
+
+    let mut namespaced = spec(RuntimeUnitClass::Service);
+    namespaced.unit_id = "tenant/provider-id".into();
+    assert!(creation_request(&namespaced).is_ok());
+}
+
+#[test]
+fn mapping_compiles_bounded_tmpfs_mounts_and_read_only_intent() {
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.mounts = vec![
+        RuntimeMount {
+            name: "scratch".into(),
+            source: RuntimeMountSource::Tmpfs {
+                size_bytes: 8 * 1024 * 1024,
+            },
+            target: "/runtime/scratch".into(),
+            read_only: false,
+        },
+        RuntimeMount {
+            name: "sealed".into(),
+            source: RuntimeMountSource::Tmpfs {
+                size_bytes: 4 * 1024 * 1024,
+            },
+            target: "/runtime/sealed".into(),
+            read_only: true,
+        },
+    ];
+
+    let request = creation_request(&spec).unwrap();
+
+    assert_eq!(
+        request.config.tmpfs,
+        vec![
+            "/runtime/scratch:size=8388608,rw",
+            "/runtime/sealed:size=4194304,ro",
+        ]
+    );
+    assert!(request.config.volumes.is_empty());
+    assert!(request.policy.volume_names.is_empty());
+}
+
+#[test]
+fn mapping_rejects_unadvertised_mount_kinds_before_mutation() {
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.mounts.push(RuntimeMount {
+        name: "data".into(),
+        source: RuntimeMountSource::Volume {
+            volume_id: "runtime-data".into(),
+        },
+        target: "/data".into(),
+        read_only: false,
+    });
+
+    assert!(matches!(
+        creation_request(&spec),
+        Err(RuntimeError::UnsupportedCapabilities(missing))
+            if missing == vec!["mount_kind:Volume"]
+    ));
+}
+
+#[test]
+fn mapping_rejects_protected_or_unencodable_tmpfs_targets() {
+    for target in ["/proc/runtime", "/dev/shm/nested", "/run/a3s-box/data"] {
+        let mut spec = spec(RuntimeUnitClass::Service);
+        spec.mounts.push(RuntimeMount {
+            name: "scratch".into(),
+            source: RuntimeMountSource::Tmpfs { size_bytes: 4096 },
+            target: target.into(),
+            read_only: false,
+        });
+        assert!(matches!(
+            creation_request(&spec),
+            Err(RuntimeError::InvalidRequest(message)) if message.contains("protected")
+        ));
+    }
+
+    for target in [
+        "/runtime/ambiguous:target",
+        "/runtime/./scratch",
+        "/runtime//scratch",
+        "/runtime/scratch/",
+    ] {
+        let mut spec = spec(RuntimeUnitClass::Service);
+        spec.mounts.push(RuntimeMount {
+            name: "scratch".into(),
+            source: RuntimeMountSource::Tmpfs { size_bytes: 4096 },
+            target: target.into(),
+            read_only: false,
+        });
+        assert!(matches!(
+            creation_request(&spec),
+            Err(RuntimeError::InvalidRequest(message)) if message.contains("encodable")
+        ));
+    }
 }
 
 #[test]

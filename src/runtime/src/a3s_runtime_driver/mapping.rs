@@ -1,13 +1,16 @@
 //! Lossless Runtime protocol to Box Sandbox creation mapping.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use a3s_box_core::log::LogConfig;
 use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecutionIsolation, ExecutionRecordPolicy,
     ExecutionRestartPolicy, NetworkMode, ResourceConfig, ResourceLimits,
 };
-use a3s_runtime::contract::{ArtifactRef, RestartPolicy, RuntimeUnitClass, RuntimeUnitSpec};
+use a3s_runtime::contract::{
+    ArtifactRef, MountKind, RestartPolicy, RuntimeMountSource, RuntimeUnitClass, RuntimeUnitSpec,
+};
 use a3s_runtime::{RuntimeError, RuntimeResult};
 use url::Position;
 
@@ -19,6 +22,7 @@ const BYTES_PER_MIB: u64 = 1024 * 1024;
 
 pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateExecutionRequest> {
     spec.validate().map_err(RuntimeError::InvalidRequest)?;
+    validate_provider_unit_id(&spec.unit_id)?;
     validate_supported_shape(spec)?;
     let spec_digest = spec.digest().map_err(RuntimeError::InvalidRequest)?;
     let memory_mb = spec.resources.memory_bytes.div_ceil(BYTES_PER_MIB);
@@ -51,6 +55,7 @@ pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateEx
             spec.process.args.clone(),
         )
     };
+    let tmpfs = compile_tmpfs_mounts(spec)?;
 
     let config = BoxConfig {
         image: image_reference(&spec.artifact)?,
@@ -71,6 +76,7 @@ pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateEx
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
         network: NetworkMode::None,
+        tmpfs,
         resource_limits: ResourceLimits {
             pids_limit: Some(u64::from(spec.resources.pids)),
             cpu_quota: Some(cpu_quota),
@@ -130,10 +136,19 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
             spec.network.mode
         )]));
     }
-    if !spec.mounts.is_empty() {
-        return Err(RuntimeError::UnsupportedCapabilities(vec![
-            "mounts are not supported by the Box Runtime driver".into(),
-        ]));
+    let unsupported_mount_kinds = spec
+        .mounts
+        .iter()
+        .map(|mount| mount.source.kind())
+        .filter(|kind| *kind != MountKind::Tmpfs)
+        .collect::<std::collections::BTreeSet<_>>();
+    if !unsupported_mount_kinds.is_empty() {
+        return Err(RuntimeError::UnsupportedCapabilities(
+            unsupported_mount_kinds
+                .into_iter()
+                .map(|kind| format!("mount_kind:{kind:?}"))
+                .collect(),
+        ));
     }
     if spec.health.is_some() {
         return Err(RuntimeError::UnsupportedCapabilities(vec![
@@ -162,6 +177,69 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
             "Runtime Tasks cannot use an always restart policy".into(),
         )),
     }
+}
+
+fn validate_provider_unit_id(unit_id: &str) -> RuntimeResult<()> {
+    if unit_id
+        .split(['/', '\\'])
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(RuntimeError::InvalidRequest(format!(
+            "Box Runtime unit identity must not contain path traversal: {unit_id:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn compile_tmpfs_mounts(spec: &RuntimeUnitSpec) -> RuntimeResult<Vec<String>> {
+    spec.mounts
+        .iter()
+        .map(|mount| {
+            let RuntimeMountSource::Tmpfs { size_bytes } = &mount.source else {
+                return Err(RuntimeError::Protocol(
+                    "Box tmpfs compilation received an unsupported mount kind".into(),
+                ));
+            };
+            validate_tmpfs_target(&mount.target)?;
+            Ok(format!(
+                "{}:size={size_bytes},{}",
+                mount.target,
+                if mount.read_only { "ro" } else { "rw" }
+            ))
+        })
+        .collect()
+}
+
+fn validate_tmpfs_target(target: &str) -> RuntimeResult<()> {
+    let path = Path::new(target);
+    let normalized = target.strip_prefix('/').is_some_and(|relative| {
+        !relative.is_empty()
+            && relative
+                .split('/')
+                .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+    });
+    if !normalized || target.contains(':') {
+        return Err(RuntimeError::InvalidRequest(format!(
+            "Box Sandbox tmpfs target must be an encodable normalized absolute path: {target:?}"
+        )));
+    }
+    let is_or_below = |root: &Path| {
+        path == root
+            || path
+                .strip_prefix(root)
+                .is_ok_and(|suffix| !suffix.as_os_str().is_empty())
+    };
+    let protected = path == Path::new("/")
+        || is_or_below(Path::new("/proc"))
+        || is_or_below(Path::new("/sys"))
+        || (is_or_below(Path::new("/dev")) && path != Path::new("/dev/shm"))
+        || is_or_below(Path::new("/run/a3s-box"));
+    if protected {
+        return Err(RuntimeError::InvalidRequest(format!(
+            "Box Sandbox tmpfs target is protected: {target:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn image_reference(artifact: &ArtifactRef) -> RuntimeResult<String> {

@@ -41,6 +41,7 @@ pub struct SandboxMount {
 pub struct SandboxTmpfs {
     pub destination: PathBuf,
     pub size_bytes: u64,
+    pub read_only: bool,
 }
 
 /// Cgroup values compiled from `BoxConfig`.
@@ -625,6 +626,7 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             "nodev".to_string(),
             "mode=1777".to_string(),
             format!("size={}", tmpfs.size_bytes),
+            if tmpfs.read_only { "ro" } else { "rw" }.to_string(),
         ];
         if is_shared_memory {
             options.push("noexec".to_string());
@@ -1364,6 +1366,7 @@ mod tests {
         input.tmpfs.push(SandboxTmpfs {
             destination: PathBuf::from("/dev/shm"),
             size_bytes: 128 * 1024 * 1024,
+            read_only: true,
         });
 
         let value = as_json(&compile_oci_spec(&input).unwrap());
@@ -1377,6 +1380,7 @@ mod tests {
         let options = shared_memory[0]["options"].as_array().unwrap();
         assert!(options.iter().any(|option| option == "size=134217728"));
         assert!(options.iter().any(|option| option == "noexec"));
+        assert!(options.iter().any(|option| option == "ro"));
 
         input.tmpfs[0].destination = PathBuf::from("/dev/shm/nested");
         assert!(compile_oci_spec(&input).is_err());

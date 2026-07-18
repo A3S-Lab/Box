@@ -352,6 +352,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
         BTreeSet::from([
             RuntimeConformanceProfile::Recovery,
             RuntimeConformanceProfile::Networking,
+            RuntimeConformanceProfile::Mounts,
             RuntimeConformanceProfile::Resources,
             RuntimeConformanceProfile::Logs,
             RuntimeConformanceProfile::Exec,
@@ -376,6 +377,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Networking => {
                 super::networking_profile::run(self, client).await?
             }
+            RuntimeConformanceProfile::Mounts => super::mounts_profile::run(self, client).await?,
             RuntimeConformanceProfile::Resources => {
                 super::resources_profile::run(self, client).await?
             }

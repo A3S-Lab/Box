@@ -9,6 +9,7 @@ mod cases;
 mod exec_profile;
 mod fixture;
 mod logs_profile;
+mod mounts_profile;
 mod networking_profile;
 mod recovery_profile;
 mod resources_profile;
@@ -65,6 +66,7 @@ async fn box_runtime_passes_all_advertised_profiles() {
         RuntimeConformanceProfile::Base,
         RuntimeConformanceProfile::Recovery,
         RuntimeConformanceProfile::Networking,
+        RuntimeConformanceProfile::Mounts,
         RuntimeConformanceProfile::Resources,
         RuntimeConformanceProfile::Logs,
         RuntimeConformanceProfile::Exec,
