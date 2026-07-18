@@ -75,7 +75,7 @@ pub(crate) fn persist_resolved_image_config(box_dir: &Path, config: &OciImageCon
 pub(crate) fn load_snapshot_oci_config(
     rootfs: &Path,
     expected_image: &str,
-) -> Result<Option<OciImageConfig>> {
+) -> Result<OciImageConfig> {
     if rootfs.file_name().is_none_or(|name| name != "rootfs") {
         return Err(BoxError::ConfigError(format!(
             "Snapshot lower must end in rootfs: {}",
@@ -104,7 +104,9 @@ pub(crate) fn load_snapshot_oci_config(
             metadata.image
         )));
     }
-    Ok(metadata.image_config.map(OciImageConfig::from))
+    Ok(OciImageConfig::from(
+        metadata.require_image_config()?.clone(),
+    ))
 }
 
 fn read_regular_json<T: DeserializeOwned>(path: &Path, description: &str) -> Result<T> {
@@ -260,5 +262,30 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded, SnapshotImageConfig::from(&original));
+    }
+
+    #[test]
+    fn legacy_snapshot_without_image_config_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("state.txt"), "captured").unwrap();
+        let store = crate::SnapshotStore::new(&directory.path().join("snapshots")).unwrap();
+        store
+            .save(
+                SnapshotMetadata::new(
+                    "legacy-snapshot".to_string(),
+                    "legacy-snapshot".to_string(),
+                    "source-execution".to_string(),
+                    "alpine:3.20".to_string(),
+                ),
+                &source,
+            )
+            .unwrap();
+
+        let error = load_snapshot_oci_config(&store.rootfs_path("legacy-snapshot"), "alpine:3.20")
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("resolved OCI image configuration"));
     }
 }

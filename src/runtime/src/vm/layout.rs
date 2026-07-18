@@ -90,14 +90,10 @@ impl VmManager {
         // result, slower). This mirrors the rootfs cache-hit path below.
         if let Some(lower) = snapshot_lower_dir(&box_dir) {
             if lower.is_dir() {
-                let oci_config = match crate::resolved_image::load_snapshot_oci_config(
+                let oci_config = Some(crate::resolved_image::load_snapshot_oci_config(
                     &lower,
                     &self.config.image,
-                )? {
-                    Some(config) => Some(config),
-                    None => crate::resolved_image::load_resolved_image_config(&box_dir)?
-                        .map(crate::oci::OciImageConfig::from),
-                };
+                )?);
                 tracing::info!(
                     lower = %lower.display(),
                     "Restoring snapshot via copy-on-write overlay lower"
