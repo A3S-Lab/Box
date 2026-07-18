@@ -226,7 +226,11 @@ fn set_interface_up(name: &str) -> Result<(), Box<dyn std::error::Error>> {
     let name_bytes = ifname.as_bytes();
     let copy_len = name_bytes.len().min(libc::IFNAMSIZ - 1);
     unsafe {
-        std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), ifr.ifr_name.as_mut_ptr(), copy_len);
+        std::ptr::copy_nonoverlapping(
+            name_bytes.as_ptr().cast(),
+            ifr.ifr_name.as_mut_ptr(),
+            copy_len,
+        );
     }
 
     // Get current flags
@@ -284,7 +288,11 @@ fn add_address(ifname: &str, ip_cidr: &str) -> Result<(), Box<dyn std::error::Er
     let name_bytes = if_cstr.as_bytes();
     let copy_len = name_bytes.len().min(libc::IFNAMSIZ - 1);
     unsafe {
-        std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), ifr.ifr_name.as_mut_ptr(), copy_len);
+        std::ptr::copy_nonoverlapping(
+            name_bytes.as_ptr().cast(),
+            ifr.ifr_name.as_mut_ptr(),
+            copy_len,
+        );
     }
 
     // Set IP address
