@@ -189,6 +189,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[allow(clippy::zombie_processes)] // Deliberately drop Child to exercise recovered waitpid.
     fn recovered_identity_reaps_an_exited_child() {
         let child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
