@@ -104,8 +104,9 @@ The destructive A3S OS integration harness is
 [`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
 requires a dedicated runtime home and explicit acknowledgement, and verifies a
 real Sandbox lifecycle, v1 running-list behavior, monotonic refresh with an
-optional body, current batch metrics, TLS direct/shared routing, token-scope
-denial, service restart recovery, envd health/metrics/environment,
+optional body, current batch metrics, generation-fenced v1/v2 structured
+runtime logs with forward/backward ordering, TLS direct/shared routing,
+token-scope denial, service restart recovery, envd health/metrics/environment,
 metadata-preserving HTTP file upload and download, a traffic-scoped workload
 service on port `49999`, stale-route fencing, authenticated terminal health,
 and resource cleanup. The default `localhost.localdomain` wildcard is DNS- and

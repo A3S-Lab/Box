@@ -2,8 +2,8 @@
 
 Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 7 complete
 for the production-tested subset; the runtime-image gate now covers
-memory-preserving lifecycle, initial Process, Filesystem, PTY, Code Interpreter,
-and envd HTTP flows)**
+memory-preserving lifecycle, runtime-backed Sandbox logs, initial Process,
+Filesystem, PTY, Code Interpreter, and envd HTTP flows)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -21,9 +21,10 @@ unversioned claim.
 | Area | Implemented evidence | Remaining gate |
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
-| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete pagination edge cases, snapshots, volumes, filesystem-only pause, logs, network updates, historical metrics, public-port breadth, and host-reboot recovery semantics |
+| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete pagination edge cases, snapshots, volumes, filesystem-only pause, network updates, historical metrics, public-port breadth, and host-reboot recovery semantics |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
 | Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, pause in memory, resume through connect, prove the same process survives, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery, filesystem-only pause, and the remaining official-client data-plane matrices |
+| Sandbox logs | Generation-fenced v1/v2 control routes read bounded current and rotated runtime JSON logs, tolerate a live partial tail, stably order concurrent stdout/stderr entries by timestamp, and implement cursor, direction, level, search, and limit filters; the real-`crun` A3S OS gate validates both response schemas and forward/backward ordering | Exercise retention limits and rotation races under sustained concurrent output in the complete black-box matrix |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
 | envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete volume-content plus multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
 | Commands and SDK surface | The Process broker has generation-scoped synthetic IDs plus Start, JSON-framed Connect, List, SendInput, CloseStdin, SIGKILL, PTY Start/resize, and ordered event streams. Runtime-image official clients cover foreground/background commands, process listing, stdin close, wait, and one PTY resize flow against real `crun` | Complete binary Connect framing, `StreamInput`, SIGTERM and other signals, reconnect/backpressure/cancellation, durable handles, and the exhaustive PTY matrix |
@@ -48,11 +49,12 @@ connect-based resume, survival of the same background process, code execution,
 and context lifecycle in addition to control-plane and health behavior. The
 same production gate validates current control-plane metrics for every official
 and A3S client, an empty historical range, v1 running-list behavior, monotonic
-refresh, batch metrics, envd metrics, the initialized environment, and
-metadata-preserving HTTP upload/download. Current metrics are read through the
-generation-fenced runtime-envd connection; `memCache` is reported as zero
-because the pinned envd metrics response has no cache-usage field. Historical
-retention remains open. This is still a selected positive matrix, not the
+refresh, batch metrics, generation-fenced v1/v2 runtime logs in both ordering
+directions, envd metrics, the initialized environment, and metadata-preserving
+HTTP upload/download. Current metrics are read through the generation-fenced
+runtime-envd connection; `memCache` is reported as zero because the pinned envd
+metrics response has no cache-usage field. Historical retention remains open.
+This is still a selected positive matrix, not the
 exhaustive filesystem-only pause, stream, error, cancellation, volume-content,
 multi-file, large-file, signed-file, rich-result, multi-language, public-port,
 and MCP suite. The recorder fixture also continues to use an in-memory
@@ -975,12 +977,13 @@ Phase 2 is delivered as small, immediately merged changes:
    Process, stdin, PTY resize, memory-preserving pause/resume, same-process
    survival, code execution, context lifecycle, and current metrics against real
    Sandboxes. The enclosing smoke passes v1 listing, paused-state listing,
-   monotonic refresh, batch metrics, envd metrics, initialized environment, and
-   metadata-preserving HTTP upload/download. Complete historical metrics,
-   filesystem-only pause, volume-content, remaining envd edge semantics,
-   exhaustive Process/Filesystem/PTY, signed-file, public-port, rich
-   interpreter, and MCP matrices without broadening these selected results into
-   a full compatibility claim.
+   monotonic refresh, batch metrics, generation-fenced v1/v2 runtime logs, envd
+   metrics, initialized environment, and metadata-preserving HTTP
+   upload/download. Complete historical metrics, filesystem-only pause,
+   volume-content, remaining envd edge semantics, exhaustive
+   Process/Filesystem/PTY, signed-file, public-port, rich interpreter, and MCP
+   matrices without broadening these selected results into a full compatibility
+   claim.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
 is the canonical schema shared by the CLI and Rust SDK, preventing either
@@ -1128,8 +1131,9 @@ implementation begins.
 
 - Implemented authentication, create/connect/get/v1-v2-list/kill/timeout,
   memory-preserving pause/connect-resume, monotonic refresh, current
-  single/batch metrics, filtered running/paused listing, durable mappings,
-  wildcard routing, and traffic tokens.
+  single/batch metrics, generation-fenced v1/v2 structured logs, filtered
+  running/paused listing, durable mappings, wildcard routing, and traffic
+  tokens.
 - Every create routes through A3S execution resolution and persists its plan.
 - Requested lifetime begins only after runtime and envd readiness, including
   startup recovery. Historical metrics, full pagination edge cases, host-reboot

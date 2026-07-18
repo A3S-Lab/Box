@@ -779,4 +779,4 @@ PY
 fi
 
 stop_service
-printf 'E2B production smoke passed: lifecycle, envd HTTP, TLS traffic proxy, restart recovery, credentials, official clients when enabled, and cleanup\n'
+printf 'E2B production smoke passed: lifecycle, Sandbox logs, envd HTTP, TLS traffic proxy, restart recovery, credentials, official clients when enabled, and cleanup\n'
