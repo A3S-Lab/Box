@@ -61,7 +61,7 @@ against an already-running production compatibility service:
 E2B_API_KEY=e2b_a1b2c3 \
 python3 compat/e2b/fixtures/official-clients/run_production.py \
   --api-url http://127.0.0.1:38081 \
-  --domain box.example.com \
+  --domain localhost.localdomain \
   --template fixture-template \
   --artifact-cache /path/to/verified-artifacts
 ```
@@ -84,14 +84,18 @@ domain must resolve to the gateway listener. Port `443` is the default. On a
 host where another data plane reserves that port, set
 `A3S_BOX_E2B_GATEWAY_SMOKE_PORT`; the smoke service advertises
 `<domain>:<port>` in lifecycle responses, so envd, Code Interpreter, MCP, and
-user-service URLs keep direct wildcard routing without `E2B_SANDBOX_URL`. A
-domain beneath `localhost`, such as `box.localhost`, keeps wildcard smoke hosts
-on loopback while preserving normal TLS hostname validation.
+user-service URLs keep direct wildcard routing without `E2B_SANDBOX_URL`.
+The production smoke defaults to `localhost.localdomain`, whose wildcard hosts
+resolve on loopback on the target A3S OS while preserving normal TLS hostname
+validation. A DNS and certificate preflight fails before any Sandbox is created
+when an override is not routable.
 
-With the immutable runtime image selected, this gate proves production
-lifecycle behavior, running and post-kill envd health, Filesystem
+With the immutable runtime image selected, the public-client matrix proves
+production lifecycle behavior, running and post-kill envd health, Filesystem
 create/read/stat/list/rename/remove, foreground and background commands,
 process listing, stdin close, one PTY resize flow, Code Interpreter execution
-and context lifecycle, and cleanup through the public clients. It does not
-claim exhaustive Process, Filesystem, PTY, rich-result, multi-language, or MCP
-compatibility; those require the complete data-plane suites.
+and context lifecycle, and cleanup. The enclosing smoke gate also validates
+envd metrics/environment and HTTP file transfer directly through the
+authenticated production data-plane route. It does not claim exhaustive
+Process, Filesystem, PTY, rich-result, multi-language, or MCP compatibility;
+those require the complete data-plane suites.

@@ -89,21 +89,21 @@ wildcard TLS data-plane edge. The edge supports direct and shared route forms,
 HTTP/1.1 and HTTP/2 streaming proxying, CORS preflight, upgrades, bounded
 connections, and generation-fenced access to real Sandbox loopback ports.
 Templates select host-broker or in-Sandbox runtime envd placement explicitly.
-Runtime placement proxies health, Process, Filesystem, and file HTTP routes to
-port `49983` only after a fenced readiness connection succeeds. Authenticated
-terminal health remains host-resolved: it returns the official-client `502`
-for a killed lifecycle record without reopening a live route lease. Invalid
-tokens remain unauthorized. The remaining pinned envd HTTP and ConnectRPC
-protocols are still required before the manifest can set
-`full_compatibility=true`.
+The host broker implements authenticated `GET /health`, including terminal
+`502` without reopening a live route lease. Runtime placement proxies health,
+Process, Filesystem, and file HTTP routes to port `49983` only after fail-closed
+initialization and a fenced readiness connection. Invalid tokens remain
+unauthorized.
 
 The destructive A3S OS integration harness is
 [`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
 requires a dedicated runtime home and explicit acknowledgement, and verifies a
 real Sandbox lifecycle, TLS direct/shared routing, token-scope denial, service
-restart recovery, host envd health, a traffic-scoped workload service on port
-`49999`, stale-route fencing, authenticated terminal health, and resource
-cleanup. With
+restart recovery, envd health/metrics/environment, metadata-preserving HTTP
+file upload and download, a traffic-scoped workload service on port `49999`,
+stale-route fencing, authenticated terminal health, and resource cleanup. The
+default `localhost.localdomain` wildcard is DNS- and TLS-preflighted before a
+Sandbox starts. With
 `A3S_BOX_E2B_OFFICIAL_CLIENTS=1`, it additionally runs the checksum-pinned,
 unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
 through the production lifecycle listener, calls their official running-state
@@ -128,3 +128,9 @@ repository's Python and TypeScript packages. The runner uses the pinned
 official dependencies already installed for the unchanged-client pass, builds
 and packs the native TypeScript package, and keeps A3S endpoint configuration
 local to each client invocation.
+
+This production subset does not establish full protocol compatibility.
+Templates, snapshots, volumes, volume-content, signed files, MCP, additional
+signals, reconnect, cancellation, backpressure, multi-file and large-file
+behavior, and other pinned edge cases remain outside the matrix, so
+`full_compatibility=false` remains mandatory.

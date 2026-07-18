@@ -2,7 +2,7 @@
 
 Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 6 complete);
 the production runtime-image gate now covers initial Process, Filesystem, PTY,
-and Code Interpreter flows)**
+Code Interpreter, and envd HTTP flows)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -24,9 +24,9 @@ unversioned claim.
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
 | Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, reconnect, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery and the official-client data-plane matrices |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
-| envd HTTP | Broker mode implements authenticated `GET /health`; runtime mode proxies health, Process, Filesystem, and file HTTP routes to pinned envd inside the fenced Sandbox. A valid token receives terminal `502` after kill without reopening a route lease, while invalid tokens remain unauthorized; official clients pass running and post-kill health over production TLS | Implement the remaining broker endpoints and exhaustively verify `/metrics`, `/init`, `/envs`, and file-content semantics |
+| envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete volume-content plus multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
 | Commands and SDK surface | The Process broker has generation-scoped synthetic IDs plus Start, JSON-framed Connect, List, SendInput, CloseStdin, SIGKILL, PTY Start/resize, and ordered event streams. Runtime-image official clients cover foreground/background commands, process listing, stdin close, wait, and one PTY resize flow against real `crun` | Complete binary Connect framing, `StreamInput`, SIGTERM and other signals, reconnect/backpressure/cancellation, durable handles, and the exhaustive PTY matrix |
-| Filesystem | Runtime-image official clients cover directory creation, write/read, stat, recursive list, rename, exists, and recursive remove through pinned runtime envd | Cover multipart and octet-stream transfer, watches, signed URLs, ownership, quota errors, traversal negatives, and host-broker behavior |
+| Filesystem | Runtime-image official clients cover directory creation, write/read, stat, recursive list, rename, exists, and recursive remove through pinned runtime envd; the envd HTTP path separately passes upload/download with metadata | Cover watches, multi-file and large-file behavior, signed URLs, ownership, quota errors, traversal negatives, and host-broker behavior |
 | Code Interpreter | Pinned Python sync/async and TypeScript clients execute code and cover context create/list/restart/remove through the immutable runtime image | Cover rich MIME streams, every advertised language, errors, cancellation, callbacks, public routing, and MCP |
 | Native SDK packages | Typed Python and TypeScript packages re-export the pinned official implementations, build as release artifacts, and can repeat the production runtime-image matrix after unchanged clients pass | Publish to PyPI/npm only after the full compatibility and release gates pass |
 
@@ -43,12 +43,15 @@ The expanded runtime-image gate runs checksum-pinned official Python sync,
 Python async, TypeScript, and Code Interpreter packages unchanged. It covers
 Filesystem mutation and metadata, foreground/background commands, stdin close,
 process listing, PTY resize, code execution, and context lifecycle in addition
-to control-plane and health behavior. This is still a selected positive matrix,
-not the exhaustive stream, error, cancellation, signed-file, rich-result,
-multi-language, public-port, and MCP suite. The recorder fixture also continues
-to use an in-memory repository and fake execution manager. These are
-complementary results rather than the full black-box compatibility matrix, so
-`full_compatibility=false` remains mandatory.
+to control-plane and health behavior. The same production gate validates envd
+metrics, the initialized environment, and metadata-preserving HTTP
+upload/download. This is still a selected positive matrix, not the exhaustive
+stream, error, cancellation, volume-content, multi-file, large-file,
+signed-file, rich-result, multi-language, public-port, and MCP suite. The
+recorder fixture also continues to use an in-memory repository and fake
+execution manager. These are complementary results rather than the full
+black-box compatibility matrix, so `full_compatibility=false` remains
+mandatory.
 
 ## Executive decision
 
@@ -318,22 +321,33 @@ separate format outside this compatibility surface.
 
 ### envd-compatible broker
 
-The envd-compatible service is a host-side broker backed by the existing A3S
-control protocols. Keeping it outside the workload prevents the workload from
-replacing the compatibility endpoint or stealing its access token.
+The envd-compatible path has two explicit modes. The host-side broker is backed
+by existing A3S control protocols and provides generation-fenced health for
+templates without an embedded envd. Production compatibility templates run the
+pinned envd inside the Sandbox; the authenticated gateway connects to its
+loopback port through the execution network namespace and strips edge
+credentials before forwarding requests.
 
-The first broker route is implemented: the gateway authenticates a `49983`
-`GET /health` request against the durable lifecycle record before disclosing
-state. For a running record it issues a generation-fenced lease, calls
-`ExecutionManager::inspect`, and compares the returned execution ID, generation,
-and `Running` state with that lease. Exact live evidence returns an empty `204`;
-runtime evidence that becomes missing, stopped, or generation-stale returns
-`502`, while an unavailable inspector returns `503`. For a killed record, a
-valid envd token receives the terminal `502` expected by the official clients
-without issuing a live lease or opening a connector; an invalid token remains
-`401`. Other envd routes currently return `404` and remain explicit release
-gates. Workload traffic on every non-envd route continues through the existing
-generation- and PID-fenced network-namespace connector.
+The gateway authenticates a `49983` `GET /health` request against the durable
+lifecycle record before disclosing state. For a running broker-mode record it
+issues a generation-fenced lease, calls `ExecutionManager::inspect`, and
+compares the returned execution ID, generation, and `Running` state with that
+lease. Exact live evidence returns an empty `204`; runtime evidence that becomes
+missing, stopped, or generation-stale returns `502`, while an unavailable
+inspector returns `503`. For a killed record, a valid envd token receives the
+terminal `502` expected by the official clients without issuing a live lease or
+opening a connector; an invalid token remains `401`.
+
+Before create becomes visible, the runtime image receives a fail-closed
+`POST /init` carrying the lifecycle ID, merged environment, timestamp, and
+default user. The initialized runtime service implements the production-tested
+Process, PTY, Filesystem, and Code Interpreter subset. A3S OS production tests
+also validate the pinned `/metrics` schema, create-time environment, multipart
+file upload with metadata, octet-stream download, invalid-token rejection, and
+cleanup. Volume-content, multi-file and large-file behavior, signed access,
+negative paths, and remaining edge semantics stay explicit release gates.
+Workload traffic continues through the generation- and PID-fenced
+network-namespace connector.
 
 It translates:
 
@@ -455,8 +469,10 @@ broker must continue to depend only on that backend-neutral interface.
 Runtime placement exposes the pinned envd Filesystem service inside the exact
 generation-fenced Sandbox. The production official clients cover directory
 creation, write/read, stat, depth-bounded list, rename, exists, and recursive
-remove for user-relative paths. Host-broker Filesystem behavior and the
-exhaustive negative/streaming matrix are not implemented.
+remove for user-relative paths. The production envd HTTP gate separately
+covers one metadata-bearing multipart upload and byte-identical download.
+Host-broker Filesystem behavior and the exhaustive negative/streaming matrix
+are not implemented.
 
 The complete target contract must cover:
 
@@ -947,7 +963,9 @@ Phase 2 is delivered as small, immediately merged changes:
    their running and post-kill health methods pass through the production TLS
    listener, and runtime-image clients cover selected Filesystem, foreground
    and background Process, stdin, PTY resize, code execution, and context
-   lifecycle flows. Complete the remaining pinned envd HTTP, exhaustive
+   lifecycle flows. The same production gate covers envd metrics, initialized
+   environment, and metadata-preserving HTTP upload/download. Complete
+   volume-content, remaining envd edge semantics, exhaustive
    Process/Filesystem/PTY, signed-file, public-port, rich interpreter, and MCP
    matrices without broadening these selected results into a full compatibility
    claim.
@@ -1031,12 +1049,13 @@ create/connect/list/timeout/kill matrix passes through that production control
 listener and real Sandbox executions. Returned official-client Sandbox objects
 now traverse the production TLS listener for running and post-kill envd health,
 and the runtime-image clients cover selected Filesystem, foreground/background
-Process, stdin, PTY, interpreter, and context operations. The Phase 2 gate
-remains closed until the remaining envd, exhaustive Process/Filesystem/PTY,
-signed-file, public-port, rich interpreter, and MCP matrices pass. Passing the
-fake manager in slice 2, the direct runtime smoke in slice 4, and these
-production clients are complementary evidence, not proof of the missing
-data-plane behavior.
+Process, stdin, PTY, interpreter, and context operations. The enclosing smoke
+also covers envd metrics/environment and HTTP file transfer. The Phase 2 gate
+remains closed until volume-content, remaining envd edge semantics, exhaustive
+Process/Filesystem/PTY, signed-file, public-port, rich interpreter, and MCP
+matrices pass. Passing the fake manager in slice 2, the direct runtime smoke in
+slice 4, and these production clients are complementary evidence, not proof of
+the missing data-plane behavior.
 
 Slice 2 evidence includes exact recorder drift checks plus live requests from
 the pinned, unmodified clients to the Rust router. The live gate was also run
@@ -1052,9 +1071,11 @@ covers create, reconnect, filtered list, timeout replacement, kill, not-found
 mapping, Code Interpreter lifecycle creation, running and post-kill
 `is_running`/`isRunning` over authenticated wildcard TLS, selected Filesystem,
 foreground/background Process, stdin, PTY resize, Code Interpreter execution,
-and context lifecycle operations, plus cleanup for every real `crun`
-execution. It intentionally does not count these selected positive flows as
-complete Process, Filesystem, PTY, or interpreter compatibility.
+and context lifecycle operations, plus cleanup for every real `crun` execution.
+The enclosing smoke gate additionally validates envd metrics/environment and
+HTTP upload/download through the same authenticated TLS route. It intentionally
+does not count these selected positive flows as complete Process, Filesystem,
+PTY, interpreter, or envd compatibility.
 
 The Slice 3 persistence batch uses a bundled SQLite build through a dedicated
 asynchronous connection thread. Versioned migrations create a STRICT table in
@@ -1101,9 +1122,10 @@ A3S sandbox.
   stdin close, listing, wait, and one PTY resize flow are production-gated, but
   the exhaustive stream, signal, reconnect, cancellation, and PTY matrix is
   not.
-- Extend runtime Filesystem coverage through HTTP transfer, watches, signed
-  URLs, ownership, quota errors, and traversal negatives; implement the
-  required broker behavior.
+- Extend runtime Filesystem coverage beyond the gated single-file HTTP transfer
+  through multi-file and large-file behavior, watches, signed URLs, ownership,
+  quota errors, and traversal negatives; implement the required broker
+  behavior.
 - Add durable process handles and recovery across service restart.
 
 Gate: upstream command/filesystem contract suites pass in Python sync, Python
