@@ -1,10 +1,16 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Duration;
 
 use a3s_box_core::{ExecutionManager, OperationId};
 use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitState};
-use a3s_runtime::{RuntimeClient, RuntimeDriver, RuntimeError, RuntimeStateStore};
+use a3s_runtime::{
+    RuntimeClient, RuntimeDriver, RuntimeError, RuntimeRequestState, RuntimeStateStore,
+};
 
-use super::super::mapping::creation_request;
+use crate::ManagedExecutionState;
+
+use super::super::mapping::{creation_request, operation};
+use super::super::metadata::{local_identity, now_ms};
 use super::fixture::BoxRuntimeConformanceFixture;
 use super::{require, Result};
 
@@ -12,11 +18,65 @@ pub(super) async fn run(
     fixture: &BoxRuntimeConformanceFixture,
     client: &dyn RuntimeClient,
 ) -> Result<()> {
+    partial_creation_replays_same_provider_identity(fixture).await?;
     create_before_ack_and_client_restart(fixture).await?;
+    cancelled_task_apply_is_replayable(fixture).await?;
     completed_client_restart(fixture, client).await?;
     provider_restart(fixture, client).await?;
     external_deletion_and_single_replacement(fixture, client).await?;
     duplicate_resource_detection(fixture, client).await
+}
+
+async fn partial_creation_replays_same_provider_identity(
+    fixture: &BoxRuntimeConformanceFixture,
+) -> Result<()> {
+    let request = fixture.cases.service(
+        "recovery-partial-creation",
+        "printf 'r17-partial-creation\\n'; exec sleep 3600",
+    );
+    let state_reservation = fixture.state.reserve_apply(&request, now_ms()).await?;
+    require(
+        state_reservation.dispatch,
+        "partial-creation reservation did not require provider work",
+    )?;
+
+    let provider_reservation = fixture
+        .driver
+        .manager
+        .create(creation_request(&request.spec)?, &operation(&request.spec)?)
+        .await
+        .map_err(|error| super::external("reserve partial Sandbox creation", error))?;
+    let provider_id = provider_reservation.execution_id.to_string();
+    let created = fixture
+        .driver
+        .manager
+        .managed_record(&provider_reservation.execution_id)
+        .await
+        .map_err(|error| super::external("load partial Sandbox creation", error))?
+        .ok_or_else(|| super::protocol("partial Sandbox creation was not durable"))?;
+    require(
+        local_identity(&created)?.2 == ManagedExecutionState::Created,
+        "partial Sandbox creation advanced before Runtime replay",
+    )?;
+
+    let restarted_driver = fixture.restarted_driver()?;
+    let restarted = fixture.client_with(restarted_driver.clone(), fixture.state.clone());
+    let recovered = restarted.apply(&request).await?;
+    require(
+        recovered.state == RuntimeUnitState::Running
+            && recovered.provider_resource_id.as_deref() == Some(provider_id.as_str()),
+        "partial-creation replay did not start the reserved provider identity",
+    )?;
+    let records = fixture
+        .records_for(&restarted_driver, &request.spec)
+        .await?;
+    require(
+        records.len() == 1 && records[0].id == provider_id,
+        "partial-creation replay left duplicate provider resources",
+    )?;
+    fixture
+        .remove_unit(&restarted, &request.spec, "recovery-partial-creation")
+        .await
 }
 
 async fn create_before_ack_and_client_restart(
@@ -26,12 +86,7 @@ async fn create_before_ack_and_client_restart(
         "recovery-create-before-ack",
         "printf 'r17-create-before-ack\\n'; exec sleep 3600",
     );
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
-    let reservation = fixture.state.reserve_apply(&request, now_ms).await?;
+    let reservation = fixture.state.reserve_apply(&request, now_ms()).await?;
     require(
         reservation.dispatch,
         "create-before-ack reservation did not require provider work",
@@ -65,6 +120,89 @@ async fn create_before_ack_and_client_restart(
     )?;
     fixture
         .remove_unit(&restarted, &request.spec, "recovery-create-before-ack")
+        .await
+}
+
+async fn cancelled_task_apply_is_replayable(fixture: &BoxRuntimeConformanceFixture) -> Result<()> {
+    let request = fixture.cases.task(
+        "recovery-cancelled-task",
+        "printf 'r17-cancelled-task\\n'; sleep 5",
+        30_000,
+    );
+    let client = Arc::new(fixture.client_with(fixture.driver.clone(), fixture.state.clone()));
+    let apply = {
+        let client = client.clone();
+        let request = request.clone();
+        tokio::spawn(async move { client.apply(&request).await })
+    };
+
+    let provider_id = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let records = fixture.records_for(&fixture.driver, &request.spec).await?;
+            require(
+                records.len() <= 1,
+                "cancelled Task created duplicate provider resources before cancellation",
+            )?;
+            if let Some(record) = records.first() {
+                match local_identity(record)?.2 {
+                    ManagedExecutionState::Running => break Ok(record.id.clone()),
+                    ManagedExecutionState::Stopped | ManagedExecutionState::Failed => {
+                        break Err(super::protocol(
+                            "cancellation fixture Task became terminal before cancellation",
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            if apply.is_finished() {
+                break Err(super::protocol(
+                    "cancellation fixture apply completed before cancellation",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| super::failure("cancellation fixture did not reach a running Sandbox"))??;
+
+    apply.abort();
+    match apply.await {
+        Err(error) if error.is_cancelled() => {}
+        Ok(result) => {
+            return Err(super::protocol(format!(
+                "cancelled Task apply completed unexpectedly: {result:?}"
+            )));
+        }
+        Err(error) => {
+            return Err(super::external("join cancelled Task apply", error));
+        }
+    }
+    let pending = fixture
+        .state
+        .load_request(&request.spec.unit_id, &request.request_id)
+        .await?;
+    require(
+        pending.state == RuntimeRequestState::Pending,
+        "cancelled Task apply did not preserve a replayable pending receipt",
+    )?;
+
+    let restarted_driver = fixture.restarted_driver()?;
+    let restarted = fixture.client_with(restarted_driver.clone(), fixture.state.clone());
+    let recovered = restarted.apply(&request).await?;
+    require(
+        recovered.state == RuntimeUnitState::Succeeded
+            && recovered.provider_resource_id.as_deref() == Some(provider_id.as_str()),
+        "cancelled Task replay did not reattach to the original provider identity",
+    )?;
+    let records = fixture
+        .records_for(&restarted_driver, &request.spec)
+        .await?;
+    require(
+        records.len() == 1 && records[0].id == provider_id,
+        "cancelled Task replay left duplicate provider resources",
+    )?;
+    fixture
+        .remove_unit(&restarted, &request.spec, "recovery-cancelled-task")
         .await
 }
 

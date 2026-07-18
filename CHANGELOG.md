@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **A3S Runtime recovery fault fixtures.** The real-provider R17 Recovery
+  profile now cancels a Task apply after its Sandbox is running and seeds a
+  provider reservation without starting it. Exact retries must reattach to
+  those original identities, finish the pending work, and leave one resource
+  before complete removal.
 - **A3S Runtime tmpfs conformance.** The Sandbox-backed Runtime provider now
   advertises bounded tmpfs mounts, preserves `ro`/`rw` intent through guest and
   OCI paths, rejects protected destinations and unsupported mount kinds before

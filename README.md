@@ -366,7 +366,9 @@ The driver advertises only capabilities it maps losslessly: Sandbox isolation,
 `none` networking, and tmpfs mounts. Bind, volume, and artifact mounts remain
 unadvertised, and unsupported input fails before provider mutation. The
 opt-in R17 gate runs every activated profile against real `crun`, including
-restart recovery and cleanup inventory equality.
+provider-effect cancellation replay, partial-creation adoption, client and
+provider restart recovery, external deletion, duplicate detection, and cleanup
+inventory equality.
 
 ### OCI images and builds
 
