@@ -14,9 +14,9 @@ mod tests;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use a3s_box_core::compose::{ComposeConfig, ServiceConfig};
+use a3s_box_core::compose::{normalize_compose, ComposeConfig, ComposeSourceFormat, ServiceConfig};
 use a3s_box_core::event::EventEmitter;
-use a3s_box_runtime::{ComposeProject, NetworkStore, VmManager};
+use a3s_box_runtime::{ComposeRuntimePlan, NetworkStore, VmManager};
 use sha2::{Digest, Sha256};
 
 use super::common;
@@ -168,19 +168,18 @@ fn load_compose_file_with_environment(
     }
     environment.extend(shell_environment);
 
-    let config = if path
+    let format = if path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("acl"))
     {
-        ComposeConfig::from_acl_str_with_environment(&source, &environment)
-            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?
+        ComposeSourceFormat::Acl
     } else {
-        let source = a3s_box_core::compose::interpolate_compose_yaml(&source, &environment)
-            .map_err(|e| format!("Failed to interpolate {}: {}", path.display(), e))?;
-        ComposeConfig::from_yaml_str(&source)
-            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?
+        ComposeSourceFormat::Yaml
     };
+    let config = normalize_compose(&source, format, &environment)
+        .map_err(|error| format!("Failed to normalize {}: {error}", path.display()))?
+        .into_config();
 
     Ok((path, config))
 }
@@ -250,7 +249,7 @@ async fn execute_up(
         .unwrap_or_else(|| std::path::Path::new("."));
     validate_compose_restart_policies(&config)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let project = ComposeProject::with_base_dir(project_name, config, base_dir)?;
+    let project = ComposeRuntimePlan::with_base_dir(project_name, config, base_dir)?;
     if isolation.is_sandbox() {
         let default_network = project.default_network_name();
         for service_name in &project.service_order {
@@ -462,13 +461,14 @@ async fn execute_up(
 
         // Connect to network before boot
         if let Some(net_name) = network_name.as_deref() {
+            let network_aliases = project.service_network_aliases(svc_name);
             // Atomic load → validate → allocate-IP → save under the store's
             // cross-process lock. A get → connect → update reads the network
             // outside the lock, so a concurrent connect (another compose up, or
             // a `run --network` to the same net) could dup the IP or drop this
-            // endpoint. Register the bare service name as a DNS alias so peers
-            // can reach this service as `svc` (Docker Compose behavior), not
-            // only as the `{project}-{svc}` box name.
+            // endpoint. Register the bare service name plus declared network
+            // aliases so peers can use Compose DNS names, not only the
+            // `{project}-{svc}` box name.
             let endpoint =
                 match net_store.with_write_lock(
                     |networks| -> Result<
@@ -483,11 +483,7 @@ async fn execute_up(
                         super::network::validate_attachable_network(net_config)
                             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
                         net_config
-                            .connect_with_aliases(
-                                &box_id,
-                                &box_name,
-                                std::slice::from_ref(svc_name),
-                            )
+                            .connect_with_aliases(&box_id, &box_name, &network_aliases)
                             .map_err(|e| -> Box<dyn std::error::Error> {
                                 format!("Failed to connect service '{}' to network: {e}", svc_name)
                                     .into()

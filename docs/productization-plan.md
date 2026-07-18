@@ -199,6 +199,12 @@ Current notes:
   stop/start/restart, pause/unpause, kill/wait/remove, `down -v`, and final
   Box/socket cleanup. Linux KVM and the complete host matrix remain release
   gates.
+- Core Compose interpretation is now a side-effect-free typed normalizer with
+  explicit environment input, deterministic `BTreeMap` output, shared ACL/YAML
+  golden fixtures, and structured diagnostics for unknown fields and
+  unsupported values. Runtime consumes the result through the stateless
+  `ComposeRuntimePlan`; Box lifecycle records and Cloud desired state remain
+  outside that translation boundary.
 - Boot failure cleanup now stops any shim that was spawned before readiness,
   stops bridge-network backends, unmounts rootfs providers before removing box
   directories, and removes only the anonymous OCI volumes created by that boot

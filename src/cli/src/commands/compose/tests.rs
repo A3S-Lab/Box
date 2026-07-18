@@ -86,7 +86,7 @@ services:
     assert_eq!(environment["DOTENV_ONLY"], "dotenv");
     assert_eq!(environment["SHELL_WINS"], "shell");
 
-    a3s_box_runtime::ComposeProject::with_base_dir("test", config, directory.path())
+    a3s_box_runtime::ComposeRuntimePlan::with_base_dir("test", config, directory.path())
         .expect("interpolation must run before port validation");
 }
 
@@ -105,6 +105,25 @@ fn test_load_compose_file_reports_unreadable_dotenv() {
         .to_string()
         .contains("Failed to read Compose environment file"));
     assert!(error.to_string().contains(".env"));
+}
+
+#[test]
+fn test_load_compose_file_rejects_unknown_yaml_fields_with_structured_path() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let compose_path = directory.path().join("compose.yaml");
+    std::fs::write(
+        &compose_path,
+        "services:\n  api:\n    image: api:latest\n    build: .\n",
+    )
+    .unwrap();
+
+    let error =
+        load_compose_file_with_environment(Some(&compose_path), HashMap::<String, String>::new())
+            .unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("compose.unsupported_field"));
+    assert!(message.contains("/services/api/build"));
 }
 
 #[test]

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use a3s_box_core::compose::ComposeConfig;
-use a3s_box_runtime::ComposeProject;
+use a3s_box_runtime::ComposeRuntimePlan;
 
 use super::{
     validate_compose_restart_policies, ComposeLogsArgs, ProjectServicesArgs, LABEL_PROJECT,
@@ -83,7 +83,7 @@ pub(super) fn execute_config(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_compose_restart_policies(&config)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let project = ComposeProject::new(project_name, config)?;
+    let project = ComposeRuntimePlan::new(project_name, config)?;
 
     println!("Project: {}", project_name);
     println!("Services: {}", project.config.services.len());

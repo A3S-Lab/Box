@@ -1,9 +1,10 @@
-//! Compose orchestrator for multi-container workloads.
+//! Stateless Compose-to-Runtime translation.
 //!
-//! Coordinates the lifecycle of multiple services defined in a compose file:
-//! network creation, dependency-ordered boot, and grouped teardown.
+//! This module builds deterministic Runtime inputs from a parsed Compose
+//! project. It deliberately owns no running-unit registry, persisted lifecycle
+//! state, or Cloud desired state; those concerns stay with their callers.
 
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::compose::ComposeConfig;
@@ -11,36 +12,28 @@ use a3s_box_core::config::{BoxConfig, ResourceConfig};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::network::NetworkMode;
 
-/// State of a compose project (group of services).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProjectState {
-    /// All services are running.
-    Running,
-    /// Some services are running.
-    Partial,
-    /// All services are stopped.
-    Stopped,
-}
-
-/// A running compose project.
+/// Stateless plan for translating one Compose project into Runtime inputs.
 #[derive(Debug, Clone)]
-pub struct ComposeProject {
+pub struct ComposeRuntimePlan {
     /// Project name (derived from directory name or --project-name).
     pub name: String,
     /// The parsed compose config.
     pub config: ComposeConfig,
     /// Service boot order (topologically sorted).
     pub service_order: Vec<String>,
-    /// Map of service name → box ID (once started).
-    pub service_boxes: HashMap<String, String>,
-    /// Networks created for this project.
-    pub networks: Vec<String>,
     /// Base directory used to resolve relative env_file paths.
     pub base_dir: PathBuf,
 }
 
-impl ComposeProject {
-    /// Create a new compose project from a config.
+/// Compatibility name for the former stateful Compose project type.
+///
+/// New code should use [`ComposeRuntimePlan`] to make the stateless translation
+/// boundary explicit.
+#[deprecated(note = "use ComposeRuntimePlan; lifecycle state is owned by the caller")]
+pub type ComposeProject = ComposeRuntimePlan;
+
+impl ComposeRuntimePlan {
+    /// Create a new translation plan from a config.
     ///
     /// Validates the config and computes the service boot order.
     pub fn new(name: impl Into<String>, config: ComposeConfig) -> Result<Self> {
@@ -82,21 +75,8 @@ impl ComposeProject {
             name,
             config,
             service_order,
-            service_boxes: HashMap::new(),
-            networks: Vec::new(),
             base_dir: base_dir.into(),
         })
-    }
-
-    /// Get the project state based on which services have box IDs.
-    pub fn state(&self) -> ProjectState {
-        if self.service_boxes.is_empty() {
-            ProjectState::Stopped
-        } else if self.service_boxes.len() == self.config.services.len() {
-            ProjectState::Running
-        } else {
-            ProjectState::Partial
-        }
     }
 
     /// Build a BoxConfig for a single service.
@@ -218,42 +198,52 @@ impl ComposeProject {
 
     /// Get all network names this project needs (project-prefixed).
     pub fn required_networks(&self) -> Vec<String> {
-        let mut nets = vec![self.default_network_name()];
+        let default = self.default_network_name();
+        let mut explicit = BTreeSet::new();
 
         // Add explicitly declared networks
         for net_name in self.config.networks.keys() {
-            let prefixed = format!("{}_{}", self.name, net_name);
-            if !nets.contains(&prefixed) {
-                nets.push(prefixed);
-            }
+            explicit.insert(format!("{}_{}", self.name, net_name));
         }
 
         // Add networks referenced by services
         for svc in self.config.services.values() {
             for net_name in svc.networks.names() {
-                let prefixed = format!("{}_{}", self.name, net_name);
-                if !nets.contains(&prefixed) {
-                    nets.push(prefixed);
-                }
+                explicit.insert(format!("{}_{}", self.name, net_name));
             }
         }
 
+        let mut nets = Vec::with_capacity(explicit.len() + 1);
+        nets.push(default);
+        nets.extend(explicit);
         nets
     }
 
-    /// Record that a service has been started with the given box ID.
-    pub fn register_service(&mut self, service_name: &str, box_id: String) {
-        self.service_boxes.insert(service_name.to_string(), box_id);
-    }
-
-    /// Remove a service's box ID (on stop/destroy).
-    pub fn unregister_service(&mut self, service_name: &str) {
-        self.service_boxes.remove(service_name);
-    }
-
-    /// Get the box ID for a service, if running.
-    pub fn box_id(&self, service_name: &str) -> Option<&str> {
-        self.service_boxes.get(service_name).map(|s| s.as_str())
+    /// DNS aliases to register for a service on its selected Compose network.
+    ///
+    /// The bare service name is always present. User-declared aliases are
+    /// deduplicated and sorted so endpoint state does not depend on map order.
+    pub fn service_network_aliases(&self, service_name: &str) -> Vec<String> {
+        let mut aliases = BTreeSet::from([service_name.to_string()]);
+        let Some(service) = self.config.services.get(service_name) else {
+            return aliases.into_iter().collect();
+        };
+        let a3s_box_core::compose::ServiceNetworks::Map(networks) = &service.networks else {
+            return aliases.into_iter().collect();
+        };
+        let Some(selected_network) = service.networks.names().into_iter().next() else {
+            return aliases.into_iter().collect();
+        };
+        if let Some(Some(config)) = networks.get(&selected_network) {
+            aliases.extend(
+                config
+                    .aliases
+                    .iter()
+                    .filter(|alias| !alias.is_empty())
+                    .cloned(),
+            );
+        }
+        aliases.into_iter().collect()
     }
 
     /// Get the shutdown order (reverse of boot order).
@@ -271,14 +261,16 @@ impl ComposeProject {
             return vec![];
         };
 
-        match &svc.depends_on {
+        let mut dependencies = match &svc.depends_on {
             a3s_box_core::compose::DependsOn::Map(map) => map
                 .iter()
                 .filter(|(_, cond)| cond.condition == "service_healthy")
                 .map(|(name, _)| name.clone())
                 .collect(),
             _ => vec![],
-        }
+        };
+        dependencies.sort();
+        dependencies
     }
 
     /// Dependencies this service must wait to run to completion (exit 0) before
@@ -288,14 +280,16 @@ impl ComposeProject {
             return vec![];
         };
 
-        match &svc.depends_on {
+        let mut dependencies = match &svc.depends_on {
             a3s_box_core::compose::DependsOn::Map(map) => map
                 .iter()
                 .filter(|(_, cond)| cond.condition == "service_completed_successfully")
                 .map(|(name, _)| name.clone())
                 .collect(),
             _ => vec![],
-        }
+        };
+        dependencies.sort();
+        dependencies
     }
 
     /// Get the health check config for a service, if defined.
@@ -540,7 +534,7 @@ volumes:
     #[test]
     fn test_compose_project_new() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         assert_eq!(project.name, "myapp");
         assert_eq!(project.service_order.len(), 3);
         // db must come before api, api before web
@@ -564,36 +558,9 @@ volumes:
     }
 
     #[test]
-    fn test_compose_project_state() {
-        let config = sample_config();
-        let mut project = ComposeProject::new("myapp", config).unwrap();
-        assert_eq!(project.state(), ProjectState::Stopped);
-
-        project.register_service("db", "box-1".to_string());
-        assert_eq!(project.state(), ProjectState::Partial);
-
-        project.register_service("api", "box-2".to_string());
-        project.register_service("web", "box-3".to_string());
-        assert_eq!(project.state(), ProjectState::Running);
-
-        project.unregister_service("web");
-        assert_eq!(project.state(), ProjectState::Partial);
-    }
-
-    #[test]
-    fn test_compose_project_box_id() {
-        let config = sample_config();
-        let mut project = ComposeProject::new("myapp", config).unwrap();
-        assert!(project.box_id("db").is_none());
-
-        project.register_service("db", "box-123".to_string());
-        assert_eq!(project.box_id("db"), Some("box-123"));
-    }
-
-    #[test]
     fn test_compose_project_shutdown_order() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let shutdown = project.shutdown_order();
         // Shutdown is reverse of boot: web → api → db
         let web_pos = shutdown.iter().position(|s| s == "web").unwrap();
@@ -606,7 +573,7 @@ volumes:
     #[test]
     fn test_compose_project_default_network() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         assert_eq!(project.default_network_name(), "myapp_default");
     }
 
@@ -628,17 +595,43 @@ networks:
   backend:
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
-        let nets = project.required_networks();
-        assert!(nets.contains(&"myapp_default".to_string()));
-        assert!(nets.contains(&"myapp_frontend".to_string()));
-        assert!(nets.contains(&"myapp_backend".to_string()));
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
+        assert_eq!(
+            project.required_networks(),
+            ["myapp_default", "myapp_backend", "myapp_frontend",]
+        );
+    }
+
+    #[test]
+    fn test_compose_runtime_plan_includes_declared_network_aliases() {
+        let config = ComposeConfig::from_yaml_str(
+            r#"
+services:
+  api:
+    image: api:latest
+    networks:
+      backend:
+        aliases:
+          - z-api
+          - api.internal
+          - z-api
+networks:
+  backend:
+"#,
+        )
+        .unwrap();
+        let plan = ComposeRuntimePlan::new("myapp", config).unwrap();
+
+        assert_eq!(
+            plan.service_network_aliases("api"),
+            ["api", "api.internal", "z-api"]
+        );
     }
 
     #[test]
     fn test_build_box_config_basic() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("db", Some("myapp_default"))
             .unwrap();
@@ -652,7 +645,7 @@ networks:
     #[test]
     fn test_build_box_config_env() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("api", Some("myapp_default"))
             .unwrap();
@@ -678,7 +671,7 @@ services:
       BAZ: inline
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::with_base_dir("myapp", config, dir.path()).unwrap();
+        let project = ComposeRuntimePlan::with_base_dir("myapp", config, dir.path()).unwrap();
         let box_config = project
             .build_box_config("api", Some("myapp_default"))
             .unwrap();
@@ -703,7 +696,7 @@ services:
     env_file: missing.env
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::with_base_dir("myapp", config, dir.path()).unwrap();
+        let project = ComposeRuntimePlan::with_base_dir("myapp", config, dir.path()).unwrap();
 
         let err = project
             .build_box_config("api", Some("myapp_default"))
@@ -721,7 +714,7 @@ services:
     working_dir: /srv/app
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("worker", Some("myapp_default"))
             .unwrap();
@@ -740,7 +733,7 @@ services:
       - "db.local:10.88.0.10"
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("web", Some("myapp_default"))
             .unwrap();
@@ -759,7 +752,7 @@ services:
       - "db.local:not-an-ip"
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
 
         let err = project
             .build_box_config("web", Some("myapp_default"))
@@ -771,7 +764,7 @@ services:
     #[test]
     fn test_build_box_config_ports() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("web", Some("myapp_default"))
             .unwrap();
@@ -789,7 +782,7 @@ services:
       - "8080:80/tcp"
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("web", Some("myapp_default"))
             .unwrap();
@@ -808,7 +801,7 @@ services:
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
 
-        let err = ComposeProject::new("myapp", config).unwrap_err();
+        let err = ComposeRuntimePlan::new("myapp", config).unwrap_err();
 
         assert!(err.to_string().contains("only TCP is supported"));
     }
@@ -816,7 +809,7 @@ services:
     #[test]
     fn test_build_box_config_network_mode() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("web", Some("myapp_default"))
             .unwrap();
@@ -830,7 +823,7 @@ services:
     #[test]
     fn test_build_box_config_service_not_found() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let result = project.build_box_config("nonexistent", None);
         assert!(result.is_err());
     }
@@ -838,7 +831,7 @@ services:
     #[test]
     fn test_build_box_config_no_network() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project.build_box_config("web", None).unwrap();
         // No default network → falls back to Tsi
         assert!(matches!(box_config.network, NetworkMode::Tsi));
@@ -853,7 +846,7 @@ services:
       - "8080:80"
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let result = ComposeProject::new("myapp", config);
+        let result = ComposeRuntimePlan::new("myapp", config);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("no image"));
     }
@@ -904,7 +897,7 @@ networks:
   frontend:
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("web", Some("myapp_default"))
             .unwrap();
@@ -929,7 +922,7 @@ services:
       - ALL
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let box_config = project
             .build_box_config("web", Some("myapp_default"))
             .unwrap();
@@ -962,7 +955,7 @@ services:
     image: postgres
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         // Simple depends_on → no health wait (condition defaults to service_started)
         assert!(project.health_wait_deps("web").is_empty());
     }
@@ -989,7 +982,7 @@ services:
     image: redis
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let deps = project.health_wait_deps("web");
         assert_eq!(deps, vec!["db".to_string()]);
     }
@@ -1008,7 +1001,7 @@ services:
       start_period: 30s
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let hc = project.healthcheck("web").unwrap();
         assert_eq!(hc.cmd, vec!["curl", "-f", "http://localhost/"]);
         assert_eq!(hc.interval_secs, 10);
@@ -1027,7 +1020,7 @@ services:
       test: ["CMD", "true"]
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let hc = project.healthcheck("web").unwrap();
         assert_eq!(hc.cmd, vec!["true"]);
         assert_eq!(hc.interval_secs, 30);
@@ -1046,7 +1039,7 @@ services:
       test: ["CMD-SHELL", "curl -f http://localhost/ || exit 1"]
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let hc = project.healthcheck("web").unwrap();
         assert_eq!(
             hc.cmd,
@@ -1064,7 +1057,7 @@ services:
       test: curl -f http://localhost/ || exit 1
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         let hc = project.healthcheck("web").unwrap();
         assert_eq!(
             hc.cmd,
@@ -1086,7 +1079,7 @@ services:
       disable: true
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         assert!(project.healthcheck("none").is_none());
         assert!(project.healthcheck_disabled("none"));
         assert!(project.healthcheck("disabled").is_none());
@@ -1096,7 +1089,7 @@ services:
     #[test]
     fn test_healthcheck_none() {
         let config = sample_config();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         assert!(project.healthcheck("db").is_none());
     }
 
@@ -1113,7 +1106,7 @@ services:
     image: busybox
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let project = ComposeProject::new("myapp", config).unwrap();
+        let project = ComposeRuntimePlan::new("myapp", config).unwrap();
         assert_eq!(project.completed_wait_deps("web"), vec!["init".to_string()]);
         // `init` itself has no completion wait.
         assert!(project.completed_wait_deps("init").is_empty());
@@ -1132,7 +1125,7 @@ services:
     image: postgres
 "#;
         let config = ComposeConfig::from_yaml_str(yaml).unwrap();
-        let err = ComposeProject::new("myapp", config).unwrap_err();
+        let err = ComposeRuntimePlan::new("myapp", config).unwrap_err();
         assert!(err.to_string().contains("unsupported condition"));
     }
 }
