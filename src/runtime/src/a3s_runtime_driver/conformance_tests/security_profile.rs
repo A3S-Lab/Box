@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use a3s_runtime::contract::{
-    RuntimeInspection, RuntimeMount, RuntimeMountSource, RuntimeUnitState,
+    HealthProbe, NetworkMode, RuntimeHealthCheck, RuntimeInspection, RuntimeMount,
+    RuntimeMountSource, RuntimeUnitState, SecretReference, SecretTarget,
 };
 use a3s_runtime::{
     FileRuntimeStateStore, RuntimeClient, RuntimeDriver, RuntimeError, RuntimeStateStore,
@@ -109,6 +110,80 @@ async fn reject_hostile_inputs(
     require(
         client.apply(&protected_mount).await.is_err(),
         "Box accepted a tmpfs mount below a protected host interface",
+    )?;
+
+    let mut outbound_network = template.clone();
+    outbound_network.request_id = fixture.cases.request_id("security-outbound-network");
+    outbound_network.spec.unit_id = fixture.cases.unit_id("security-outbound-network");
+    outbound_network.spec.network.mode = NetworkMode::Outbound;
+    require(
+        matches!(
+            client.apply(&outbound_network).await,
+            Err(RuntimeError::UnsupportedCapabilities(missing))
+                if missing == vec!["network_mode:Outbound"]
+        ),
+        "Box accepted an unadvertised outbound network",
+    )?;
+
+    let mut volume = template.clone();
+    volume.request_id = fixture.cases.request_id("security-volume");
+    volume.spec.unit_id = fixture.cases.unit_id("security-volume");
+    volume.spec.mounts = vec![RuntimeMount {
+        name: "provider-volume".into(),
+        source: RuntimeMountSource::Volume {
+            volume_id: "r17-provider-volume".into(),
+        },
+        target: "/mnt/provider-volume".into(),
+        read_only: false,
+    }];
+    require(
+        matches!(
+            client.apply(&volume).await,
+            Err(RuntimeError::UnsupportedCapabilities(missing))
+                if missing == vec!["mount_kind:Volume"]
+        ),
+        "Box accepted an unadvertised volume mount",
+    )?;
+
+    let mut health = template.clone();
+    health.request_id = fixture.cases.request_id("security-health");
+    health.spec.unit_id = fixture.cases.unit_id("security-health");
+    health.spec.health = Some(RuntimeHealthCheck {
+        probe: HealthProbe::Command {
+            command: vec!["/bin/true".into()],
+        },
+        interval_ms: 1_000,
+        timeout_ms: 500,
+        start_period_ms: 0,
+        success_threshold: 1,
+        failure_threshold: 3,
+    });
+    require(
+        matches!(
+            client.apply(&health).await,
+            Err(RuntimeError::UnsupportedCapabilities(missing))
+                if missing == vec!["health_check:Command"]
+        ),
+        "Box accepted an unadvertised health check",
+    )?;
+
+    let mut secret = template.clone();
+    secret.request_id = fixture.cases.request_id("security-secret");
+    secret.spec.unit_id = fixture.cases.unit_id("security-secret");
+    secret.spec.secrets = vec![SecretReference {
+        name: "provider-token".into(),
+        reference: "secret://r17/provider-token".into(),
+        target: SecretTarget::Environment {
+            variable: "R17_PROVIDER_TOKEN".into(),
+        },
+    }];
+    require(
+        matches!(
+            client.apply(&secret).await,
+            Err(RuntimeError::UnsupportedCapabilities(missing))
+                if missing == vec!["feature:SecretReferences"]
+        ),
+        "Box accepted an unadvertised secret reference",
     )?;
 
     let after = fixture
