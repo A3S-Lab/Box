@@ -98,22 +98,24 @@ unauthorized.
 The destructive A3S OS integration harness is
 [`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
 requires a dedicated runtime home and explicit acknowledgement, and verifies a
-real Sandbox lifecycle, TLS direct/shared routing, token-scope denial, service
-restart recovery, envd health/metrics/environment, metadata-preserving HTTP
-file upload and download, a traffic-scoped workload service on port `49999`,
-stale-route fencing, authenticated terminal health, and resource cleanup. The
-default `localhost.localdomain` wildcard is DNS- and TLS-preflighted before a
-Sandbox starts. With
+real Sandbox lifecycle, v1 running-list behavior, monotonic refresh with an
+optional body, current batch metrics, TLS direct/shared routing, token-scope
+denial, service restart recovery, envd health/metrics/environment,
+metadata-preserving HTTP file upload and download, a traffic-scoped workload
+service on port `49999`, stale-route fencing, authenticated terminal health,
+and resource cleanup. The default `localhost.localdomain` wildcard is DNS- and
+TLS-preflighted before a Sandbox starts. With
 `A3S_BOX_E2B_OFFICIAL_CLIENTS=1`, it additionally runs the checksum-pinned,
 unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
 through the production lifecycle listener, calls their official running-state
 health methods through the TLS gateway before and after kill, and verifies
 cleanup of every real `crun` execution. With the runtime image selected, the
 three base clients also exercise Filesystem create/read/stat/list/rename/remove,
-foreground and background commands, process listing, stdin close, and PTY
-resize. The Code Interpreter clients execute code and cover context
-create/list/restart/remove. This does not establish complete Process,
-Filesystem, PTY, rich-result, or multi-language compatibility.
+foreground and background commands, process listing, stdin close, PTY resize,
+and current Sandbox metrics with historical-range filtering. The Code
+Interpreter clients execute code and cover context create/list/restart/remove.
+This does not establish complete Process, Filesystem, PTY, rich-result,
+multi-language, or historical-metrics compatibility.
 
 The default smoke uses the small Alpine broker fixture. Set
 `A3S_BOX_E2B_RUNTIME_IMAGE` to an immutable
@@ -131,6 +133,6 @@ local to each client invocation.
 
 This production subset does not establish full protocol compatibility.
 Templates, snapshots, volumes, volume-content, signed files, MCP, additional
-signals, reconnect, cancellation, backpressure, multi-file and large-file
-behavior, and other pinned edge cases remain outside the matrix, so
-`full_compatibility=false` remains mandatory.
+signals, reconnect, cancellation, backpressure, historical metrics, multi-file
+and large-file behavior, and other pinned edge cases remain outside the matrix,
+so `full_compatibility=false` remains mandatory.

@@ -48,7 +48,7 @@ remain explicit in
 | Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell/exec-form `RUN` are implemented by the host engine on Linux. `--run-pool` can execute `RUN` through a leased warm-pool VM by mounting the mutable build rootfs into the guest. On macOS, auto `RUN` builds still delegate to BuildKit inside an A3S Linux VM (`--builder=buildkit-vm`) unless `--run-pool` is selected; unsafe host execution remains an explicit experiment-only escape hatch. |
 | Lifecycle and exec | `run`, `create`, `start`, `stop`, `restart`, `rm`, `wait`, foreground/detached runs, non-PTY exec, PTY exec, logs, stats, and inspect are implemented. |
 | OCI Sandbox | Linux-only, explicit `--isolation sandbox` shared-kernel execution through certified `crun`. Structured `json-file` logs preserve stdout/stderr identity for foreground, detached, natural-exit, stop, kill, and auto-remove paths. Generation-owned log workers are PID-start-time fenced, drained before archival, and recovered during cleanup. The security-negative matrix and performance gate remain release work; this mode does not claim MicroVM-equivalent isolation. |
-| E2B protocol preview | The ACL-configured service covers lifecycle, TLS routing, terminal health, and runtime envd metrics/environment/HTTP file transfer. The immutable runtime-image gate drives pinned Python sync/async and TypeScript clients through Filesystem operations, foreground/background commands, stdin, PTY resize, and Code Interpreter execution/context lifecycle on real `crun` Sandboxes. Typed source packages are built but unpublished. Volume-content, multi-file and large-file behavior, exhaustive Process/PTY, signed-file, public-port, rich interpreter, MCP, and full release matrices remain incomplete; `full_compatibility=false`. |
+| E2B protocol preview | The ACL-configured service covers lifecycle, v1/v2 listing, monotonic refresh, current single/batch control metrics, TLS routing, terminal health, and runtime envd metrics/environment/HTTP file transfer. The immutable runtime-image gate drives pinned Python sync/async and TypeScript clients through Filesystem operations, foreground/background commands, stdin, PTY resize, and Code Interpreter execution/context lifecycle on real `crun` Sandboxes. Typed source packages are built but unpublished. Historical metrics, volume-content, multi-file and large-file behavior, exhaustive Process/PTY, signed-file, public-port, rich interpreter, MCP, and full release matrices remain incomplete; `full_compatibility=false`. |
 | Warm pool and snapshot-fork | A warm pool serves pre-booted sandboxes over a socket. Native snapshot-fork (Copy-on-Write microVM cloning) snapshots one booted template and restores many forks from it, each mapping the template RAM `MAP_PRIVATE`. Verified on `/dev/kvm`: ~4× faster than a cold boot per fork, 100 forks in under ~1 s (~8 ms amortized each). Requires `/dev/kvm`; opt in with `pool start --snapshot-fork` or the `KRUN_SNAPSHOT_*` / `KRUN_RESTORE_FROM` env. |
 | Networking | Default TSI networking, TCP `host:guest` publishing, user-defined bridge networks, network inspect/connect/disconnect/rm, and `/etc/hosts` peer discovery are implemented with documented platform boundaries. |
 | Compose | Canonical `compose.acl` applications and an explicit Docker Compose-compatible YAML subset are implemented, including convergent `up`, project-scoped lifecycle commands, dependency conditions, health checks, networks, volumes, ports, and runtime/security settings. |
@@ -386,20 +386,22 @@ configured non-standard TLS port, so normal deployments do not require a
 process-global Sandbox URL override.
 
 The Phase 2 preview includes an owner-scoped Rust lifecycle router for create,
-connect, get, list, timeout, and kill; a SQLite WAL repository with
-generation-fenced transitions and restart reconciliation; and a canonical
-runtime `ExecutionManager` with a production VM/Sandbox backend. CI runs the
+connect, get, v1/v2 list, timeout, monotonic refresh, current single/batch
+metrics, and kill; a SQLite WAL repository with generation-fenced transitions
+and restart reconciliation; and a canonical runtime `ExecutionManager` with a
+production VM/Sandbox backend. CI runs the
 pinned official Python sync/async, TypeScript, and Code Interpreter clients
 against the router through an in-memory repository and fake execution manager.
 An opt-in A3S OS gate installs those same checksum-pinned packages without
 modification and runs them against the ACL-configured production process and
 real `crun` Sandboxes. Python sync, Python async, and TypeScript each cover
-create, connect, filtered list, timeout replacement, kill, and not-found
-behavior. The tested base packages are Python `e2b` 2.32.0 in sync and async
-modes and TypeScript `e2b` 2.33.0. All three run one foreground `commands.run`
-through the ConnectRPC JSON transport as the image's default non-root user and
-verify its stdout, empty stderr, and successful exit on a real `crun`
-execution. Python `e2b-code-interpreter` 2.8.1 and TypeScript
+create, connect, filtered list, timeout replacement, current metrics with
+historical-range filtering, kill, and not-found behavior. The tested base
+packages are Python `e2b` 2.32.0 in sync and async modes and TypeScript `e2b`
+2.33.0. All three run one foreground `commands.run` through the ConnectRPC JSON
+transport as the image's default non-root user and verify its stdout, empty
+stderr, and successful exit on a real `crun` execution. Python
+`e2b-code-interpreter` 2.8.1 and TypeScript
 `@e2b/code-interpreter` 2.6.1 participate in the runtime-image execution gate.
 That mode additionally exercises Filesystem create/read/stat/list/rename/remove,
 background commands with process listing and stdin close, PTY allocation and
@@ -489,19 +491,22 @@ compatibility claims.
 
 An A3S OS production smoke test exercises this path on a real `crun` OCI
 Sandbox created with `--isolation sandbox`. It verifies lifecycle operations,
-envd health over both TLS route forms, runtime metrics/environment and HTTP
-file transfer, a real traffic-token-protected workload service on port `49999`,
-invalid and scope-swapped token denial, service-restart recovery, stale-route
-fencing after kill, authenticated terminal health, and complete runtime
-cleanup. The default `localhost.localdomain` wildcard is DNS- and
+v1 running-list behavior, monotonic refresh with an optional body, current
+batch metrics, envd health over both TLS route forms, runtime
+metrics/environment and HTTP file transfer, a real traffic-token-protected
+workload service on port `49999`, invalid and scope-swapped token denial,
+service-restart recovery, stale-route fencing after kill, authenticated
+terminal health, and complete runtime cleanup. The default
+`localhost.localdomain` wildcard is DNS- and
 TLS-preflighted before a Sandbox starts. The same A3S OS gate runs the unchanged
 official clients through both running and post-kill health checks and the
 runtime data-plane cases described above. Failed runs can preserve the Sandbox
 PID, `crun` state, OCI bundle, and service logs for diagnosis. Volume-content,
-multi-file and large-file behavior, exhaustive Process and PTY matrices,
-Filesystem watches and signed URLs, official public-port coverage, rich
-multi-language Code Interpreter behavior, MCP, native package publication, and
-the complete production package matrix remain open release gates.
+historical metrics, multi-file and large-file behavior, exhaustive Process and
+PTY matrices, Filesystem watches and signed URLs, official public-port
+coverage, rich multi-language Code Interpreter behavior, MCP, native package
+publication, and the complete production package matrix remain open release
+gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in
