@@ -112,7 +112,7 @@ pub struct CommonBoxArgs {
     #[arg(short = 'l', long = "label")]
     pub labels: Vec<String>,
 
-    /// Mount a tmpfs (e.g., "/tmp" or "/tmp:size=100m"), can be repeated
+    /// Mount a tmpfs (PATH[:size=SIZE][,ro|rw]), can be repeated
     #[arg(long)]
     pub tmpfs: Vec<String>,
 
