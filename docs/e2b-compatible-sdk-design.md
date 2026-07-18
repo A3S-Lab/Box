@@ -3,7 +3,8 @@
 Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 7 complete
 for the production-tested subset; the runtime-image gate now covers
 memory-preserving lifecycle, runtime-backed Sandbox logs, initial Process,
-Filesystem, PTY, Code Interpreter, and envd HTTP flows)**
+Filesystem, Volume control/content and mounts, PTY, Code Interpreter, and envd
+HTTP flows)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -21,12 +22,13 @@ unversioned claim.
 | Area | Implemented evidence | Remaining gate |
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
-| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete pagination edge cases, snapshots, volumes, filesystem-only pause, network updates, historical metrics, public-port breadth, and host-reboot recovery semantics |
+| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete pagination edge cases, snapshots, filesystem-only pause, network updates, historical metrics, public-port breadth, and host-reboot recovery semantics |
+| Volumes | Owner-scoped create, connect/get, list, and delete use durable SQLite records, encrypted scope-bound tokens, startup reconciliation, and runtime-managed storage; the authenticated volume-content routes implement directory, file, path, and metadata operations with descriptor-relative path safety; all six production clients pass bidirectional Sandbox mounts, UID/GID mapping, public mount metadata, in-use deletion conflicts, and cleanup against real `crun` executions | Complete large-file, concurrent-mutation, service-crash, host-reboot, and negative-path breadth before treating Volume coverage as a standalone compatibility claim |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
 | Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, pause in memory, resume through connect, prove the same process survives, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery, filesystem-only pause, and the remaining official-client data-plane matrices |
 | Sandbox logs | Generation-fenced v1/v2 control routes read bounded current and rotated runtime JSON logs, tolerate a live partial tail, stably order concurrent stdout/stderr entries by timestamp, and implement cursor, direction, level, search, and limit filters; the real-`crun` A3S OS gate validates both response schemas and forward/backward ordering | Exercise retention limits and rotation races under sustained concurrent output in the complete black-box matrix |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
-| envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete volume-content plus multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
+| envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
 | Commands and SDK surface | The Process broker has generation-scoped synthetic IDs plus Start, JSON-framed Connect, List, SendInput, CloseStdin, SIGKILL, PTY Start/resize, and ordered event streams. Runtime-image official clients cover foreground/background commands, process listing, stdin close, wait, and one PTY resize flow against real `crun` | Complete binary Connect framing, `StreamInput`, SIGTERM and other signals, reconnect/backpressure/cancellation, durable handles, and the exhaustive PTY matrix |
 | Filesystem | Runtime-image official clients cover directory creation, write/read, stat, recursive list, rename, exists, and recursive remove through pinned runtime envd; the envd HTTP path separately passes upload/download with metadata | Cover watches, multi-file and large-file behavior, signed URLs, ownership, quota errors, traversal negatives, and host-broker behavior |
 | Code Interpreter | Pinned Python sync/async and TypeScript clients execute code and cover context create/list/restart/remove through the immutable runtime image | Cover rich MIME streams, every advertised language, errors, cancellation, callbacks, public routing, and MCP |
@@ -45,22 +47,24 @@ The expanded runtime-image gate runs checksum-pinned official Python sync,
 Python async, TypeScript, and Code Interpreter packages unchanged. It covers
 Filesystem mutation and metadata, foreground/background commands, stdin close,
 process listing, PTY resize, memory-preserving pause, paused-state listing,
-connect-based resume, survival of the same background process, code execution,
-and context lifecycle in addition to control-plane and health behavior. The
-same production gate validates current control-plane metrics for every official
-and A3S client, an empty historical range, v1 running-list behavior, monotonic
-refresh, batch metrics, generation-fenced v1/v2 runtime logs in both ordering
-directions, envd metrics, the initialized environment, and metadata-preserving
-HTTP upload/download. Current metrics are read through the generation-fenced
-runtime-envd connection; `memCache` is reported as zero because the pinned envd
-metrics response has no cache-usage field. Historical retention remains open.
-This is still a selected positive matrix, not the
-exhaustive filesystem-only pause, stream, error, cancellation, volume-content,
-multi-file, large-file, signed-file, rich-result, multi-language, public-port,
-and MCP suite. The recorder fixture also continues to use an in-memory
-repository and fake execution manager. These are complementary results rather
-than the full black-box compatibility matrix, so `full_compatibility=false`
-remains mandatory.
+connect-based resume, survival of the same background process, owner-scoped
+Volume control/content, bidirectional Sandbox mounts, UID/GID mapping, in-use
+deletion conflicts, code execution, and context lifecycle in addition to
+control-plane and health behavior. The same production gate validates current
+control-plane metrics for every official and A3S client, an empty historical
+range, v1 running-list behavior, monotonic refresh, batch metrics,
+generation-fenced v1/v2 runtime logs in both ordering directions, envd metrics,
+the initialized environment, and metadata-preserving HTTP upload/download.
+Current metrics are read through the generation-fenced runtime-envd connection;
+`memCache` is reported as zero because the pinned envd metrics response has no
+cache-usage field. Historical retention remains open. This is still a selected
+positive matrix, not the exhaustive filesystem-only pause, stream, error,
+cancellation, deeper Volume failure/recovery, multi-file, large-file,
+signed-file, rich-result, multi-language, public-port, and MCP suite. The
+recorder fixture also continues to use an in-memory repository and fake
+execution manager. These are complementary results rather than the full
+black-box compatibility matrix, so `full_compatibility=false` remains
+mandatory.
 
 ## Executive decision
 
@@ -166,9 +170,9 @@ following are true for a published compatibility manifest:
 The conformance report is published per template and isolation profile. A
 shared-kernel template cannot inherit a passing MicroVM result.
 Memory-preserving pause and resume now have matching observable behavior on the
-Sandbox backend, but filesystem-only pause, snapshots, volumes, and the rest of
-the pinned lifecycle surface remain gates. The backend is therefore still
-reported as a preview subset rather than fully compatible.
+Sandbox backend, but filesystem-only pause, snapshots, and the rest of the
+pinned lifecycle surface remain gates. The backend is therefore still reported
+as a preview subset rather than fully compatible.
 
 ## Compatibility architecture
 
@@ -354,8 +358,9 @@ default user. The initialized runtime service implements the production-tested
 Process, PTY, Filesystem, and Code Interpreter subset. A3S OS production tests
 also validate the pinned `/metrics` schema, create-time environment, multipart
 file upload with metadata, octet-stream download, invalid-token rejection, and
-cleanup. Volume-content, multi-file and large-file behavior, signed access,
-negative paths, and remaining edge semantics stay explicit release gates.
+cleanup. Multi-file and large-file behavior, signed access, negative paths, and
+remaining edge semantics stay explicit release gates. Volume control and
+content use the separate durable service described below.
 Workload traffic continues through the generation- and PID-fenced
 network-namespace connector.
 
@@ -438,8 +443,8 @@ class, the server returns the matching protocol error and does not switch
 backends. That configuration is then listed as partial rather than fully
 compatible unless the pinned upstream contract rejects the same request. For
 example, shared-kernel execution still cannot be certified for the full
-lifecycle surface while filesystem-only pause, snapshots, and volumes lack
-matching observable semantics.
+lifecycle surface while filesystem-only pause and snapshots lack matching
+observable semantics.
 
 ## Command and PTY compatibility
 
@@ -473,6 +478,34 @@ open. The internal
 session layer must eventually provide independent stdin, stdout, stderr,
 signal, wait, and PTY channels on every advertised backend; the compatibility
 broker must continue to depend only on that backend-neutral interface.
+
+## Volume compatibility
+
+The compatibility control plane implements owner-scoped Volume create,
+connect/get, list, and delete. Public IDs and encrypted scope-bound content
+tokens are stored in SQLite separately from runtime volume names. Creating and
+deleting records use explicit transitional states so startup reconciliation can
+finish interrupted materialization or deletion without exposing another
+owner's storage. Deleting a mounted Volume returns the pinned conflict behavior
+and restores the active record; deletion succeeds after the Sandbox releases
+the mount.
+
+The separate authenticated volume-content routes implement recursive directory
+creation, streaming atomic file replacement, file reads, bounded-depth listing,
+stat, metadata changes, and recursive removal. Unix operations stay relative to
+opened directory descriptors, reject traversal and symlink escapes, reserve
+internal upload names, and translate UID/GID values through the certified
+Sandbox user-namespace mapping. Sandbox creation resolves public Volume names
+to runtime-managed host paths without exposing those paths in the protocol.
+
+Official and A3S Python sync/async and TypeScript clients pass the same A3S OS
+matrix: API writes are visible inside the mounted Sandbox, Sandbox writes are
+visible through the content API, public listing retains mount name/path
+metadata, in-use deletion fails, and final deletion removes the durable record
+and data. Native A3S clients derive both control and content endpoints from
+`A3S_BOX_ENDPOINT`; they do not read `E2B_API_URL` or
+`E2B_VOLUME_API_URL`. Large-file, concurrent-mutation, service-crash,
+host-reboot, and broader negative-path coverage remain release gates.
 
 ## Filesystem compatibility
 
@@ -975,12 +1008,13 @@ Phase 2 is delivered as small, immediately merged changes:
    through the production TLS listener. Official and A3S Python sync/async and
    TypeScript clients cover selected Filesystem, foreground and background
    Process, stdin, PTY resize, memory-preserving pause/resume, same-process
-   survival, code execution, context lifecycle, and current metrics against real
-   Sandboxes. The enclosing smoke passes v1 listing, paused-state listing,
-   monotonic refresh, batch metrics, generation-fenced v1/v2 runtime logs, envd
-   metrics, initialized environment, and metadata-preserving HTTP
-   upload/download. Complete historical metrics, filesystem-only pause,
-   volume-content, remaining envd edge semantics, exhaustive
+   survival, owner-scoped Volume control/content and bidirectional mounts, code
+   execution, context lifecycle, and current metrics against real Sandboxes.
+   The enclosing smoke passes v1 listing, paused-state listing, monotonic
+   refresh, batch metrics, generation-fenced v1/v2 runtime logs, envd metrics,
+   initialized environment, and metadata-preserving HTTP upload/download.
+   Complete historical metrics, filesystem-only pause, deeper Volume
+   failure/recovery, remaining envd edge semantics, exhaustive
    Process/Filesystem/PTY, signed-file, public-port, rich interpreter, and MCP
    matrices without broadening these selected results into a full compatibility
    claim.
@@ -1067,14 +1101,14 @@ production control listener and real Sandbox executions. Returned
 official-client Sandbox objects now traverse the production TLS listener for
 running and post-kill envd health, and the runtime-image clients cover selected
 Filesystem, foreground/background Process, stdin, PTY, interpreter, context,
-and current-metric operations. The enclosing smoke also covers v1 listing,
-monotonic refresh, batch metrics, envd metrics/environment, and HTTP file
-transfer. The Phase 2 gate remains closed until historical metrics,
-volume-content, remaining envd edge semantics, exhaustive
-Process/Filesystem/PTY, signed-file, public-port, rich interpreter, and MCP
-matrices pass. Passing the fake manager in slice 2, the direct runtime smoke in
-slice 4, and these production clients are complementary evidence, not proof of
-the missing data-plane behavior.
+current-metric, and Volume control/content/mount operations. The enclosing smoke
+also covers v1 listing, monotonic refresh, batch metrics, envd
+metrics/environment, and HTTP file transfer. The Phase 2 gate remains closed
+until historical metrics, deeper Volume failure/recovery, remaining envd edge
+semantics, exhaustive Process/Filesystem/PTY, signed-file, public-port, rich
+interpreter, and MCP matrices pass. Passing the fake manager in slice 2, the
+direct runtime smoke in slice 4, and these production clients are complementary
+evidence, not proof of the missing data-plane behavior.
 
 Slice 2 evidence includes exact recorder drift checks plus live requests from
 the pinned, unmodified clients to the Rust router. The live gate was also run
@@ -1090,12 +1124,14 @@ covers create, reconnect, filtered list, timeout replacement, current metrics
 with historical-range filtering, kill, not-found mapping, Code Interpreter
 lifecycle creation, running and post-kill `is_running`/`isRunning` over
 authenticated wildcard TLS, selected Filesystem, foreground/background Process,
-stdin, PTY resize, Code Interpreter execution, and context lifecycle
-operations, plus cleanup for every real `crun` execution. The enclosing smoke
-gate additionally validates v1 listing, monotonic refresh, batch metrics, envd
-metrics/environment, and HTTP upload/download through the same authenticated
-TLS route. It intentionally does not count these selected positive flows as
-complete Process, Filesystem, PTY, interpreter, metrics, or envd compatibility.
+stdin, PTY resize, owner-scoped Volume create/connect/list/content/delete,
+bidirectional Sandbox mounts, UID/GID mapping, in-use deletion conflicts, Code
+Interpreter execution, and context lifecycle operations, plus cleanup for every
+real `crun` execution. The enclosing smoke gate additionally validates v1
+listing, monotonic refresh, batch metrics, envd metrics/environment, and HTTP
+upload/download through the same authenticated TLS route. It intentionally does
+not count these selected positive flows as complete Process, Filesystem, PTY,
+interpreter, metrics, envd, or Volume compatibility.
 
 The Slice 3 persistence batch uses a bundled SQLite build through a dedicated
 asynchronous connection thread. Versioned migrations create a STRICT table in
@@ -1171,9 +1207,11 @@ patches.
 
 ### Phase 5: complete public surface
 
-- Implement templates/builds, snapshots, filesystem-only pause, volumes,
-  historical metrics, network policy, routed ports, and remaining public
-  helpers.
+- Owner-scoped Volume control/content, durable recovery, and Sandbox mounts are
+  implemented and pass the six-client A3S OS matrix; deeper failure, recovery,
+  large-file, concurrent-mutation, and negative-path breadth remains open.
+- Implement templates/builds, snapshots, filesystem-only pause, historical
+  metrics, network policy, routed ports, and remaining public helpers.
 - Run compatibility across every supported SDK/version tuple.
 
 Gate: the complete public SDK inventory has an observed passing test or an
