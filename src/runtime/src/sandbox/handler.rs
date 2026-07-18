@@ -13,6 +13,10 @@ use sysinfo::{Pid, System};
 // `crun kill` accepts Linux signal numbers even though this module must also
 // type-check on hosts where libc does not expose POSIX signal constants.
 const SIGKILL_NUMBER: i32 = 9;
+#[cfg(target_os = "linux")]
+const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CrunState {
@@ -160,6 +164,109 @@ impl CrunHandler {
                 hint: None,
             })?;
         Ok(Some(state))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pause_at(
+        runtime_path: &Path,
+        runtime_root: &Path,
+        container_id: &str,
+    ) -> Result<()> {
+        Self::transition_state_at(
+            runtime_path,
+            runtime_root,
+            container_id,
+            "pause",
+            &["created", "running"],
+            "paused",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn resume_at(
+        runtime_path: &Path,
+        runtime_root: &Path,
+        container_id: &str,
+    ) -> Result<()> {
+        Self::transition_state_at(
+            runtime_path,
+            runtime_root,
+            container_id,
+            "resume",
+            &["paused"],
+            "running",
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn transition_state_at(
+        runtime_path: &Path,
+        runtime_root: &Path,
+        container_id: &str,
+        operation: &str,
+        source_states: &[&str],
+        target_state: &str,
+    ) -> Result<()> {
+        let state =
+            Self::query_state_at(runtime_path, runtime_root, container_id)?.ok_or_else(|| {
+                BoxError::StateError(format!(
+                    "Sandbox runtime {container_id} does not exist for {operation}"
+                ))
+            })?;
+        if state.status == target_state {
+            return Ok(());
+        }
+        if !source_states.contains(&state.status.as_str()) {
+            return Err(BoxError::StateError(format!(
+                "Cannot {operation} Sandbox runtime {container_id} in state {}",
+                state.status
+            )));
+        }
+
+        let output = Command::new(runtime_path)
+            .arg("--root")
+            .arg(runtime_root)
+            .arg(operation)
+            .arg(container_id)
+            .env("LC_ALL", "C")
+            .output()
+            .map_err(|error| {
+                BoxError::ExecError(format!("Failed to run crun {operation}: {error}"))
+            })?;
+        if !output.status.success() {
+            if Self::query_state_at(runtime_path, runtime_root, container_id)?
+                .is_some_and(|state| state.status == target_state)
+            {
+                return Ok(());
+            }
+            return Err(runtime_failure(&format!("crun {operation}"), &output));
+        }
+
+        let deadline = Instant::now() + LIFECYCLE_TIMEOUT;
+        loop {
+            match Self::query_state_at(runtime_path, runtime_root, container_id)? {
+                Some(state) if state.status == target_state => return Ok(()),
+                Some(state) if state.status == "stopped" => {
+                    return Err(BoxError::StateError(format!(
+                        "Sandbox runtime {container_id} stopped while waiting for {operation}"
+                    )))
+                }
+                None => {
+                    return Err(BoxError::StateError(format!(
+                        "Sandbox runtime {container_id} disappeared while waiting for {operation}"
+                    )))
+                }
+                Some(_) if Instant::now() < deadline => {
+                    std::thread::sleep(LIFECYCLE_POLL_INTERVAL);
+                }
+                Some(state) => {
+                    return Err(BoxError::StateError(format!(
+                        "Timed out waiting for Sandbox runtime {container_id} to enter {target_state}; current state is {}",
+                        state.status
+                    )))
+                }
+            }
+        }
     }
 
     fn runtime_command(&self, operation: &str) -> Command {
@@ -409,7 +516,7 @@ impl VmHandler for CrunHandler {
         self.query_state()
             .ok()
             .flatten()
-            .is_some_and(|state| state.status == "running" || state.status == "created")
+            .is_some_and(|state| matches!(state.status.as_str(), "created" | "running" | "paused"))
     }
 
     fn has_exited(&self) -> bool {
@@ -465,6 +572,77 @@ fn remove_dir_if_exists(path: &Path) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    fn lifecycle_runtime(temporary: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let runtime_root = temporary.path().join("runtime");
+        std::fs::create_dir(&runtime_root).unwrap();
+        std::fs::write(runtime_root.join("state"), "running\n").unwrap();
+        let runtime = temporary.path().join("crun-fixture");
+        std::fs::write(
+            &runtime,
+            r#"#!/bin/sh
+root="$2"
+operation="$3"
+case "$operation" in
+  state)
+    status="$(cat "$root/state")"
+    printf '{"status":"%s","pid":42}\n' "$status"
+    ;;
+  pause)
+    printf 'paused\n' > "$root/state"
+    ;;
+  resume)
+    printf 'running\n' > "$root/state"
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        (runtime, runtime_root)
+    }
+
+    #[test]
+    fn crun_pause_and_resume_are_state_checked_and_idempotent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (runtime, runtime_root) = lifecycle_runtime(&temporary);
+
+        CrunHandler::pause_at(&runtime, &runtime_root, "sandbox-1").unwrap();
+        CrunHandler::pause_at(&runtime, &runtime_root, "sandbox-1").unwrap();
+        assert_eq!(
+            CrunHandler::query_state_at(&runtime, &runtime_root, "sandbox-1")
+                .unwrap()
+                .unwrap()
+                .status,
+            "paused"
+        );
+
+        CrunHandler::resume_at(&runtime, &runtime_root, "sandbox-1").unwrap();
+        CrunHandler::resume_at(&runtime, &runtime_root, "sandbox-1").unwrap();
+        assert_eq!(
+            CrunHandler::query_state_at(&runtime, &runtime_root, "sandbox-1")
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+    }
+
+    #[test]
+    fn crun_pause_rejects_a_terminal_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (runtime, runtime_root) = lifecycle_runtime(&temporary);
+        std::fs::write(runtime_root.join("state"), "stopped\n").unwrap();
+
+        let error = CrunHandler::pause_at(&runtime, &runtime_root, "sandbox-1").unwrap_err();
+
+        assert!(error.to_string().contains("state stopped"));
+    }
 
     #[cfg(feature = "vm")]
     #[test]

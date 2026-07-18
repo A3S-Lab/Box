@@ -91,6 +91,46 @@ async fn router_serves_the_pinned_official_lifecycle_shape() {
 
     let response = send(
         &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/pause",
+        Some(json!({"memory": true})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = send(&app, Method::POST, "/sandboxes/sandbox-1/pause", None, true).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let response = send(&app, Method::GET, "/sandboxes/sandbox-1", None, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["state"], "paused");
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/resume",
+        Some(json!({"timeout": 400, "autoPause": true})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = send(&app, Method::POST, "/sandboxes/sandbox-1/pause", None, true).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/connect",
+        Some(json!({"timeout": 222})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let response = send(
+        &app,
         Method::GET,
         "/v2/sandboxes?limit=2&metadata=team%3Dalpha%252520beta&nextToken=cursor-0&state=running%2Cpaused",
         None,

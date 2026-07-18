@@ -88,6 +88,28 @@ pub struct TimeoutBody {
     pub timeout: u32,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseBody {
+    #[serde(default = "default_true")]
+    pub memory: bool,
+}
+
+impl Default for PauseBody {
+    fn default() -> Self {
+        Self { memory: true }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeBody {
+    #[serde(default = "default_timeout")]
+    pub timeout: u32,
+    #[serde(rename = "autoPause", default)]
+    pub auto_pause: bool,
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct RefreshBody {
     #[serde(default)]

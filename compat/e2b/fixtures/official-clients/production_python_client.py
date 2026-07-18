@@ -336,6 +336,34 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         trace(label, "process.foreground.complete")
         exercise_sync_data_plane(sandbox, label)
 
+        trace(label, "sandbox.pause-process-start")
+        survivor = sandbox.commands.run("cat", background=True, stdin=True, timeout=20)
+        trace(label, "sandbox.pause")
+        if not sandbox.pause(keep_memory=True):
+            raise AssertionError("running sandbox was reported as already paused")
+        trace(label, "sandbox.pause-idempotent")
+        if sandbox.pause(keep_memory=True):
+            raise AssertionError("second pause did not report the paused state")
+        trace(label, "sandbox.list-paused")
+        paused = Sandbox.list(
+            query=SandboxQuery(metadata=metadata, state=[SandboxState.PAUSED]),
+            limit=20,
+            **options,
+        )
+        assert_listed(paused.next_items(), sandbox.sandbox_id)
+        trace(label, "sandbox.resume-connect")
+        resumed = sandbox.connect(timeout=45)
+        if resumed.sandbox_id != sandbox.sandbox_id:
+            raise AssertionError("resume returned a different sandbox ID")
+        trace(label, "sandbox.pause-process-survived")
+        survivor.send_stdin(f"{label}-pause")
+        survivor.close_stdin()
+        survivor_result = survivor.wait()
+        if survivor_result.exit_code != 0 or survivor_result.stdout != f"{label}-pause":
+            raise AssertionError(
+                f"memory-preserving pause lost the running process: {survivor_result!r}"
+            )
+
         trace(label, "sandbox.list")
         paginator = Sandbox.list(
             query=SandboxQuery(metadata=metadata, state=[SandboxState.RUNNING]),
@@ -430,6 +458,36 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
             raise AssertionError(f"unexpected async command result: {result!r}")
         trace(label, "process.foreground.complete")
         await exercise_async_data_plane(sandbox, label)
+
+        trace(label, "sandbox.pause-process-start")
+        survivor = await sandbox.commands.run(
+            "cat", background=True, stdin=True, timeout=20
+        )
+        trace(label, "sandbox.pause")
+        if not await sandbox.pause(keep_memory=True):
+            raise AssertionError("running sandbox was reported as already paused")
+        trace(label, "sandbox.pause-idempotent")
+        if await sandbox.pause(keep_memory=True):
+            raise AssertionError("second pause did not report the paused state")
+        trace(label, "sandbox.list-paused")
+        paused = AsyncSandbox.list(
+            query=SandboxQuery(metadata=metadata, state=[SandboxState.PAUSED]),
+            limit=20,
+            **options,
+        )
+        assert_listed(await paused.next_items(), sandbox.sandbox_id)
+        trace(label, "sandbox.resume-connect")
+        resumed = await sandbox.connect(timeout=45)
+        if resumed.sandbox_id != sandbox.sandbox_id:
+            raise AssertionError("resume returned a different sandbox ID")
+        trace(label, "sandbox.pause-process-survived")
+        await survivor.send_stdin(f"{label}-pause")
+        await survivor.close_stdin()
+        survivor_result = await survivor.wait()
+        if survivor_result.exit_code != 0 or survivor_result.stdout != f"{label}-pause":
+            raise AssertionError(
+                f"memory-preserving pause lost the running process: {survivor_result!r}"
+            )
 
         trace(label, "sandbox.list")
         paginator = AsyncSandbox.list(

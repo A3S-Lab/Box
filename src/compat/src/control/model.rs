@@ -399,11 +399,19 @@ impl SandboxRecord {
         Ok(next)
     }
 
+    pub fn abort_pause(&mut self) -> Result<SandboxGeneration, LifecycleError> {
+        self.transition(&[LifecycleState::Pausing], LifecycleState::Running)
+    }
+
     pub fn begin_resume(&mut self) -> Result<SandboxGeneration, LifecycleError> {
         if self.execution_id.is_none() || self.execution_generation.is_none() {
             return Err(LifecycleError::MissingExecution);
         }
         self.transition(&[LifecycleState::Paused], LifecycleState::Resuming)
+    }
+
+    pub fn abort_resume(&mut self) -> Result<SandboxGeneration, LifecycleError> {
+        self.transition(&[LifecycleState::Resuming], LifecycleState::Paused)
     }
 
     pub fn begin_kill(&mut self) -> Result<SandboxGeneration, LifecycleError> {

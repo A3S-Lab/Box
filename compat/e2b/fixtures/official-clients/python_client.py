@@ -47,6 +47,9 @@ def run_sync(api_url: str) -> None:
     sandbox = Sandbox.create("fixture-template", **create_options(api_url))
     assert sandbox.sandbox_id == SANDBOX_ID
 
+    assert sandbox.pause(keep_memory=True)
+    assert not sandbox.pause(keep_memory=True)
+
     connected = Sandbox.connect(SANDBOX_ID, timeout=222, **connection(api_url))
     assert connected.sandbox_id == SANDBOX_ID
 
@@ -79,6 +82,9 @@ def run_sync(api_url: str) -> None:
 async def run_async(api_url: str) -> None:
     sandbox = await AsyncSandbox.create("fixture-template", **create_options(api_url))
     assert sandbox.sandbox_id == SANDBOX_ID
+
+    assert await sandbox.pause(keep_memory=True)
+    assert not await sandbox.pause(keep_memory=True)
 
     connected = await AsyncSandbox.connect(
         SANDBOX_ID, timeout=222, **connection(api_url)

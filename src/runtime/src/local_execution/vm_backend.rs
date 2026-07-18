@@ -497,16 +497,14 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
         let metadata = self.metadata(record)?;
+        if metadata.plan.backend == ExecutionBackend::Crun {
+            return self.inspect_sandbox(record).await;
+        }
         if let Some(manager) = self.manager(&record.id) {
             return self.inspect_registered(record, manager).await;
         }
-        match metadata.plan.backend {
-            ExecutionBackend::Crun => self.inspect_sandbox(record).await,
-            ExecutionBackend::Krun => {
-                let manager = self.recover_microvm(record).await?;
-                self.inspect_registered(record, manager).await
-            }
-        }
+        let manager = self.recover_microvm(record).await?;
+        self.inspect_registered(record, manager).await
     }
 
     async fn pause(
@@ -516,7 +514,14 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
     ) -> ExecutionManagerResult<LocalExecutionHandle> {
         let metadata = self.metadata(record)?;
         if metadata.plan.backend == ExecutionBackend::Crun {
-            return Err(unsupported(record, "pause", "the Sandbox backend"));
+            if !keep_memory {
+                return Err(unsupported(
+                    record,
+                    "pause without memory retention",
+                    "the Sandbox backend",
+                ));
+            }
+            return self.pause_sandbox(record).await;
         }
         if !keep_memory {
             return Err(unsupported(
@@ -538,7 +543,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         let metadata = self.metadata(record)?;
         if metadata.plan.backend == ExecutionBackend::Crun {
-            return Err(unsupported(record, "resume", "the Sandbox backend"));
+            return self.resume_sandbox(record).await;
         }
         let shared = self.require_microvm(record).await?;
         let manager = shared.lock().await;

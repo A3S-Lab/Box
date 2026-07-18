@@ -11,8 +11,8 @@ use crate::control::{ConnectionDisposition, ControlServiceError, PublicSandboxSt
 
 use super::dto::{
     parse_list_filter, parse_metric_range, parse_metric_sandbox_ids, ListedSandboxResponse,
-    NewSandboxBody, RefreshBody, SandboxDetailResponse, SandboxMetricResponse, SandboxResponse,
-    SandboxesWithMetricsResponse, TimeoutBody,
+    NewSandboxBody, PauseBody, RefreshBody, ResumeBody, SandboxDetailResponse,
+    SandboxMetricResponse, SandboxResponse, SandboxesWithMetricsResponse, TimeoutBody,
 };
 use super::error::ApiError;
 use super::router::LifecycleHttpState;
@@ -56,6 +56,50 @@ pub async fn connect(
         ConnectionDisposition::AlreadyRunning | ConnectionDisposition::Created => StatusCode::OK,
     };
     Ok((status, Json(response)))
+}
+
+pub async fn pause(
+    State(state): State<LifecycleHttpState>,
+    Extension(account): Extension<AuthenticatedAccount>,
+    Path(sandbox_id): Path<String>,
+    body: Result<Json<PauseBody>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let sandbox_id = parse_sandbox_id(sandbox_id)?;
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(JsonRejection::MissingJsonContentType(_)) => PauseBody::default(),
+        Err(error) => return Err(error.into()),
+    };
+    state
+        .service()
+        .pause(&account.owner_id, &sandbox_id, body.memory)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn resume(
+    State(state): State<LifecycleHttpState>,
+    Extension(account): Extension<AuthenticatedAccount>,
+    Path(sandbox_id): Path<String>,
+    body: Result<Json<ResumeBody>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let sandbox_id = parse_sandbox_id(sandbox_id)?;
+    let body = body?.0;
+    let connection = state
+        .service()
+        .resume(
+            &account.owner_id,
+            &sandbox_id,
+            body.timeout,
+            body.auto_pause,
+        )
+        .await?;
+    let (response, _) = SandboxResponse::from_connection(
+        connection,
+        account.client_id,
+        state.domain().map(str::to_string),
+    );
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 pub async fn list(
