@@ -135,6 +135,7 @@ pub async fn execute(args: ExecArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let request = ExecRequest {
+        request_id: None,
         cmd: args.cmd,
         timeout_ns,
         env: args.envs,

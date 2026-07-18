@@ -1488,7 +1488,8 @@ fn mount_user_volumes() -> Result<(), Box<dyn std::error::Error>> {
 /// Mount tmpfs volumes passed via BOX_TMPFS_* environment variables.
 ///
 /// Each variable has the format: `<path>[:<options>]`
-/// Options are passed directly to mount (e.g., "size=100m").
+/// Data options are passed directly to mount (e.g., "size=100m"); `ro` and
+/// `rw` select the mount access mode.
 fn mount_tmpfs_volumes() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
@@ -1499,15 +1500,12 @@ fn mount_tmpfs_volumes() -> Result<(), Box<dyn std::error::Error>> {
             let env_key = format!("BOX_TMPFS_{}", index);
             match std::env::var(&env_key) {
                 Ok(value) => {
-                    // Format: "/path" or "/path:options"
-                    let (path, options) = match value.split_once(':') {
-                        Some((p, opts)) => (p, Some(opts.to_string())),
-                        None => (value.as_str(), None),
-                    };
+                    let (path, options, read_only) = parse_tmpfs_mount(&value)?;
 
                     info!(
                         path = path,
                         options = ?options,
+                        read_only = read_only,
                         "Mounting tmpfs"
                     );
 
@@ -1518,7 +1516,11 @@ fn mount_tmpfs_volumes() -> Result<(), Box<dyn std::error::Error>> {
                         None::<&str>,
                         path,
                         Some("tmpfs"),
-                        MsFlags::empty(),
+                        if read_only {
+                            MsFlags::MS_RDONLY
+                        } else {
+                            MsFlags::empty()
+                        },
                         options.as_deref(),
                     )?;
 
@@ -1539,6 +1541,45 @@ fn mount_tmpfs_volumes() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn parse_tmpfs_mount(value: &str) -> std::io::Result<(&str, Option<String>, bool)> {
+    let (path, options) = value
+        .split_once(':')
+        .map_or((value, None), |(path, options)| (path, Some(options)));
+    if path.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "tmpfs mount path cannot be empty",
+        ));
+    }
+
+    let mut data = Vec::new();
+    let mut read_only = None;
+    for option in options
+        .into_iter()
+        .flat_map(|options| options.split(','))
+        .filter(|option| !option.is_empty())
+    {
+        match option {
+            "ro" | "rw" => {
+                let requested = option == "ro";
+                if read_only.replace(requested).is_some() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("tmpfs mount has duplicate or conflicting access modes: {value:?}"),
+                    ));
+                }
+            }
+            _ => data.push(option),
+        }
+    }
+
+    Ok((
+        path,
+        (!data.is_empty()).then(|| data.join(",")),
+        read_only.unwrap_or(false),
+    ))
 }
 
 /// Remount the container rootfs as read-only if `BOX_READONLY=1` is set.
@@ -1869,6 +1910,23 @@ mod tests {
             console_handoff_delay(BootstrapMode::Microvm),
             std::time::Duration::from_millis(250)
         );
+    }
+
+    #[test]
+    fn tmpfs_mount_parser_separates_access_mode_from_mount_data() {
+        assert_eq!(
+            parse_tmpfs_mount("/scratch:size=1048576,rw").unwrap(),
+            ("/scratch", Some("size=1048576".into()), false)
+        );
+        assert_eq!(
+            parse_tmpfs_mount("/sealed:size=4096,ro").unwrap(),
+            ("/sealed", Some("size=4096".into()), true)
+        );
+        assert_eq!(
+            parse_tmpfs_mount("/ephemeral").unwrap(),
+            ("/ephemeral", None, false)
+        );
+        assert!(parse_tmpfs_mount("/scratch:ro,rw").is_err());
     }
 
     fn set_sidecar_env(image: &str, vsock_port: u32, env: &[(&str, &str)]) {

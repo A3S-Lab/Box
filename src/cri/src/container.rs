@@ -139,6 +139,7 @@ impl Container {
             .collect();
 
         Ok(ExecRequest {
+            request_id: None,
             cmd,
             timeout_ns,
             env,

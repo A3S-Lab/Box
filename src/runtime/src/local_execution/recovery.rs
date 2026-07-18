@@ -20,6 +20,12 @@ impl LocalExecutionManager {
             }
             ManagedExecutionState::Stopped => return Ok((record, ExecutionState::Stopped)),
             ManagedExecutionState::Failed => return Ok((record, ExecutionState::Failed)),
+            ManagedExecutionState::Removing => {
+                return Err(ExecutionManagerError::Conflict {
+                    execution_id: execution_id(&record)?,
+                    message: "execution removal is in progress".to_string(),
+                });
+            }
             ManagedExecutionState::RestartStopping => {
                 let id = execution_id(&record)?;
                 if matches!(

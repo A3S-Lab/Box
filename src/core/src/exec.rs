@@ -14,8 +14,16 @@ pub const PORT_FWD_VSOCK_PORT: u32 = 4093;
 /// Default exec timeout: 5 seconds.
 pub const DEFAULT_EXEC_TIMEOUT_NS: u64 = 5_000_000_000;
 
-/// Maximum output size per stream (stdout/stderr): 16 MiB.
+/// Maximum buffered streaming output size per stream (stdout/stderr): 16 MiB.
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum captured one-shot output size per stream: 1 MiB.
+///
+/// One-shot responses retain the legacy JSON `Vec<u8>` representation, whose
+/// worst-case encoding uses four bytes per input byte. Bounding both streams
+/// at 1 MiB guarantees the complete response fits the transport's 16 MiB
+/// frame without breaking older host or guest binaries.
+pub const MAX_ONE_SHOT_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Frame type byte for streaming exec chunks.
 pub const FRAME_EXEC_CHUNK: u8 = 0x01;
@@ -24,8 +32,17 @@ pub const FRAME_EXEC_CHUNK: u8 = 0x01;
 pub const FRAME_EXEC_EXIT: u8 = 0x02;
 
 /// Request to execute a command in the guest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecRequest {
+    /// Optional idempotency key for one-shot execution.
+    ///
+    /// A guest that supports replay must execute the same keyed request at
+    /// most once while the result remains in its bounded replay cache. The key
+    /// is deliberately optional for wire compatibility with older clients.
+    /// Streaming execution cannot provide an exact one-shot result replay and
+    /// therefore must not set this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     /// Command and arguments (e.g., ["ls", "-la"]).
     pub cmd: Vec<String>,
     /// Timeout in nanoseconds. 0 means use the default.
@@ -54,7 +71,7 @@ pub struct ExecRequest {
 }
 
 /// Output from an executed command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecOutput {
     /// Captured stdout bytes.
     pub stdout: Vec<u8>,
@@ -62,6 +79,10 @@ pub struct ExecOutput {
     pub stderr: Vec<u8>,
     /// Process exit code.
     pub exit_code: i32,
+    /// Whether either captured stream exceeded its bound and was truncated.
+    /// Defaults to `false` when reading responses from older guest binaries.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Which output stream a chunk belongs to.
@@ -176,6 +197,7 @@ mod tests {
     #[test]
     fn test_exec_request_serialization_roundtrip() {
         let req = ExecRequest {
+            request_id: Some("exec-1".to_string()),
             cmd: vec!["ls".to_string(), "-la".to_string()],
             timeout_ns: 3_000_000_000,
             env: vec!["FOO=bar".to_string()],
@@ -189,6 +211,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.cmd, vec!["ls", "-la"]);
+        assert_eq!(parsed.request_id.as_deref(), Some("exec-1"));
         assert_eq!(parsed.timeout_ns, 3_000_000_000);
         assert_eq!(parsed.env, vec!["FOO=bar"]);
         assert_eq!(parsed.working_dir, Some("/tmp".to_string()));
@@ -205,6 +228,7 @@ mod tests {
     #[test]
     fn test_exec_request_streaming_flag() {
         let req = ExecRequest {
+            request_id: None,
             cmd: vec!["tail".to_string(), "-f".to_string()],
             timeout_ns: 0,
             env: vec![],
@@ -224,6 +248,7 @@ mod tests {
     #[test]
     fn test_exec_request_stdin_streaming_flag() {
         let req = ExecRequest {
+            request_id: None,
             cmd: vec!["cat".to_string()],
             timeout_ns: 0,
             env: vec![],
@@ -245,12 +270,14 @@ mod tests {
             stdout: b"hello\n".to_vec(),
             stderr: b"warning\n".to_vec(),
             exit_code: 0,
+            truncated: true,
         };
         let json = serde_json::to_string(&output).unwrap();
         let parsed: ExecOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.stdout, b"hello\n");
         assert_eq!(parsed.stderr, b"warning\n");
         assert_eq!(parsed.exit_code, 0);
+        assert!(parsed.truncated);
     }
 
     #[test]
@@ -259,6 +286,7 @@ mod tests {
             stdout: vec![],
             stderr: b"not found\n".to_vec(),
             exit_code: 127,
+            truncated: false,
         };
         let json = serde_json::to_string(&output).unwrap();
         let parsed: ExecOutput = serde_json::from_str(&json).unwrap();
@@ -274,11 +302,25 @@ mod tests {
     #[test]
     fn test_max_output_bytes_constant() {
         assert_eq!(MAX_OUTPUT_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MAX_ONE_SHOT_OUTPUT_BYTES, 1024 * 1024);
+    }
+
+    #[test]
+    fn maximum_one_shot_output_fits_one_transport_frame() {
+        let output = ExecOutput {
+            stdout: vec![u8::MAX; MAX_ONE_SHOT_OUTPUT_BYTES],
+            stderr: vec![u8::MAX; MAX_ONE_SHOT_OUTPUT_BYTES],
+            exit_code: i32::MIN,
+            truncated: true,
+        };
+        let encoded = serde_json::to_vec(&output).unwrap();
+        assert!(encoded.len() <= a3s_transport::MAX_PAYLOAD_SIZE as usize);
     }
 
     #[test]
     fn test_exec_request_empty_cmd() {
         let req = ExecRequest {
+            request_id: None,
             cmd: vec![],
             timeout_ns: 0,
             env: vec![],
@@ -292,6 +334,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let parsed: ExecRequest = serde_json::from_str(&json).unwrap();
         assert!(parsed.cmd.is_empty());
+        assert!(parsed.request_id.is_none());
         assert_eq!(parsed.timeout_ns, 0);
         assert!(parsed.env.is_empty());
         assert!(parsed.working_dir.is_none());
@@ -306,6 +349,7 @@ mod tests {
         let json = r#"{"cmd":["ls"],"timeout_ns":0}"#;
         let parsed: ExecRequest = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.cmd, vec!["ls"]);
+        assert!(parsed.request_id.is_none());
         assert!(parsed.env.is_empty());
         assert!(parsed.working_dir.is_none());
         assert!(parsed.rootfs.is_none());
@@ -318,6 +362,7 @@ mod tests {
     #[test]
     fn test_exec_request_with_stdin() {
         let req = ExecRequest {
+            request_id: None,
             cmd: vec!["sh".to_string()],
             timeout_ns: 0,
             env: vec![],
@@ -337,6 +382,7 @@ mod tests {
     #[test]
     fn test_exec_request_with_user() {
         let req = ExecRequest {
+            request_id: None,
             cmd: vec!["whoami".to_string()],
             timeout_ns: 0,
             env: vec![],
@@ -355,6 +401,7 @@ mod tests {
     #[test]
     fn test_exec_request_with_user_uid_gid() {
         let req = ExecRequest {
+            request_id: None,
             cmd: vec!["id".to_string()],
             timeout_ns: 0,
             env: vec![],
@@ -376,10 +423,19 @@ mod tests {
             stdout: vec![],
             stderr: vec![],
             exit_code: 0,
+            truncated: false,
         };
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
         assert_eq!(output.exit_code, 0);
+        assert!(!output.truncated);
+    }
+
+    #[test]
+    fn test_exec_output_backward_compatible_deserialization() {
+        let parsed: ExecOutput =
+            serde_json::from_str(r#"{"stdout":[],"stderr":[],"exit_code":0}"#).unwrap();
+        assert!(!parsed.truncated);
     }
 
     // --- Streaming types ---

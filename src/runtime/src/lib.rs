@@ -14,6 +14,8 @@
 #![allow(clippy::result_large_err)]
 
 // -- Core modules (always compiled) --
+#[cfg(all(feature = "vm", target_os = "linux"))]
+pub mod a3s_runtime_driver;
 pub mod audit;
 pub mod box_record;
 pub mod box_state;
@@ -57,6 +59,9 @@ pub mod scale;
 
 // Audit
 pub use audit::{read_audit_log, AuditLog, AuditQuery};
+
+#[cfg(all(feature = "vm", target_os = "linux"))]
+pub use a3s_runtime_driver::{BoxRuntimeDriver, BoxRuntimeDriverConfig};
 
 // Canonical local execution metadata
 pub use box_record::{

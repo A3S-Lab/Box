@@ -454,6 +454,7 @@ async fn process_session_inherits_environment_from_persisted_record() {
             &execution_id,
             record.managed_execution.as_ref().unwrap().generation,
             ExecRequest {
+                request_id: None,
                 cmd: vec!["env".to_string()],
                 timeout_ns: 1_000_000_000,
                 env: vec!["OVERRIDE=request".to_string()],

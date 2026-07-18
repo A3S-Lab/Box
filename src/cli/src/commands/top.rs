@@ -84,6 +84,7 @@ pub async fn execute(args: TopArgs) -> Result<(), Box<dyn std::error::Error>> {
     cmd.extend(ps_args);
 
     let request = ExecRequest {
+        request_id: None,
         cmd,
         timeout_ns: DEFAULT_EXEC_TIMEOUT_NS,
         env: vec![],

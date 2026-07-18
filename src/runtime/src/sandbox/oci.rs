@@ -41,6 +41,7 @@ pub struct SandboxMount {
 pub struct SandboxTmpfs {
     pub destination: PathBuf,
     pub size_bytes: u64,
+    pub read_only: bool,
 }
 
 /// Cgroup values compiled from `BoxConfig`.
@@ -70,11 +71,21 @@ impl SandboxResources {
             ));
         }
 
-        let memory_limit = i64::from(config.resources.memory_mb)
-            .checked_mul(1024 * 1024)
-            .ok_or_else(|| {
+        let memory_limit = match config.resource_limits.sandbox_memory_limit_bytes {
+            Some(0) => {
+                return Err(BoxError::ConfigError(
+                    "Sandbox memory limit must be greater than zero".to_string(),
+                ))
+            }
+            Some(bytes) => i64::try_from(bytes).map_err(|_| {
                 BoxError::ConfigError("Sandbox memory limit overflows i64".to_string())
-            })?;
+            })?,
+            None => i64::from(config.resources.memory_mb)
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| {
+                    BoxError::ConfigError("Sandbox memory limit overflows i64".to_string())
+                })?,
+        };
         let memory_reservation = config
             .resource_limits
             .memory_reservation
@@ -615,6 +626,7 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             "nodev".to_string(),
             "mode=1777".to_string(),
             format!("size={}", tmpfs.size_bytes),
+            if tmpfs.read_only { "ro" } else { "rw" }.to_string(),
         ];
         if is_shared_memory {
             options.push("noexec".to_string());
@@ -1354,6 +1366,7 @@ mod tests {
         input.tmpfs.push(SandboxTmpfs {
             destination: PathBuf::from("/dev/shm"),
             size_bytes: 128 * 1024 * 1024,
+            read_only: true,
         });
 
         let value = as_json(&compile_oci_spec(&input).unwrap());
@@ -1367,6 +1380,7 @@ mod tests {
         let options = shared_memory[0]["options"].as_array().unwrap();
         assert!(options.iter().any(|option| option == "size=134217728"));
         assert!(options.iter().any(|option| option == "noexec"));
+        assert!(options.iter().any(|option| option == "ro"));
 
         input.tmpfs[0].destination = PathBuf::from("/dev/shm/nested");
         assert!(compile_oci_spec(&input).is_err());

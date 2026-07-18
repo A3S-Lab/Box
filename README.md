@@ -151,8 +151,9 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
   resource and syscall controls, audit records, AMD SEV-SNP-oriented
   attestation, RA-TLS, sealing, and secret injection
 - **Typed SDKs and protocols**: Direct runtime-backed Rust management APIs,
-  an optional programmable pipeline runner, and a production-tested E2B
-  protocol subset with Python and TypeScript packages
+  a provider-neutral A3S Runtime adapter, an optional programmable pipeline
+  runner, and a production-tested E2B protocol subset with Python and
+  TypeScript packages
 - **Operations and cluster integration**: Structured logs, stats, events,
   Prometheus endpoints, health monitoring, CRI, and containerd RuntimeClass
 
@@ -162,6 +163,7 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | --- | --- | --- |
 | MicroVM runtime | libkrun-backed OCI execution on Linux/KVM and Apple Silicon/HVF | Primary local runtime. Each box has its own guest kernel. Host-backed validation is required for releases. |
 | OCI Sandbox | Explicit `--isolation sandbox` execution through certified `crun 1.28` on Linux | Preview. Shares the host kernel, never replaces or emulates MicroVM isolation, and still has open security-negative and performance release gates. |
+| A3S Runtime provider | Sandbox-backed Task and Service lifecycle, recovery, `none` networking, bounded tmpfs mounts, CPU/memory/PID controls, structured logs, idempotent exec, and security fencing | The real-provider R17 suite passes Base, Recovery, Networking, Mounts, Resources, Logs, Exec, and Security profiles. Artifacts must be digest-pinned; the provider advertises only `tmpfs` mounts and `none` networking. |
 | Lifecycle and exec | Foreground/detached runs, managed create/start/restart/kill, exec, PTY, logs, health, wait, and cleanup | Implemented for MicroVM. The managed Sandbox path and its structured logs are implemented, while complete parity and adversarial validation remain in progress. |
 | OCI images | Resumable bounded registry pulls, concurrent layers, verified cross-image blob reuse, push, credentials, digest verification, optional cosign verification/signing, indexed archive selection, and tag operations | Implemented. `pull` validates declared size and SHA-256 before atomic blob publication; `load` selects one Linux platform from direct or nested OCI indexes and verifies the selected manifest, config, and layers before publishing it. Registry throughput and redirect behavior still require validation against each production registry. |
 | Dockerfile builds | Built-in Dockerfile subset, layer cache, BuildKit-in-MicroVM, and warm-pool `RUN` execution | Implemented subset, not a full Buildx replacement. One target platform is recorded per build. |
@@ -356,6 +358,24 @@ Some controls are platform- or backend-specific. `--device` and GPU
 passthrough are not implemented, custom seccomp profiles are not accepted by
 the local CLI, and the Sandbox resolver rejects every VM-only feature before
 pulling an image or allocating runtime state.
+
+### A3S Runtime provider
+
+The `a3s-box-runtime` crate includes a provider-neutral A3S Runtime driver
+backed by the certified shared-kernel Sandbox. It maps digest-pinned Tasks and
+Services onto durable Box executions with generation fencing, recovery,
+structured logs, bounded idempotent exec, CPU/memory/PID controls, and tmpfs
+mounts. Tmpfs requests preserve byte limits and `ro`/`rw` intent, reject
+protected destinations, start empty for each Sandbox generation, and are
+removed with their owner process and provider record.
+
+The driver advertises only capabilities it maps losslessly: Sandbox isolation,
+`none` networking, and tmpfs mounts. Bind, volume, and artifact mounts remain
+unadvertised, and unsupported input fails before provider mutation. The
+opt-in R17 gate runs every activated profile against real `crun`, including
+provider-effect cancellation replay, partial-creation adoption, client and
+provider restart recovery, external deletion, duplicate detection, and cleanup
+inventory equality.
 
 ### OCI images and builds
 

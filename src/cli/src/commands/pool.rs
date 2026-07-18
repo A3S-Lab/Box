@@ -700,6 +700,7 @@ impl PoolRegistry {
             .lock()
             .await
             .exec_request(&a3s_box_core::exec::ExecRequest {
+                request_id: None,
                 cmd: req.cmd,
                 timeout_ns: req.timeout_ns.unwrap_or(60_000_000_000),
                 env: req.env,
@@ -1158,6 +1159,7 @@ async fn handle_conn(
                             .await
                         } else {
                             vm.exec_request(&a3s_box_core::exec::ExecRequest {
+                                request_id: None,
                                 cmd: run.cmd,
                                 timeout_ns: run.timeout_ns.unwrap_or(EXEC_TIMEOUT_NS),
                                 env: run.env,

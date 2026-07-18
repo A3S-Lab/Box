@@ -1,0 +1,389 @@
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use a3s_box_core::ExecutionManager;
+use a3s_runtime::contract::{
+    ArtifactRef, IsolationLevel, MountKind, NetworkMode, ResourceControl, ResourceLimits,
+    RestartPolicy, RuntimeFeature, RuntimeMount, RuntimeMountSource, RuntimeNetworkSpec,
+    RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
+};
+use a3s_runtime::RuntimeDriver;
+
+use super::mapping::{creation_request, operation};
+use super::metadata::validate_record_for_spec;
+use super::*;
+
+fn spec(class: RuntimeUnitClass) -> RuntimeUnitSpec {
+    RuntimeUnitSpec {
+        schema: RuntimeUnitSpec::SCHEMA.into(),
+        unit_id: "box-runtime-test".into(),
+        generation: 7,
+        class,
+        artifact: ArtifactRef {
+            uri: format!(
+                "oci://registry.example/a3s/runtime@sha256:{}",
+                "a".repeat(64)
+            ),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            media_type: OCI_IMAGE_MANIFEST.into(),
+        },
+        process: RuntimeProcessSpec {
+            command: vec!["/bin/sh".into(), "-c".into()],
+            args: vec!["echo ready".into()],
+            working_directory: Some("/work".into()),
+            environment: BTreeMap::from([("LANG".into(), "C.UTF-8".into())]),
+        },
+        mounts: Vec::new(),
+        secrets: Vec::new(),
+        network: RuntimeNetworkSpec {
+            mode: NetworkMode::None,
+            ports: Vec::new(),
+        },
+        resources: ResourceLimits {
+            cpu_millis: 1_501,
+            memory_bytes: 65 * 1024 * 1024 + 17,
+            pids: 37,
+            ephemeral_storage_bytes: None,
+            execution_timeout_ms: (class == RuntimeUnitClass::Task).then_some(2_500),
+        },
+        isolation: IsolationLevel::Sandbox,
+        health: None,
+        restart: if class == RuntimeUnitClass::Task {
+            RestartPolicy::Never
+        } else {
+            RestartPolicy::Always
+        },
+        outputs: Vec::new(),
+        semantics_profile_digest: None,
+    }
+}
+
+fn driver(directory: &tempfile::TempDir) -> BoxRuntimeDriver {
+    BoxRuntimeDriver::new(BoxRuntimeDriverConfig {
+        home_dir: directory.path().join("home"),
+        control_timeout: Duration::from_secs(2),
+        task_poll_interval: Duration::from_millis(5),
+    })
+    .unwrap()
+}
+
+fn mutate_record(
+    driver: &BoxRuntimeDriver,
+    execution_id: &str,
+    mutation: impl FnOnce(&mut crate::BoxRecord),
+) {
+    crate::BoxStateStore::modify(driver.manager.state_path(), move |store| {
+        let record = store.find_by_id_mut(execution_id).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("missing managed execution {execution_id}"),
+            )
+        })?;
+        mutation(record);
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn capabilities_claim_only_the_mapped_box_surface() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = driver(&directory);
+    driver
+        .provider_build
+        .set("a3s-box/test crun/test sha256:0123456789abcdef".into())
+        .unwrap();
+
+    let capabilities = driver.capabilities().await.unwrap();
+    assert_eq!(capabilities.provider_id.as_str(), "a3s-box");
+    assert_eq!(
+        capabilities.unit_classes,
+        vec![RuntimeUnitClass::Task, RuntimeUnitClass::Service]
+    );
+    assert_eq!(capabilities.isolation_levels, vec![IsolationLevel::Sandbox]);
+    assert_eq!(capabilities.network_modes, vec![NetworkMode::None]);
+    assert_eq!(capabilities.mount_kinds, vec![MountKind::Tmpfs]);
+    assert!(capabilities.health_check_kinds.is_empty());
+    assert_eq!(
+        capabilities.resource_controls,
+        vec![
+            ResourceControl::Cpu,
+            ResourceControl::Memory,
+            ResourceControl::Pids,
+            ResourceControl::ExecutionTimeout,
+        ]
+    );
+    assert_eq!(
+        capabilities.features,
+        vec![
+            RuntimeFeature::DurableIdentity,
+            RuntimeFeature::Stop,
+            RuntimeFeature::Remove,
+            RuntimeFeature::Logs,
+            RuntimeFeature::Exec,
+        ]
+    );
+}
+
+#[test]
+fn mapping_preserves_digest_resources_timeout_and_hardening() {
+    let spec = spec(RuntimeUnitClass::Task);
+    let request = creation_request(&spec).unwrap();
+    assert_eq!(
+        request.config.image,
+        format!("registry.example/a3s/runtime@sha256:{}", "a".repeat(64))
+    );
+    assert_eq!(request.config.resources.vcpus, 2);
+    assert_eq!(request.config.resources.memory_mb, 66);
+    assert_eq!(request.config.resources.timeout, 3);
+    assert_eq!(request.config.resource_limits.cpu_period, Some(100_000));
+    assert_eq!(request.config.resource_limits.cpu_quota, Some(150_100));
+    assert_eq!(request.config.resource_limits.pids_limit, Some(37));
+    assert_eq!(
+        request.config.resource_limits.sandbox_memory_limit_bytes,
+        Some(spec.resources.memory_bytes)
+    );
+    assert_eq!(
+        request.config.resource_limits.memory_swap,
+        Some(spec.resources.memory_bytes as i64)
+    );
+    assert!(request.config.persistent);
+    assert_eq!(request.config.cap_drop, vec!["ALL"]);
+    assert_eq!(request.config.security_opt, vec!["no-new-privileges"]);
+}
+
+#[test]
+fn mapping_rejects_path_like_unit_identity_before_mutation() {
+    for unit_id in [
+        "../provider-escape",
+        "/absolute-provider-id",
+        "tenant/../provider-escape",
+        "tenant//provider-id",
+    ] {
+        let mut spec = spec(RuntimeUnitClass::Service);
+        spec.unit_id = unit_id.into();
+        assert!(matches!(
+            creation_request(&spec),
+            Err(RuntimeError::InvalidRequest(message))
+                if message.contains("path traversal")
+        ));
+    }
+
+    let mut namespaced = spec(RuntimeUnitClass::Service);
+    namespaced.unit_id = "tenant/provider-id".into();
+    assert!(creation_request(&namespaced).is_ok());
+}
+
+#[test]
+fn mapping_compiles_bounded_tmpfs_mounts_and_read_only_intent() {
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.mounts = vec![
+        RuntimeMount {
+            name: "scratch".into(),
+            source: RuntimeMountSource::Tmpfs {
+                size_bytes: 8 * 1024 * 1024,
+            },
+            target: "/runtime/scratch".into(),
+            read_only: false,
+        },
+        RuntimeMount {
+            name: "sealed".into(),
+            source: RuntimeMountSource::Tmpfs {
+                size_bytes: 4 * 1024 * 1024,
+            },
+            target: "/runtime/sealed".into(),
+            read_only: true,
+        },
+    ];
+
+    let request = creation_request(&spec).unwrap();
+
+    assert_eq!(
+        request.config.tmpfs,
+        vec![
+            "/runtime/scratch:size=8388608,rw",
+            "/runtime/sealed:size=4194304,ro",
+        ]
+    );
+    assert!(request.config.volumes.is_empty());
+    assert!(request.policy.volume_names.is_empty());
+}
+
+#[test]
+fn mapping_rejects_unadvertised_mount_kinds_before_mutation() {
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.mounts.push(RuntimeMount {
+        name: "data".into(),
+        source: RuntimeMountSource::Volume {
+            volume_id: "runtime-data".into(),
+        },
+        target: "/data".into(),
+        read_only: false,
+    });
+
+    assert!(matches!(
+        creation_request(&spec),
+        Err(RuntimeError::UnsupportedCapabilities(missing))
+            if missing == vec!["mount_kind:Volume"]
+    ));
+}
+
+#[test]
+fn mapping_rejects_protected_or_unencodable_tmpfs_targets() {
+    for target in ["/proc/runtime", "/dev/shm/nested", "/run/a3s-box/data"] {
+        let mut spec = spec(RuntimeUnitClass::Service);
+        spec.mounts.push(RuntimeMount {
+            name: "scratch".into(),
+            source: RuntimeMountSource::Tmpfs { size_bytes: 4096 },
+            target: target.into(),
+            read_only: false,
+        });
+        assert!(matches!(
+            creation_request(&spec),
+            Err(RuntimeError::InvalidRequest(message)) if message.contains("protected")
+        ));
+    }
+
+    for target in [
+        "/runtime/ambiguous:target",
+        "/runtime/./scratch",
+        "/runtime//scratch",
+        "/runtime/scratch/",
+    ] {
+        let mut spec = spec(RuntimeUnitClass::Service);
+        spec.mounts.push(RuntimeMount {
+            name: "scratch".into(),
+            source: RuntimeMountSource::Tmpfs { size_bytes: 4096 },
+            target: target.into(),
+            read_only: false,
+        });
+        assert!(matches!(
+            creation_request(&spec),
+            Err(RuntimeError::InvalidRequest(message)) if message.contains("encodable")
+        ));
+    }
+}
+
+#[test]
+fn mapping_rejects_unpinned_mismatched_and_unsupported_artifacts() {
+    let mut value = spec(RuntimeUnitClass::Service);
+    value.artifact.uri = "oci://registry.example/a3s/runtime:latest".into();
+    assert!(creation_request(&value).is_err());
+
+    let mut value = spec(RuntimeUnitClass::Service);
+    value.artifact.uri = format!(
+        "oci://registry.example/a3s/runtime@sha256:{}",
+        "b".repeat(64)
+    );
+    assert!(creation_request(&value).is_err());
+
+    let mut value = spec(RuntimeUnitClass::Service);
+    value.artifact.media_type = "application/vnd.oci.image.index.v1+json".into();
+    assert!(matches!(
+        creation_request(&value),
+        Err(RuntimeError::UnsupportedCapabilities(_))
+    ));
+
+    let mut value = spec(RuntimeUnitClass::Service);
+    value.artifact.uri = format!(
+        "oci://user:secret@registry.example/a3s/runtime@sha256:{}",
+        "a".repeat(64)
+    );
+    assert!(creation_request(&value).is_err());
+}
+
+#[test]
+fn mapping_rejects_numeric_overflow_before_mutation() {
+    let mut value = spec(RuntimeUnitClass::Service);
+    value.resources.memory_bytes = i64::MAX as u64 + 1;
+    assert!(matches!(
+        creation_request(&value),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("memory")
+    ));
+
+    let mut value = spec(RuntimeUnitClass::Service);
+    value.resources.cpu_millis = u64::MAX;
+    assert!(matches!(
+        creation_request(&value),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("CPU")
+    ));
+}
+
+#[tokio::test]
+async fn metadata_tamper_is_rejected_fail_closed() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = driver(&directory);
+    let spec = spec(RuntimeUnitClass::Service);
+    let operation_id = operation(&spec).unwrap();
+    let reservation = driver
+        .manager
+        .create(creation_request(&spec).unwrap(), &operation_id)
+        .await
+        .unwrap();
+    let mut record = driver
+        .manager
+        .managed_record(&reservation.execution_id)
+        .await
+        .unwrap()
+        .unwrap();
+    validate_record_for_spec(&record, &spec).unwrap();
+
+    record
+        .labels
+        .insert(super::metadata::GENERATION_LABEL.into(), "8".into());
+    assert!(matches!(
+        validate_record_for_spec(&record, &spec),
+        Err(RuntimeError::Protocol(message)) if message.contains("identity") || message.contains("intent")
+    ));
+}
+
+#[tokio::test]
+async fn discovery_rejects_a_runtime_record_hidden_by_unit_label_tamper() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = driver(&directory);
+    let spec = spec(RuntimeUnitClass::Service);
+    let reservation = driver
+        .manager
+        .create(creation_request(&spec).unwrap(), &operation(&spec).unwrap())
+        .await
+        .unwrap();
+
+    mutate_record(&driver, reservation.execution_id.as_str(), |record| {
+        record
+            .labels
+            .insert(super::metadata::UNIT_LABEL.into(), "hidden-unit".into());
+    });
+
+    assert!(matches!(
+        driver.find_generation(&spec).await,
+        Err(RuntimeError::Protocol(message)) if message.contains("ownership")
+    ));
+}
+
+#[tokio::test]
+async fn discovery_rejects_a_runtime_operation_that_lost_all_labels() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = driver(&directory);
+    let spec = spec(RuntimeUnitClass::Service);
+    let reservation = driver
+        .manager
+        .create(creation_request(&spec).unwrap(), &operation(&spec).unwrap())
+        .await
+        .unwrap();
+
+    mutate_record(&driver, reservation.execution_id.as_str(), |record| {
+        record.labels.clear();
+        record
+            .managed_execution
+            .as_mut()
+            .unwrap()
+            .request
+            .labels
+            .clear();
+    });
+
+    assert!(matches!(
+        driver.find_generation(&spec).await,
+        Err(RuntimeError::Protocol(message)) if message.contains("no unit identity")
+    ));
+}
