@@ -10,7 +10,8 @@ All notable changes to A3S Box will be documented in this file.
   profile now cancels a Task apply after its Sandbox is running and seeds a
   provider reservation without starting it. Exact retries must reattach to
   those original identities, finish the pending work, and leave one resource
-  before complete removal.
+  before complete removal. The opt-in test provisions bounded runner and Tokio
+  worker stacks instead of depending on an external `RUST_MIN_STACK`.
 - **A3S Runtime tmpfs conformance.** The Sandbox-backed Runtime provider now
   advertises bounded tmpfs mounts, preserves `ro`/`rw` intent through guest and
   OCI paths, rejects protected destinations and unsupported mount kinds before

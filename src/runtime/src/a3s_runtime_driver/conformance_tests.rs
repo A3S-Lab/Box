@@ -26,6 +26,9 @@ use self::fixture::BoxRuntimeConformanceFixture;
 
 type Result<T> = RuntimeResult<T>;
 
+const R17_RUNNER_STACK_BYTES: usize = 32 * 1024 * 1024;
+const R17_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 fn failure(message: impl Into<String>) -> RuntimeError {
     RuntimeError::ProviderUnavailable(message.into())
 }
@@ -50,9 +53,27 @@ fn require(condition: bool, message: impl Into<String>) -> Result<()> {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[test]
 #[ignore = "requires a dedicated A3S OS Sandbox certification home"]
-async fn box_runtime_passes_all_advertised_profiles() {
+fn box_runtime_passes_all_advertised_profiles() {
+    let runner = std::thread::Builder::new()
+        .name("a3s-box-r17".into())
+        .stack_size(R17_RUNNER_STACK_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_name("a3s-box-r17-worker")
+                .thread_stack_size(R17_WORKER_STACK_BYTES)
+                .enable_all()
+                .build()
+                .expect("R17 Tokio runtime must start");
+            runtime.block_on(run_all_advertised_profiles());
+        })
+        .expect("R17 runner thread must start");
+    runner.join().expect("R17 runner thread must not panic");
+}
+
+async fn run_all_advertised_profiles() {
     let fixture = BoxRuntimeConformanceFixture::from_environment()
         .expect("R17 Box conformance preflight must pass");
     let client = fixture.primary_client();
