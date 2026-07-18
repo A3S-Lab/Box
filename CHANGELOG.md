@@ -6,6 +6,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Memory-preserving E2B Sandbox pause and resume.** The compatibility service
+  now exposes generation-fenced pause/resume transitions backed by certified
+  `crun`, preserves paused state across listing and reconciliation, and resumes
+  through `connect` without shortening the existing TTL. Official and A3S
+  Python sync/async and TypeScript clients prove that an already-running
+  process survives the cycle. Filesystem-only pause remains explicitly
+  unsupported.
 - Added canonical `compose.acl` project files with automatic discovery, a
   closed A3S ACL schema for services, health checks, volumes, and networks,
   and `env("NAME")` resolution. Explicit Docker Compose-compatible YAML files

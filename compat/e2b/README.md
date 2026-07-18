@@ -75,6 +75,11 @@ readiness, so cold startup does not consume the caller's requested usable
 timeout. Startup reconciliation applies the same lifetime rule when it recovers
 a creating record whose execution was committed before the service restarted.
 
+Memory-preserving pause maps to certified `crun pause`; a later `connect` or
+deprecated `resume` request maps to `crun resume` without shortening the
+existing TTL. Filesystem-only pause is rejected explicitly until cold-pause
+semantics are implemented.
+
 Run it from the Rust workspace:
 
 ```bash
@@ -112,10 +117,12 @@ health methods through the TLS gateway before and after kill, and verifies
 cleanup of every real `crun` execution. With the runtime image selected, the
 three base clients also exercise Filesystem create/read/stat/list/rename/remove,
 foreground and background commands, process listing, stdin close, PTY resize,
-and current Sandbox metrics with historical-range filtering. The Code
-Interpreter clients execute code and cover context create/list/restart/remove.
-This does not establish complete Process, Filesystem, PTY, rich-result,
-multi-language, or historical-metrics compatibility.
+current Sandbox metrics with historical-range filtering, memory-preserving
+pause, paused-state listing, connect-based resume, and survival of the same
+background process. The Code Interpreter clients execute code and cover context
+create/list/restart/remove. This does not establish filesystem-only pause or
+complete Process, Filesystem, PTY, rich-result, multi-language, or
+historical-metrics compatibility.
 
 The default smoke uses the small Alpine broker fixture. Set
 `A3S_BOX_E2B_RUNTIME_IMAGE` to an immutable
@@ -132,7 +139,8 @@ and packs the native TypeScript package, and keeps A3S endpoint configuration
 local to each client invocation.
 
 This production subset does not establish full protocol compatibility.
-Templates, snapshots, volumes, volume-content, signed files, MCP, additional
-signals, reconnect, cancellation, backpressure, historical metrics, multi-file
-and large-file behavior, and other pinned edge cases remain outside the matrix,
-so `full_compatibility=false` remains mandatory.
+Templates, snapshots, volumes, volume-content, signed files, filesystem-only
+pause, MCP, additional signals, reconnect, cancellation, backpressure,
+historical metrics, multi-file and large-file behavior, and other pinned edge
+cases remain outside the matrix, so `full_compatibility=false` remains
+mandatory.

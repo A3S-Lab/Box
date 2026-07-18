@@ -1,8 +1,9 @@
 # E2B Protocol Compatibility and SDK Design
 
-Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 6 complete);
-the production runtime-image gate now covers initial Process, Filesystem, PTY,
-Code Interpreter, and envd HTTP flows)**
+Status: **Phase 1 complete; Phase 2 in progress (slices 1 through 7 complete
+for the production-tested subset; the runtime-image gate now covers
+memory-preserving lifecycle, initial Process, Filesystem, PTY, Code Interpreter,
+and envd HTTP flows)**
 
 Implementation evidence starts in [`compat/e2b/`](../compat/e2b/README.md).
 The pinned contract manifest intentionally reports `full_compatibility=false`;
@@ -20,9 +21,9 @@ unversioned claim.
 | Area | Implemented evidence | Remaining gate |
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
-| Lifecycle protocol | Owner-scoped create, connect, get, v1/v2 list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete pagination edge cases, snapshots, volumes, pause/resume, logs, network updates, historical metrics, public-port breadth, and host-reboot recovery semantics |
+| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete pagination edge cases, snapshots, volumes, filesystem-only pause, logs, network updates, historical metrics, public-port breadth, and host-reboot recovery semantics |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
-| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, reconnect, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery and the official-client data-plane matrices |
+| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, pause in memory, resume through connect, prove the same process survives, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery, filesystem-only pause, and the remaining official-client data-plane matrices |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
 | envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete volume-content plus multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
 | Commands and SDK surface | The Process broker has generation-scoped synthetic IDs plus Start, JSON-framed Connect, List, SendInput, CloseStdin, SIGKILL, PTY Start/resize, and ordered event streams. Runtime-image official clients cover foreground/background commands, process listing, stdin close, wait, and one PTY resize flow against real `crun` | Complete binary Connect framing, `StreamInput`, SIGTERM and other signals, reconnect/backpressure/cancellation, durable handles, and the exhaustive PTY matrix |
@@ -42,20 +43,22 @@ cleanup.
 The expanded runtime-image gate runs checksum-pinned official Python sync,
 Python async, TypeScript, and Code Interpreter packages unchanged. It covers
 Filesystem mutation and metadata, foreground/background commands, stdin close,
-process listing, PTY resize, code execution, and context lifecycle in addition
-to control-plane and health behavior. The same production gate validates
-current control-plane metrics for every official and A3S client, an empty
-historical range, v1 running-list behavior, monotonic refresh, batch metrics,
-envd metrics, the initialized environment, and metadata-preserving HTTP
-upload/download. Current metrics are read through the generation-fenced
-runtime-envd connection; `memCache` is reported as zero because the pinned envd
-metrics response has no cache-usage field. Historical retention remains open.
-This is still a selected positive matrix, not the exhaustive stream, error,
-cancellation, volume-content, multi-file, large-file, signed-file, rich-result,
-multi-language, public-port, and MCP suite. The recorder fixture also continues
-to use an in-memory repository and fake execution manager. These are
-complementary results rather than the full black-box compatibility matrix, so
-`full_compatibility=false` remains mandatory.
+process listing, PTY resize, memory-preserving pause, paused-state listing,
+connect-based resume, survival of the same background process, code execution,
+and context lifecycle in addition to control-plane and health behavior. The
+same production gate validates current control-plane metrics for every official
+and A3S client, an empty historical range, v1 running-list behavior, monotonic
+refresh, batch metrics, envd metrics, the initialized environment, and
+metadata-preserving HTTP upload/download. Current metrics are read through the
+generation-fenced runtime-envd connection; `memCache` is reported as zero
+because the pinned envd metrics response has no cache-usage field. Historical
+retention remains open. This is still a selected positive matrix, not the
+exhaustive filesystem-only pause, stream, error, cancellation, volume-content,
+multi-file, large-file, signed-file, rich-result, multi-language, public-port,
+and MCP suite. The recorder fixture also continues to use an in-memory
+repository and fake execution manager. These are complementary results rather
+than the full black-box compatibility matrix, so `full_compatibility=false`
+remains mandatory.
 
 ## Executive decision
 
@@ -159,10 +162,11 @@ following are true for a published compatibility manifest:
    an A3S-only error for behavior that succeeds against the pinned contract.
 
 The conformance report is published per template and isolation profile. A
-shared-kernel template cannot inherit a passing MicroVM result. Until pause,
-resume, snapshots, volumes, and the rest of the pinned lifecycle surface have
-matching observable behavior on the Sandbox backend, that backend is reported
-as a preview subset rather than fully compatible.
+shared-kernel template cannot inherit a passing MicroVM result.
+Memory-preserving pause and resume now have matching observable behavior on the
+Sandbox backend, but filesystem-only pause, snapshots, volumes, and the rest of
+the pinned lifecycle surface remain gates. The backend is therefore still
+reported as a preview subset rather than fully compatible.
 
 ## Compatibility architecture
 
@@ -431,9 +435,9 @@ If a requested protocol operation is unavailable for the selected isolation
 class, the server returns the matching protocol error and does not switch
 backends. That configuration is then listed as partial rather than fully
 compatible unless the pinned upstream contract rejects the same request. For
-example, shared-kernel execution cannot be certified for the full lifecycle
-surface until memory-preserving pause and resume have matching observable
-semantics.
+example, shared-kernel execution still cannot be certified for the full
+lifecycle surface while filesystem-only pause, snapshots, and volumes lack
+matching observable semantics.
 
 ## Command and PTY compatibility
 
@@ -963,15 +967,17 @@ Phase 2 is delivered as small, immediately merged changes:
    namespace on a disposable OS thread. Pull the merge commit on an A3S OS
    server and prove direct/shared routing, restart recovery, scope denial, and
    stale-route fencing against a real `--isolation sandbox` execution.
-7. **In progress:** the unmodified official clients now cover their lifecycle
-   flows through the production control listener and real Sandbox runtime,
-   their running and post-kill health methods pass through the production TLS
-   listener, and runtime-image clients cover selected Filesystem, foreground
-   and background Process, stdin, PTY resize, code execution, and context
-   lifecycle flows plus current metrics against real Sandboxes. The enclosing
-   smoke passes v1 listing, monotonic refresh, batch metrics, envd metrics,
-   initialized environment, and metadata-preserving HTTP upload/download.
-   Complete historical metrics, volume-content, remaining envd edge semantics,
+7. **Complete for the production-tested subset:** the unmodified official
+   clients cover their lifecycle flows through the production control listener
+   and real Sandbox runtime, and their running and post-kill health methods pass
+   through the production TLS listener. Official and A3S Python sync/async and
+   TypeScript clients cover selected Filesystem, foreground and background
+   Process, stdin, PTY resize, memory-preserving pause/resume, same-process
+   survival, code execution, context lifecycle, and current metrics against real
+   Sandboxes. The enclosing smoke passes v1 listing, paused-state listing,
+   monotonic refresh, batch metrics, envd metrics, initialized environment, and
+   metadata-preserving HTTP upload/download. Complete historical metrics,
+   filesystem-only pause, volume-content, remaining envd edge semantics,
    exhaustive Process/Filesystem/PTY, signed-file, public-port, rich
    interpreter, and MCP matrices without broadening these selected results into
    a full compatibility claim.
@@ -1015,14 +1021,16 @@ later restart; auto-remove terminal kills remove them.
 
 The production VM/Sandbox backend is also complete for this slice. It owns live
 runtime handles, reconstructs MicroVM processes with PID identity fencing,
-reconstructs Sandbox executions from validated durable `crun` evidence,
-rejects unsupported Sandbox pause/resume without falling back to MicroVM, and
-owns terminal cleanup. The opt-in A3S OS smoke harness has proven that Sandbox
-`create` persists a `created` reservation without allocating a Box directory,
-runtime root, or sockets; manager reconstruction reconciles the same unstarted
-reservation; and explicit `start` launches through `crun`. It also proves pause
-rollback, kill, and terminal cleanup. Deterministic image-pull failure injection
-proves that a failed start does not create those runtime resources.
+reconstructs running and paused Sandbox executions from validated durable
+`crun` evidence, implements idempotent memory-preserving `crun pause` and
+`crun resume`, rejects filesystem-only pause without falling back to MicroVM,
+and owns terminal cleanup. The opt-in A3S OS smoke harness has proven that
+Sandbox `create` persists a `created` reservation without allocating a Box
+directory, runtime root, or sockets; manager reconstruction reconciles the same
+unstarted reservation; and explicit `start` launches through `crun`. It also
+proves pause rollback, same-process survival after resume, kill, and terminal
+cleanup. Deterministic image-pull failure injection proves that a failed start
+does not create those runtime resources.
 
 CLI `create` now converts its validated arguments into `BoxConfig` and
 `ExecutionRecordPolicy`, then calls `LocalExecutionManager::create`. It no
@@ -1119,15 +1127,17 @@ implementation begins.
 ### Phase 2: lifecycle and routing (in progress)
 
 - Implemented authentication, create/connect/get/v1-v2-list/kill/timeout,
-  monotonic refresh, current single/batch metrics, filtered listing, durable
-  mappings, wildcard routing, and traffic tokens.
+  memory-preserving pause/connect-resume, monotonic refresh, current
+  single/batch metrics, filtered running/paused listing, durable mappings,
+  wildcard routing, and traffic tokens.
 - Every create routes through A3S execution resolution and persists its plan.
 - Requested lifetime begins only after runtime and envd readiness, including
   startup recovery. Historical metrics, full pagination edge cases, host-reboot
   recovery, and certificate rotation remain open.
 
-Gate: unmodified official SDKs create, reconnect to, list, refresh, read current
-metrics from, time out, and kill an A3S sandbox.
+Gate: unmodified official SDKs create, pause, resume, reconnect to, list,
+refresh, read current metrics from, time out, and kill an A3S sandbox while an
+already-running process survives the pause cycle.
 
 ### Phase 3: commands, files, and PTY (in progress)
 
@@ -1157,8 +1167,9 @@ patches.
 
 ### Phase 5: complete public surface
 
-- Implement templates/builds, snapshots, pause/resume, volumes, historical
-  metrics, network policy, routed ports, and remaining public helpers.
+- Implement templates/builds, snapshots, filesystem-only pause, volumes,
+  historical metrics, network policy, routed ports, and remaining public
+  helpers.
 - Run compatibility across every supported SDK/version tuple.
 
 Gate: the complete public SDK inventory has an observed passing test or an

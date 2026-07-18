@@ -2,8 +2,9 @@
 
 These fixtures execute the published, unmodified Python sync, Python async,
 TypeScript, and Code Interpreter packages pinned by `upstream.lock.json`.
-Their create, connect, list, timeout, kill, and not-found flows run against a
-deterministic recording server and the Rust lifecycle router.
+Their create, memory-preserving pause, connect/resume, list, timeout, kill, and
+not-found flows run against a deterministic recording server and the Rust
+lifecycle router.
 
 The runner downloads the exact wheel and npm tarball URLs from the source lock,
 verifies SHA-256 and npm integrity before installation, and records only stable
@@ -93,9 +94,11 @@ when an override is not routable.
 With the immutable runtime image selected, the public-client matrix proves
 production lifecycle behavior, running and post-kill envd health, Filesystem
 create/read/stat/list/rename/remove, foreground and background commands,
-process listing, stdin close, one PTY resize flow, Code Interpreter execution
-and context lifecycle, and cleanup. The enclosing smoke gate also validates
-envd metrics/environment and HTTP file transfer directly through the
-authenticated production data-plane route. It does not claim exhaustive
+process listing, stdin close, one PTY resize flow, memory-preserving pause,
+paused-state listing, connect-based resume, survival of the same background
+process, Code Interpreter execution and context lifecycle, and cleanup. The
+enclosing smoke gate also validates envd metrics/environment and HTTP file
+transfer directly through the authenticated production data-plane route.
+Filesystem-only pause remains outside this matrix. It does not claim exhaustive
 Process, Filesystem, PTY, rich-result, multi-language, or MCP compatibility;
 those require the complete data-plane suites.
