@@ -53,6 +53,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "futures",
  "hex",
  "hyper 0.14.32",
  "prost",

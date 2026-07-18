@@ -7,11 +7,11 @@ use a3s_box_core::{
     ExecutionManagerError, ExecutionPortConnector, NetworkMode,
 };
 use chrono::{DateTime, Utc};
-use hyper::body::Body;
+use hyper::body::{Body, HttpBody};
 use hyper::client::conn;
 use hyper::header::{CONTENT_TYPE, HOST};
 use hyper::{Method, Request, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
@@ -55,6 +55,18 @@ pub struct SandboxConnection {
     pub envd_access_token: SecretToken,
     pub traffic_access_token: SecretToken,
     pub disposition: ConnectionDisposition,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SandboxMetric {
+    pub timestamp: DateTime<Utc>,
+    pub cpu_count: u32,
+    pub cpu_used_pct: f32,
+    pub mem_used: u64,
+    pub mem_total: u64,
+    pub mem_cache: u64,
+    pub disk_used: u64,
+    pub disk_total: u64,
 }
 
 impl std::fmt::Debug for SandboxConnection {
@@ -402,6 +414,74 @@ impl ControlService {
         self.replace(expected, record).await
     }
 
+    pub async fn refresh_timeout(
+        &self,
+        owner_id: &str,
+        sandbox_id: &super::SandboxId,
+        timeout_seconds: u32,
+    ) -> ControlServiceResult<()> {
+        let mut record = self.require_visible(owner_id, sandbox_id).await?;
+        let refreshed_expiry = expiry_from(self.clock.now(), timeout_seconds)?;
+        if refreshed_expiry <= record.expires_at() {
+            return Ok(());
+        }
+        let expected = record.generation();
+        record.replace_expiry(refreshed_expiry)?;
+        self.replace(expected, record).await
+    }
+
+    pub async fn current_metric(
+        &self,
+        owner_id: &str,
+        sandbox_id: &super::SandboxId,
+    ) -> ControlServiceResult<Option<SandboxMetric>> {
+        let record = self.require_visible(owner_id, sandbox_id).await?;
+        if record.state() != LifecycleState::Running || record.envd_mode() != EnvdMode::Runtime {
+            return Ok(None);
+        }
+        let execution_id = record
+            .execution_id()
+            .ok_or_else(|| ControlServiceError::Conflict(sandbox_id.clone()))?;
+        let generation = record
+            .execution_generation()
+            .ok_or_else(|| ControlServiceError::Conflict(sandbox_id.clone()))?;
+        let port = NonZeroU16::new(ENVD_PORT).ok_or_else(|| {
+            ExecutionManagerError::Internal("envd port must be non-zero".to_string())
+        })?;
+        let stream = self
+            .ports
+            .connect_port(execution_id, generation, port, RUNTIME_ENVD_CONNECT_TIMEOUT)
+            .await?;
+        let metrics = tokio::time::timeout(
+            RUNTIME_ENVD_REQUEST_TIMEOUT,
+            read_runtime_envd_metrics(stream),
+        )
+        .await
+        .map_err(|_| {
+            ExecutionManagerError::Unavailable(format!(
+                "runtime envd metrics timed out after {} ms",
+                RUNTIME_ENVD_REQUEST_TIMEOUT.as_millis()
+            ))
+        })?
+        .map_err(ExecutionManagerError::Unavailable)?;
+        let timestamp = DateTime::from_timestamp(metrics.ts, 0).ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "runtime envd returned an invalid metrics timestamp {}",
+                metrics.ts
+            ))
+        })?;
+        Ok(Some(SandboxMetric {
+            timestamp,
+            cpu_count: metrics.cpu_count,
+            cpu_used_pct: metrics.cpu_used_pct,
+            mem_used: metrics.mem_used,
+            mem_total: metrics.mem_total,
+            mem_cache: 0,
+            disk_used: metrics.disk_used,
+            disk_total: metrics.disk_total,
+        }))
+    }
+
     pub async fn kill(
         &self,
         owner_id: &str,
@@ -497,21 +577,25 @@ struct RuntimeEnvdInitRequest<'a> {
     default_user: &'a str,
 }
 
+#[derive(Deserialize)]
+struct RuntimeEnvdMetrics {
+    ts: i64,
+    cpu_count: u32,
+    cpu_used_pct: f32,
+    mem_used: u64,
+    mem_total: u64,
+    disk_used: u64,
+    disk_total: u64,
+}
+
+const RUNTIME_ENVD_METRICS_MAX_BYTES: usize = 64 * 1024;
+
 async fn send_runtime_envd_init(
     stream: a3s_box_core::ExecutionPortStream,
     init: RuntimeEnvdInitRequest<'_>,
 ) -> Result<StatusCode, String> {
     let payload = serde_json::to_vec(&init)
         .map_err(|error| format!("failed to encode runtime envd initialization: {error}"))?;
-    let (mut sender, connection) = conn::Builder::new()
-        .handshake(stream)
-        .await
-        .map_err(|error| format!("runtime envd HTTP handshake failed: {error}"))?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            debug!(%error, "runtime envd initialization connection closed");
-        }
-    });
     let request = Request::builder()
         .method(Method::POST)
         .uri("/init")
@@ -519,11 +603,60 @@ async fn send_runtime_envd_init(
         .header(CONTENT_TYPE, "application/json")
         .body(Body::from(payload))
         .map_err(|error| format!("failed to build runtime envd initialization: {error}"))?;
+    send_runtime_envd_request(stream, request)
+        .await
+        .map(|response| response.status())
+}
+
+async fn read_runtime_envd_metrics(
+    stream: a3s_box_core::ExecutionPortStream,
+) -> Result<RuntimeEnvdMetrics, String> {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/metrics")
+        .header(HOST, "127.0.0.1")
+        .body(Body::empty())
+        .map_err(|error| format!("failed to build runtime envd metrics request: {error}"))?;
+    let response = send_runtime_envd_request(stream, request).await?;
+    if response.status() != StatusCode::OK {
+        return Err(format!(
+            "runtime envd metrics returned HTTP {}",
+            response.status()
+        ));
+    }
+    let mut response_body = response.into_body();
+    let mut body = Vec::new();
+    while let Some(chunk) = response_body.data().await {
+        let chunk =
+            chunk.map_err(|error| format!("failed to read runtime envd metrics: {error}"))?;
+        if body.len().saturating_add(chunk.len()) > RUNTIME_ENVD_METRICS_MAX_BYTES {
+            return Err(format!(
+                "runtime envd metrics exceeded {RUNTIME_ENVD_METRICS_MAX_BYTES} bytes"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|error| format!("runtime envd returned invalid metrics JSON: {error}"))
+}
+
+async fn send_runtime_envd_request(
+    stream: a3s_box_core::ExecutionPortStream,
+    request: Request<Body>,
+) -> Result<hyper::Response<Body>, String> {
+    let (mut sender, connection) = conn::Builder::new()
+        .handshake(stream)
+        .await
+        .map_err(|error| format!("runtime envd HTTP handshake failed: {error}"))?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            debug!(%error, "runtime envd HTTP connection closed");
+        }
+    });
     sender
         .send_request(request)
         .await
-        .map(|response| response.status())
-        .map_err(|error| format!("runtime envd initialization request failed: {error}"))
+        .map_err(|error| format!("runtime envd request failed: {error}"))
 }
 
 fn expiry_from(now: DateTime<Utc>, timeout_seconds: u32) -> ControlServiceResult<DateTime<Utc>> {

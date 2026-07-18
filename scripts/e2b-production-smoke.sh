@@ -436,6 +436,61 @@ TRAFFIC_TOKEN="$(json_field "$CREATE_RESPONSE" trafficAccessToken)"
 [[ -n "$TRAFFIC_TOKEN" ]] ||
   fail 'create omitted the traffic access token'
 
+V1_LIST_RESPONSE="$STATE_DIR/list-v1.json"
+[[ "$(status_request GET '/sandboxes?metadata=test%3Dproduction-service' "$V1_LIST_RESPONSE")" == "200" ]] ||
+  fail 'v1 sandbox list did not return HTTP 200'
+if ! python3 - "$V1_LIST_RESPONSE" "$SANDBOX_ID" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    sandboxes = json.load(source)
+if not any(sandbox.get("sandboxID") == sys.argv[2] for sandbox in sandboxes):
+    raise SystemExit("created Sandbox was absent")
+PY
+then
+  fail 'v1 sandbox list omitted the created Sandbox'
+fi
+
+REFRESH_BEFORE_RESPONSE="$STATE_DIR/refresh-before.json"
+[[ "$(status_request GET "/sandboxes/$SANDBOX_ID" "$REFRESH_BEFORE_RESPONSE")" == "200" ]] ||
+  fail 'sandbox detail before refresh did not return HTTP 200'
+REFRESH_BEFORE_END_AT="$(json_field "$REFRESH_BEFORE_RESPONSE" endAt)"
+[[ "$(status_request POST "/sandboxes/$SANDBOX_ID/refreshes" /dev/null '{"duration":55}')" == "204" ]] ||
+  fail 'sandbox refresh did not return HTTP 204'
+[[ "$(status_request POST "/sandboxes/$SANDBOX_ID/refreshes" /dev/null '{}')" == "204" ]] ||
+  fail 'sandbox refresh with an empty object did not return HTTP 204'
+[[ "$(status_request POST "/sandboxes/$SANDBOX_ID/refreshes" /dev/null)" == "204" ]] ||
+  fail 'sandbox refresh without a request body did not return HTTP 204'
+REFRESH_UNCHANGED_RESPONSE="$STATE_DIR/refresh-unchanged.json"
+[[ "$(status_request GET "/sandboxes/$SANDBOX_ID" "$REFRESH_UNCHANGED_RESPONSE")" == "200" ]] ||
+  fail 'sandbox detail after short refresh did not return HTTP 200'
+[[ "$(json_field "$REFRESH_UNCHANGED_RESPONSE" endAt)" == "$REFRESH_BEFORE_END_AT" ]] ||
+  fail 'sandbox refresh shortened the existing timeout'
+[[ "$(status_request POST "/sandboxes/$SANDBOX_ID/refreshes" /dev/null '{"duration":3600}')" == "204" ]] ||
+  fail 'sandbox refresh extension did not return HTTP 204'
+REFRESH_EXTENDED_RESPONSE="$STATE_DIR/refresh-extended.json"
+[[ "$(status_request GET "/sandboxes/$SANDBOX_ID" "$REFRESH_EXTENDED_RESPONSE")" == "200" ]] ||
+  fail 'sandbox detail after extended refresh did not return HTTP 200'
+if ! python3 - "$REFRESH_BEFORE_RESPONSE" "$REFRESH_EXTENDED_RESPONSE" <<'PY'
+import datetime
+import json
+import sys
+
+
+def end_at(path: str) -> datetime.datetime:
+    with open(path, encoding="utf-8") as source:
+        value = json.load(source)["endAt"]
+    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+if end_at(sys.argv[2]) <= end_at(sys.argv[1]):
+    raise SystemExit("refresh did not extend the sandbox timeout")
+PY
+then
+  fail 'sandbox refresh did not extend the existing timeout'
+fi
+
 DIRECT_HOST="49983-$SANDBOX_ID.$SANDBOX_DOMAIN"
 wait_gateway_ready "$DIRECT_HOST" || fail 'TLS direct route did not become ready'
 [[ ! -s "$STATE_DIR/gateway-body.txt" ]] ||
@@ -526,6 +581,34 @@ PY
     fail 'runtime envd file download differed from the uploaded content'
   [[ "$(gateway_request "$DIRECT_HOST" /dev/null X-Access-Token wrong-token /metrics)" == "401" ]] ||
     fail 'runtime envd metrics accepted an invalid token'
+
+  CONTROL_METRICS_RESPONSE="$STATE_DIR/control-metrics.json"
+  [[ "$(status_request GET "/sandboxes/metrics?sandbox_ids=$SANDBOX_ID" "$CONTROL_METRICS_RESPONSE")" == "200" ]] ||
+    fail 'control-plane batch metrics did not return HTTP 200'
+  if ! python3 - "$CONTROL_METRICS_RESPONSE" "$SANDBOX_ID" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    response = json.load(source)
+metric = response.get("sandboxes", {}).get(sys.argv[2])
+required = (
+    "timestamp",
+    "timestampUnix",
+    "cpuCount",
+    "cpuUsedPct",
+    "memUsed",
+    "memTotal",
+    "memCache",
+    "diskUsed",
+    "diskTotal",
+)
+if not isinstance(metric, dict) or any(field not in metric for field in required):
+    raise SystemExit(f"invalid batch metric: {metric!r}")
+PY
+  then
+    fail 'control-plane batch metrics violated the pinned schema'
+  fi
 fi
 
 TRAFFIC_HOST="49999-$SANDBOX_ID.$SANDBOX_DOMAIN"
