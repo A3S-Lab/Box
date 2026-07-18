@@ -121,11 +121,21 @@ foreground and background commands, process listing, stdin close, PTY resize,
 current Sandbox metrics with historical-range filtering, memory-preserving
 pause, paused-state listing, connect-based resume, survival of the same
 background process, owner-scoped Volume create/connect/list/content/delete,
-bidirectional Sandbox mounts, UID/GID mapping, and in-use deletion conflicts.
-The Code Interpreter clients execute code and cover context
-create/list/restart/remove. This does not establish filesystem-only pause,
-deeper Volume failure/recovery, or complete Process, Filesystem, PTY,
-rich-result, multi-language, or historical-metrics compatibility.
+bidirectional Sandbox mounts, UID/GID mapping, in-use deletion conflicts, and
+owner-scoped filesystem Snapshot capture/list/restore/delete. Snapshot clients
+prove that the source remains running after capture, restored files retain
+content, ownership, and mode after the source is killed, the restored rootfs is
+writable through a private copy-on-write upper, an in-use Snapshot cannot be
+deleted, and final deletion releases its content. They also exercise Python
+Code Interpreter execution plus context create/list/run/restart/remove.
+
+Snapshot control records use the same owner isolation and durable SQLite
+transition model as lifecycle records. Startup reconciliation finishes or
+cleans interrupted captures and deletes, while the runtime quiesces the source,
+captures authoritative rootfs metadata and resolved OCI image defaults, then
+returns a running or paused source to its original state. Snapshot records from
+older builds that lack those OCI defaults remain inspectable and deletable but
+fail closed on restore.
 
 The default smoke uses the small Alpine broker fixture. Set
 `A3S_BOX_E2B_RUNTIME_IMAGE` to an immutable
@@ -134,16 +144,13 @@ template policies and exercise envd plus Code Interpreter health inside that
 image. This mode is destructive and retains the same dedicated-home,
 credential, restart, stale-route, and cleanup requirements.
 
-Set `A3S_BOX_E2B_NATIVE_SDKS=1` together with
-`A3S_BOX_E2B_OFFICIAL_CLIENTS=1` to repeat that same matrix through the
-repository's Python and TypeScript packages. The runner uses the pinned
-official dependencies already installed for the unchanged-client pass, builds
-and packs the native TypeScript package, and keeps A3S endpoint configuration
-local to each client invocation.
-
-This production subset does not establish full protocol compatibility.
-Templates, snapshots, signed files, filesystem-only pause, MCP, additional
-signals, reconnect, cancellation, backpressure, historical metrics, multi-file
-and large-file behavior, deeper Volume failure/recovery, concurrent mutation,
-and other pinned edge cases remain outside the matrix, so
-`full_compatibility=false` remains mandatory.
+With `A3S_BOX_E2B_NATIVE_SDKS=1` and
+`A3S_BOX_E2B_OFFICIAL_CLIENTS=1`, the harness repeats that matrix through the
+A3S Python sync/async and TypeScript packages after removing every `E2B_*`
+connection variable and configuring only `A3S_BOX_*`. This production subset
+passes on A3S OS with certified `crun`, but it does not establish full protocol
+compatibility. Templates/builds, signed files, filesystem-only pause,
+historical metrics, MCP, additional signals, reconnect, cancellation,
+backpressure, multi-file and large-file behavior, deeper Snapshot and Volume
+failure/recovery cases, and other pinned edge cases remain outside the matrix,
+so `full_compatibility=false` remains mandatory.

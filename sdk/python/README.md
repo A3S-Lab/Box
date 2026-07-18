@@ -3,7 +3,8 @@
 `a3s-box` is a typed convenience package around the checksum-pinned official
 E2B Python clients used by A3S Box compatibility tests. It re-exports the
 official `e2b` 2.32.0 API instead of maintaining a fork, so existing E2B code
-can keep the same classes and method signatures.
+can keep the same classes and method signatures. A3S Box provides the runtime;
+this native package does not read `E2B_API_URL` or contact E2B Cloud.
 
 ```bash
 export A3S_BOX_ENDPOINT=https://api.box.example.com
@@ -60,4 +61,16 @@ from a3s_box import A3SConnectionConfig, Volume
 connection = A3SConnectionConfig.from_environment()
 volume = Volume.create("data", **connection.python_options())
 volume.write_file("/input.txt", "hello", **connection.volume_options())
+```
+
+Filesystem Snapshots use the same Sandbox connection. They capture rootfs
+state, preserve the source Sandbox state, and restore into a writable private
+copy-on-write layer:
+
+```python
+snapshot = await sandbox.create_snapshot(name="checkpoint")
+restored = await AsyncSandbox.create(
+    snapshot.snapshot_id,
+    **connection.python_options(),
+)
 ```

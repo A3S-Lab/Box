@@ -6,6 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Owner-scoped E2B filesystem Snapshots.** The compatibility service now
+  provides durable capture, source-filtered listing, restore, and delete with
+  startup reconciliation, generation-fenced source quiescing, copy-on-write
+  restores, resolved OCI-default fidelity, Unix ownership/mode preservation,
+  and in-use deletion conflicts. Official and A3S Python sync/async and
+  TypeScript clients pass the same real-`crun` matrix on A3S OS.
 - **Owner-scoped E2B Volumes.** The compatibility service now provides durable
   create, connect, list, and delete operations plus authenticated
   volume-content directory, file, path, and metadata routes, with startup
@@ -94,6 +100,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Legacy filesystem Snapshot restore fails closed.** Snapshot records from
+  older builds that lack resolved OCI image defaults remain listable,
+  inspectable, and deletable, but restore is rejected before execution
+  reservation because the historical entrypoint, environment, user, and
+  working directory cannot be reconstructed safely.
 - Started E2B Sandbox expiry after both the runtime and envd control path are
   ready, so cold startup no longer consumes the requested usable timeout.
   Startup reconciliation applies the same rule while preserving recovery of

@@ -48,7 +48,7 @@ remain explicit in
 | Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell/exec-form `RUN` are implemented by the host engine on Linux. `--run-pool` can execute `RUN` through a leased warm-pool VM by mounting the mutable build rootfs into the guest. On macOS, auto `RUN` builds still delegate to BuildKit inside an A3S Linux VM (`--builder=buildkit-vm`) unless `--run-pool` is selected; unsafe host execution remains an explicit experiment-only escape hatch. |
 | Lifecycle and exec | `run`, `create`, `start`, `stop`, `restart`, `rm`, `wait`, foreground/detached runs, non-PTY exec, PTY exec, logs, stats, and inspect are implemented. |
 | OCI Sandbox | Linux-only, explicit `--isolation sandbox` shared-kernel execution through certified `crun`. Structured `json-file` logs preserve stdout/stderr identity for foreground, detached, natural-exit, stop, kill, and auto-remove paths. Generation-owned log workers are PID-start-time fenced, drained before archival, and recovered during cleanup. The security-negative matrix and performance gate remain release work; this mode does not claim MicroVM-equivalent isolation. |
-| E2B protocol preview | The ACL-configured service covers durable lifecycle, memory-preserving pause/resume, v1/v2 running/paused listing and runtime-backed structured logs, monotonic refresh, current single/batch control metrics, owner-scoped Volume control/content and Sandbox mounts, TLS routing, terminal health, and runtime envd metrics/environment/HTTP file transfer. The immutable runtime-image gate drives pinned Python sync/async and TypeScript clients through Filesystem operations, foreground/background commands, stdin, PTY resize, pause/connect-resume with same-process survival, generation-fenced v1/v2 logs with cursor/direction/level/search/limit behavior, bidirectional Volume mounts with UID/GID mapping, and Code Interpreter execution/context lifecycle on real `crun` Sandboxes. Typed source packages are built but unpublished. Filesystem-only pause, historical metrics, sustained log-retention/rotation races, deeper Volume failure/recovery and concurrent-mutation cases, multi-file and large-file behavior, exhaustive Process/PTY, signed-file, public-port, rich interpreter, MCP, and full release matrices remain incomplete; `full_compatibility=false`. |
+| E2B protocol preview | The ACL-configured service covers durable lifecycle, memory-preserving pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 running/paused listing and runtime-backed structured logs, current control metrics, TLS routing, terminal health, and runtime envd file/environment operations. The immutable runtime-image gate drives pinned official and native A3S Python sync/async and TypeScript clients through Snapshot capture/list/restore/delete with filesystem, Unix-metadata, and OCI-default fidelity; bidirectional Volume mounts; Filesystem, Process, PTY, logs, and Code Interpreter flows on real `crun` Sandboxes. Typed source packages are built but unpublished. Templates/builds, filesystem-only pause, historical metrics, sustained log-retention/rotation races, deeper Snapshot/Volume failure recovery, multi-file and large-file behavior, signed-file, public-port, rich interpreter, MCP, and full release matrices remain incomplete; `full_compatibility=false`. |
 | Warm pool and snapshot-fork | A warm pool serves pre-booted sandboxes over a socket. Native snapshot-fork (Copy-on-Write microVM cloning) snapshots one booted template and restores many forks from it, each mapping the template RAM `MAP_PRIVATE`. Verified on `/dev/kvm`: ~4× faster than a cold boot per fork, 100 forks in under ~1 s (~8 ms amortized each). Requires `/dev/kvm`; opt in with `pool start --snapshot-fork` or the `KRUN_SNAPSHOT_*` / `KRUN_RESTORE_FROM` env. |
 | Networking | Default TSI networking, TCP `host:guest` publishing, user-defined bridge networks, network inspect/connect/disconnect/rm, and `/etc/hosts` peer discovery are implemented with documented platform boundaries. |
 | Compose | Canonical `compose.acl` applications and an explicit Docker Compose-compatible YAML subset are implemented, including convergent `up`, project-scoped lifecycle commands, dependency conditions, health checks, networks, volumes, ports, and runtime/security settings. |
@@ -315,6 +315,16 @@ a3s-box snapshot prune --keep 5          # bound disk: keep the 5 newest
 
 Host directory volumes are mounted with virtio-fs `cache=none` by default to favor stable traversal on macOS/HVF workloads with large source trees. Use `--virtiofs-cache=always` for release verification jobs where the host source tree is not changing during the run, or `--virtiofs-cache=auto|default` for local experiments; `A3S_VIRTIOFS_CACHE` remains available as a process-wide fallback and `a3s-box info` prints the active fallback setting. On macOS, each Linux rootfs lives below a private directory in a case-sensitive APFS sparse image. Cached sparse images are cloned with APFS copy-on-write, preserving Linux path identity without exposing APFS volume-management entries to the guest.
 
+Filesystem snapshots capture configuration and rootfs state, not live RAM or
+device state. On overlay-capable hosts, restore uses a read-only snapshot lower
+plus a private writable upper; in-use snapshots are protected from pruning.
+Snapshots created by current builds also retain resolved OCI image defaults
+and Unix rootfs metadata. Older records missing those defaults remain visible
+for inspection and deletion, but restore fails closed because the original
+entrypoint, environment, user, and working directory cannot be reconstructed
+safely. Live MicroVM memory cloning is the separate snapshot-fork mechanism
+below.
+
 Image extraction and `commit` preserve Linux uid, gid, mode, and symlink
 metadata even when the macOS backing filesystem cannot represent OCI ownership
 directly. Box records rootless layer metadata during extraction and guest-init
@@ -383,18 +393,24 @@ Native SDK users configure `A3S_BOX_ENDPOINT` and `A3S_BOX_API_KEY`; conventiona
 `https://api.<domain>` endpoints derive the Sandbox routing domain automatically.
 Lifecycle responses advertise the public direct Sandbox authority, including a
 configured non-standard TLS port, so normal deployments do not require a
-process-global Sandbox URL override.
+process-global Sandbox URL override. Native A3S SDK applications use only
+`A3S_BOX_*` connection settings and do not read `E2B_API_URL`; that variable is
+reserved for the optional unchanged-official-SDK migration path.
 
 The Phase 2 preview includes an owner-scoped Rust lifecycle router for create,
 connect, get, memory-preserving pause, connect/resume, v1/v2 running/paused
 list, timeout, monotonic refresh, current single/batch metrics,
 generation-fenced v1/v2 structured logs, and kill; owner-scoped Volume
-create/connect/list/delete and authenticated content operations; a SQLite WAL
-repository with generation-fenced transitions and restart reconciliation; and
-a canonical runtime `ExecutionManager` with a production VM/Sandbox backend. CI
-runs the pinned official Python sync/async, TypeScript, and Code Interpreter
-clients against the router through an in-memory repository and fake execution
-manager.
+create/connect/list/delete and authenticated content operations; and
+owner-scoped filesystem Snapshot capture, source-filtered listing, restore, and
+delete. Snapshot control records use the same durable SQLite transition model,
+and the runtime quiesces the source for capture, preserves resolved OCI
+defaults and Unix metadata, and restores through a private copy-on-write upper.
+Older Snapshot records without the resolved image configuration remain
+inspectable and deletable but fail closed on restore. A canonical runtime
+`ExecutionManager` provides the production VM/Sandbox backend. CI runs the
+pinned official Python sync/async, TypeScript, and Code Interpreter clients
+against the router through an in-memory repository and fake execution manager.
 An opt-in A3S OS gate installs those same checksum-pinned packages without
 modification and runs them against the ACL-configured production process and
 real `crun` Sandboxes. Python sync, Python async, and TypeScript each cover
@@ -530,14 +546,18 @@ official clients through both running and post-kill health checks and the
 runtime data-plane cases described above. Those client paths additionally prove
 v2 paused-state listing and memory-preserving pause/connect-resume with
 same-process survival, owner-scoped Volume create/connect/list/content/delete,
-bidirectional Sandbox mounts, UID/GID mapping, and in-use deletion conflicts.
+bidirectional Sandbox mounts, UID/GID mapping, in-use deletion conflicts, and
+filesystem Snapshot capture/list/restore/delete. Snapshot clients prove source
+state preservation, restore after source termination, file content,
+ownership/mode and OCI-default fidelity, writable private restores, in-use
+deletion conflicts, and final cleanup.
 Failed runs can preserve the Sandbox PID, `crun` state, OCI bundle, and service
 logs for diagnosis. Filesystem-only pause, historical metrics, multi-file and
-large-file behavior, deeper Volume failure/recovery and concurrent-mutation
-cases, exhaustive Process and PTY matrices, Filesystem watches and signed URLs,
-official public-port coverage, rich multi-language Code Interpreter behavior,
-MCP, native package publication, and the complete production package matrix
-remain open release gates.
+large-file behavior, deeper Snapshot and Volume failure/recovery,
+concurrent-mutation cases, exhaustive Process and PTY matrices, Filesystem
+watches and signed URLs, official public-port coverage, rich multi-language
+Code Interpreter behavior, MCP, native package publication, and the complete
+production package matrix remain open release gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in
