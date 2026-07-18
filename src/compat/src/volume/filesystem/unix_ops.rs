@@ -423,7 +423,10 @@ fn open_raw(
     flags: libc::c_int,
     mode: libc::mode_t,
 ) -> VolumeContentResult<OwnedFd> {
-    let fd = unsafe { libc::openat(parent, name.as_ptr(), flags, mode) };
+    // C variadic arguments apply integer promotion to mode_t. This is
+    // observable on Apple targets where mode_t is narrower than c_uint.
+    let promoted_mode = libc::c_uint::from(mode);
+    let fd = unsafe { libc::openat(parent, name.as_ptr(), flags, promoted_mode) };
     if fd < 0 {
         return Err(io_error("open volume path", io::Error::last_os_error()));
     }
@@ -766,34 +769,34 @@ fn timestamp_parts(seconds: libc::time_t, nanos: libc::c_long) -> (i64, i64) {
     (seconds as i64, nanos as i64)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
 fn atime(stat: &libc::stat) -> (i64, i64) {
     timestamp_parts(stat.st_atime, stat.st_atime_nsec)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
 fn mtime(stat: &libc::stat) -> (i64, i64) {
     timestamp_parts(stat.st_mtime, stat.st_mtime_nsec)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
 fn ctime(stat: &libc::stat) -> (i64, i64) {
     timestamp_parts(stat.st_ctime, stat.st_ctime_nsec)
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn atime(stat: &libc::stat) -> (i64, i64) {
-    timestamp_parts(stat.st_atimespec.tv_sec, stat.st_atimespec.tv_nsec)
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn mtime(stat: &libc::stat) -> (i64, i64) {
-    timestamp_parts(stat.st_mtimespec.tv_sec, stat.st_mtimespec.tv_nsec)
-}
-
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-fn ctime(stat: &libc::stat) -> (i64, i64) {
-    timestamp_parts(stat.st_ctimespec.tv_sec, stat.st_ctimespec.tv_nsec)
 }
 
 #[cfg(not(any(
