@@ -499,24 +499,20 @@ fn run_json_file_processor(
     eof_policy: ConsoleEofPolicy,
 ) {
     let json_path = json_log_path(log_dir);
-    let writer = std::sync::Mutex::new(match RotatingWriter::new(&json_path, max_size, max_file) {
-        Ok(w) => w,
-        Err(_) => return,
-    });
+    let writer = std::sync::Mutex::new(
+        match OrderedJsonWriter::new(&json_path, max_size, max_file) {
+            Ok(writer) => writer,
+            Err(_) => return,
+        },
+    );
     let err_log = stderr_console_path(console_log);
 
     // Write one tagged JSON record per line; shared by the stdout and stderr
-    // tail threads (the Mutex serializes their interleave into container.json).
+    // tail threads. Timestamp assignment is inside the same critical section
+    // as the append, so file order cannot invert timestamps across streams.
     let emit = |line: &str, stream: &str| {
-        let entry = LogEntry {
-            log: format!("{line}\n"),
-            stream: stream.to_string(),
-            time: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        };
-        if let Ok(json) = serde_json::to_string(&entry) {
-            if let Ok(mut w) = writer.lock() {
-                let _ = w.write_line(&json);
-            }
+        if let Ok(mut writer) = writer.lock() {
+            writer.write_entry(line, stream, chrono::Utc::now());
         }
     };
     let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
@@ -554,6 +550,36 @@ fn run_json_file_processor(
             )
         });
     });
+}
+
+struct OrderedJsonWriter {
+    output: RotatingWriter,
+    last_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl OrderedJsonWriter {
+    fn new(path: &Path, max_size: u64, max_file: u32) -> std::io::Result<Self> {
+        Ok(Self {
+            output: RotatingWriter::new(path, max_size, max_file)?,
+            last_timestamp: None,
+        })
+    }
+
+    fn write_entry(&mut self, line: &str, stream: &str, timestamp: chrono::DateTime<chrono::Utc>) {
+        let timestamp = match &self.last_timestamp {
+            Some(previous) if previous > &timestamp => previous.to_owned(),
+            _ => timestamp,
+        };
+        let entry = LogEntry {
+            log: format!("{line}\n"),
+            stream: stream.to_string(),
+            time: timestamp.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        };
+        self.last_timestamp = Some(timestamp);
+        if let Ok(json) = serde_json::to_string(&entry) {
+            let _ = self.output.write_line(&json);
+        }
+    }
 }
 
 /// Forward both console streams (stdout + stderr) to a syslog endpoint.
@@ -1153,6 +1179,31 @@ mod tests {
             !json.contains("init.krun"),
             "runtime noise must be filtered: {json}"
         );
+    }
+
+    #[test]
+    fn ordered_json_writer_clamps_a_regressed_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("container.json");
+        let mut writer = OrderedJsonWriter::new(&path, 10 * 1024 * 1024, 3).unwrap();
+        let newer = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:01Z")
+            .unwrap()
+            .to_utc();
+        let older = chrono::DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+            .unwrap()
+            .to_utc();
+
+        writer.write_entry("first", "stdout", newer);
+        writer.write_entry("second", "stderr", older);
+        drop(writer);
+
+        let entries = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<LogEntry>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].time, entries[1].time);
     }
 
     #[test]

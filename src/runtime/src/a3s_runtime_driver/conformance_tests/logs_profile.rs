@@ -83,18 +83,21 @@ pub(super) async fn run(
 
     let record = fixture.record_for(&service.spec).await?;
     let structured = record.box_dir.join("logs/container.json");
+    let same_timestamp = timestamp_after(&initial, 1_000)?;
+    let rotation_timestamp = timestamp_after(&initial, 2_000)?;
+    let oversized_timestamp = timestamp_after(&initial, 3_000)?;
     append_entries(
         &structured,
         &[
             LogEntry {
                 log: "r17-same-time-one\\n".into(),
                 stream: "stdout".into(),
-                time: "2026-07-17T12:00:00.123456789Z".into(),
+                time: same_timestamp.clone(),
             },
             LogEntry {
                 log: "r17-same-time-two\\n".into(),
                 stream: "stderr".into(),
-                time: "2026-07-17T12:00:00.123456789Z".into(),
+                time: same_timestamp,
             },
         ],
     )?;
@@ -116,7 +119,7 @@ pub(super) async fn run(
         &[LogEntry {
             log: "r17-after-rotation\\n".into(),
             stream: "stdout".into(),
-            time: "2026-07-17T12:00:01Z".into(),
+            time: rotation_timestamp,
         }],
     )?;
     let gap = client
@@ -137,7 +140,7 @@ pub(super) async fn run(
         &[LogEntry {
             log: "x".repeat(1024 * 1024 + 1),
             stream: "stdout".into(),
-            time: "2026-07-17T12:00:02Z".into(),
+            time: oversized_timestamp,
         }],
     )?;
     let oversized = client
@@ -187,6 +190,20 @@ async fn wait_for_initial_logs(
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+}
+
+fn timestamp_after(chunks: &[RuntimeLogChunk], offset_ms: u64) -> Result<String> {
+    let latest = chunks
+        .iter()
+        .map(|chunk| chunk.observed_at_ms)
+        .max()
+        .ok_or_else(|| super::protocol("Box log timestamp fixture has no source record"))?;
+    let timestamp_ms = latest
+        .checked_add(offset_ms)
+        .and_then(|value| i64::try_from(value).ok())
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .ok_or_else(|| super::protocol("Box log timestamp fixture overflowed"))?;
+    Ok(timestamp_ms.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 fn append_entries(path: &Path, entries: &[LogEntry]) -> Result<()> {

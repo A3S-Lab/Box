@@ -328,23 +328,38 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
 
 #[cfg(target_os = "linux")]
 fn drain_recorded_log_worker(record: &RecordedSandboxRuntime, box_id: &str) {
-    let (Some(pid), Some(_start_time)) = (record.log_worker_pid, record.log_worker_pid_start_time)
+    const LOG_WORKER_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let (Some(pid), Some(start_time)) = (record.log_worker_pid, record.log_worker_pid_start_time)
     else {
         return;
     };
-    if wait_for_log_worker_identity(record, std::time::Duration::from_secs(2)) {
-        return;
-    }
-
-    tracing::warn!(
-        box_id,
-        log_worker_pid = pid,
-        "Recovered Sandbox log worker did not drain after crun cleanup; terminating it"
-    );
-    if let Ok(pid) = i32::try_from(pid) {
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
+    if !wait_for_log_worker_identity(record, LOG_WORKER_EXIT_TIMEOUT) {
+        tracing::warn!(
+            box_id,
+            log_worker_pid = pid,
+            "Recovered Sandbox log worker did not drain after crun cleanup; terminating it"
+        );
+        // Revalidate the stable identity immediately before signalling so a
+        // PID reused during cleanup cannot be targeted.
+        if crate::process::is_process_running_with_identity(pid, Some(start_time)) {
+            if let Ok(pid) = i32::try_from(pid) {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
         }
+    }
+    if !crate::process::wait_for_process_exit_with_identity(
+        pid,
+        start_time,
+        LOG_WORKER_EXIT_TIMEOUT,
+    ) {
+        tracing::warn!(
+            box_id,
+            log_worker_pid = pid,
+            "Recovered Sandbox log worker remained present after cleanup"
+        );
     }
 }
 
@@ -572,5 +587,28 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Cannot verify the recorded Sandbox runtime"));
+    }
+
+    #[test]
+    fn cleanup_reaps_a_terminal_recovered_log_worker() {
+        let worker = std::process::Command::new("true").spawn().unwrap();
+        let pid = worker.id();
+        let start_time = crate::process::pid_start_time(pid).unwrap();
+        drop(worker);
+        let record = RecordedSandboxRuntime {
+            runtime_path: Path::new("/bin/true").to_path_buf(),
+            runtime_root: Path::new("/tmp/recovered-runtime").to_path_buf(),
+            bundle_dir: Path::new("/tmp/recovered-bundle").to_path_buf(),
+            init_pid: 42,
+            log_worker_pid: Some(pid),
+            log_worker_pid_start_time: Some(start_time),
+        };
+
+        drain_recorded_log_worker(&record, "terminal-recovered-worker");
+
+        assert!(
+            !crate::process::is_process_alive_with_identity(pid, Some(start_time)),
+            "cleanup must not leave its completed child as a zombie"
+        );
     }
 }

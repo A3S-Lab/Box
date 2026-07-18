@@ -15,6 +15,7 @@ use super::metadata::{
 use super::BoxRuntimeDriver;
 
 const NANOS_PER_MILLISECOND: u64 = 1_000_000;
+const EXEC_RESPONSE_BUDGET_MS: u64 = 100;
 
 impl BoxRuntimeDriver {
     pub(super) async fn execute_runtime_command(
@@ -142,17 +143,27 @@ fn validate_exec_identity(
 }
 
 fn effective_timeout(request: &RuntimeExecRequest) -> RuntimeResult<Duration> {
+    effective_timeout_at(request, now_ms())
+}
+
+fn effective_timeout_at(request: &RuntimeExecRequest, now_ms: u64) -> RuntimeResult<Duration> {
     let mut timeout_ms = request.timeout_ms;
     if let Some(deadline_at_ms) = request.deadline_at_ms {
-        let remaining_ms = deadline_at_ms.checked_sub(now_ms()).ok_or_else(|| {
+        let remaining_ms = deadline_at_ms.checked_sub(now_ms).ok_or_else(|| {
             RuntimeError::DeadlineExceeded("exec request expired before provider dispatch".into())
         })?;
-        if remaining_ms == 0 {
-            return Err(RuntimeError::DeadlineExceeded(
-                "exec request expired before provider dispatch".into(),
-            ));
-        }
-        timeout_ms = timeout_ms.min(remaining_ms);
+        let execution_budget_ms = remaining_ms
+            .checked_sub(EXEC_RESPONSE_BUDGET_MS)
+            .filter(|budget| *budget > 0)
+            .ok_or_else(|| {
+                RuntimeError::DeadlineExceeded(
+                    "exec request has insufficient time for a provider response".into(),
+                )
+            })?;
+        // Runtime bounds the complete provider future by this same deadline.
+        // Stop the guest command first so the driver can collect its bounded
+        // output, reconstruct the observation, and return a replayable result.
+        timeout_ms = timeout_ms.min(execution_budget_ms);
     }
     timeout_ms
         .checked_mul(NANOS_PER_MILLISECOND)
@@ -191,6 +202,31 @@ mod tests {
         assert!(matches!(
             effective_timeout(&overflow),
             Err(RuntimeError::InvalidRequest(message)) if message.contains("overflows")
+        ));
+    }
+
+    #[test]
+    fn effective_timeout_reserves_time_for_the_provider_response() {
+        let mut request = RuntimeExecRequest {
+            schema: RuntimeExecRequest::SCHEMA.into(),
+            request_id: "request-1".into(),
+            unit_id: "unit-1".into(),
+            generation: 1,
+            command: vec!["true".into()],
+            timeout_ms: 5_000,
+            deadline_at_ms: Some(1_500),
+        };
+
+        assert_eq!(
+            effective_timeout_at(&request, 1_000).unwrap(),
+            Duration::from_millis(400)
+        );
+
+        request.deadline_at_ms = Some(1_100);
+        assert!(matches!(
+            effective_timeout_at(&request, 1_000),
+            Err(RuntimeError::DeadlineExceeded(message))
+                if message.contains("insufficient time")
         ));
     }
 

@@ -93,6 +93,43 @@ pub fn is_process_running_with_identity(pid: u32, expected_start_time: Option<u6
     is_process_alive_with_identity(pid, expected_start_time)
 }
 
+/// Wait for a Linux process identity to disappear, reaping it when it is an
+/// exited child of the current process.
+///
+/// Recovered runtime handles retain only a durable PID/start-time pair. When a
+/// worker was originally spawned by this process, dropping its `Child` handle
+/// does not transfer wait ownership: the completed worker remains a zombie
+/// until an explicit `waitpid`. Workers inherited by another process cannot be
+/// reaped here, so this helper waits for their owner to reap them instead.
+#[cfg(target_os = "linux")]
+pub(crate) fn wait_for_process_exit_with_identity(
+    pid: u32,
+    expected_start_time: u64,
+    timeout: std::time::Duration,
+) -> bool {
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !is_process_alive_with_identity(pid, Some(expected_start_time)) {
+            return true;
+        }
+        if !is_process_running_with_identity(pid, Some(expected_start_time)) {
+            let mut status = 0;
+            let waited = unsafe { libc::waitpid(raw_pid, &mut status, libc::WNOHANG) };
+            if waited == raw_pid || !is_process_alive_with_identity(pid, Some(expected_start_time))
+            {
+                return true;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn linux_process_identity_from_stat(stat: &str) -> Option<(char, u64)> {
     // `comm` may contain spaces and parentheses, so fields begin after the
@@ -152,8 +189,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn running_identity_treats_an_unreaped_child_as_finished() {
-        let mut child = std::process::Command::new("true").spawn().unwrap();
+    fn recovered_identity_reaps_an_exited_child() {
+        let child = std::process::Command::new("true").spawn().unwrap();
         let pid = child.id();
         let start_time = pid_start_time(pid).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -165,6 +202,11 @@ mod tests {
 
         assert!(is_process_alive_with_identity(pid, Some(start_time)));
         assert!(!is_process_running_with_identity(pid, Some(start_time)));
-        child.wait().unwrap();
+        assert!(wait_for_process_exit_with_identity(
+            pid,
+            start_time,
+            std::time::Duration::from_secs(1),
+        ));
+        assert!(!is_process_alive_with_identity(pid, Some(start_time)));
     }
 }

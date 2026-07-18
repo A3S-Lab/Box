@@ -102,14 +102,17 @@ pub(super) async fn run(
             vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "timeout 1 sh -c 'while :; do :; done'".into(),
+                "timeout 1 sh -c 'trap \"exit 124\" TERM; while :; do :; done'".into(),
             ],
             5_000,
         ))
         .await?;
     require(
         cpu.exit_code == 124,
-        format!("CPU saturation oracle exited with {}", cpu.exit_code),
+        format!(
+            "CPU saturation oracle exited with {}; stdout={:?}; stderr={:?}",
+            cpu.exit_code, cpu.stdout, cpu.stderr
+        ),
     )?;
     let throttled_after = counter(&cgroup.join("cpu.stat"), "nr_throttled")?;
     require(

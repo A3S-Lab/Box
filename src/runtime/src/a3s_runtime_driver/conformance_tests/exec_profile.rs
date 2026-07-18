@@ -4,6 +4,15 @@ use a3s_runtime::{RuntimeClient, RuntimeError};
 use super::fixture::BoxRuntimeConformanceFixture;
 use super::{require, Result};
 
+fn case_error(case_id: &str, error: RuntimeError) -> RuntimeError {
+    match error {
+        RuntimeError::DeadlineExceeded(message) => {
+            RuntimeError::DeadlineExceeded(format!("{case_id}: {message}"))
+        }
+        error => RuntimeError::ProviderUnavailable(format!("{case_id}: {error}")),
+    }
+}
+
 pub(super) async fn run(
     fixture: &BoxRuntimeConformanceFixture,
     client: &dyn RuntimeClient,
@@ -28,7 +37,10 @@ pub(super) async fn run(
         ],
         5_000,
     );
-    let basic = client.exec(&basic_request).await?;
+    let basic = client
+        .exec(&basic_request)
+        .await
+        .map_err(|error| case_error("exec-exit-code", error))?;
     require(
         basic.exit_code == 23
             && basic.stdout == "r17-exec-stdout\n"
@@ -36,7 +48,10 @@ pub(super) async fn run(
             && !basic.truncated,
         "Box exec did not preserve exit code and stream identity",
     )?;
-    let replay = client.exec(&basic_request).await?;
+    let replay = client
+        .exec(&basic_request)
+        .await
+        .map_err(|error| case_error("exec-exit-code replay", error))?;
     require(replay == basic, "Box exec exact replay changed its result")?;
 
     let mut conflict = basic_request.clone();
@@ -55,13 +70,20 @@ pub(super) async fn run(
         vec!["/bin/sh".into(), "-c".into(), "exec sleep 3600".into()],
         150,
     );
-    let timeout = client.exec(&timeout_request).await?;
+    let timeout = client
+        .exec(&timeout_request)
+        .await
+        .map_err(|error| case_error("exec-timeout", error))?;
     require(
         timeout.exit_code == 137 && timeout.stderr.contains("timeout exceeded"),
         "Box exec timeout did not kill and report the command",
     )?;
     require(
-        client.exec(&timeout_request).await? == timeout,
+        client
+            .exec(&timeout_request)
+            .await
+            .map_err(|error| case_error("exec-timeout replay", error))?
+            == timeout,
         "timed-out Box exec was re-executed instead of replayed",
     )?;
 
@@ -72,16 +94,25 @@ pub(super) async fn run(
             vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "yes o | head -c 1100000; yes e | head -c 1100000 >&2".into(),
+                "awk 'BEGIN { s=\"o\"; for (i=0; i<21; i++) s=s s; printf \"%s\", s; printf \"%s\", s > \"/dev/stderr\" }'"
+                    .into(),
             ],
             15_000,
         ))
-        .await?;
+        .await
+        .map_err(|error| case_error("exec-output-bounds", error))?;
     require(
         output.truncated
             && output.stdout.len() == 1024 * 1024
             && output.stderr.len() == 1024 * 1024,
-        "Box exec did not enforce the one-MiB per-stream output bound",
+        format!(
+            "Box exec did not enforce the one-MiB per-stream output bound: \
+             truncated={} stdout_len={} stderr_len={} exit_code={}",
+            output.truncated,
+            output.stdout.len(),
+            output.stderr.len(),
+            output.exit_code,
+        ),
     )?;
 
     let mut wrong_generation = fixture.cases.exec(
