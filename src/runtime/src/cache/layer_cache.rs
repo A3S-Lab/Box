@@ -386,7 +386,7 @@ fn copy_dir_recursive_cow(src: &Path, dst: &Path) -> std::io::Result<bool> {
 /// copy when cloning is unsupported or the source and destination are on
 /// different filesystems. Overlay is preferred on Linux, so this mostly helps
 /// macOS/HVF and Linux `CopyProvider` fallback paths.
-fn copy_file_cow(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_file_cow(src: &Path, dst: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::io::AsRawFd;

@@ -246,7 +246,13 @@ impl LocalExecutionManager {
                 ))
             })?;
             let metadata = build_snapshot_metadata(&record, &snapshot_id);
-            match store.save(metadata, &rootfs) {
+            #[cfg(target_os = "linux")]
+            let rootfs_metadata = capture_sandbox_rootfs_metadata(&record, &rootfs)?;
+            #[cfg(target_os = "linux")]
+            let saved = store.save_managed(metadata, &rootfs, &rootfs_metadata);
+            #[cfg(not(target_os = "linux"))]
+            let saved = store.save(metadata, &rootfs);
+            match saved {
                 Ok(saved) => Ok(saved.size_bytes),
                 Err(save_error) => match store.get(snapshot_id.as_str()) {
                     Ok(Some(existing))
@@ -424,6 +430,176 @@ fn resolve_managed_rootfs(box_dir: &Path) -> Option<PathBuf> {
         return Some(apfs_data);
     }
     populated(&rootfs).then_some(rootfs)
+}
+
+#[cfg(target_os = "linux")]
+fn capture_sandbox_rootfs_metadata(
+    record: &BoxRecord,
+    rootfs: &Path,
+) -> ExecutionManagerResult<a3s_box_core::rootfs_metadata::RootfsMetadataManifest> {
+    let config_path = record.box_dir.join("sandbox/bundle/config.json");
+    let spec = oci_spec::runtime::Spec::load(&config_path).map_err(|error| {
+        snapshot_error(
+            record,
+            "load Sandbox OCI mappings",
+            format!("{}: {error}", config_path.display()),
+        )
+    })?;
+    let configured_rootfs = spec
+        .root()
+        .as_ref()
+        .map(|root| root.path())
+        .ok_or_else(|| {
+            snapshot_error(
+                record,
+                "validate Sandbox OCI mappings",
+                "OCI specification has no rootfs",
+            )
+        })?;
+    if configured_rootfs != rootfs {
+        return Err(snapshot_error(
+            record,
+            "validate Sandbox OCI mappings",
+            format!(
+                "OCI rootfs {} does not match the active rootfs {}",
+                configured_rootfs.display(),
+                rootfs.display()
+            ),
+        ));
+    }
+    let linux = spec.linux().as_ref().ok_or_else(|| {
+        snapshot_error(
+            record,
+            "validate Sandbox OCI mappings",
+            "OCI specification has no Linux section",
+        )
+    })?;
+    let uid_mappings = convert_id_mappings(record, "UID", linux.uid_mappings())?;
+    let gid_mappings = convert_id_mappings(record, "GID", linux.gid_mappings())?;
+    let maximum_container_uid = maximum_container_id(record, "UID", &uid_mappings)?;
+    let maximum_container_gid = maximum_container_id(record, "GID", &gid_mappings)?;
+    let plan = crate::sandbox::SandboxIdMappingPlan {
+        uid_mappings,
+        gid_mappings,
+        maximum_container_uid,
+        maximum_container_gid,
+    };
+    crate::sandbox::rootfs::capture_snapshot_rootfs_metadata(rootfs, &plan)
+        .map_err(|error| snapshot_error(record, "capture Sandbox rootfs metadata", error))
+}
+
+#[cfg(target_os = "linux")]
+fn convert_id_mappings(
+    record: &BoxRecord,
+    kind: &str,
+    mappings: &Option<Vec<oci_spec::runtime::LinuxIdMapping>>,
+) -> ExecutionManagerResult<Vec<crate::sandbox::IdMapping>> {
+    let mappings = mappings.as_ref().ok_or_else(|| {
+        snapshot_error(
+            record,
+            "validate Sandbox OCI mappings",
+            format!("OCI specification has no {kind} mappings"),
+        )
+    })?;
+    if mappings.is_empty() {
+        return Err(snapshot_error(
+            record,
+            "validate Sandbox OCI mappings",
+            format!("OCI specification has empty {kind} mappings"),
+        ));
+    }
+    let converted: Vec<_> = mappings
+        .iter()
+        .map(|mapping| crate::sandbox::IdMapping {
+            container_id: mapping.container_id(),
+            host_id: mapping.host_id(),
+            size: mapping.size(),
+        })
+        .collect();
+    validate_id_mappings(record, kind, &converted)?;
+    Ok(converted)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_id_mappings(
+    record: &BoxRecord,
+    kind: &str,
+    mappings: &[crate::sandbox::IdMapping],
+) -> ExecutionManagerResult<()> {
+    for (index, mapping) in mappings.iter().enumerate() {
+        let (Some(container_end), Some(host_end)) = (
+            mapping.container_id.checked_add(mapping.size),
+            mapping.host_id.checked_add(mapping.size),
+        ) else {
+            return Err(snapshot_error(
+                record,
+                "validate Sandbox OCI mappings",
+                format!("OCI {kind} mapping {index} is empty or overflows"),
+            ));
+        };
+        if mapping.size == 0 {
+            return Err(snapshot_error(
+                record,
+                "validate Sandbox OCI mappings",
+                format!("OCI {kind} mapping {index} is empty or overflows"),
+            ));
+        }
+        for previous in &mappings[..index] {
+            let previous_container_end = previous
+                .container_id
+                .checked_add(previous.size)
+                .ok_or_else(|| {
+                    snapshot_error(
+                        record,
+                        "validate Sandbox OCI mappings",
+                        format!("OCI {kind} mappings overflow"),
+                    )
+                })?;
+            let previous_host_end =
+                previous.host_id.checked_add(previous.size).ok_or_else(|| {
+                    snapshot_error(
+                        record,
+                        "validate Sandbox OCI mappings",
+                        format!("OCI {kind} mappings overflow"),
+                    )
+                })?;
+            if (mapping.container_id < previous_container_end
+                && previous.container_id < container_end)
+                || (mapping.host_id < previous_host_end && previous.host_id < host_end)
+            {
+                return Err(snapshot_error(
+                    record,
+                    "validate Sandbox OCI mappings",
+                    format!("OCI {kind} mappings overlap"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn maximum_container_id(
+    record: &BoxRecord,
+    kind: &str,
+    mappings: &[crate::sandbox::IdMapping],
+) -> ExecutionManagerResult<u32> {
+    mappings
+        .iter()
+        .filter_map(|mapping| {
+            mapping
+                .container_id
+                .checked_add(mapping.size)
+                .and_then(|end| end.checked_sub(1))
+        })
+        .max()
+        .ok_or_else(|| {
+            snapshot_error(
+                record,
+                "validate Sandbox OCI mappings",
+                format!("OCI {kind} mappings have no covered IDs"),
+            )
+        })
 }
 
 fn build_snapshot_metadata(

@@ -201,6 +201,7 @@ dependencies = [
  "der",
  "dirs",
  "ecdsa",
+ "filetime",
  "flate2",
  "hex",
  "libc",
@@ -231,6 +232,7 @@ dependencies = [
  "uuid",
  "windows-sys 0.48.0",
  "x509-cert",
+ "xattr",
  "xz2",
  "zstd",
 ]

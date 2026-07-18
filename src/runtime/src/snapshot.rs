@@ -11,10 +11,17 @@ use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::rootfs_metadata::RootfsMetadataManifest;
+#[cfg(test)]
+use a3s_box_core::rootfs_metadata::{IMAGE_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH};
 use a3s_box_core::snapshot::SnapshotMetadata;
 use a3s_box_core::SnapshotStoreBackend;
 
 use crate::file_lock::FileLock;
+
+mod copy;
+
+use copy::{copy_dir_recursive, dir_size, install_rootfs_metadata};
 
 /// Persistent store for VM snapshots.
 pub struct SnapshotStore {
@@ -79,8 +86,29 @@ impl SnapshotStore {
     /// Returns the updated metadata with `size_bytes` populated.
     pub fn save(
         &self,
+        metadata: SnapshotMetadata,
+        rootfs_source: &Path,
+    ) -> Result<SnapshotMetadata> {
+        self.save_inner(metadata, rootfs_source, None)
+    }
+
+    /// Save a managed Sandbox snapshot with an authoritative terminal rootfs
+    /// metadata manifest captured while the source execution is quiesced.
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn save_managed(
+        &self,
+        metadata: SnapshotMetadata,
+        rootfs_source: &Path,
+        rootfs_metadata: &RootfsMetadataManifest,
+    ) -> Result<SnapshotMetadata> {
+        self.save_inner(metadata, rootfs_source, Some(rootfs_metadata))
+    }
+
+    fn save_inner(
+        &self,
         mut metadata: SnapshotMetadata,
         rootfs_source: &Path,
+        rootfs_metadata: Option<&RootfsMetadataManifest>,
     ) -> Result<SnapshotMetadata> {
         let _lock = FileLock::acquire(&self.base_dir.join(".snapshot-store")).map_err(|e| {
             BoxError::CacheError(format!(
@@ -102,25 +130,20 @@ impl SnapshotStore {
         // leaves at most a `<id>.staging-*` dir (GC-able), never a partial
         // `<id>/` that get/list ignore (they key on metadata.json) yet that
         // blocks re-create and never prunes.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
-        let staging = self.base_dir.join(format!(
-            ".staging-{}-{}-{}",
-            metadata.id,
-            std::process::id(),
-            STAGE_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&staging);
-        std::fs::create_dir_all(&staging).map_err(|e| {
-            BoxError::CacheError(format!(
-                "Failed to create snapshot staging directory {}: {}",
-                staging.display(),
-                e
-            ))
-        })?;
+        let staging_prefix = format!(".staging-{}-{}-", metadata.id, std::process::id());
+        let staging = tempfile::Builder::new()
+            .prefix(&staging_prefix)
+            .tempdir_in(&self.base_dir)
+            .map_err(|e| {
+                BoxError::CacheError(format!(
+                    "Failed to create snapshot staging directory in {}: {}",
+                    self.base_dir.display(),
+                    e
+                ))
+            })?;
 
         // Copy rootfs if source exists
-        let rootfs_dest = staging.join("rootfs");
+        let rootfs_dest = staging.path().join("rootfs");
         if rootfs_source.exists() {
             copy_dir_recursive(rootfs_source, &rootfs_dest)?;
         } else {
@@ -128,12 +151,15 @@ impl SnapshotStore {
                 BoxError::CacheError(format!("Failed to create snapshot rootfs directory: {}", e))
             })?;
         }
+        if let Some(rootfs_metadata) = rootfs_metadata {
+            install_rootfs_metadata(&rootfs_dest, rootfs_metadata)?;
+        }
 
         // Calculate size
-        metadata.size_bytes = dir_size(&staging);
+        metadata.size_bytes = dir_size(&rootfs_dest)?;
 
         // Write metadata into the staging dir.
-        let meta_path = staging.join("metadata.json");
+        let meta_path = staging.path().join("metadata.json");
         let json = serde_json::to_string_pretty(&metadata).map_err(|e| {
             BoxError::SerializationError(format!("Failed to serialize snapshot metadata: {}", e))
         })?;
@@ -147,8 +173,7 @@ impl SnapshotStore {
 
         // Atomic publish: the snapshot becomes visible (with its metadata) in one
         // step, or not at all.
-        std::fs::rename(&staging, &snap_dir).map_err(|e| {
-            let _ = std::fs::remove_dir_all(&staging);
+        std::fs::rename(staging.path(), &snap_dir).map_err(|e| {
             BoxError::CacheError(format!(
                 "Failed to publish snapshot {}: {}",
                 snap_dir.display(),
@@ -331,99 +356,6 @@ impl SnapshotStore {
         }
         set
     }
-}
-
-/// Recursively clone a directory while preserving rootfs ownership and modes.
-#[cfg(not(windows))]
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    crate::cache::layer_cache::copy_dir_recursive(src, dst)
-}
-
-/// Windows keeps the portable snapshot copy because the rootfs cache helper
-/// intentionally rejects Windows symlinks. Managed Sandbox snapshots are
-/// Linux-only, but the pre-existing VM Snapshot store remains cross-platform.
-#[cfg(windows)]
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst).map_err(|e| {
-        BoxError::CacheError(format!(
-            "Failed to create directory {}: {}",
-            dst.display(),
-            e
-        ))
-    })?;
-
-    for entry in std::fs::read_dir(src).map_err(|e| {
-        BoxError::CacheError(format!("Failed to read directory {}: {}", src.display(), e))
-    })? {
-        let entry = entry
-            .map_err(|e| BoxError::CacheError(format!("Failed to read directory entry: {}", e)))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        let file_type = entry.file_type().map_err(|e| {
-            BoxError::CacheError(format!(
-                "Failed to read file type for {}: {}",
-                src_path.display(),
-                e
-            ))
-        })?;
-
-        if file_type.is_symlink() {
-            copy_symlink(&src_path, &dst_path)?;
-        } else if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path).map_err(|e| {
-                BoxError::CacheError(format!(
-                    "Failed to copy {} → {}: {}",
-                    src_path.display(),
-                    dst_path.display(),
-                    e
-                ))
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(windows)]
-fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
-    let target = std::fs::read_link(src).map_err(|e| {
-        BoxError::CacheError(format!("Failed to read symlink {}: {}", src.display(), e))
-    })?;
-
-    let is_dir = src.metadata().map(|m| m.is_dir()).unwrap_or(false);
-    let result = if is_dir {
-        std::os::windows::fs::symlink_dir(&target, dst)
-    } else {
-        std::os::windows::fs::symlink_file(&target, dst)
-    };
-    result.map_err(|e| {
-        BoxError::CacheError(format!(
-            "Failed to create symlink {} → {}: {}",
-            dst.display(),
-            target.display(),
-            e
-        ))
-    })?;
-
-    Ok(())
-}
-
-/// Calculate the total size of a directory recursively.
-fn dir_size(path: &Path) -> u64 {
-    let mut total = 0u64;
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                total += dir_size(&p);
-            } else if let Ok(meta) = p.metadata() {
-                total += meta.len();
-            }
-        }
-    }
-    total
 }
 
 impl SnapshotStoreBackend for SnapshotStore {
@@ -743,7 +675,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "hello").unwrap();
         std::fs::write(dir.join("b.txt"), "world!").unwrap();
 
-        let size = dir_size(&dir);
+        let size = dir_size(&dir).unwrap();
         assert_eq!(size, 11); // 5 + 6
     }
 
@@ -755,7 +687,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "abc").unwrap();
         std::fs::write(dir.join("sub/b.txt"), "defgh").unwrap();
 
-        let size = dir_size(&dir);
+        let size = dir_size(&dir).unwrap();
         assert_eq!(size, 8); // 3 + 5
     }
 
@@ -764,7 +696,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("empty");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(dir_size(&dir), 0);
+        assert_eq!(dir_size(&dir).unwrap(), 0);
     }
 
     #[test]
@@ -786,6 +718,120 @@ mod tests {
             std::fs::read_to_string(dst.join("sub/b.txt")).unwrap(),
             "world"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_size_does_not_follow_absolute_symlinks() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = TempDir::new().unwrap();
+        let store = SnapshotStore::new(&tmp.path().join("snapshots")).unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        std::fs::create_dir(&rootfs).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::write(&outside, vec![0_u8; 64 * 1024]).unwrap();
+        std::os::unix::fs::symlink(&outside, rootfs.join("outside-link")).unwrap();
+
+        let saved = store
+            .save(make_metadata("symlink-size", "symlink-size"), &rootfs)
+            .unwrap();
+
+        assert_eq!(
+            saved.size_bytes,
+            outside.as_os_str().as_bytes().len() as u64
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_preserves_hardlinks_and_xattrs() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let store = SnapshotStore::new(&tmp.path().join("snapshots")).unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        std::fs::create_dir(&rootfs).unwrap();
+        let first = rootfs.join("first");
+        let second = rootfs.join("second");
+        std::fs::write(&first, b"shared inode").unwrap();
+        std::fs::hard_link(&first, &second).unwrap();
+        xattr::set(&first, "user.a3s.snapshot", b"preserved").unwrap();
+
+        let saved = store
+            .save(make_metadata("hardlink-xattr", "hardlink-xattr"), &rootfs)
+            .unwrap();
+        let captured = store.rootfs_path(&saved.id);
+        let captured_first = std::fs::metadata(captured.join("first")).unwrap();
+        let captured_second = std::fs::metadata(captured.join("second")).unwrap();
+
+        assert_eq!(captured_first.dev(), captured_second.dev());
+        assert_eq!(captured_first.ino(), captured_second.ino());
+        assert_eq!(saved.size_bytes, b"shared inode".len() as u64);
+        assert_eq!(
+            xattr::get(captured.join("first"), "user.a3s.snapshot").unwrap(),
+            Some(b"preserved".to_vec())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_rejects_fifo_without_leaking_staging() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = TempDir::new().unwrap();
+        let snapshots = tmp.path().join("snapshots");
+        let store = SnapshotStore::new(&snapshots).unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        std::fs::create_dir(&rootfs).unwrap();
+        let fifo = rootfs.join("blocking-fifo");
+        let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let error = store
+            .save(make_metadata("fifo", "fifo"), &rootfs)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported special file"));
+        assert!(store.get("fifo").unwrap().is_none());
+        assert!(
+            std::fs::read_dir(snapshots)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-")),
+            "failed Snapshot must remove its staging tree"
+        );
+    }
+
+    #[test]
+    fn managed_snapshot_installs_only_terminal_rootfs_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let store = SnapshotStore::new(&tmp.path().join("snapshots")).unwrap();
+        let rootfs = make_rootfs(&tmp);
+        std::fs::write(
+            rootfs.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            b"stale image metadata",
+        )
+        .unwrap();
+        let manifest = RootfsMetadataManifest::new(Vec::new());
+
+        store
+            .save_managed(
+                make_metadata("managed-metadata", "managed-metadata"),
+                &rootfs,
+                &manifest,
+            )
+            .unwrap();
+
+        let captured = store.rootfs_path("managed-metadata");
+        assert!(!captured
+            .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            .exists());
+        let stored: RootfsMetadataManifest = serde_json::from_slice(
+            &std::fs::read(captured.join(ROOTFS_METADATA_PATH.trim_start_matches('/'))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored, manifest);
     }
 
     #[test]

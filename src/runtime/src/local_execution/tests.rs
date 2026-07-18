@@ -88,6 +88,8 @@ impl LocalExecutionBackend for FakeBackend {
                 "fake start is unavailable".to_string(),
             ));
         }
+        #[cfg(target_os = "linux")]
+        write_fake_sandbox_bundle(record)?;
         let handle = Self::handle(record);
         executions.insert(
             record.id.clone(),
@@ -197,6 +199,42 @@ impl LocalExecutionBackend for FakeBackend {
         }
         Ok(KillOutcome::Killed)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn write_fake_sandbox_bundle(record: &BoxRecord) -> ExecutionManagerResult<()> {
+    let bundle = record.box_dir.join("sandbox/bundle");
+    std::fs::create_dir_all(&bundle).map_err(|error| {
+        ExecutionManagerError::Internal(format!("failed to create fake OCI bundle: {error}"))
+    })?;
+    let config = serde_json::json!({
+        "ociVersion": "1.1.0",
+        "root": {
+            "path": record.box_dir.join("rootfs"),
+            "readonly": false
+        },
+        "linux": {
+            "uidMappings": [{
+                "containerID": 0,
+                "hostID": unsafe { libc::geteuid() },
+                "size": 1
+            }],
+            "gidMappings": [{
+                "containerID": 0,
+                "hostID": unsafe { libc::getegid() },
+                "size": 1
+            }]
+        }
+    });
+    std::fs::write(
+        bundle.join("config.json"),
+        serde_json::to_vec(&config).map_err(|error| {
+            ExecutionManagerError::Internal(format!("failed to encode fake OCI bundle: {error}"))
+        })?,
+    )
+    .map_err(|error| {
+        ExecutionManagerError::Internal(format!("failed to write fake OCI bundle: {error}"))
+    })
 }
 
 fn harness() -> (tempfile::TempDir, LocalExecutionManager, Arc<FakeBackend>) {
@@ -1572,6 +1610,57 @@ async fn snapshot_failure_restores_running_state_at_the_same_generation() {
             .unwrap(),
         None
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn special_file_snapshot_failure_resumes_running_source() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let (directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("special-file-source"),
+            &operation("special-file-create"),
+        )
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "still-running");
+    let rootfs = persisted(&manager, &running.execution_id)
+        .box_dir
+        .join("rootfs");
+    let fifo = rootfs.join("workspace/blocking-fifo");
+    let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+    let snapshot_id = ExecutionSnapshotId::new("special-file-snapshot").unwrap();
+
+    let error = manager
+        .create_filesystem_snapshot(&running.execution_id, running.generation, &snapshot_id)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("unsupported special file") && message.contains("fifo")
+    ));
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Running
+    );
+    assert_eq!(
+        manager
+            .filesystem_snapshot_size(&snapshot_id)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(std::fs::read_dir(directory.path().join("home/snapshots"))
+        .unwrap()
+        .flatten()
+        .all(|entry| !entry.file_name().to_string_lossy().starts_with(".staging-")));
 }
 
 #[tokio::test]
