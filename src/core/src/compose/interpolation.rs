@@ -42,6 +42,13 @@ pub fn interpolate_compose_yaml(
     serde_yaml::to_string(&yaml).map_err(ComposeInterpolationError::from)
 }
 
+pub(super) fn interpolate_compose_scalar(
+    input: &str,
+    environment: &HashMap<String, String>,
+) -> Result<String, ComposeInterpolationError> {
+    interpolate_scalar(input, environment, 0)
+}
+
 fn interpolate_value(
     value: &mut serde_yaml::Value,
     environment: &HashMap<String, String>,

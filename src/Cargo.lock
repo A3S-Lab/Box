@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "a3s-acl"
-version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/ACL.git?rev=6e2a6469edc0f4c61b1e588d0ace873aaf15ce22#6e2a6469edc0f4c61b1e588d0ace873aaf15ce22"
+version = "0.2.2"
+source = "git+https://github.com/A3S-Lab/ACL.git?rev=fc041758758eba89dd5d22a3414d884c158c9ac1#fc041758758eba89dd5d22a3414d884c158c9ac1"
 
 [[package]]
 name = "a3s-box-cli"
@@ -83,6 +83,7 @@ dependencies = [
 name = "a3s-box-core"
 version = "3.0.10"
 dependencies = [
+ "a3s-acl",
  "a3s-common",
  "async-trait",
  "base64 0.22.1",

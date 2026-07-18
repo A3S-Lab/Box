@@ -1,6 +1,15 @@
 //! `a3s-box compose` command — Multi-container orchestration.
 //!
-//! Subcommands: `up`, `down`, `ps`, `config`.
+//! Project discovery, service selection, and lifecycle operations are kept in
+//! this command while individual box behavior is delegated to the existing
+//! single-box commands.
+
+mod args;
+mod lifecycle;
+mod operations;
+mod read;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,94 +17,52 @@ use std::path::PathBuf;
 use a3s_box_core::compose::{ComposeConfig, ServiceConfig};
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::{ComposeProject, NetworkStore, VmManager};
-use clap::{Args, Subcommand};
+use sha2::{Digest, Sha256};
 
 use super::common;
 use crate::state::{BoxRecord, HealthCheck, StateFile};
 use crate::status;
 
+pub use args::{ComposeArgs, ComposeCommand, ComposeDownArgs, ComposeLogsArgs, ComposeUpArgs};
+use lifecycle::{
+    cleanup_partial_service_box, cleanup_service_box, execute_down, rollback_compose_up,
+    rollback_with_current, stop_service_process, ServiceBox,
+};
+use operations::{ComposeStopArgs, ProjectServicesArgs};
+use read::{execute_config, execute_logs, execute_ps};
+
 /// Label key for compose project name.
 const LABEL_PROJECT: &str = "com.a3s.compose.project";
 /// Label key for compose service name.
 const LABEL_SERVICE: &str = "com.a3s.compose.service";
+/// Label key for the normalized service configuration digest.
+const LABEL_CONFIG_HASH: &str = "com.a3s.compose.config-hash";
+type ExistingService = (ServiceBox, Option<String>);
 
 /// Default compose file names to search for.
 const COMPOSE_FILES: &[&str] = &[
+    "compose.acl",
     "compose.yaml",
     "compose.yml",
     "docker-compose.yaml",
     "docker-compose.yml",
 ];
 
-#[derive(Args)]
-pub struct ComposeArgs {
-    /// Path to compose file (default: compose.yaml or docker-compose.yml)
-    #[arg(short = 'f', long = "file")]
-    pub file: Option<PathBuf>,
-
-    /// Project name (default: directory name)
-    #[arg(short = 'p', long = "project-name")]
-    pub project_name: Option<String>,
-
-    #[command(subcommand)]
-    pub command: ComposeCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ComposeCommand {
-    /// Create and start all services
-    Up(ComposeUpArgs),
-    /// Stop and remove all services
-    Down(ComposeDownArgs),
-    /// List services and their status
-    Ps,
-    /// Validate and display the compose configuration
-    Config,
-    /// View logs from all services
-    Logs(ComposeLogsArgs),
-}
-
-#[derive(Args)]
-pub struct ComposeUpArgs {
-    /// Run in detached mode (background)
-    #[arg(short = 'd', long)]
-    pub detach: bool,
-
-    /// Timeout in seconds to wait for healthy dependencies (default: 120)
-    #[arg(long, default_value = "120")]
-    pub timeout: u64,
-
-    /// Use the shared-kernel sandbox backend (omit for MicroVM isolation)
-    #[arg(long, value_enum)]
-    pub isolation: Option<common::IsolationArg>,
-}
-
-#[derive(Args)]
-pub struct ComposeDownArgs {
-    /// Remove named volumes declared in the compose file
-    #[arg(short = 'v', long)]
-    pub volumes: bool,
-}
-
-#[derive(Args)]
-pub struct ComposeLogsArgs {
-    /// Follow log output
-    #[arg(short = 'f', long)]
-    pub follow: bool,
-
-    /// Number of lines to show from the end of the logs
-    #[arg(long, default_value = "100")]
-    pub tail: usize,
-
-    /// Show logs for a specific service only
-    pub service: Option<String>,
-}
-
 pub async fn execute(args: ComposeArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let (compose_path, config) = load_compose_file(args.file.as_deref())?;
+    let ComposeArgs {
+        file,
+        project_name,
+        command,
+    } = args;
+
+    if let ComposeCommand::Ls(ls_args) = command {
+        return operations::execute_ls(ls_args).await;
+    }
+
+    let (compose_path, config) = load_compose_file(file.as_deref())?;
 
     // Derive project name from flag or directory name
-    let project_name = args.project_name.unwrap_or_else(|| {
+    let project_name = project_name.unwrap_or_else(|| {
         compose_path
             .parent()
             .and_then(|p| p.file_name())
@@ -104,14 +71,60 @@ pub async fn execute(args: ComposeArgs) -> Result<(), Box<dyn std::error::Error>
             .to_string()
     });
 
-    match args.command {
+    match command {
         ComposeCommand::Up(up_args) => {
             execute_up(&project_name, config, compose_path, up_args).await
         }
-        ComposeCommand::Down(down_args) => execute_down(&project_name, down_args).await,
-        ComposeCommand::Ps => execute_ps(&project_name).await,
+        ComposeCommand::Down(down_args) => execute_down(&project_name, &config, down_args).await,
+        ComposeCommand::Ps(command_args) => execute_ps(&project_name, &config, command_args).await,
         ComposeCommand::Config => execute_config(&project_name, config),
-        ComposeCommand::Logs(logs_args) => execute_logs(&project_name, logs_args).await,
+        ComposeCommand::Logs(logs_args) => execute_logs(&project_name, &config, logs_args).await,
+        ComposeCommand::Start(command_args) => {
+            operations::execute_start(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Stop(command_args) => {
+            operations::execute_stop(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Restart(command_args) => {
+            operations::execute_restart(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Rm(command_args) => {
+            operations::execute_rm(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Kill(command_args) => {
+            operations::execute_kill(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Pause(command_args) => {
+            operations::execute_pause(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Unpause(command_args) => {
+            operations::execute_unpause(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Wait(command_args) => {
+            operations::execute_wait(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Exec(command_args) => {
+            operations::execute_exec(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Top(command_args) => {
+            operations::execute_top(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Port(command_args) => {
+            operations::execute_port(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Cp(command_args) => {
+            operations::execute_cp(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Images(command_args) => {
+            operations::execute_images(&project_name, &config, command_args)
+        }
+        ComposeCommand::Pull(command_args) => {
+            operations::execute_pull(&project_name, &config, command_args).await
+        }
+        ComposeCommand::Volumes => operations::execute_volumes(&project_name, &config),
+        ComposeCommand::Ls(_) => {
+            Err("Compose ls was not dispatched before project file loading".into())
+        }
     }
 }
 
@@ -126,27 +139,10 @@ fn load_compose_file_with_environment(
     explicit_path: Option<&std::path::Path>,
     shell_environment: impl IntoIterator<Item = (String, String)>,
 ) -> Result<(PathBuf, ComposeConfig), Box<dyn std::error::Error>> {
-    let path = if let Some(p) = explicit_path {
-        if !p.exists() {
-            return Err(format!("Compose file not found: {}", p.display()).into());
-        }
-        p.to_path_buf()
-    } else {
-        // Search for default compose files in current directory
-        let cwd = std::env::current_dir()?;
-        COMPOSE_FILES
-            .iter()
-            .map(|name| cwd.join(name))
-            .find(|p| p.exists())
-            .ok_or_else(|| {
-                format!(
-                    "No compose file found. Looked for: {}",
-                    COMPOSE_FILES.join(", ")
-                )
-            })?
-    };
+    let cwd = std::env::current_dir()?;
+    let path = resolve_compose_path(explicit_path, &cwd)?;
 
-    let yaml = std::fs::read_to_string(&path)
+    let source = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
     let mut environment = HashMap::new();
@@ -172,12 +168,46 @@ fn load_compose_file_with_environment(
     }
     environment.extend(shell_environment);
 
-    let yaml = a3s_box_core::compose::interpolate_compose_yaml(&yaml, &environment)
-        .map_err(|e| format!("Failed to interpolate {}: {}", path.display(), e))?;
-    let config = ComposeConfig::from_yaml_str(&yaml)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    let config = if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("acl"))
+    {
+        ComposeConfig::from_acl_str_with_environment(&source, &environment)
+            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?
+    } else {
+        let source = a3s_box_core::compose::interpolate_compose_yaml(&source, &environment)
+            .map_err(|e| format!("Failed to interpolate {}: {}", path.display(), e))?;
+        ComposeConfig::from_yaml_str(&source)
+            .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?
+    };
 
     Ok((path, config))
+}
+
+fn resolve_compose_path(
+    explicit_path: Option<&std::path::Path>,
+    search_directory: &std::path::Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(p) = explicit_path {
+        if !p.exists() {
+            return Err(format!("Compose file not found: {}", p.display()).into());
+        }
+        Ok(p.to_path_buf())
+    } else {
+        match COMPOSE_FILES
+            .iter()
+            .map(|name| search_directory.join(name))
+            .find(|p| p.exists())
+        {
+            Some(path) => Ok(path),
+            None => Err(format!(
+                "No compose file found. Looked for: {}",
+                COMPOSE_FILES.join(", ")
+            )
+            .into()),
+        }
+    }
 }
 
 fn validate_compose_restart_policies(config: &ComposeConfig) -> Result<(), String> {
@@ -214,6 +244,7 @@ async fn execute_up(
     up_args: ComposeUpArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let isolation = common::resolve_isolation(up_args.isolation);
+    let config = operations::select_up_config(config, &up_args.services)?;
     let base_dir = compose_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -229,29 +260,6 @@ async fn execute_up(
         }
     }
     let mut state = StateFile::load_default()?;
-
-    // Check for already-active services
-    let existing = state.find_by_label(LABEL_PROJECT, project_name);
-    let active: Vec<_> = existing
-        .iter()
-        .filter(|record| status::is_active(record))
-        .collect();
-    if !active.is_empty() {
-        let names: Vec<_> = active
-            .iter()
-            .filter_map(|r| r.labels.get(LABEL_SERVICE))
-            .collect();
-        return Err(format!(
-            "Project '{}' already has active services: {}. Run `compose down` first.",
-            project_name,
-            names
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-        .into());
-    }
 
     // Step 1: Create networks
     let networks = project.required_networks();
@@ -329,6 +337,29 @@ async fn execute_up(
     );
 
     for svc_name in &project.service_order {
+        let service = project.config.services.get(svc_name).ok_or_else(|| {
+            format!("Service '{svc_name}' disappeared from the resolved Compose project")
+        })?;
+        let mut desired_box_config = project.build_box_config(svc_name, Some(&default_net))?;
+        desired_box_config.isolation = isolation;
+        let config_hash = service_config_hash(service, &desired_box_config)?;
+        if let Some((existing, existing_hash)) = find_existing_service(project_name, svc_name)? {
+            if existing.is_active() && existing_hash.as_deref() == Some(config_hash.as_str()) {
+                println!("  [=] {} is unchanged and already running", svc_name);
+                continue;
+            }
+
+            if existing.is_active() {
+                println!("  [~] Recreating changed service {}...", svc_name);
+                stop_service_process(&existing).await;
+            } else {
+                println!("  [~] Recreating existing service {}...", svc_name);
+            }
+            StateFile::remove_record(&existing.box_id)?;
+            state.forget(&existing.box_id);
+            cleanup_service_box(&existing);
+        }
+
         // Wait for healthy dependencies before booting this service
         let health_deps = project.health_wait_deps(svc_name);
         if !health_deps.is_empty() {
@@ -370,19 +401,7 @@ async fn execute_up(
             println!(" ✓");
         }
 
-        let mut box_config = match project.build_box_config(svc_name, Some(&default_net)) {
-            Ok(config) => config,
-            Err(error) => {
-                return rollback_compose_up(
-                    &mut state,
-                    &started_services,
-                    &created_networks,
-                    error,
-                )
-                .await;
-            }
-        };
-        box_config.isolation = isolation;
+        let mut box_config = desired_box_config;
         let (resolved_volumes, volume_names) = match resolve_service_volumes(&box_config.volumes) {
             Ok(volumes) => volumes,
             Err(error) => {
@@ -413,13 +432,30 @@ async fn execute_up(
         let mut vm = VmManager::new(box_config, emitter);
         let box_id = vm.box_id().to_string();
         let box_dir = home.join("boxes").join(&box_id);
+        let initial_exec_socket_path = box_dir.join("sockets").join("exec.sock");
 
         // Create box directory structure
         if let Err(error) = std::fs::create_dir_all(box_dir.join("sockets")) {
+            cleanup_partial_service_box(
+                &box_id,
+                &box_dir,
+                &initial_exec_socket_path,
+                network_name.as_deref(),
+                &volume_names,
+                &[],
+            );
             return rollback_compose_up(&mut state, &started_services, &created_networks, error)
                 .await;
         }
         if let Err(error) = std::fs::create_dir_all(box_dir.join("logs")) {
+            cleanup_partial_service_box(
+                &box_id,
+                &box_dir,
+                &initial_exec_socket_path,
+                network_name.as_deref(),
+                &volume_names,
+                &[],
+            );
             return rollback_compose_up(&mut state, &started_services, &created_networks, error)
                 .await;
         }
@@ -460,6 +496,14 @@ async fn execute_up(
                 ) {
                     Ok(endpoint) => endpoint,
                     Err(error) => {
+                        cleanup_partial_service_box(
+                            &box_id,
+                            &box_dir,
+                            &initial_exec_socket_path,
+                            network_name.as_deref(),
+                            &volume_names,
+                            &[],
+                        );
                         return rollback_compose_up(
                             &mut state,
                             &started_services,
@@ -476,17 +520,14 @@ async fn execute_up(
         }
 
         if let Err(e) = vm.boot().await {
-            crate::cleanup::cleanup_box_resources(&box_id, &volume_names, network_name.as_deref());
-            crate::cleanup::cleanup_external_socket_dir(
+            cleanup_partial_service_box(
+                &box_id,
                 &box_dir,
-                &box_dir.join("sockets/exec.sock"),
+                &initial_exec_socket_path,
+                network_name.as_deref(),
+                &volume_names,
+                vm.anonymous_volumes(),
             );
-            // Release the overlay mount before deleting the box dir, else
-            // remove_dir_all recurses into the live mount ("Stale file handle")
-            // and leaks it — the same class as the rm/restart leak fixed in #33,
-            // which cleanup_box_resources (volumes + network only) does not cover.
-            a3s_box_runtime::rootfs::unmount_box_overlay(&box_dir.join("merged"));
-            let _ = std::fs::remove_dir_all(&box_dir);
             return rollback_compose_up(
                 &mut state,
                 &started_services,
@@ -514,6 +555,7 @@ async fn execute_up(
         let mut labels = svc.map(|s| s.labels.to_map()).unwrap_or_default();
         labels.insert(LABEL_PROJECT.to_string(), project_name.to_string());
         labels.insert(LABEL_SERVICE.to_string(), svc_name.to_string());
+        labels.insert(LABEL_CONFIG_HASH.to_string(), config_hash);
 
         // Get service config for extra fields
         let port_map: Vec<String> = svc.map(|s| s.ports.clone()).unwrap_or_default();
@@ -667,8 +709,76 @@ async fn execute_up(
         println!(" ✓");
     }
 
-    println!("All {} services started.", project.service_order.len());
+    println!("All {} services converged.", project.service_order.len());
+
+    if !up_args.detach {
+        println!("Attaching to project logs. Press Ctrl-C to stop services.");
+        let logs = execute_logs(
+            project_name,
+            &project.config,
+            ComposeLogsArgs {
+                follow: true,
+                tail: 100,
+                services: project.service_order.clone(),
+            },
+        );
+        tokio::select! {
+            result = logs => result?,
+            signal = tokio::signal::ctrl_c() => {
+                signal.map_err(|error| format!("Failed to listen for Ctrl-C: {error}"))?;
+                operations::execute_stop(
+                    project_name,
+                    &project.config,
+                    ComposeStopArgs {
+                        timeout: None,
+                        services: project.service_order.clone(),
+                    },
+                )
+                .await?;
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn service_config_hash(
+    service: &ServiceConfig,
+    config: &a3s_box_core::BoxConfig,
+) -> Result<String, serde_json::Error> {
+    let mut normalized = config.clone();
+    normalized.extra_env.sort();
+    let value = serde_json::json!({
+        "service": service,
+        "runtime": normalized,
+    });
+    let encoded = serde_json::to_vec(&value)?;
+    Ok(hex::encode(Sha256::digest(encoded)))
+}
+
+fn find_existing_service(
+    project_name: &str,
+    service_name: &str,
+) -> Result<Option<ExistingService>, Box<dyn std::error::Error>> {
+    let state = StateFile::load_default()?;
+    let matching = state
+        .find_by_label(LABEL_PROJECT, project_name)
+        .into_iter()
+        .filter(|record| record.labels.get(LABEL_SERVICE).map(String::as_str) == Some(service_name))
+        .collect::<Vec<_>>();
+    if matching.len() > 1 {
+        return Err(format!(
+            "service '{service_name}' has {} existing boxes; scaling is not yet enabled for this project",
+            matching.len()
+        )
+        .into());
+    }
+    Ok(matching.first().map(|record| {
+        (
+            ServiceBox::from_record(record),
+            record.labels.get(LABEL_CONFIG_HASH).cloned(),
+        )
+    }))
 }
 
 fn resolve_service_volumes(
@@ -791,696 +901,5 @@ async fn wait_for_completed(
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
-}
-
-// ============================================================================
-// compose down
-// ============================================================================
-
-/// Snapshot of a compose service box for the `down` operation.
-#[derive(Clone)]
-struct ServiceBox {
-    box_id: String,
-    svc_name: String,
-    pid: Option<u32>,
-    status: String,
-    box_dir: PathBuf,
-    exec_socket_path: PathBuf,
-    network_name: Option<String>,
-    volume_names: Vec<String>,
-    anonymous_volumes: Vec<String>,
-    stop_signal: Option<String>,
-    stop_timeout: Option<u64>,
-}
-
-impl ServiceBox {
-    fn from_record(record: &BoxRecord) -> Self {
-        Self {
-            box_id: record.id.clone(),
-            svc_name: record
-                .labels
-                .get(LABEL_SERVICE)
-                .cloned()
-                .unwrap_or_default(),
-            pid: record.pid,
-            status: record.status.clone(),
-            box_dir: record.box_dir.clone(),
-            exec_socket_path: record.exec_socket_path.clone(),
-            network_name: crate::cleanup::record_network_name(record).map(str::to_string),
-            volume_names: record.volume_names.clone(),
-            anonymous_volumes: record.anonymous_volumes.clone(),
-            stop_signal: record.stop_signal.clone(),
-            stop_timeout: record.stop_timeout,
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        status::is_active_status(&self.status)
-    }
-}
-
-fn cleanup_service_box(svc: &ServiceBox) {
-    crate::cleanup::cleanup_box_resources(
-        &svc.box_id,
-        &svc.volume_names,
-        svc.network_name.as_deref(),
-    );
-    crate::cleanup::cleanup_anonymous_volumes(&svc.anonymous_volumes);
-    // Release the overlay mount before deleting the box dir, else remove_dir_all
-    // recurses into the live mount ("Stale file handle") and leaks it (#33).
-    // cleanup_box_resources above only detaches volumes + network, not the mount.
-    a3s_box_runtime::rootfs::unmount_box_overlay(&svc.box_dir.join("merged"));
-    let _ = std::fs::remove_dir_all(&svc.box_dir);
-    crate::cleanup::cleanup_external_socket_dir(&svc.box_dir, &svc.exec_socket_path);
-}
-
-fn rollback_with_current(started_services: &[ServiceBox], current: ServiceBox) -> Vec<ServiceBox> {
-    let mut rollback_services = started_services.to_vec();
-    rollback_services.push(current);
-    rollback_services
-}
-
-async fn rollback_compose_up<T>(
-    state: &mut StateFile,
-    started_services: &[ServiceBox],
-    created_networks: &[String],
-    error: impl Into<Box<dyn std::error::Error>>,
-) -> Result<T, Box<dyn std::error::Error>> {
-    rollback_started_services(state, started_services).await;
-    cleanup_created_networks(created_networks);
-    Err(error.into())
-}
-
-async fn rollback_started_services(state: &mut StateFile, started_services: &[ServiceBox]) {
-    if started_services.is_empty() {
-        return;
-    }
-
-    eprintln!(
-        "  [!] Rolling back {} started service(s)...",
-        started_services.len()
-    );
-
-    for svc in started_services.iter().rev() {
-        stop_service_process(svc).await;
-
-        cleanup_service_box(svc);
-        let _ = state.remove(&svc.box_id);
-    }
-}
-
-async fn stop_service_process(svc: &ServiceBox) {
-    if !svc.is_active() {
-        return;
-    }
-
-    let Some(pid) = svc.pid else {
-        eprintln!(
-            "  Warning: service {} is {} but has no recorded PID; removing stale service state.",
-            svc.svc_name, svc.status
-        );
-        return;
-    };
-
-    if svc.status == "paused" {
-        #[cfg(unix)]
-        if let Err(error) = crate::process::send_signal(pid, libc::SIGCONT) {
-            eprintln!(
-                "  Warning: failed to resume paused service {} before stopping: {}",
-                svc.svc_name, error
-            );
-        }
-    }
-
-    let stop_signal = svc
-        .stop_signal
-        .as_deref()
-        .map(a3s_box_core::vmm::parse_signal_name)
-        .unwrap_or(libc::SIGTERM);
-    let stop_timeout = svc.stop_timeout.unwrap_or(10);
-    let exec_socket = if svc.exec_socket_path.as_os_str().is_empty() {
-        svc.box_dir.join("sockets").join("exec.sock")
-    } else {
-        svc.exec_socket_path.clone()
-    };
-    crate::process::graceful_stop_via_guest(pid, &exec_socket, stop_signal, stop_timeout).await;
-}
-
-fn cleanup_created_networks(created_networks: &[String]) {
-    if created_networks.is_empty() {
-        return;
-    }
-
-    let Ok(net_store) = NetworkStore::default_path() else {
-        return;
-    };
-
-    for net_name in created_networks.iter().rev() {
-        if let Ok(Some(mut net_config)) = net_store.get(net_name) {
-            let endpoint_ids: Vec<_> = net_config.endpoints.keys().cloned().collect();
-            for endpoint_id in endpoint_ids {
-                let _ = net_config.disconnect(&endpoint_id);
-            }
-            let _ = net_store.update(&net_config);
-        }
-
-        if let Err(error) = net_store.remove(net_name) {
-            eprintln!(
-                "  Warning: failed to roll back network {}: {}",
-                net_name, error
-            );
-        }
-    }
-}
-
-/// `compose down` — Stop and remove all services, networks, and optionally volumes.
-async fn execute_down(
-    project_name: &str,
-    down_args: ComposeDownArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = StateFile::load_default()?;
-
-    // Find all boxes belonging to this project
-    let project_boxes: Vec<ServiceBox> = state
-        .find_by_label(LABEL_PROJECT, project_name)
-        .iter()
-        .map(|r| ServiceBox::from_record(r))
-        .collect();
-
-    if project_boxes.is_empty() {
-        println!("No services found for project '{}'.", project_name);
-        return Ok(());
-    }
-
-    println!(
-        "Stopping project '{}' ({} services)...",
-        project_name,
-        project_boxes.len()
-    );
-
-    // Stop in reverse order (last started = first stopped)
-    for svc in project_boxes.iter().rev() {
-        print!("  [-] Stopping {}...", svc.svc_name);
-
-        stop_service_process(svc).await;
-
-        cleanup_service_box(svc);
-        state.remove(&svc.box_id)?;
-
-        println!(" ✓");
-    }
-
-    // Clean up networks
-    if let Ok(net_store) = NetworkStore::default_path() {
-        let prefix = format!("{}_", project_name);
-        if let Ok(all_nets) = net_store.list() {
-            for net in all_nets {
-                if net.name.starts_with(&prefix) {
-                    // Disconnect any remaining endpoints first
-                    if !net.endpoints.is_empty() {
-                        let mut net_config = net.clone();
-                        let ids: Vec<_> = net_config.endpoints.keys().cloned().collect();
-                        for id in ids {
-                            net_config.disconnect(&id).ok();
-                        }
-                        let _ = net_store.update(&net_config);
-                    }
-                    if let Err(e) = net_store.remove(&net.name) {
-                        eprintln!("  Warning: failed to remove network {}: {}", net.name, e);
-                    } else {
-                        println!("  [-] Network {} removed", net.name);
-                    }
-                }
-            }
-        }
-    }
-
-    // Optionally remove named volumes
-    if down_args.volumes {
-        let vol_store = a3s_box_runtime::volume::VolumeStore::default_path()?;
-        let mut removed = 0u32;
-        for svc in &project_boxes {
-            for vol_name in &svc.volume_names {
-                match vol_store.remove(vol_name, true) {
-                    Ok(_) => {
-                        println!("  [-] Volume {} removed", vol_name);
-                        removed += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Warning: failed to remove volume {}: {}", vol_name, e);
-                    }
-                }
-            }
-        }
-        if removed > 0 {
-            println!("  Removed {} volume(s).", removed);
-        }
-    }
-
-    println!("Project '{}' stopped.", project_name);
-    Ok(())
-}
-
-// ============================================================================
-// compose ps
-// ============================================================================
-
-/// `compose ps` — List services and their actual status.
-async fn execute_ps(project_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let state = StateFile::load_default()?;
-    let boxes = state.find_by_label(LABEL_PROJECT, project_name);
-
-    if boxes.is_empty() {
-        println!("No services found for project '{}'.", project_name);
-        return Ok(());
-    }
-
-    println!(
-        "{:<20} {:<30} {:<12} {:<12} {:<10}",
-        "SERVICE", "IMAGE", "STATUS", "HEALTH", "PID"
-    );
-    println!("{}", "-".repeat(84));
-
-    for record in &boxes {
-        let svc_name = record
-            .labels
-            .get(LABEL_SERVICE)
-            .map(|s| s.as_str())
-            .unwrap_or("?");
-        let pid_str = record
-            .pid
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "-".to_string());
-        println!(
-            "{:<20} {:<30} {:<12} {:<12} {:<10}",
-            svc_name, record.image, record.status, record.health_status, pid_str
-        );
-    }
-
-    Ok(())
-}
-
-// ============================================================================
-// compose config
-// ============================================================================
-
-/// `compose config` — Validate and display the parsed compose configuration.
-fn execute_config(
-    project_name: &str,
-    config: ComposeConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    validate_compose_restart_policies(&config)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let project = ComposeProject::new(project_name, config)?;
-
-    println!("Project: {}", project_name);
-    println!("Services: {}", project.config.services.len());
-    println!("Networks: {}", project.required_networks().len());
-    println!("Volumes: {}", project.config.volumes.len());
-    println!("\nBoot order: {}", project.service_order.join(" → "));
-
-    for svc_name in &project.service_order {
-        if let Some(svc) = project.config.services.get(svc_name) {
-            println!("\n[{}]", svc_name);
-            if let Some(ref img) = svc.image {
-                println!("  image: {}", img);
-            }
-            if !svc.ports.is_empty() {
-                println!("  ports: {}", svc.ports.join(", "));
-            }
-            if !svc.volumes.is_empty() {
-                println!("  volumes: {}", svc.volumes.join(", "));
-            }
-            let deps = svc.depends_on.services();
-            if !deps.is_empty() {
-                println!("  depends_on: {}", deps.join(", "));
-            }
-            let env = svc.environment.to_pairs();
-            if !env.is_empty() {
-                println!("  environment:");
-                for (k, v) in &env {
-                    println!("    {}={}", k, v);
-                }
-            }
-        }
-    }
-
-    println!("\nConfiguration is valid.");
-    Ok(())
-}
-
-// ============================================================================
-// compose logs
-// ============================================================================
-
-/// `compose logs` — View logs from all (or one) service in the project.
-async fn execute_logs(
-    project_name: &str,
-    logs_args: ComposeLogsArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state = StateFile::load_default()?;
-    let boxes = state.find_by_label(LABEL_PROJECT, project_name);
-
-    if boxes.is_empty() {
-        println!("No services found for project '{}'.", project_name);
-        return Ok(());
-    }
-
-    // Filter to specific service if requested
-    let targets: Vec<_> = if let Some(ref svc) = logs_args.service {
-        boxes
-            .iter()
-            .filter(|r| {
-                r.labels
-                    .get(LABEL_SERVICE)
-                    .map(|s| s == svc)
-                    .unwrap_or(false)
-            })
-            .collect()
-    } else {
-        boxes.iter().collect()
-    };
-
-    if targets.is_empty() {
-        if let Some(ref svc) = logs_args.service {
-            return Err(
-                format!("Service '{}' not found in project '{}'.", svc, project_name).into(),
-            );
-        }
-    }
-
-    for record in &targets {
-        let svc_name = record
-            .labels
-            .get(LABEL_SERVICE)
-            .map(|s| s.as_str())
-            .unwrap_or("?");
-
-        let log_path = record.console_log.clone();
-        if !log_path.exists() {
-            println!("[{}] (no logs)", svc_name);
-            continue;
-        }
-
-        let content = std::fs::read_to_string(&log_path)
-            .map_err(|e| format!("Failed to read logs for {}: {}", svc_name, e))?;
-
-        let lines: Vec<&str> = content.lines().collect();
-        let start = lines.len().saturating_sub(logs_args.tail);
-        let prefix = if targets.len() > 1 {
-            format!("{} | ", svc_name)
-        } else {
-            String::new()
-        };
-
-        for line in &lines[start..] {
-            println!("{}{}", prefix, line);
-        }
-    }
-
-    if logs_args.follow {
-        println!("(follow mode: use Ctrl-C to stop)");
-        // In follow mode, tail all log files concurrently
-        // For simplicity, we poll every second
-        let mut last_sizes: HashMap<String, u64> = HashMap::new();
-        for record in &targets {
-            let size = std::fs::metadata(&record.console_log)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            last_sizes.insert(record.id.clone(), size);
-        }
-
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-            for record in &targets {
-                let log_path = &record.console_log;
-                let current_size = std::fs::metadata(log_path).map(|m| m.len()).unwrap_or(0);
-                let last_size = last_sizes.get(&record.id).copied().unwrap_or(0);
-
-                if current_size > last_size {
-                    let svc_name = record
-                        .labels
-                        .get(LABEL_SERVICE)
-                        .map(|s| s.as_str())
-                        .unwrap_or("?");
-                    let prefix = if targets.len() > 1 {
-                        format!("{} | ", svc_name)
-                    } else {
-                        String::new()
-                    };
-
-                    if let Ok(file) = std::fs::File::open(log_path) {
-                        use std::io::{Read, Seek, SeekFrom};
-                        let mut file = file;
-                        if file.seek(SeekFrom::Start(last_size)).is_ok() {
-                            let mut buf = String::new();
-                            if file.read_to_string(&mut buf).is_ok() {
-                                for line in buf.lines() {
-                                    println!("{}{}", prefix, line);
-                                }
-                            }
-                        }
-                    }
-
-                    last_sizes.insert(record.id.clone(), current_size);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_load_compose_file_not_found() {
-        let result = load_compose_file(Some(std::path::Path::new("/nonexistent/compose.yaml")));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
-    }
-
-    #[test]
-    fn test_load_compose_file_interpolates_dotenv_and_shell_before_validation() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let compose_path = directory.path().join("compose.yaml");
-        std::fs::write(
-            &compose_path,
-            r#"
-services:
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    environment:
-      DASH_EMPTY: ${EMPTY-default}
-      COLON_DASH_EMPTY: ${EMPTY:-default}
-      PLUS_EMPTY: ${EMPTY+replacement}
-      COLON_PLUS_EMPTY: ${EMPTY:+replacement}
-      DOTENV_ONLY: ${DOTENV_ONLY}
-      SHELL_WINS: ${SHELL_WINS}
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            directory.path().join(".env"),
-            "REDIS_PORT=6379\nEMPTY=\nDOTENV_ONLY=dotenv\nSHELL_WINS=dotenv\n",
-        )
-        .unwrap();
-        let shell = HashMap::from([
-            ("REDIS_PORT".to_string(), "16379".to_string()),
-            ("SHELL_WINS".to_string(), "shell".to_string()),
-        ]);
-
-        let (_, config) = load_compose_file_with_environment(Some(&compose_path), shell).unwrap();
-        let service = &config.services["redis"];
-        assert_eq!(service.ports, vec!["16379:6379"]);
-        let environment: HashMap<_, _> = service.environment.to_pairs().into_iter().collect();
-        assert_eq!(environment["DASH_EMPTY"], "");
-        assert_eq!(environment["COLON_DASH_EMPTY"], "default");
-        assert_eq!(environment["PLUS_EMPTY"], "replacement");
-        assert_eq!(environment["COLON_PLUS_EMPTY"], "");
-        assert_eq!(environment["DOTENV_ONLY"], "dotenv");
-        assert_eq!(environment["SHELL_WINS"], "shell");
-
-        a3s_box_runtime::ComposeProject::with_base_dir("test", config, directory.path())
-            .expect("interpolation must run before port validation");
-    }
-
-    #[test]
-    fn test_load_compose_file_reports_unreadable_dotenv() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let compose_path = directory.path().join("compose.yaml");
-        std::fs::write(&compose_path, "services: {}\n").unwrap();
-        std::fs::create_dir(directory.path().join(".env")).unwrap();
-
-        let error = load_compose_file_with_environment(
-            Some(&compose_path),
-            HashMap::<String, String>::new(),
-        )
-        .unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("Failed to read Compose environment file"));
-        assert!(error.to_string().contains(".env"));
-    }
-
-    #[test]
-    fn test_compose_files_constant() {
-        assert_eq!(COMPOSE_FILES.len(), 4);
-        assert!(COMPOSE_FILES.contains(&"compose.yaml"));
-        assert!(COMPOSE_FILES.contains(&"docker-compose.yml"));
-    }
-
-    #[test]
-    fn test_label_constants() {
-        assert_eq!(LABEL_PROJECT, "com.a3s.compose.project");
-        assert_eq!(LABEL_SERVICE, "com.a3s.compose.service");
-    }
-
-    #[test]
-    fn test_service_restart_policy_normalizes_on_failure_limit() {
-        let service = ServiceConfig {
-            restart: Some("on-failure:3".to_string()),
-            ..Default::default()
-        };
-
-        let (policy, max_count) = service_restart_policy("web", Some(&service)).unwrap();
-
-        assert_eq!(policy, "on-failure");
-        assert_eq!(max_count, 3);
-    }
-
-    #[test]
-    fn test_validate_compose_restart_policies_rejects_invalid_service_policy() {
-        let mut services = HashMap::new();
-        services.insert(
-            "web".to_string(),
-            ServiceConfig {
-                image: Some("docker.io/library/alpine:latest".to_string()),
-                restart: Some("never".to_string()),
-                ..Default::default()
-            },
-        );
-        let config = ComposeConfig {
-            version: None,
-            services,
-            volumes: HashMap::new(),
-            networks: HashMap::new(),
-        };
-
-        let error = validate_compose_restart_policies(&config).unwrap_err();
-
-        assert!(error.contains("Service 'web' has invalid restart policy"));
-        assert!(error.contains("Invalid restart policy"));
-    }
-
-    #[test]
-    fn test_service_box_from_record_captures_cleanup_fields() {
-        let mut record = crate::test_helpers::fixtures::make_record(
-            "compose-id",
-            "project-web",
-            "running",
-            Some(123),
-        );
-        record
-            .labels
-            .insert(LABEL_SERVICE.to_string(), "web".to_string());
-        record.network_name = Some("project_default".to_string());
-        record.volume_names = vec!["data".to_string()];
-        record.anonymous_volumes = vec!["anon".to_string()];
-        record.stop_signal = Some("SIGINT".to_string());
-        record.stop_timeout = Some(3);
-
-        let service = ServiceBox::from_record(&record);
-
-        assert_eq!(service.box_id, "compose-id");
-        assert_eq!(service.svc_name, "web");
-        assert_eq!(service.pid, Some(123));
-        assert_eq!(service.network_name.as_deref(), Some("project_default"));
-        assert_eq!(service.volume_names, vec!["data".to_string()]);
-        assert_eq!(service.anonymous_volumes, vec!["anon".to_string()]);
-        assert_eq!(service.stop_signal.as_deref(), Some("SIGINT"));
-        assert_eq!(service.stop_timeout, Some(3));
-        assert!(service.is_active());
-    }
-
-    #[test]
-    fn test_service_box_from_record_uses_network_mode_fallback() {
-        let mut record = crate::test_helpers::fixtures::make_record(
-            "compose-id",
-            "project-web",
-            "running",
-            None,
-        );
-        record.network_name = None;
-        record.network_mode = a3s_box_core::NetworkMode::Bridge {
-            network: "legacy_default".to_string(),
-        };
-
-        let service = ServiceBox::from_record(&record);
-
-        assert_eq!(service.network_name.as_deref(), Some("legacy_default"));
-    }
-
-    #[test]
-    fn test_rollback_with_current_appends_current_service() {
-        let mut first_record =
-            crate::test_helpers::fixtures::make_record("first-id", "project-db", "running", None);
-        first_record
-            .labels
-            .insert(LABEL_SERVICE.to_string(), "db".to_string());
-        let mut current_record = crate::test_helpers::fixtures::make_record(
-            "current-id",
-            "project-web",
-            "running",
-            None,
-        );
-        current_record
-            .labels
-            .insert(LABEL_SERVICE.to_string(), "web".to_string());
-
-        let first = ServiceBox::from_record(&first_record);
-        let current = ServiceBox::from_record(&current_record);
-        let rollback_services = rollback_with_current(&[first], current);
-
-        assert_eq!(rollback_services.len(), 2);
-        assert_eq!(rollback_services[0].svc_name, "db");
-        assert_eq!(rollback_services[1].svc_name, "web");
-    }
-
-    #[test]
-    fn test_service_box_paused_is_active() {
-        let mut record =
-            crate::test_helpers::fixtures::make_record("compose-id", "project-web", "paused", None);
-        record
-            .labels
-            .insert(LABEL_SERVICE.to_string(), "web".to_string());
-
-        let service = ServiceBox::from_record(&record);
-
-        assert!(service.is_active());
-    }
-
-    #[test]
-    fn test_service_box_stopped_is_not_active() {
-        let mut record = crate::test_helpers::fixtures::make_record(
-            "compose-id",
-            "project-web",
-            "stopped",
-            None,
-        );
-        record
-            .labels
-            .insert(LABEL_SERVICE.to_string(), "web".to_string());
-
-        let service = ServiceBox::from_record(&record);
-
-        assert!(!service.is_active());
     }
 }

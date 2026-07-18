@@ -16,6 +16,15 @@ use std::time::Duration;
 mod support;
 use support::*;
 
+fn inspect_box(cli: &CliTest, name: &str) -> serde_json::Value {
+    let value: serde_json::Value =
+        serde_json::from_str(&cli.ok(&["inspect", name])).expect("box inspect JSON");
+    match value {
+        serde_json::Value::Array(mut records) if !records.is_empty() => records.remove(0),
+        other => other,
+    }
+}
+
 #[test]
 #[ignore]
 #[cfg(target_os = "linux")]
@@ -385,30 +394,47 @@ fn test_real_vm_command_matrix() {
 
 #[test]
 #[ignore]
-fn test_real_compose_smoke() {
+fn test_real_compose_acl_smoke() {
     let cli = CliTest::new();
     let image = host_smoke_image();
     let boot_timeout = host_smoke_timeout(45);
     let project = "covcompose";
     let service_box = "covcompose-worker";
+    let unowned_network = "covcompose_unowned";
+    let socket_dirs_before = host_socket_dirs();
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve Compose host port");
+    let host_port = listener.local_addr().expect("reserved host address").port();
+    drop(listener);
 
     cleanup(&cli, service_box);
     seed_runnable_alpine_image(&cli, &image);
+    cli.ok(&[
+        "network",
+        "create",
+        unowned_network,
+        "--subnet",
+        "10.126.0.0/24",
+    ]);
 
     let compose_dir = cli.home_path().join("compose");
     std::fs::create_dir_all(&compose_dir).expect("create compose dir");
-    let compose_file = compose_dir.join("compose.yaml");
+    let compose_file = compose_dir.join("compose.acl");
     std::fs::write(
         &compose_file,
         format!(
-            r#"services:
-  worker:
-    image: {image}
-    command: ["sleep", "3600"]
-    environment:
-      A3S_COMPOSE_COVERAGE: "1"
-    labels:
-      purpose: coverage
+            r#"service "worker" {{
+  image = "{image}"
+  command = ["sleep", "3600"]
+  environment = {{ A3S_COMPOSE_COVERAGE = "1" }}
+  labels = {{ purpose = "coverage" }}
+  ports = ["{host_port}:8080"]
+  volumes = ["data:/data"]
+}}
+
+volume "data" {{
+  driver = "local"
+}}
 "#,
         ),
     )
@@ -423,6 +449,16 @@ fn test_real_compose_smoke() {
         project,
         "config",
     ]);
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "pull",
+        "--quiet",
+        "worker",
+    ]);
     cli.ok_status(&[
         "compose",
         "--file",
@@ -433,6 +469,21 @@ fn test_real_compose_smoke() {
         "--detach",
     ]);
     wait_for_running(&cli, service_box, boot_timeout);
+    let first_inspect = inspect_box(&cli, service_box);
+
+    // A second unchanged `up` must converge onto the same service box.
+    cli.ok_status(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "up",
+        "--detach",
+    ]);
+    let second_inspect = inspect_box(&cli, service_box);
+    assert_eq!(first_inspect["id"], second_inspect["id"]);
+
     cli.ok(&[
         "compose",
         "--file",
@@ -451,9 +502,47 @@ fn test_real_compose_smoke() {
         "--tail",
         "20",
     ]);
+    let images = cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "images",
+    ]);
+    assert!(images.contains("worker"));
+    assert!(images.contains(&image));
+    let volumes = cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "volumes",
+    ]);
+    assert_eq!(volumes.trim(), "data");
+    let projects = cli.ok(&["compose", "ls", "--quiet"]);
+    assert!(projects.lines().any(|name| name == project));
+    let published = cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "port",
+        "worker",
+        "8080",
+    ]);
+    assert_eq!(published.trim(), format!("0.0.0.0:{host_port}"));
+
     let env_value = cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
         "exec",
-        service_box,
+        "worker",
         "--",
         "sh",
         "-c",
@@ -466,11 +555,167 @@ fn test_real_compose_smoke() {
         &compose_file_arg,
         "--project-name",
         project,
+        "top",
+        "worker",
+    ]);
+
+    let source = cli.home_path().join("compose-copy-source.txt");
+    let destination = cli.home_path().join("compose-copy-destination.txt");
+    std::fs::write(&source, "compose-copy-ok\n").expect("write Compose copy source");
+    let source_arg = source.to_string_lossy().to_string();
+    let destination_arg = destination.to_string_lossy().to_string();
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "cp",
+        &source_arg,
+        "worker:/tmp/compose-copy.txt",
+    ]);
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "cp",
+        "worker:/tmp/compose-copy.txt",
+        &destination_arg,
+    ]);
+    assert_eq!(
+        std::fs::read_to_string(&destination).expect("read Compose copy destination"),
+        "compose-copy-ok\n"
+    );
+
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "stop",
+        "worker",
+    ]);
+    let stopped = inspect_box(&cli, service_box);
+    assert_eq!(stopped["status"], "stopped");
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "start",
+        "worker",
+    ]);
+    wait_for_running(&cli, service_box, boot_timeout);
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "restart",
+        "worker",
+    ]);
+    wait_for_running(&cli, service_box, boot_timeout);
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "pause",
+        "worker",
+    ]);
+    let paused = inspect_box(&cli, service_box);
+    assert_eq!(paused["status"], "paused");
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "unpause",
+        "worker",
+    ]);
+    wait_for_running(&cli, service_box, boot_timeout);
+
+    let waiter = cli.spawn_background(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "wait",
+        "--no-heartbeat",
+        "worker",
+    ]);
+    std::thread::sleep(Duration::from_secs(1));
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "kill",
+        "--signal",
+        "TERM",
+        "worker",
+    ]);
+    let wait_output = waiter
+        .wait_with_output()
+        .expect("collect Compose wait output");
+    assert!(
+        wait_output.status.success(),
+        "Compose wait failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&wait_output.stdout),
+        String::from_utf8_lossy(&wait_output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&wait_output.stdout).trim(), "143");
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
+        "rm",
+        "worker",
+    ]);
+    cli.ok(&[
+        "compose",
+        "--file",
+        &compose_file_arg,
+        "--project-name",
+        project,
         "down",
+        "--volumes",
     ]);
 
     let ps = cli.ok(&["ps", "-a"]);
     assert!(!ps.contains(service_box));
+    let volume_list = cli.ok(&["volume", "ls"]);
+    assert!(!volume_list
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some("data")));
+    let network_list = cli.ok(&["network", "ls"]);
+    assert!(
+        network_list.contains(unowned_network),
+        "Compose down removed a prefix-matching network it did not own\n{network_list}"
+    );
+    assert!(!network_list.contains("covcompose_default"));
+    cli.ok(&["network", "rm", unowned_network]);
+    let boxes_dir = cli.home_path().join("boxes");
+    let remaining_boxes = std::fs::read_dir(&boxes_dir)
+        .map(|entries| entries.filter_map(Result::ok).collect::<Vec<_>>())
+        .unwrap_or_default();
+    assert!(
+        remaining_boxes.is_empty(),
+        "compose down left box storage or a mounted rootfs under {}",
+        boxes_dir.display()
+    );
+    assert_no_new_host_socket_dirs(&socket_dirs_before);
 }
 
 /// Warm-pool daemon end-to-end: `pool start` pre-warms VMs, then `pool run`
