@@ -106,15 +106,46 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build Rust lifecycle fixture server
         run: cd src && cargo build -p a3s-box-compat --bin a3s-box-e2b-fixture-server
+      - name: Test production client harness
+        run: python3 compat/e2b/fixtures/official-clients/test_run_production.py -v
       - name: Verify official client lifecycle requests
         run: >-
           python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify
           --rust-server-bin src/target/debug/a3s-box-e2b-fixture-server
 
+  # ── Native Python and TypeScript SDK package gate ─────────────
+  sdk-packages:
+    name: SDK Packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - name: Build and test Python package
+        run: |
+          python -m pip install build
+          python -m build sdk/python
+          python -m venv /tmp/a3s-box-python-sdk
+          /tmp/a3s-box-python-sdk/bin/pip install sdk/python/dist/*.whl
+          /tmp/a3s-box-python-sdk/bin/python -m unittest discover -s sdk/python/tests
+      - name: Build and test TypeScript package
+        working-directory: sdk/typescript
+        run: |
+          npm ci
+          npm run build
+          npm test
+          npm pack --dry-run
+
   # ── Build check (compile only, no artifacts) ────────────────────
   build-check:
     name: Build Check (${{ matrix.target }})
-    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients]
+    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages]
     strategy:
       matrix:
         include:
@@ -155,12 +186,13 @@ jobs:
           cargo check --release -p a3s-box-cli -p a3s-box-shim
           if [ "${{ runner.os }}" = "Linux" ]; then
             cargo check --release -p a3s-box-cri
+            cargo check --release -p a3s-box-compat --bin a3s-box-e2b
           fi
 
   # ── Windows native WHPX build check ────────────────────────────
   build-windows:
     name: Build Windows WHPX
-    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients]
+    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -202,7 +234,7 @@ jobs:
   # Until both are done this job is SKIPPED (inert) and never blocks a PR.
   integration-kvm:
     name: Integration (real microVM, KVM)
-    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients]
+    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages]
     if: vars.KVM_CI == 'true'
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 75

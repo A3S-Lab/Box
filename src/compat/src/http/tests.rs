@@ -50,7 +50,7 @@ fn app() -> Router {
         Arc::new(TestCredentialVerifier),
         Arc::new(TestCursorDecoder),
         LifecycleHttpConfig {
-            domain: Some("fixture.invalid".to_string()),
+            domain: Some("fixture.invalid:3443".to_string()),
             ..LifecycleHttpConfig::default()
         },
     ))
@@ -77,7 +77,7 @@ async fn router_serves_the_pinned_official_lifecycle_shape() {
     assert_eq!(created["clientID"], "fixture-client");
     assert_eq!(created["envdAccessToken"], "fixture-envd-token");
     assert_eq!(created["trafficAccessToken"], "fixture-traffic-token");
-    assert_eq!(created["domain"], "fixture.invalid");
+    assert_eq!(created["domain"], "fixture.invalid:3443");
 
     let response = send(
         &app,

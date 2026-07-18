@@ -10,8 +10,8 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::control::{
-    LifecyclePolicy, NewSandboxRecord, OnTimeoutAction, PublicSandboxState, SandboxCredentials,
-    StoredToken,
+    EnvdMode, LifecyclePolicy, NewSandboxRecord, OnTimeoutAction, PublicSandboxState,
+    SandboxCredentials, StoredToken,
 };
 
 fn instant(second: u32) -> DateTime<Utc> {
@@ -76,12 +76,14 @@ fn running_record_at(
         expires_at: created_at + Duration::seconds(300),
         metadata,
         envd_version: "0.1.3".to_string(),
+        envd_mode: EnvdMode::Broker,
         secure: true,
         allow_internet_access: Some(false),
         credentials: SandboxCredentials {
             envd: stored_token(10),
             traffic: stored_token(20),
         },
+        routing: crate::routing::SandboxRoutePolicy::default(),
     })
     .unwrap();
     record
@@ -229,6 +231,7 @@ async fn records_survive_restart_and_cas_rejects_stale_writers() {
     assert_eq!(loaded.owner_id(), "owner-1");
     assert_eq!(loaded.execution_id(), record.execution_id());
     assert_eq!(loaded.credentials(), record.credentials());
+    assert_eq!(loaded.routing(), record.routing());
 
     let expected = loaded.generation();
     let mut replacement = loaded.clone();

@@ -37,6 +37,41 @@ jobs:
           workspaces: src
       - run: cd src && cargo test --workspace --lib
 
+  # ── Build native SDK release assets ───────────────────────────
+  sdk:
+    name: Build SDK packages
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - name: Build and verify Python package
+        run: |
+          mkdir -p sdk-artifacts
+          python -m pip install build
+          python -m build sdk/python --outdir "$GITHUB_WORKSPACE/sdk-artifacts"
+          python -m venv /tmp/a3s-box-python-sdk
+          /tmp/a3s-box-python-sdk/bin/pip install sdk-artifacts/*.whl
+          /tmp/a3s-box-python-sdk/bin/python -m unittest discover -s sdk/python/tests
+      - name: Build and verify TypeScript package
+        working-directory: sdk/typescript
+        run: |
+          npm ci
+          npm run build
+          npm test
+          npm pack --pack-destination "$GITHUB_WORKSPACE/sdk-artifacts"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sdk-packages
+          path: sdk-artifacts/*
+
   # ── Build matrix ───────────────────────────────────────────────
   build:
     name: Build (${{ matrix.target }})
@@ -98,6 +133,7 @@ jobs:
           cargo build --release -p a3s-box-cli -p a3s-box-shim
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             cargo build --release -p a3s-box-cri
+            cargo build --release -p a3s-box-compat --bin a3s-box-e2b
           fi
 
       - name: Build guest binaries
@@ -124,6 +160,7 @@ jobs:
 
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             cp src/target/release/a3s-box-cri "$DIR/"
+            cp src/target/release/a3s-box-e2b "$DIR/"
           fi
 
           cp "src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" "$DIR/"
@@ -150,6 +187,7 @@ jobs:
             done
             if [ "${{ matrix.build_cri }}" = "true" ]; then
               patchelf --set-rpath '$ORIGIN/lib' "$DIR/a3s-box-cri" 2>/dev/null || true
+              patchelf --set-rpath '$ORIGIN/lib' "$DIR/a3s-box-e2b" 2>/dev/null || true
             fi
           fi
 
@@ -171,7 +209,7 @@ jobs:
   # ── Create GitHub Release ──────────────────────────────────────
   release:
     name: GitHub Release
-    needs: build
+    needs: [build, sdk]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
@@ -188,6 +226,8 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/**/*.tar.gz
+            artifacts/**/*.whl
+            artifacts/**/*.tgz
 
   # ── Publish to crates.io ───────────────────────────────────────
   publish-crates:
@@ -320,6 +360,7 @@ jobs:
               bin.install "a3s-box-shim"
               bin.install "a3s-box-guest-init"
               bin.install "a3s-box-cri" if File.exist?("a3s-box-cri")
+              bin.install "a3s-box-e2b" if File.exist?("a3s-box-e2b")
               lib.install Dir["lib/*"] if Dir.exist?("lib")
             end
 

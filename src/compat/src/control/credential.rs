@@ -123,7 +123,8 @@ impl fmt::Debug for IssuedToken {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TokenScope {
     Envd,
     Traffic,
@@ -133,6 +134,8 @@ pub enum TokenScope {
 pub enum TokenIssuerError {
     #[error("token material is invalid")]
     InvalidMaterial,
+    #[error("token key version {0} is not configured")]
+    UnknownKeyVersion(u32),
     #[error("token provider is unavailable: {0}")]
     Unavailable(String),
 }
@@ -146,5 +149,19 @@ pub trait TokenIssuer: Send + Sync {
 
 #[async_trait]
 pub trait TokenResolver: Send + Sync {
-    async fn resolve(&self, stored: &StoredToken) -> TokenIssuerResult<SecretToken>;
+    async fn resolve(
+        &self,
+        scope: TokenScope,
+        stored: &StoredToken,
+    ) -> TokenIssuerResult<SecretToken>;
+}
+
+#[async_trait]
+pub trait TokenVerifier: Send + Sync {
+    async fn verify(
+        &self,
+        scope: TokenScope,
+        presented: &SecretToken,
+        stored: &StoredToken,
+    ) -> TokenIssuerResult<bool>;
 }

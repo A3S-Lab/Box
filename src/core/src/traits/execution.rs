@@ -1,11 +1,15 @@
 //! Backend-neutral lifecycle interface for managed A3S executions.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU16;
+use std::pin::Pin;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::config::{BoxConfig, ResourceConfig};
 use crate::execution::ResolvedExecutionPlan;
@@ -371,6 +375,29 @@ pub enum ExecutionManagerError {
 }
 
 pub type ExecutionManagerResult<T> = std::result::Result<T, ExecutionManagerError>;
+
+/// Bidirectional byte stream connected to one generation-fenced workload port.
+pub trait ExecutionPortIo: AsyncRead + AsyncWrite + Send + Unpin {}
+
+impl<T> ExecutionPortIo for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
+
+pub type ExecutionPortStream = Pin<Box<dyn ExecutionPortIo>>;
+
+/// Backend-neutral connector used by data-plane gateways.
+///
+/// Implementations must validate the execution generation atomically with
+/// selecting the live runtime. A connector must never fall back to another
+/// execution or generation when the requested runtime is unavailable.
+#[async_trait]
+pub trait ExecutionPortConnector: Send + Sync {
+    async fn connect_port(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        port: NonZeroU16,
+        timeout: Duration,
+    ) -> ExecutionManagerResult<ExecutionPortStream>;
+}
 
 /// Backend-neutral lifecycle facade shared by the CLI, SDK, and remote service.
 #[async_trait]

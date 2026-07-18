@@ -1,38 +1,45 @@
 # A3S Box
 
 <p align="center">
-  <strong>A kernel per workload — at container speed.</strong>
+  <strong>OCI Workload Runtime for MicroVMs and Sandboxes</strong>
 </p>
 
 <p align="center">
-  <em>A Docker-like runtime that runs each Linux OCI workload inside its own libkrun MicroVM. VM-grade isolation — a real kernel per box, with optional hardware TEE — brought to container-class startup and density by native Copy-on-Write snapshot-fork.</em>
+  <em>Run Linux OCI workloads in a hardware-backed MicroVM by default, or explicitly choose a low-overhead shared-kernel Sandbox on certified Linux hosts.</em>
 </p>
 
 ---
 
-## Why A3S Box
+## Overview
 
-**The tradeoff every runtime forces on you.** Containers are fast and dense, but they share the host kernel — one kernel bug or escape crosses every tenant on the box. Virtual machines isolate with their own kernel, but they are slow and heavy to start and to scale. You pick *speed* or *isolation*.
+A3S Box is an OCI workload runtime with a Docker-like CLI and two explicit
+execution backends. The default path boots each workload in its own
+[libkrun](https://github.com/containers/libkrun) MicroVM. Linux operators can
+instead request `--isolation sandbox` to run through certified
+[crun](https://github.com/containers/crun) with namespaces, seccomp,
+capabilities, `no_new_privs`, and cgroup v2.
 
-**A3S Box collapses that tradeoff.** Every box is a real MicroVM with its own Linux kernel — yet native Copy-on-Write **snapshot-fork** clones a *booted* template instead of cold-booting each one, so a VM starts and scales like a container. Strong isolation stops being a thing you pay for in latency and footprint.
+The two modes are deliberately not presented as equivalent. A MicroVM has a
+separate guest kernel and a hardware-virtualization boundary. A Sandbox shares
+the host Linux kernel and is intended for agent tools, benchmarks, and
+development automation whose threat model does not include a working kernel
+exploit. Box never falls back from MicroVM to Sandbox when virtualization is
+unavailable.
 
-Measured on a `/dev/kvm` host (not aspirational):
-
-| | A3S Box | Why it matters |
-| --- | --- | --- |
-| **Isolation** | A real Linux kernel per workload, optional AMD SEV-SNP confidential computing | A guest kernel bug stays in the guest — unlike a shared-kernel container escape |
-| **Cold start** | ~200 ms | Already VM-fast, before forking |
-| **Snapshot-fork** | ~110 ms per fork · 100 forks in **under ~1 s** (~8 ms amortized) · ~13 MB RSS each | VM density and startup at *container* scale |
-| **Warm pool** | a pre-booted box served in ~73 ms (~23× vs cold), CoW-filled | Sub-100 ms acquire for bursty/agent workloads |
-| **Developer surface** | `run` / `build` / `exec` / `logs` / `compose`, OCI images, Kubernetes CRI, a Rust SDK (programmable CI pipelines) | No new mental model — your Docker workflow, unchanged |
-
-In one line: **the isolation of a VM, the startup and density of a container, the ergonomics of Docker.** That is the core of A3S Box. Everything below is an honest account of how far each surface is actually built.
+The local CLI and Rust SDK are the primary product surfaces. OCI Sandbox
+execution, the E2B protocol service, Kubernetes integration, TEE workflows,
+and Windows support have different maturity and host requirements; the status
+table below states those boundaries explicitly.
 
 ## Current status
 
-A3S Box is built toward production use, but it is not a full Docker, containerd, or Kubernetes replacement yet. The local CLI runtime is the primary product surface. Kubernetes CRI, hardware TEE, and Windows support exist in code paths but should be treated as integration surfaces that need host-specific validation before production use.
-
-As of **v2.4.0**, three adversarial audits — production-operability (24 findings), untrusted-input security (4, including a critical registry-digest path-traversal), and concurrency/atomicity (4) — have been closed, every fix verified on real microVMs. The merged tree is validated end-to-end: a composed-main CI integration run on a real `/dev/kvm` host, a **2-hour / 4584-operation endurance soak with zero resource leak**, and complex **stateful** workloads (named-volume persistence across stop/start and restart, a stateful database surviving a restart, and a web server). Net: the local CLI runtime is suitable for **controlled production** with trusted-to-semi-trusted workloads; adversarial multi-tenant deployment at large scale still benefits from independent scale testing and an external security review.
+A3S Box is not a full Docker, containerd, or Kubernetes replacement. An
+implemented API is also not automatically a production guarantee for every
+host or threat model. Release claims require the host-backed gates documented
+in [Host Integration](docs/host-integration.md), while cluster and CRI gaps
+remain explicit in
+[Production Cluster Tests](docs/production-cluster-tests.md) and
+[CRI Conformance](docs/cri-conformance.md).
 
 | Area | Status today |
 | --- | --- |
@@ -41,16 +48,29 @@ As of **v2.4.0**, three adversarial audits — production-operability (24 findin
 | Dockerfile build | Honest subset. `FROM`, metadata instructions, `COPY`/`ADD`, and shell/exec-form `RUN` are implemented by the host engine on Linux. `--run-pool` can execute `RUN` through a leased warm-pool VM by mounting the mutable build rootfs into the guest. On macOS, auto `RUN` builds still delegate to BuildKit inside an A3S Linux VM (`--builder=buildkit-vm`) unless `--run-pool` is selected; unsafe host execution remains an explicit experiment-only escape hatch. |
 | Lifecycle and exec | `run`, `create`, `start`, `stop`, `restart`, `rm`, `wait`, foreground/detached runs, non-PTY exec, PTY exec, logs, stats, and inspect are implemented. |
 | OCI Sandbox | Linux-only, explicit `--isolation sandbox` shared-kernel execution through certified `crun`. Structured `json-file` logs preserve stdout/stderr identity for foreground, detached, natural-exit, stop, kill, and auto-remove paths. Generation-owned log workers are PID-start-time fenced, drained before archival, and recovered during cleanup. The security-negative matrix and performance gate remain release work; this mode does not claim MicroVM-equivalent isolation. |
+| E2B protocol preview | The ACL-configured service covers lifecycle, TLS routing, terminal health, and a host Process broker. The immutable runtime-image gate drives pinned Python sync/async and TypeScript clients through Filesystem operations, foreground/background commands, stdin, PTY resize, and Code Interpreter execution/context lifecycle on real `crun` Sandboxes. Typed source packages are built but unpublished. Exhaustive Process/PTY, signed-file, public-port, rich interpreter, MCP, and full release matrices remain incomplete; `full_compatibility=false`. |
 | Warm pool and snapshot-fork | A warm pool serves pre-booted sandboxes over a socket. Native snapshot-fork (Copy-on-Write microVM cloning) snapshots one booted template and restores many forks from it, each mapping the template RAM `MAP_PRIVATE`. Verified on `/dev/kvm`: ~4× faster than a cold boot per fork, 100 forks in under ~1 s (~8 ms amortized each). Requires `/dev/kvm`; opt in with `pool start --snapshot-fork` or the `KRUN_SNAPSHOT_*` / `KRUN_RESTORE_FROM` env. |
 | Networking | Default TSI networking, TCP `host:guest` publishing, user-defined bridge networks, network inspect/connect/disconnect/rm, and `/etc/hosts` peer discovery are implemented with documented platform boundaries. |
-| Compose | A useful local subset is implemented: image, command, entrypoint, env, env_file, ports, volumes, depends_on, networks, DNS, tmpfs, workdir, hostname, extra_hosts, labels, healthcheck, restart, CPU/memory, capabilities, and privileged mode. |
+| Compose | Canonical `compose.acl` applications and an explicit Docker Compose-compatible YAML subset are implemented, including convergent `up`, project-scoped lifecycle commands, dependency conditions, health checks, networks, volumes, ports, and runtime/security settings. |
 | TEE | AMD SEV-SNP-oriented attestation, RA-TLS, sealing, and secret injection flows exist, plus simulation mode for development. Hardware-backed operation depends on SEV-SNP-capable hosts and libkrun support. TDX is not a productized path. |
 | Kubernetes CRI | Reachable by `crictl`/kubelet over its Unix socket. Verified on a `/dev/kvm` host: pod + container lifecycle (`RunPodSandbox` → `CreateContainer` → `StartContainer` → `Stop`/`Remove`), `exec` over Kubernetes SPDY/3.1 `remotecommand` (TTY and non-TTY, stdin/stdout/stderr, exit codes), and container log capture to `log_path`. Not yet conformant: `attach` and the stricter `critest` specs (log format, Linux SecurityContext, seccomp/AppArmor, namespaces, mount propagation). Linux-only; not the core completion target. **RuntimeClass:** a one-command per-node installer (`deploy/scripts/install-runtimeclass.sh`) registers the `io.containerd.a3s-box.v2` runtime, and `runtimeClassName: a3s-box` is validated end-to-end (pod start + `kubectl exec`) across a 5-node cluster — see [Deploy as a Kubernetes RuntimeClass](#deploy-as-a-kubernetes-runtimeclass). |
-| Windows | Native WHPX backend through libkrun. The Windows package runs directly on Windows with Windows Hypervisor Platform enabled; it does not require WSL. Windows CRI is intentionally out of scope. |
+| Windows | Native x86_64 WHPX/libkrun code paths exist and do not require WSL. Windows remains a host-specific integration surface; standard release automation currently focuses on Linux and macOS, and Windows CRI is out of scope. |
 
-## What A3S Box is
+## Isolation model
 
-A3S Box is a **MicroVM runtime**. It takes a Linux OCI image, prepares a root filesystem, boots a small VM with libkrun, and runs the image process under guest-init. It is designed for stronger isolation than a namespace-only container while keeping a Docker-like developer workflow.
+A3S Box takes a Linux OCI image and resolves it to either the default MicroVM
+backend or the explicitly selected shared-kernel Sandbox backend. Backend
+selection is deterministic, persisted with managed executions, and never
+silently falls back. Use the default MicroVM backend when a separate guest
+kernel or hardware virtualization boundary is required.
+
+| Property | Default MicroVM | `--isolation sandbox` |
+| --- | --- | --- |
+| Runtime | libkrun | Certified `crun` |
+| Isolation class | Hardware VM with a dedicated guest kernel | Shared host kernel |
+| Intended workload | Stronger tenant boundaries and untrusted workloads | Trusted or semi-trusted tools, benchmarks, and automation |
+| TEE, warm pool, snapshot-fork | Supported on qualifying hosts | Rejected |
+| Automatic fallback | Never | Never |
 
 A3S Box is not:
 
@@ -80,6 +100,12 @@ produced a passing evidence bundle at
 `src/target/a3s-box-soak/20260629T120916Z-22543` with 407 seconds of runtime,
 4 resource samples, zero failed iterations, and no shim/mount/socket/box-dir
 growth.
+
+On July 18, 2026, the focused canonical `compose.acl` host smoke also passed on
+macOS arm64/HVF with `docker.io/library/alpine:latest`. It covered unchanged
+`up` convergence, pull/project views, exec/top/port/copy, stop/start/restart,
+pause/unpause, kill/wait/remove, `down -v`, and final Box/socket cleanup. This
+focused result does not replace the full macOS/Linux host matrix release gate.
 
 For **v2.4.0**, the merged tree was additionally validated on a real Linux
 `/dev/kvm` host: the composed-main CI integration suite passed; a **2-hour
@@ -303,7 +329,16 @@ The `snapshot` command produces configuration/filesystem-oriented Box snapshots,
 
 ## SDK
 
-`a3s-box-sdk` is the Rust SDK for A3S Box, published to crates.io. Today it provides a **programmable CI/CD pipeline** API (`a3s_box_sdk::pipeline`): a pipeline is a Rust program and each step runs in its **own MicroVM** (one kernel per step), forking a warmed snapshot via copy-on-write `snapshot restore`. It is a dependency-free wrapper over the `a3s-box` CLI — the DAG is your code, not YAML.
+`a3s-box-sdk` is the Rust SDK for A3S Box, published to crates.io. Its default
+`A3sBoxClient` calls runtime stores, sockets, and the same generation-fenced
+execution manager as the CLI without spawning the CLI. It exposes typed managed
+lifecycle, image, volume, network, snapshot, diagnostics, exec, and file APIs;
+see [`src/sdk/README.md`](src/sdk/README.md) for the direct client.
+
+The optional `pipeline-cli` feature provides a **programmable CI/CD pipeline**
+API (`a3s_box_sdk::pipeline`): a pipeline is a Rust program and each step runs
+in its **own MicroVM** (one kernel per step), forking a warmed snapshot via
+copy-on-write `snapshot restore`. The DAG is your code, not YAML.
 
 ```rust
 use a3s_box_sdk::pipeline::{warm_base, WarmBase, FileCache, Step};
@@ -328,12 +363,53 @@ Interpreter contracts under [`compat/e2b/`](compat/e2b/README.md). CI regenerate
 their endpoint, field, error, descriptor, and public-export inventories and
 rejects unreviewed protocol drift.
 
+| Client | Pinned version |
+| --- | ---: |
+| Python `e2b` | 2.32.0 |
+| TypeScript `e2b` | 2.33.0 |
+| Python `e2b-code-interpreter` | 2.8.1 |
+| TypeScript `@e2b/code-interpreter` | 2.6.1 |
+
+The typed [`a3s-box` Python package](sdk/python/README.md) and
+[`@a3s-lab/box` TypeScript package](sdk/typescript/README.md) re-export those
+pinned official SDK surfaces and provide per-call A3S endpoint configuration.
+CI builds, installs, and tests both packages, and release automation produces
+wheel, source, and npm tarball artifacts. They are source-tree previews and
+are not yet published to PyPI or npm. The destructive production runner can
+repeat its complete runtime-image matrix through both A3S packages after the
+unchanged official clients pass.
+
+Native SDK users configure `A3S_BOX_ENDPOINT` and `A3S_BOX_API_KEY`; conventional
+`https://api.<domain>` endpoints derive the Sandbox routing domain automatically.
+Lifecycle responses advertise the public direct Sandbox authority, including a
+configured non-standard TLS port, so normal deployments do not require a
+process-global Sandbox URL override.
+
 The Phase 2 preview includes an owner-scoped Rust lifecycle router for create,
 connect, get, list, timeout, and kill; a SQLite WAL repository with
 generation-fenced transitions and restart reconciliation; and a canonical
 runtime `ExecutionManager` with a production VM/Sandbox backend. CI runs the
 pinned official Python sync/async, TypeScript, and Code Interpreter clients
 against the router through an in-memory repository and fake execution manager.
+An opt-in A3S OS gate installs those same checksum-pinned packages without
+modification and runs them against the ACL-configured production process and
+real `crun` Sandboxes. Python sync, Python async, and TypeScript each cover
+create, connect, filtered list, timeout replacement, kill, and not-found
+behavior. The tested base packages are Python `e2b` 2.32.0 in sync and async
+modes and TypeScript `e2b` 2.33.0. All three run one foreground `commands.run`
+through the ConnectRPC JSON transport as the image's default non-root user and
+verify its stdout, empty stderr, and successful exit on a real `crun`
+execution. Python `e2b-code-interpreter` 2.8.1 and TypeScript
+`@e2b/code-interpreter` 2.6.1 participate in the runtime-image execution gate.
+That mode additionally exercises Filesystem create/read/stat/list/rename/remove,
+background commands with process listing and stdin close, PTY allocation and
+resize, and Code Interpreter execution plus context create/list/restart/remove.
+Each Python sync/async, TypeScript, and Code
+Interpreter object also calls its official `is_running`/`isRunning` method
+through the production TLS gateway. Running checks follow the template's
+broker/runtime placement; post-kill checks use host-resolved terminal health,
+returning `true` while running and `false` after termination.
+
 Managed creation requests also persist a typed caller policy for names,
 restart and health behavior, logging, stop behavior, and local resource
 metadata. An idempotent retry therefore cannot silently reuse a reservation
@@ -347,22 +423,73 @@ that structured Sandbox logs retain both stdout and stderr, drain final records
 before natural-exit or auto-remove archival, and leave no generation log worker,
 crun state, box directory, or socket behind.
 
-Those protocol and runtime tests are not yet one end-to-end service path. CLI
-`create` now persists its reservation and complete caller policy through the
-canonical manager, and the first `start` of that reservation consumes its
-persisted generation through the same manager. The production backend prepares
-named-volume and network ownership idempotently and rolls back only resources
-acquired by a failed start attempt. Ordinary `start` does not revive a terminal
-managed execution. CLI `restart` now uses a durable two-phase operation that
-terminates the old runtime before advancing the generation, recovers ambiguous
-kill/start responses from backend evidence, and rebinds local resources without
-duplicating ownership. CLI `run` now reserves and starts through the same
-manager, freezes image-defined health and stop defaults into the durable
-request, and leaves network, volume, rootfs, stop, and auto-remove ownership to
-the managed backend. The Rust SDK still needs migration. The production
-HCL service, encrypted credentials, generation-fenced route leases, wildcard
-TLS gateway, envd data plane, and real official-client Sandbox suite also
-remain open gates.
+The first production E2B data-plane slices are now implemented, while the full
+envd surface remains incomplete. CLI `create` persists its reservation and
+complete caller policy through the canonical manager, and the first `start` of
+that reservation consumes its persisted generation through the same manager.
+The production backend prepares named-volume and network ownership
+idempotently and rolls back only resources acquired by a failed start attempt.
+Ordinary `start` does not revive a terminal managed execution. CLI `restart`
+uses a durable two-phase operation that terminates the old runtime before
+advancing the generation, recovers ambiguous kill/start responses from backend
+evidence, and rebinds local resources without duplicating ownership. CLI `run`
+reserves and starts through the same manager, freezes image-defined health and
+stop defaults into the durable request, and leaves network, volume, rootfs,
+stop, and auto-remove ownership to the managed backend. The Rust SDK exposes
+typed create, start, run, inspect, pause, resume, restart, kill, and
+reconciliation calls through that same manager.
+
+The `a3s-box-e2b` process accepts only `.acl` configuration parsed by `a3s-acl`.
+It composes SQLite lifecycle state, the canonical runtime manager, production
+credential providers, startup reconciliation, periodic expiry reaping, and
+graceful shutdown. Account keys use salted PBKDF2-SHA256 hashes; scope-separated
+sandbox tokens use AES-256-GCM, independent HMAC validation, and versioned key
+rotation. Route policy is persisted with each lifecycle record, and strict
+wildcard/shared parsing projects immutable leases fenced by generation, expiry,
+port, and token scope without a second mutable routing state.
+
+Each template persists an explicit envd placement. Broker mode handles the
+implemented envd routes on the host. Runtime mode forwards health, Process,
+Filesystem, and file HTTP requests to port `49983` inside the exact
+generation-fenced Sandbox. A runtime-mode sandbox remains unpublished until
+that port accepts a fenced connection; readiness failure stops the execution
+and leaves its lifecycle record hidden.
+
+The production wildcard TLS gateway supports HTTP/1.1 and HTTP/2 clients over
+both direct and shared sandbox routes. It validates each lease, applies CORS,
+strips edge credentials, and enters the real `crun` network namespace through a
+generation- and PID-fenced connector. As with the official E2B sandbox proxy,
+the plaintext Sandbox origin is contacted with HTTP/1.1, including when the
+downstream client uses HTTP/2; the origin is not required to provide h2c.
+Authenticated terminal `GET /health` remains host-resolved after kill so a
+scope-valid envd token receives the `502` response expected by official SDK
+running-state methods without reopening a route lease. An invalid token remains
+unauthorized. Ordinary traffic continues through the fenced Sandbox
+network-namespace proxy.
+
+The first Process broker slice is also implemented. It uses generation-scoped
+synthetic process IDs and supports Start, JSON-framed Connect, List, SendInput,
+CloseStdin, SIGKILL, PTY Start/resize, and ordered start, output, keepalive, and
+end events. The pinned Python sync/async and TypeScript runtime-image clients
+cover foreground and background commands, process listing, stdin/close, wait,
+and one PTY resize flow. Client-streaming `StreamInput`, SIGTERM and other
+signals, binary Connect framing, the complete PTY/reconnect/backpressure
+matrix, and durable process recovery across service restart are not yet
+compatibility claims.
+
+An A3S OS production smoke test exercises this path on a real `crun` OCI
+Sandbox created with `--isolation sandbox`. It verifies lifecycle operations,
+host envd health over both TLS route forms, a real traffic-token-protected
+workload service on port `49999`, invalid and scope-swapped token denial,
+service-restart recovery, stale-route fencing after kill, authenticated
+terminal health, and complete runtime cleanup. The same A3S OS gate runs the
+unchanged official clients through both running and post-kill health checks and
+the runtime data-plane cases described above. Failed runs can preserve the
+Sandbox PID, `crun` state, OCI bundle, and service logs for diagnosis. The
+remaining envd HTTP endpoints, exhaustive Process and PTY matrices, Filesystem
+watches and signed URLs, official public-port coverage, rich multi-language
+Code Interpreter behavior, MCP, native package publication, and the complete
+production package matrix remain open release gates.
 
 The server, native Python/TypeScript packages, and unchanged-official-client
 black-box suites follow the phased design in
@@ -480,17 +607,62 @@ a3s-box port api
 
 Published ports support TCP only in `host_port:guest_port[/tcp]` form. UDP, host-IP binds such as `127.0.0.1:8080:80`, single-port shorthand, and ranges are rejected during CLI or Compose validation. `network connect` and `network disconnect` apply to inactive boxes; live hot-plug is not implemented. Strict/custom network policy modes are rejected until packet filtering is implemented.
 
-## Compose subset
+## Compose applications
 
-```bash
-a3s-box compose -f compose.yaml config
-a3s-box compose -f compose.yaml up -d
-a3s-box compose -f compose.yaml ps
-a3s-box compose -f compose.yaml logs -f
-a3s-box compose -f compose.yaml down
+`compose.acl` is the canonical project file and is discovered automatically:
+
+```acl
+service "api" {
+  image = "ghcr.io/a3s-lab/api:latest"
+  command = ["serve"]
+  environment = { PORT = "8080" }
+  ports = ["8080:8080"]
+  depends_on = ["db"]
+}
+
+service "db" {
+  image = "postgres:17"
+  volumes = ["data:/var/lib/postgresql/data"]
+}
+
+volume "data" {
+  driver = "local"
+}
 ```
 
-Supported Compose keys: `image`, `command`, `entrypoint`, `environment`, `env_file`, `ports`, `volumes`, `depends_on` with `service_started` or `service_healthy`, `networks`, `dns`, `tmpfs`, `working_dir`, `hostname`, `extra_hosts`, `labels`, `healthcheck`, `restart`, `cpus`, `mem_limit`, `cap_add`, `cap_drop`, and `privileged`.
+```bash
+a3s-box compose config
+a3s-box compose up -d
+a3s-box compose ps
+a3s-box compose logs -f
+a3s-box compose exec api -- sh
+a3s-box compose restart api
+a3s-box compose stop
+a3s-box compose start
+a3s-box compose down
+```
+
+The project command surface includes `up`, `down`, `ps`, `logs`, `config`,
+`start`, `stop`, `restart`, `rm`, `kill`, `pause`, `unpause`, `wait`, `exec`,
+`top`, `port`, `cp`, `images`, `pull`, `ls`, and `volumes`. Service-scoped
+operations resolve the immutable project and service labels, then reuse the
+same lifecycle commands as individual boxes instead of maintaining a second
+state machine.
+
+`compose up` is convergent. It records a deterministic digest of the effective
+service and runtime configuration, reuses an unchanged running service, and
+recreates a changed or inactive service. Supplying service names limits the
+operation to those services and their transitive dependencies. Without `-d`,
+`up` attaches to prefixed project logs and stops the selected services on
+Ctrl-C; detached mode returns after convergence.
+
+Supported Compose keys: `image`, `command`, `entrypoint`, `environment`, `env_file`, `ports`, `volumes`, `depends_on` with `service_started`, `service_healthy`, or `service_completed_successfully`, `networks`, `dns`, `tmpfs`, `working_dir`, `hostname`, `extra_hosts`, `labels`, `healthcheck`, `restart`, `cpus`, `mem_limit`, `cap_add`, `cap_drop`, and `privileged`.
+
+A3S ACL uses a closed schema: unknown root blocks, nested blocks, attributes,
+types, and functions are rejected instead of being silently ignored. Explicit
+`compose.yaml`, `compose.yml`, `docker-compose.yaml`, and `docker-compose.yml`
+files remain supported as a local Docker Compose-compatible subset, not as a
+claim of full Compose Specification parity.
 
 Compose scalar values support `$VAR`, `${VAR}`, `${VAR-default}`,
 `${VAR:-default}`, `${VAR+replacement}`, and `${VAR:+replacement}` (plus the
@@ -498,6 +670,8 @@ standard required-value forms). Values come from the project `.env` file next
 to the selected Compose file, with the invoking shell environment taking
 precedence. Expansion happens before typed service and port validation;
 mapping keys are not expanded, and `$$` emits a literal dollar sign.
+ACL values may also use `env("NAME")`; it resolves from that same merged
+environment and fails when the variable is absent.
 
 ## TEE workflows
 
@@ -778,6 +952,7 @@ cargo test -p a3s-box-runtime --lib --quiet
 cargo test -p a3s-box-cli --test command_coverage --quiet
 cargo test -p a3s-box-cli --test host_smoke --quiet
 cargo test -p a3s-box-cli --test core_smoke --quiet
+cargo test -p a3s-box-cli --test host_smoke test_real_compose_acl_smoke -- --ignored --exact --nocapture
 ```
 
 Or run the macOS/Linux validation ladder from `crates/box`:

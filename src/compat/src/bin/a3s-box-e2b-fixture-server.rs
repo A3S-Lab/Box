@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use a3s_box_compat::control::{
     Clock, ControlService, ControlServiceDependencies, IdentityProviderResult, IssuedToken,
@@ -17,8 +19,8 @@ use a3s_box_compat::http::{
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionId,
     ExecutionIsolation, ExecutionLease, ExecutionManager, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionReservation, ExecutionState, ExecutionStatus, KillOutcome,
-    OperationId, ReconcileOutcome, ResourceConfig,
+    ExecutionManagerResult, ExecutionPortConnector, ExecutionPortStream, ExecutionReservation,
+    ExecutionState, ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome, ResourceConfig,
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -39,9 +41,11 @@ async fn run() -> Result<()> {
     let port_file = parse_port_file()?;
     let clock = Arc::new(FixedClock(fixture_time()?));
     let tokens = Arc::new(FixtureTokens);
+    let executions = Arc::new(FixtureExecutionManager::new(clock.clone()));
     let service = Arc::new(ControlService::new(ControlServiceDependencies {
         repository: Arc::new(MemorySandboxRepository::default()),
-        executions: Arc::new(FixtureExecutionManager::new(clock.clone())),
+        executions: executions.clone(),
+        ports: executions,
         clock,
         identities: Arc::new(FixtureIdentities::default()),
         templates: Arc::new(FixtureTemplates),
@@ -151,6 +155,17 @@ impl TemplateProvider for FixtureTemplates {
                 ..BoxConfig::default()
             },
             envd_version: "0.1.3".to_string(),
+            envd_mode: a3s_box_compat::control::EnvdMode::Broker,
+            routing: if template_id == "code-interpreter-v1" {
+                a3s_box_compat::routing::SandboxRoutePolicy::default()
+                    .with_port(
+                        a3s_box_compat::routing::CODE_INTERPRETER_PORT,
+                        TokenScope::Traffic,
+                    )
+                    .map_err(|error| TemplateProviderError::Invalid(error.to_string()))?
+            } else {
+                a3s_box_compat::routing::SandboxRoutePolicy::default()
+            },
         })
     }
 }
@@ -173,7 +188,11 @@ impl TokenIssuer for FixtureTokens {
 
 #[async_trait]
 impl TokenResolver for FixtureTokens {
-    async fn resolve(&self, stored: &StoredToken) -> TokenIssuerResult<SecretToken> {
+    async fn resolve(
+        &self,
+        _scope: TokenScope,
+        stored: &StoredToken,
+    ) -> TokenIssuerResult<SecretToken> {
         let digest = Sha256::digest(stored.ciphertext());
         if &digest[..] != stored.digest() {
             return Err(TokenIssuerError::InvalidMaterial);
@@ -445,5 +464,18 @@ impl ExecutionManager for FixtureExecutionManager {
             }
             ExecutionState::Stopped | ExecutionState::Failed => ReconcileOutcome::Failed,
         })
+    }
+}
+
+#[async_trait]
+impl ExecutionPortConnector for FixtureExecutionManager {
+    async fn connect_port(
+        &self,
+        execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _port: NonZeroU16,
+        _timeout: Duration,
+    ) -> ExecutionManagerResult<ExecutionPortStream> {
+        Err(ExecutionManagerError::NotFound(execution_id.clone()))
     }
 }

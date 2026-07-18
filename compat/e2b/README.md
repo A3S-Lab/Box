@@ -61,3 +61,65 @@ vendored sources, inventories, and manifest remain byte-for-byte consistent.
 
 Never edit generated inventories by hand or infer compatibility from matching
 method names alone.
+
+## Production control service
+
+`a3s-box-e2b` composes the lifecycle router with the SQLite repository, the
+canonical A3S runtime manager, production credential providers, startup
+reconciliation, and periodic expiry maintenance. It requires a `.acl` file
+parsed by `a3s-acl`; literal sandbox token keys are rejected in favor of
+`env("VARIABLE")` references.
+
+Run it from the Rust workspace:
+
+```bash
+cargo run --locked -p a3s-box-compat --bin a3s-box-e2b -- \
+  --config /etc/a3s-box/e2b.acl
+```
+
+The validated schema and an operator example are documented in
+[`docs/e2b-compatible-sdk-design.md`](../../docs/e2b-compatible-sdk-design.md#configuration).
+This process exposes the lifecycle control subset plus an authenticated
+wildcard TLS data-plane edge. The edge supports direct and shared route forms,
+HTTP/1.1 and HTTP/2 streaming proxying, CORS preflight, upgrades, bounded
+connections, and generation-fenced access to real Sandbox loopback ports.
+Templates select host-broker or in-Sandbox runtime envd placement explicitly.
+Runtime placement proxies health, Process, Filesystem, and file HTTP routes to
+port `49983` only after a fenced readiness connection succeeds. Authenticated
+terminal health remains host-resolved: it returns the official-client `502`
+for a killed lifecycle record without reopening a live route lease. Invalid
+tokens remain unauthorized. The remaining pinned envd HTTP and ConnectRPC
+protocols are still required before the manifest can set
+`full_compatibility=true`.
+
+The destructive A3S OS integration harness is
+[`scripts/e2b-production-smoke.sh`](../../scripts/e2b-production-smoke.sh). It
+requires a dedicated runtime home and explicit acknowledgement, and verifies a
+real Sandbox lifecycle, TLS direct/shared routing, token-scope denial, service
+restart recovery, host envd health, a traffic-scoped workload service on port
+`49999`, stale-route fencing, authenticated terminal health, and resource
+cleanup. With
+`A3S_BOX_E2B_OFFICIAL_CLIENTS=1`, it additionally runs the checksum-pinned,
+unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
+through the production lifecycle listener, calls their official running-state
+health methods through the TLS gateway before and after kill, and verifies
+cleanup of every real `crun` execution. With the runtime image selected, the
+three base clients also exercise Filesystem create/read/stat/list/rename/remove,
+foreground and background commands, process listing, stdin close, and PTY
+resize. The Code Interpreter clients execute code and cover context
+create/list/restart/remove. This does not establish complete Process,
+Filesystem, PTY, rich-result, or multi-language compatibility.
+
+The default smoke uses the small Alpine broker fixture. Set
+`A3S_BOX_E2B_RUNTIME_IMAGE` to an immutable
+`ghcr.io/a3s-lab/box-e2b-runtime` tag or digest to generate runtime-mode
+template policies and exercise envd plus Code Interpreter health inside that
+image. This mode is destructive and retains the same dedicated-home,
+credential, restart, stale-route, and cleanup requirements.
+
+Set `A3S_BOX_E2B_NATIVE_SDKS=1` together with
+`A3S_BOX_E2B_OFFICIAL_CLIENTS=1` to repeat that same matrix through the
+repository's Python and TypeScript packages. The runner uses the pinned
+official dependencies already installed for the unchanged-client pass, builds
+and packs the native TypeScript package, and keeps A3S endpoint configuration
+local to each client invocation.

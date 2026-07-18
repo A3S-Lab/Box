@@ -155,7 +155,7 @@ pub fn probe_sandbox_capabilities(runtime_path: Option<&Path>) -> SandboxCapabil
         snapshot
             .failures
             .push("Sandbox isolation is supported only on Linux".to_string());
-        return snapshot;
+        snapshot
     }
 
     #[cfg(target_os = "linux")]

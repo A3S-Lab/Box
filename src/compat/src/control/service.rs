@@ -1,17 +1,34 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
-use a3s_box_core::{resolve_execution, CreateExecutionRequest, ExecutionManager, NetworkMode};
+use a3s_box_core::{
+    resolve_execution, CreateExecutionRequest, ExecutionLease, ExecutionManager,
+    ExecutionManagerError, ExecutionPortConnector, NetworkMode,
+};
 use chrono::{DateTime, Duration, Utc};
+use hyper::body::Body;
+use hyper::client::conn;
+use hyper::header::{CONTENT_TYPE, HOST};
+use hyper::{Method, Request, StatusCode};
+use serde::Serialize;
 use thiserror::Error;
+use tracing::debug;
 
 use super::{
-    Clock, CompareAndSwapResult, IdentityProviderError, LifecycleError, LifecycleFailure,
+    Clock, CompareAndSwapResult, EnvdMode, IdentityProviderError, LifecycleError, LifecycleFailure,
     LifecyclePolicy, LifecycleState, NewSandboxRecord, RepositoryError, SandboxCredentials,
     SandboxIdentityProvider, SandboxListFilter, SandboxPage, SandboxRecord, SandboxRepository,
     SecretToken, TemplateProvider, TemplateProviderError, TokenIssuer, TokenIssuerError,
     TokenResolver, TokenScope,
 };
+use crate::routing::ENVD_PORT;
+
+const RUNTIME_ENVD_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const RUNTIME_ENVD_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const RUNTIME_ENVD_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const RUNTIME_ENVD_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+const RUNTIME_ENVD_DEFAULT_USER: &str = "user";
 
 #[derive(Debug, Clone)]
 pub struct CreateSandboxRequest {
@@ -79,6 +96,7 @@ pub type ControlServiceResult<T> = std::result::Result<T, ControlServiceError>;
 pub struct ControlService {
     repository: Arc<dyn SandboxRepository>,
     executions: Arc<dyn ExecutionManager>,
+    ports: Arc<dyn ExecutionPortConnector>,
     clock: Arc<dyn Clock>,
     identities: Arc<dyn SandboxIdentityProvider>,
     templates: Arc<dyn TemplateProvider>,
@@ -89,6 +107,7 @@ pub struct ControlService {
 pub struct ControlServiceDependencies {
     pub repository: Arc<dyn SandboxRepository>,
     pub executions: Arc<dyn ExecutionManager>,
+    pub ports: Arc<dyn ExecutionPortConnector>,
     pub clock: Arc<dyn Clock>,
     pub identities: Arc<dyn SandboxIdentityProvider>,
     pub templates: Arc<dyn TemplateProvider>,
@@ -101,6 +120,7 @@ impl ControlService {
         Self {
             repository: dependencies.repository,
             executions: dependencies.executions,
+            ports: dependencies.ports,
             clock: dependencies.clock,
             identities: dependencies.identities,
             templates: dependencies.templates,
@@ -124,6 +144,7 @@ impl ControlService {
         let mut config = template.config;
         config.resources.timeout = u64::from(request.timeout_seconds);
         config.extra_env.extend(request.env_vars);
+        let runtime_env_vars = config.extra_env.iter().cloned().collect::<BTreeMap<_, _>>();
         match request.allow_internet_access {
             Some(false) => config.network = NetworkMode::None,
             Some(true) if matches!(config.network, NetworkMode::None) => {
@@ -150,12 +171,14 @@ impl ControlService {
             expires_at,
             metadata: request.metadata.clone(),
             envd_version: template.envd_version,
+            envd_mode: template.envd_mode,
             secure: request.secure,
             allow_internet_access: request.allow_internet_access,
             credentials: SandboxCredentials {
                 envd: envd.stored,
                 traffic: traffic.stored,
             },
+            routing: template.routing,
         })?;
         self.repository.insert(record.clone()).await?;
 
@@ -178,6 +201,27 @@ impl ControlService {
                 return Err(error.into());
             }
         };
+        if template.envd_mode == EnvdMode::Runtime {
+            if let Err(readiness_error) = self
+                .initialize_runtime_envd(&lease, record.sandbox_id().as_str(), &runtime_env_vars)
+                .await
+            {
+                let cleanup = self
+                    .executions
+                    .kill(&lease.execution_id, lease.generation)
+                    .await;
+                let expected = record.generation();
+                record.mark_failed(LifecycleFailure::RuntimeFailed)?;
+                self.replace(expected, record).await?;
+                return Err(match cleanup {
+                    Ok(_) => readiness_error,
+                    Err(cleanup_error) => ExecutionManagerError::Internal(format!(
+                        "{readiness_error}; runtime cleanup failed: {cleanup_error}"
+                    )),
+                }
+                .into());
+            }
+        }
 
         let expected = record.generation();
         if let Err(error) = record.mark_running(lease) {
@@ -193,6 +237,71 @@ impl ControlService {
             traffic_access_token: traffic.secret,
             disposition: ConnectionDisposition::Created,
         })
+    }
+
+    async fn initialize_runtime_envd(
+        &self,
+        lease: &ExecutionLease,
+        lifecycle_id: &str,
+        env_vars: &BTreeMap<String, String>,
+    ) -> Result<(), ExecutionManagerError> {
+        let port = NonZeroU16::new(ENVD_PORT).ok_or_else(|| {
+            ExecutionManagerError::Internal("envd port must be non-zero".to_string())
+        })?;
+        let deadline = tokio::time::Instant::now() + RUNTIME_ENVD_READY_TIMEOUT;
+        loop {
+            let last_error = match self
+                .ports
+                .connect_port(
+                    &lease.execution_id,
+                    lease.generation,
+                    port,
+                    RUNTIME_ENVD_CONNECT_TIMEOUT,
+                )
+                .await
+            {
+                Ok(stream) => match tokio::time::timeout(
+                    RUNTIME_ENVD_REQUEST_TIMEOUT,
+                    send_runtime_envd_init(
+                        stream,
+                        RuntimeEnvdInitRequest {
+                            lifecycle_id,
+                            env_vars,
+                            timestamp: self.clock.now(),
+                            default_user: RUNTIME_ENVD_DEFAULT_USER,
+                        },
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(StatusCode::NO_CONTENT)) => return Ok(()),
+                    Ok(Ok(status)) if status.is_client_error() => {
+                        return Err(ExecutionManagerError::Internal(format!(
+                            "runtime envd initialization returned HTTP {status}"
+                        )))
+                    }
+                    Ok(Ok(status)) => {
+                        format!("runtime envd initialization returned HTTP {status}")
+                    }
+                    Ok(Err(error)) => error,
+                    Err(_) => format!(
+                        "runtime envd initialization timed out after {} ms",
+                        RUNTIME_ENVD_REQUEST_TIMEOUT.as_millis()
+                    ),
+                },
+                Err(error @ ExecutionManagerError::InvalidRequest(_))
+                | Err(error @ ExecutionManagerError::Internal(_)) => return Err(error),
+                Err(error) => error.to_string(),
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "runtime envd did not become ready within {} seconds: {}",
+                    RUNTIME_ENVD_READY_TIMEOUT.as_secs(),
+                    last_error
+                )));
+            }
+            tokio::time::sleep(RUNTIME_ENVD_RETRY_INTERVAL).await;
+        }
     }
 
     pub async fn connect(
@@ -320,11 +429,11 @@ impl ControlService {
     ) -> ControlServiceResult<SandboxConnection> {
         let envd_access_token = self
             .token_resolver
-            .resolve(&record.credentials().envd)
+            .resolve(TokenScope::Envd, &record.credentials().envd)
             .await?;
         let traffic_access_token = self
             .token_resolver
-            .resolve(&record.credentials().traffic)
+            .resolve(TokenScope::Traffic, &record.credentials().traffic)
             .await?;
         Ok(SandboxConnection {
             record,
@@ -350,6 +459,45 @@ impl ControlService {
             CompareAndSwapResult::Conflict { .. } => Err(ControlServiceError::Conflict(sandbox_id)),
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeEnvdInitRequest<'a> {
+    #[serde(rename = "lifecycleID")]
+    lifecycle_id: &'a str,
+    env_vars: &'a BTreeMap<String, String>,
+    timestamp: DateTime<Utc>,
+    default_user: &'a str,
+}
+
+async fn send_runtime_envd_init(
+    stream: a3s_box_core::ExecutionPortStream,
+    init: RuntimeEnvdInitRequest<'_>,
+) -> Result<StatusCode, String> {
+    let payload = serde_json::to_vec(&init)
+        .map_err(|error| format!("failed to encode runtime envd initialization: {error}"))?;
+    let (mut sender, connection) = conn::Builder::new()
+        .handshake(stream)
+        .await
+        .map_err(|error| format!("runtime envd HTTP handshake failed: {error}"))?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            debug!(%error, "runtime envd initialization connection closed");
+        }
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/init")
+        .header(HOST, "127.0.0.1")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(payload))
+        .map_err(|error| format!("failed to build runtime envd initialization: {error}"))?;
+    sender
+        .send_request(request)
+        .await
+        .map(|response| response.status())
+        .map_err(|error| format!("runtime envd initialization request failed: {error}"))
 }
 
 fn expiry_from(now: DateTime<Utc>, timeout_seconds: u32) -> ControlServiceResult<DateTime<Utc>> {

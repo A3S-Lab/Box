@@ -8,6 +8,8 @@ pub enum ClientError {
     State(#[from] std::io::Error),
     #[error("runtime error: {0}")]
     Runtime(#[from] a3s_box_core::error::BoxError),
+    #[error("execution lifecycle error: {0}")]
+    Execution(#[from] a3s_box_core::ExecutionManagerError),
     #[error("validation error: {0}")]
     Validation(String),
     #[error("box not found: {0}")]

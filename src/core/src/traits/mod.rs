@@ -11,6 +11,7 @@ pub mod event;
 pub mod execution;
 pub mod metrics;
 pub mod registry;
+pub mod session;
 pub mod store;
 
 pub use audit::AuditSink;
@@ -19,12 +20,16 @@ pub use credential::CredentialProvider;
 pub use event::EventBus;
 pub use execution::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
-    ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionRecordPolicy,
-    ExecutionReservation, ExecutionRestartPolicy, ExecutionState, ExecutionStatus, KillOutcome,
-    OperationId, ReconcileOutcome, RestartExecutionOptions,
+    ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
+    ExecutionPortIo, ExecutionPortStream, ExecutionRecordPolicy, ExecutionReservation,
+    ExecutionRestartPolicy, ExecutionState, ExecutionStatus, KillOutcome, OperationId,
+    ReconcileOutcome, RestartExecutionOptions,
 };
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};
+pub use session::{
+    ExecutionProcess, ExecutionProcessInput, ExecutionProcessStream, ExecutionSessionManager,
+};
 pub use store::{
     ImageStoreBackend, NetworkStoreBackend, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
 };

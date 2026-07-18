@@ -2,7 +2,7 @@
   "schema_version": 1,
   "compatibility": {
     "id": "e2b-2026-07-14",
-    "version": "0.1.0-preview.1",
+    "version": "3.0.10-preview.1",
     "control_plane_tags": [
       "auth",
       "sandboxes",

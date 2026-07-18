@@ -7,6 +7,8 @@ use std::path::Component;
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
+#[cfg(target_os = "linux")]
+use a3s_box_core::rootfs_metadata::runtime_managed_rootfs_mode;
 #[cfg(any(target_os = "linux", test))]
 use a3s_box_core::rootfs_metadata::{RootfsEntryKind, RootfsMetadataEntry};
 use a3s_box_core::rootfs_metadata::{
@@ -193,17 +195,17 @@ pub fn prepare_rootfs_ownership(
     modes.sort_by_key(|entry| std::cmp::Reverse(entry.relative.components().count()));
     for entry in modes {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            &entry.target,
-            std::fs::Permissions::from_mode(entry.metadata.mode & 0o7777),
-        )
-        .map_err(|error| BoxError::BoxBootError {
-            message: format!(
-                "Failed to restore Sandbox rootfs mode at {}: {error}",
-                entry.target.display()
-            ),
-            hint: None,
-        })?;
+        let mode =
+            runtime_managed_rootfs_mode(&entry.relative).unwrap_or(entry.metadata.mode & 0o7777);
+        std::fs::set_permissions(&entry.target, std::fs::Permissions::from_mode(mode)).map_err(
+            |error| BoxError::BoxBootError {
+                message: format!(
+                    "Failed to restore Sandbox rootfs mode at {}: {error}",
+                    entry.target.display()
+                ),
+                hint: None,
+            },
+        )?;
     }
 
     Ok(())
@@ -605,5 +607,82 @@ mod tests {
     fn unsafe_manifest_path_is_rejected() {
         assert!(safe_relative_path(Path::new("../escape")).is_err());
         assert!(safe_relative_path(Path::new("/host")).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ownership_preparation_keeps_runtime_managed_files_readable() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let etc = directory.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let hosts = etc.join("hosts");
+        let probe = etc.join("probe");
+        let init = directory.path().join("usr/sbin/init");
+        std::fs::create_dir_all(init.parent().unwrap()).unwrap();
+        std::fs::write(&hosts, "127.0.0.1 localhost\n").unwrap();
+        std::fs::write(&probe, "probe\n").unwrap();
+        for path in [&hosts, &probe] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        std::fs::write(&init, "guest init\n").unwrap();
+        std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let owner = std::fs::metadata(directory.path()).unwrap();
+        let entry = |path: &str, size: u64| RootfsMetadataEntry {
+            path_base64: base64::engine::general_purpose::STANDARD.encode(path),
+            kind: RootfsEntryKind::Regular,
+            mode: 0o100600,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+            size,
+            link_target_base64: None,
+        };
+        let manifest = RootfsMetadataManifest {
+            schema: ROOTFS_METADATA_SCHEMA.to_string(),
+            entries: vec![
+                entry("./etc/hosts", 20),
+                entry("./etc/probe", 6),
+                entry("./usr/sbin/init", 1),
+            ],
+        };
+        std::fs::write(
+            directory
+                .path()
+                .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let plan = SandboxIdMappingPlan {
+            uid_mappings: vec![IdMapping {
+                container_id: 0,
+                host_id: owner.uid(),
+                size: 1,
+            }],
+            gid_mappings: vec![IdMapping {
+                container_id: 0,
+                host_id: owner.gid(),
+                size: 1,
+            }],
+            maximum_container_uid: 0,
+            maximum_container_gid: 0,
+        };
+
+        prepare_rootfs_ownership(directory.path(), &plan, 0, false).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(hosts).unwrap().permissions().mode() & 0o7777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(probe).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(init).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
     }
 }

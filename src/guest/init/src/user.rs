@@ -136,6 +136,27 @@ pub fn primary_gid_for_uid(rootfs: &str, uid: u32) -> Option<u32> {
     passwd_entry_for_uid(rootfs, uid).map(|(_, gid)| gid)
 }
 
+/// Return the home directory recorded for `uid` in `<rootfs>/etc/passwd`.
+///
+/// A process that switches from root to an image user must not keep root's
+/// `HOME`. Login shells use this value to select their startup files, and a
+/// mismatched inherited value can both leak root-oriented configuration and
+/// produce permission errors. Callers should still preserve an explicit
+/// `HOME` supplied in the process request.
+pub fn home_dir_for_uid(rootfs: &str, uid: u32) -> Option<String> {
+    let passwd = std::fs::read_to_string(std::path::Path::new(rootfs).join("etc/passwd")).ok()?;
+    for line in passwd.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 7 && fields[2].parse::<u32>().ok() == Some(uid) {
+            let home = fields[5];
+            if !home.is_empty() && home.starts_with('/') && !home.contains('\0') {
+                return Some(home.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Look up a user's name and primary gid by uid in `<rootfs>/etc/passwd`.
 fn passwd_entry_for_uid(rootfs: &str, uid: u32) -> Option<(String, u32)> {
     let passwd = std::fs::read_to_string(std::path::Path::new(rootfs).join("etc/passwd")).ok()?;
@@ -297,5 +318,25 @@ mod tests {
             resolve_image_groups(rootfs, 1000, Some(1000), "1000"),
             vec![1000]
         );
+    }
+
+    #[test]
+    fn test_home_dir_for_uid_uses_passwd_home() {
+        let dir = write_rootfs(
+            "root:x:0:0:root:/root:/bin/sh\ntester:x:1000:1000:tester:/home/tester:/bin/sh\n",
+            "",
+        );
+        let rootfs = dir.path().to_str().unwrap();
+        assert_eq!(
+            home_dir_for_uid(rootfs, 1000).as_deref(),
+            Some("/home/tester")
+        );
+        assert_eq!(home_dir_for_uid(rootfs, 4242), None);
+    }
+
+    #[test]
+    fn test_home_dir_for_uid_rejects_invalid_home() {
+        let dir = write_rootfs("tester:x:1000:1000:tester:relative:/bin/sh\n", "");
+        assert_eq!(home_dir_for_uid(dir.path().to_str().unwrap(), 1000), None);
     }
 }

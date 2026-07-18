@@ -47,12 +47,14 @@ fn creating_record_with_timeout_action(id: &str, on_timeout: OnTimeoutAction) ->
         expires_at: instant(0) + Duration::seconds(300),
         metadata: BTreeMap::from([("team".to_string(), "fixture".to_string())]),
         envd_version: "0.1.3".to_string(),
+        envd_mode: EnvdMode::Broker,
         secure: true,
         allow_internet_access: Some(false),
         credentials: SandboxCredentials {
             envd: stored_token(10),
             traffic: stored_token(20),
         },
+        routing: crate::routing::SandboxRoutePolicy::default(),
     })
     .unwrap()
 }
@@ -223,11 +225,37 @@ fn invalid_transition_does_not_mutate_record() {
 #[test]
 fn persisted_control_identifiers_preserve_invariants() {
     assert!(serde_json::from_str::<SandboxId>("\"\"").is_err());
+    for invalid in [
+        "Uppercase",
+        "-leading",
+        "trailing-",
+        "contains.dot",
+        "contains/slash",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert!(SandboxId::new(invalid).is_err(), "accepted {invalid}");
+    }
     assert!(serde_json::from_str::<SandboxGeneration>("0").is_err());
     assert!(serde_json::from_str::<StoredToken>(
         r#"{"key_version":0,"ciphertext":[],"digest":[]}"#
     )
     .is_err());
+}
+
+#[test]
+fn records_written_before_route_policies_and_envd_modes_use_broker_defaults() {
+    let record = creating_record("legacy-route-record");
+    let mut value = serde_json::to_value(record).unwrap();
+    value.as_object_mut().unwrap().remove("routing");
+    value.as_object_mut().unwrap().remove("envd_mode");
+
+    let restored: SandboxRecord = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.envd_mode(), EnvdMode::Broker);
+    assert_eq!(
+        restored.routing().token_scope(crate::routing::ENVD_PORT),
+        Some(TokenScope::Envd)
+    );
+    assert_eq!(restored.routing().ports().count(), 1);
 }
 
 #[test]

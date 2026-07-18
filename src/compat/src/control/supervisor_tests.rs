@@ -52,12 +52,14 @@ fn creating_record(sandbox_id: &str, action: OnTimeoutAction) -> (SandboxRecord,
         expires_at: instant(10),
         metadata: BTreeMap::new(),
         envd_version: "0.1.3".to_string(),
+        envd_mode: EnvdMode::Broker,
         secure: true,
         allow_internet_access: Some(false),
         credentials: SandboxCredentials {
             envd: stored_token(10),
             traffic: stored_token(20),
         },
+        routing: crate::routing::SandboxRoutePolicy::default(),
     })
     .unwrap();
     (record, config)

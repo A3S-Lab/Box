@@ -136,6 +136,24 @@ impl OciRootfsBuilder {
             tracing::debug!(dir = %full_path.display(), "Created directory");
         }
 
+        // The service can run with a restrictive umask (the production smoke
+        // uses 077), but the root of a Linux container must remain traversable
+        // by image users other than root. Layer archives normally omit an
+        // explicit `.` entry, so without this normalization the host-created
+        // rootfs directory becomes `/` with mode 0700 inside the container.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            std::fs::set_permissions(&self.rootfs_path, std::fs::Permissions::from_mode(0o755))
+                .map_err(|error| {
+                    BoxError::BuildError(format!(
+                        "Failed to set rootfs permissions on {}: {error}",
+                        self.rootfs_path.display()
+                    ))
+                })?;
+        }
+
         Ok(())
     }
 
@@ -360,6 +378,20 @@ impl OciRootfsBuilder {
             BoxError::BuildError(format!("Failed to write {}: {}", full_path.display(), e))
         })?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(0o644)).map_err(
+                |e| {
+                    BoxError::BuildError(format!(
+                        "Failed to set permissions on {}: {}",
+                        full_path.display(),
+                        e
+                    ))
+                },
+            )?;
+        }
+
         tracing::debug!(path = %full_path.display(), "Created file");
         Ok(())
     }
@@ -471,6 +503,32 @@ mod tests {
         assert!(rootfs_path.join("workspace").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_oci_rootfs_builder_makes_root_searchable_by_image_users() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs_path = temp_dir.path().join("rootfs");
+        let image = temp_dir.path().join("image");
+
+        std::fs::create_dir_all(&rootfs_path).unwrap();
+        std::fs::set_permissions(&rootfs_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        create_test_oci_image(&image);
+
+        OciRootfsBuilder::new(&rootfs_path)
+            .with_image(&image)
+            .build()
+            .unwrap();
+
+        let mode = std::fs::metadata(&rootfs_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755);
+    }
+
     #[test]
     fn test_oci_rootfs_builder_creates_essential_files() {
         let temp_dir = TempDir::new().unwrap();
@@ -491,6 +549,35 @@ mod tests {
 
         let passwd = fs::read_to_string(rootfs_path.join("etc/passwd")).unwrap();
         assert!(passwd.contains("root:x:0:0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_oci_rootfs_builder_makes_essential_files_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs_path = temp_dir.path().join("rootfs");
+        let builder = OciRootfsBuilder::new(&rootfs_path);
+        let essential_files = ["passwd", "group", "hosts", "resolv.conf", "nsswitch.conf"];
+
+        fs::create_dir_all(rootfs_path.join("etc")).unwrap();
+        for name in essential_files {
+            let path = rootfs_path.join("etc").join(name);
+            fs::write(&path, "image content\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        builder.create_essential_files().unwrap();
+
+        for name in essential_files {
+            let mode = fs::metadata(rootfs_path.join("etc").join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o644, "unexpected mode for /etc/{name}");
+        }
     }
 
     #[test]

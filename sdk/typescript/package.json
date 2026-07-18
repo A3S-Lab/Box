@@ -1,0 +1,46 @@
+{
+  "name": "@a3s-lab/box",
+  "version": "3.0.10",
+  "description": "Typed TypeScript convenience package for the A3S Box E2B-compatible endpoint",
+  "type": "module",
+  "sideEffects": false,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/A3S-Lab/Box.git",
+    "directory": "sdk/typescript"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./code-interpreter": {
+      "types": "./dist/code-interpreter.d.ts",
+      "import": "./dist/code-interpreter.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node tests/exports.mjs"
+  },
+  "dependencies": {
+    "@e2b/code-interpreter": "2.6.1",
+    "e2b": "2.33.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

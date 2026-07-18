@@ -22,7 +22,13 @@ pub use client::{
     SnapshotSummary, StopBox, StopBoxSummary, StopOutcome, TagImage, VolumeSummary,
 };
 
-pub use a3s_box_core::{ExecOutput, ExecRequest, FileOp, FileRequest, FileResponse, Platform};
+pub use a3s_box_core::{
+    BoxConfig, CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionGeneration,
+    ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionLease, ExecutionManager,
+    ExecutionManagerError, ExecutionRecordPolicy, ExecutionReservation, ExecutionRestartPolicy,
+    ExecutionState, ExecutionStatus, FileOp, FileRequest, FileResponse, KillOutcome, OperationId,
+    Platform, ReconcileOutcome, RestartExecutionOptions,
+};
 pub use a3s_box_runtime::{RegistryAuth, RegistryProtocol, SignaturePolicy};
 
 #[cfg(unix)]

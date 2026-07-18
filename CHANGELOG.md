@@ -2,6 +2,109 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added canonical `compose.acl` project files with automatic discovery, a
+  closed A3S ACL schema for services, health checks, volumes, and networks,
+  and `env("NAME")` resolution. Explicit Docker Compose-compatible YAML files
+  remain supported.
+- Expanded Compose project operations with `start`, `stop`, `restart`, `rm`,
+  `kill`, `pause`, `unpause`, `wait`, `exec`, `top`, `port`, `cp`, `images`,
+  `pull`, `ls`, and `volumes`, all resolved through durable project/service
+  labels. Lifecycle, process, copy, and pull operations reuse the canonical
+  single-box paths, while project views remain read-only.
+- Exposed typed Rust SDK create, start, run, inspect, pause, resume, restart,
+  kill, and reconciliation operations through the canonical generation-fenced
+  execution manager, with complete caller-policy parity coverage.
+- Added production E2B credential providers with salted PBKDF2-SHA256 account
+  hashes and scope-bound AES-256-GCM sandbox tokens backed by independent HMAC
+  verification and versioned key rotation.
+- Added durable E2B sandbox route policies, strict wildcard/shared route
+  parsing, and immutable leases fenced by sandbox and execution generations,
+  expiry, exact port policy, and token scope.
+- Added the ACL-configured `a3s-box-e2b` production control service, composing
+  hashed account authentication, rotating encrypted sandbox tokens, SQLite
+  lifecycle state, the canonical runtime manager, startup reconciliation,
+  periodic expiry maintenance, and graceful shutdown. An opt-in A3S OS smoke
+  covers HTTP lifecycle, process restart recovery, and runtime cleanup.
+- Added the production E2B wildcard TLS gateway with bounded HTTP/1.1 and
+  HTTP/2 proxying, direct/shared route validation, CORS preflight, credential
+  stripping, upgrade bridging, and a generation- and PID-fenced connector into
+  real Sandbox network namespaces. The production smoke now covers TLS routing,
+  scope denial, restart recovery, and stale-route fencing.
+- Added an opt-in production lifecycle gate for the checksum-pinned, unchanged
+  official Python sync, Python async, TypeScript, and Code Interpreter clients,
+  with real Sandbox cleanup verification after every client flow.
+- Added a host-side authenticated envd `GET /health` broker on port `49983`.
+  It re-inspects the generation-fenced execution before returning `204`, while
+  all non-envd routes continue through the Sandbox namespace connector.
+- Added a backend-neutral execution-session interface for generation-fenced
+  command, PTY, and file access. Local sessions bind the runtime endpoint
+  before their final generation and process-identity check.
+- Added the first E2B Process Connect JSON broker with generation-scoped
+  synthetic process IDs, ordered output streams, stdin and SIGKILL control,
+  PTY start/resize support, and a focused official-client foreground-command
+  production gate.
+- Added typed per-template envd placement (`broker` or `runtime`) and a pinned
+  multi-architecture runtime image definition. Runtime-mode templates proxy
+  authenticated health, Process, Filesystem, and file HTTP requests to envd
+  inside the exact generation-fenced Sandbox.
+- Added typed Python (`a3s-box`) and TypeScript (`@a3s-lab/box`) convenience
+  packages that re-export pinned official E2B clients, provide per-call A3S
+  endpoint configuration, and are built and tested as CI and release assets.
+- Added an opt-in production smoke mode for immutable E2B runtime images,
+  covering runtime-mode envd readiness and in-Sandbox Code Interpreter health
+  while retaining restart, fencing, and cleanup assertions.
+- Expanded the unchanged official-client runtime-image gate across Python
+  sync/async and TypeScript with Filesystem mutation and metadata, background
+  stdin, process listing, PTY resize, and Code Interpreter context execution.
+- Added an opt-in replay of the production runtime-image matrix through the
+  native Python and TypeScript packages, including a regression test that keeps
+  their TypeScript build bound to the pinned official dependencies.
+
+### Changed
+
+- Made `compose up` convergent through deterministic effective-configuration
+  digests. Unchanged active services are reused, changed or inactive services
+  are recreated, service selection includes transitive dependencies, and
+  foreground mode now attaches logs and handles Ctrl-C instead of silently
+  behaving like detached mode.
+
+### Fixed
+
+- Normalized generated resolver/account files and cached standalone
+  `/etc/hosts` to `0644`, so non-root Sandbox users can resolve names and read
+  essential identity files even after restrictive image or host umasks.
+- Delayed runtime-mode sandbox publication until a generation-fenced envd port
+  probe succeeds, and now stop and hide runtimes that never become ready. The
+  pinned runtime image also waits for Jupyter and Code Interpreter health
+  before starting envd.
+- Preserved OCI layer directory modes in recursive cache copies and normalized
+  host-created rootfs roots to `0755`, so restrictive service umasks do not
+  prevent non-root image users from traversing the container filesystem.
+- Made authenticated envd health return the official-client terminal `502`
+  after kill without reopening a live route lease. Invalid tokens remain
+  unauthorized, ordinary traffic stays fenced, and the production client gate
+  now checks running-state methods before and after termination.
+- Applied `${...}` expansion directly to string values in the parsed Compose
+  ACL document instead of round-tripping ACL source through YAML. Canonical
+  files beginning with `service` now retain their syntax and environment
+  interpolation works without a leading blank line.
+- Made `compose down` detach both Linux overlay mounts and platform-backed
+  writable rootfs mounts before deleting service storage, preventing leaked
+  macOS APFS mounts after a project is removed.
+- Kept explicit service selections scoped to the requested services across
+  lifecycle commands and foreground `up`, rejected unknown service names in
+  `logs` and `cp`, and stopped Compose copy operations from resolving boxes
+  outside the current project.
+- Made Compose teardown use atomic state removal, exact project network names,
+  deduplicated named volumes, and shared partial-start cleanup so failures do
+  not leave service directories or platform rootfs mounts behind.
+- Made the host-integration runner invoke the canonical ACL Compose smoke and
+  remove its temporary stub-libkrun directory on both ordinary and soak exits.
+
 ## [3.0.9] — 2026-07-11
 
 ### Added

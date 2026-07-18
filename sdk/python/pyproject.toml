@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "a3s-box"
+version = "3.0.10"
+description = "Typed Python convenience package for the A3S Box E2B-compatible endpoint"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "A3S Lab" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+]
+dependencies = [
+  "e2b==2.32.0",
+  "e2b-code-interpreter==2.8.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/A3S-Lab/Box"
+Repository = "https://github.com/A3S-Lab/Box"
+Issues = "https://github.com/A3S-Lab/Box/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+a3s_box = ["py.typed"]

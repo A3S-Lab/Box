@@ -3,10 +3,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecutionGeneration, ExecutionHealthCheck, ExecutionId,
-    ExecutionIsolation, ExecutionManager, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionState, KillOutcome, NetworkMode,
-    OperationId, ReconcileOutcome, RestartExecutionOptions,
+    BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionGeneration,
+    ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
+    ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
+    ExecutionState, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
+    RestartExecutionOptions,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -297,6 +298,119 @@ async fn create_persists_trusted_identity_and_returns_running_lease() {
         .starts_with(directory.path().join("home/boxes")));
     assert_eq!(record.pid, Some(4242));
     assert_eq!(record.anonymous_volumes, vec!["anonymous-1"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_session_inherits_environment_from_persisted_record() {
+    let (directory, manager, _backend) = harness();
+    let execution_id = ExecutionId::new("execution-session-environment").unwrap();
+    let operation_id = operation("operation-session-environment");
+    let mut create_request = request("external-session-environment");
+    create_request.config.extra_env = vec![
+        ("OFFICIAL_CLIENT".to_string(), "python-sync".to_string()),
+        ("OVERRIDE".to_string(), "container".to_string()),
+    ];
+    let record = build_managed_record(
+        &manager.home_dir,
+        &execution_id,
+        operation_id,
+        create_request,
+        Utc::now(),
+    )
+    .unwrap();
+    let record = manager.reserve(record).await.unwrap().into_record();
+    let record = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Created,
+            ManagedExecutionState::Starting,
+            RuntimeUpdate::None,
+        )
+        .await
+        .unwrap();
+
+    // Keep the path below Darwin's shorter SUN_LEN while retaining automatic
+    // tempdir cleanup on every test outcome.
+    let socket_path = directory.path().join("exec.sock");
+    std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    let process_id = std::process::id();
+    let record = manager
+        .complete_with_handle(
+            &record,
+            ManagedExecutionState::Starting,
+            ManagedExecutionState::Running,
+            LocalExecutionHandle {
+                started_at: Utc::now(),
+                pid: Some(process_id),
+                pid_start_time: crate::process::pid_start_time(process_id),
+                exec_socket_path: socket_path.clone(),
+                console_log: record.box_dir.join("logs/console.log"),
+                anonymous_volumes: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted(&manager, &execution_id).env,
+        HashMap::from([
+            ("OFFICIAL_CLIENT".to_string(), "python-sync".to_string()),
+            ("OVERRIDE".to_string(), "container".to_string()),
+        ])
+    );
+
+    let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+    let (request_sender, request_receiver) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, write) = tokio::io::split(stream);
+        let mut reader = a3s_transport::FrameReader::new(read);
+        let mut writer = a3s_transport::FrameWriter::new(write);
+        let frame = reader.read_frame().await.unwrap().unwrap();
+        assert_eq!(frame.frame_type, a3s_transport::FrameType::Data);
+        let request: ExecRequest = serde_json::from_slice(&frame.payload).unwrap();
+        request_sender.send(request).unwrap();
+        writer
+            .write_control(
+                &serde_json::to_vec(&a3s_box_core::exec::ExecExit {
+                    exit_code: 0,
+                    oom_killed: false,
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let mut process = manager
+        .start_process(
+            &execution_id,
+            record.managed_execution.as_ref().unwrap().generation,
+            ExecRequest {
+                cmd: vec!["env".to_string()],
+                timeout_ns: 1_000_000_000,
+                env: vec!["OVERRIDE=request".to_string()],
+                working_dir: None,
+                rootfs: None,
+                stdin: None,
+                stdin_streaming: false,
+                user: None,
+                streaming: false,
+            },
+        )
+        .await
+        .unwrap();
+    let forwarded = request_receiver.await.unwrap();
+    assert_eq!(
+        forwarded.env,
+        ["OFFICIAL_CLIENT=python-sync", "OVERRIDE=request"]
+    );
+    assert!(forwarded.streaming);
+    assert!(matches!(
+        process.next_event().await.unwrap(),
+        Some(ExecEvent::Exit(exit)) if exit.exit_code == 0
+    ));
+    server.await.unwrap();
 }
 
 #[tokio::test]
