@@ -30,6 +30,7 @@ pub mod oci;
 pub mod process;
 pub mod prom;
 pub mod resize;
+mod resolved_image;
 pub mod rootfs;
 pub mod sandbox;
 pub mod snapshot;
@@ -99,6 +100,7 @@ pub use oci::{OciImage, SignResult, SignaturePolicy};
 pub use prom::RuntimeMetrics;
 
 // Snapshot
+pub use resolved_image::{load_resolved_image_config, RESOLVED_IMAGE_CONFIG_FILE};
 pub use snapshot::SnapshotStore;
 
 // TEE
