@@ -5,59 +5,63 @@ use std::collections::HashMap;
 use a3s_acl::{Block, Document, Lexer, Token, Value};
 use thiserror::Error;
 
+use super::diagnostic::{child_path, pointer_segment, ComposeDiagnostic};
 use super::interpolation::interpolate_compose_scalar;
-use super::{
-    ComposeConfig, DependsOn, DependsOnCondition, DnsConfig, EnvVars, HealthcheckConfig, Labels,
-    NetworkDeclaration, ServiceConfig, ServiceNetworkConfig, ServiceNetworks, StringOrList,
-    VolumeDeclaration,
+use super::schema::{
+    DEPENDS_ON_FIELDS, HEALTHCHECK_FIELDS, NETWORK_FIELDS, SERVICE_FIELDS, SERVICE_NETWORK_FIELDS,
+    VOLUME_FIELDS,
 };
-
-const SERVICE_ATTRIBUTES: &[&str] = &[
-    "image",
-    "entrypoint",
-    "command",
-    "environment",
-    "env_file",
-    "ports",
-    "volumes",
-    "depends_on",
-    "networks",
-    "cpus",
-    "mem_limit",
-    "restart",
-    "dns",
-    "tmpfs",
-    "cap_add",
-    "cap_drop",
-    "privileged",
-    "labels",
-    "healthcheck",
-    "working_dir",
-    "hostname",
-    "extra_hosts",
-];
-
-const HEALTHCHECK_ATTRIBUTES: &[&str] = &[
-    "test",
-    "disable",
-    "interval",
-    "timeout",
-    "retries",
-    "start_period",
-];
+use super::{
+    ComposeConfig, ComposeDiagnosticCode, DependsOn, DependsOnCondition, DnsConfig, EnvVars,
+    HealthcheckConfig, Labels, NetworkDeclaration, ServiceConfig, ServiceNetworkConfig,
+    ServiceNetworks, StringOrList, VolumeDeclaration,
+};
 
 /// An invalid A3S Compose ACL document.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("{message}")]
+#[error("{diagnostic}")]
 pub struct ComposeAclError {
-    message: String,
+    diagnostic: ComposeDiagnostic,
 }
 
 impl ComposeAclError {
     fn invalid(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            diagnostic: ComposeDiagnostic::new(ComposeDiagnosticCode::InvalidValue, "/", message),
         }
+    }
+
+    fn syntax(message: impl Into<String>) -> Self {
+        Self {
+            diagnostic: ComposeDiagnostic::new(ComposeDiagnosticCode::Syntax, "/", message),
+        }
+    }
+
+    fn interpolation(message: impl Into<String>) -> Self {
+        Self {
+            diagnostic: ComposeDiagnostic::new(ComposeDiagnosticCode::Interpolation, "/", message),
+        }
+    }
+
+    fn unsupported_field(path: impl Into<String>, field: &str) -> Self {
+        Self {
+            diagnostic: ComposeDiagnostic::unsupported_field(path, field),
+        }
+    }
+
+    fn unsupported_value(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            diagnostic: ComposeDiagnostic::new(
+                ComposeDiagnosticCode::UnsupportedValue,
+                path,
+                message,
+            ),
+        }
+    }
+
+    /// Structured diagnostic suitable for CLI, API, or Cloud callers.
+    pub fn diagnostic(&self) -> &ComposeDiagnostic {
+        &self.diagnostic
     }
 }
 
@@ -67,7 +71,7 @@ pub(super) fn parse_compose_acl(
 ) -> Result<ComposeConfig, ComposeAclError> {
     validate_balanced_braces(source)?;
     let mut document = a3s_acl::parse(source)
-        .map_err(|error| ComposeAclError::invalid(format!("invalid A3S ACL: {error}")))?;
+        .map_err(|error| ComposeAclError::syntax(format!("invalid A3S ACL: {error}")))?;
     interpolate_document_values(&mut document, environment)?;
     resolve_environment_calls(&mut document, environment)?;
     convert_document(document)
@@ -79,7 +83,7 @@ fn validate_balanced_braces(source: &str) -> Result<(), ComposeAclError> {
         match token.token {
             Token::LeftBrace => depth += 1,
             Token::RightBrace if depth == 0 => {
-                return Err(ComposeAclError::invalid(
+                return Err(ComposeAclError::syntax(
                     "compose ACL contains an unmatched closing brace",
                 ));
             }
@@ -88,7 +92,7 @@ fn validate_balanced_braces(source: &str) -> Result<(), ComposeAclError> {
         }
     }
     if depth != 0 {
-        return Err(ComposeAclError::invalid(
+        return Err(ComposeAclError::syntax(
             "compose ACL contains an unclosed block or object",
         ));
     }
@@ -125,7 +129,7 @@ fn interpolate_value(
     match value {
         Value::String(text) => {
             *text = interpolate_compose_scalar(text, environment).map_err(|error| {
-                ComposeAclError::invalid(format!("invalid Compose interpolation: {error}"))
+                ComposeAclError::interpolation(format!("invalid Compose interpolation: {error}"))
             })?;
         }
         Value::List(values) | Value::Call(_, values) => {
@@ -173,9 +177,10 @@ fn resolve_value_environment(
     match value {
         Value::Call(name, arguments) => {
             if name != "env" {
-                return Err(ComposeAclError::invalid(format!(
-                    "unsupported ACL function {name:?}; only env(\"NAME\") is supported"
-                )));
+                return Err(ComposeAclError::unsupported_value(
+                    "/",
+                    format!("unsupported ACL function {name:?}; only env(\"NAME\") is supported"),
+                ));
             }
             let [Value::String(variable)] = arguments.as_slice() else {
                 return Err(ComposeAclError::invalid(
@@ -224,9 +229,10 @@ fn convert_document(document: Document) -> Result<ComposeConfig, ComposeAclError
             "volume" => {
                 let name = named_block_label(&block, "volume")?;
                 validate_compose_name("volume", &name)?;
-                validate_plain_block(&block, &["driver"], &format!("volume {name:?}"))?;
+                let path = format!("/volumes/{}", pointer_segment(&name));
+                validate_plain_block(&block, VOLUME_FIELDS, &path)?;
                 let declaration = VolumeDeclaration {
-                    driver: optional_string(&block, "driver", &format!("volume {name:?}"))?,
+                    driver: optional_string(&block, "driver", &path)?,
                 };
                 if volumes.insert(name.clone(), Some(declaration)).is_some() {
                     return Err(ComposeAclError::invalid(format!(
@@ -237,9 +243,10 @@ fn convert_document(document: Document) -> Result<ComposeConfig, ComposeAclError
             "network" => {
                 let name = named_block_label(&block, "network")?;
                 validate_compose_name("network", &name)?;
-                validate_plain_block(&block, &["driver"], &format!("network {name:?}"))?;
+                let path = format!("/networks/{}", pointer_segment(&name));
+                validate_plain_block(&block, NETWORK_FIELDS, &path)?;
                 let declaration = NetworkDeclaration {
-                    driver: optional_string(&block, "driver", &format!("network {name:?}"))?,
+                    driver: optional_string(&block, "driver", &path)?,
                 };
                 if networks.insert(name.clone(), Some(declaration)).is_some() {
                     return Err(ComposeAclError::invalid(format!(
@@ -248,9 +255,10 @@ fn convert_document(document: Document) -> Result<ComposeConfig, ComposeAclError
                 }
             }
             name => {
-                return Err(ComposeAclError::invalid(format!(
-                    "unsupported root block {name:?}; expected service, volume, or network"
-                )));
+                return Err(ComposeAclError::unsupported_field(
+                    format!("/{}", pointer_segment(name)),
+                    name,
+                ));
             }
         }
     }
@@ -270,8 +278,8 @@ fn convert_document(document: Document) -> Result<ComposeConfig, ComposeAclError
 }
 
 fn parse_service(block: &Block, name: &str) -> Result<ServiceConfig, ComposeAclError> {
-    let path = format!("service {name:?}");
-    validate_attributes(block, SERVICE_ATTRIBUTES, &path)?;
+    let path = format!("/services/{}", pointer_segment(name));
+    validate_attributes(block, SERVICE_FIELDS, &path)?;
     let healthcheck = parse_service_healthcheck(block, &path)?;
 
     Ok(ServiceConfig {
@@ -307,10 +315,10 @@ fn parse_service_healthcheck(
     let mut nested_healthcheck = None;
     for nested in &service.blocks {
         if nested.name != "healthcheck" {
-            return Err(ComposeAclError::invalid(format!(
-                "{service_path} contains unsupported nested block {:?}",
-                nested.name
-            )));
+            return Err(ComposeAclError::unsupported_field(
+                child_path(service_path, &nested.name),
+                &nested.name,
+            ));
         }
         if nested_healthcheck.replace(nested).is_some() {
             return Err(ComposeAclError::invalid(format!(
@@ -339,13 +347,13 @@ fn parse_healthcheck(
     value: &Value,
     service_path: &str,
 ) -> Result<HealthcheckConfig, ComposeAclError> {
-    let path = format!("{service_path}.healthcheck");
+    let path = child_path(service_path, "healthcheck");
     let Value::Object(entries) = value else {
         return Err(ComposeAclError::invalid(format!(
             "{path} must be an object or a healthcheck block"
         )));
     };
-    let fields = object_fields(entries, HEALTHCHECK_ATTRIBUTES, &path)?;
+    let fields = object_fields(entries, HEALTHCHECK_FIELDS, &path)?;
     parse_healthcheck_fields(&fields, &path)
 }
 
@@ -353,13 +361,13 @@ fn parse_healthcheck_block(
     block: &Block,
     service_path: &str,
 ) -> Result<HealthcheckConfig, ComposeAclError> {
-    let path = format!("{service_path}.healthcheck");
+    let path = child_path(service_path, "healthcheck");
     if !block.labels.is_empty() {
         return Err(ComposeAclError::invalid(format!(
             "{path} block cannot have labels"
         )));
     }
-    validate_plain_block(block, HEALTHCHECK_ATTRIBUTES, &path)?;
+    validate_plain_block(block, HEALTHCHECK_FIELDS, &path)?;
     let fields = block
         .attributes
         .iter()
@@ -447,10 +455,14 @@ fn validate_attributes(block: &Block, allowed: &[&str], path: &str) -> Result<()
         .collect::<Vec<_>>();
     unknown.sort();
     if !unknown.is_empty() {
-        return Err(ComposeAclError::invalid(format!(
-            "{path} contains unsupported attribute(s): {}",
-            unknown.join(", ")
-        )));
+        let first = &unknown[0];
+        return Err(ComposeAclError {
+            diagnostic: ComposeDiagnostic::new(
+                ComposeDiagnosticCode::UnsupportedField,
+                child_path(path, first),
+                format!("unsupported Compose field(s): {}", unknown.join(", ")),
+            ),
+        });
     }
     Ok(())
 }
@@ -630,7 +642,7 @@ fn optional_depends_on(
     let Some(value) = block.attributes.get(field) else {
         return Ok(DependsOn::Empty);
     };
-    let field_path = format!("{path}.{field}");
+    let field_path = child_path(path, field);
     match value {
         Value::List(_) => string_list_value(value, &field_path).map(DependsOn::List),
         Value::Object(entries) => {
@@ -640,19 +652,20 @@ fn optional_depends_on(
                 let condition = match value {
                     Value::Null => "service_started".to_string(),
                     Value::Object(fields) => {
-                        let fields =
-                            object_fields(fields, &["condition"], &format!("{field_path}.{name}"))?;
+                        let dependency_path = child_path(&field_path, name);
+                        let fields = object_fields(fields, DEPENDS_ON_FIELDS, &dependency_path)?;
                         fields
                             .get("condition")
                             .map(|value| {
-                                string_value(value, &format!("{field_path}.{name}.condition"))
+                                string_value(value, &child_path(&dependency_path, "condition"))
                             })
                             .transpose()?
                             .unwrap_or_else(|| "service_started".to_string())
                     }
                     _ => {
                         return Err(ComposeAclError::invalid(format!(
-                            "{field_path}.{name} must be an object or null"
+                            "{} must be an object or null",
+                            child_path(&field_path, name)
                         )));
                     }
                 };
@@ -660,9 +673,10 @@ fn optional_depends_on(
                     condition.as_str(),
                     "service_started" | "service_healthy" | "service_completed_successfully"
                 ) {
-                    return Err(ComposeAclError::invalid(format!(
-                        "{field_path}.{name}.condition has unsupported value {condition:?}"
-                    )));
+                    return Err(ComposeAclError::unsupported_value(
+                        child_path(&child_path(&field_path, name), "condition"),
+                        format!("unsupported depends_on condition {condition:?}"),
+                    ));
                 }
                 if dependencies
                     .insert(name.clone(), DependsOnCondition { condition })
@@ -689,7 +703,7 @@ fn optional_service_networks(
     let Some(value) = block.attributes.get(field) else {
         return Ok(ServiceNetworks::Empty);
     };
-    let field_path = format!("{path}.{field}");
+    let field_path = child_path(path, field);
     match value {
         Value::List(_) => string_list_value(value, &field_path).map(ServiceNetworks::List),
         Value::Object(entries) => {
@@ -699,12 +713,12 @@ fn optional_service_networks(
                 let config = match value {
                     Value::Null => None,
                     Value::Object(fields) => {
-                        let fields =
-                            object_fields(fields, &["aliases"], &format!("{field_path}.{name}"))?;
+                        let network_path = child_path(&field_path, name);
+                        let fields = object_fields(fields, SERVICE_NETWORK_FIELDS, &network_path)?;
                         let aliases = fields
                             .get("aliases")
                             .map(|value| {
-                                string_list_value(value, &format!("{field_path}.{name}.aliases"))
+                                string_list_value(value, &child_path(&network_path, "aliases"))
                             })
                             .transpose()?
                             .unwrap_or_default();
@@ -712,7 +726,8 @@ fn optional_service_networks(
                     }
                     _ => {
                         return Err(ComposeAclError::invalid(format!(
-                            "{field_path}.{name} must be an object or null"
+                            "{} must be an object or null",
+                            child_path(&field_path, name)
                         )));
                     }
                 };
@@ -738,9 +753,10 @@ fn object_fields<'a>(
     let mut output = HashMap::new();
     for (key, value) in entries {
         if !allowed.contains(&key.as_str()) {
-            return Err(ComposeAclError::invalid(format!(
-                "{path} contains unsupported attribute {key:?}"
-            )));
+            return Err(ComposeAclError::unsupported_field(
+                child_path(path, key),
+                key,
+            ));
         }
         if output.insert(key.as_str(), value).is_some() {
             return Err(ComposeAclError::invalid(format!(

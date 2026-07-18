@@ -7,10 +7,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 mod acl;
+mod diagnostic;
 mod interpolation;
+mod normalization;
+mod normalized;
+mod schema;
 
 pub use acl::ComposeAclError;
+pub use diagnostic::{ComposeDiagnostic, ComposeDiagnosticCode, ComposeNormalizationError};
 pub use interpolation::{interpolate_compose_yaml, ComposeInterpolationError};
+pub use normalization::{normalize_compose, normalize_compose_config, ComposeSourceFormat};
+pub use normalized::{
+    NormalizedComposeConfig, NormalizedDependsOn, NormalizedHealthcheckConfig,
+    NormalizedNetworkDeclaration, NormalizedServiceConfig, NormalizedServiceNetwork,
+    NormalizedVolumeDeclaration,
+};
 
 /// Top-level compose file configuration.
 ///
@@ -33,6 +44,7 @@ pub use interpolation::{interpolate_compose_yaml, ComposeInterpolationError};
 ///   default:
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComposeConfig {
     /// Compose file version (informational, not enforced).
     #[serde(default)]
@@ -52,6 +64,7 @@ pub struct ComposeConfig {
 
 /// A single service in a compose file.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
     /// OCI image reference (e.g., "nginx:latest").
     #[serde(default)]
@@ -144,6 +157,7 @@ pub struct ServiceConfig {
 
 /// Health check configuration for a service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HealthcheckConfig {
     /// Command to run (e.g., ["CMD", "curl", "-f", "http://localhost/"]).
     #[serde(default)]
@@ -167,6 +181,7 @@ pub struct HealthcheckConfig {
 
 /// Volume declaration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct VolumeDeclaration {
     /// Volume driver (default: "local").
     #[serde(default)]
@@ -175,6 +190,7 @@ pub struct VolumeDeclaration {
 
 /// Network declaration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkDeclaration {
     /// Network driver (default: "bridge").
     #[serde(default)]
@@ -231,7 +247,14 @@ impl EnvVars {
     pub fn to_pairs(&self) -> Vec<(String, String)> {
         match self {
             Self::Empty => vec![],
-            Self::Map(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            Self::Map(m) => {
+                let mut pairs = m
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                pairs.sort_by(|left, right| left.0.cmp(&right.0));
+                pairs
+            }
             Self::List(list) => list
                 .iter()
                 .filter_map(|s| {
@@ -262,13 +285,18 @@ impl DependsOn {
         match self {
             Self::Empty => vec![],
             Self::List(v) => v.clone(),
-            Self::Map(m) => m.keys().cloned().collect(),
+            Self::Map(m) => {
+                let mut services = m.keys().cloned().collect::<Vec<_>>();
+                services.sort();
+                services
+            }
         }
     }
 }
 
 /// Condition for a depends_on entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DependsOnCondition {
     /// Condition: "service_started" (default) or "service_healthy".
     #[serde(default = "default_condition")]
@@ -298,13 +326,18 @@ impl ServiceNetworks {
         match self {
             Self::Empty => vec![],
             Self::List(v) => v.clone(),
-            Self::Map(m) => m.keys().cloned().collect(),
+            Self::Map(m) => {
+                let mut names = m.keys().cloned().collect::<Vec<_>>();
+                names.sort();
+                names
+            }
         }
     }
 }
 
 /// Per-service network configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceNetworkConfig {
     /// Network aliases for this service.
     #[serde(default)]
@@ -393,7 +426,9 @@ impl ComposeConfig {
         // 0 = unvisited, 1 = in-progress, 2 = done
         let mut state: HashMap<String, u8> = HashMap::new();
 
-        for name in self.services.keys() {
+        let mut service_names = self.services.keys().collect::<Vec<_>>();
+        service_names.sort();
+        for name in service_names {
             if !state.contains_key(name) {
                 self.topo_visit(name, &mut state, &mut order)?;
             }
@@ -457,6 +492,16 @@ services:
             config.services["web"].image.as_deref(),
             Some("nginx:latest")
         );
+    }
+
+    #[test]
+    fn test_raw_yaml_parser_never_silently_ignores_unknown_fields() {
+        let error = ComposeConfig::from_yaml_str(
+            "services:\n  api:\n    image: api:latest\n    build: .\n",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `build`"));
     }
 
     #[test]
