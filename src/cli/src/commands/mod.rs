@@ -448,5 +448,6 @@ mod isolation_cli_tests {
             panic!("expected compose up command");
         };
         assert_eq!(args.isolation, Some(common::IsolationArg::Sandbox));
+        assert!(args.services.is_empty());
     }
 }

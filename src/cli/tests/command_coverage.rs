@@ -167,6 +167,22 @@ fn test_nested_subcommand_help() {
         &["compose", "ps"],
         &["compose", "logs"],
         &["compose", "config"],
+        &["compose", "start"],
+        &["compose", "stop"],
+        &["compose", "restart"],
+        &["compose", "rm"],
+        &["compose", "kill"],
+        &["compose", "pause"],
+        &["compose", "unpause"],
+        &["compose", "wait"],
+        &["compose", "exec"],
+        &["compose", "top"],
+        &["compose", "port"],
+        &["compose", "cp"],
+        &["compose", "images"],
+        &["compose", "pull"],
+        &["compose", "ls"],
+        &["compose", "volumes"],
     ];
 
     for command in commands {
@@ -700,6 +716,80 @@ fn test_compose_config_interpolates_shell_over_project_dotenv() {
     assert!(output.contains("EMPTY_SET=replacement"));
     assert!(output.contains("EMPTY_NONEMPTY="));
     assert!(output.contains("Configuration is valid."));
+}
+
+#[test]
+fn test_compose_config_accepts_a3s_acl() {
+    let cli = CliTest::new();
+    let project = cli.home_path().join("compose-acl");
+    std::fs::create_dir_all(&project).expect("create Compose ACL project directory");
+    let compose = project.join("compose.acl");
+    std::fs::write(
+        &compose,
+        r#"service "api" {
+  image = "ghcr.io/a3s-lab/api:${A3S_COMPOSE_TEST_TAG:-latest}"
+  environment = { TOKEN = env("A3S_COMPOSE_TEST_TOKEN") }
+  labels = { description = "服务" }
+  ports = ["8080:8080"]
+
+  healthcheck {
+    test = ["CMD", "true"]
+  }
+}
+"#,
+    )
+    .expect("write Compose ACL file");
+    let compose_arg = compose.to_string_lossy().to_string();
+
+    let output = cli.ok_with_env(
+        &["compose", "--file", &compose_arg, "config"],
+        &[("A3S_COMPOSE_TEST_TOKEN", "secret")],
+    );
+
+    assert!(output.contains("ghcr.io/a3s-lab/api:latest"));
+    assert!(output.contains("TOKEN=secret"));
+    assert!(output.contains("ports: 8080:8080"));
+    assert!(output.contains("Configuration is valid."));
+}
+
+#[test]
+fn test_compose_local_project_views_do_not_require_a_runtime() {
+    let cli = CliTest::new();
+    let project = cli.home_path().join("compose-views");
+    std::fs::create_dir_all(&project).expect("create Compose project directory");
+    let compose = project.join("compose.yaml");
+    std::fs::write(
+        &compose,
+        r#"services:
+  api:
+    image: ghcr.io/a3s-lab/api:latest
+    depends_on: [db]
+  db:
+    image: postgres:17
+    volumes:
+      - data:/var/lib/postgresql/data
+volumes:
+  data:
+"#,
+    )
+    .expect("write Compose file");
+    let compose_arg = compose.to_string_lossy().to_string();
+
+    let images = cli.ok(&["compose", "--file", &compose_arg, "images"]);
+    assert!(images.contains("api"));
+    assert!(images.contains("ghcr.io/a3s-lab/api:latest"));
+    assert!(images.contains("postgres:17"));
+
+    let volumes = cli.ok(&["compose", "--file", &compose_arg, "volumes"]);
+    assert_eq!(volumes.trim(), "data");
+
+    let projects = cli.ok(&["compose", "ls"]);
+    assert!(projects.contains("NAME"));
+
+    cli.fails(
+        &["compose", "--file", &compose_arg, "logs", "api", "missing"],
+        "service 'missing' is not defined in the Compose project",
+    );
 }
 
 #[cfg(unix)]

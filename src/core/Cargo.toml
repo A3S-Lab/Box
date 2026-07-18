@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Core types, config, and error handling for A3S Box MicroVM runtime"
 
 [dependencies]
+a3s-acl = { workspace = true }
 a3s-transport = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

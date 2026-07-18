@@ -251,9 +251,10 @@ before a release window when the monorepo depends on thousands of packages.
 
 ## Host command matrix
 
-The host matrix extends the core smoke with VM lifecycle commands, Compose,
-copy, stats, snapshots, network operations, image tagging/saving, local build,
-and optional registry push coverage.
+The host matrix extends the core smoke with VM lifecycle commands, canonical
+`compose.acl` discovery and teardown, copy, stats, snapshots, network
+operations, image tagging/saving, local build, and optional registry push
+coverage.
 
 ```bash
 cd crates/box
