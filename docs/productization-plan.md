@@ -182,6 +182,29 @@ Current notes:
 - Compose labels are persisted alongside A3S project/service labels, and image
   healthcheck/stop-signal defaults are applied to Compose services when the
   service does not override or disable them.
+- Compose applications now use `compose.acl` as the canonical discovered
+  project file, parsed through `a3s-acl` with a closed schema, direct
+  `${...}` interpolation, and `env("NAME")` lookup. Explicit Compose YAML
+  remains an intentionally bounded compatibility input. `compose up` now
+  converges services by an effective-config digest and service selections
+  include only their dependency closure. Project-scoped start/stop/restart,
+  remove, signal, pause, wait, exec, top, port, copy, image, pull, project, and
+  volume operations are now exposed; lifecycle, process, copy, and pull
+  operations delegate to the corresponding single-box paths while project
+  views stay read-only. Pure regression coverage protects Unicode ACL parsing,
+  strict service scoping, exact network cleanup, deduplicated volume cleanup,
+  and partial-start directory teardown. On 2026-07-18, the canonical ACL smoke
+  passed on macOS arm64/HVF with `docker.io/library/alpine:latest`, covering
+  unchanged convergence, pull/project views, exec/top/port/copy,
+  stop/start/restart, pause/unpause, kill/wait/remove, `down -v`, and final
+  Box/socket cleanup. Linux KVM and the complete host matrix remain release
+  gates.
+- Core Compose interpretation is now a side-effect-free typed normalizer with
+  explicit environment input, deterministic `BTreeMap` output, shared ACL/YAML
+  golden fixtures, and structured diagnostics for unknown fields and
+  unsupported values. Runtime consumes the result through the stateless
+  `ComposeRuntimePlan`; Box lifecycle records and Cloud desired state remain
+  outside that translation boundary.
 - Boot failure cleanup now stops any shim that was spawned before readiness,
   stops bridge-network backends, unmounts rootfs providers before removing box
   directories, and removes only the anonymous OCI volumes created by that boot

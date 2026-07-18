@@ -1,0 +1,92 @@
+{
+  "services": {
+    "api": {
+      "image": "ghcr.io/a3s/api:latest",
+      "entrypoint": [
+        "/bin/api"
+      ],
+      "command": [
+        "serve",
+        "--port",
+        "8080"
+      ],
+      "environment": {
+        "A_FIRST": "a",
+        "Z_LAST": "z"
+      },
+      "env_file": [
+        "base.env",
+        "local.env"
+      ],
+      "ports": [
+        "8080:80"
+      ],
+      "volumes": [
+        "data:/data"
+      ],
+      "depends_on": {
+        "db": {
+          "condition": "service_healthy"
+        }
+      },
+      "networks": {
+        "backend": {
+          "aliases": [
+            "api.internal"
+          ]
+        }
+      },
+      "cpus": 2,
+      "mem_limit": "1g",
+      "restart": "unless-stopped",
+      "dns": [
+        "1.1.1.1"
+      ],
+      "tmpfs": [
+        "/tmp:rw"
+      ],
+      "cap_add": [
+        "NET_ADMIN"
+      ],
+      "cap_drop": [
+        "SYS_ADMIN"
+      ],
+      "labels": {
+        "a.label": "first",
+        "z.label": "last"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/bin/health"
+        ],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 3,
+        "start_period": "5s"
+      },
+      "working_dir": "/app",
+      "hostname": "api",
+      "extra_hosts": [
+        "host.internal:10.0.0.1"
+      ]
+    },
+    "db": {
+      "image": "postgres:17",
+      "environment": {
+        "A_FIRST": "a",
+        "Z_LAST": "z"
+      }
+    }
+  },
+  "volumes": {
+    "data": {
+      "driver": "local"
+    }
+  },
+  "networks": {
+    "backend": {
+      "driver": "bridge"
+    }
+  }
+}

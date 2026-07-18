@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Protocol compatibility service and contract fixtures for A3S Box"
 
 [dependencies]
-a3s-acl = { git = "https://github.com/A3S-Lab/ACL.git", rev = "6e2a6469edc0f4c61b1e588d0ace873aaf15ce22" }
+a3s-acl = { workspace = true }
 a3s-box-core = { version = "3.0", path = "../core" }
 a3s-box-runtime = { version = "3.0", path = "../runtime", default-features = false, features = ["vm"] }
 anyhow = { workspace = true }

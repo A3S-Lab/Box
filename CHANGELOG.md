@@ -17,6 +17,13 @@ All notable changes to A3S Box will be documented in this file.
   OCI paths, rejects protected destinations and unsupported mount kinds before
   mutation, and passes the real-provider R17 Mounts profile for read-only
   enforcement, restart isolation, and complete removal.
+- **Pure deterministic Compose normalization.** Canonical ACL and bounded YAML
+  inputs now produce one typed, byte-stable model covered by shared golden
+  fixtures. A closed schema reports unsupported fields and values through
+  stable codes and JSON Pointer-style paths. Stateless
+  `ComposeRuntimePlan` translation is separate from CLI lifecycle state and
+  Cloud desired state, and declared service network aliases now reach Runtime
+  DNS endpoint registration.
 
 ### Fixed
 

@@ -267,6 +267,13 @@ a3s-box compose -f compose.yaml logs -f
 a3s-box compose -f compose.yaml down
 ```
 
+`compose.acl` is the canonical project format; explicit Compose YAML remains a
+bounded compatibility input. Both formats pass through the same pure,
+deterministic normalizer. Unknown fields fail with stable diagnostic codes and
+JSON Pointer-style paths instead of being silently ignored. Embedding and
+Runtime-boundary details are documented in
+[Compose Normalization](docs/compose-normalization.md).
+
 Compose is a MicroVM-oriented subset today. Although the parser accepts
 `--isolation sandbox`, the current Compose plan creates a default named bridge,
 so the fail-closed Sandbox resolver rejects it before launch.

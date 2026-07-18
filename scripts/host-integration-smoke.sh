@@ -255,6 +255,15 @@ host_arch() {
 
 stub_dir=""
 
+cleanup_stub_libkrun() {
+    if [ -n "$stub_dir" ] && [ -d "$stub_dir" ]; then
+        rm -rf -- "$stub_dir"
+    fi
+    stub_dir=""
+}
+
+trap 'cleanup_stub_libkrun' EXIT
+
 ensure_stub_libkrun() {
     if [ -n "$stub_dir" ]; then
         return
@@ -456,7 +465,7 @@ run_host_suite() {
     log "Running warm-pool Dockerfile RUN smoke"
     run_real cargo test -p a3s-box-cli --test host_smoke test_real_build_run_pool_smoke -- --ignored --nocapture --test-threads=1
     log "Running host Compose smoke"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_compose_smoke -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_compose_acl_smoke -- --ignored --nocapture --test-threads=1
 
     if [ -n "${A3S_BOX_PUSH_TEST_REF:-}" ]; then
         log "Running registry push smoke"
@@ -738,6 +747,7 @@ run_soak_verifier() {
 
 handle_soak_exit() {
     local rc="$1"
+    cleanup_stub_libkrun
     if [ "$rc" -eq 0 ] || [ "$SOAK_FAILURE_TRAP_ARMED" -eq 0 ]; then
         return
     fi

@@ -125,6 +125,7 @@ base64 = "0.22"
 ring = "0.17"
 
 # Shared types (transport protocol, privacy, tools)
+a3s-acl = { git = "https://github.com/A3S-Lab/ACL.git", rev = "fc041758758eba89dd5d22a3414d884c158c9ac1" }
 a3s-transport = { version = "0.1.1", package = "a3s-common" }
 a3s-runtime = { git = "https://github.com/A3S-Lab/Runtime.git", rev = "91a1b4c67ef2691915f2409a8cf835f7534020ff" }
 

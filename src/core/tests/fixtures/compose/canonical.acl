@@ -1,0 +1,53 @@
+service "db" {
+  image = "postgres:17"
+  environment = {
+    Z_LAST = "z"
+    A_FIRST = "a"
+  }
+}
+
+service "api" {
+  image = env("API_IMAGE")
+  entrypoint = ["/bin/api"]
+  command = ["serve", "--port", "8080"]
+  environment = {
+    Z_LAST = "z"
+    A_FIRST = "a"
+  }
+  env_file = ["base.env", "local.env"]
+  ports = ["8080:80/tcp"]
+  volumes = ["data:/data"]
+  depends_on = {
+    db = { condition = "service_healthy" }
+  }
+  networks = {
+    backend = { aliases = ["api.internal"] }
+  }
+  cpus = 2
+  mem_limit = "1g"
+  restart = "unless-stopped"
+  dns = ["1.1.1.1"]
+  tmpfs = ["/tmp:rw"]
+  cap_add = ["NET_ADMIN"]
+  cap_drop = ["SYS_ADMIN"]
+  labels = ["z.label=last", "a.label=first"]
+  working_dir = "/app"
+  hostname = "api"
+  extra_hosts = ["host.internal:10.0.0.1"]
+
+  healthcheck {
+    test = ["CMD", "/bin/health"]
+    interval = "10s"
+    timeout = "3s"
+    retries = 3
+    start_period = "5s"
+  }
+}
+
+volume "data" {
+  driver = "local"
+}
+
+network "backend" {
+  driver = "bridge"
+}

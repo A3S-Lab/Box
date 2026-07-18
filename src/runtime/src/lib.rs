@@ -143,7 +143,8 @@ pub use volume::VolumeStore;
 pub use oci::{BuildConfig, BuildRunPoolConfig, Dockerfile, Instruction};
 
 #[cfg(feature = "compose")]
-pub use compose::{ComposeProject, HealthCheckSpec};
+#[allow(deprecated)]
+pub use compose::{ComposeProject, ComposeRuntimePlan, HealthCheckSpec};
 
 #[cfg(feature = "operator")]
 pub use operator::AutoscalerController;
