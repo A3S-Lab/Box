@@ -18,13 +18,15 @@ pub(super) async fn run(
     fixture: &BoxRuntimeConformanceFixture,
     client: &dyn RuntimeClient,
 ) -> Result<()> {
-    partial_creation_replays_same_provider_identity(fixture).await?;
-    create_before_ack_and_client_restart(fixture).await?;
-    cancelled_task_apply_is_replayable(fixture).await?;
-    completed_client_restart(fixture, client).await?;
-    provider_restart(fixture, client).await?;
-    external_deletion_and_single_replacement(fixture, client).await?;
-    duplicate_resource_detection(fixture, client).await
+    // Keep the real-provider scenario state machines off libtest's default
+    // thread stack as this profile grows.
+    Box::pin(partial_creation_replays_same_provider_identity(fixture)).await?;
+    Box::pin(create_before_ack_and_client_restart(fixture)).await?;
+    Box::pin(cancelled_task_apply_is_replayable(fixture)).await?;
+    Box::pin(completed_client_restart(fixture, client)).await?;
+    Box::pin(provider_restart(fixture, client)).await?;
+    Box::pin(external_deletion_and_single_replacement(fixture, client)).await?;
+    Box::pin(duplicate_resource_detection(fixture, client)).await
 }
 
 async fn partial_creation_replays_same_provider_identity(
