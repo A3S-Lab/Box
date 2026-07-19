@@ -39,7 +39,17 @@ async fn wait_one(
     let mut heartbeat = WaitHeartbeat::new(heartbeat_interval);
     loop {
         let state = StateFile::load_default()?;
-        let record = resolve::resolve(&state, query)?;
+        let record = match resolve::resolve(&state, query) {
+            Ok(record) => record,
+            Err(error @ resolve::ResolveError::NotFound(_)) => {
+                if let Some(exit_code) = archived_wait_exit_code(query)? {
+                    println!("{exit_code}");
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
 
         match wait_poll_action(record) {
             WaitPollAction::Finish(exit_code) => {
@@ -52,6 +62,10 @@ async fn wait_one(
             }
         }
     }
+}
+
+fn archived_wait_exit_code(query: &str) -> Result<Option<i32>, String> {
+    Ok(crate::log_archive::resolve_archive(query)?.map(|archive| archive.exit_code.unwrap_or(0)))
 }
 
 fn wait_heartbeat_interval(args: &WaitArgs) -> Option<std::time::Duration> {
