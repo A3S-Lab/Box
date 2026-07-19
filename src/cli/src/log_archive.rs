@@ -1,4 +1,4 @@
-//! Archived logs for auto-removed boxes.
+//! Archived terminal metadata and logs for auto-removed boxes.
 
 use std::path::{Path, PathBuf};
 
@@ -45,38 +45,29 @@ pub(crate) struct RemovedLogArchive {
 
 impl RemovedLogArchive {
     pub(crate) fn log_dir(&self) -> PathBuf {
-        archive_dir(&self.id).join("logs")
-    }
-
-    pub(crate) fn console_log(&self) -> PathBuf {
-        self.log_dir().join("console.log")
+        archive_dir(&archive_root(), &self.id).join("logs")
     }
 }
 
+/// Persist terminal metadata and copy any available logs.
+///
+/// `Some` means at least one log file was retained. Terminal metadata is still
+/// persisted when this returns `None`, so callers can avoid advertising logs
+/// that do not exist without losing the removed box's final status.
 pub(crate) fn archive_removed_logs(record: &BoxRecord) -> std::io::Result<Option<PathBuf>> {
-    if record.log_config.driver == a3s_box_core::log::LogDriver::None {
-        return Ok(None);
-    }
+    archive_removed_logs_in(record, &archive_root())
+}
 
+fn archive_removed_logs_in(
+    record: &BoxRecord,
+    archive_root: &Path,
+) -> std::io::Result<Option<PathBuf>> {
     let source_log_dir = record.box_dir.join("logs");
-    if !source_log_dir.exists() && !record.console_log.exists() {
-        return Ok(None);
-    }
-
-    let archive_dir = archive_dir(&record.id);
+    let archive_dir = archive_dir(archive_root, &record.id);
     if archive_dir.exists() {
         std::fs::remove_dir_all(&archive_dir)?;
     }
-    std::fs::create_dir_all(archive_dir.join("logs"))?;
-
-    if source_log_dir.exists() {
-        copy_dir_contents(&source_log_dir, &archive_dir.join("logs"))?;
-    } else if record.console_log.exists() {
-        std::fs::copy(
-            &record.console_log,
-            archive_dir.join("logs").join("console.log"),
-        )?;
-    }
+    std::fs::create_dir_all(&archive_dir)?;
 
     let metadata = RemovedLogArchive {
         id: record.id.clone(),
@@ -92,18 +83,39 @@ pub(crate) fn archive_removed_logs(record: &BoxRecord) -> std::io::Result<Option
     let data = serde_json::to_vec_pretty(&metadata).map_err(std::io::Error::other)?;
     std::fs::write(archive_dir.join(METADATA_FILE), data)?;
 
-    if let Err(error) = prune_archives(LogArchiveRetention::default()) {
+    let mut archived_logs = false;
+    if record.log_config.driver != a3s_box_core::log::LogDriver::None {
+        let archived_log_dir = archive_dir.join("logs");
+        if source_log_dir.is_dir() {
+            archived_logs = copy_dir_contents(&source_log_dir, &archived_log_dir)?;
+        }
+        if !archived_logs && record.console_log.is_file() {
+            std::fs::create_dir_all(&archived_log_dir)?;
+            std::fs::copy(&record.console_log, archived_log_dir.join("console.log"))?;
+            archived_logs = true;
+        }
+    }
+
+    if let Err(error) = prune_archives(archive_root, LogArchiveRetention::default()) {
         tracing::debug!(
             error = %error,
             "Failed to prune removed-log archives after archiving logs"
         );
     }
 
-    Ok(Some(archive_dir))
+    Ok(archived_logs.then_some(archive_dir))
 }
 
 pub(crate) fn resolve_archive(query: &str) -> Result<Option<RemovedLogArchive>, String> {
-    let archives = load_archives().map_err(|e| format!("Failed to read removed logs: {e}"))?;
+    resolve_archive_in(query, &archive_root())
+}
+
+fn resolve_archive_in(
+    query: &str,
+    archive_root: &Path,
+) -> Result<Option<RemovedLogArchive>, String> {
+    let archives =
+        load_archives(archive_root).map_err(|e| format!("Failed to read removed logs: {e}"))?;
 
     if let Some(archive) = archives.iter().find(|archive| archive.id == query) {
         return Ok(Some(archive.clone()));
@@ -135,8 +147,8 @@ pub(crate) fn resolve_archive(query: &str) -> Result<Option<RemovedLogArchive>, 
     }
 }
 
-fn load_archives() -> std::io::Result<Vec<RemovedLogArchive>> {
-    Ok(load_archive_entries()?
+fn load_archives(archive_root: &Path) -> std::io::Result<Vec<RemovedLogArchive>> {
+    Ok(load_archive_entries(archive_root)?
         .into_iter()
         .map(|entry| entry.archive)
         .collect())
@@ -148,14 +160,13 @@ struct ArchiveEntry {
     size_bytes: u64,
 }
 
-fn load_archive_entries() -> std::io::Result<Vec<ArchiveEntry>> {
-    let root = archive_root();
-    if !root.exists() {
+fn load_archive_entries(archive_root: &Path) -> std::io::Result<Vec<ArchiveEntry>> {
+    if !archive_root.exists() {
         return Ok(Vec::new());
     }
 
     let mut archives = Vec::new();
-    for entry in std::fs::read_dir(root)? {
+    for entry in std::fs::read_dir(archive_root)? {
         let entry = entry?;
         let path = entry.path().join(METADATA_FILE);
         if !path.exists() {
@@ -177,8 +188,8 @@ fn load_archive_entries() -> std::io::Result<Vec<ArchiveEntry>> {
     Ok(archives)
 }
 
-pub(crate) fn prune_archives(retention: LogArchiveRetention) -> std::io::Result<usize> {
-    let mut entries = load_archive_entries()?;
+fn prune_archives(archive_root: &Path, retention: LogArchiveRetention) -> std::io::Result<usize> {
+    let mut entries = load_archive_entries(archive_root)?;
     let now = Utc::now();
     let mut removed = 0;
 
@@ -246,68 +257,40 @@ fn dir_size(path: &Path) -> std::io::Result<u64> {
     Ok(size)
 }
 
-fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
+fn copy_dir_contents(src: &Path, dst: &Path) -> std::io::Result<bool> {
+    let mut copied_file = false;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
         if file_type.is_dir() {
-            copy_dir_contents(&from, &to)?;
+            copied_file |= copy_dir_contents(&from, &to)?;
         } else if file_type.is_file() {
+            std::fs::create_dir_all(dst)?;
             std::fs::copy(from, to)?;
+            copied_file = true;
         }
     }
-    Ok(())
+    Ok(copied_file)
 }
 
 fn archive_root() -> PathBuf {
     a3s_box_core::dirs_home().join(ARCHIVE_DIR)
 }
 
-fn archive_dir(id: &str) -> PathBuf {
-    archive_root().join(id)
+fn archive_dir(archive_root: &Path, id: &str) -> PathBuf {
+    archive_root.join(id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &Path) -> Self {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            let lock = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self {
-                _lock: lock,
-                key,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
 
     #[test]
     fn archives_and_resolves_auto_removed_logs_by_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set("A3S_HOME", tmp.path());
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
         let box_dir = tmp.path().join("box");
         std::fs::create_dir_all(box_dir.join("logs")).unwrap();
         std::fs::write(box_dir.join("logs").join("container.json"), "{}\n").unwrap();
@@ -322,63 +305,165 @@ mod tests {
         record.box_dir = box_dir;
         record.console_log = record.box_dir.join("logs").join("console.log");
 
-        let archive_path = archive_removed_logs(&record).unwrap().unwrap();
+        let archive_path = archive_removed_logs_in(&record, &archive_root)
+            .unwrap()
+            .unwrap();
         assert!(archive_path.join("logs").join("container.json").exists());
 
-        let archive = resolve_archive("web").unwrap().unwrap();
+        let archive = resolve_archive_in("web", &archive_root).unwrap().unwrap();
         assert_eq!(archive.id, record.id);
-        assert!(archive.log_dir().join("container.json").exists());
+        assert!(archive_dir(&archive_root, &archive.id)
+            .join("logs")
+            .join("container.json")
+            .exists());
+    }
+
+    #[test]
+    fn archives_terminal_metadata_without_log_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
+
+        for (id, name, driver, exit_code) in [
+            (
+                "550e8400-e29b-41d4-a716-446655440001",
+                "logging-disabled",
+                a3s_box_core::log::LogDriver::None,
+                17,
+            ),
+            (
+                "550e8400-e29b-41d4-a716-446655440002",
+                "logs-missing",
+                a3s_box_core::log::LogDriver::JsonFile,
+                23,
+            ),
+        ] {
+            let mut record = crate::test_helpers::fixtures::make_record(id, name, "dead", None);
+            record.auto_remove = true;
+            record.exit_code = Some(exit_code);
+            record.log_config.driver = driver;
+            record.box_dir = tmp.path().join(name);
+            record.console_log = record.box_dir.join("logs").join("console.log");
+
+            assert!(archive_removed_logs_in(&record, &archive_root)
+                .unwrap()
+                .is_none());
+
+            let archive = resolve_archive_in(name, &archive_root).unwrap().unwrap();
+            assert_eq!(archive.id, record.id);
+            assert_eq!(archive.exit_code, Some(exit_code));
+            assert!(!archive_dir(&archive_root, &archive.id)
+                .join("logs")
+                .exists());
+        }
     }
 
     #[test]
     fn prunes_archives_by_age_and_count() {
         let tmp = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set("A3S_HOME", tmp.path());
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
 
-        write_archive("old", Utc::now() - chrono::Duration::days(30), 8);
-        write_archive("keep-1", Utc::now() - chrono::Duration::days(3), 8);
-        write_archive("keep-2", Utc::now() - chrono::Duration::days(2), 8);
-        write_archive("keep-3", Utc::now() - chrono::Duration::days(1), 8);
+        write_archive(
+            &archive_root,
+            "old",
+            Utc::now() - chrono::Duration::days(30),
+            8,
+        );
+        write_archive(
+            &archive_root,
+            "keep-1",
+            Utc::now() - chrono::Duration::days(3),
+            8,
+        );
+        write_archive(
+            &archive_root,
+            "keep-2",
+            Utc::now() - chrono::Duration::days(2),
+            8,
+        );
+        write_archive(
+            &archive_root,
+            "keep-3",
+            Utc::now() - chrono::Duration::days(1),
+            8,
+        );
 
-        let removed = prune_archives(LogArchiveRetention {
-            max_age_days: 7,
-            max_archives: 2,
-            max_total_bytes: u64::MAX,
-        })
+        let removed = prune_archives(
+            &archive_root,
+            LogArchiveRetention {
+                max_age_days: 7,
+                max_archives: 2,
+                max_total_bytes: u64::MAX,
+            },
+        )
         .unwrap();
 
         assert_eq!(removed, 2);
-        assert!(resolve_archive("old").unwrap().is_none());
-        assert!(resolve_archive("keep-1").unwrap().is_none());
-        assert!(resolve_archive("keep-2").unwrap().is_some());
-        assert!(resolve_archive("keep-3").unwrap().is_some());
+        assert!(resolve_archive_in("old", &archive_root).unwrap().is_none());
+        assert!(resolve_archive_in("keep-1", &archive_root)
+            .unwrap()
+            .is_none());
+        assert!(resolve_archive_in("keep-2", &archive_root)
+            .unwrap()
+            .is_some());
+        assert!(resolve_archive_in("keep-3", &archive_root)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
     fn prunes_archives_by_total_size() {
         let tmp = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set("A3S_HOME", tmp.path());
+        let archive_root = tmp.path().join(ARCHIVE_DIR);
 
-        write_archive("large-1", Utc::now() - chrono::Duration::days(3), 128);
-        write_archive("large-2", Utc::now() - chrono::Duration::days(2), 128);
-        write_archive("large-3", Utc::now() - chrono::Duration::days(1), 128);
+        write_archive(
+            &archive_root,
+            "large-1",
+            Utc::now() - chrono::Duration::days(3),
+            128,
+        );
+        write_archive(
+            &archive_root,
+            "large-2",
+            Utc::now() - chrono::Duration::days(2),
+            128,
+        );
+        write_archive(
+            &archive_root,
+            "large-3",
+            Utc::now() - chrono::Duration::days(1),
+            128,
+        );
 
-        let before = dir_size(&archive_root()).unwrap();
-        let removed = prune_archives(LogArchiveRetention {
-            max_age_days: 7,
-            max_archives: 10,
-            max_total_bytes: before.saturating_sub(1),
-        })
+        let before = dir_size(&archive_root).unwrap();
+        let removed = prune_archives(
+            &archive_root,
+            LogArchiveRetention {
+                max_age_days: 7,
+                max_archives: 10,
+                max_total_bytes: before.saturating_sub(1),
+            },
+        )
         .unwrap();
 
         assert_eq!(removed, 1);
-        assert!(resolve_archive("large-1").unwrap().is_none());
-        assert!(resolve_archive("large-2").unwrap().is_some());
-        assert!(resolve_archive("large-3").unwrap().is_some());
+        assert!(resolve_archive_in("large-1", &archive_root)
+            .unwrap()
+            .is_none());
+        assert!(resolve_archive_in("large-2", &archive_root)
+            .unwrap()
+            .is_some());
+        assert!(resolve_archive_in("large-3", &archive_root)
+            .unwrap()
+            .is_some());
     }
 
-    fn write_archive(id: &str, removed_at: DateTime<Utc>, payload_bytes: usize) {
-        let dir = archive_dir(id);
+    fn write_archive(
+        archive_root: &Path,
+        id: &str,
+        removed_at: DateTime<Utc>,
+        payload_bytes: usize,
+    ) {
+        let dir = archive_dir(archive_root, id);
         std::fs::create_dir_all(dir.join("logs")).unwrap();
         std::fs::write(
             dir.join("logs").join("console.log"),

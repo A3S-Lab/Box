@@ -345,6 +345,9 @@ transitions, idempotent operation IDs, and restart reconciliation. The runtime
 persists caller policy instead of rebuilding it from defaults during a retry.
 Health checks and restart policies are owned by generation-fenced background
 workers, and structured `json-file` logging keeps stdout and stderr distinct.
+Auto-removed boxes retain terminal exit metadata, plus logs when enabled and
+available, under the removed-box retention limits. Both `wait` and `logs` can
+therefore resolve a removed box by name or ID after its live state is gone.
 
 Common runtime controls include:
 

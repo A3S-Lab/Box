@@ -324,7 +324,11 @@ fn resolve_archived_log_source(
     archive: &crate::log_archive::RemovedLogArchive,
 ) -> Option<LogSource> {
     let log_dir = archive.log_dir();
-    let json_log = a3s_box_runtime::log::json_log_path(&log_dir);
+    resolve_archived_log_source_in(&log_dir)
+}
+
+fn resolve_archived_log_source_in(log_dir: &Path) -> Option<LogSource> {
+    let json_log = a3s_box_runtime::log::json_log_path(log_dir);
     if json_log.exists() {
         return Some(LogSource {
             path: json_log,
@@ -332,7 +336,7 @@ fn resolve_archived_log_source(
         });
     }
 
-    let console_log = archive.console_log();
+    let console_log = log_dir.join("console.log");
     if console_log.exists() {
         return Some(LogSource {
             path: console_log,
@@ -488,36 +492,6 @@ fn extract_line_timestamp(line: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
-        key: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &Path) -> Self {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            let lock = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self {
-                _lock: lock,
-                key,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
 
     #[test]
     #[cfg(unix)]
@@ -694,24 +668,13 @@ mod tests {
     #[test]
     fn test_resolve_archived_log_source_prefers_structured_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set("A3S_HOME", tmp.path());
-        let archive = crate::log_archive::RemovedLogArchive {
-            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-            short_id: "550e8400e29b".to_string(),
-            name: "web".to_string(),
-            image: "alpine:latest".to_string(),
-            removed_at: Utc::now(),
-            created_at: Utc::now(),
-            started_at: None,
-            exit_code: Some(1),
-            log_config: a3s_box_core::log::LogConfig::default(),
-        };
-        std::fs::create_dir_all(archive.log_dir()).unwrap();
-        let json_log = a3s_box_runtime::log::json_log_path(&archive.log_dir());
+        let log_dir = tmp.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let json_log = a3s_box_runtime::log::json_log_path(&log_dir);
         std::fs::write(&json_log, "{}\n").unwrap();
-        std::fs::write(archive.console_log(), "console\n").unwrap();
+        std::fs::write(log_dir.join("console.log"), "console\n").unwrap();
 
-        let source = resolve_archived_log_source(&archive).unwrap();
+        let source = resolve_archived_log_source_in(&log_dir).unwrap();
         assert!(source.structured);
         assert_eq!(source.path, json_log);
     }
