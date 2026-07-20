@@ -220,6 +220,15 @@ jobs:
             exit 1
           fi
 
+          if [ -f "src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll" ]; then
+            cp src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll "$DIR/lib/"
+          elif [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/libkrunfw.dll" ]; then
+            cp src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/libkrunfw.dll "$DIR/lib/"
+          else
+            echo "libkrunfw.dll is required for the native WHPX package" >&2
+            exit 1
+          fi
+
           # Copy README and LICENSE
           cp README.md "$DIR/" 2>/dev/null || true
           cp LICENSE "$DIR/" 2>/dev/null || true

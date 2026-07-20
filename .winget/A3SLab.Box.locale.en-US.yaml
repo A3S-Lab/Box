@@ -19,7 +19,7 @@ Description: |-
 
   Key features:
   - Native Windows Hypervisor Platform (WHPX) backend
-  - Bundled a3s-box CLI, shim, Linux guest init, and krun.dll
+  - Bundled a3s-box CLI, shim, Linux guest init, krun.dll, and libkrunfw.dll
   - Docker-like run/create/start/logs/image workflows on Windows
   - Named-pipe host/guest control channel for WHPX guests
   - Windows CRI is not supported
@@ -39,7 +39,7 @@ Tags:
 ReleaseNotes: |-
   Windows packaging uses the native WHPX backend. The package includes the
   Windows a3s-box CLI, the Windows shim, the Linux guest-init binary that runs
-  inside the MicroVM, and krun.dll.
+  inside the MicroVM, krun.dll, and the libkrunfw.dll companion kernel.
 
   Windows boundaries:
   - Requires Windows Hypervisor Platform.

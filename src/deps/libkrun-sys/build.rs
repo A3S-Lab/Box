@@ -186,6 +186,12 @@ fn find_sibling_libkrun_windows(triple: &str) -> Option<PathBuf> {
     None
 }
 
+fn has_windows_runtime_bundle(dir: &Path) -> bool {
+    dir.join("krun.lib").is_file()
+        && dir.join("krun.dll").is_file()
+        && dir.join("libkrunfw.dll").is_file()
+}
+
 fn find_libkrunfw_under_target(target_root: PathBuf) -> Option<PathBuf> {
     let direct_candidates = [
         target_root.join("release/build"),
@@ -832,7 +838,7 @@ fn download_krun_windows_prebuilt(out_dir: &Path) -> PathBuf {
     let extract_dir = out_dir.join("krun-windows-x64");
     let lib_dir = extract_dir.join("krun-windows-x64");
 
-    if lib_dir.join("krun.lib").exists() {
+    if has_windows_runtime_bundle(&lib_dir) {
         println!("cargo:warning=Using cached krun Windows prebuilt");
         return lib_dir;
     }
@@ -891,7 +897,7 @@ fn build_windows() {
     } else {
         let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
         let prebuilt = manifest_dir.join("prebuilt").join(&triple);
-        if prebuilt.join("krun.lib").exists() {
+        if has_windows_runtime_bundle(&prebuilt) {
             prebuilt
         } else {
             download_krun_windows_prebuilt(&out_dir)

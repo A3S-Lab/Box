@@ -551,6 +551,55 @@ fn test_reconcile_reads_exit_code_from_upper() {
 }
 
 #[test]
+fn test_reconcile_reads_exit_code_from_windows_rootfs() {
+    let tmp = TempDir::new().unwrap();
+    let path = test_state_path(&tmp);
+
+    let box_dir = tmp.path().join("boxes").join("windows-exitcode-id");
+    std::fs::create_dir_all(box_dir.join("rootfs")).unwrap();
+    std::fs::write(box_dir.join("rootfs").join(".a3s_exit_code"), "23").unwrap();
+    #[cfg(target_os = "windows")]
+    {
+        std::fs::write(
+            box_dir.join("rootfs").join("guest-init.stdout.log"),
+            "detached stdout\n",
+        )
+        .unwrap();
+        std::fs::write(
+            box_dir.join("rootfs").join("guest-init.stderr.log"),
+            "detached stderr\n",
+        )
+        .unwrap();
+    }
+
+    {
+        let mut sf = StateFile::load(&path).unwrap();
+        let mut record = sample_record("windows-exitcode-id", "windows_exitcode_box", "created");
+        record.status = "running".to_string();
+        record.pid = Some(4294967);
+        record.box_dir = box_dir.clone();
+        sf.records.push(record);
+        sf.save().unwrap();
+    }
+
+    let sf = StateFile::load(&path).unwrap();
+    let record = sf.find_by_id("windows-exitcode-id").unwrap();
+    assert_eq!(record.status, "dead");
+    assert_eq!(record.exit_code, Some(23));
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(
+            std::fs::read_to_string(box_dir.join("logs").join("console.log")).unwrap(),
+            "detached stdout\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(box_dir.join("logs").join("console.err.log")).unwrap(),
+            "detached stderr\n"
+        );
+    }
+}
+
+#[test]
 fn test_reconcile_running_without_pid() {
     let tmp = TempDir::new().unwrap();
     let path = test_state_path(&tmp);

@@ -106,4 +106,5 @@ xz2 = "0.1"
 
 [dev-dependencies]
 rand = { workspace = true }
+rcgen = { workspace = true }
 tempfile = { workspace = true }

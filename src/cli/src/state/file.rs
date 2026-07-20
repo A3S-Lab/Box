@@ -324,20 +324,37 @@ impl StateFile {
 
             let has_live_pid = is_record_pid_live(record);
             if !has_live_pid {
-                // guest-init writes the container exit code into the overlay
-                // rootfs (`/.a3s_exit_code`) on exit; it surfaces on the host at
-                // <box_dir>/upper/.a3s_exit_code. Capture it here so a detached
-                // box's `wait`/`inspect` report the real code — libkrun's
-                // start_enter takeover means we can't waitpid the VM, so liveness
-                // polling alone would otherwise always yield exit 0.
-                if record.exit_code.is_none() {
-                    if let Ok(contents) =
-                        std::fs::read_to_string(record.box_dir.join("upper").join(".a3s_exit_code"))
-                    {
-                        if let Ok(code) = contents.trim().parse::<i32>() {
-                            record.exit_code = Some(code);
+                // guest-init writes `/.a3s_exit_code` before shutdown. It appears
+                // under `upper/` for Unix overlays and directly under `rootfs/`
+                // for the Windows copy-based rootfs.
+                #[cfg(target_os = "windows")]
+                {
+                    let persisted = a3s_box_runtime::vm::read_persisted_exit_code(&record.box_dir);
+                    if record.box_dir.join("rootfs").is_dir() {
+                        let fallback = record.exit_code.or(persisted).unwrap_or(0);
+                        match a3s_box_runtime::vm::collect_windows_guest_result(
+                            &record.box_dir,
+                            &record.log_config,
+                            fallback,
+                        ) {
+                            Ok(code) => record.exit_code = Some(code),
+                            Err(error) => {
+                                tracing::warn!(
+                                    box_id = %record.id,
+                                    %error,
+                                    "Failed to collect completed Windows guest result"
+                                );
+                                record.exit_code = Some(if fallback == 0 { 1 } else { fallback });
+                            }
                         }
+                    } else if record.exit_code.is_none() {
+                        record.exit_code = persisted;
                     }
+                }
+                #[cfg(not(target_os = "windows"))]
+                if record.exit_code.is_none() {
+                    record.exit_code =
+                        a3s_box_runtime::vm::read_persisted_exit_code(&record.box_dir);
                 }
                 record.status = "dead".to_string();
                 record.pid = None;

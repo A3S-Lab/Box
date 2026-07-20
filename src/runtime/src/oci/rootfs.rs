@@ -183,11 +183,7 @@ impl OciRootfsBuilder {
                             err
                         ))
                     })?;
-                    if target.is_absolute() {
-                        target
-                    } else {
-                        self.rootfs_path.join(target)
-                    }
+                    self.resolve_rootfs_link_target(&self.rootfs_path, &target)?
                 }
                 Ok(_) => {
                     return Err(BoxError::BuildError(format!(
@@ -406,17 +402,7 @@ impl OciRootfsBuilder {
                             e
                         ))
                     })?;
-                    current = if target.is_absolute() {
-                        let stripped = target.strip_prefix("/").map_err(|_| {
-                            BoxError::BuildError(format!(
-                                "Invalid absolute rootfs symlink target {}",
-                                target.display()
-                            ))
-                        })?;
-                        self.rootfs_path.join(stripped)
-                    } else {
-                        current.join(target)
-                    };
+                    current = self.resolve_rootfs_link_target(&current, &target)?;
                 }
                 Ok(metadata) if !metadata.is_dir() => {
                     return Err(BoxError::BuildError(format!(
@@ -431,6 +417,59 @@ impl OciRootfsBuilder {
         }
 
         Ok(current)
+    }
+
+    /// Resolve a Linux guest symlink without allowing it to escape `rootfs`.
+    ///
+    /// Windows does not consider `/usr/etc` an absolute host path, and
+    /// `read_link` may render it as `\usr\etc`. Treat both separators as guest
+    /// separators on Windows and resolve a leading slash from the guest root.
+    fn resolve_rootfs_link_target(&self, parent: &Path, target: &Path) -> Result<PathBuf> {
+        let rendered = target.to_string_lossy();
+        #[cfg(windows)]
+        let rendered = rendered.replace('\\', "/");
+        #[cfg(not(windows))]
+        let rendered = rendered.into_owned();
+
+        let mut segments: Vec<String> = if rendered.starts_with('/') {
+            Vec::new()
+        } else {
+            parent
+                .strip_prefix(&self.rootfs_path)
+                .map_err(|_| {
+                    BoxError::BuildError(format!(
+                        "Rootfs symlink parent escapes rootfs: {}",
+                        parent.display()
+                    ))
+                })?
+                .components()
+                .filter_map(|component| match component {
+                    Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        for segment in rendered.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    if segments.pop().is_none() {
+                        return Err(BoxError::BuildError(format!(
+                            "Rootfs symlink target escapes rootfs: {}",
+                            target.display()
+                        )));
+                    }
+                }
+                value => segments.push(value.to_string()),
+            }
+        }
+
+        let mut resolved = self.rootfs_path.clone();
+        for segment in segments {
+            resolved.push(segment);
+        }
+        Ok(resolved)
     }
 
     /// Get the OCI image configuration.
@@ -712,6 +751,7 @@ mod tests {
             rootfs_path: rootfs_path.clone(),
             image_path: PathBuf::new(),
             guest_init_path: Some(guest_init),
+            resolv_conf: None,
         };
 
         builder.install_guest_init().unwrap();

@@ -105,7 +105,10 @@ impl RootfsCache {
         if let Ok(content) = std::fs::read_to_string(&meta_path) {
             if let Ok(mut meta) = serde_json::from_str::<RootfsMeta>(&content) {
                 meta.last_accessed = chrono::Utc::now().timestamp();
-                if let Err(e) = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?) {
+                if let Err(e) = super::layer_cache::write_meta_atomically(
+                    &meta_path,
+                    &serde_json::to_string_pretty(&meta)?,
+                ) {
                     tracing::warn!(path = %meta_path.display(), error = %e, "Failed to update rootfs cache metadata");
                 }
             }

@@ -204,35 +204,68 @@ pub fn is_runtime_console_noise(line: &str) -> bool {
 /// reads. Returns `None` only when `stop` is set AND EOF is reached — i.e. the
 /// VM has exited and `console.log` is fully drained — flushing any final partial
 /// line as the last value before the subsequent `None`.
-fn tail_next_line(
-    reader: &mut (impl BufRead + Seek),
+fn tail_next_line<R: BufRead + Seek>(
+    reader: &mut R,
     buf: &mut String,
     stop: &AtomicBool,
     on_eof: Option<&dyn Fn() -> bool>,
+    reopen_at_eof: Option<&dyn Fn(u64) -> Option<(R, u64)>>,
 ) -> Option<String> {
+    let mut refreshed_after_stop = false;
     loop {
         match reader.read_line(buf) {
             Ok(0) | Err(_) => {
-                if stop.load(Ordering::Relaxed) {
-                    // VM exited and we are at EOF: flush a trailing partial line
-                    // (no newline) once, then signal completion.
+                // Caught up at a clean line boundary (no partial line buffered):
+                // let the caller bound the file's growth. If it truncated, seek
+                // back to the start so reads don't sit forever past a stale EOF.
+                let mut position = reader.stream_position().ok();
+                if buf.is_empty() {
+                    if let Some(on_eof) = on_eof {
+                        if on_eof() {
+                            let _ = reader.seek(std::io::SeekFrom::Start(0));
+                            position = Some(0);
+                        }
+                    }
+                }
+
+                let stopping = stop.load(Ordering::Relaxed);
+
+                // Windows shared-filesystem producers can replace the path or
+                // append through a handle whose updates remain invisible to a
+                // reader already parked at EOF. Path metadata may be cached as
+                // well, so reopen unconditionally after each polling interval.
+                // On shutdown, perform one final fresh-handle read before
+                // declaring the source drained.
+                if let (Some(position), Some(reopen_at_eof)) = (position, reopen_at_eof) {
+                    if !(stopping && refreshed_after_stop) {
+                        if !stopping {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        if let Some((mut replacement, replacement_position)) =
+                            reopen_at_eof(position)
+                        {
+                            if replacement_position != position {
+                                buf.clear();
+                            }
+                            std::mem::swap(reader, &mut replacement);
+                            refreshed_after_stop = stopping;
+                            continue;
+                        }
+                    }
+                }
+
+                if stopping {
+                    // VM exited and the current path is drained: flush a
+                    // trailing partial line (no newline) once, then finish.
                     if buf.is_empty() {
                         return None;
                     }
                     let line = std::mem::take(buf);
                     return Some(line.trim_end_matches(['\n', '\r']).to_string());
                 }
-                // Caught up at a clean line boundary (no partial line buffered):
-                // let the caller bound the file's growth. If it truncated, seek
-                // back to the start so reads don't sit forever past a stale EOF.
-                if buf.is_empty() {
-                    if let Some(on_eof) = on_eof {
-                        if on_eof() {
-                            let _ = reader.seek(std::io::SeekFrom::Start(0));
-                        }
-                    }
+                if reopen_at_eof.is_none() {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
             }
             Ok(_) => {}
@@ -256,25 +289,45 @@ pub fn run_log_processor(
     config: &LogConfig,
     stop: &AtomicBool,
 ) {
+    let stderr_log = stderr_console_path(console_log);
+    run_log_processor_streams(console_log, &stderr_log, log_dir, config, stop);
+}
+
+/// Run the log processor against explicitly selected stdout and stderr files.
+///
+/// Most VMM backends write the conventional `console.log` and
+/// `console.err.log` pair, which [`run_log_processor`] discovers automatically.
+/// Backends that persist completed guest streams elsewhere can use this entry
+/// point to process exactly those files without replaying an older raw console.
+pub fn run_log_processor_streams(
+    stdout_log: &Path,
+    stderr_log: &Path,
+    log_dir: &Path,
+    config: &LogConfig,
+    stop: &AtomicBool,
+) {
     match config.driver {
         // `none` produces no structured output, but libkrun still writes the raw
         // console for the VM's lifetime — drain + bound it so a chatty box with
         // logging disabled doesn't fill the disk (same hazard as the other
         // drivers).
         LogDriver::None => run_discard_processor(
-            console_log,
+            stdout_log,
+            stderr_log,
             Some(console_cap(config.max_size(), config.max_file())),
             stop,
         ),
         LogDriver::JsonFile => run_json_file_processor(
-            console_log,
+            stdout_log,
+            stderr_log,
             log_dir,
             config.max_size(),
             config.max_file(),
             stop,
         ),
         LogDriver::Syslog => run_syslog_processor(
-            console_log,
+            stdout_log,
+            stderr_log,
             config.syslog_address(),
             config.syslog_facility(),
             config.tag().unwrap_or("a3s-box"),
@@ -297,6 +350,16 @@ fn open_console(console_log: &Path, stop: &AtomicBool) -> Option<std::fs::File> 
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     std::fs::File::open(console_log).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn reopen_console(console_log: &Path, position: u64) -> Option<(BufReader<std::fs::File>, u64)> {
+    let mut file = std::fs::File::open(console_log).ok()?;
+    let visible_len = file.seek(std::io::SeekFrom::End(0)).ok()?;
+    let replacement_position = if visible_len < position { 0 } else { position };
+    file.seek(std::io::SeekFrom::Start(replacement_position))
+        .ok()?;
+    Some((BufReader::new(file), replacement_position))
 }
 
 /// Tail console.log and write one Docker-style JSON record per container line.
@@ -327,7 +390,14 @@ fn run_tagged_tail(
     // console_truncate_if_over). None = unbounded (used by tests).
     let truncate = bound.map(|cap| move || console_truncate_if_over(file, cap));
     let on_eof: Option<&dyn Fn() -> bool> = truncate.as_ref().map(|t| t as &dyn Fn() -> bool);
-    while let Some(line) = tail_next_line(&mut reader, &mut buf, stop, on_eof) {
+    #[cfg(target_os = "windows")]
+    let reopen = |position| reopen_console(file, position);
+    #[cfg(target_os = "windows")]
+    let reopen_at_eof = Some(&reopen as &dyn Fn(u64) -> Option<(BufReader<std::fs::File>, u64)>);
+    #[cfg(not(target_os = "windows"))]
+    let reopen_at_eof = None;
+
+    while let Some(line) = tail_next_line(&mut reader, &mut buf, stop, on_eof, reopen_at_eof) {
         if filter_noise && is_runtime_console_noise(&line) {
             continue;
         }
@@ -346,18 +416,18 @@ fn console_cap(max_size: u64, max_file: u32) -> u64 {
 /// (advancing to clean line boundaries) and truncate when over `cap`, emitting
 /// nothing. Without this, `--log-driver none` would leave libkrun's raw
 /// `console.log`/`console.err.log` to grow without limit.
-fn run_discard_processor(console_log: &Path, cap: Option<u64>, stop: &AtomicBool) {
-    let err_log = stderr_console_path(console_log);
+fn run_discard_processor(console_log: &Path, err_log: &Path, cap: Option<u64>, stop: &AtomicBool) {
     let discard = |_line: &str, _stream: &str| {};
     let discard: &(dyn Fn(&str, &str) + Sync) = &discard;
     std::thread::scope(|s| {
         s.spawn(|| run_tagged_tail(console_log, "stdout", false, cap, stop, discard));
-        s.spawn(|| run_tagged_tail(&err_log, "stderr", false, cap, stop, discard));
+        s.spawn(|| run_tagged_tail(err_log, "stderr", false, cap, stop, discard));
     });
 }
 
 fn run_json_file_processor(
     console_log: &Path,
+    err_log: &Path,
     log_dir: &Path,
     max_size: u64,
     max_file: u32,
@@ -368,8 +438,6 @@ fn run_json_file_processor(
         Ok(w) => w,
         Err(_) => return,
     });
-    let err_log = stderr_console_path(console_log);
-
     // Write one tagged JSON record per line; shared by the stdout and stderr
     // tail threads (the Mutex serializes their interleave into container.json).
     let emit = |line: &str, stream: &str| {
@@ -391,13 +459,14 @@ fn run_json_file_processor(
         s.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit));
         // libkrun's `init.krun:` preamble can land on EITHER stream, so filter
         // the noise on stderr too.
-        s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit));
+        s.spawn(|| run_tagged_tail(err_log, "stderr", true, cap, stop, emit));
     });
 }
 
 /// Forward both console streams (stdout + stderr) to a syslog endpoint.
 fn run_syslog_processor(
     console_log: &Path,
+    err_log: &Path,
     address: &str,
     _facility: &str,
     tag: &str,
@@ -413,8 +482,6 @@ fn run_syslog_processor(
     } else {
         ("udp", address)
     };
-    let err_log = stderr_console_path(console_log);
-
     match proto {
         "udp" => {
             let socket = match UdpSocket::bind("0.0.0.0:0") {
@@ -429,7 +496,7 @@ fn run_syslog_processor(
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
             std::thread::scope(|s| {
                 s.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit));
-                s.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit));
+                s.spawn(|| run_tagged_tail(err_log, "stderr", true, cap, stop, emit));
             });
         }
         "tcp" => {
@@ -451,7 +518,7 @@ fn run_syslog_processor(
             let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
             std::thread::scope(|sc| {
                 sc.spawn(|| run_tagged_tail(console_log, "stdout", true, cap, stop, emit));
-                sc.spawn(|| run_tagged_tail(&err_log, "stderr", true, cap, stop, emit));
+                sc.spawn(|| run_tagged_tail(err_log, "stderr", true, cap, stop, emit));
             });
         }
         _ => {}
@@ -657,14 +724,17 @@ mod tests {
         let mut buf = String::new();
         let stop = AtomicBool::new(true);
         assert_eq!(
-            tail_next_line(&mut reader, &mut buf, &stop, None),
+            tail_next_line(&mut reader, &mut buf, &stop, None, None),
             Some("alpha".to_string())
         );
         assert_eq!(
-            tail_next_line(&mut reader, &mut buf, &stop, None),
+            tail_next_line(&mut reader, &mut buf, &stop, None, None),
             Some("beta".to_string())
         );
-        assert_eq!(tail_next_line(&mut reader, &mut buf, &stop, None), None);
+        assert_eq!(
+            tail_next_line(&mut reader, &mut buf, &stop, None, None),
+            None
+        );
         assert!(buf.is_empty());
     }
 
@@ -677,10 +747,13 @@ mod tests {
         let mut buf = String::new();
         let stop = AtomicBool::new(true);
         assert_eq!(
-            tail_next_line(&mut reader, &mut buf, &stop, None),
+            tail_next_line(&mut reader, &mut buf, &stop, None, None),
             Some("only-partial".to_string())
         );
-        assert_eq!(tail_next_line(&mut reader, &mut buf, &stop, None), None);
+        assert_eq!(
+            tail_next_line(&mut reader, &mut buf, &stop, None, None),
+            None
+        );
     }
 
     #[test]
@@ -747,6 +820,52 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_run_tagged_tail_reopens_replaced_source() {
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guest-init.stdout.log");
+        let retired = dir.path().join("guest-init.stdout.log.retired");
+        std::fs::write(&path, b"").unwrap();
+
+        let collected = Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (c2, s2, p2) = (collected.clone(), stop.clone(), path.clone());
+        let handle = std::thread::spawn(move || {
+            let emit = move |line: &str, _stream: &str| c2.lock().unwrap().push(line.to_string());
+            let emit: &(dyn Fn(&str, &str) + Sync) = &emit;
+            run_tagged_tail(&p2, "stdout", false, None, &s2, emit);
+        });
+
+        // Model a shared-filesystem producer replacing an empty file after the
+        // host tailer has already reached EOF on the original file handle.
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::rename(&path, &retired).unwrap();
+        std::fs::write(&path, b"late-line\n").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline
+            && !collected
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line == "late-line")
+        {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        let got = collected.lock().unwrap().clone();
+        assert!(
+            got.iter().any(|line| line == "late-line"),
+            "tailer stayed attached to the stale Windows file handle: {got:?}"
+        );
+    }
+
     #[test]
     fn test_none_driver_still_bounds_console() {
         use std::sync::Arc;
@@ -797,14 +916,20 @@ mod tests {
         // every line logged after the first EOF (here: BBB after a quiet line).
         let dir = tempfile::tempdir().unwrap();
         let console = dir.path().join("console.log");
+        let stderr = dir.path().join("persisted-stderr.log");
         std::fs::write(&console, "AAA\ninit.krun: noise\nBBB\n").unwrap();
+        std::fs::write(&stderr, "init.krun: stderr noise\nERR\n").unwrap();
         let stop = AtomicBool::new(true);
-        run_json_file_processor(&console, dir.path(), 10 * 1024 * 1024, 3, &stop);
+        run_log_processor_streams(&console, &stderr, dir.path(), &LogConfig::default(), &stop);
         let json = std::fs::read_to_string(json_log_path(dir.path())).unwrap();
         assert!(json.contains("\"log\":\"AAA\\n\""), "AAA missing: {json}");
         assert!(
             json.contains("\"log\":\"BBB\\n\""),
             "BBB (after a quiet line) missing: {json}"
+        );
+        assert!(
+            json.contains("\"log\":\"ERR\\n\"") && json.contains("\"stream\":\"stderr\""),
+            "custom stderr stream missing: {json}"
         );
         assert!(
             !json.contains("init.krun"),

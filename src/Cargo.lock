@@ -212,6 +212,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.48.0",

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use a3s_box_core::compose::{ComposeConfig, ServiceConfig};
+use a3s_box_core::config::DEFAULT_VCPUS;
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::{ComposeProject, NetworkStore, VmManager};
 use clap::{Args, Subcommand};
@@ -506,7 +507,7 @@ async fn execute_up(
             status: "running".to_string(),
             pid,
             pid_start_time: pid.and_then(crate::process::pid_start_time),
-            cpus: svc.and_then(|s| s.cpus).unwrap_or(2),
+            cpus: svc.and_then(|s| s.cpus).unwrap_or(DEFAULT_VCPUS),
             memory_mb: svc
                 .and_then(|s| s.mem_limit.as_ref())
                 .and_then(|m| crate::output::parse_memory(m).ok())

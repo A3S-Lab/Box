@@ -45,7 +45,7 @@ As of **v2.4.0**, three adversarial audits — production-operability (24 findin
 | Compose | A useful local subset is implemented: image, command, entrypoint, env, env_file, ports, volumes, depends_on, networks, DNS, tmpfs, workdir, hostname, extra_hosts, labels, healthcheck, restart, CPU/memory, capabilities, and privileged mode. |
 | TEE | AMD SEV-SNP-oriented attestation, RA-TLS, sealing, and secret injection flows exist, plus simulation mode for development. Hardware-backed operation depends on SEV-SNP-capable hosts and libkrun support. TDX is not a productized path. |
 | Kubernetes CRI | Reachable by `crictl`/kubelet over its Unix socket. Verified on a `/dev/kvm` host: pod + container lifecycle (`RunPodSandbox` → `CreateContainer` → `StartContainer` → `Stop`/`Remove`), `exec` over Kubernetes SPDY/3.1 `remotecommand` (TTY and non-TTY, stdin/stdout/stderr, exit codes), and container log capture to `log_path`. Not yet conformant: `attach` and the stricter `critest` specs (log format, Linux SecurityContext, seccomp/AppArmor, namespaces, mount propagation). Linux-only; not the core completion target. **RuntimeClass:** a one-command per-node installer (`deploy/scripts/install-runtimeclass.sh`) registers the `io.containerd.a3s-box.v2` runtime, and `runtimeClassName: a3s-box` is validated end-to-end (pod start + `kubectl exec`) across a 5-node cluster — see [Deploy as a Kubernetes RuntimeClass](#deploy-as-a-kubernetes-runtimeclass). |
-| Windows | Native WHPX backend through libkrun. The Windows package runs directly on Windows with Windows Hypervisor Platform enabled; it does not require WSL. Windows CRI is intentionally out of scope. |
+| Windows | Native x86_64 WHPX backend through libkrun. Foreground and detached Alpine workloads, stdout/stderr collection, structured logs, and real exit-code propagation were validated on Windows on July 20, 2026. Windows Hypervisor Platform is required; WSL is not. The current reliable boot path is limited to one vCPU, and Windows CRI is intentionally out of scope. See [Windows WHPX](docs/windows-whpx.md). |
 
 ## What A3S Box is
 
@@ -120,6 +120,21 @@ On macOS, use Apple Silicon. On Linux, use a host with KVM/libkrun support. On W
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
 
+For a Windows source build, build the Linux guest PID 1 with Zig before the
+native binaries:
+
+```powershell
+cd src
+cargo install cargo-zigbuild
+cargo zigbuild --release -p a3s-box-guest-init --target x86_64-unknown-linux-musl
+cargo build --release -p a3s-box-cli -p a3s-box-shim
+```
+
+Zig only cross-links the static Linux guest-init executable. The Linux kernel
+is supplied by the packaged `libkrunfw.dll`; A3S Box does not compile a kernel
+during this build. See [docs/windows-whpx.md](docs/windows-whpx.md) for package
+layout, validation commands, and current platform limits.
+
 Run `a3s-box info` first; it reports virtualization, platform, bridge backend, port-publishing support, TEE availability, package-cache state, and the current virtio-fs cache mode.
 
 ## Quick start
@@ -141,6 +156,9 @@ a3s-box logs -f web
 a3s-box stop web
 a3s-box rm web
 ```
+
+On Windows, omit `--cpus` or use `--cpus 1`; higher counts are rejected before
+the image is pulled until the WHPX SMP path is reliable.
 
 ## Command surface
 

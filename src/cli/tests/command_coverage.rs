@@ -197,6 +197,9 @@ fn test_local_state_command_smoke() {
     cli.ok(&["audit", "--limit", "1"]);
     cli.ok(&["snapshot", "ls"]);
     cli.ok(&["snapshot", "ls", "--json"]);
+    #[cfg(target_os = "windows")]
+    cli.fails(&["pool", "status"], "not supported on Windows");
+    #[cfg(not(target_os = "windows"))]
     cli.ok(&["pool", "status"]);
     cli.ok(&["pool", "stop"]);
     cli.ok(&["prune", "--force"]);
@@ -379,13 +382,23 @@ fn test_create_persists_rich_runtime_options() {
     let env_file = cli.home_path().join("rich.env");
     std::fs::write(&env_file, "FROM_FILE=kept\nOVERRIDE=file\n").expect("write env file");
     let env_file_arg = env_file.to_string_lossy().to_string();
+    let cpus = if cfg!(target_os = "windows") {
+        "1"
+    } else {
+        "4"
+    };
+    let cpuset = if cfg!(target_os = "windows") {
+        "0"
+    } else {
+        "0,1"
+    };
 
     cli.ok(&[
         "create",
         "--name",
         "cov-rich",
         "--cpus",
-        "4",
+        cpus,
         "--memory",
         "768m",
         "--volume",
@@ -425,7 +438,7 @@ fn test_create_persists_rich_runtime_options() {
         "--pids-limit",
         "128",
         "--cpuset-cpus",
-        "0,1",
+        cpuset,
         "--ulimit",
         "nofile=1024:2048",
         "--cpu-shares",
@@ -470,7 +483,7 @@ fn test_create_persists_rich_runtime_options() {
     let inspect = parse_inspect(&inspect);
     assert_eq!(inspect["name"], "cov-rich");
     assert_eq!(inspect["status"], "created");
-    assert_eq!(inspect["cpus"], 4);
+    assert_eq!(inspect["cpus"], cpus.parse::<u64>().unwrap());
     assert_eq!(inspect["memory_mb"], 768);
     assert_eq!(inspect["cmd"], serde_json::json!(["sleep", "60"]));
     assert_eq!(inspect["entrypoint"], serde_json::json!(["/bin/sh", "-lc"]));
@@ -506,7 +519,7 @@ fn test_create_persists_rich_runtime_options() {
     assert_eq!(inspect["health_check"]["retries"], 5);
     assert_eq!(inspect["health_check"]["start_period_secs"], 3);
     assert_eq!(inspect["resource_limits"]["pids_limit"], 128);
-    assert_eq!(inspect["resource_limits"]["cpuset_cpus"], "0,1");
+    assert_eq!(inspect["resource_limits"]["cpuset_cpus"], cpuset);
     assert_eq!(
         inspect["resource_limits"]["ulimits"],
         serde_json::json!(["nofile=1024:2048"])
@@ -548,6 +561,12 @@ fn test_noninteractive_boundary_command_smoke() {
         "not found locally",
     );
     cli.fails(&["attach", "missing-box"], "No such box");
+    #[cfg(target_os = "windows")]
+    cli.fails(
+        &["shell", "missing-box"],
+        "'shell' is not supported on windows/amd64",
+    );
+    #[cfg(not(target_os = "windows"))]
     cli.fails(&["shell", "missing-box"], "No such box");
     cli.fails(&["stats", "--no-stream", "missing-box"], "No such box");
     cli.fails(

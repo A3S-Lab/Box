@@ -2,6 +2,44 @@
 
 All notable changes to A3S Box will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Runnable native Windows WHPX path.** Windows packages now include the
+  `libkrunfw.dll` companion kernel alongside `krun.dll`, and the native path is
+  documented and validated with Alpine foreground/detached workloads, separated
+  output streams, structured logs, and real workload exit codes.
+
+### Changed
+
+- **Explicit Windows CPU boundary.** Windows defaults to one vCPU and rejects
+  unsupported SMP requests before image pull; Linux and macOS keep their
+  existing two-vCPU default.
+
+### Fixed
+
+- **WHPX vCPU register access.** Hypervisor register buffers now satisfy WHPX
+  alignment requirements, preventing the host-side crash seen during vCPU
+  setup.
+- **Windows result and rootfs handling.** The parent runtime collects completed
+  guest stdout/stderr and exit status after libkrun terminates the shim, while
+  Windows layer extraction recreates image symlinks instead of dropping them.
+- **Windows persistence and guest paths.** Native cross-process locks now
+  serialize cache, network, volume, and credential updates; cache metadata
+  tolerates transient Windows sharing conflicts, and guest paths remain
+  slash-normalized for Dockerignore, rootfs symlinks, and CLI diff output.
+- **Windows live logs and repeated port forwarding.** Detached workloads now
+  expose stdout and stderr while they are still running, and the guest drains
+  coalesced control frames so a published TCP port accepts sequential
+  connections instead of stalling after the first request.
+- **Windows bind-mount parsing.** Drive-letter and UNC sources are classified as
+  bind mounts and retain their Linux guest target through runtime preparation,
+  including read-only single-file mounts.
+- **Filesystem snapshot command restoration.** Starting a box restored from a
+  filesystem snapshot now preserves its persisted command even when the
+  restored layout has no OCI metadata.
+
 ## [3.0.5] — 2026-07-08
 
 ### Added

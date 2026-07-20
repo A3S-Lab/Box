@@ -141,10 +141,6 @@ fn serve_control(control: std::fs::File) -> io::Result<()> {
     let mut reader = control;
 
     loop {
-        if !wait_readable(reader.as_raw_fd(), Duration::from_secs(1))? {
-            continue;
-        }
-
         let frame = match read_frame(&mut reader)? {
             Some(frame) => frame,
             None => {
@@ -237,26 +233,6 @@ fn serve_control(control: std::fs::File) -> io::Result<()> {
     }
 }
 
-fn wait_readable(fd: i32, timeout: Duration) -> io::Result<bool> {
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let timeout_ms = timeout.as_millis().clamp(0, i32::MAX as u128) as i32;
-    let rc = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if rc > 0 && (pollfd.revents & (libc::POLLHUP | libc::POLLERR)) != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "vsock connection closed",
-        ));
-    }
-    Ok(rc > 0 && (pollfd.revents & libc::POLLIN) != 0)
-}
-
 fn spawn_guest_reader(
     stream_id: u32,
     mut stream: TcpStream,
@@ -344,7 +320,8 @@ mod tests {
 
     #[test]
     fn write_then_read_frame_round_trips_kind_stream_and_payload() {
-        let file = tempfile::tempfile().unwrap();
+        let backing_file = tempfile::NamedTempFile::new().unwrap();
+        let file = backing_file.reopen().unwrap();
         let writer = Arc::new(Mutex::new(file));
 
         write_frame(&writer, FRAME_DATA, 0x0102_0304, b"hello").unwrap();
@@ -360,7 +337,8 @@ mod tests {
 
     #[test]
     fn write_then_read_frame_supports_empty_payload() {
-        let file = tempfile::tempfile().unwrap();
+        let backing_file = tempfile::NamedTempFile::new().unwrap();
+        let file = backing_file.reopen().unwrap();
         let writer = Arc::new(Mutex::new(file));
 
         write_frame(&writer, FRAME_CLOSE, 7, &[]).unwrap();
@@ -396,5 +374,28 @@ mod tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn read_frame_consumes_coalesced_frames_without_an_extra_readiness_edge() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[FRAME_CLOSE]);
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(&[FRAME_OPEN]);
+        bytes.extend_from_slice(&2_u32.to_be_bytes());
+        bytes.extend_from_slice(&2_u32.to_be_bytes());
+        bytes.extend_from_slice(&8080_u16.to_be_bytes());
+        let mut cursor = Cursor::new(bytes);
+
+        let close = read_frame(&mut cursor).unwrap().unwrap();
+        let open = read_frame(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(close.kind, FRAME_CLOSE);
+        assert_eq!(close.stream_id, 1);
+        assert!(close.payload.is_empty());
+        assert_eq!(open.kind, FRAME_OPEN);
+        assert_eq!(open.stream_id, 2);
+        assert_eq!(open.payload, 8080_u16.to_be_bytes());
     }
 }

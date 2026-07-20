@@ -145,6 +145,8 @@ jobs:
           path: |
             src/target/x86_64-pc-windows-msvc/release/a3s-box.exe
             src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe
+            src/target/x86_64-pc-windows-msvc/release/krun.dll
+            src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll
 
   # ── Real microVM integration gate (self-hosted, /dev/kvm) ───────
   # The fmt/clippy/test/build jobs above all run in STUB mode

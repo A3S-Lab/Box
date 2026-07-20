@@ -274,7 +274,7 @@ LABEL org.opencontainers.image.title="scratch-smoke"
                 quiet: true,
                 platforms: vec![],
                 target: None,
-                no_cache: false,
+                no_cache: true,
                 metrics: None,
             },
             store.clone(),
@@ -298,7 +298,10 @@ LABEL org.opencontainers.image.title="scratch-smoke"
             .collect();
 
         assert!(names.iter().any(|n| n == "app/keep.txt"));
-        assert!(names.iter().any(|n| n == "app/logs/important.log")); // !negation
+        assert!(
+            names.iter().any(|n| n == "app/logs/important.log"),
+            "re-included log missing from layer: {names:?}"
+        ); // !negation
         assert!(
             !names.iter().any(|n| n.contains(".env")),
             "secret leaked: {names:?}"

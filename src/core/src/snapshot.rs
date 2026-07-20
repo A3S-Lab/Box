@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::config::DEFAULT_VCPUS;
+
 /// Metadata for a saved VM snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMetadata {
@@ -75,7 +77,7 @@ impl SnapshotMetadata {
             name,
             source_box_id,
             image,
-            vcpus: 2,
+            vcpus: DEFAULT_VCPUS,
             memory_mb: 512,
             volumes: Vec::new(),
             env: HashMap::new(),
@@ -146,7 +148,7 @@ mod tests {
         assert_eq!(meta.name, "my-snapshot");
         assert_eq!(meta.source_box_id, "box-abc");
         assert_eq!(meta.image, "alpine:latest");
-        assert_eq!(meta.vcpus, 2);
+        assert_eq!(meta.vcpus, DEFAULT_VCPUS);
         assert_eq!(meta.memory_mb, 512);
         assert!(meta.volumes.is_empty());
         assert!(meta.env.is_empty());

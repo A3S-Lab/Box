@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use a3s_box_core::config::ResourceLimits;
+use a3s_box_core::config::{validate_vcpu_count, ResourceLimits, DEFAULT_VCPUS};
 use a3s_box_runtime::oci::{OciHealthCheck, OciImageConfig};
 use clap::Args;
 
@@ -20,7 +20,7 @@ pub struct CommonBoxArgs {
     pub name: Option<String>,
 
     /// Number of CPUs
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value_t = DEFAULT_VCPUS)]
     pub cpus: u32,
 
     /// Memory (e.g., "512m", "2g")
@@ -370,14 +370,7 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
         return Err("--gpus is not implemented; GPU passthrough is not available".to_string());
     }
 
-    // CPUs must fit the microVM sizing contract: `vcpus as u8` (spec.rs) turned 0
-    // into a non-bootable VM and >= 256 into a wrapped/truncated count.
-    if common.cpus == 0 {
-        return Err("--cpus must be at least 1".to_string());
-    }
-    if common.cpus > 255 {
-        return Err(format!("--cpus {} exceeds the maximum of 255", common.cpus));
-    }
+    validate_vcpu_count(common.cpus).map_err(|error| format!("--cpus: {error}"))?;
 
     // OOM controls are accepted for Docker-CLI compatibility but not enforced by
     // the libkrun backend; warn instead of silently misleading an operator who
@@ -673,7 +666,7 @@ mod tests {
     #[test]
     fn test_validate_rejects_zero_and_excessive_cpus() {
         let mut args = default_common_args();
-        args.cpus = 2;
+        args.cpus = DEFAULT_VCPUS;
         assert!(validate_runtime_options(&args).is_ok());
         args.cpus = 0;
         assert!(validate_runtime_options(&args)
@@ -681,6 +674,16 @@ mod tests {
             .contains("cpus"));
         args.cpus = 256;
         assert!(validate_runtime_options(&args).unwrap_err().contains("255"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_rejects_windows_smp() {
+        let mut args = default_common_args();
+        args.cpus = 2;
+        assert!(validate_runtime_options(&args)
+            .unwrap_err()
+            .contains("WHPX"));
     }
 
     #[test]
@@ -829,7 +832,7 @@ mod tests {
         CommonBoxArgs {
             image: "test".to_string(),
             name: None,
-            cpus: 2,
+            cpus: DEFAULT_VCPUS,
             memory: "512m".to_string(),
             volumes: vec![],
             env: vec![],

@@ -123,6 +123,7 @@ NestedInstallerFiles:
 - RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\a3s-box-shim.exe
 - RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\a3s-box-guest-init
 - RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\lib\krun.dll
+- RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\lib\libkrunfw.dll
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/AI45Lab/Box/releases/download/v0.8.0/a3s-box-v0.8.0-windows-x86_64.zip

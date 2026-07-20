@@ -63,7 +63,9 @@ impl LayerCache {
         if let Ok(content) = std::fs::read_to_string(&meta_path) {
             if let Ok(mut meta) = serde_json::from_str::<LayerMeta>(&content) {
                 meta.last_accessed = chrono::Utc::now().timestamp();
-                if let Err(e) = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?) {
+                if let Err(e) =
+                    write_meta_atomically(&meta_path, &serde_json::to_string_pretty(&meta)?)
+                {
                     tracing::warn!(path = %meta_path.display(), error = %e, "Failed to update layer cache metadata");
                 }
             }
@@ -285,15 +287,15 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         })?;
 
         if meta.is_symlink() {
+            let target = std::fs::read_link(&src_path).map_err(|e| {
+                BoxError::CacheError(format!(
+                    "Failed to read symlink {}: {}",
+                    src_path.display(),
+                    e
+                ))
+            })?;
             #[cfg(unix)]
             {
-                let target = std::fs::read_link(&src_path).map_err(|e| {
-                    BoxError::CacheError(format!(
-                        "Failed to read symlink {}: {}",
-                        src_path.display(),
-                        e
-                    ))
-                })?;
                 std::os::unix::fs::symlink(&target, &dst_path).map_err(|e| {
                     BoxError::CacheError(format!(
                         "Failed to create symlink {} -> {}: {}",
@@ -304,7 +306,29 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
                 })?;
                 preserve_owner(&meta, &dst_path);
             }
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+
+                // Do not follow the link to determine its type. Absolute Linux
+                // targets such as `/bin/busybox` are intentionally broken from
+                // the Windows host's perspective but valid inside the guest.
+                const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+                let result = if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                    std::os::windows::fs::symlink_dir(&target, &dst_path)
+                } else {
+                    std::os::windows::fs::symlink_file(&target, &dst_path)
+                };
+                result.map_err(|e| {
+                    BoxError::CacheError(format!(
+                        "Failed to create symlink {} -> {}: {}",
+                        dst_path.display(),
+                        target.display(),
+                        e
+                    ))
+                })?;
+            }
+            #[cfg(not(any(unix, windows)))]
             {
                 return Err(BoxError::CacheError(format!(
                     "Symlink copy is not supported on this platform: {}",
@@ -417,11 +441,55 @@ pub(crate) fn write_meta_atomically(meta_path: &Path, json: &str) -> Result<()> 
     let parent = meta_path.parent().ok_or_else(|| {
         BoxError::CacheError(format!("meta path has no parent: {}", meta_path.display()))
     })?;
+    let _lock = crate::file_lock::FileLock::acquire(meta_path).map_err(|e| {
+        BoxError::CacheError(format!(
+            "Failed to lock cache metadata {}: {e}",
+            meta_path.display()
+        ))
+    })?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .map_err(|e| BoxError::CacheError(format!("Failed to stage metadata: {e}")))?;
     use std::io::Write as _;
     tmp.write_all(json.as_bytes())
         .map_err(|e| BoxError::CacheError(format!("Failed to write metadata: {e}")))?;
+    persist_meta_file(tmp, meta_path)
+}
+
+#[cfg(windows)]
+fn persist_meta_file(mut tmp: tempfile::NamedTempFile, meta_path: &Path) -> Result<()> {
+    use std::time::Duration;
+
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    const MAX_RETRIES: usize = 200;
+
+    let mut attempts = 0;
+    loop {
+        match tmp.persist(meta_path) {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if attempts < MAX_RETRIES
+                    && matches!(
+                        error.error.raw_os_error(),
+                        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+                    ) =>
+            {
+                tmp = error.file;
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err(BoxError::CacheError(format!(
+                    "Failed to persist metadata: {error}"
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn persist_meta_file(tmp: tempfile::NamedTempFile, meta_path: &Path) -> Result<()> {
     tmp.persist(meta_path)
         .map_err(|e| BoxError::CacheError(format!("Failed to persist metadata: {e}")))?;
     Ok(())
@@ -597,6 +665,53 @@ mod tests {
         assert!(cache.get(digest).unwrap().is_some());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_write_meta_atomically_retries_windows_sharing_conflict() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, Instant};
+
+        let tmp = TempDir::new().unwrap();
+        let meta_path = tmp.path().join("entry.meta.json");
+        std::fs::write(&meta_path, r#"{"state":"old"}"#).unwrap();
+
+        let blocker = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&meta_path)
+            .unwrap();
+        let writer_path = meta_path.clone();
+        let writer =
+            std::thread::spawn(move || write_meta_atomically(&writer_path, r#"{"state":"new"}"#));
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let staged_file_seen = loop {
+            let entry_count = std::fs::read_dir(tmp.path()).unwrap().count();
+            if entry_count >= 3 {
+                break true;
+            }
+            if writer.is_finished() || Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            staged_file_seen,
+            "metadata writer should stage a temporary file before retrying"
+        );
+        assert!(
+            !writer.is_finished(),
+            "metadata writer should wait for the Windows sharing conflict"
+        );
+
+        drop(blocker);
+        writer.join().unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(meta_path).unwrap(),
+            r#"{"state":"new"}"#
+        );
+    }
+
     #[test]
     fn test_layer_cache_invalidate() {
         let tmp = TempDir::new().unwrap();
@@ -768,6 +883,30 @@ mod tests {
             std::fs::read_to_string(dst.join("sub/deep/c.txt")).unwrap(),
             "ccc"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_copy_dir_recursive_preserves_windows_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("target.txt"), "target").unwrap();
+        std::os::windows::fs::symlink_file("target.txt", src.join("link.txt")).unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        let copied_link = dst.join("link.txt");
+        assert!(std::fs::symlink_metadata(&copied_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(&copied_link).unwrap(),
+            Path::new("target.txt")
+        );
+        assert_eq!(std::fs::read_to_string(copied_link).unwrap(), "target");
     }
 
     #[test]

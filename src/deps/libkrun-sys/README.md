@@ -174,13 +174,19 @@ cd Box/src/deps/libkrun-sys
 cd vendor/libkrun
 cargo build --release --target x86_64-pc-windows-msvc
 
-# Copy DLL
+# Copy the runtime DLL and MSVC import library
 Copy-Item target\x86_64-pc-windows-msvc\release\krun.dll ..\..\prebuilt\x86_64-pc-windows-msvc\
+Copy-Item target\x86_64-pc-windows-msvc\release\krun.dll.lib ..\..\prebuilt\x86_64-pc-windows-msvc\krun.lib
 
 # Run tests
 cd ..\..
 cargo test --target x86_64-pc-windows-msvc --lib -- --test-threads=1
 ```
+
+The Windows runtime bundle is complete only when the prebuilt directory also
+contains `libkrunfw.dll`. That companion DLL supplies the Linux guest kernel;
+building `krun.dll` does not build a kernel. Use the checked-in companion or
+build `libkrunfw-windows` with a compatible kernel before packaging.
 
 ## Architecture
 
