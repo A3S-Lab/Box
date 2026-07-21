@@ -28,6 +28,13 @@ DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 120
 
 
+def require_executable(name: str, search_path: str | None = None) -> str:
+    executable = shutil.which(name, path=search_path)
+    if executable is None:
+        raise FileNotFoundError(f"required executable not found: {name}")
+    return executable
+
+
 def load_artifacts() -> dict[str, dict[str, Any]]:
     lock = json.loads(SOURCE_LOCK.read_text(encoding="utf-8"))
     return {artifact["id"]: artifact for artifact in lock["artifacts"]}
@@ -155,6 +162,7 @@ def prepare_typescript(
     artifacts: dict[str, dict[str, Any]],
     artifact_cache: Path | None,
 ) -> Path:
+    npm = require_executable("npm")
     environment = temp / "typescript"
     environment.mkdir()
     tarballs = []
@@ -167,7 +175,7 @@ def prepare_typescript(
         tarballs.append(str(tarball))
     subprocess.run(
         [
-            "npm",
+            npm,
             "install",
             "--ignore-scripts",
             "--no-audit",

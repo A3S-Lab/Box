@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -31,13 +31,15 @@ impl VolumeMount {
                 "volume mount name is invalid".to_string(),
             ));
         }
-        if self.path.len() > MAX_MOUNT_PATH_BYTES || self.path.contains(':') {
+        if self.path.len() > MAX_MOUNT_PATH_BYTES || self.path.contains([':', '\\', '\0']) {
             return Err(VolumeServiceError::InvalidRequest(
                 "volume mount path is invalid".to_string(),
             ));
         }
-        let path = Path::new(&self.path);
-        if !path.is_absolute() || path == Path::new("/") {
+        // This path belongs to the Linux guest/OCI contract. Parsing it with
+        // std::path::Path would apply the host's Windows path semantics and
+        // reject every valid `/mnt/...` destination.
+        if !self.path.starts_with('/') || self.path == "/" {
             return Err(VolumeServiceError::InvalidRequest(
                 "volume mount path must be an absolute non-root path".to_string(),
             ));
@@ -51,16 +53,6 @@ impl VolumeMount {
             return Err(VolumeServiceError::InvalidRequest(
                 "volume mount path must be lexically normalized".to_string(),
             ));
-        }
-        for component in path.components() {
-            if matches!(
-                component,
-                Component::ParentDir | Component::CurDir | Component::Prefix(_)
-            ) {
-                return Err(VolumeServiceError::InvalidRequest(
-                    "volume mount path cannot contain traversal components".to_string(),
-                ));
-            }
         }
         Ok(())
     }

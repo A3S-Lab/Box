@@ -15,8 +15,16 @@ impl VolumeFilesystem {
         Self { _ids: ids }
     }
 
-    pub async fn initialize_root(&self, _root: &Path) -> VolumeContentResult<()> {
-        Err(unsupported())
+    pub async fn initialize_root(&self, root: &Path) -> VolumeContentResult<()> {
+        let metadata = tokio::fs::symlink_metadata(root).await.map_err(|error| {
+            VolumeContentError::Unavailable(format!("inspect volume root: {error}"))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(VolumeContentError::InvalidPath(
+                "volume root must be an existing non-symlink directory".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     pub async fn stat(&self, _root: &Path, _path: &str) -> VolumeContentResult<VolumeEntry> {
@@ -88,4 +96,22 @@ impl PendingVolumeWrite {
 
 fn unsupported() -> VolumeContentError {
     VolumeContentError::Unsupported("descriptor-relative filesystem APIs require Unix".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::volume::IdentityVolumeIdMapper;
+
+    #[tokio::test]
+    async fn control_plane_initialization_works_but_content_access_fails_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let filesystem = VolumeFilesystem::new(Arc::new(IdentityVolumeIdMapper::current()));
+
+        filesystem.initialize_root(directory.path()).await.unwrap();
+        assert!(matches!(
+            filesystem.stat(directory.path(), "/").await,
+            Err(VolumeContentError::Unsupported(_))
+        ));
+    }
 }

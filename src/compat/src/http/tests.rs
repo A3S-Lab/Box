@@ -81,6 +81,7 @@ fn app_with_volumes(volumes: Arc<VolumeService>) -> Router {
     )
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn router_serves_owner_scoped_volume_control_and_bearer_content() {
     let volumes = VolumeServiceHarness::new();
@@ -221,6 +222,37 @@ async fn router_serves_owner_scoped_volume_control_and_bearer_content() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[cfg(not(unix))]
+#[tokio::test]
+async fn volume_control_works_while_unsupported_content_access_fails_closed() {
+    let volumes = VolumeServiceHarness::new();
+    let app = app_with_volumes(Arc::new(volumes.service.clone()));
+
+    let response = send(
+        &app,
+        Method::POST,
+        "/volumes",
+        Some(json!({"name": "data"})),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created = body_json(response).await;
+    let volume_id = created["volumeID"].as_str().unwrap();
+    let authorization = format!("Bearer {}", created["token"].as_str().unwrap());
+
+    let response = send_raw(
+        &app,
+        Method::POST,
+        &format!("/volumecontent/{volume_id}/dir?path=%2Fnested&force=true"),
+        Body::empty(),
+        &[("authorization", &authorization)],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body_json(response).await["code"], "internal_server_error");
 }
 
 #[tokio::test]

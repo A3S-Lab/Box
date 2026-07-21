@@ -16,6 +16,7 @@ from run_fixtures import (
     load_artifacts,
     prepare_python,
     prepare_typescript,
+    require_executable,
 )
 
 SDK_ROOT = COMPAT_ROOT.parent.parent / "sdk"
@@ -31,6 +32,7 @@ E2B_CONNECTION_ENVIRONMENT = (
 
 
 def prepare_native_typescript(temp: Path, client: Path) -> None:
+    npm = require_executable("npm")
     source = SDK_ROOT / "typescript"
     if not source.is_dir():
         raise FileNotFoundError(f"TypeScript SDK source not found: {source}")
@@ -43,7 +45,7 @@ def prepare_native_typescript(temp: Path, client: Path) -> None:
     )
     subprocess.run(
         [
-            "npm",
+            npm,
             "install",
             "--ignore-scripts",
             "--no-audit",
@@ -55,9 +57,20 @@ def prepare_native_typescript(temp: Path, client: Path) -> None:
         ],
         check=True,
     )
-    compiler = environment / "node_modules" / ".bin" / "tsc"
+    compiler = require_executable(
+        "tsc", str(environment / "node_modules" / ".bin")
+    )
     dependencies = build_source / "node_modules"
-    dependencies.symlink_to(environment / "node_modules", target_is_directory=True)
+    copied_dependencies = False
+    try:
+        dependencies.symlink_to(environment / "node_modules", target_is_directory=True)
+    except OSError:
+        # Ordinary Windows users cannot create directory symlinks unless
+        # Developer Mode or SeCreateSymbolicLinkPrivilege is enabled. Keep the
+        # production harness runnable in that fail-closed host posture by
+        # copying only this temporary, checksum-pinned dependency tree.
+        shutil.copytree(environment / "node_modules", dependencies)
+        copied_dependencies = True
     try:
         subprocess.run(
             [str(compiler), "-p", "tsconfig.json"],
@@ -65,9 +78,12 @@ def prepare_native_typescript(temp: Path, client: Path) -> None:
             check=True,
         )
     finally:
-        dependencies.unlink(missing_ok=True)
+        if copied_dependencies:
+            shutil.rmtree(dependencies)
+        else:
+            dependencies.unlink(missing_ok=True)
     packed = subprocess.run(
-        ["npm", "pack", "--ignore-scripts", "--pack-destination", str(temp)],
+        [npm, "pack", "--ignore-scripts", "--pack-destination", str(temp)],
         cwd=build_source,
         check=True,
         capture_output=True,
@@ -76,7 +92,7 @@ def prepare_native_typescript(temp: Path, client: Path) -> None:
     tarball = temp / packed.splitlines()[-1]
     subprocess.run(
         [
-            "npm",
+            npm,
             "install",
             "--ignore-scripts",
             "--no-audit",

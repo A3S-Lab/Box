@@ -17,6 +17,8 @@ mod resources;
 mod restart;
 #[cfg(unix)]
 mod session;
+#[cfg(not(unix))]
+mod session_unsupported;
 mod snapshot;
 mod store;
 mod support;
