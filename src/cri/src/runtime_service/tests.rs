@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 use tokio::time::{sleep, Duration};
@@ -274,7 +275,7 @@ async fn test_cri_one_container_pod_smoke_flow() {
     svc.network_store
         .create(a3s_box_core::NetworkConfig::new("cri-net", "10.244.0.0/24").unwrap())
         .unwrap();
-    put_test_oci_image(&svc.image_store, "example.com/app:latest").await;
+    let _image_digest = put_test_oci_image(&svc.image_store, "example.com/app:latest").await;
 
     let expected_exec = Arc::new(std::sync::Mutex::new(
         None::<(Vec<String>, Vec<String>, String)>,
@@ -827,7 +828,7 @@ async fn attach_ready_test_vm(box_id: &str, exec_socket_path: &Path) -> VmManage
     vm
 }
 
-async fn put_test_oci_image(store: &ImageStore, reference: &str) {
+async fn put_test_oci_image(store: &ImageStore, reference: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
     let blobs = tmp.path().join("blobs").join("sha256");
     std::fs::create_dir_all(&blobs).unwrap();
@@ -853,8 +854,8 @@ async fn put_test_oci_image(store: &ImageStore, reference: &str) {
             },
             "history": []
         }"#;
-    let config_hash = "config456";
-    std::fs::write(blobs.join(config_hash), config_content).unwrap();
+    let config_hash = format!("{:x}", Sha256::digest(config_content.as_bytes()));
+    std::fs::write(blobs.join(&config_hash), config_content).unwrap();
 
     let manifest_content = format!(
         r#"{{
@@ -870,8 +871,8 @@ async fn put_test_oci_image(store: &ImageStore, reference: &str) {
         config_hash,
         config_content.len()
     );
-    let manifest_hash = "manifest789";
-    std::fs::write(blobs.join(manifest_hash), &manifest_content).unwrap();
+    let manifest_hash = format!("{:x}", Sha256::digest(manifest_content.as_bytes()));
+    std::fs::write(blobs.join(&manifest_hash), &manifest_content).unwrap();
 
     let index_content = format!(
         r#"{{
@@ -890,10 +891,12 @@ async fn put_test_oci_image(store: &ImageStore, reference: &str) {
     );
     std::fs::write(tmp.path().join("index.json"), index_content).unwrap();
 
+    let image_digest = format!("sha256:{manifest_hash}");
     store
-        .put(reference, "sha256:imageconfigtest", tmp.path())
+        .put(reference, &image_digest, tmp.path())
         .await
         .unwrap();
+    image_digest
 }
 
 fn test_sandbox(id: &str) -> PodSandbox {
@@ -1737,7 +1740,7 @@ async fn test_create_container_requires_ready_sandbox() {
 async fn test_create_container_allows_multi_container_pod() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
-    put_test_oci_image(&svc.image_store, "nginx:latest").await;
+    let _image_digest = put_test_oci_image(&svc.image_store, "nginx:latest").await;
     svc.store
         .containers
         .add(test_container("existing", "sb-1"))
@@ -1781,7 +1784,7 @@ async fn test_create_container_allows_multi_container_pod() {
 async fn test_create_container_success() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
-    put_test_oci_image(&svc.image_store, "nginx:latest").await;
+    let image_digest = put_test_oci_image(&svc.image_store, "nginx:latest").await;
 
     let resp = svc
         .create_container(Request::new(CreateContainerRequest {
@@ -1828,7 +1831,7 @@ async fn test_create_container_success() {
     assert_eq!(c.name, "my-container");
     assert_eq!(c.sandbox_id, "sb-1");
     assert_eq!(c.state, ContainerState::Created);
-    assert_eq!(c.resolved_image_digest, "sha256:imageconfigtest");
+    assert_eq!(c.resolved_image_digest, image_digest);
     assert!(!c.resolved_image_path.is_empty());
     assert!(!c.rootfs_path.is_empty());
     assert!(PathBuf::from(&c.rootfs_path).is_dir());
@@ -1866,7 +1869,7 @@ async fn test_create_container_success() {
 async fn test_create_container_materializes_readonly_mount() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
-    put_test_oci_image(&svc.image_store, "nginx:latest").await;
+    let _image_digest = put_test_oci_image(&svc.image_store, "nginx:latest").await;
 
     let source = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(source.path().join("nested")).unwrap();
@@ -1935,7 +1938,7 @@ async fn test_create_container_materializes_readonly_mount() {
 async fn test_create_container_materializes_writable_mount() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
-    put_test_oci_image(&svc.image_store, "nginx:latest").await;
+    let _image_digest = put_test_oci_image(&svc.image_store, "nginx:latest").await;
 
     // Mirrors the CRI volume conformance: a writable mount with selinux_relabel
     // set. Both are now accepted (relabel is a no-op on this non-SELinux
@@ -2105,7 +2108,7 @@ async fn test_create_container_requires_pulled_image() {
 async fn test_create_container_uses_image_defaults() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
-    put_test_oci_image(&svc.image_store, "example.com/app:latest").await;
+    let image_digest = put_test_oci_image(&svc.image_store, "example.com/app:latest").await;
 
     let resp = svc
         .create_container(Request::new(CreateContainerRequest {
@@ -2138,7 +2141,7 @@ async fn test_create_container_uses_image_defaults() {
         .into_inner();
 
     let c = svc.store.containers.get(&resp.container_id).await.unwrap();
-    assert_eq!(c.resolved_image_digest, "sha256:imageconfigtest");
+    assert_eq!(c.resolved_image_digest, image_digest);
     assert!(!c.resolved_image_path.is_empty());
     assert!(!c.rootfs_path.is_empty());
     assert!(PathBuf::from(&c.rootfs_path).is_dir());
@@ -2166,7 +2169,7 @@ async fn test_create_container_uses_image_defaults() {
 async fn test_create_then_start_container_uses_image_defaults_and_rootfs() {
     let svc = make_test_service();
     svc.store.sandboxes.add(test_sandbox("sb-1")).await;
-    put_test_oci_image(&svc.image_store, "example.com/app:latest").await;
+    let _image_digest = put_test_oci_image(&svc.image_store, "example.com/app:latest").await;
 
     let resp = svc
         .create_container(Request::new(CreateContainerRequest {

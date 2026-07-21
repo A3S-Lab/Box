@@ -211,6 +211,9 @@ fn console_truncate_if_over(
     cap: u64,
     expected_identity: Option<ConsoleFileIdentity>,
 ) -> bool {
+    #[cfg(not(target_os = "windows"))]
+    let _ = expected_identity;
+
     #[cfg(target_os = "windows")]
     let file = crate::windows_file::open_regular_file_for_write(path, expected_identity)
         .map(|(file, _)| file);
