@@ -3352,9 +3352,10 @@ mod tests {
         let (input_tx, input_rx) = std::sync::mpsc::channel();
         let mut buf = Vec::new();
 
+        let signal_tx = input_tx.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
-            input_tx.send(ExecInputEvent::Signal(15)).unwrap();
+            signal_tx.send(ExecInputEvent::Signal(15)).unwrap();
         });
 
         let started = std::time::Instant::now();
@@ -3377,6 +3378,7 @@ mod tests {
             &mut buf,
         )
         .unwrap();
+        drop(input_tx);
 
         let mut cursor = std::io::Cursor::new(buf);
         let mut stdout = Vec::new();
