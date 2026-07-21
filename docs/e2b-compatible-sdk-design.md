@@ -26,7 +26,7 @@ unversioned claim.
 | Sandbox logs | Generation-fenced v1/v2 control routes read bounded current and rotated runtime JSON logs, tolerate a live partial tail, stably order concurrent stdout/stderr entries by timestamp, and implement cursor, direction, level, search, and limit filters; the real-`crun` A3S OS gate validates both response schemas and forward/backward ordering | Exercise retention limits and rotation races under sustained concurrent output in the complete black-box matrix |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
 | envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
-| Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground/background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output against real `crun` Sandboxes | Complete additional signals, binary framing, reconnect, cancellation, backpressure, and adversarial concurrent-stream cases |
+| Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground/background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output against real `crun` Sandboxes; the shared Exec/PTY transport implements the pinned SIGTERM and SIGKILL semantics with wire and guest process-group tests | Complete signals outside the pinned contract, binary framing, reconnect, cancellation, backpressure, and adversarial concurrent-stream cases |
 | Filesystem | The same client matrix passes remove, make-directory, write, read, stat, list, rename, exists, and cleanup through production TLS routing; the envd HTTP path separately passes upload/download with metadata | Complete watches, multi-file and ownership edge cases, signed URLs, large-file behavior, and negative-path breadth |
 | Code Interpreter | Official and A3S Python sync/async and TypeScript clients execute Python and pass context create/list/run/restart/remove | Complete other languages, rich MIME/error/cancellation breadth, MCP, and the rest of the pinned interpreter contract |
 | A3S SDKs | Typed Python and TypeScript packages re-export the pinned public objects and pass the production matrix using only `A3S_BOX_*` connection variables | Publish to PyPI/npm and complete conformance for the protocol surfaces above |
@@ -483,7 +483,8 @@ The target process service contract includes:
 
 The broker allocates synthetic process IDs within one execution generation and
 supports Start, JSON-framed Process Connect, List, SendInput, ordered
-client-streaming StreamInput, CloseStdin, SIGKILL, PTY Start/resize, and
+client-streaming StreamInput, CloseStdin, the pinned SIGTERM and SIGKILL
+semantics for both Exec and PTY processes, PTY Start/resize, and
 ordered start, stdout, stderr, PTY, keepalive, and end events. StreamInput
 incrementally decodes bounded Connect envelopes, permits upstream keepalives
 and process reselection, and awaits each backend write before receiving the
@@ -494,8 +495,8 @@ successful exit as the image's default non-root user. It runs this matrix
 through the pinned official Python sync/async and TypeScript clients and the
 corresponding A3S packages.
 
-This is not full Process compatibility. Binary Connect framing, SIGTERM and
-other signals, reconnect, transport-cancellation and backpressure stress,
+This is not full Process compatibility. Binary Connect framing, signals outside
+the pinned contract, reconnect, transport-cancellation and backpressure stress,
 adversarial concurrent streams, and durable process recovery across a
 compatibility-service restart remain open. The internal session layer must
 eventually provide independent stdin, stdout, stderr, signal, wait, and PTY
@@ -1257,7 +1258,7 @@ replaces processes and reinitializes runtime services.
   read, stat, list, rename, exists, and cleanup across the same clients.
 - The production envd HTTP gate covers metrics, initialized environment, a
   metadata-bearing multipart upload, and byte-identical download.
-- Remaining gates include binary framing, additional signals, reconnect,
+- Remaining gates include binary framing, signals outside the pinned contract, reconnect,
   cancellation/backpressure stress, durable process recovery, watches,
   multi-file and large-file behavior, signed URLs, and edge-case breadth.
 

@@ -7,7 +7,8 @@ use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
     BoxError, ExecEvent, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
     ExecutionManagerError, ExecutionManagerResult, ExecutionProcess, ExecutionProcessInput,
-    ExecutionProcessStream, ExecutionSessionManager, FileRequest, FileResponse,
+    ExecutionProcessSignal, ExecutionProcessStream, ExecutionSessionManager, FileRequest,
+    FileResponse,
 };
 use async_trait::async_trait;
 
@@ -245,6 +246,13 @@ impl ExecutionProcessInput for ExecInput {
             .await
             .map_err(|error| session_error(&self.execution_id, "cancel command", error))
     }
+
+    async fn send_signal(&self, signal: ExecutionProcessSignal) -> ExecutionManagerResult<()> {
+        self.input
+            .send_signal(signal)
+            .await
+            .map_err(|error| session_error(&self.execution_id, "signal command", error))
+    }
 }
 
 struct ExecStream {
@@ -289,6 +297,13 @@ impl ExecutionProcessInput for PtyInput {
             .close()
             .await
             .map_err(|error| session_error(&self.execution_id, "close PTY", error))
+    }
+
+    async fn send_signal(&self, signal: ExecutionProcessSignal) -> ExecutionManagerResult<()> {
+        self.input
+            .send_signal(signal)
+            .await
+            .map_err(|error| session_error(&self.execution_id, "signal PTY", error))
     }
 
     async fn resize_pty(&self, cols: u16, rows: u16) -> ExecutionManagerResult<()> {

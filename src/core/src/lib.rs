@@ -68,11 +68,12 @@ pub use traits::{
     EventBus, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
     ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
     ExecutionPortIo, ExecutionPortStream, ExecutionProcess, ExecutionProcessInput,
-    ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation, ExecutionRestartPolicy,
-    ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
-    ExecutionStatus, ImageRegistry, ImageStoreBackend, KillExecutionOptions, KillOutcome,
-    MetricsCollector, NetworkStoreBackend, NoopMetrics, OperationId, PulledImage, ReconcileOutcome,
-    RestartExecutionOptions, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
+    ExecutionProcessSignal, ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation,
+    ExecutionRestartPolicy, ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId,
+    ExecutionState, ExecutionStatus, ImageRegistry, ImageStoreBackend, KillExecutionOptions,
+    KillOutcome, MetricsCollector, NetworkStoreBackend, NoopMetrics, OperationId, PulledImage,
+    ReconcileOutcome, RestartExecutionOptions, SnapshotStoreBackend, StoredImage,
+    VolumeStoreBackend,
 };
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmHandler,

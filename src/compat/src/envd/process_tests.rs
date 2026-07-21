@@ -5,7 +5,8 @@ use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
     ExecChunk, ExecEvent, ExecExit, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
     ExecutionManagerError, ExecutionManagerResult, ExecutionProcess, ExecutionProcessInput,
-    ExecutionProcessStream, ExecutionSessionManager, FileRequest, FileResponse, StreamType,
+    ExecutionProcessSignal, ExecutionProcessStream, ExecutionSessionManager, FileRequest,
+    FileResponse, StreamType,
 };
 use async_trait::async_trait;
 use axum::body::Body;
@@ -23,6 +24,7 @@ struct TestInput {
     writes: Mutex<Vec<Vec<u8>>>,
     closed: Mutex<bool>,
     cancelled: Mutex<bool>,
+    signals: Mutex<Vec<ExecutionProcessSignal>>,
     sizes: Mutex<Vec<(u16, u16)>>,
 }
 
@@ -40,6 +42,11 @@ impl ExecutionProcessInput for TestInput {
 
     async fn cancel(&self) -> ExecutionManagerResult<()> {
         *self.cancelled.lock().unwrap() = true;
+        Ok(())
+    }
+
+    async fn send_signal(&self, signal: ExecutionProcessSignal) -> ExecutionManagerResult<()> {
+        self.signals.lock().unwrap().push(signal);
         Ok(())
     }
 
@@ -124,7 +131,16 @@ impl ExecutionSessionManager for TestSessions {
         _generation: ExecutionGeneration,
         _request: PtyRequest,
     ) -> ExecutionManagerResult<ExecutionProcess> {
-        Err(unsupported())
+        let input = Arc::new(TestInput::default());
+        self.inputs.lock().unwrap().push(input.clone());
+        let events = self
+            .queued_events
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default()
+            .into();
+        Ok(Box::new(TestProcess { events, input }))
     }
 
     async fn transfer_file(
@@ -242,6 +258,24 @@ async fn start_running_process(broker: &ProcessBroker, command: &str) -> u32 {
                 json!({
                     "process": {"cmd": command, "args": [], "envs": {}},
                     "stdin": true
+                }),
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    let start = response.body_mut().data().await.unwrap().unwrap();
+    pid_from_start_frame(&start)
+}
+
+async fn start_running_pty(broker: &ProcessBroker, command: &str) -> u32 {
+    let mut response = broker
+        .handle(
+            stream_request(
+                "/process.Process/Start",
+                json!({
+                    "process": {"cmd": command, "args": [], "envs": {}},
+                    "pty": {"size": {"cols": 80, "rows": 24}}
                 }),
             ),
             &execution_id(),
@@ -371,6 +405,91 @@ async fn list_and_input_are_scoped_to_the_exact_execution_generation() {
         )
         .await;
     assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn send_signal_delivers_pinned_sigterm_and_sigkill_to_exec_and_pty() {
+    let sessions = Arc::new(TestSessions::default());
+    let broker = ProcessBroker::new(sessions.clone());
+
+    let exec_pid = start_running_process(&broker, "/bin/cat").await;
+    let exec_input = sessions.latest_input();
+    let pty_pid = start_running_pty(&broker, "/bin/sh").await;
+    let pty_input = sessions.latest_input();
+
+    let terminate = broker
+        .handle(
+            unary_request(
+                "/process.Process/SendSignal",
+                json!({
+                    "process": {"pid": exec_pid},
+                    "signal": "SIGNAL_SIGTERM"
+                }),
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    assert_eq!(terminate.status(), StatusCode::OK);
+
+    let kill = broker
+        .handle(
+            unary_request(
+                "/process.Process/SendSignal",
+                json!({"process": {"pid": pty_pid}, "signal": 9}),
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    assert_eq!(kill.status(), StatusCode::OK);
+    assert_eq!(
+        &*exec_input.signals.lock().unwrap(),
+        &[ExecutionProcessSignal::Terminate]
+    );
+    assert_eq!(
+        &*pty_input.signals.lock().unwrap(),
+        &[ExecutionProcessSignal::Kill]
+    );
+
+    let unsupported = broker
+        .handle(
+            unary_request(
+                "/process.Process/SendSignal",
+                json!({"process": {"pid": exec_pid}, "signal": 2}),
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    assert_eq!(unsupported.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let unspecified = broker
+        .handle(
+            unary_request(
+                "/process.Process/SendSignal",
+                json!({"process": {"pid": exec_pid}}),
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    assert_eq!(unspecified.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let missing_process_wins_before_signal_validation = broker
+        .handle(
+            unary_request(
+                "/process.Process/SendSignal",
+                json!({"process": {"pid": 999999}, "signal": 2}),
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    assert_eq!(
+        missing_process_wins_before_signal_validation.status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]

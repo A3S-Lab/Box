@@ -256,6 +256,7 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
 const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 const EXEC_CONTROL_CANCEL: &[u8] = b"cancel";
 const EXEC_CONTROL_STDIN_CLOSE: &[u8] = b"stdin-close";
+const EXEC_CONTROL_SIGNAL: &[u8] = b"signal:";
 /// Host→guest control: flush all buffered output, then reply with a flush-ack.
 const EXEC_CONTROL_FLUSH: &[u8] = b"flush";
 /// Guest→host marker (in a Control frame) acknowledging a flush: every output
@@ -1034,6 +1035,7 @@ enum ExecInputEvent {
     Stdin(Vec<u8>),
     StdinClose,
     Cancel,
+    Signal(i32),
     /// Flush buffered output and emit a flush-ack (log-rotation boundary).
     Flush,
 }
@@ -1068,6 +1070,18 @@ fn spawn_exec_input_monitor(
                     break;
                 }
             }
+            Ok(Some((frame_type, payload)))
+                if frame_type == FrameType::Control as u8
+                    && payload.starts_with(EXEC_CONTROL_SIGNAL) =>
+            {
+                if let Some(signal) = parse_exec_process_signal(&payload) {
+                    if tx.send(ExecInputEvent::Signal(signal)).is_err() {
+                        break;
+                    }
+                } else {
+                    warn!("Ignoring invalid exec signal control frame");
+                }
+            }
             Ok(Some((frame_type, payload))) if frame_type == FrameType::Data as u8 => {
                 if tx.send(ExecInputEvent::Stdin(payload)).is_err() {
                     break;
@@ -1087,6 +1101,15 @@ fn spawn_exec_input_monitor(
     });
 
     Ok(rx)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_exec_process_signal(payload: &[u8]) -> Option<i32> {
+    let number = std::str::from_utf8(payload.strip_prefix(EXEC_CONTROL_SIGNAL)?)
+        .ok()?
+        .parse::<i32>()
+        .ok()?;
+    matches!(number, 9 | 15).then_some(number)
 }
 
 /// Serialize a completed command output as streaming exec frames.
@@ -1709,7 +1732,7 @@ fn wait_streaming_child(
         }
 
         match child.try_wait() {
-            Ok(Some(status)) => return Ok((status.code().unwrap_or(1), None)),
+            Ok(Some(status)) => return Ok((process_exit_code(&status), None)),
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     warn!(
@@ -1766,6 +1789,9 @@ fn drain_exec_input_events(
                 let _ = child.stdin.take();
             }
             Ok(ExecInputEvent::Flush) => outcome.flush = true,
+            Ok(ExecInputEvent::Signal(signal)) => {
+                signal_child_process_group(child, signal);
+            }
             Ok(ExecInputEvent::Cancel) => {
                 outcome.cancel = true;
                 return outcome;
@@ -1823,6 +1849,21 @@ fn write_live_child_stdin(child: &mut std::process::Child, data: &[u8]) {
     if close_stdin {
         let _ = child.stdin.take();
     }
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn process_exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
 }
 
 /// Execute a command and emit stdout/stderr chunks while the process is running.
@@ -2431,6 +2472,21 @@ fn kill_child_process_group(child: &mut std::process::Child) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn signal_child_process_group(child: &std::process::Child, signal: i32) {
+    #[cfg(unix)]
+    unsafe {
+        let pid = child.id() as i32;
+        if pid > 0 {
+            if libc::kill(-pid, signal) != 0 {
+                let _ = libc::kill(pid, signal);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (child, signal);
 }
 
 /// Truncate one-shot output to its wire-safe bound.
@@ -3280,5 +3336,80 @@ mod tests {
         assert!(!String::from_utf8_lossy(&stdout).contains("done"));
         assert!(String::from_utf8_lossy(&stderr).contains("stop requested"));
         assert_eq!(exit_code, Some(137));
+    }
+
+    #[test]
+    fn exec_process_signal_control_accepts_only_pinned_signals() {
+        assert_eq!(parse_exec_process_signal(b"signal:15"), Some(15));
+        assert_eq!(parse_exec_process_signal(b"signal:9"), Some(9));
+        assert_eq!(parse_exec_process_signal(b"signal:0"), None);
+        assert_eq!(parse_exec_process_signal(b"signal:64"), None);
+        assert_eq!(parse_exec_process_signal(b"signal:SIGTERM"), None);
+        assert_eq!(parse_exec_process_signal(b"signal-main:15"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_execute_command_streaming_delivers_sigterm_to_process_group() {
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let mut buf = Vec::new();
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            input_tx.send(ExecInputEvent::Signal(15)).unwrap();
+        });
+
+        execute_command_streaming(
+            ExecCommandSpec {
+                cmd: &[
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "trap 'printf terminated; exit 42' TERM; printf ready; while :; do sleep 1; done"
+                        .to_string(),
+                ],
+                timeout_ns: 5_000_000_000,
+                env: &[],
+                working_dir: None,
+                rootfs: None,
+                stdin_data: None,
+                stdin_streaming: false,
+                user: None,
+            },
+            Some(input_rx),
+            &mut buf,
+        )
+        .unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let mut stdout = Vec::new();
+        let mut exit_code = None;
+        while let Some((frame_type, payload)) = read_frame(&mut cursor).unwrap() {
+            match frame_type {
+                value if value == FrameType::Data as u8 => {
+                    let chunk: ExecChunk = serde_json::from_slice(&payload).unwrap();
+                    if chunk.stream == StreamType::Stdout {
+                        stdout.extend_from_slice(&chunk.data);
+                    }
+                }
+                value if value == FrameType::Control as u8 => {
+                    let exit: ExecExit = serde_json::from_slice(&payload).unwrap();
+                    exit_code = Some(exit.exit_code);
+                }
+                other => panic!("unexpected frame type: {other}"),
+            }
+        }
+
+        assert_eq!(stdout, b"readyterminated");
+        assert_eq!(exit_code, Some(42));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn process_exit_code_preserves_terminating_signal() {
+        let status = std::process::Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+        assert_eq!(process_exit_code(&status), 143);
     }
 }

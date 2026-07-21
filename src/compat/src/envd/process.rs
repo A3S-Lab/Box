@@ -9,7 +9,8 @@ use std::time::Duration;
 use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
     ExecEvent, ExecRequest, ExecutionGeneration, ExecutionId, ExecutionManagerError,
-    ExecutionProcess, ExecutionProcessInput, ExecutionSessionManager, StreamType,
+    ExecutionProcess, ExecutionProcessInput, ExecutionProcessSignal, ExecutionSessionManager,
+    StreamType,
 };
 use axum::body::Body;
 use axum::http::header::AUTHORIZATION;
@@ -274,17 +275,14 @@ impl ProcessBroker {
             Ok(request) => request,
             Err(error) => return error.unary_response(),
         };
-        if !request.signal.is_sigkill() {
-            return ConnectFailure::unimplemented(
-                "this execution transport currently supports SIGNAL_SIGKILL only",
-            )
-            .unary_response();
-        }
         let entry = match self.entry(key, &request.process).await {
             Ok(entry) => entry,
             Err(error) => return error.unary_response(),
         };
-        match entry.input.cancel().await {
+        let Some(signal) = request.signal.process_signal() else {
+            return ConnectFailure::unimplemented("invalid process signal").unary_response();
+        };
+        match entry.input.send_signal(signal).await {
             Ok(()) => unary_ok(&EmptyResponse {}),
             Err(error) => manager_failure(error).unary_response(),
         }
@@ -1014,6 +1012,7 @@ struct CloseStdinRequest {
 struct SendSignalRequest {
     #[serde(default)]
     process: Option<ProcessSelector>,
+    #[serde(default)]
     signal: Signal,
 }
 
@@ -1024,11 +1023,20 @@ enum Signal {
     Number(i32),
 }
 
+impl Default for Signal {
+    fn default() -> Self {
+        Self::Number(0)
+    }
+}
+
 impl Signal {
-    fn is_sigkill(&self) -> bool {
+    fn process_signal(&self) -> Option<ExecutionProcessSignal> {
         match self {
-            Self::Name(name) => name == "SIGNAL_SIGKILL",
-            Self::Number(number) => *number == 9,
+            Self::Name(name) if name == "SIGNAL_SIGTERM" => Some(ExecutionProcessSignal::Terminate),
+            Self::Name(name) if name == "SIGNAL_SIGKILL" => Some(ExecutionProcessSignal::Kill),
+            Self::Number(15) => Some(ExecutionProcessSignal::Terminate),
+            Self::Number(9) => Some(ExecutionProcessSignal::Kill),
+            _ => None,
         }
     }
 }

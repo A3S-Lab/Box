@@ -139,8 +139,9 @@ A3S Python sync/async and TypeScript packages after removing every `E2B_*`
 connection variable and configuring only `A3S_BOX_*`. The previously certified
 subset passes on A3S OS with `crun`; the newly added filesystem-only pause
 assertions require the next certified-host run. This does not establish full protocol
-compatibility. Templates/builds, signed files, historical metrics, MCP,
-additional signals, reconnect, cancellation,
+compatibility. The shared Exec/PTY transport now implements the pinned SIGTERM
+and SIGKILL semantics with wire and guest process-group tests. Templates/builds,
+signed files, historical metrics, MCP, signals outside the pinned contract, reconnect, cancellation,
 backpressure, multi-file and large-file behavior, deeper Snapshot and Volume
 failure/recovery cases, and other pinned edge cases remain outside the matrix,
 so `full_compatibility=false` remains mandatory.

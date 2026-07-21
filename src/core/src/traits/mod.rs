@@ -29,7 +29,8 @@ pub use execution::{
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};
 pub use session::{
-    ExecutionProcess, ExecutionProcessInput, ExecutionProcessStream, ExecutionSessionManager,
+    ExecutionProcess, ExecutionProcessInput, ExecutionProcessSignal, ExecutionProcessStream,
+    ExecutionSessionManager,
 };
 pub use store::{
     ImageStoreBackend, NetworkStoreBackend, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,

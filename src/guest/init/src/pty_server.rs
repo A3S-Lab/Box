@@ -12,6 +12,8 @@ use tracing::info;
 #[cfg(target_os = "linux")]
 use tracing::{error, warn};
 
+const PTY_CONTROL_SIGNAL: &[u8] = b"signal:";
+
 #[cfg(target_os = "linux")]
 use crate::user::{
     home_dir_for_uid, parse_process_user, primary_gid_for_uid, resolve_image_groups,
@@ -695,6 +697,13 @@ fn relay_pty_data(
                             }
                         }
                         FRAME_PTY_ERROR if payload.is_empty() => break,
+                        FRAME_PTY_ERROR => {
+                            if let Some(signal) = parse_pty_process_signal(&payload) {
+                                signal_pty_child(child, signal);
+                            } else {
+                                warn!("Ignoring invalid PTY signal control frame");
+                            }
+                        }
                         _ => {} // Ignore unknown frames
                     }
                 }
@@ -756,6 +765,27 @@ fn terminate_pty_child(child: nix::unistd::Pid) {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_pty_process_signal(payload: &[u8]) -> Option<i32> {
+    let number = std::str::from_utf8(payload.strip_prefix(PTY_CONTROL_SIGNAL)?)
+        .ok()?
+        .parse::<i32>()
+        .ok()?;
+    matches!(number, 9 | 15).then_some(number)
+}
+
+#[cfg(target_os = "linux")]
+fn signal_pty_child(child: nix::unistd::Pid, signal: i32) {
+    let pid = child.as_raw();
+    if pid > 0 {
+        unsafe {
+            if libc::kill(-pid, signal) != 0 {
+                let _ = libc::kill(pid, signal);
+            }
+        }
+    }
+}
+
 /// Set terminal window size on a PTY fd.
 #[cfg(target_os = "linux")]
 fn set_winsize(fd: std::os::fd::RawFd, cols: u16, rows: u16) {
@@ -812,5 +842,15 @@ mod tests {
     fn test_validate_rootfs_request_rejects_nul_workdir() {
         let err = validate_rootfs_request(Some("/rootfs"), Some("/bad\0dir")).unwrap_err();
         assert!(err.contains("Invalid rootfs path"));
+    }
+
+    #[test]
+    fn pty_process_signal_control_accepts_only_pinned_signals() {
+        assert_eq!(parse_pty_process_signal(b"signal:15"), Some(15));
+        assert_eq!(parse_pty_process_signal(b"signal:9"), Some(9));
+        assert_eq!(parse_pty_process_signal(b"signal:0"), None);
+        assert_eq!(parse_pty_process_signal(b"signal:64"), None);
+        assert_eq!(parse_pty_process_signal(b"signal:SIGTERM"), None);
+        assert_eq!(parse_pty_process_signal(b""), None);
     }
 }

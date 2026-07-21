@@ -4,7 +4,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::ExecutionProcessSignal;
 use tokio::sync::Mutex;
+
+const PTY_CONTROL_SIGNAL: &[u8] = b"signal:";
 
 type PtyFrameReader = a3s_transport::FrameReader<tokio::io::ReadHalf<tokio::net::UnixStream>>;
 type PtyFrameWriter = a3s_transport::FrameWriter<tokio::io::WriteHalf<tokio::net::UnixStream>>;
@@ -161,6 +164,27 @@ impl StreamingPtyInput {
             .write_frame(&a3s_transport::Frame::close())
             .await
             .map_err(|e| BoxError::ExecError(format!("PTY close write failed: {}", e)))
+    }
+
+    /// Deliver a typed Linux workload signal to the PTY process group.
+    pub async fn send_signal(&self, signal: ExecutionProcessSignal) -> Result<()> {
+        if signal == ExecutionProcessSignal::Kill {
+            return self.close().await;
+        }
+        let mut payload = PTY_CONTROL_SIGNAL.to_vec();
+        payload.extend_from_slice(signal.linux_number().to_string().as_bytes());
+        let frame = a3s_transport::Frame {
+            // PTY frames are directional. Error/Close (0x05) is the existing
+            // host-to-guest control lane and remains an error guest-to-host.
+            frame_type: a3s_transport::FrameType::Close,
+            payload,
+        };
+        self.writer
+            .lock()
+            .await
+            .write_frame(&frame)
+            .await
+            .map_err(|e| BoxError::ExecError(format!("PTY signal write failed: {}", e)))
     }
 }
 
@@ -393,7 +417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pty_stream_input_writes_stdin_and_resize_frames() {
+    async fn test_pty_stream_input_writes_stdin_resize_and_signal_frames() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sock_path = tmp.path().join("pty_input.sock");
         let Some(listener) = bind_test_listener(&sock_path) else {
@@ -412,7 +436,9 @@ mod tests {
             );
             let stdin = reader.read_frame().await.unwrap().unwrap();
             let resize = reader.read_frame().await.unwrap().unwrap();
-            (stdin, resize)
+            let terminate = reader.read_frame().await.unwrap().unwrap();
+            let kill = reader.read_frame().await.unwrap().unwrap();
+            (stdin, resize, terminate, kill)
         });
 
         let client = PtyClient::connect(&sock_path).await.unwrap();
@@ -420,8 +446,16 @@ mod tests {
         let input = stream.input();
         input.write_stdin(b"echo hi\n").await.unwrap();
         input.resize(132, 43).await.unwrap();
+        input
+            .send_signal(ExecutionProcessSignal::Terminate)
+            .await
+            .unwrap();
+        input
+            .send_signal(ExecutionProcessSignal::Kill)
+            .await
+            .unwrap();
 
-        let (stdin, resize) = server.await.unwrap();
+        let (stdin, resize, terminate, kill) = server.await.unwrap();
         assert_eq!(stdin.frame_type, a3s_transport::FrameType::Control);
         assert_eq!(stdin.payload, b"echo hi\n");
 
@@ -429,6 +463,11 @@ mod tests {
         let resize: a3s_box_core::pty::PtyResize = serde_json::from_slice(&resize.payload).unwrap();
         assert_eq!(resize.cols, 132);
         assert_eq!(resize.rows, 43);
+
+        assert_eq!(terminate.frame_type, a3s_transport::FrameType::Close);
+        assert_eq!(terminate.payload, b"signal:15");
+        assert_eq!(kill.frame_type, a3s_transport::FrameType::Close);
+        assert!(kill.payload.is_empty());
     }
 
     #[tokio::test]

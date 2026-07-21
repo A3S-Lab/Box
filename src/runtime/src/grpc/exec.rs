@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::ExecutionProcessSignal;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 const EXEC_CONTROL_CANCEL: &[u8] = b"cancel";
 const EXEC_CONTROL_STDIN_CLOSE: &[u8] = b"stdin-close";
+const EXEC_CONTROL_SIGNAL: &[u8] = b"signal:";
 /// Host→guest control: flush all buffered output and reply with a flush-ack.
 const EXEC_CONTROL_FLUSH: &[u8] = b"flush";
 /// Host→guest control: stream a tar archive of the guest-visible rootfs.
@@ -502,6 +504,23 @@ impl StreamingExecInput {
             .write_control(EXEC_CONTROL_CANCEL)
             .await
             .map_err(|e| BoxError::ExecError(format!("Streaming exec cancel write failed: {}", e)))
+    }
+
+    /// Deliver one of the typed Linux workload signals to the command's
+    /// process group. SIGKILL retains the established cancel control for
+    /// compatibility with older guests; SIGTERM uses the signal control.
+    pub async fn send_signal(&self, signal: ExecutionProcessSignal) -> Result<()> {
+        if signal == ExecutionProcessSignal::Kill {
+            return self.cancel().await;
+        }
+        let mut payload = EXEC_CONTROL_SIGNAL.to_vec();
+        payload.extend_from_slice(signal.linux_number().to_string().as_bytes());
+        self.writer
+            .lock()
+            .await
+            .write_control(&payload)
+            .await
+            .map_err(|e| BoxError::ExecError(format!("Streaming exec signal write failed: {}", e)))
     }
 
     /// Request a flush of the guest's buffered output. The guest replies with a
@@ -1082,7 +1101,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exec_client_exec_stream_input_writes_stdin_and_close() {
+    async fn test_exec_client_exec_stream_input_writes_stdin_close_and_signals() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sock_path = tmp.path().join("exec_stream_stdin.sock");
         let Some(listener) = bind_test_listener(&sock_path) else {
@@ -1110,6 +1129,14 @@ mod tests {
             let close = reader.read_frame().await.unwrap().unwrap();
             assert_eq!(close.frame_type, a3s_transport::FrameType::Control);
             assert_eq!(close.payload, EXEC_CONTROL_STDIN_CLOSE);
+
+            let terminate = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(terminate.frame_type, a3s_transport::FrameType::Control);
+            assert_eq!(terminate.payload, b"signal:15");
+
+            let kill = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(kill.frame_type, a3s_transport::FrameType::Control);
+            assert_eq!(kill.payload, EXEC_CONTROL_CANCEL);
 
             let exit = a3s_box_core::exec::ExecExit {
                 exit_code: 0,
@@ -1141,6 +1168,14 @@ mod tests {
         let input = stream.input();
         input.write_stdin(b"hello stdin\n").await.unwrap();
         input.close_stdin().await.unwrap();
+        input
+            .send_signal(ExecutionProcessSignal::Terminate)
+            .await
+            .unwrap();
+        input
+            .send_signal(ExecutionProcessSignal::Kill)
+            .await
+            .unwrap();
         let event = stream.next_event().await.unwrap().unwrap();
         match event {
             a3s_box_core::exec::ExecEvent::Exit(exit) => assert_eq!(exit.exit_code, 0),
