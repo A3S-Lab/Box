@@ -17,13 +17,13 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Method, Request, Response};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::{broadcast, RwLock};
 
 use super::connect::{
-    data_frame, decode_client_stream, decode_stream, decode_unary, stream_error, stream_response,
-    stream_unary_ok, success_end_stream_frame, unary_ok, ConnectFailure,
+    data_frame, decode_client_stream, decode_stream, decode_unary, stream_encoding, stream_error,
+    stream_response, stream_unary_ok, success_end_stream_frame, unary_ok, ConnectEncoding,
+    ConnectFailure,
 };
 
 const DEFAULT_PROCESS_TIMEOUT_MS: u64 = 60_000;
@@ -76,37 +76,42 @@ impl ProcessBroker {
     }
 
     async fn start(&self, request: Request<Body>, key: ProcessGeneration) -> Response<Body> {
+        let encoding = match stream_encoding(&request) {
+            Ok(encoding) => encoding,
+            Err(error) => return error.unary_response(),
+        };
         let user = match process_user(request.headers()) {
             Ok(user) => user,
-            Err(error) => return stream_error(&error),
+            Err(error) => return stream_error(&error, encoding),
         };
         let timeout_ns = match process_timeout_ns(request.headers()) {
             Ok(timeout) => timeout,
-            Err(error) => return stream_error(&error),
+            Err(error) => return stream_error(&error, encoding),
         };
-        let request: StartRequest = match decode_stream(request).await {
+        let request: StartRequest = match decode_stream(request, encoding).await {
             Ok(request) => request,
-            Err(error) => return stream_error(&error),
+            Err(error) => return stream_error(&error, encoding),
         };
         let config = match request.process {
             Some(config) => config,
             None => {
-                return stream_error(&ConnectFailure::invalid_argument(
-                    "StartRequest.process is required",
-                ))
+                return stream_error(
+                    &ConnectFailure::invalid_argument("StartRequest.process is required"),
+                    encoding,
+                )
             }
         };
         if let Err(error) = config.validate() {
-            return stream_error(&error);
+            return stream_error(&error, encoding);
         }
         let tag = match normalize_tag(request.tag) {
             Ok(tag) => tag,
-            Err(error) => return stream_error(&error),
+            Err(error) => return stream_error(&error, encoding),
         };
         let process = if let Some(pty) = request.pty {
             let size = match pty.validated_size() {
                 Ok(size) => size,
-                Err(error) => return stream_error(&error),
+                Err(error) => return stream_error(&error, encoding),
             };
             self.sessions
                 .start_pty(
@@ -147,30 +152,35 @@ impl ProcessBroker {
         };
         let (process, pty) = match process {
             Ok(process) => process,
-            Err(error) => return stream_error(&manager_failure(error)),
+            Err(error) => return stream_error(&manager_failure(error), encoding),
         };
         match self.register(key, config, tag, pty, process).await {
-            Ok((pid, subscription)) => process_stream(pid, subscription),
-            Err(error) => stream_error(&error),
+            Ok((pid, subscription)) => process_stream(pid, subscription, encoding),
+            Err(error) => stream_error(&error, encoding),
         }
     }
 
     async fn connect(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
-        let request: ConnectRequest = match decode_stream(request).await {
+        let encoding = match stream_encoding(&request) {
+            Ok(encoding) => encoding,
+            Err(error) => return error.unary_response(),
+        };
+        let request: ConnectRequest = match decode_stream(request, encoding).await {
             Ok(request) => request,
-            Err(error) => return stream_error(&error),
+            Err(error) => return stream_error(&error, encoding),
         };
         let entry = match self.entry(key, &request.process).await {
             Ok(entry) => entry,
-            Err(error) => return stream_error(&error),
+            Err(error) => return stream_error(&error, encoding),
         };
-        process_stream(entry.pid, entry.subscribe())
+        process_stream(entry.pid, entry.subscribe(), encoding)
     }
 
     async fn list(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
-        if let Err(error) = decode_unary::<EmptyRequest>(request).await {
-            return error.unary_response();
-        }
+        let (_, encoding) = match decode_unary::<EmptyRequest>(request).await {
+            Ok(decoded) => decoded,
+            Err(error) => return error.unary_response(),
+        };
         let mut processes = self
             .registry
             .read()
@@ -190,12 +200,12 @@ impl ProcessBroker {
             })
             .unwrap_or_default();
         processes.sort_by_key(|process| process.pid);
-        unary_ok(&ListResponse { processes })
+        unary_ok(&ListResponse { processes }, encoding)
     }
 
     async fn send_input(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
-        let request: SendInputRequest = match decode_unary(request).await {
-            Ok(request) => request,
+        let (request, encoding): (SendInputRequest, _) = match decode_unary(request).await {
+            Ok(decoded) => decoded,
             Err(error) => return error.unary_response(),
         };
         let entry = match self.entry(key, &request.process).await {
@@ -203,7 +213,7 @@ impl ProcessBroker {
             Err(error) => return error.unary_response(),
         };
         match write_process_input(&entry, request.input, "SendInputRequest.input").await {
-            Ok(()) => unary_ok(&EmptyResponse {}),
+            Ok(()) => unary_ok(&EmptyResponse {}, encoding),
             Err(error) => error.unary_response(),
         }
     }
@@ -213,45 +223,49 @@ impl ProcessBroker {
         request: Request<Body>,
         key: &ProcessGeneration,
     ) -> Response<Body> {
-        let mut stream = match decode_client_stream::<StreamInputRequest>(request) {
-            Ok(stream) => stream,
-            Err(error) => return stream_error(&error),
+        let encoding = match stream_encoding(&request) {
+            Ok(encoding) => encoding,
+            Err(error) => return error.unary_response(),
         };
+        let mut stream = decode_client_stream::<StreamInputRequest>(request, encoding);
         let mut entry = None;
         loop {
             let request = match stream.next().await {
                 Ok(Some(request)) => request,
-                Ok(None) => return stream_unary_ok(&EmptyResponse {}),
-                Err(error) => return stream_error(&error),
+                Ok(None) => return stream_unary_ok(&EmptyResponse {}, encoding),
+                Err(error) => return stream_error(&error, encoding),
             };
             match request.into_event() {
                 Ok(StreamInputEvent::Start(selector)) => {
                     entry = match self.entry(key, &selector).await {
                         Ok(entry) => Some(entry),
-                        Err(error) => return stream_error(&error),
+                        Err(error) => return stream_error(&error, encoding),
                     };
                 }
                 Ok(StreamInputEvent::Data(input)) => {
                     let Some(entry) = entry.as_ref() else {
-                        return stream_error(&ConnectFailure::failed_precondition(
-                            "StreamInput data requires a preceding start event",
-                        ));
+                        return stream_error(
+                            &ConnectFailure::failed_precondition(
+                                "StreamInput data requires a preceding start event",
+                            ),
+                            encoding,
+                        );
                     };
                     if let Err(error) =
                         write_process_input(entry, input, "StreamInputRequest.data.input").await
                     {
-                        return stream_error(&error);
+                        return stream_error(&error, encoding);
                     }
                 }
                 Ok(StreamInputEvent::KeepAlive) => {}
-                Err(error) => return stream_error(&error),
+                Err(error) => return stream_error(&error, encoding),
             }
         }
     }
 
     async fn close_stdin(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
-        let request: CloseStdinRequest = match decode_unary(request).await {
-            Ok(request) => request,
+        let (request, encoding): (CloseStdinRequest, _) = match decode_unary(request).await {
+            Ok(decoded) => decoded,
             Err(error) => return error.unary_response(),
         };
         let entry = match self.entry(key, &request.process).await {
@@ -265,32 +279,32 @@ impl ProcessBroker {
             .unary_response();
         }
         match entry.input.close_stdin().await {
-            Ok(()) => unary_ok(&EmptyResponse {}),
+            Ok(()) => unary_ok(&EmptyResponse {}, encoding),
             Err(error) => manager_failure(error).unary_response(),
         }
     }
 
     async fn send_signal(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
-        let request: SendSignalRequest = match decode_unary(request).await {
-            Ok(request) => request,
+        let (request, encoding): (SendSignalRequest, _) = match decode_unary(request).await {
+            Ok(decoded) => decoded,
             Err(error) => return error.unary_response(),
         };
         let entry = match self.entry(key, &request.process).await {
             Ok(entry) => entry,
             Err(error) => return error.unary_response(),
         };
-        let Some(signal) = request.signal.process_signal() else {
+        let Some(signal) = request.process_signal() else {
             return ConnectFailure::unimplemented("invalid process signal").unary_response();
         };
         match entry.input.send_signal(signal).await {
-            Ok(()) => unary_ok(&EmptyResponse {}),
+            Ok(()) => unary_ok(&EmptyResponse {}, encoding),
             Err(error) => manager_failure(error).unary_response(),
         }
     }
 
     async fn update(&self, request: Request<Body>, key: &ProcessGeneration) -> Response<Body> {
-        let request: UpdateRequest = match decode_unary(request).await {
-            Ok(request) => request,
+        let (request, encoding): (UpdateRequest, _) = match decode_unary(request).await {
+            Ok(decoded) => decoded,
             Err(error) => return error.unary_response(),
         };
         let entry = match self.entry(key, &request.process).await {
@@ -312,7 +326,7 @@ impl ProcessBroker {
             }
         };
         match entry.input.resize_pty(size.cols, size.rows).await {
-            Ok(()) => unary_ok(&EmptyResponse {}),
+            Ok(()) => unary_ok(&EmptyResponse {}, encoding),
             Err(error) => manager_failure(error).unary_response(),
         }
     }
@@ -537,20 +551,13 @@ impl BrokerEvent {
         matches!(self, Self::End { .. } | Self::Failure(_))
     }
 
-    fn response_json(&self) -> Option<Value> {
+    fn response(&self) -> Option<ProcessResponse> {
         match self {
-            Self::Stdout(data) => Some(process_event("data", json!({ "stdout": encode(data) }))),
-            Self::Stderr(data) => Some(process_event("data", json!({ "stderr": encode(data) }))),
-            Self::Pty(data) => Some(process_event("data", json!({ "pty": encode(data) }))),
-            Self::KeepAlive => Some(process_event("keepalive", json!({}))),
-            Self::End { exit_code } => Some(process_event(
-                "end",
-                json!({
-                    "exitCode": exit_code,
-                    "exited": true,
-                    "status": "exited",
-                }),
-            )),
+            Self::Stdout(data) => Some(ProcessResponse::data(Some(data.clone()), None, None)),
+            Self::Stderr(data) => Some(ProcessResponse::data(None, Some(data.clone()), None)),
+            Self::Pty(data) => Some(ProcessResponse::data(None, None, Some(data.clone()))),
+            Self::KeepAlive => Some(ProcessResponse::keepalive()),
+            Self::End { exit_code } => Some(ProcessResponse::end(*exit_code)),
             Self::Failure(_) => None,
         }
     }
@@ -614,10 +621,20 @@ async fn remove_process(
     }
 }
 
-fn process_stream(pid: u32, mut subscription: ProcessSubscription) -> Response<Body> {
+fn process_stream(
+    pid: u32,
+    mut subscription: ProcessSubscription,
+    encoding: ConnectEncoding,
+) -> Response<Body> {
     let (mut sender, body) = Body::channel();
     tokio::spawn(async move {
-        let start = data_frame(&process_event("start", json!({ "pid": pid })));
+        let start = match data_frame(&ProcessResponse::start(pid), encoding) {
+            Ok(start) => start,
+            Err(error) => {
+                let _ = sender.send_data(error.end_stream_frame().into()).await;
+                return;
+            }
+        };
         if sender.send_data(start).await.is_err() {
             return;
         }
@@ -634,9 +651,17 @@ fn process_stream(pid: u32, mut subscription: ProcessSubscription) -> Response<B
                 return;
             }
             let terminal = event.is_terminal();
-            if let Some(value) = event.response_json() {
-                if sender.send_data(data_frame(&value)).await.is_err() {
-                    return;
+            if let Some(value) = event.response() {
+                match data_frame(&value, encoding) {
+                    Ok(frame) => {
+                        if sender.send_data(frame).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send_data(error.end_stream_frame().into()).await;
+                        return;
+                    }
                 }
             }
             if terminal {
@@ -645,17 +670,7 @@ fn process_stream(pid: u32, mut subscription: ProcessSubscription) -> Response<B
             }
         }
     });
-    stream_response(body)
-}
-
-fn process_event(kind: &'static str, value: Value) -> Value {
-    let mut event = serde_json::Map::new();
-    event.insert(kind.to_string(), value);
-    json!({ "event": Value::Object(event) })
-}
-
-fn encode(data: &[u8]) -> String {
-    STANDARD.encode(data)
+    stream_response(body, encoding)
 }
 
 async fn write_process_input(
@@ -668,7 +683,6 @@ async fn write_process_input(
             "{field} must contain exactly one stdin or PTY value"
         ))
     })?;
-    let data = input.decode()?;
     if input.is_pty() != entry.pty {
         return Err(ConnectFailure::failed_precondition(if entry.pty {
             "PTY processes require PTY input"
@@ -678,7 +692,7 @@ async fn write_process_input(
     }
     entry
         .input
-        .write_stdin(&data)
+        .write_stdin(input.value())
         .await
         .map_err(manager_failure)
 }
@@ -757,14 +771,133 @@ fn normalize_tag(tag: Option<String>) -> Result<Option<String>, ConnectFailure> 
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
+struct ProcessResponse {
+    #[prost(message, optional, tag = "1")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event: Option<ProcessEvent>,
+}
+
+impl ProcessResponse {
+    fn start(pid: u32) -> Self {
+        Self {
+            event: Some(ProcessEvent {
+                start: Some(ProcessStartEvent { pid }),
+                ..ProcessEvent::default()
+            }),
+        }
+    }
+
+    fn data(stdout: Option<Vec<u8>>, stderr: Option<Vec<u8>>, pty: Option<Vec<u8>>) -> Self {
+        Self {
+            event: Some(ProcessEvent {
+                data: Some(ProcessDataEvent {
+                    stdout,
+                    stderr,
+                    pty,
+                }),
+                ..ProcessEvent::default()
+            }),
+        }
+    }
+
+    fn end(exit_code: i32) -> Self {
+        Self {
+            event: Some(ProcessEvent {
+                end: Some(ProcessEndEvent {
+                    exit_code,
+                    exited: true,
+                    status: "exited".to_string(),
+                    error: None,
+                }),
+                ..ProcessEvent::default()
+            }),
+        }
+    }
+
+    fn keepalive() -> Self {
+        Self {
+            event: Some(ProcessEvent {
+                keepalive: Some(ProcessKeepAlive {}),
+                ..ProcessEvent::default()
+            }),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
+struct ProcessEvent {
+    #[prost(message, optional, tag = "1")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start: Option<ProcessStartEvent>,
+    #[prost(message, optional, tag = "2")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<ProcessDataEvent>,
+    #[prost(message, optional, tag = "3")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end: Option<ProcessEndEvent>,
+    #[prost(message, optional, tag = "4")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keepalive: Option<ProcessKeepAlive>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
+struct ProcessStartEvent {
+    #[prost(uint32, tag = "1")]
+    pid: u32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
+struct ProcessDataEvent {
+    #[prost(bytes = "vec", optional, tag = "1")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_bytes"
+    )]
+    stdout: Option<Vec<u8>>,
+    #[prost(bytes = "vec", optional, tag = "2")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_bytes"
+    )]
+    stderr: Option<Vec<u8>>,
+    #[prost(bytes = "vec", optional, tag = "3")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_bytes"
+    )]
+    pty: Option<Vec<u8>>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessEndEvent {
+    #[prost(sint32, tag = "1")]
+    exit_code: i32,
+    #[prost(bool, tag = "2")]
+    exited: bool,
+    #[prost(string, tag = "3")]
+    status: String,
+    #[prost(string, optional, tag = "4")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
+struct ProcessKeepAlive {}
+
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProcessConfig {
+    #[prost(string, tag = "1")]
     cmd: String,
+    #[prost(string, repeated, tag = "2")]
     #[serde(default)]
     args: Vec<String>,
+    #[prost(btree_map = "string, string", tag = "3")]
     #[serde(default)]
     envs: BTreeMap<String, String>,
+    #[prost(string, optional, tag = "4")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cwd: Option<String>,
 }
@@ -810,21 +943,26 @@ impl ProcessConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StartRequest {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     process: Option<ProcessConfig>,
+    #[prost(message, optional, tag = "2")]
     #[serde(default)]
     pty: Option<Pty>,
+    #[prost(string, optional, tag = "3")]
     #[serde(default)]
     tag: Option<String>,
+    #[prost(bool, optional, tag = "4")]
     #[serde(default)]
     stdin: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct Pty {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     size: Option<PtySize>,
 }
@@ -837,9 +975,11 @@ impl Pty {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct PtySize {
+    #[prost(uint32, tag = "1")]
     cols: u32,
+    #[prost(uint32, tag = "2")]
     rows: u32,
 }
 
@@ -862,35 +1002,42 @@ struct ValidatedPtySize {
     rows: u16,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct EmptyRequest {}
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
 struct EmptyResponse {}
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
 struct ListResponse {
+    #[prost(message, repeated, tag = "1")]
     processes: Vec<ProcessInfo>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Serialize)]
 struct ProcessInfo {
+    #[prost(message, required, tag = "1")]
     config: ProcessConfig,
+    #[prost(uint32, tag = "2")]
     pid: u32,
+    #[prost(string, optional, tag = "3")]
     #[serde(skip_serializing_if = "Option::is_none")]
     tag: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct ConnectRequest {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     process: Option<ProcessSelector>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct ProcessSelector {
+    #[prost(uint32, optional, tag = "1")]
     #[serde(default)]
     pid: Option<u32>,
+    #[prost(string, optional, tag = "2")]
     #[serde(default)]
     tag: Option<String>,
 }
@@ -912,20 +1059,25 @@ enum Selection<'a> {
     Tag(&'a str),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct SendInputRequest {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     process: Option<ProcessSelector>,
+    #[prost(message, optional, tag = "2")]
     #[serde(default)]
     input: Option<ProcessInput>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct StreamInputRequest {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     start: Option<StreamInputStart>,
+    #[prost(message, optional, tag = "2")]
     #[serde(default)]
     data: Option<StreamInputData>,
+    #[prost(message, optional, tag = "3")]
     #[serde(default)]
     keepalive: Option<EmptyRequest>,
 }
@@ -943,14 +1095,16 @@ impl StreamInputRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct StreamInputStart {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     process: Option<ProcessSelector>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct StreamInputData {
+    #[prost(message, optional, tag = "2")]
     #[serde(default)]
     input: Option<ProcessInput>,
 }
@@ -961,92 +1115,121 @@ enum StreamInputEvent {
     KeepAlive,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct ProcessInput {
-    #[serde(default)]
-    stdin: Option<String>,
-    #[serde(default)]
-    pty: Option<String>,
+    #[prost(bytes = "vec", optional, tag = "1")]
+    #[serde(default, deserialize_with = "deserialize_optional_bytes")]
+    stdin: Option<Vec<u8>>,
+    #[prost(bytes = "vec", optional, tag = "2")]
+    #[serde(default, deserialize_with = "deserialize_optional_bytes")]
+    pty: Option<Vec<u8>>,
 }
 
 impl ProcessInput {
-    fn into_input(self) -> Option<EncodedInput> {
+    fn into_input(self) -> Option<DecodedInput> {
         match (self.stdin, self.pty) {
-            (Some(data), None) => Some(EncodedInput::Stdin(data)),
-            (None, Some(data)) => Some(EncodedInput::Pty(data)),
+            (Some(data), None) => Some(DecodedInput::Stdin(data)),
+            (None, Some(data)) => Some(DecodedInput::Pty(data)),
             _ => None,
         }
     }
 }
 
-enum EncodedInput {
-    Stdin(String),
-    Pty(String),
+enum DecodedInput {
+    Stdin(Vec<u8>),
+    Pty(Vec<u8>),
 }
 
-impl EncodedInput {
-    fn decode(&self) -> Result<Vec<u8>, ConnectFailure> {
-        STANDARD.decode(self.value()).map_err(|_| {
-            ConnectFailure::invalid_argument("process input is not valid protobuf JSON base64")
-        })
-    }
-
+impl DecodedInput {
     fn is_pty(&self) -> bool {
         matches!(self, Self::Pty(_))
     }
 
-    fn value(&self) -> &str {
+    fn value(&self) -> &[u8] {
         match self {
             Self::Stdin(value) | Self::Pty(value) => value,
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct CloseStdinRequest {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     process: Option<ProcessSelector>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct SendSignalRequest {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     process: Option<ProcessSelector>,
-    #[serde(default)]
-    signal: Signal,
+    #[prost(int32, tag = "2")]
+    #[serde(default, deserialize_with = "deserialize_signal")]
+    signal: i32,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum Signal {
-    Name(String),
-    Number(i32),
-}
-
-impl Default for Signal {
-    fn default() -> Self {
-        Self::Number(0)
-    }
-}
-
-impl Signal {
+impl SendSignalRequest {
     fn process_signal(&self) -> Option<ExecutionProcessSignal> {
-        match self {
-            Self::Name(name) if name == "SIGNAL_SIGTERM" => Some(ExecutionProcessSignal::Terminate),
-            Self::Name(name) if name == "SIGNAL_SIGKILL" => Some(ExecutionProcessSignal::Kill),
-            Self::Number(15) => Some(ExecutionProcessSignal::Terminate),
-            Self::Number(9) => Some(ExecutionProcessSignal::Kill),
+        match self.signal {
+            15 => Some(ExecutionProcessSignal::Terminate),
+            9 => Some(ExecutionProcessSignal::Kill),
             _ => None,
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message, Deserialize)]
 struct UpdateRequest {
+    #[prost(message, optional, tag = "1")]
     #[serde(default)]
     process: Option<ProcessSelector>,
+    #[prost(message, optional, tag = "2")]
     #[serde(default)]
     pty: Option<Pty>,
+}
+
+fn serialize_optional_bytes<S>(value: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serializer.serialize_some(&STANDARD.encode(value)),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_optional_bytes<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| STANDARD.decode(value).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+fn deserialize_signal<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SignalValue {
+        Name(String),
+        Number(i32),
+    }
+
+    match Option::<SignalValue>::deserialize(deserializer)? {
+        None => Ok(0),
+        Some(SignalValue::Name(name)) if name == "SIGNAL_UNSPECIFIED" => Ok(0),
+        Some(SignalValue::Name(name)) if name == "SIGNAL_SIGTERM" => Ok(15),
+        Some(SignalValue::Name(name)) if name == "SIGNAL_SIGKILL" => Ok(9),
+        Some(SignalValue::Name(name)) => Err(serde::de::Error::custom(format!(
+            "unknown process signal {name:?}"
+        ))),
+        Some(SignalValue::Number(number)) => Ok(number),
+    }
 }
 
 #[cfg(test)]
