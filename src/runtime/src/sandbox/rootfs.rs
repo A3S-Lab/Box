@@ -520,7 +520,7 @@ fn load_manifest_if_present(path: &Path) -> Result<Option<RootfsMetadataManifest
     }
 
     let mut bytes = Vec::with_capacity(length as usize);
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(MAX_ROOTFS_METADATA_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| BoxError::BoxBootError {
