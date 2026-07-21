@@ -9,9 +9,11 @@ use a3s_box_core::execution::ResolvedExecutionPlan;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
+use crate::sandbox::rootfs::{
+    inspect_rootfs_identity_requirements_with_preference, prepare_rootfs_ownership_with_preference,
+};
 use crate::sandbox::{
-    compile_oci_spec, inspect_rootfs_identity_requirements, plan_id_mappings,
-    prepare_crun_path_access, prepare_managed_mount_source, prepare_rootfs_ownership,
+    compile_oci_spec, plan_id_mappings, prepare_crun_path_access, prepare_managed_mount_source,
     probe_sandbox_capabilities, validate_external_mount_access, write_bundle, CrunController,
     SandboxBundleSpec, SandboxLaunchSpec, SandboxMount, SandboxResources, SandboxTmpfs,
 };
@@ -87,10 +89,20 @@ impl VmManager {
         self.image_config = layout.oci_config.clone();
 
         let prepare = (|| -> Result<_> {
+            // Snapshot-backed rootfs overlays are mounted by `prepare_layout`.
+            // Stage through the exact merged root before ownership planning or
+            // crun launch so the terminal completion marker is invalidated in
+            // this box's writable upper, never in the shared Snapshot lower.
+            a3s_box_core::rootfs_metadata::stage_terminal_rootfs_metadata_for_boot(
+                &layout.rootfs_path,
+            )?;
             let instance_prepare_start = std::time::Instant::now();
             let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
-            std::fs::write(layout.rootfs_path.join("etc/resolv.conf"), resolv_content)
-                .map_err(BoxError::IoError)?;
+            crate::oci::rootfs::write_guest_file(
+                &layout.rootfs_path,
+                "etc/resolv.conf",
+                resolv_content,
+            )?;
             self.write_hostname_file(&layout)?;
             self.write_standalone_hosts_file(&layout)?;
 
@@ -114,7 +126,10 @@ impl VmManager {
             let (mounts, tmpfs) = self.compile_sandbox_mounts(&layout, &instance_spec)?;
             ensure_mount_destinations(&layout.rootfs_path, &mounts, &tmpfs)?;
 
-            let rootfs_ids = inspect_rootfs_identity_requirements(&layout.rootfs_path)?;
+            let rootfs_ids = inspect_rootfs_identity_requirements_with_preference(
+                &layout.rootfs_path,
+                layout.prefer_image_rootfs_metadata,
+            )?;
             let (account_uid, account_gid) = maximum_account_ids(&layout.rootfs_path)?;
             let (process_uid, process_gid) = maximum_process_ids(&instance_spec.entrypoint.env)?;
             let maximum_uid = rootfs_ids.maximum_uid.max(account_uid).max(process_uid);
@@ -132,11 +147,12 @@ impl VmManager {
                 mount_sources_start.elapsed(),
             );
             let rootfs_ownership_start = std::time::Instant::now();
-            prepare_rootfs_ownership(
+            prepare_rootfs_ownership_with_preference(
                 &layout.rootfs_path,
                 &id_mappings,
                 user_namespace.effective_uid,
                 self.config.read_only,
+                layout.prefer_image_rootfs_metadata,
             )?;
             a3s_box_core::lifecycle_profile::record_lifecycle_phase(
                 "sandbox.rootfs_ownership",
@@ -497,20 +513,19 @@ fn parse_byte_size(value: &str) -> Result<u64> {
 }
 
 fn normalized_container_path(value: &str, label: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(value);
-    if !path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::CurDir | Component::ParentDir | Component::Prefix(_)
-            )
-        })
+    // Container paths always use Linux semantics. Host `Path::is_absolute`
+    // rejects `/work` on Windows because it has no drive prefix, even though it
+    // is the correct absolute path inside the guest/container.
+    if !value.starts_with('/')
+        || value
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
     {
         return Err(BoxError::ConfigError(format!(
             "Sandbox {label} must be an absolute normalized path: {value:?}"
         )));
     }
-    Ok(path)
+    Ok(PathBuf::from(value))
 }
 
 fn ensure_mount_destinations(
@@ -581,7 +596,7 @@ fn ensure_mount_destination(rootfs: &Path, destination: &Path, file: bool) -> Re
 fn maximum_account_ids(rootfs: &Path) -> Result<(u32, u32)> {
     let mut maximum_uid = 0u32;
     let mut maximum_gid = 0u32;
-    if let Ok(passwd) = std::fs::read_to_string(rootfs.join("etc/passwd")) {
+    if let Some(passwd) = crate::oci::rootfs::read_guest_file_to_string(rootfs, "etc/passwd")? {
         for line in passwd.lines().filter(|line| !line.starts_with('#')) {
             let fields: Vec<_> = line.split(':').collect();
             if fields.len() >= 4 {
@@ -594,7 +609,7 @@ fn maximum_account_ids(rootfs: &Path) -> Result<(u32, u32)> {
             }
         }
     }
-    if let Ok(group) = std::fs::read_to_string(rootfs.join("etc/group")) {
+    if let Some(group) = crate::oci::rootfs::read_guest_file_to_string(rootfs, "etc/group")? {
         for line in group.lines().filter(|line| !line.starts_with('#')) {
             if let Some(Ok(gid)) = line.split(':').nth(2).map(str::parse::<u32>) {
                 maximum_gid = maximum_gid.max(gid);
@@ -676,8 +691,11 @@ mod tests {
 
         assert!(parse_sandbox_tmpfs("/scratch:size=1m,ro,rw").is_err());
         assert!(parse_sandbox_tmpfs("/scratch:exec").is_err());
+        assert!(normalized_container_path("relative", "test path").is_err());
+        assert!(normalized_container_path("/work/../escape", "test path").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn mount_destination_rejects_symlink_parent() {
         let rootfs = tempfile::tempdir().unwrap();

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Package deterministic, checksum-pinned libkrun source for Linux/macOS and
+  the exact tested `krun.dll`, `krun.lib`, and `libkrunfw.dll` bundle for
+  Windows without exceeding crates.io's 10 MiB archive limit.
+- Publish the native runtime release, license notices, provenance record, and
+  matching libkrunfw/Linux corresponding source before publishing the crate.
+
+### Fixed
+
+- Verify cached firmware downloads on every use and replace partial or corrupt
+  downloads instead of extracting them as trusted inputs.
+- Keep the Windows runtime trio version-locked instead of combining a current
+  `krun.dll` with an older downloaded firmware DLL.
+
 ## [0.1.5] - 2026-03-12
 
 ### Fixed

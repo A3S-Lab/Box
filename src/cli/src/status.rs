@@ -113,6 +113,10 @@ fn status_hint(record: &BoxRecord) -> Option<String> {
             "Use `a3s-box start {}` to start it again or `a3s-box rm {}` to remove it.",
             record.name, record.name
         )),
+        "dead" if record.exit_code == Some(0) => Some(format!(
+            "The box exited successfully. Run `a3s-box logs {}` to review output, then `a3s-box restart {}` or `a3s-box rm {}`.",
+            record.name, record.name, record.name
+        )),
         "dead" => Some(format!(
             "Run `a3s-box logs {}` to inspect failure output, then `a3s-box restart {}` or `a3s-box rm {}`.",
             record.name, record.name, record.name
@@ -212,6 +216,18 @@ mod tests {
         assert_eq!(details.summary, "paused");
         assert!(details.active);
         assert!(details.hint.unwrap().contains("a3s-box unpause box"));
+    }
+
+    #[test]
+    fn test_status_details_does_not_call_exit_zero_a_failure() {
+        let mut record = make_record("id", "box", "dead", None);
+        record.exit_code = Some(0);
+
+        let details = status_details(&record);
+        let hint = details.hint.unwrap();
+
+        assert!(hint.contains("exited successfully"));
+        assert!(!hint.contains("failure"));
     }
 
     #[test]

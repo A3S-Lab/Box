@@ -28,6 +28,8 @@ pub mod tee;
 pub mod traits;
 pub mod vmm;
 pub mod volume;
+#[cfg(windows)]
+pub mod windows_file;
 pub mod workload;
 
 // Re-export commonly used types
@@ -41,8 +43,8 @@ pub use exec::{ExecOutput, ExecRequest};
 pub use exec::{FileOp, FileRequest, FileResponse};
 pub use exec::{EXEC_VSOCK_PORT, PORT_FWD_VSOCK_PORT};
 pub use execution::{
-    resolve_execution, validate_sandbox_compatibility, ExecutionBackend, IsolationClass,
-    ResolvedExecutionPlan,
+    resolve_execution, validate_microvm_compatibility, validate_sandbox_compatibility,
+    ExecutionBackend, IsolationClass, ResolvedExecutionPlan,
 };
 pub use network::{IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode, NetworkPolicy};
 pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};

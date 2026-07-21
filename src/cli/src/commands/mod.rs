@@ -246,27 +246,15 @@ pub(crate) fn resolve_box_rootfs(box_dir: &std::path::Path) -> Option<PathBuf> {
     None
 }
 
-/// Tail a file, printing new content as it appears.
-///
-/// Waits for the file to exist, then continuously reads and prints new data.
-/// Used by `run` (foreground mode) and `attach`.
-pub(crate) async fn tail_file(path: &std::path::Path) {
-    tail_file_stream(path, false).await;
-}
-
-/// Tail a console file to the terminal. `to_stderr` routes it to the terminal's
-/// stderr — used for the container's stderr console (console.err.log) so a
-/// foreground `run`/`attach` shows stdout and stderr like Docker.
-pub(crate) async fn tail_file_stream(path: &std::path::Path, to_stderr: bool) {
-    tail_file_stream_positioned(path, to_stderr, None).await;
-}
-
+/// Wait for a stream file to exist, then continuously print new data.
+/// `to_stderr` preserves the workload's stdout/stderr identity.
 pub(crate) async fn tail_file_stream_positioned(
     path: &std::path::Path,
     to_stderr: bool,
     position: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    runtime_filter: Option<std::sync::Arc<a3s_box_core::log::RuntimeConsoleFilter>>,
 ) {
-    use std::io::Write as _;
     use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -285,24 +273,79 @@ pub(crate) async fn tail_file_stream_positioned(
         if path.exists() {
             break;
         }
+        if stop
+            .as_ref()
+            .is_some_and(|stop| stop.load(Ordering::Acquire))
+        {
+            return;
+        }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
+    #[cfg(target_os = "windows")]
+    let (mut file, windows_identity) = {
+        let Ok((file, identity)) = a3s_box_core::windows_file::open_regular_file(path, None) else {
+            return;
+        };
+        (tokio::fs::File::from_std(file), identity)
+    };
+    #[cfg(not(target_os = "windows"))]
     let mut file = match tokio::fs::File::open(path).await {
-        Ok(f) => f,
+        Ok(file) => file,
         Err(_) => return,
     };
 
     let mut buf = vec![0u8; 4096];
     let mut pos: u64 = 0;
+    let mut noise_filter = RuntimeNoiseLineFilter::new(runtime_filter);
     loop {
         match file.read(&mut buf).await {
             Ok(0) => {
+                if stop
+                    .as_ref()
+                    .is_some_and(|stop| stop.load(Ordering::Acquire))
+                {
+                    noise_filter.finish(|bytes| write_terminal_bytes(bytes, to_stderr));
+                    return;
+                }
+
+                #[cfg(target_os = "windows")]
+                {
+                    // Shared-rootfs writers can append through a handle whose
+                    // updates stay invisible to a reader already at EOF. Open
+                    // a fresh handle and resume from the consumed byte offset.
+                    tokio::time::sleep(eof_poll).await;
+                    if let Ok((replacement, _)) =
+                        a3s_box_core::windows_file::open_regular_file(path, Some(windows_identity))
+                    {
+                        let mut replacement = tokio::fs::File::from_std(replacement);
+                        let visible_len = replacement
+                            .metadata()
+                            .await
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(pos);
+                        let replacement_pos = if visible_len < pos { 0 } else { pos };
+                        if replacement
+                            .seek(std::io::SeekFrom::Start(replacement_pos))
+                            .await
+                            .is_ok()
+                        {
+                            file = replacement;
+                            pos = replacement_pos;
+                            if let Some(position) = &position {
+                                position.store(pos, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 // Detect truncation/rotation: if our read offset is past the
                 // file's current end, the shim bounded the raw console under us
                 // (see core::log::console_truncate_if_over). Re-read from the
                 // start so we keep streaming instead of freezing forever at a
                 // stale offset.
+                #[cfg(not(target_os = "windows"))]
                 if let Ok(meta) = file.metadata().await {
                     if pos > meta.len() {
                         pos = file.seek(std::io::SeekFrom::Start(0)).await.unwrap_or(0);
@@ -311,26 +354,260 @@ pub(crate) async fn tail_file_stream_positioned(
                         }
                     }
                 }
+                #[cfg(not(target_os = "windows"))]
                 tokio::time::sleep(eof_poll).await;
             }
             Ok(n) => {
                 pos += n as u64;
-                let text = String::from_utf8_lossy(&buf[..n]);
-                if to_stderr {
-                    let mut err = std::io::stderr();
-                    let _ = err.write_all(text.as_bytes());
-                    let _ = err.flush();
-                } else {
-                    let mut out = std::io::stdout();
-                    let _ = out.write_all(text.as_bytes());
-                    let _ = out.flush();
-                }
+                noise_filter.push(&buf[..n], |bytes| write_terminal_bytes(bytes, to_stderr));
                 if let Some(position) = &position {
                     position.store(pos, Ordering::Relaxed);
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                noise_filter.finish(|bytes| write_terminal_bytes(bytes, to_stderr));
+                break;
+            }
         }
+    }
+}
+
+fn write_terminal_bytes(bytes: &[u8], to_stderr: bool) {
+    use std::io::Write as _;
+
+    if to_stderr {
+        let mut err = std::io::stderr();
+        let _ = err.write_all(bytes);
+        let _ = err.flush();
+    } else {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(bytes);
+        let _ = out.flush();
+    }
+}
+
+struct RuntimeNoiseLineFilter {
+    runtime_filter: Option<std::sync::Arc<a3s_box_core::log::RuntimeConsoleFilter>>,
+    state: RuntimeNoiseLineState,
+}
+
+enum RuntimeNoiseLineState {
+    /// Buffer only while the beginning of a line could still be the runtime
+    /// noise prefix. This is bounded by `RUNTIME_NOISE_PREFIX.len()`.
+    Probe(Vec<u8>),
+    /// The line cannot be runtime noise, so stream it without further delay.
+    Passthrough,
+    /// The runtime prefix matched. Buffer the bounded candidate until its
+    /// newline so the strict core grammar can classify the complete line.
+    Candidate(Vec<u8>),
+}
+
+impl RuntimeNoiseLineFilter {
+    const RUNTIME_NOISE_PREFIX: &'static [u8] = b"init.krun:";
+    const MAX_CANDIDATE_LEN: usize = 64 * 1024;
+
+    fn new(
+        runtime_filter: Option<std::sync::Arc<a3s_box_core::log::RuntimeConsoleFilter>>,
+    ) -> Self {
+        Self {
+            runtime_filter,
+            state: RuntimeNoiseLineState::Probe(Vec::new()),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8], mut emit: impl FnMut(&[u8])) {
+        if self.runtime_filter.is_none() {
+            emit(bytes);
+            return;
+        }
+
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if self
+                .runtime_filter
+                .as_ref()
+                .is_some_and(|filter| !filter.preamble_active())
+            {
+                self.disable_and_flush(&mut emit);
+                emit(&bytes[offset..]);
+                return;
+            }
+
+            let state =
+                std::mem::replace(&mut self.state, RuntimeNoiseLineState::Probe(Vec::new()));
+            match state {
+                RuntimeNoiseLineState::Probe(mut pending) => {
+                    pending.push(bytes[offset]);
+                    offset += 1;
+
+                    if !Self::RUNTIME_NOISE_PREFIX.starts_with(&pending) {
+                        emit(&pending);
+                        let ended_line = pending.last() == Some(&b'\n');
+                        self.state = if ended_line {
+                            RuntimeNoiseLineState::Probe(Vec::new())
+                        } else {
+                            RuntimeNoiseLineState::Passthrough
+                        };
+                    } else if pending.len() == Self::RUNTIME_NOISE_PREFIX.len() {
+                        self.state = RuntimeNoiseLineState::Candidate(pending);
+                    } else {
+                        self.state = RuntimeNoiseLineState::Probe(pending);
+                    }
+                }
+                RuntimeNoiseLineState::Passthrough => {
+                    if let Some(relative_newline) =
+                        bytes[offset..].iter().position(|byte| *byte == b'\n')
+                    {
+                        let end = offset + relative_newline + 1;
+                        emit(&bytes[offset..end]);
+                        offset = end;
+                        self.state = RuntimeNoiseLineState::Probe(Vec::new());
+                    } else {
+                        emit(&bytes[offset..]);
+                        self.state = RuntimeNoiseLineState::Passthrough;
+                        return;
+                    }
+                }
+                RuntimeNoiseLineState::Candidate(mut candidate) => {
+                    if let Some(relative_newline) =
+                        bytes[offset..].iter().position(|byte| *byte == b'\n')
+                    {
+                        let end = offset + relative_newline + 1;
+                        candidate.extend_from_slice(&bytes[offset..end]);
+                        offset = end;
+
+                        if candidate.len() > Self::MAX_CANDIDATE_LEN {
+                            emit(&candidate);
+                        } else {
+                            let keep = std::str::from_utf8(&candidate).map_or(true, |line| {
+                                self.runtime_filter
+                                    .as_ref()
+                                    .is_none_or(|filter| filter.keep_line(line))
+                            });
+                            if keep {
+                                emit(&candidate);
+                            }
+                        }
+                        self.state = RuntimeNoiseLineState::Probe(Vec::new());
+                    } else {
+                        candidate.extend_from_slice(&bytes[offset..]);
+                        if candidate.len() > Self::MAX_CANDIDATE_LEN {
+                            emit(&candidate);
+                            self.state = RuntimeNoiseLineState::Passthrough;
+                        } else {
+                            self.state = RuntimeNoiseLineState::Candidate(candidate);
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self, mut emit: impl FnMut(&[u8])) {
+        let state = std::mem::replace(&mut self.state, RuntimeNoiseLineState::Passthrough);
+        if let RuntimeNoiseLineState::Probe(pending) | RuntimeNoiseLineState::Candidate(pending) =
+            state
+        {
+            // An unterminated fragment is not a complete C-init record.
+            emit(&pending);
+        }
+    }
+
+    fn disable_and_flush(&mut self, mut emit: impl FnMut(&[u8])) {
+        self.runtime_filter = None;
+        let state = std::mem::replace(&mut self.state, RuntimeNoiseLineState::Passthrough);
+        if let RuntimeNoiseLineState::Probe(pending) | RuntimeNoiseLineState::Candidate(pending) =
+            state
+        {
+            emit(&pending);
+        }
+    }
+}
+
+#[cfg(test)]
+mod console_tail_tests {
+    use super::RuntimeNoiseLineFilter;
+    use a3s_box_core::log::RuntimeConsoleFilter;
+    use std::sync::Arc;
+
+    fn runtime_filter() -> Arc<RuntimeConsoleFilter> {
+        Arc::new(RuntimeConsoleFilter::new())
+    }
+
+    #[test]
+    fn runtime_noise_filter_handles_cross_chunk_sentinel_and_final_partial() {
+        let mut filter = RuntimeNoiseLineFilter::new(Some(runtime_filter()));
+        let mut visible = Vec::new();
+
+        filter.push(b"init.kr", |bytes| visible.extend_from_slice(bytes));
+        filter.push(
+            b"un: execvp(/bin/app) starting\ninit.krun: business\npart",
+            |bytes| visible.extend_from_slice(bytes),
+        );
+        filter.push(b"ial", |bytes| visible.extend_from_slice(bytes));
+        filter.finish(|bytes| visible.extend_from_slice(bytes));
+
+        assert_eq!(visible, b"init.krun: business\npartial");
+    }
+
+    #[test]
+    fn runtime_noise_filter_preserves_generic_prefix_and_unterminated_candidate() {
+        let mut filtered = RuntimeNoiseLineFilter::new(Some(runtime_filter()));
+        let mut visible = Vec::new();
+        filtered.push(b"ok\r\ninit.krun: business\n", |bytes| {
+            visible.extend_from_slice(bytes)
+        });
+        filtered.push(b"init.krun: mount_filesystems ok", |bytes| {
+            visible.extend_from_slice(bytes)
+        });
+        filtered.finish(|bytes| visible.extend_from_slice(bytes));
+        assert_eq!(
+            visible,
+            b"ok\r\ninit.krun: business\ninit.krun: mount_filesystems ok"
+        );
+
+        let mut raw = RuntimeNoiseLineFilter::new(None);
+        raw.push(b"init.kr", |bytes| visible.extend_from_slice(bytes));
+        raw.push(b"un: retained", |bytes| visible.extend_from_slice(bytes));
+        raw.finish(|bytes| visible.extend_from_slice(bytes));
+        assert!(visible.ends_with(b"init.krun: retained"));
+    }
+
+    #[test]
+    fn runtime_noise_filter_shares_sentinel_across_streams() {
+        let shared = runtime_filter();
+        let mut stdout = RuntimeNoiseLineFilter::new(Some(Arc::clone(&shared)));
+        let mut stderr = RuntimeNoiseLineFilter::new(Some(shared));
+        let mut visible_stdout = Vec::new();
+        let mut visible_stderr = Vec::new();
+
+        stdout.push(b"init.krun: mount_filesystems ok\n", |bytes| {
+            visible_stdout.extend_from_slice(bytes)
+        });
+        stderr.push(b"init.krun: execvp(/bin/app) starting\n", |bytes| {
+            visible_stderr.extend_from_slice(bytes)
+        });
+        stdout.push(b"init.krun: mount_filesystems ok\n", |bytes| {
+            visible_stdout.extend_from_slice(bytes)
+        });
+
+        assert_eq!(visible_stdout, b"init.krun: mount_filesystems ok\n");
+        assert!(visible_stderr.is_empty());
+    }
+
+    #[test]
+    fn runtime_noise_filter_streams_visible_partial_line_during_push() {
+        let mut filter = RuntimeNoiseLineFilter::new(Some(runtime_filter()));
+        let mut visible = Vec::new();
+
+        filter.push(b"progress without newline", |bytes| {
+            visible.extend_from_slice(bytes)
+        });
+
+        assert_eq!(visible, b"progress without newline");
+        filter.finish(|bytes| visible.extend_from_slice(bytes));
+        assert_eq!(visible, b"progress without newline");
     }
 }
 

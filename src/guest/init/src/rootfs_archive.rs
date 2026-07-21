@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use a3s_box_core::rootfs_metadata::IMAGE_ROOTFS_METADATA_PATH;
 use a3s_box_core::rootfs_metadata::{
-    runtime_managed_rootfs_mode, RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest,
+    runtime_managed_rootfs_mode, stage_terminal_rootfs_metadata_for_boot, RootfsEntryKind,
+    RootfsMetadataEntry, RootfsMetadataManifest, PREVIOUS_ROOTFS_METADATA_PATH,
     ROOTFS_METADATA_PATH,
 };
 use base64::Engine;
@@ -45,6 +46,17 @@ pub fn persist_rootfs_metadata(root: &Path) -> Result<(), Box<dyn std::error::Er
         file.sync_all()?;
     }
     std::fs::rename(temporary, destination)?;
+    sync_rootfs_directory(root)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_rootfs_directory(root: &Path) -> std::io::Result<()> {
+    std::fs::File::open(root)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_rootfs_directory(_root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -71,12 +83,26 @@ fn restore_rootfs_metadata_excluding(
     root: &Path,
     excluded_mounts: &HashSet<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // The host normally stages this before launching the VM so commit observes
+    // the missing canonical marker immediately. Repeat it here for runtimes that
+    // launch guest-init directly: replay is one-shot, and only a subsequent
+    // clean shutdown may create a new terminal completion marker.
+    stage_terminal_rootfs_metadata_for_boot(root)?;
     // Runtime may update generated files such as resolv.conf after the image
     // rootfs cache is composed, so image replay validates type and symlink
     // identity but not regular-file size. The terminal snapshot was captured
     // after all container writes and remains strict.
     apply_metadata_manifest(root, IMAGE_ROOTFS_METADATA_PATH, false, excluded_mounts)?;
-    apply_metadata_manifest(root, ROOTFS_METADATA_PATH, true, excluded_mounts)?;
+    apply_metadata_manifest(root, PREVIOUS_ROOTFS_METADATA_PATH, true, excluded_mounts)?;
+    match std::fs::remove_file(root.join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'))) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // Fence even a not-found retry: a prior delete may have succeeded before
+    // its directory sync reported an error. Never exec the workload until that
+    // one-shot deletion is durably ordered.
+    sync_rootfs_directory(root)?;
     Ok(())
 }
 
@@ -91,11 +117,15 @@ fn apply_metadata_manifest(
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let source = root.join(manifest_path.trim_start_matches('/'));
-    let bytes = match std::fs::read(&source) {
-        Ok(bytes) => bytes,
+    let source_metadata = match std::fs::symlink_metadata(&source) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
+    if !source_metadata.file_type().is_file() {
+        return Err(format!("rootfs metadata is not a plain file: {}", source.display()).into());
+    }
+    let bytes = std::fs::read(&source)?;
     let manifest: RootfsMetadataManifest = serde_json::from_slice(&bytes)?;
     manifest.validate()?;
     let mut decoded = Vec::with_capacity(manifest.entries.len());
@@ -109,6 +139,7 @@ fn apply_metadata_manifest(
         let relative = safe_relative_path(&relative)?;
         if relative == Path::new(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
             || relative == Path::new(ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            || relative == Path::new(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'))
             || !unique.insert(relative.clone())
         {
             return Err("duplicate or reserved rootfs metadata path".into());
@@ -368,6 +399,7 @@ fn should_skip(root: &Path, source: &Path, excluded_mounts: &HashSet<PathBuf>) -
         relative.to_str(),
         Some(".a3s_rootfs_metadata_v1.json")
             | Some(".a3s_rootfs_metadata_v1.json.tmp")
+            | Some(".a3s_rootfs_metadata_v1.previous.json")
             | Some(".a3s_image_metadata_v1.json")
             | Some(".a3s_image_metadata_v1.json.tmp")
             | Some(".a3s_exit_code")
@@ -411,6 +443,13 @@ fn decode_mountinfo_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_errors_are_propagated() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(sync_rootfs_directory(&directory.path().join("missing")).is_err());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

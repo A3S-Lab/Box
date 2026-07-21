@@ -336,7 +336,13 @@
         std::fs::create_dir_all(record.console_log.parent().unwrap()).unwrap();
         std::fs::write(
             &record.console_log,
-            "init.krun: boot internals\ncontainer line\n",
+            concat!(
+                "init.krun: mount_filesystems ok\n",
+                "init.krun: business\n",
+                "init.krun: execvp(/bin/app) starting\n",
+                "init.krun: mount_filesystems ok\n",
+                "container line\n",
+            ),
         )
         .unwrap();
 
@@ -346,12 +352,43 @@
 
         assert_eq!(
             logs,
-            vec![BoxLogLine {
-                stream: "stdout".to_string(),
-                timestamp: None,
-                message: "container line".to_string(),
-            }]
+            vec![
+                BoxLogLine {
+                    stream: "stdout".to_string(),
+                    timestamp: None,
+                    message: "init.krun: business".to_string(),
+                },
+                BoxLogLine {
+                    stream: "stdout".to_string(),
+                    timestamp: None,
+                    message: "init.krun: mount_filesystems ok".to_string(),
+                },
+                BoxLogLine {
+                    stream: "stdout".to_string(),
+                    timestamp: None,
+                    message: "container line".to_string(),
+                },
+            ]
         );
+    }
+
+    #[test]
+    fn preserves_unterminated_console_prefix_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_for(&dir);
+        let mut record = box_record("11111111-1111-4111-8111-111111111111", "api", "stopped");
+        record.box_dir = dir.path().join("boxes").join(&record.id);
+        record.console_log = record.box_dir.join("logs").join("console.log");
+        write_boxes(&client, &[record.clone()]);
+
+        std::fs::create_dir_all(record.console_log.parent().unwrap()).unwrap();
+        std::fs::write(&record.console_log, "init.krun: mount_filesystems ok").unwrap();
+
+        let logs = client
+            .read_box_logs(&record.id, ReadBoxLogsOptions::default())
+            .unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].message, "init.krun: mount_filesystems ok");
     }
 
     #[test]

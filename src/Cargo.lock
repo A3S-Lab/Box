@@ -97,6 +97,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -268,6 +269,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "windows-sys 0.48.0",

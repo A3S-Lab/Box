@@ -4,7 +4,7 @@
 //! added, changed, and deleted files, similar to `docker diff`.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use clap::Args;
 
@@ -147,7 +147,7 @@ fn walk_recursive(
         let path = entry.path();
         let rel = path
             .strip_prefix(root)
-            .map(|p| format!("/{}", p.display()))
+            .map(rootfs_path_string)
             .unwrap_or_default();
 
         let meta = match entry.metadata() {
@@ -178,6 +178,17 @@ fn walk_recursive(
     }
 
     Ok(())
+}
+
+fn rootfs_path_string(relative: &Path) -> String {
+    let segments = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    format!("/{}", segments.join("/"))
 }
 
 /// Create a baseline snapshot of a rootfs directory.

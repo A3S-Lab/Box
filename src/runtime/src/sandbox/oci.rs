@@ -578,7 +578,7 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
     }
 
     for tmpfs in user_tmpfs {
-        validate_absolute_normalized(&tmpfs.destination, "tmpfs destination")?;
+        validate_linux_absolute_normalized(&tmpfs.destination, "tmpfs destination")?;
         if tmpfs.size_bytes == 0 {
             return Err(BoxError::ConfigError(format!(
                 "Sandbox tmpfs {} must have a non-zero size",
@@ -586,10 +586,10 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             )));
         }
         let is_shared_memory = tmpfs.destination == Path::new("/dev/shm");
-        if path_is_or_below(&tmpfs.destination, Path::new("/proc"))
-            || path_is_or_below(&tmpfs.destination, Path::new("/sys"))
-            || (path_is_or_below(&tmpfs.destination, Path::new("/dev")) && !is_shared_memory)
-            || path_is_or_below(&tmpfs.destination, Path::new("/run/a3s-box"))
+        if linux_path_is_or_below(&tmpfs.destination, Path::new("/proc"))
+            || linux_path_is_or_below(&tmpfs.destination, Path::new("/sys"))
+            || (linux_path_is_or_below(&tmpfs.destination, Path::new("/dev")) && !is_shared_memory)
+            || linux_path_is_or_below(&tmpfs.destination, Path::new("/run/a3s-box"))
             || tmpfs.destination == Path::new("/")
         {
             return Err(BoxError::ConfigError(format!(
@@ -770,15 +770,15 @@ fn validate_mapping_set(mappings: &[IdMapping], maximum: u32, kind: &str) -> Res
 }
 
 fn validate_user_mount(mount: &SandboxMount) -> Result<()> {
-    validate_absolute_normalized(&mount.source, "mount source")?;
-    validate_absolute_normalized(&mount.destination, "mount destination")?;
+    validate_host_absolute_normalized(&mount.source, "mount source")?;
+    validate_linux_absolute_normalized(&mount.destination, "mount destination")?;
 
     const PROTECTED_SOURCES: &[&str] = &[
         "/", "/boot", "/dev", "/etc", "/proc", "/run", "/sys", "/var/run",
     ];
     if PROTECTED_SOURCES
         .iter()
-        .any(|protected| path_is_or_below(&mount.source, Path::new(protected)))
+        .any(|protected| host_path_is_or_below(&mount.source, Path::new(protected)))
     {
         return Err(BoxError::ConfigError(format!(
             "Sandbox mount source {} is protected",
@@ -794,14 +794,17 @@ fn validate_user_mount(mount: &SandboxMount) -> Result<()> {
         "/sys",
         RUNTIME_ENV_PATH,
         "/.a3s_image_metadata_v1.json",
+        "/.a3s_image_metadata_v1.json.tmp",
         "/.a3s_rootfs_metadata_v1.json",
+        "/.a3s_rootfs_metadata_v1.json.tmp",
+        "/.a3s_rootfs_metadata_v1.previous.json",
     ];
     if mount.destination == Path::new("/")
         || PROTECTED_DESTINATIONS.iter().any(|protected| {
             let protected = Path::new(protected);
-            path_is_or_below(&mount.destination, protected)
+            linux_path_is_or_below(&mount.destination, protected)
                 || (mount.destination != Path::new("/")
-                    && protected.starts_with(&mount.destination))
+                    && linux_path_is_or_below(protected, &mount.destination))
         })
     {
         return Err(BoxError::ConfigError(format!(
@@ -813,8 +816,8 @@ fn validate_user_mount(mount: &SandboxMount) -> Result<()> {
 }
 
 fn validate_rootfs_path(path: &Path) -> Result<()> {
-    validate_absolute_normalized(path, "rootfs path")?;
-    if path == Path::new("/") {
+    validate_host_absolute_normalized(path, "rootfs path")?;
+    if path.parent().is_none() {
         return Err(BoxError::ConfigError(
             "Host root cannot be used as a Sandbox rootfs".to_string(),
         ));
@@ -822,14 +825,11 @@ fn validate_rootfs_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_absolute_normalized(path: &Path, label: &str) -> Result<()> {
+fn validate_host_absolute_normalized(path: &Path, label: &str) -> Result<()> {
     if !path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                Component::CurDir | Component::ParentDir | Component::Prefix(_)
-            )
-        })
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
     {
         return Err(BoxError::ConfigError(format!(
             "Sandbox {label} must be an absolute normalized path: {}",
@@ -839,8 +839,41 @@ fn validate_absolute_normalized(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn path_is_or_below(path: &Path, protected: &Path) -> bool {
+fn validate_linux_absolute_normalized(path: &Path, label: &str) -> Result<()> {
+    let Some(path) = path.to_str() else {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox {label} must be a UTF-8 Linux path"
+        )));
+    };
+    if !path.starts_with('/')
+        || path.contains('\0')
+        || path
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
+    {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox {label} must be an absolute normalized Linux path: {path}"
+        )));
+    }
+    Ok(())
+}
+
+fn host_path_is_or_below(path: &Path, protected: &Path) -> bool {
     path == protected || (protected != Path::new("/") && path.starts_with(protected))
+}
+
+fn linux_path_is_or_below(path: &Path, protected: &Path) -> bool {
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    let Some(protected) = protected.to_str() else {
+        return false;
+    };
+    path == protected
+        || (protected != "/"
+            && path
+                .strip_prefix(protected)
+                .is_some_and(|suffix| suffix.starts_with('/')))
 }
 
 fn validate_box_id(box_id: &str) -> Result<()> {
@@ -1203,7 +1236,7 @@ mod tests {
     fn sample_input() -> SandboxBundleSpec {
         SandboxBundleSpec {
             box_id: "box-123".to_string(),
-            rootfs_path: PathBuf::from("/var/lib/a3s/boxes/box-123/rootfs"),
+            rootfs_path: std::env::temp_dir().join("a3s/boxes/box-123/rootfs"),
             rootfs_read_only: false,
             hostname: "box-123".to_string(),
             init_environment: vec![
@@ -1214,7 +1247,7 @@ mod tests {
                 ),
             ],
             mounts: vec![SandboxMount {
-                source: PathBuf::from("/srv/a3s/workspaces/box-123"),
+                source: std::env::temp_dir().join("a3s/workspaces/box-123"),
                 destination: PathBuf::from("/workspace"),
                 read_only: false,
             }],
@@ -1361,6 +1394,20 @@ mod tests {
     }
 
     #[test]
+    fn compiler_rejects_mounts_at_or_below_metadata_temp_paths() {
+        for destination in [
+            "/.a3s_image_metadata_v1.json.tmp",
+            "/.a3s_image_metadata_v1.json.tmp/child",
+            "/.a3s_rootfs_metadata_v1.json.tmp",
+            "/.a3s_rootfs_metadata_v1.json.tmp/child",
+        ] {
+            let mut input = sample_input();
+            input.mounts[0].destination = PathBuf::from(destination);
+            assert!(compile_oci_spec(&input).is_err(), "accepted {destination}");
+        }
+    }
+
+    #[test]
     fn compiler_allows_only_the_exact_shared_memory_tmpfs_override() {
         let mut input = sample_input();
         input.tmpfs.push(SandboxTmpfs {
@@ -1391,8 +1438,20 @@ mod tests {
         let config = BoxConfig::default();
         let resources = SandboxResources::from_box_config(&config).unwrap();
         assert_eq!(resources.memory_limit, 1024 * 1024 * 1024);
-        assert_eq!(resources.cpu_quota, 200000);
+        assert_eq!(
+            resources.cpu_quota,
+            i64::from(a3s_box_core::config::DEFAULT_VCPUS) * 100000
+        );
         assert_eq!(resources.cpu_period, 100000);
         assert_eq!(resources.pids_limit, DEFAULT_SANDBOX_PIDS_LIMIT);
+    }
+
+    #[test]
+    fn linux_guest_path_validation_is_host_independent() {
+        validate_linux_absolute_normalized(Path::new("/workspace"), "test path").unwrap();
+        assert!(validate_linux_absolute_normalized(Path::new("workspace"), "test path").is_err());
+        assert!(
+            validate_linux_absolute_normalized(Path::new("/work/../escape"), "test path").is_err()
+        );
     }
 }

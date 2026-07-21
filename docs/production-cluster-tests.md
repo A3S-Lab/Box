@@ -91,11 +91,14 @@ known-good cohort is more useful than broad noisy coverage.
 
 Install the same release or commit on every selected node. Prefer release
 artifacts. For a candidate build, use `deploy/scripts/install-runtimeclass.sh`
-with `--from-dir` so the exact local artifacts are installed everywhere.
+with `--from-dir` so the exact local artifacts are installed everywhere. The
+directory must contain the platform tarball, the matching standalone
+`containerd-shim-a3s-box-v2-linux-<arch>` asset, and the release-generated
+`a3s-box-<version>-linux-<arch>.sha256` file that covers both.
 
 ```bash
 sudo deploy/scripts/install-runtimeclass.sh \
-  --version v3.0.0 \
+  --version v3.0.11 \
   --from-dir /opt/a3s-box-artifacts \
   --warmup-image docker.m.daocloud.io/library/busybox:latest
 ```

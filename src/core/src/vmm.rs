@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::config::ResourceLimits;
+use crate::config::{ResourceLimits, DEFAULT_VCPUS};
 use crate::error::Result;
 
 // ── VM instance spec ──────────────────────────────────────────────────────────
@@ -104,7 +104,7 @@ pub struct InstanceSpec {
     /// Unique identifier for this box instance
     pub box_id: String,
 
-    /// Number of vCPUs (default: 2)
+    /// Number of vCPUs (platform default: 1 on Windows, 2 elsewhere)
     pub vcpus: u8,
 
     /// Memory in MiB (default: 512)
@@ -195,7 +195,7 @@ impl Default for InstanceSpec {
     fn default() -> Self {
         Self {
             box_id: String::new(),
-            vcpus: 2,
+            vcpus: DEFAULT_VCPUS as u8,
             memory_mib: 512,
             rootfs_path: PathBuf::new(),
             exec_socket_path: PathBuf::new(),
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn test_instance_spec_default_values() {
         let spec = InstanceSpec::default();
-        assert_eq!(spec.vcpus, 2);
+        assert_eq!(spec.vcpus, DEFAULT_VCPUS as u8);
         assert_eq!(spec.memory_mib, 512);
         assert_eq!(spec.workdir, "/");
         assert!(spec.box_id.is_empty());

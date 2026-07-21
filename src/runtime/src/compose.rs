@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::compose::ComposeConfig;
-use a3s_box_core::config::{BoxConfig, ResourceConfig};
+use a3s_box_core::config::{BoxConfig, ResourceConfig, DEFAULT_VCPUS};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::network::NetworkMode;
 
@@ -150,7 +150,7 @@ impl ComposeRuntimePlan {
         let config = BoxConfig {
             image: image.to_string(),
             resources: ResourceConfig {
-                vcpus: svc.cpus.unwrap_or(2),
+                vcpus: svc.cpus.unwrap_or(DEFAULT_VCPUS),
                 memory_mb,
                 ..Default::default()
             },

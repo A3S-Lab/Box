@@ -4,6 +4,7 @@
 //! Optionally installs the guest-init binary at /sbin/init.
 
 use a3s_box_core::error::{BoxError, Result};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::path::{Component, Path};
 
@@ -189,59 +190,28 @@ impl OciRootfsBuilder {
             )));
         }
 
-        #[cfg(target_os = "windows")]
-        let install_dir = {
-            let sbin_link = self.rootfs_path.join("sbin");
-            match std::fs::symlink_metadata(&sbin_link) {
-                Ok(meta) if meta.is_dir() => sbin_link.clone(),
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    let target = std::fs::read_link(&sbin_link).map_err(|err| {
-                        BoxError::BuildError(format!(
-                            "Failed to resolve /sbin symlink {}: {}",
-                            sbin_link.display(),
-                            err
-                        ))
-                    })?;
-                    if target.is_absolute() {
-                        target
-                    } else {
-                        self.rootfs_path.join(target)
-                    }
-                }
-                Ok(_) => {
-                    return Err(BoxError::BuildError(format!(
-                        "Cannot install guest init because {} exists and is not a directory or symlink",
-                        sbin_link.display()
-                    )));
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let usr_sbin = self.rootfs_path.join("usr").join("sbin");
-                    if usr_sbin.is_dir() {
-                        usr_sbin
-                    } else {
-                        std::fs::create_dir_all(&sbin_link).map_err(|e| {
-                            BoxError::BuildError(format!("Failed to create /sbin directory: {}", e))
-                        })?;
-                        sbin_link.clone()
-                    }
-                }
-                Err(err) => {
-                    return Err(BoxError::BuildError(format!(
-                        "Failed to inspect /sbin path {}: {}",
-                        sbin_link.display(),
-                        err
-                    )));
+        // Resolve Linux guest symlinks component-by-component on every host.
+        // Using `rootfs.join("sbin")` directly is unsafe even on Unix: an image
+        // may contain `sbin -> /tmp`, whose host interpretation would escape the
+        // rootfs and replace `/tmp/init`. Prefer an existing `/usr/sbin` only
+        // when `/sbin` is genuinely absent, preserving usr-only image support.
+        let sbin_path = self.rootfs_path.join("sbin");
+        let install_dir = match std::fs::symlink_metadata(&sbin_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let usr_sbin = self.rootfs_directory_path("usr/sbin")?;
+                if usr_sbin.is_dir() {
+                    usr_sbin
+                } else {
+                    self.rootfs_directory_path("sbin")?
                 }
             }
-        };
-
-        #[cfg(not(target_os = "windows"))]
-        let install_dir = {
-            let sbin_dir = self.rootfs_path.join("sbin");
-            std::fs::create_dir_all(&sbin_dir).map_err(|e| {
-                BoxError::BuildError(format!("Failed to create /sbin directory: {}", e))
-            })?;
-            sbin_dir
+            Ok(_) => self.rootfs_directory_path("sbin")?,
+            Err(error) => {
+                return Err(BoxError::BuildError(format!(
+                    "Failed to inspect /sbin path {}: {error}",
+                    sbin_path.display()
+                )));
+            }
         };
 
         std::fs::create_dir_all(&install_dir).map_err(|e| {
@@ -359,39 +329,7 @@ impl OciRootfsBuilder {
     }
 
     fn write_file(&self, relative_path: &str, content: &str) -> Result<()> {
-        let full_path = self.rootfs_file_path(relative_path)?;
-
-        if let Some(parent) = full_path.parent() {
-            if parent.exists() && !parent.is_dir() {
-                return Err(BoxError::BuildError(format!(
-                    "Cannot write {} because parent {} exists and is not a directory",
-                    full_path.display(),
-                    parent.display()
-                )));
-            }
-            std::fs::create_dir_all(parent).map_err(|e| {
-                BoxError::BuildError(format!("Failed to create parent directory: {}", e))
-            })?;
-        }
-
-        std::fs::write(&full_path, content).map_err(|e| {
-            BoxError::BuildError(format!("Failed to write {}: {}", full_path.display(), e))
-        })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&full_path, std::fs::Permissions::from_mode(0o644)).map_err(
-                |e| {
-                    BoxError::BuildError(format!(
-                        "Failed to set permissions on {}: {}",
-                        full_path.display(),
-                        e
-                    ))
-                },
-            )?;
-        }
-
+        let full_path = write_guest_file(&self.rootfs_path, relative_path, content)?;
         tracing::debug!(path = %full_path.display(), "Created file");
         Ok(())
     }
@@ -408,62 +346,121 @@ impl OciRootfsBuilder {
             )));
         }
 
-        let file_name = relative.file_name().ok_or_else(|| {
+        relative.file_name().ok_or_else(|| {
             BoxError::BuildError(format!("Invalid rootfs file path: {relative_path}"))
         })?;
-        let parent = relative.parent().unwrap_or_else(|| Path::new(""));
-        Ok(self.resolve_rootfs_dir(parent)?.join(file_name))
+        self.resolve_rootfs_path(relative, true)
     }
 
-    fn resolve_rootfs_dir(&self, relative_dir: &Path) -> Result<PathBuf> {
-        let mut current = self.rootfs_path.clone();
+    fn rootfs_directory_path(&self, relative_path: &str) -> Result<PathBuf> {
+        let relative = Path::new(relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
+            return Err(BoxError::BuildError(format!(
+                "Invalid rootfs relative directory: {relative_path}"
+            )));
+        }
+        self.resolve_rootfs_path(relative, false)
+    }
 
-        for component in relative_dir.components() {
-            let Component::Normal(name) = component else {
-                if matches!(component, Component::CurDir) {
-                    continue;
+    /// Resolve a Linux guest path without allowing any symlink hop to escape
+    /// `rootfs`. The final component may be a regular file only when
+    /// `allow_final_file` is true.
+    ///
+    /// Windows does not consider `/usr/etc` an absolute host path, and
+    /// `read_link` may render it as `\usr\etc`. Treat both separators as guest
+    /// separators on Windows and resolve a leading slash from the guest root.
+    fn resolve_rootfs_path(&self, path: &Path, allow_final_file: bool) -> Result<PathBuf> {
+        let (absolute, pending) = guest_path_components(path)?;
+        if absolute {
+            return Err(BoxError::BuildError(format!(
+                "Rootfs path must be relative: {}",
+                path.display()
+            )));
+        }
+        self.resolve_rootfs_components(Vec::new(), pending, allow_final_file)
+    }
+
+    fn resolve_rootfs_components(
+        &self,
+        mut resolved: Vec<String>,
+        mut pending: VecDeque<String>,
+        allow_final_file: bool,
+    ) -> Result<PathBuf> {
+        // Linux limits path resolution to 40 symbolic-link traversals. Matching
+        // that bound makes loops fail deterministically before any write.
+        const MAX_SYMLINK_HOPS: usize = 40;
+        let mut symlink_hops = 0_usize;
+
+        while let Some(component) = pending.pop_front() {
+            if component == ".." {
+                if resolved.pop().is_none() {
+                    return Err(BoxError::BuildError(
+                        "Rootfs symlink target escapes rootfs".to_string(),
+                    ));
                 }
-                return Err(BoxError::BuildError(format!(
-                    "Invalid rootfs directory path: {}",
-                    relative_dir.display()
-                )));
-            };
+                continue;
+            }
 
-            let candidate = current.join(name);
+            let mut candidate = self.rootfs_path.clone();
+            for segment in &resolved {
+                candidate.push(segment);
+            }
+            candidate.push(&component);
+
             match std::fs::symlink_metadata(&candidate) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
-                    let target = std::fs::read_link(&candidate).map_err(|e| {
+                    symlink_hops += 1;
+                    if symlink_hops > MAX_SYMLINK_HOPS {
+                        return Err(BoxError::BuildError(format!(
+                            "Too many rootfs symlink hops while resolving {}",
+                            candidate.display()
+                        )));
+                    }
+                    let target = std::fs::read_link(&candidate).map_err(|error| {
                         BoxError::BuildError(format!(
-                            "Failed to resolve rootfs symlink {}: {}",
-                            candidate.display(),
-                            e
+                            "Failed to resolve rootfs symlink {}: {error}",
+                            candidate.display()
                         ))
                     })?;
-                    current = if target.is_absolute() {
-                        let stripped = target.strip_prefix("/").map_err(|_| {
-                            BoxError::BuildError(format!(
-                                "Invalid absolute rootfs symlink target {}",
-                                target.display()
-                            ))
-                        })?;
-                        self.rootfs_path.join(stripped)
-                    } else {
-                        current.join(target)
-                    };
+                    let (absolute, target_components) = guest_path_components(&target)?;
+                    if absolute {
+                        resolved.clear();
+                    }
+                    for target_component in target_components.into_iter().rev() {
+                        pending.push_front(target_component);
+                    }
                 }
-                Ok(metadata) if !metadata.is_dir() => {
+                Ok(metadata) if metadata.is_dir() => resolved.push(component),
+                Ok(metadata) if allow_final_file && pending.is_empty() && metadata.is_file() => {
+                    resolved.push(component)
+                }
+                Ok(_) => {
                     return Err(BoxError::BuildError(format!(
                         "Cannot use {} as a rootfs directory because it is not a directory",
                         candidate.display()
                     )));
                 }
-                Ok(_) | Err(_) => {
-                    current = candidate;
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    resolved.push(component)
+                }
+                Err(error) => {
+                    return Err(BoxError::BuildError(format!(
+                        "Failed to inspect rootfs path {}: {error}",
+                        candidate.display()
+                    )));
                 }
             }
         }
 
-        Ok(current)
+        let mut result = self.rootfs_path.clone();
+        for segment in resolved {
+            result.push(segment);
+        }
+        Ok(result)
     }
 
     /// Get the OCI image configuration.
@@ -473,6 +470,264 @@ impl OciRootfsBuilder {
         let image = OciImage::from_path(&self.image_path)?;
         Ok(image.config().clone())
     }
+}
+
+/// Resolve a file path using Linux guest symlink semantics while guaranteeing
+/// that every resolved component remains beneath `rootfs_path`.
+///
+/// Runtime startup code must use this helper before reading, writing, or
+/// changing metadata for image-owned paths. Host `Path::join`/`canonicalize`
+/// interpret absolute OCI symlink targets as host paths and can otherwise
+/// escape the guest rootfs.
+pub(crate) fn resolve_guest_file_path(rootfs_path: &Path, relative_path: &str) -> Result<PathBuf> {
+    OciRootfsBuilder::new(rootfs_path).rootfs_file_path(relative_path)
+}
+
+/// Resolve only the parent components of a guest path, leaving the final
+/// directory entry itself untouched. Use this when replacing a symlink rather
+/// than following it.
+pub(crate) fn resolve_guest_entry_path(rootfs_path: &Path, relative_path: &str) -> Result<PathBuf> {
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(BoxError::BuildError(format!(
+            "Invalid rootfs relative entry: {relative_path}"
+        )));
+    }
+    let name = relative.file_name().ok_or_else(|| {
+        BoxError::BuildError(format!("Invalid rootfs entry path: {relative_path}"))
+    })?;
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = parent.to_str().ok_or_else(|| {
+        BoxError::BuildError(format!(
+            "Rootfs entry parent is not UTF-8: {}",
+            parent.display()
+        ))
+    })?;
+    Ok(resolve_guest_directory_path(rootfs_path, parent)?.join(name))
+}
+
+/// Remove a final guest directory entry without traversing a symlink/reparse
+/// point. Missing entries are already in the desired state; real directories
+/// are rejected.
+pub(crate) fn remove_guest_entry_no_follow(
+    rootfs_path: &Path,
+    relative_path: &str,
+) -> Result<PathBuf> {
+    let path = resolve_guest_entry_path(rootfs_path, relative_path)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            return Err(BoxError::BuildError(format!(
+                "Refusing to replace guest directory {} with a file",
+                path.display()
+            )));
+        }
+        Ok(_) => {
+            #[cfg(windows)]
+            a3s_box_core::windows_file::remove_path_no_follow(&path).map_err(|error| {
+                BoxError::BuildError(format!(
+                    "Failed to remove guest entry {}: {error}",
+                    path.display()
+                ))
+            })?;
+            #[cfg(not(windows))]
+            std::fs::remove_file(&path).map_err(|error| {
+                BoxError::BuildError(format!(
+                    "Failed to remove guest entry {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(BoxError::BuildError(format!(
+                "Failed to inspect guest entry {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    Ok(path)
+}
+
+/// Replace the final guest entry with a newly created regular file, never
+/// following an existing symlink at that entry.
+pub(crate) fn replace_guest_file_no_follow(
+    rootfs_path: &Path,
+    relative_path: &str,
+    content: impl AsRef<[u8]>,
+) -> Result<PathBuf> {
+    use std::io::Write as _;
+
+    let path = remove_guest_entry_no_follow(rootfs_path, relative_path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to create guest file parent {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to create guest file {}: {error}",
+                path.display()
+            ))
+        })?;
+    file.write_all(content.as_ref()).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to write guest file {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.flush().map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to flush guest file {}: {error}",
+            path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).map_err(
+            |error| {
+                BoxError::BuildError(format!(
+                    "Failed to set guest file permissions on {}: {error}",
+                    path.display()
+                ))
+            },
+        )?;
+    }
+    Ok(path)
+}
+
+/// Directory counterpart to [`resolve_guest_file_path`].
+pub(crate) fn resolve_guest_directory_path(
+    rootfs_path: &Path,
+    relative_path: &str,
+) -> Result<PathBuf> {
+    OciRootfsBuilder::new(rootfs_path).rootfs_directory_path(relative_path)
+}
+
+/// Create (or resolve) one guest directory without ever interpreting an OCI
+/// absolute symlink as a host-absolute path.
+pub(crate) fn ensure_guest_directory(rootfs_path: &Path, relative_path: &str) -> Result<PathBuf> {
+    let path = resolve_guest_directory_path(rootfs_path, relative_path)?;
+    std::fs::create_dir_all(&path).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to create guest directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
+}
+
+/// Read one UTF-8 guest file through the same bounded resolver used for
+/// writes. A missing file is represented by `None`; malformed or unsafe paths
+/// are errors rather than silently falling back to host data.
+pub(crate) fn read_guest_file_to_string(
+    rootfs_path: &Path,
+    relative_path: &str,
+) -> Result<Option<String>> {
+    let path = resolve_guest_file_path(rootfs_path, relative_path)?;
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BoxError::BuildError(format!(
+            "Failed to read guest file {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+/// Write one regular guest file after safely resolving all image-owned parent
+/// and final-component symlinks.
+pub(crate) fn write_guest_file(
+    rootfs_path: &Path,
+    relative_path: &str,
+    content: impl AsRef<[u8]>,
+) -> Result<PathBuf> {
+    let path = resolve_guest_file_path(rootfs_path, relative_path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to create guest file parent {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    std::fs::write(&path, content).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to write guest file {}: {error}",
+            path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).map_err(
+            |error| {
+                BoxError::BuildError(format!(
+                    "Failed to set guest file permissions on {}: {error}",
+                    path.display()
+                ))
+            },
+        )?;
+    }
+    Ok(path)
+}
+
+fn guest_path_components(path: &Path) -> Result<(bool, VecDeque<String>)> {
+    let rendered = path.to_str().ok_or_else(|| {
+        BoxError::BuildError(format!(
+            "Rootfs symlink target is not valid UTF-8: {}",
+            path.display()
+        ))
+    })?;
+    #[cfg(windows)]
+    let rendered = rendered.replace('\\', "/");
+    #[cfg(not(windows))]
+    let rendered = rendered.to_string();
+
+    let absolute = rendered.starts_with('/');
+    let mut components = VecDeque::new();
+    for component in rendered.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => components.push_back(component.to_string()),
+            value => {
+                if value.contains('\0') {
+                    return Err(BoxError::BuildError(
+                        "Rootfs symlink target contains NUL".to_string(),
+                    ));
+                }
+                #[cfg(windows)]
+                if value.contains(':') {
+                    return Err(BoxError::BuildError(format!(
+                        "Rootfs symlink target contains a Windows path prefix: {}",
+                        path.display()
+                    )));
+                }
+                let mut host_components = Path::new(value).components();
+                if !matches!(host_components.next(), Some(Component::Normal(_)))
+                    || host_components.next().is_some()
+                {
+                    return Err(BoxError::BuildError(format!(
+                        "Invalid rootfs symlink component in {}",
+                        path.display()
+                    )));
+                }
+                components.push_back(value.to_string());
+            }
+        }
+    }
+    Ok((absolute, components))
 }
 
 #[cfg(test)]
@@ -652,22 +907,136 @@ mod tests {
 
         create_test_oci_image_with_etc_symlink(&image);
 
-        OciRootfsBuilder::new(&rootfs_path)
+        let result = OciRootfsBuilder::new(&rootfs_path)
             .with_image(&image)
-            .build()
-            .unwrap();
+            .build();
+        let built = match result {
+            Ok(()) => true,
+            #[cfg(windows)]
+            Err(error) => {
+                let message = error.to_string();
+                assert!(message.contains("ERROR_PRIVILEGE_NOT_HELD (1314)"));
+                assert!(message.contains("Developer Mode"));
+                assert!(message.contains("flattening the link would corrupt the image"));
+                false
+            }
+            #[cfg(not(windows))]
+            Err(error) => panic!("failed to build rootfs: {error}"),
+        };
 
-        assert!(rootfs_path
-            .join("etc")
-            .symlink_metadata()
+        if built {
+            assert!(rootfs_path
+                .join("etc")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(rootfs_path.join("usr/etc/passwd").exists());
+            assert!(rootfs_path.join("usr/etc/group").exists());
+            assert!(rootfs_path.join("usr/etc/hosts").exists());
+            assert!(rootfs_path.join("usr/etc/resolv.conf").exists());
+            assert!(rootfs_path.join("usr/etc/nsswitch.conf").exists());
+        }
+    }
+
+    #[test]
+    fn test_rootfs_path_resolves_absolute_and_relative_symlink_hops() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        fs::create_dir_all(rootfs.join("usr")).unwrap();
+        fs::create_dir_all(rootfs.join("shared/etc")).unwrap();
+        if !create_dir_symlink(Path::new("/usr/etc"), &rootfs.join("etc"))
+            || !create_dir_symlink(Path::new("../shared/etc"), &rootfs.join("usr/etc"))
+        {
+            return;
+        }
+
+        let builder = OciRootfsBuilder::new(&rootfs);
+        builder.write_file("etc/hosts", "inside\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(rootfs.join("shared/etc/hosts")).unwrap(),
+            "inside\n"
+        );
+    }
+
+    #[test]
+    fn test_rootfs_path_rejects_intermediate_symlink_escape() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&rootfs).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        if !create_dir_symlink(Path::new("usr/etc"), &rootfs.join("etc"))
+            || !create_dir_symlink(Path::new("../outside"), &rootfs.join("usr"))
+        {
+            return;
+        }
+
+        let error = OciRootfsBuilder::new(&rootfs)
+            .write_file("etc/hosts", "escaped\n")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.join("etc/hosts").exists());
+    }
+
+    #[test]
+    fn test_rootfs_path_rejects_final_file_symlink_escape() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(rootfs.join("etc")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        if !create_file_symlink(Path::new("../../outside/hosts"), &rootfs.join("etc/hosts")) {
+            return;
+        }
+
+        let error = OciRootfsBuilder::new(&rootfs)
+            .write_file("etc/hosts", "escaped\n")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.join("hosts").exists());
+    }
+
+    #[test]
+    fn test_rootfs_path_rejects_symlink_loop() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+        if !create_dir_symlink(Path::new("/etc"), &rootfs.join("etc")) {
+            return;
+        }
+
+        let error = OciRootfsBuilder::new(&rootfs)
+            .write_file("etc/hosts", "loop\n")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Too many rootfs symlink hops"), "{error}");
+    }
+
+    #[test]
+    fn test_replace_guest_file_no_follow_replaces_link_not_target() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        fs::create_dir_all(rootfs.join("shared")).unwrap();
+        fs::write(rootfs.join("shared/target"), b"preserve").unwrap();
+        if !create_file_symlink(Path::new("shared/target"), &rootfs.join("marker")) {
+            return;
+        }
+
+        replace_guest_file_no_follow(&rootfs, "marker", b"replacement").unwrap();
+
+        assert_eq!(fs::read(rootfs.join("shared/target")).unwrap(), b"preserve");
+        assert_eq!(fs::read(rootfs.join("marker")).unwrap(), b"replacement");
+        assert!(!fs::symlink_metadata(rootfs.join("marker"))
             .unwrap()
             .file_type()
             .is_symlink());
-        assert!(rootfs_path.join("usr/etc/passwd").exists());
-        assert!(rootfs_path.join("usr/etc/group").exists());
-        assert!(rootfs_path.join("usr/etc/hosts").exists());
-        assert!(rootfs_path.join("usr/etc/resolv.conf").exists());
-        assert!(rootfs_path.join("usr/etc/nsswitch.conf").exists());
     }
 
     #[test]
@@ -761,6 +1130,54 @@ mod tests {
     }
 
     #[test]
+    fn test_install_guest_init_resolves_absolute_and_relative_sbin_symlinks_inside_rootfs() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        let guest_init = temp_dir.path().join("guest-init");
+        fs::create_dir_all(rootfs.join("usr")).unwrap();
+        fs::create_dir_all(rootfs.join("shared/sbin")).unwrap();
+        fs::write(&guest_init, b"safe-init").unwrap();
+        if !create_dir_symlink(Path::new("/usr/sbin"), &rootfs.join("sbin"))
+            || !create_dir_symlink(Path::new("../shared/sbin"), &rootfs.join("usr/sbin"))
+        {
+            return;
+        }
+
+        OciRootfsBuilder::new(&rootfs)
+            .with_guest_init(&guest_init)
+            .install_guest_init_only()
+            .unwrap();
+
+        assert_eq!(
+            fs::read(rootfs.join("shared/sbin/init")).unwrap(),
+            b"safe-init"
+        );
+    }
+
+    #[test]
+    fn test_install_guest_init_rejects_sbin_symlink_escape() {
+        let temp_dir = TempDir::new().unwrap();
+        let rootfs = temp_dir.path().join("rootfs");
+        let outside = temp_dir.path().join("outside");
+        let guest_init = temp_dir.path().join("guest-init");
+        fs::create_dir_all(&rootfs).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(&guest_init, b"unsafe-init").unwrap();
+        if !create_dir_symlink(Path::new("../outside"), &rootfs.join("sbin")) {
+            return;
+        }
+
+        let error = OciRootfsBuilder::new(&rootfs)
+            .with_guest_init(&guest_init)
+            .install_guest_init_only()
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.join("init").exists());
+    }
+
+    #[test]
     fn test_oci_rootfs_builder_image_config_reads_oci_config() {
         let temp_dir = TempDir::new().unwrap();
         let image = temp_dir.path().join("image");
@@ -786,7 +1203,6 @@ mod tests {
         assert_eq!(config.working_dir, Some("/app".to_string()));
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn test_install_guest_init_prefers_usr_sbin_when_sbin_missing() {
         let temp_dir = TempDir::new().unwrap();
@@ -800,6 +1216,7 @@ mod tests {
             rootfs_path: rootfs_path.clone(),
             image_path: PathBuf::new(),
             guest_init_path: Some(guest_init),
+            resolv_conf: None,
         };
 
         builder.install_guest_init().unwrap();
@@ -821,6 +1238,37 @@ mod tests {
         create_test_oci_image_with_entries(path, &[], Some(("/usr/etc", "etc")));
     }
 
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+        create_windows_symlink(|| std::os::windows::fs::symlink_dir(target, link))
+    }
+
+    #[cfg(unix)]
+    fn create_file_symlink(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink(target: &Path, link: &Path) -> bool {
+        create_windows_symlink(|| std::os::windows::fs::symlink_file(target, link))
+    }
+
+    #[cfg(windows)]
+    fn create_windows_symlink(create: impl FnOnce() -> std::io::Result<()>) -> bool {
+        match create() {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) => panic!("failed to create Windows test symlink: {error}"),
+        }
+    }
+
     fn entry_count(content: &str, name: &str) -> usize {
         content
             .lines()
@@ -830,6 +1278,28 @@ mod tests {
 
     fn create_test_oci_image_with_files(path: &Path, files: &[(&str, &[u8])]) {
         create_test_oci_image_with_entries(path, files, None);
+    }
+
+    fn test_content_digest(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    fn test_digest_hex(digest: &str) -> &str {
+        digest.strip_prefix("sha256:").unwrap()
+    }
+
+    fn write_test_oci_blob(image_path: &Path, bytes: &[u8]) -> String {
+        let digest = test_content_digest(bytes);
+        fs::write(
+            image_path
+                .join("blobs/sha256")
+                .join(test_digest_hex(&digest)),
+            bytes,
+        )
+        .unwrap();
+        digest
     }
 
     fn create_test_oci_image_with_entries(
@@ -844,8 +1314,7 @@ mod tests {
         fs::create_dir_all(path.join("blobs/sha256")).unwrap();
         fs::write(path.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
 
-        let layer_hash = "layer123";
-        let layer_path = path.join("blobs/sha256").join(layer_hash);
+        let layer_path = path.join("fixture-layer.tar.gz");
         {
             let file = fs::File::create(&layer_path).unwrap();
             let encoder = GzEncoder::new(file, Compression::default());
@@ -880,6 +1349,9 @@ mod tests {
             }
             builder.finish().unwrap();
         }
+        let layer_content = fs::read(&layer_path).unwrap();
+        fs::remove_file(layer_path).unwrap();
+        let layer_digest = write_test_oci_blob(path, &layer_content);
 
         let config_content = r#"{
             "architecture": "amd64",
@@ -892,12 +1364,11 @@ mod tests {
             },
             "rootfs": {
                 "type": "layers",
-                "diff_ids": ["sha256:layer123"]
+                "diff_ids": ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]
             },
             "history": []
         }"#;
-        let config_hash = "config456";
-        fs::write(path.join("blobs/sha256").join(config_hash), config_content).unwrap();
+        let config_digest = write_test_oci_blob(path, config_content.as_bytes());
 
         let manifest_content = format!(
             r#"{{
@@ -905,27 +1376,23 @@ mod tests {
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "config": {{
                 "mediaType": "application/vnd.oci.image.config.v1+json",
-                "digest": "sha256:{}",
+                "digest": "{}",
                 "size": {}
             }},
             "layers": [
                 {{
                     "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                    "digest": "sha256:{}",
-                    "size": 100
+                    "digest": "{}",
+                    "size": {}
                 }}
             ]
         }}"#,
-            config_hash,
+            config_digest,
             config_content.len(),
-            layer_hash
+            layer_digest,
+            layer_content.len()
         );
-        let manifest_hash = "manifest789";
-        fs::write(
-            path.join("blobs/sha256").join(manifest_hash),
-            &manifest_content,
-        )
-        .unwrap();
+        let manifest_digest = write_test_oci_blob(path, manifest_content.as_bytes());
 
         let index_content = format!(
             r#"{{
@@ -934,12 +1401,12 @@ mod tests {
             "manifests": [
                 {{
                     "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "digest": "sha256:{}",
+                    "digest": "{}",
                     "size": {}
                 }}
             ]
         }}"#,
-            manifest_hash,
+            manifest_digest,
             manifest_content.len()
         );
         fs::write(path.join("index.json"), index_content).unwrap();

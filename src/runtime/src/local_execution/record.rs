@@ -20,6 +20,7 @@ pub(crate) fn build_managed_record(
     request: CreateExecutionRequest,
     now: DateTime<Utc>,
 ) -> ExecutionManagerResult<BoxRecord> {
+    validate_health_policy(&request.policy)?;
     let metadata =
         ManagedExecutionMetadata::new(operation_id, ExecutionGeneration::INITIAL, request.clone())
             .map_err(|error| ExecutionManagerError::InvalidRequest(error.to_string()))?;
@@ -104,6 +105,37 @@ pub(crate) fn build_managed_record(
     })
 }
 
+pub(super) fn validate_record_health(record: &BoxRecord) -> ExecutionManagerResult<()> {
+    validate_effective_health_check(record.health_check.is_some(), record.healthcheck_disabled)?;
+    if let Some(metadata) = record.managed_execution.as_ref() {
+        validate_health_policy(&metadata.request.policy)?;
+    }
+    Ok(())
+}
+
+fn validate_health_policy(
+    policy: &a3s_box_core::ExecutionRecordPolicy,
+) -> ExecutionManagerResult<()> {
+    validate_effective_health_check(policy.health_check.is_some(), policy.healthcheck_disabled)
+}
+
+fn validate_effective_health_check(
+    has_health_check: bool,
+    healthcheck_disabled: bool,
+) -> ExecutionManagerResult<()> {
+    #[cfg(windows)]
+    if has_health_check && !healthcheck_disabled {
+        return Err(ExecutionManagerError::InvalidRequest(
+            "container health checks are not supported on Windows".to_string(),
+        ));
+    }
+
+    #[cfg(not(windows))]
+    let _ = (has_health_check, healthcheck_disabled);
+
+    Ok(())
+}
+
 pub(crate) fn apply_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle) {
     record.pid = handle.pid;
     record.pid_start_time = handle.pid_start_time;
@@ -129,7 +161,7 @@ pub(crate) fn apply_restart_handle(record: &mut BoxRecord, handle: &LocalExecuti
 }
 
 fn initialize_health(record: &mut BoxRecord) {
-    record.health_status = if record.health_check.is_some() {
+    record.health_status = if record.health_check.is_some() && !record.healthcheck_disabled {
         "starting".to_string()
     } else {
         "none".to_string()

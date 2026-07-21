@@ -39,6 +39,50 @@ fn registry_auth_for_image(home_dir: &Path, reference: &str) -> Result<crate::oc
     ))
 }
 
+pub(super) fn persistent_rootfs_generation_exists(box_dir: &Path) -> Result<bool> {
+    for directory in [box_dir.join("rootfs"), box_dir.join("upper")] {
+        match std::fs::read_dir(&directory) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return Ok(true);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BoxError::BuildError(format!(
+                    "Failed to inspect persistent rootfs state {}: {error}",
+                    directory.display()
+                )));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if box_dir.join("rootfs-apfs-v2.sparseimage").is_file() {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn validate_image_health_support(
+    health_check: Option<&crate::oci::OciHealthCheck>,
+    healthcheck_disabled: bool,
+) -> Result<()> {
+    #[cfg(windows)]
+    if !healthcheck_disabled && health_check.is_some_and(crate::oci::OciHealthCheck::is_enabled) {
+        return Err(BoxError::ConfigError(
+            "container health checks are not supported on Windows; disable the image health check explicitly to start this box"
+                .to_string(),
+        ));
+    }
+
+    #[cfg(not(windows))]
+    let _ = (health_check, healthcheck_disabled);
+
+    Ok(())
+}
+
 impl VmManager {
     pub(crate) async fn prepare_layout(&self) -> Result<BoxLayout> {
         // Create box-specific directories
@@ -94,6 +138,12 @@ impl VmManager {
                     &lower,
                     &self.config.image,
                 )?);
+                validate_image_health_support(
+                    oci_config
+                        .as_ref()
+                        .and_then(|config| config.health_check.as_ref()),
+                    self.healthcheck_disabled,
+                )?;
                 tracing::info!(
                     lower = %lower.display(),
                     "Restoring snapshot via copy-on-write overlay lower"
@@ -123,6 +173,7 @@ impl VmManager {
                     workspace_path,
                     console_output: Some(logs_dir.join("console.log")),
                     oci_config,
+                    prefer_image_rootfs_metadata: false,
                     tee_instance_config,
                 });
             }
@@ -151,6 +202,12 @@ impl VmManager {
         if prebuilt_is_populated {
             let oci_config = crate::resolved_image::load_resolved_image_config(&box_dir)?
                 .map(crate::oci::OciImageConfig::from);
+            validate_image_health_support(
+                oci_config
+                    .as_ref()
+                    .and_then(|config| config.health_check.as_ref()),
+                self.healthcheck_disabled,
+            )?;
             tracing::info!(
                 rootfs = %prebuilt_rootfs.display(),
                 "Booting from pre-populated rootfs (snapshot restore)"
@@ -175,6 +232,7 @@ impl VmManager {
                 workspace_path,
                 console_output: Some(logs_dir.join("console.log")),
                 oci_config,
+                prefer_image_rootfs_metadata: false,
                 tee_instance_config,
             });
         }
@@ -182,6 +240,8 @@ impl VmManager {
         // Pull OCI image from registry and extract at rootfs root.
         // Extracting at root preserves absolute symlinks and dynamic linker paths.
         let reference = &self.config.image;
+        let has_persistent_rootfs_generation =
+            self.config.persistent && persistent_rootfs_generation_exists(&box_dir)?;
 
         // Snapshot-fork fast path: a restored guest reuses the already-cached rootfs.
         // Skip the registry pull/resolution — a network round-trip that costs ~100ms
@@ -207,6 +267,7 @@ impl VmManager {
                     workspace_path,
                     console_output: Some(logs_dir.join("console.log")),
                     oci_config: None,
+                    prefer_image_rootfs_metadata: !has_persistent_rootfs_generation,
                     tee_instance_config,
                 });
             }
@@ -226,12 +287,16 @@ impl VmManager {
         tracing::info!(reference = %reference, "Pulling OCI image from registry");
 
         let oci_image = puller.pull(reference).await?;
+        validate_image_health_support(
+            oci_image.config().health_check.as_ref(),
+            self.healthcheck_disabled,
+        )?;
 
         let image_path = oci_image.root_dir().to_path_buf();
 
         // Try rootfs cache first — on hit, use the rootfs provider (overlay or copy)
         let cache_key = RootfsCache::compute_key(reference, &[], &[], &[]);
-        let (rootfs_path, oci_config) =
+        let (rootfs_path, oci_config, prefer_image_rootfs_metadata) =
             if let Some(cached_path) = self.try_rootfs_cache_path(&cache_key)? {
                 tracing::info!(
                     cache_key = %&cache_key[..12],
@@ -258,7 +323,11 @@ impl VmManager {
                 }
 
                 let builder = OciRootfsBuilder::new(&rootfs_path).with_image(&image_path);
-                (rootfs_path, Some(builder.image_config()?))
+                (
+                    rootfs_path,
+                    Some(builder.image_config()?),
+                    !has_persistent_rootfs_generation,
+                )
             } else {
                 tracing::info!(
                     image = %image_path.display(),
@@ -290,7 +359,7 @@ impl VmManager {
                         "Reusing populated persistent rootfs"
                     );
                     let config = builder.image_config()?;
-                    (rootfs_path, Some(config))
+                    (rootfs_path, Some(config), false)
                 } else {
                     // Install guest init if available (runs as PID 1, mounts virtiofs shares,
                     // then execs the container entrypoint)
@@ -312,7 +381,7 @@ impl VmManager {
                     // Store in cache for next time
                     self.store_rootfs_cache(&cache_key, &rootfs_path, reference);
 
-                    (rootfs_path, Some(config))
+                    (rootfs_path, Some(config), true)
                 }
             };
 
@@ -332,6 +401,7 @@ impl VmManager {
             workspace_path,
             console_output: Some(logs_dir.join("console.log")),
             oci_config,
+            prefer_image_rootfs_metadata,
             tee_instance_config,
         })
     }
@@ -921,6 +991,8 @@ mod tests {
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
             image_config: None,
+            healthcheck_disabled: false,
+            preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
             tee: None,
             rootfs_provider: crate::rootfs::default_provider(),
@@ -933,6 +1005,38 @@ mod tests {
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
         }
+    }
+
+    fn image_health_check(test: &[&str]) -> crate::oci::OciHealthCheck {
+        crate::oci::OciHealthCheck {
+            test: test.iter().map(|part| (*part).to_string()).collect(),
+            interval: None,
+            timeout: None,
+            retries: None,
+            start_period: None,
+        }
+    }
+
+    #[test]
+    fn image_health_support_is_platform_aware_and_honors_disable() {
+        let enabled = image_health_check(&["CMD", "/bin/true"]);
+        let result = validate_image_health_support(Some(&enabled), false);
+
+        if cfg!(windows) {
+            let error = result.expect_err("Windows must reject effective image health checks");
+            assert!(error
+                .to_string()
+                .contains("health checks are not supported on Windows"));
+        } else {
+            result.expect("Unix guests support image health checks");
+        }
+
+        validate_image_health_support(Some(&enabled), true)
+            .expect("an explicitly disabled image health check must not block boot");
+        validate_image_health_support(Some(&image_health_check(&["NONE"])), false)
+            .expect("Docker NONE is not an effective health check");
+        validate_image_health_support(Some(&image_health_check(&["CMD"])), false)
+            .expect("an empty CMD is not an effective health check");
     }
 
     #[test]
@@ -978,6 +1082,18 @@ mod tests {
             snapshot_lower_dir(box_dir),
             Some(PathBuf::from("/root/.a3s/snapshots/snap-1/rootfs"))
         );
+    }
+
+    #[test]
+    fn persistent_rootfs_generation_detection_ignores_empty_directories() {
+        let temporary = TempDir::new().unwrap();
+        let box_dir = temporary.path();
+        std::fs::create_dir(box_dir.join("rootfs")).unwrap();
+        std::fs::create_dir(box_dir.join("upper")).unwrap();
+        assert!(!persistent_rootfs_generation_exists(box_dir).unwrap());
+
+        std::fs::write(box_dir.join("upper/.a3s_rootfs_metadata_v1.json"), b"{}").unwrap();
+        assert!(persistent_rootfs_generation_exists(box_dir).unwrap());
     }
 
     #[tokio::test]

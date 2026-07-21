@@ -44,14 +44,23 @@ async fn stop_one(
     query: &str,
     timeout: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let record = resolve::resolve(state, query)?;
+    let box_id = resolve::resolve(state, query)?.id.clone();
+    let _lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+    // Reload only after acquiring the shared per-box lock. Otherwise a start or
+    // restart can publish a new PID while this command is waiting on the old
+    // process, and the final stopped write would erase the new execution.
+    let current_state = StateFile::load_default()?;
+    let record = current_state
+        .find_by_id(&box_id)
+        .ok_or_else(|| format!("Box {query} was removed while waiting to stop"))?
+        .clone();
+    drop(current_state);
 
-    status::require_active(record, "stop")
+    status::require_active(&record, "stop")
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
-    let pid = lifecycle::require_live_pid(record, "stop")
+    let pid = lifecycle::require_live_pid(&record, "stop")
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
 
-    let box_id = record.id.clone();
     let name = record.name.clone();
     let auto_remove = record.auto_remove;
     let record_snapshot = record.clone();
@@ -68,11 +77,11 @@ async fn stop_one(
     let effective_timeout = timeout.or(record.stop_timeout).unwrap_or(10);
 
     // Exec socket used to deliver the stop signal inside the guest.
-    let exec_socket = crate::socket_paths::exec(record);
+    let exec_socket = crate::socket_paths::exec(&record);
 
     // Deliver the stop signal to the container (honouring its STOPSIGNAL), then
     // wait for the VM to exit; SIGKILL the shim after the timeout.
-    lifecycle::resume_paused_for_termination(record, pid, "stop")
+    lifecycle::resume_paused_for_termination(&record, pid, "stop")
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     let stop_outcome = Some(
         process::graceful_stop_via_guest(pid, &exec_socket, stop_signal, effective_timeout).await,
@@ -91,17 +100,28 @@ async fn stop_one(
     // state lock) so it cannot clobber a concurrent run/monitor/compose write
     // with our pre-await snapshot.
     let new_exit_code = stopped_exit_code(previous_exit_code, stop_outcome, stop_signal);
-    StateFile::modify(|s| {
-        if let Some(record) = s.find_by_id_mut(&box_id) {
-            record.status = "stopped".to_string();
-            record.pid = None;
-            record.stopped_by_user = true;
-            record.exit_code = new_exit_code;
-            record.health_status = "none".to_string();
-            record.health_retries = 0;
-        }
-        Ok::<(), std::io::Error>(())
+    let expected_pid_start_time = record.pid_start_time;
+    let persisted = StateFile::modify(|s| {
+        let updated = match s.find_by_id_mut(&box_id) {
+            Some(record) if lifecycle::matches_execution(record, pid, expected_pid_start_time) => {
+                record.status = "stopped".to_string();
+                record.pid = None;
+                record.stopped_by_user = true;
+                record.exit_code = new_exit_code;
+                record.health_status = "none".to_string();
+                record.health_retries = 0;
+                true
+            }
+            _ => false,
+        };
+        Ok::<bool, std::io::Error>(updated)
     })?;
+    if !persisted {
+        return Err(format!(
+            "Box {name} changed execution while it was stopping; did not overwrite the replacement state"
+        )
+        .into());
+    }
     crate::audit::record(
         a3s_box_core::audit::AuditAction::BoxStop,
         a3s_box_core::audit::AuditOutcome::Success,

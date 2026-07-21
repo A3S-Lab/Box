@@ -6,8 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,10 +19,34 @@ jobs:
     env:
       A3S_DEPS_STUB: "1"
     steps:
-      - uses: actions/checkout@v5
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
-      - uses: dtolnay/rust-toolchain@stable
+      # dtolnay/rust-toolchain stable (2026-07-16)
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - name: Verify release version alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          workspace_version="$(
+            cargo metadata --locked --no-deps --format-version 1 \
+              --manifest-path src/Cargo.toml |
+              jq -r '.packages[] | select(.name == "a3s-box-cli") | .version'
+          )"
+          installer_version="$(
+            sed -n 's/^VERSION="v\([^"]*\)"$/\1/p' \
+              deploy/scripts/install-runtimeclass.sh
+          )"
+          if [ "$tag_version" != "$workspace_version" ]; then
+            echo "release tag v$tag_version does not match workspace $workspace_version" >&2
+            exit 1
+          fi
+          if [ "$tag_version" != "$installer_version" ]; then
+            echo "release tag v$tag_version does not match installer default v$installer_version" >&2
+            exit 1
+          fi
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Create stub libkrun for linking
@@ -32,10 +55,18 @@ jobs:
           gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
           sudo cp /tmp/libkrun.so /usr/lib/
           sudo ldconfig
-      - uses: Swatinem/rust-cache@v2
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          workspaces: src
-      - run: cd src && cargo test --workspace --lib
+          workspaces: |
+            src -> target
+            containerd-shim -> target
+      - run: cd src && cargo test --locked --workspace --lib
+      - name: Test standalone containerd RuntimeClass shim
+        working-directory: containerd-shim
+        run: cargo test --locked --all-targets
+      - name: Test RuntimeClass installer
+        run: bash deploy/scripts/test-install-runtimeclass.sh
 
   # ── Build native SDK release assets ───────────────────────────
   sdk:
@@ -43,11 +74,14 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      # actions/setup-python v6.3.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v7
+      # actions/setup-node v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '20'
           cache: npm
@@ -67,7 +101,8 @@ jobs:
           npm run build
           npm test
           npm pack --pack-destination "$GITHUB_WORKSPACE/sdk-artifacts"
-      - uses: actions/upload-artifact@v6
+      # actions/upload-artifact v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: sdk-packages
           path: sdk-artifacts/*
@@ -81,29 +116,37 @@ jobs:
         include:
           - target: linux-x86_64
             os: ubuntu-latest
+            host_target: x86_64-unknown-linux-gnu
             rust_target: x86_64-unknown-linux-musl
             guest_target: x86_64-unknown-linux-musl
             build_cri: true
+            build_containerd_shim: true
           - target: linux-arm64
             os: ubuntu-24.04-arm
+            host_target: aarch64-unknown-linux-gnu
             rust_target: aarch64-unknown-linux-musl
             guest_target: aarch64-unknown-linux-musl
             build_cri: true
+            build_containerd_shim: true
           - target: macos-arm64
             os: macos-14
+            host_target: aarch64-apple-darwin
             rust_target: ""
             guest_target: aarch64-unknown-linux-musl
             build_cri: false
+            build_containerd_shim: false
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
 
       - name: Init submodules
         run: |
           git -c http.extraheader= submodule update --init --recursive
 
-      - uses: dtolnay/rust-toolchain@stable
+      # dtolnay/rust-toolchain stable (2026-07-16)
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           targets: ${{ matrix.guest_target }}
 
@@ -120,56 +163,131 @@ jobs:
         run: |
           brew install lld llvm protobuf
           pip3 install --break-system-packages ziglang
-          cargo install cargo-zigbuild
+          cargo install cargo-zigbuild --version 0.23.0 --locked
 
-      - uses: Swatinem/rust-cache@v2
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          workspaces: src
+          workspaces: |
+            src -> target
+            containerd-shim -> target
           key: release-${{ matrix.target }}
 
       - name: Build host binaries
         run: |
+          set -euo pipefail
           cd src
-          cargo build --release -p a3s-box-cli -p a3s-box-shim
-          if [ "${{ matrix.build_cri }}" = "true" ]; then
-            cargo build --release -p a3s-box-cri
-            cargo build --release -p a3s-box-compat --bin a3s-box-e2b
+          # Linux release executables intentionally use the native GNU target:
+          # they dynamically load the packaged libkrun. The standalone
+          # containerd shim below is the portable static-musl node asset.
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            # Force the release to build the checked-in libkrun source. Remove
+            # any restored build-script result first so Cargo cannot reuse one
+            # that was linked against a runner system/cached libkrun.
+            export A3S_BUILD_LIBKRUN=1
+            cargo clean -p a3s-libkrun-sys \
+              --target ${{ matrix.host_target }}
           fi
+          cargo build --locked --release -p a3s-box-cli -p a3s-box-shim \
+            --target ${{ matrix.host_target }}
+          if [ "${{ matrix.build_cri }}" = "true" ]; then
+            cargo build --locked --release -p a3s-box-cri \
+              --target ${{ matrix.host_target }}
+            cargo build --locked --release -p a3s-box-compat --bin a3s-box-e2b \
+              --target ${{ matrix.host_target }}
+          fi
+
+      - name: Build containerd RuntimeClass shim
+        if: matrix.build_containerd_shim
+        working-directory: containerd-shim
+        run: |
+          cargo build --locked --release \
+            --target ${{ matrix.rust_target }} \
+            --bin containerd-shim-a3s-box-v2
 
       - name: Build guest binaries
         run: |
           cd src
           if [ "${{ runner.os }}" = "macOS" ]; then
-            cargo zigbuild --release \
+            cargo zigbuild --locked --release \
               -p a3s-box-guest-init \
               --target ${{ matrix.guest_target }}
           else
-            cargo build --release \
+            cargo build --locked --release \
               -p a3s-box-guest-init \
               --target ${{ matrix.guest_target }}
           fi
 
       - name: Package release
         run: |
+          set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
           DIR="a3s-box-${TAG}-${{ matrix.target }}"
+          HOST_RELEASE_DIR="src/target/${{ matrix.host_target }}/release"
           mkdir -p "$DIR/lib"
 
-          cp src/target/release/a3s-box "$DIR/"
-          cp src/target/release/a3s-box-shim "$DIR/"
+          cp "$HOST_RELEASE_DIR/a3s-box" "$DIR/"
+          cp "$HOST_RELEASE_DIR/a3s-box-shim" "$DIR/"
 
           if [ "${{ matrix.build_cri }}" = "true" ]; then
-            cp src/target/release/a3s-box-cri "$DIR/"
-            cp src/target/release/a3s-box-e2b "$DIR/"
+            cp "$HOST_RELEASE_DIR/a3s-box-cri" "$DIR/"
+            cp "$HOST_RELEASE_DIR/a3s-box-e2b" "$DIR/"
+          fi
+
+          if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
+            SHIM_ASSET="containerd-shim-a3s-box-v2-${{ matrix.target }}"
+            SHIM_SOURCE="containerd-shim/target/${{ matrix.rust_target }}/release/containerd-shim-a3s-box-v2"
+            install -m0755 \
+              "$SHIM_SOURCE" \
+              "$DIR/containerd-shim-a3s-box-v2"
+            install -m0755 \
+              "$SHIM_SOURCE" \
+              "$SHIM_ASSET"
           fi
 
           cp "src/target/${{ matrix.guest_target }}/release/a3s-box-guest-init" "$DIR/"
 
-          # Find and copy libkrun/libkrunfw shared libraries from build output
-          BUILD_DIR=$(find src/target/release/build -name "out" -path "*libkrun*" -type d | head -1)
-          if [ -n "$BUILD_DIR" ]; then
-            find "$BUILD_DIR" -name "libkrun*" \( -name "*.dylib" -o -name "*.so*" \) -exec cp {} "$DIR/lib/" \;
-            find "$BUILD_DIR" -name "libkrunfw*" \( -name "*.dylib" -o -name "*.so*" \) -exec cp {} "$DIR/lib/" \;
+          # Copy the runtime libraries produced by this host-target build. On
+          # Linux the package is invalid unless both halves of the vendored
+          # libkrun + libkrunfw runtime are present.
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            mapfile -t LIBKRUN_BUILD_DIRS < <(
+              find "$HOST_RELEASE_DIR/build" \
+                -mindepth 2 -maxdepth 2 -type d -name out \
+                -path '*/a3s-libkrun-sys-*/out' -print
+            )
+            if [ "${#LIBKRUN_BUILD_DIRS[@]}" -ne 1 ]; then
+              echo "expected exactly one current a3s-libkrun-sys build output, found ${#LIBKRUN_BUILD_DIRS[@]}" >&2
+              exit 1
+            fi
+            BUILD_DIR="${LIBKRUN_BUILD_DIRS[0]}"
+            shopt -s nullglob
+            LIBKRUN_SOURCES=("$BUILD_DIR/libkrun/lib64"/libkrun.so*)
+            LIBKRUNFW_SOURCES=("$BUILD_DIR/libkrunfw/lib64"/libkrunfw.so*)
+            if [ "${#LIBKRUN_SOURCES[@]}" -eq 0 ]; then
+              echo "vendored build did not produce libkrun.so in $BUILD_DIR" >&2
+              exit 1
+            fi
+            if [ "${#LIBKRUNFW_SOURCES[@]}" -eq 0 ]; then
+              echo "vendored build did not produce libkrunfw.so in $BUILD_DIR" >&2
+              exit 1
+            fi
+            cp -a -- "${LIBKRUN_SOURCES[@]}" "$DIR/lib/"
+            cp -a -- "${LIBKRUNFW_SOURCES[@]}" "$DIR/lib/"
+
+            PACKAGED_LIBKRUN=("$DIR/lib"/libkrun.so*)
+            PACKAGED_LIBKRUNFW=("$DIR/lib"/libkrunfw.so*)
+            if [ "${#PACKAGED_LIBKRUN[@]}" -eq 0 ] ||
+               [ "${#PACKAGED_LIBKRUNFW[@]}" -eq 0 ]; then
+              echo "failed to copy the complete libkrun + libkrunfw runtime" >&2
+              exit 1
+            fi
+          else
+            BUILD_DIR=$(find "$HOST_RELEASE_DIR/build" -name "out" -path "*libkrun*" -type d -print -quit)
+            if [ -n "$BUILD_DIR" ]; then
+              find "$BUILD_DIR" -name "libkrun*" \( -name "*.dylib" -o -name "*.so*" \) -exec cp {} "$DIR/lib/" \;
+              find "$BUILD_DIR" -name "libkrunfw*" \( -name "*.dylib" -o -name "*.so*" \) -exec cp {} "$DIR/lib/" \;
+            fi
           fi
 
           # Fix rpath for macOS binaries to look in ../lib relative to bin
@@ -182,12 +300,120 @@ jobs:
 
           # Fix rpath for Linux binaries
           if [ "${{ runner.os }}" = "Linux" ]; then
-            for bin in "$DIR/a3s-box" "$DIR/a3s-box-shim"; do
-              patchelf --set-rpath '$ORIGIN/lib' "$bin" 2>/dev/null || true
-            done
+            # The main package has an explicit GNU/glibc contract because it
+            # ships a dynamically loaded libkrun beside the host binaries.
+            HOST_BINARIES=("$DIR/a3s-box" "$DIR/a3s-box-shim")
             if [ "${{ matrix.build_cri }}" = "true" ]; then
-              patchelf --set-rpath '$ORIGIN/lib' "$DIR/a3s-box-cri" 2>/dev/null || true
-              patchelf --set-rpath '$ORIGIN/lib' "$DIR/a3s-box-e2b" 2>/dev/null || true
+              HOST_BINARIES+=("$DIR/a3s-box-cri" "$DIR/a3s-box-e2b")
+            fi
+
+            assert_runpath() {
+              local object="$1"
+              local expected="$2"
+              local actual dynamic_line
+              actual="$(patchelf --print-rpath "$object")"
+              if [ "$actual" != "$expected" ]; then
+                echo "$object has RUNPATH '$actual', expected '$expected'" >&2
+                exit 1
+              fi
+              dynamic_line="$(readelf -d "$object" | awk '$2 == "(RUNPATH)" { print }')"
+              if [[ "$dynamic_line" != *"[$expected]"* ]]; then
+                echo "$object does not contain DT_RUNPATH [$expected]" >&2
+                exit 1
+              fi
+            }
+
+            for bin in "${HOST_BINARIES[@]}"; do
+              readelf -l "$bin" |
+                grep 'Requesting program interpreter' >/dev/null
+              patchelf --set-rpath '$ORIGIN/lib' "$bin"
+              assert_runpath "$bin" '$ORIGIN/lib'
+            done
+
+            mapfile -d '' PACKAGED_LIBKRUN_ELFS < <(
+              find "$DIR/lib" -maxdepth 1 -type f \
+                -name 'libkrun.so*' -print0
+            )
+            mapfile -d '' PACKAGED_LIBKRUNFW_ELFS < <(
+              find "$DIR/lib" -maxdepth 1 -type f \
+                -name 'libkrunfw.so*' -print0
+            )
+            if [ "${#PACKAGED_LIBKRUN_ELFS[@]}" -eq 0 ] ||
+               [ "${#PACKAGED_LIBKRUNFW_ELFS[@]}" -eq 0 ]; then
+              echo "package does not contain regular libkrun and libkrunfw ELF files" >&2
+              exit 1
+            fi
+            PACKAGED_RUNTIME_LIBS=(
+              "${PACKAGED_LIBKRUN_ELFS[@]}"
+              "${PACKAGED_LIBKRUNFW_ELFS[@]}"
+            )
+            PACKAGE_LIB_DIR="$(realpath "$DIR/lib")"
+            for library in "${PACKAGED_RUNTIME_LIBS[@]}"; do
+              patchelf --set-rpath '$ORIGIN' "$library"
+              assert_runpath "$library" '$ORIGIN'
+              SONAME="$(patchelf --print-soname "$library")"
+              if [ -z "$SONAME" ] || [ ! -e "$DIR/lib/$SONAME" ]; then
+                echo "$library has missing or unpackaged SONAME '$SONAME'" >&2
+                exit 1
+              fi
+            done
+
+            # Every packaged-library edge in the ELF dependency graph must
+            # name an object shipped in DIR/lib. ldd must resolve those edges
+            # back into that directory, never to an ambient runner library.
+            SAW_LIBKRUN_NEEDED=false
+            SAW_LIBKRUNFW_NEEDED=false
+            ELF_OBJECTS=("${HOST_BINARIES[@]}" "${PACKAGED_RUNTIME_LIBS[@]}")
+            for object in "${ELF_OBJECTS[@]}"; do
+              LDD_OUTPUT="$(LD_LIBRARY_PATH= ldd "$object")"
+              if grep 'not found' <<< "$LDD_OUTPUT" >/dev/null; then
+                echo "unresolved DT_NEEDED entry for $object:" >&2
+                echo "$LDD_OUTPUT" >&2
+                exit 1
+              fi
+              NEEDED_OUTPUT="$(patchelf --print-needed "$object")"
+              while IFS= read -r needed; do
+                case "$needed" in
+                  libkrun.so*) SAW_LIBKRUN_NEEDED=true ;;
+                  libkrunfw.so*) SAW_LIBKRUNFW_NEEDED=true ;;
+                  *) continue ;;
+                esac
+                if [ ! -e "$DIR/lib/$needed" ]; then
+                  echo "$object needs $needed, but it is absent from $DIR/lib" >&2
+                  exit 1
+                fi
+                RESOLVED="$(
+                  awk -v needed="$needed" \
+                    '$1 == needed && $2 == "=>" { print $3; exit }' \
+                    <<< "$LDD_OUTPUT"
+                )"
+                if [ -z "$RESOLVED" ]; then
+                  echo "ldd did not resolve $needed for $object" >&2
+                  exit 1
+                fi
+                case "$(realpath "$RESOLVED")" in
+                  "$PACKAGE_LIB_DIR"/*) ;;
+                  *)
+                    echo "$object resolved $needed outside the package: $RESOLVED" >&2
+                    exit 1
+                    ;;
+                esac
+              done <<< "$NEEDED_OUTPUT"
+            done
+            if [ "$SAW_LIBKRUN_NEEDED" != true ] ||
+               [ "$SAW_LIBKRUNFW_NEEDED" != true ]; then
+              echo "host ELF closure does not contain both libkrun and libkrunfw DT_NEEDED edges" >&2
+              exit 1
+            fi
+            if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
+              SHIM_PROGRAM_HEADERS="$(
+                readelf -l "$DIR/containerd-shim-a3s-box-v2"
+              )"
+              if grep 'Requesting program interpreter' \
+                   <<< "$SHIM_PROGRAM_HEADERS" >/dev/null; then
+                echo "RuntimeClass shim is not a static musl binary" >&2
+                exit 1
+              fi
             fi
           fi
 
@@ -198,36 +424,233 @@ jobs:
           echo "Package contents:"
           ls -lhR "$DIR/"
 
-          tar czf "${DIR}.tar.gz" "$DIR"
-          echo "ASSET=${DIR}.tar.gz" >> "$GITHUB_ENV"
+          for binary in a3s-box a3s-box-shim a3s-box-guest-init; do
+            test -s "$DIR/$binary" && test -x "$DIR/$binary"
+          done
+          if [ "${{ matrix.build_cri }}" = "true" ]; then
+            for binary in a3s-box-cri a3s-box-e2b; do
+              test -s "$DIR/$binary" && test -x "$DIR/$binary"
+            done
+          fi
+          if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
+            test -s "$DIR/containerd-shim-a3s-box-v2"
+            test -x "$DIR/containerd-shim-a3s-box-v2"
+            test -s "$SHIM_ASSET"
+            test -x "$SHIM_ASSET"
+          fi
 
-      - uses: actions/upload-artifact@v6
+          tar czf "${DIR}.tar.gz" "$DIR"
+          tar tzf "${DIR}.tar.gz" > "${DIR}.contents"
+          grep -Fx "${DIR}/a3s-box" "${DIR}.contents"
+          grep -Fx "${DIR}/a3s-box-guest-init" "${DIR}.contents"
+          if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
+            grep -Fx "${DIR}/containerd-shim-a3s-box-v2" "${DIR}.contents"
+            sha256sum "${DIR}.tar.gz" "$SHIM_ASSET" > "${DIR}.sha256"
+            sha256sum --check "${DIR}.sha256"
+          fi
+
+          mkdir release-assets
+          mv "${DIR}.tar.gz" release-assets/
+          if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
+            mv "$SHIM_ASSET" "${DIR}.sha256" release-assets/
+          fi
+
+      # actions/upload-artifact v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: ${{ matrix.target }}
-          path: ${{ env.ASSET }}
+          path: release-assets/*
+          if-no-files-found: error
 
   # ── Create GitHub Release ──────────────────────────────────────
+  # ── Windows native WHPX build ──────────────────────────────────
+  build-windows:
+    name: Build Windows (WHPX Backend)
+    needs: [test, build]
+    runs-on: windows-latest
+    steps:
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
+      # dtolnay/rust-toolchain stable (2026-07-16)
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Verify bundled libkrun source archive
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-source.ps1 -Check
+      - name: Verify bundled Windows libkrun archive
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-windows.ps1 -Check
+      - name: Setup Zig
+        # mlugg/setup-zig v2.2.1
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+      - name: Build libkrun Linux init payload
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File src/deps/libkrun-sys/vendor/libkrun/scripts/build-windows-init.ps1
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          workspaces: src
+          key: release-windows
+
+      - name: Build Windows native binaries
+        run: |
+          $separator = [char]0x1f
+          $env:CARGO_ENCODED_RUSTFLAGS = [string]::Join($separator, @(
+            "--remap-path-prefix=$env:GITHUB_WORKSPACE=.",
+            "--remap-path-prefix=$env:USERPROFILE=."
+          ))
+          cd src
+          cargo build --locked --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
+
+      - name: Download Linux guest init artifact
+        # actions/download-artifact v7.0.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: linux-x86_64
+          path: linux-x86_64
+
+      - name: Package Windows release
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          DIR="a3s-box-${TAG}-windows-x86_64"
+          mkdir -p "$DIR"
+
+          cp src/target/x86_64-pc-windows-msvc/release/a3s-box.exe "$DIR/"
+          cp src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe "$DIR/"
+
+          tar -xzf "linux-x86_64/a3s-box-${TAG}-linux-x86_64.tar.gz" -C linux-x86_64
+          cp "linux-x86_64/a3s-box-${TAG}-linux-x86_64/a3s-box-guest-init" "$DIR/"
+
+          if [ -f "src/target/x86_64-pc-windows-msvc/release/krun.dll" ]; then
+            cp src/target/x86_64-pc-windows-msvc/release/krun.dll "$DIR/"
+          elif [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll" ]; then
+            cp src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/krun.dll "$DIR/"
+          else
+            echo "krun.dll is required for the native WHPX package" >&2
+            exit 1
+          fi
+
+          if [ -f "src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll" ]; then
+            cp src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll "$DIR/"
+          elif [ -f "src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/libkrunfw.dll" ]; then
+            cp src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/libkrunfw.dll "$DIR/"
+          else
+            echo "libkrunfw.dll is required for the native WHPX package" >&2
+            exit 1
+          fi
+
+          # Copy README and LICENSE
+          cp README.md "$DIR/" 2>/dev/null || true
+          cp LICENSE "$DIR/" 2>/dev/null || true
+          cp src/deps/libkrun-sys/THIRD_PARTY_NOTICES.md "$DIR/"
+          cp src/deps/libkrun-sys/SOURCE-PROVENANCE.md "$DIR/"
+          cp -R src/deps/libkrun-sys/licenses "$DIR/licenses"
+
+          # List package contents
+          echo "Package contents:"
+          ls -lhR "$DIR/"
+
+          # Create zip archive (Windows-friendly)
+          powershell Compress-Archive -Path "$DIR" -DestinationPath "${DIR}.zip"
+          echo "ASSET=${DIR}.zip" >> "$GITHUB_ENV"
+
+      # actions/upload-artifact v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: windows-x86_64
+          path: ${{ env.ASSET }}
+
   release:
     name: GitHub Release
-    needs: [build, sdk]
+    needs: [build, sdk, build-windows]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v7
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      # actions/download-artifact v7.0.0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           path: artifacts
 
       - name: List artifacts
         run: find artifacts -type f
 
+      - name: Verify Linux package and RuntimeClass shim checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' checksum_files < <(
+            find artifacts -type f -name 'a3s-box-*-linux-*.sha256' -print0
+          )
+          if [ "${#checksum_files[@]}" -ne 2 ]; then
+            echo "expected two Linux checksum files, found ${#checksum_files[@]}" >&2
+            exit 1
+          fi
+          for checksum_file in "${checksum_files[@]}"; do
+            checksum_dir="$(dirname "$checksum_file")"
+            checksum_name="$(basename "$checksum_file")"
+            (cd "$checksum_dir" && sha256sum --check "$checksum_name")
+          done
+
+      - name: Prepare Windows libkrun corresponding source assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            --output artifacts/libkrunfw-x86_64-v5.5.0.tgz \
+            https://github.com/libkrun/libkrunfw/releases/download/v5.5.0/libkrunfw-x86_64.tgz
+          curl --fail --location --retry 5 \
+            --output artifacts/libkrunfw-5.5.0-source.tar.gz \
+            https://github.com/libkrun/libkrunfw/archive/refs/tags/v5.5.0.tar.gz
+          curl --fail --location --retry 5 \
+            --output artifacts/linux-6.12.91.tar.xz \
+            https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.91.tar.xz
+
+          cp src/deps/libkrun-sys/vendor/libkrun-source.tar \
+            artifacts/a3s-libkrun-source.tar
+          cp src/deps/libkrun-sys/SOURCE-PROVENANCE.md artifacts/
+          cp src/deps/libkrun-sys/THIRD_PARTY_NOTICES.md artifacts/
+
+          cd artifacts
+          cat > CORRESPONDING-SOURCE-SHA256SUMS.txt <<'EOF'
+          c169206b01c89fbe134f1728bf4f988702bc7f73b4cf73e6fdece447d6fceca1 *libkrunfw-x86_64-v5.5.0.tgz
+          b0cbf1450269c80aea1dccbf440011deb2762a098b338c234079a6ef06456ead *libkrunfw-5.5.0-source.tar.gz
+          0ff2ab9e169f9f1948557471fbb450d3018f8c5b77caf288e1a3982582597969 *linux-6.12.91.tar.xz
+          EOF
+          sha256sum --check CORRESPONDING-SOURCE-SHA256SUMS.txt
+          sha256sum a3s-libkrun-source.tar >> CORRESPONDING-SOURCE-SHA256SUMS.txt
+
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        # softprops/action-gh-release v2.6.2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
             artifacts/**/*.tar.gz
+            artifacts/**/*.tar
+            artifacts/**/*.zip
             artifacts/**/*.whl
             artifacts/**/*.tgz
+            artifacts/**/*.tar.xz
+            artifacts/**/*.sha256
+            artifacts/**/containerd-shim-a3s-box-v2-linux-x86_64
+            artifacts/**/containerd-shim-a3s-box-v2-linux-arm64
+            artifacts/**/SOURCE-PROVENANCE.md
+            artifacts/**/THIRD_PARTY_NOTICES.md
+            artifacts/**/CORRESPONDING-SOURCE-SHA256SUMS.txt
+          fail_on_unmatched_files: true
 
   # ── Publish to crates.io ───────────────────────────────────────
   publish-crates:
@@ -237,10 +660,12 @@ jobs:
     env:
       A3S_DEPS_STUB: "1"
     steps:
-      - uses: actions/checkout@v5
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
-      - uses: dtolnay/rust-toolchain@stable
+      # dtolnay/rust-toolchain stable (2026-07-16)
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Create stub libkrun for linking
@@ -249,7 +674,8 @@ jobs:
           gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
           sudo cp /tmp/libkrun.so /usr/lib/
           sudo ldconfig
-      - uses: Swatinem/rust-cache@v2
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: src
       - name: Publish crates
@@ -266,17 +692,24 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Publishing version $VERSION (in dependency order)"
           FAILED=""
+          libkrun_code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://crates.io/api/v1/crates/a3s-libkrun-sys/$VERSION")
+          if [ "$libkrun_code" != "200" ]; then
+            echo "::error title=missing a3s-libkrun-sys release::Publish and verify a3s-libkrun-sys@$VERSION with publish-libkrun-sys.yml before running the general release."
+            exit 1
+          fi
           # Order matters: a dependent is published AFTER its internal deps so
-          # the index has them. runtime depends on core + netproxy + libkrun-sys;
-          # a3s-box-sdk is dependency-free (a thin CLI wrapper) so its position is free.
-          for crate in a3s-libkrun-sys a3s-box-core a3s-box-netproxy a3s-box-runtime a3s-box-sdk; do
+          # the index has them. libkrun-sys is deliberately excluded: its
+          # dedicated workflow performs native clean-package, size, and
+          # corresponding-source gates that this stub-mode job cannot bypass.
+          for crate in a3s-box-core a3s-box-netproxy a3s-box-runtime a3s-box-sdk; do
             code=$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$crate/$VERSION")
             if [ "$code" = "200" ]; then
               echo "✓ $crate@$VERSION already on crates.io — skipping"
               continue
             fi
             echo "Publishing $crate@$VERSION..."
-            if cargo publish -p "$crate" --allow-dirty; then
+            if cargo publish --locked -p "$crate" --allow-dirty; then
               echo "✓ published $crate@$VERSION"
               sleep 30   # let the sparse index update before dependents publish
             else
@@ -319,7 +752,8 @@ jobs:
           done
 
       - name: Checkout homebrew-tap
-        uses: actions/checkout@v5
+        # actions/checkout v5.1.0
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: A3S-Lab/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}

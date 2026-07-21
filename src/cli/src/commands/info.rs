@@ -76,6 +76,7 @@ pub async fn execute(_args: InfoArgs) -> Result<(), Box<dyn std::error::Error>> 
     }
     print_package_cache_info();
     print_host_mount_info();
+    print_rootfs_symlink_info(&home);
     print_warm_pool_info().await;
 
     Ok(())
@@ -174,6 +175,33 @@ fn print_host_mount_info() {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "none".to_string());
     println!("VirtioFS cache mode: {cache_mode}");
+}
+
+#[cfg(windows)]
+fn print_rootfs_symlink_info(home: &Path) {
+    match probe_windows_symlink_support(home) {
+        Ok(()) => println!("OCI symlink support: available"),
+        Err(error) if error.raw_os_error() == Some(1314) => println!(
+            "OCI symlink support: unavailable (enable Windows Developer Mode or grant \
+             SeCreateSymbolicLinkPrivilege; ERROR_PRIVILEGE_NOT_HELD (1314))"
+        ),
+        Err(error) => println!("OCI symlink support: unavailable (probe failed: {error})"),
+    }
+}
+
+#[cfg(windows)]
+fn probe_windows_symlink_support(home: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(home)?;
+    let directory = tempfile::Builder::new()
+        .prefix(".symlink-capability-")
+        .tempdir_in(home)?;
+    std::fs::write(directory.path().join("target"), b"probe")?;
+    std::os::windows::fs::symlink_file("target", directory.path().join("link"))
+}
+
+#[cfg(not(windows))]
+fn print_rootfs_symlink_info(_home: &Path) {
+    println!("OCI symlink support: native");
 }
 
 #[cfg(not(windows))]

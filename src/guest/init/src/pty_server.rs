@@ -32,9 +32,7 @@ pub struct PtyListener;
 ///
 /// The descriptor must refer to an already-bound, listening AF_UNIX stream
 /// socket. It is validated and marked `CLOEXEC` before the workload is forked.
-pub fn adopt_inherited_pty_listener(
-    fd: std::os::fd::RawFd,
-) -> Result<PtyListener, Box<dyn std::error::Error>> {
+pub fn adopt_inherited_pty_listener(fd: i32) -> Result<PtyListener, Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         Ok(PtyListener(crate::listener::adopt_unix_listener(

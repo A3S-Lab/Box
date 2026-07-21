@@ -95,6 +95,8 @@ a3s-box-netproxy = { version = "3.0", path = "../netproxy" }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = [
     "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Hypervisor",
     "Win32_System_Threading",
 ] }
 
@@ -127,4 +129,5 @@ a3s-runtime = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 rand = { workspace = true }
+rcgen = { workspace = true }
 tempfile = { workspace = true }

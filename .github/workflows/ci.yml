@@ -8,6 +8,9 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
@@ -18,10 +21,10 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
         with:
           components: rustfmt
       - run: cd src && cargo fmt --all -- --check
@@ -30,10 +33,10 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
         with:
           components: clippy
       - name: Install protoc
@@ -44,20 +47,20 @@ jobs:
           gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
           sudo cp /tmp/libkrun.so /usr/lib/
           sudo ldconfig
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: src
-      - run: cd src && cargo clippy --workspace --all-targets -- -D warnings
+      - run: cd src && cargo clippy --locked --workspace --all-targets -- -D warnings
 
   # ── Tests (stub mode, no VM) ───────────────────────────────────
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Create stub libkrun
@@ -66,25 +69,50 @@ jobs:
           gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
           sudo cp /tmp/libkrun.so /usr/lib/
           sudo ldconfig
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: src
-      - run: cd src && cargo test --workspace --lib
+      - run: cd src && cargo test --locked --workspace --lib
+
+  # The RuntimeClass shim is an intentionally standalone Cargo workspace, so
+  # none of the src workspace gates above compile or test it.
+  containerd-shim:
+    name: Containerd Shim (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          workspaces: containerd-shim
+      - name: Check formatting
+        working-directory: containerd-shim
+        run: cargo fmt --all -- --check
+      - name: Lint
+        working-directory: containerd-shim
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        working-directory: containerd-shim
+        run: cargo test --locked --all-targets
+      - name: Test RuntimeClass installer
+        run: bash deploy/scripts/test-install-runtimeclass.sh
 
   # ── Pinned E2B protocol and SDK surface drift gate ────────────
   e2b-contract:
     name: E2B Contract
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: src
       - name: Verify pinned contracts and SDK exports
-        run: cd src && cargo run -p a3s-box-compat --bin a3s-box-e2b-contract -- verify
+        run: cd src && cargo run --locked -p a3s-box-compat --bin a3s-box-e2b-contract -- verify
 
   # ── Pinned official E2B client wire compatibility gate ────────
   e2b-official-clients:
@@ -92,20 +120,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '20'
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           version: '0.11.8'
           enable-cache: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
       - name: Build Rust lifecycle fixture server
-        run: cd src && cargo build -p a3s-box-compat --bin a3s-box-e2b-fixture-server
+        run: cd src && cargo build --locked -p a3s-box-compat --bin a3s-box-e2b-fixture-server
       - name: Test production client harness
         run: python3 compat/e2b/fixtures/official-clients/test_run_production.py -v
       - name: Verify official client lifecycle requests
@@ -118,11 +146,11 @@ jobs:
     name: SDK Packages
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '20'
           cache: npm
@@ -157,11 +185,11 @@ jobs:
             os: macos-14
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -175,19 +203,25 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install lld llvm protobuf
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
-          workspaces: src
+          workspaces: |
+            src -> target
+            containerd-shim -> target
           key: ${{ matrix.target }}
 
       - name: Check compilation
         run: |
           cd src
-          cargo check --release -p a3s-box-cli -p a3s-box-shim
+          cargo check --locked --release -p a3s-box-cli -p a3s-box-shim
           if [ "${{ runner.os }}" = "Linux" ]; then
-            cargo check --release -p a3s-box-cri
-            cargo check --release -p a3s-box-compat --bin a3s-box-e2b
+            cargo check --locked --release -p a3s-box-cri
+            cargo check --locked --release -p a3s-box-compat --bin a3s-box-e2b
           fi
+      - name: Check containerd RuntimeClass shim
+        if: runner.os == 'Linux'
+        working-directory: containerd-shim
+        run: cargo check --locked --release --all-targets
 
   # ── Windows native WHPX build check ────────────────────────────
   build-windows:
@@ -195,28 +229,62 @@ jobs:
     needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
         with:
           targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
+      - name: Verify bundled libkrun source archive
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-source.ps1 -Check
+      - name: Verify bundled Windows libkrun archive
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-windows.ps1 -Check
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - name: Build libkrun Linux init payload
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File src/deps/libkrun-sys/vendor/libkrun/scripts/build-windows-init.ps1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           workspaces: src
           key: windows-whpx
       - name: Build Windows native binaries
         run: |
           Remove-Item Env:A3S_DEPS_STUB -ErrorAction SilentlyContinue
+          $separator = [char]0x1f
+          $env:CARGO_ENCODED_RUSTFLAGS = [string]::Join($separator, @(
+            "--remap-path-prefix=$env:GITHUB_WORKSPACE=.",
+            "--remap-path-prefix=$env:USERPROFILE=."
+          ))
           cd src
-          cargo build --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
+          cargo build --locked --release -p a3s-box-cli -p a3s-box-shim --target x86_64-pc-windows-msvc
+      - name: Verify Windows artifact bundle
+        shell: pwsh
+        run: |
+          $required = @(
+            'src/target/x86_64-pc-windows-msvc/release/a3s-box.exe',
+            'src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe',
+            'src/target/x86_64-pc-windows-msvc/release/krun.dll',
+            'src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll'
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Required Windows artifact is missing: $path"
+            }
+          }
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: windows-whpx
           path: |
             src/target/x86_64-pc-windows-msvc/release/a3s-box.exe
             src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe
+            src/target/x86_64-pc-windows-msvc/release/krun.dll
+            src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll
 
   # ── Real microVM integration gate (self-hosted, /dev/kvm) ───────
   # The fmt/clippy/test/build jobs above all run in STUB mode
@@ -235,7 +303,7 @@ jobs:
   integration-kvm:
     name: Integration (real microVM, KVM)
     needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages]
-    if: vars.KVM_CI == 'true'
+    if: github.event_name != 'pull_request' && vars.KVM_CI == 'true'
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 75
     # The runner has no direct docker.io egress (CN network), so the smoke
@@ -245,7 +313,7 @@ jobs:
     env:
       A3S_REGISTRY_MIRRORS: ${{ vars.KVM_CI_REGISTRY_MIRRORS || 'docker.io=docker.m.daocloud.io' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
       # The self-hosted runner already has a working rustup/cargo. Using
@@ -275,13 +343,13 @@ jobs:
         run: |
           unset A3S_DEPS_STUB
           cd src
-          cargo build --release -p a3s-box-guest-init --target x86_64-unknown-linux-musl
-          cargo build --release -p a3s-box-cli -p a3s-box-cri -p a3s-box-shim
+          cargo build --locked --release -p a3s-box-guest-init --target x86_64-unknown-linux-musl
+          cargo build --locked --release -p a3s-box-cli -p a3s-box-cri -p a3s-box-shim
       - name: Core smoke — real boot + exec over virtio-fs
         run: |
           unset A3S_DEPS_STUB
           cd src
-          cargo test --release -p a3s-box-cli --test core_smoke -- --ignored --nocapture --test-threads=1
+          cargo test --locked --release -p a3s-box-cli --test core_smoke -- --ignored --nocapture --test-threads=1
       # Keep the cached foreground no-op inside a bounded production envelope.
       # Docker is intentionally unavailable on this runner; the original
       # macOS/HVF Docker ratio remains a separate hardware-specific comparison.
@@ -307,7 +375,7 @@ jobs:
         run: |
           unset A3S_DEPS_STUB
           cd src
-          cargo test --release -p a3s-box-cri --test crictl_smoke -- --ignored --nocapture --test-threads=1
+          cargo test --locked --release -p a3s-box-cri --test crictl_smoke -- --ignored --nocapture --test-threads=1
       # Gate leak-freeness under churn against REAL VMs: create/run/remove cycles
       # must return orphan shims / overlay mounts / box dirs to baseline. Exits
       # non-zero on a leak, so a resource-leak regression fails the gate.
@@ -344,7 +412,7 @@ jobs:
         run: |
           unset A3S_DEPS_STUB
           cd src
-          cargo test --release -p a3s-box-sdk --test integration_kvm -- --ignored --nocapture --test-threads=1
+          cargo test --locked --release -p a3s-box-sdk --features pipeline-cli --test integration_kvm -- --ignored --nocapture --test-threads=1
       # Soak the fork-eval loop: sustained churn must stay leak-free (no orphan
       # boxes/snapshots, snapshot count flat) and memory-stable. Light here (120
       # fork-evals); crank A3S_SDK_SOAK_FORKS for a manual long soak.
@@ -356,4 +424,4 @@ jobs:
         run: |
           unset A3S_DEPS_STUB
           cd src
-          cargo test --release -p a3s-box-sdk --test soak_kvm -- --ignored --nocapture --test-threads=1
+          cargo test --locked --release -p a3s-box-sdk --features pipeline-cli --test soak_kvm -- --ignored --nocapture --test-threads=1

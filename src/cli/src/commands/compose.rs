@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use a3s_box_core::compose::{normalize_compose, ComposeConfig, ComposeSourceFormat, ServiceConfig};
+use a3s_box_core::config::DEFAULT_VCPUS;
 use a3s_box_core::event::EventEmitter;
 use a3s_box_runtime::{ComposeRuntimePlan, NetworkStore, VmManager};
 use sha2::{Digest, Sha256};
@@ -25,8 +26,8 @@ use crate::status;
 
 pub use args::{ComposeArgs, ComposeCommand, ComposeDownArgs, ComposeLogsArgs, ComposeUpArgs};
 use lifecycle::{
-    cleanup_partial_service_box, cleanup_service_box, execute_down, rollback_compose_up,
-    rollback_with_current, stop_service_process, ServiceBox,
+    cleanup_partial_service_box, execute_down, rollback_compose_up, rollback_with_current,
+    teardown_service_box, ServiceBox,
 };
 use operations::{ComposeStopArgs, ProjectServicesArgs};
 use read::{execute_config, execute_logs, execute_ps};
@@ -216,6 +217,95 @@ fn validate_compose_restart_policies(config: &ComposeConfig) -> Result<(), Strin
     Ok(())
 }
 
+async fn validate_compose_health_support(
+    project: &ComposeRuntimePlan,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        let default_network = project.default_network_name();
+        // Reject every explicit service health check before resolving (and
+        // potentially pulling) any image in the project.
+        for service_name in &project.service_order {
+            let disabled = project.healthcheck_disabled(service_name);
+            let service_health_check =
+                project
+                    .healthcheck(service_name)
+                    .map(|health_check| HealthCheck {
+                        cmd: health_check.cmd,
+                        interval_secs: health_check.interval_secs,
+                        timeout_secs: health_check.timeout_secs,
+                        retries: health_check.retries,
+                        start_period_secs: health_check.start_period_secs,
+                    });
+            validate_known_compose_health(service_name, disabled, service_health_check, None)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        }
+
+        for service_name in &project.service_order {
+            if project.healthcheck_disabled(service_name) {
+                continue;
+            }
+
+            let image = project
+                .build_box_config(service_name, Some(&default_network))?
+                .image;
+            let mut image_config = common::cached_image_config(&image).await?;
+            if image_config.is_none() {
+                // Resolving image metadata may populate the image cache, but it
+                // happens before network/box creation and VM startup. This is
+                // necessary to distinguish a normal fresh image from one whose
+                // OCI config defines an unsupported Windows HEALTHCHECK.
+                super::pull::execute(super::pull::PullArgs {
+                    image: image.clone(),
+                    quiet: false,
+                    platform: None,
+                    verify_key: None,
+                    verify_issuer: None,
+                    verify_identity: None,
+                })
+                .await?;
+                image_config = common::cached_image_config(&image).await?;
+            }
+            let image_config = image_config.ok_or_else(|| {
+                format!(
+                    "Compose service '{service_name}' image metadata was unavailable after pulling {image}"
+                )
+            })?;
+            validate_known_compose_health(service_name, false, None, Some(&image_config))
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        }
+    }
+
+    #[cfg(not(windows))]
+    let _ = project;
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_known_compose_health(
+    service_name: &str,
+    healthcheck_disabled: bool,
+    service_health_check: Option<HealthCheck>,
+    cached_image_config: Option<&a3s_box_runtime::oci::OciImageConfig>,
+) -> Result<(), String> {
+    if healthcheck_disabled {
+        return Ok(());
+    }
+
+    let effective_health_check = service_health_check.or_else(|| {
+        cached_image_config
+            .and_then(|config| config.health_check.as_ref())
+            .and_then(common::health_check_from_oci)
+    });
+    if let Some(health_check) = effective_health_check.as_ref() {
+        return common::validate_health_check_support(Some(health_check))
+            .map_err(|error| format!("Compose service '{service_name}': {error}"));
+    }
+
+    Ok(())
+}
+
 fn service_restart_policy(
     service_name: &str,
     service: Option<&ServiceConfig>,
@@ -250,6 +340,10 @@ async fn execute_up(
     validate_compose_restart_policies(&config)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let project = ComposeRuntimePlan::with_base_dir(project_name, config, base_dir)?;
+    // Windows has no guest health-probe transport. Resolve declared health
+    // checks and image metadata before creating networks, box directories, or
+    // starting a VM. Metadata resolution may populate the image cache.
+    validate_compose_health_support(&project).await?;
     if isolation.is_sandbox() {
         let default_network = project.default_network_name();
         for service_name in &project.service_order {
@@ -350,13 +444,10 @@ async fn execute_up(
 
             if existing.is_active() {
                 println!("  [~] Recreating changed service {}...", svc_name);
-                stop_service_process(&existing).await;
             } else {
                 println!("  [~] Recreating existing service {}...", svc_name);
             }
-            StateFile::remove_record(&existing.box_id)?;
-            state.forget(&existing.box_id);
-            cleanup_service_box(&existing);
+            teardown_service_box(&mut state, &existing).await?;
         }
 
         // Wait for healthy dependencies before booting this service
@@ -429,6 +520,7 @@ async fn execute_up(
         let emitter = EventEmitter::new(256);
         let box_name = format!("{}-{}", project_name, svc_name);
         let mut vm = VmManager::new(box_config, emitter);
+        vm.set_healthcheck_disabled(project.healthcheck_disabled(svc_name));
         let box_id = vm.box_id().to_string();
         let box_dir = home.join("boxes").join(&box_id);
         let initial_exec_socket_path = box_dir.join("sockets").join("exec.sock");
@@ -593,7 +685,7 @@ async fn execute_up(
             status: "running".to_string(),
             pid,
             pid_start_time: pid.and_then(crate::process::pid_start_time),
-            cpus: svc.and_then(|s| s.cpus).unwrap_or(2),
+            cpus: svc.and_then(|s| s.cpus).unwrap_or(DEFAULT_VCPUS),
             memory_mb: svc
                 .and_then(|s| s.mem_limit.as_ref())
                 .and_then(|m| crate::output::parse_memory(m).ok())

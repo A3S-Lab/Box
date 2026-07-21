@@ -71,8 +71,195 @@ pub(crate) struct BoxLayout {
     pub(crate) console_output: Option<PathBuf>,
     /// OCI image config (entrypoint, env, working dir, volumes)
     pub(crate) oci_config: Option<crate::oci::OciImageConfig>,
+    /// Fresh image/cache rootfs generations must ignore any terminal manifest
+    /// baked into an older malicious image. Persistent and Snapshot generations
+    /// instead prefer the terminal manifest captured after guest writes.
+    pub(crate) prefer_image_rootfs_metadata: bool,
     /// TEE instance configuration (if TEE is enabled)
     pub(crate) tee_instance_config: Option<crate::vmm::TeeInstanceConfig>,
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_EXIT_CODE: &str = ".a3s_exit_code";
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_STDOUT: &str = "guest-init.stdout.log";
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_STDERR: &str = "guest-init.stderr.log";
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_RESULT_MARKER: &str = ".a3s_host_result_collected";
+#[cfg(target_os = "windows")]
+const WINDOWS_LIVE_LOGS_DRAINED_MARKER: &str = ".a3s_host_live_logs_drained";
+
+/// Append a completed Windows guest stream to its raw host console, filtering
+/// libkrun's pre-guest C-init diagnostics while preserving arbitrary bytes.
+#[cfg(target_os = "windows")]
+fn append_windows_guest_stream(
+    source: &Path,
+    destination: &Path,
+    runtime_filter: &a3s_box_core::log::RuntimeConsoleFilter,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, Write};
+
+    let input = match a3s_box_core::windows_file::open_regular_file(source, None) {
+        Ok((input, _)) => input,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let mut reader = std::io::BufReader::new(input);
+    let mut output = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(destination)?;
+    let mut line = Vec::new();
+
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        let keep = !line.ends_with(b"\n")
+            || std::str::from_utf8(&line).map_or(true, |line| runtime_filter.keep_line(line));
+        if keep {
+            output.write_all(&line)?;
+        }
+    }
+
+    output.flush()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_marker_matches(path: &Path, expected: &[u8]) -> bool {
+    use std::io::Read;
+
+    let Ok((file, _)) = a3s_box_core::windows_file::open_regular_file(path, None) else {
+        return false;
+    };
+    let mut contents = Vec::with_capacity(expected.len().saturating_add(1));
+    if file
+        .take(expected.len().saturating_add(1) as u64)
+        .read_to_end(&mut contents)
+        .is_err()
+    {
+        return false;
+    }
+    contents == expected
+}
+
+/// Collect the completed WHPX guest result after the shim process has exited.
+///
+/// Current shims drain structured logs before exiting. The runtime still owns
+/// raw-console collection and provides a completed-stream fallback for older
+/// libkrun bundles that terminate the shim with `_exit`.
+#[cfg(target_os = "windows")]
+pub fn collect_windows_guest_result(
+    box_dir: &Path,
+    log_config: &a3s_box_core::log::LogConfig,
+    shim_exit_code: i32,
+) -> Result<i32> {
+    let rootfs = box_dir.join("rootfs");
+    let logs = box_dir.join("logs");
+    let marker = rootfs.join(WINDOWS_GUEST_RESULT_MARKER);
+    let live_logs_drained = rootfs.join(WINDOWS_LIVE_LOGS_DRAINED_MARKER);
+    let stdout_source = rootfs.join(WINDOWS_GUEST_STDOUT);
+    let stderr_source = rootfs.join(WINDOWS_GUEST_STDERR);
+
+    if !windows_marker_matches(&marker, b"collected\n") {
+        std::fs::create_dir_all(&logs)?;
+        let runtime_filter = a3s_box_core::log::RuntimeConsoleFilter::new();
+
+        for (source, destination) in [
+            (&stdout_source, logs.join("console.log")),
+            (&stderr_source, logs.join("console.err.log")),
+        ] {
+            append_windows_guest_stream(source, &destination, &runtime_filter).map_err(
+                |error| BoxError::BoxBootError {
+                    message: format!(
+                        "Failed to collect Windows guest output {} into {}: {error}",
+                        source.display(),
+                        destination.display()
+                    ),
+                    hint: None,
+                },
+            )?;
+        }
+
+        // New Windows shims tail these sources live and drain them before exit.
+        // Older libkrun bundles still terminate the shim with `_exit`, so keep
+        // the completed-stream fallback when no drained marker exists. Process
+        // the sources rather than the retained raw console to avoid replaying a
+        // previous restart.
+        if !windows_marker_matches(&live_logs_drained, b"drained\n") {
+            let stopped = std::sync::atomic::AtomicBool::new(true);
+            a3s_box_core::log::run_log_processor_streams(
+                &stdout_source,
+                &stderr_source,
+                &logs,
+                log_config,
+                &stopped,
+            );
+        }
+
+        a3s_box_core::windows_file::replace_regular_file(&marker, b"collected\n").map_err(
+            |error| BoxError::BoxBootError {
+                message: format!(
+                    "Failed to mark the Windows guest result collected at {}: {error}",
+                    marker.display()
+                ),
+                hint: None,
+            },
+        )?;
+    }
+
+    let exit_path = rootfs.join(WINDOWS_GUEST_EXIT_CODE);
+    let contents = match a3s_box_core::windows_file::open_regular_file(&exit_path, None) {
+        Ok((file, _)) => {
+            use std::io::Read;
+            let mut contents = String::new();
+            file.take(64)
+                .read_to_string(&mut contents)
+                .map_err(|error| BoxError::BoxBootError {
+                    message: format!(
+                        "Failed to read the Windows guest exit code {}: {error}",
+                        exit_path.display()
+                    ),
+                    hint: None,
+                })?;
+            contents
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && shim_exit_code != 0 => {
+            return Ok(shim_exit_code);
+        }
+        Err(error) => {
+            return Err(BoxError::BoxBootError {
+                message: if error.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "WHPX stopped before the guest persisted its exit code ({})",
+                        exit_path.display()
+                    )
+                } else {
+                    format!(
+                        "Failed to read the Windows guest exit code {}: {error}",
+                        exit_path.display()
+                    )
+                },
+                hint: Some(
+                    "Inspect logs/init-rust.log and the shim log for the guest boot failure"
+                        .to_string(),
+                ),
+            });
+        }
+    };
+
+    contents
+        .trim()
+        .parse::<i32>()
+        .map_err(|error| BoxError::BoxBootError {
+            message: format!(
+                "Invalid Windows guest exit code in {}: {error}",
+                exit_path.display()
+            ),
+            hint: None,
+        })
 }
 
 /// VM manager - orchestrates VM lifecycle.
@@ -117,6 +304,15 @@ pub struct VmManager {
 
     /// OCI image config resolved during the last successful boot.
     pub(crate) image_config: Option<crate::oci::OciImageConfig>,
+
+    /// Suppress an image-defined health check for callers that explicitly
+    /// requested Docker-compatible `--no-healthcheck` semantics.
+    pub(crate) healthcheck_disabled: bool,
+
+    /// Whether this boot attempt started with an existing persistent rootfs
+    /// generation. Failed first boots may discard a partial extraction, while
+    /// failed restarts must retain the pre-existing guest data.
+    pub(crate) preserve_rootfs_on_boot_failure: bool,
 
     /// TEE extension (attestation, sealing, secret injection)
     #[cfg(unix)]
@@ -172,6 +368,8 @@ impl VmManager {
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
             image_config: None,
+            healthcheck_disabled: false,
+            preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
             tee: None,
             rootfs_provider: crate::rootfs::default_provider(),
@@ -204,6 +402,8 @@ impl VmManager {
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
             image_config: None,
+            healthcheck_disabled: false,
+            preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
             tee: None,
             rootfs_provider: crate::rootfs::default_provider(),
@@ -266,9 +466,10 @@ impl VmManager {
             .retain(|name| !created_set.contains(name));
     }
 
-    /// Remove the box directory on the host.
+    /// Remove transient host boot artifacts, retaining persistent guest data.
     fn cleanup_box_dir(&self) {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let socket_dir = self.socket_dir();
 
         // Reap the box's passt daemon (Linux bridge mode) BEFORE removing its
         // socket dir. A boot that fails after passt spawned but before
@@ -279,7 +480,10 @@ impl VmManager {
         #[cfg(target_os = "linux")]
         crate::network::terminate_passt(&self.socket_dir());
 
-        if let Err(error) = self.rootfs_provider.cleanup(&box_dir, false) {
+        if let Err(error) = self
+            .rootfs_provider
+            .cleanup(&box_dir, self.preserve_rootfs_on_boot_failure)
+        {
             tracing::warn!(
                 box_id = %self.box_id,
                 path = %box_dir.display(),
@@ -288,30 +492,32 @@ impl VmManager {
             );
         }
 
-        match std::fs::remove_dir_all(&box_dir) {
+        match std::fs::remove_dir_all(&socket_dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     box_id = %self.box_id,
-                    path = %box_dir.display(),
+                    path = %socket_dir.display(),
                     error = %error,
-                    "Failed to cleanup box directory after boot failure"
+                    "Failed to cleanup socket directory after boot failure"
                 );
             }
         }
 
-        let socket_dir = self.socket_dir();
-        if socket_dir != box_dir.join("sockets") {
-            match std::fs::remove_dir_all(&socket_dir) {
+        // A failed restart must never erase a persistent writable rootfs. The
+        // provider cleanup above detaches transient mounts while retaining the
+        // persistent generation; only ephemeral boxes are removed wholesale.
+        if !self.config.persistent {
+            match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         box_id = %self.box_id,
-                        path = %socket_dir.display(),
+                        path = %box_dir.display(),
                         error = %error,
-                        "Failed to cleanup socket directory after boot failure"
+                        "Failed to cleanup box directory after boot failure"
                     );
                 }
             }
@@ -340,6 +546,8 @@ impl VmManager {
             anonymous_volumes: Vec::new(),
             created_anonymous_volumes: Vec::new(),
             image_config: None,
+            healthcheck_disabled: false,
+            preserve_rootfs_on_boot_failure: false,
             #[cfg(unix)]
             tee: None,
             rootfs_provider: crate::rootfs::default_provider(),
@@ -537,6 +745,11 @@ impl VmManager {
         self.log_config = log_config;
     }
 
+    /// Set whether an image-defined health check is explicitly disabled.
+    pub fn set_healthcheck_disabled(&mut self, disabled: bool) {
+        self.healthcheck_disabled = disabled;
+    }
+
     /// Get the attached Prometheus metrics (if any).
     pub fn metrics_prom(&self) -> Option<&crate::prom::RuntimeMetrics> {
         self.prom.as_ref()
@@ -569,6 +782,7 @@ impl VmManager {
         self.shim_exit_code
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn persisted_exit_code(&self) -> Option<i32> {
         crate::rootfs::read_persisted_exit_code(&self.home_dir.join("boxes").join(&self.box_id))
     }
@@ -579,6 +793,15 @@ impl VmManager {
     /// finish on its own and the CLI should clean up instead of waiting for
     /// a Ctrl-C.
     pub async fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+        if let Some(code) = self.shim_exit_code {
+            return Ok(Some(code));
+        }
+
+        // Unix guests expose the overlay exit file only once their shutdown is
+        // effectively complete. On Windows the shared-rootfs file appears while
+        // the shim still has to relay guest stdout/stderr into the host logs, so
+        // treating it as completion here races teardown against that relay.
+        #[cfg(not(target_os = "windows"))]
         if let Some(code) = self.persisted_exit_code() {
             self.shim_exit_code = Some(code);
             return Ok(Some(code));
@@ -590,6 +813,12 @@ impl VmManager {
         };
 
         if let Some(code) = handler.try_wait_exit()? {
+            #[cfg(target_os = "windows")]
+            let code = collect_windows_guest_result(
+                &self.home_dir.join("boxes").join(&self.box_id),
+                &self.log_config,
+                code,
+            )?;
             self.shim_exit_code = Some(code);
             return Ok(Some(code));
         }
@@ -600,7 +829,12 @@ impl VmManager {
     /// Return true once the foreground container is known to have finished, even
     /// if the shim exit status has not been reaped yet.
     pub async fn has_exited(&self) -> bool {
-        if self.shim_exit_code.is_some() || self.persisted_exit_code().is_some() {
+        if self.shim_exit_code.is_some() {
+            return true;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        if self.persisted_exit_code().is_some() {
             return true;
         }
 
@@ -745,6 +979,7 @@ impl VmManager {
     }
 
     /// Read the box's json-file console logs, split into stdout/stderr by stream.
+    #[cfg(unix)]
     fn read_container_logs(&self) -> (Vec<u8>, Vec<u8>) {
         let path = self
             .home_dir
@@ -859,6 +1094,10 @@ impl VmManager {
             }
         }
 
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        self.preserve_rootfs_on_boot_failure =
+            self.config.persistent && layout::persistent_rootfs_generation_exists(&box_dir)?;
+
         let execution_plan = a3s_box_core::resolve_execution(&self.config)?;
         self.resolved_execution_plan = Some(execution_plan.clone());
         if execution_plan.backend == ExecutionBackend::Crun {
@@ -886,12 +1125,25 @@ impl VmManager {
         };
         self.image_config = layout.oci_config.clone();
 
+        // `prepare_layout` may only now have mounted a Snapshot lower through
+        // this box's overlay. Stage via the exact guest-visible root so rename
+        // copy-ups into the per-box upper before any guest process can launch.
+        if let Err(error) = a3s_box_core::rootfs_metadata::stage_terminal_rootfs_metadata_for_boot(
+            &layout.rootfs_path,
+        ) {
+            self.cleanup_boot_failure().await;
+            return Err(BoxError::IoError(error));
+        }
+
         // 1.5. Override /etc/resolv.conf with configured DNS
         let resolv_content = a3s_box_core::dns::generate_resolv_conf(&self.config.dns);
-        let resolv_path = layout.rootfs_path.join("etc/resolv.conf");
-        if let Err(e) = tokio::fs::write(&resolv_path, &resolv_content).await {
+        if let Err(e) = crate::oci::rootfs::write_guest_file(
+            &layout.rootfs_path,
+            "etc/resolv.conf",
+            &resolv_content,
+        ) {
             self.cleanup_boot_failure().await;
-            return Err(BoxError::IoError(e));
+            return Err(e);
         }
         tracing::debug!(parent: &boot_span, dns = %resolv_content.trim(), "Configured guest DNS");
 
@@ -1128,7 +1380,8 @@ impl VmManager {
 
     /// Destroy the VM with a custom shutdown timeout and SIGTERM.
     pub async fn destroy_with_timeout(&mut self, timeout_ms: u64) -> Result<()> {
-        self.destroy_with_options(libc::SIGTERM, timeout_ms).await
+        self.destroy_with_options(default_stop_signal(), timeout_ms)
+            .await
     }
 
     /// Destroy the VM with a specific stop signal and timeout.
@@ -1592,6 +1845,36 @@ mod tests {
         }
     }
 
+    struct CompletedHandler {
+        code: i32,
+    }
+
+    impl VmHandler for CompletedHandler {
+        fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+            Ok(())
+        }
+
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+
+        fn is_running(&self) -> bool {
+            false
+        }
+
+        fn has_exited(&self) -> bool {
+            true
+        }
+
+        fn pid(&self) -> u32 {
+            42
+        }
+
+        fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+            Ok(Some(self.code))
+        }
+    }
+
     /// A handler whose `stop` always fails — models a wedged VM that won't halt.
     struct FailingHandler;
 
@@ -1689,6 +1972,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cleanup_boot_failure_preserves_persistent_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-persistent-boot-failure".to_string();
+        let config = BoxConfig {
+            persistent: true,
+            ..BoxConfig::default()
+        };
+        let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+
+        let box_dir = tmp.path().join("boxes").join(&box_id);
+        let sentinel = box_dir.join("rootfs/var/lib/application/data.db");
+        std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+        std::fs::write(&sentinel, b"persistent guest data").unwrap();
+        std::fs::create_dir_all(vm.socket_dir()).unwrap();
+        std::fs::write(vm.socket_dir().join("stale.sock"), b"stale").unwrap();
+        vm.preserve_rootfs_on_boot_failure = true;
+
+        vm.cleanup_boot_failure().await;
+
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"persistent guest data",
+            "a failed restart must not erase the persistent writable rootfs"
+        );
+        assert!(box_dir.exists());
+        assert!(
+            !vm.socket_dir().exists(),
+            "transient sockets should still be removed after a failed restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_boot_failure_discards_partial_first_persistent_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-partial-first-boot".to_string();
+        let config = BoxConfig {
+            persistent: true,
+            ..BoxConfig::default()
+        };
+        let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+
+        let box_dir = tmp.path().join("boxes").join(&box_id);
+        let partial = box_dir.join("rootfs/partially-extracted");
+        std::fs::create_dir_all(partial.parent().unwrap()).unwrap();
+        std::fs::write(&partial, b"incomplete").unwrap();
+
+        vm.cleanup_boot_failure().await;
+
+        assert!(box_dir.exists(), "a retained box keeps its host directory");
+        assert!(
+            !box_dir.join("rootfs").exists(),
+            "a failed first boot must discard its incomplete rootfs generation"
+        );
+    }
+
+    #[tokio::test]
     async fn test_wait_for_vm_running_returns_error_when_handler_exited() {
         let vm = VmManager::with_box_id(
             BoxConfig::default(),
@@ -1716,6 +2059,7 @@ mod tests {
         vm.wait_for_vm_running().await.unwrap();
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_try_wait_exit_reads_guest_persisted_exit_code() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1736,6 +2080,287 @@ mod tests {
         assert_eq!(vm.try_wait_exit().await.unwrap(), Some(42));
         assert_eq!(vm.exit_code(), Some(42));
         assert!(vm.has_exited().await);
+    }
+
+    #[tokio::test]
+    async fn test_try_wait_exit_reads_windows_rootfs_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-windows-exit-code".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 23 }));
+
+        let exit_path = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("rootfs")
+            .join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        std::fs::write(&exit_path, "23\n").unwrap();
+        #[cfg(target_os = "windows")]
+        {
+            std::fs::write(
+                exit_path.parent().unwrap().join(WINDOWS_GUEST_STDOUT),
+                "guest stdout\n",
+            )
+            .unwrap();
+            std::fs::write(
+                exit_path.parent().unwrap().join(WINDOWS_GUEST_STDERR),
+                concat!(
+                    "init.krun: mount_filesystems ok\n",
+                    "init.krun: execvp(/bin/app) starting\n",
+                    "guest stderr\n",
+                ),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(vm.try_wait_exit().await.unwrap(), Some(23));
+        assert_eq!(vm.exit_code(), Some(23));
+        assert!(vm.has_exited().await);
+        #[cfg(target_os = "windows")]
+        {
+            let logs = tmp.path().join("boxes").join(&box_id).join("logs");
+            assert_eq!(
+                std::fs::read_to_string(logs.join("console.log")).unwrap(),
+                "guest stdout\n"
+            );
+            assert_eq!(
+                std::fs::read_to_string(logs.join("console.err.log")).unwrap(),
+                "guest stderr\n"
+            );
+            let json = std::fs::read_to_string(logs.join("container.json")).unwrap();
+            assert!(json.contains("\"log\":\"guest stdout\\n\""));
+            assert!(json.contains("\"log\":\"guest stderr\\n\""));
+            assert!(!json.contains("init.krun"));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_append_windows_guest_stream_uses_shared_phase_and_keeps_partial_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stdout_source = tmp.path().join("stdout.source");
+        let stderr_source = tmp.path().join("stderr.source");
+        let stdout_destination = tmp.path().join("stdout.destination");
+        let stderr_destination = tmp.path().join("stderr.destination");
+        std::fs::write(
+            &stdout_source,
+            concat!(
+                "init.krun: mount_filesystems ok\n",
+                "init.krun: business\n",
+                "init.krun: config parsed",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &stderr_source,
+            concat!(
+                "init.krun: execvp(/bin/app) starting\n",
+                "init.krun: mount_filesystems ok\n",
+            ),
+        )
+        .unwrap();
+
+        let filter = a3s_box_core::log::RuntimeConsoleFilter::new();
+        append_windows_guest_stream(&stdout_source, &stdout_destination, &filter).unwrap();
+        append_windows_guest_stream(&stderr_source, &stderr_destination, &filter).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(stdout_destination).unwrap(),
+            "init.krun: business\ninit.krun: config parsed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(stderr_destination).unwrap(),
+            "init.krun: mount_filesystems ok\n"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_collect_windows_guest_result_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_dir = tmp.path().join("box");
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDOUT), "once\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDERR), "error once\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_EXIT_CODE), "7\n").unwrap();
+
+        let config = a3s_box_core::log::LogConfig::default();
+        assert_eq!(
+            collect_windows_guest_result(&box_dir, &config, 0).unwrap(),
+            7
+        );
+        assert_eq!(
+            collect_windows_guest_result(&box_dir, &config, 0).unwrap(),
+            7
+        );
+
+        let logs = box_dir.join("logs");
+        assert_eq!(
+            std::fs::read_to_string(logs.join("console.log")).unwrap(),
+            "once\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(logs.join("console.err.log")).unwrap(),
+            "error once\n"
+        );
+        let json = std::fs::read_to_string(logs.join("container.json")).unwrap();
+        assert_eq!(json.matches("\"log\":\"once\\n\"").count(), 1);
+        assert_eq!(json.matches("\"log\":\"error once\\n\"").count(), 1);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_collect_windows_guest_result_does_not_replay_drained_live_logs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_dir = tmp.path().join("box");
+        let rootfs = box_dir.join("rootfs");
+        let logs = box_dir.join("logs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDOUT), "live once\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDERR), "live error once\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_EXIT_CODE), "4\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_LIVE_LOGS_DRAINED_MARKER), "drained\n").unwrap();
+        let live_json =
+            "{\"log\":\"live once\\n\",\"stream\":\"stdout\",\"time\":\"2026-01-01T00:00:00Z\"}\n";
+        std::fs::write(logs.join("container.json"), live_json).unwrap();
+
+        let config = a3s_box_core::log::LogConfig::default();
+        assert_eq!(
+            collect_windows_guest_result(&box_dir, &config, 0).unwrap(),
+            4
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(logs.join("container.json")).unwrap(),
+            live_json
+        );
+        assert_eq!(
+            std::fs::read_to_string(logs.join("console.log")).unwrap(),
+            "live once\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(logs.join("console.err.log")).unwrap(),
+            "live error once\n"
+        );
+        assert!(rootfs.join(WINDOWS_GUEST_RESULT_MARKER).exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_collect_windows_guest_result_replaces_marker_symlink_without_touching_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_dir = tmp.path().join("box");
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDOUT), "safe output\n").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDERR), "").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_EXIT_CODE), "0\n").unwrap();
+
+        let host_target = tmp.path().join("host-target.txt");
+        std::fs::write(&host_target, "host secret").unwrap();
+        let marker = rootfs.join(WINDOWS_GUEST_RESULT_MARKER);
+        match std::os::windows::fs::symlink_file(&host_target, &marker) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error) => panic!("failed to create marker symlink: {error}"),
+        }
+
+        let config = a3s_box_core::log::LogConfig::default();
+        assert_eq!(
+            collect_windows_guest_result(&box_dir, &config, 0).unwrap(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(&host_target).unwrap(),
+            "host secret"
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "collected\n");
+        assert!(!std::fs::symlink_metadata(marker)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_collect_windows_guest_result_refuses_stream_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_dir = tmp.path().join("box");
+        let rootfs = box_dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let host_secret = tmp.path().join("host-secret.txt");
+        std::fs::write(&host_secret, "must not be logged\n").unwrap();
+        match std::os::windows::fs::symlink_file(&host_secret, rootfs.join(WINDOWS_GUEST_STDOUT)) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error) => panic!("failed to create stream symlink: {error}"),
+        }
+        std::fs::write(rootfs.join(WINDOWS_GUEST_STDERR), "").unwrap();
+        std::fs::write(rootfs.join(WINDOWS_GUEST_EXIT_CODE), "0\n").unwrap();
+
+        let config = a3s_box_core::log::LogConfig::default();
+        let error = collect_windows_guest_result(&box_dir, &config, 0)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("Failed to collect Windows guest output"));
+        let console = box_dir.join("logs").join("console.log");
+        assert!(
+            !console.exists()
+                || !std::fs::read_to_string(console)
+                    .unwrap()
+                    .contains("must not")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_collect_windows_guest_result_rejects_false_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(box_dir.join("rootfs")).unwrap();
+        let config = a3s_box_core::log::LogConfig::default();
+
+        let error = collect_windows_guest_result(&box_dir, &config, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("before the guest persisted its exit code"));
+        assert_eq!(
+            collect_windows_guest_result(&box_dir, &config, 9).unwrap(),
+            9
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn test_windows_exit_file_waits_for_shim_log_relay() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-windows-pending-relay".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        *vm.handler.write().await = Some(Box::new(RecordingHandler {
+            stopped: Arc::new(AtomicBool::new(false)),
+        }));
+
+        let exit_path = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("rootfs")
+            .join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        std::fs::write(exit_path, "0\n").unwrap();
+
+        assert_eq!(vm.try_wait_exit().await.unwrap(), None);
+        assert_eq!(vm.exit_code(), None);
+        assert!(!vm.has_exited().await);
     }
 
     #[cfg(unix)]

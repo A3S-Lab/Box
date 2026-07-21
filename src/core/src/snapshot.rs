@@ -5,10 +5,13 @@
 //! restore achieves sub-500ms cold start.
 
 use crate::error::{BoxError, Result};
+use crate::traits::ExecutionHealthCheck;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use crate::config::DEFAULT_VCPUS;
 
 /// Resolved OCI image defaults required to reproduce a captured rootfs.
 ///
@@ -72,6 +75,25 @@ pub struct SnapshotImageHealthCheck {
     pub start_period: Option<u64>,
 }
 
+impl SnapshotImageHealthCheck {
+    /// Whether the OCI health-check declaration contains an executable command.
+    pub fn is_enabled(&self) -> bool {
+        let Some(marker) = self.test.first() else {
+            return false;
+        };
+        if marker.eq_ignore_ascii_case("NONE") {
+            return false;
+        }
+        if marker.eq_ignore_ascii_case("CMD") || marker.eq_ignore_ascii_case("CMD-SHELL") {
+            return self
+                .test
+                .get(1..)
+                .is_some_and(|command| command.iter().any(|part| !part.trim().is_empty()));
+        }
+        self.test.iter().any(|part| !part.trim().is_empty())
+    }
+}
+
 /// Metadata for a saved VM snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotMetadata {
@@ -102,6 +124,12 @@ pub struct SnapshotMetadata {
     /// Resolved defaults from the source OCI image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_config: Option<SnapshotImageConfig>,
+    /// Explicit health check selected for the source box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<ExecutionHealthCheck>,
+    /// Whether health checks were explicitly disabled for the source box.
+    #[serde(default)]
+    pub healthcheck_disabled: bool,
     /// Port mappings
     #[serde(default)]
     pub port_map: Vec<String>,
@@ -141,7 +169,7 @@ impl SnapshotMetadata {
             name,
             source_box_id,
             image,
-            vcpus: 2,
+            vcpus: DEFAULT_VCPUS,
             memory_mb: 512,
             volumes: Vec::new(),
             env: HashMap::new(),
@@ -149,6 +177,8 @@ impl SnapshotMetadata {
             entrypoint: None,
             workdir: None,
             image_config: None,
+            health_check: None,
+            healthcheck_disabled: false,
             port_map: Vec::new(),
             labels: HashMap::new(),
             network_mode: None,
@@ -184,6 +214,17 @@ impl SnapshotMetadata {
                 self.id
             ))
         })
+    }
+
+    /// Whether restoring this snapshot would enable an explicit or image health check.
+    pub fn has_effective_health_check(&self) -> bool {
+        !self.healthcheck_disabled
+            && (self.health_check.is_some()
+                || self
+                    .image_config
+                    .as_ref()
+                    .and_then(|config| config.health_check.as_ref())
+                    .is_some_and(SnapshotImageHealthCheck::is_enabled))
     }
 }
 
@@ -227,12 +268,14 @@ mod tests {
         assert_eq!(meta.name, "my-snapshot");
         assert_eq!(meta.source_box_id, "box-abc");
         assert_eq!(meta.image, "alpine:latest");
-        assert_eq!(meta.vcpus, 2);
+        assert_eq!(meta.vcpus, DEFAULT_VCPUS);
         assert_eq!(meta.memory_mb, 512);
         assert!(meta.volumes.is_empty());
         assert!(meta.env.is_empty());
         assert!(meta.description.is_empty());
         assert!(meta.image_config.is_none());
+        assert!(meta.health_check.is_none());
+        assert!(!meta.healthcheck_disabled);
     }
 
     #[test]
@@ -283,6 +326,8 @@ mod tests {
         assert_eq!(parsed.id, "snap-old");
         assert_eq!(parsed.size_bytes, 0);
         assert_eq!(parsed.created_at, DateTime::<Utc>::UNIX_EPOCH);
+        assert!(parsed.health_check.is_none());
+        assert!(!parsed.healthcheck_disabled);
         assert!(parsed.require_image_config().is_err());
     }
 
@@ -323,6 +368,14 @@ mod tests {
             }),
             onbuild: vec!["RUN prepare-runtime".to_string()],
         });
+        meta.health_check = Some(ExecutionHealthCheck {
+            cmd: vec!["test".to_string(), "-f".to_string(), "/ready".to_string()],
+            interval_secs: 11,
+            timeout_secs: 3,
+            retries: 7,
+            start_period_secs: 2,
+        });
+        meta.healthcheck_disabled = true;
         meta.port_map = vec!["8080:80".to_string()];
         meta.labels.insert("env".to_string(), "prod".to_string());
         meta.network_mode = Some("bridge".to_string());
@@ -348,6 +401,9 @@ mod tests {
         );
         assert_eq!(parsed.workdir, Some("/app".to_string()));
         assert_eq!(parsed.image_config, meta.image_config);
+        assert_eq!(parsed.health_check, meta.health_check);
+        assert!(parsed.healthcheck_disabled);
+        assert!(!parsed.has_effective_health_check());
         assert_eq!(parsed.port_map, vec!["8080:80"]);
         assert_eq!(parsed.labels.get("env").unwrap(), "prod");
         assert_eq!(parsed.network_mode, Some("bridge".to_string()));
@@ -377,6 +433,8 @@ mod tests {
         assert!(meta.entrypoint.is_none());
         assert!(meta.workdir.is_none());
         assert!(meta.image_config.is_none());
+        assert!(meta.health_check.is_none());
+        assert!(!meta.healthcheck_disabled);
         assert!(meta.port_map.is_empty());
         assert!(meta.labels.is_empty());
         assert!(meta.network_mode.is_none());
@@ -423,5 +481,32 @@ mod tests {
         assert_eq!(cloned.id, meta.id);
         assert_eq!(cloned.name, meta.name);
         assert_eq!(cloned.source_box_id, meta.source_box_id);
+    }
+
+    #[test]
+    fn effective_health_check_respects_none_and_disabled_declarations() {
+        let mut meta = SnapshotMetadata::new(
+            "snap-health".to_string(),
+            "health".to_string(),
+            "box-health".to_string(),
+            "image:latest".to_string(),
+        );
+        meta.image_config = Some(SnapshotImageConfig {
+            health_check: Some(SnapshotImageHealthCheck {
+                test: vec!["NONE".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(!meta.has_effective_health_check());
+
+        meta.image_config.as_mut().unwrap().health_check = Some(SnapshotImageHealthCheck {
+            test: vec!["CMD".to_string(), "true".to_string()],
+            ..Default::default()
+        });
+        assert!(meta.has_effective_health_check());
+
+        meta.healthcheck_disabled = true;
+        assert!(!meta.has_effective_health_check());
     }
 }

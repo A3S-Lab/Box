@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::rootfs_metadata::RootfsMetadataManifest;
 #[cfg(test)]
-use a3s_box_core::rootfs_metadata::{IMAGE_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH};
+use a3s_box_core::rootfs_metadata::{
+    IMAGE_ROOTFS_METADATA_PATH, PREVIOUS_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
+};
 use a3s_box_core::snapshot::SnapshotMetadata;
 use a3s_box_core::SnapshotStoreBackend;
 
@@ -812,6 +814,11 @@ mod tests {
             b"stale image metadata",
         )
         .unwrap();
+        std::fs::write(
+            rootfs.join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            b"stale replay metadata",
+        )
+        .unwrap();
         let manifest = RootfsMetadataManifest::new(Vec::new());
 
         store
@@ -825,6 +832,9 @@ mod tests {
         let captured = store.rootfs_path("managed-metadata");
         assert!(!captured
             .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+            .exists());
+        assert!(!captured
+            .join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'))
             .exists());
         let stored: RootfsMetadataManifest = serde_json::from_slice(
             &std::fs::read(captured.join(ROOTFS_METADATA_PATH.trim_start_matches('/'))).unwrap(),

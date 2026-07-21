@@ -23,7 +23,7 @@ pub async fn execute(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut errors: Vec<String> = Vec::new();
 
     for query in &args.boxes {
-        if let Err(e) = rm_one(&mut state, query, args.force) {
+        if let Err(e) = rm_one(&mut state, query, args.force).await {
             errors.push(format!("{query}: {e}"));
         }
     }
@@ -35,22 +35,26 @@ pub async fn execute(args: RmArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn rm_one(
+async fn rm_one(
     state: &mut StateFile,
     query: &str,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let record = resolve::resolve(state, query)?.clone();
+    let box_id = resolve::resolve(state, query)?.id.clone();
+    let _lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+    // Re-resolve after waiting for start/restart/commit. The lock then remains
+    // held through termination, cleanup, and removal so no new execution can be
+    // published for a record whose resources are being deleted.
+    let current_state = StateFile::load_default()?;
+    let record = current_state
+        .find_by_id(&box_id)
+        .ok_or_else(|| format!("Box {query} was removed while waiting to remove it"))?
+        .clone();
+    drop(current_state);
+
+    validate_remove_request(&record, force)?;
 
     if status::is_active(&record) {
-        if !force {
-            return Err(format!(
-                "Box {} is {}. Use --force to remove an active box.",
-                record.name, record.status
-            )
-            .into());
-        }
-
         // Force-kill the active box. A missing PID is treated as stale state;
         // --force still removes metadata and resources below. Only signal a PID
         // whose start-time identity still matches, so a reused PID after a
@@ -62,7 +66,6 @@ fn rm_one(
         }
     }
 
-    let box_id = record.id.clone();
     let name = record.name.clone();
     cleanup::cleanup_removed_box(&record)?;
 
@@ -82,32 +85,41 @@ fn rm_one(
     Ok(())
 }
 
+fn validate_remove_request(
+    record: &crate::state::BoxRecord,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if status::is_active(record) && !force {
+        return Err(format!(
+            "Box {} is {}. Use --force to remove an active box.",
+            record.name, record.status
+        )
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::fixtures::{make_record, setup_state};
+    use crate::test_helpers::fixtures::make_record;
 
     #[test]
     fn test_rm_rejects_paused_without_force() {
-        let (_tmp, mut state) =
-            setup_state(vec![make_record("id-1", "paused_box", "paused", None)]);
+        let record = make_record("id-1", "paused_box", "paused", None);
 
-        let result = rm_one(&mut state, "paused_box", false);
+        let result = validate_remove_request(&record, false);
 
         assert!(result.is_err());
         let error = result.unwrap_err().to_string();
         assert!(error.contains("paused"));
         assert!(error.contains("--force"));
-        assert!(state.find_by_id("id-1").is_some());
     }
 
     #[test]
-    fn test_rm_force_removes_paused_stale_record() {
-        let (_tmp, mut state) =
-            setup_state(vec![make_record("id-1", "paused_box", "paused", None)]);
+    fn test_rm_force_accepts_paused_stale_record() {
+        let record = make_record("id-1", "paused_box", "paused", None);
 
-        rm_one(&mut state, "paused_box", true).unwrap();
-
-        assert!(state.find_by_id("id-1").is_none());
+        validate_remove_request(&record, true).unwrap();
     }
 }

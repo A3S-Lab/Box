@@ -174,7 +174,7 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | E2B protocol and language SDKs | Pinned contracts, durable lifecycle, memory-preserving pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | Production-tested preview subset on A3S OS with certified `crun`: pinned official Python sync/async and TypeScript clients, plus A3S Python sync/async and TypeScript packages, pass the same matrix, including Snapshot capture/list/restore/delete, filesystem and OCI-default fidelity, bidirectional Volume mounts, pause/resume process survival, and generation-fenced logs. Templates/builds, filesystem-only pause, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. PyPI/npm publication is also pending. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
-| Windows | Native x86_64 WHPX/libkrun code paths | Integration surface requiring host-specific validation. Current standard release automation focuses on Linux and macOS; Windows CRI is out of scope. |
+| Windows | Native x86_64 WHPX/libkrun MicroVM execution | Host-specific. Foreground and detached workloads, live split logs, exit codes, TCP publishing, bind mounts, named-volume persistence, stats, stopped-box commit, and stopped-box filesystem snapshot flows have passed real-host validation. Running-box commit has no guest archive channel. The reliable path is currently limited to one vCPU; container health checks, bridge networking, interactive execution, TEE, snapshot-fork, and CRI remain unsupported. |
 
 An implemented API is not automatically a production guarantee for every host
 or threat model. Real-runtime validation evidence and remaining platform gaps
@@ -212,11 +212,35 @@ Host requirements:
 | Linux | KVM and libkrun | The current primary production-host path |
 | macOS | Apple Silicon and Hypervisor.framework | Intel macOS is unsupported |
 | Linux Sandbox | Certified `crun 1.28`, user namespaces, subordinate IDs, seccomp, and delegated cgroup v2 | Does not require KVM; explicitly select `--isolation sandbox` |
-| Windows | x86_64, WHPX, and matching libkrun assets | Host-specific integration path; not part of the current standard release matrix |
+| Windows | x86_64, Windows Hypervisor Platform, Developer Mode (or `SeCreateSymbolicLinkPrivilege`), and matching `krun.dll`/`libkrunfw.dll` assets | Native release path; currently one vCPU, with the command boundaries documented below |
+
+Linux release archives intentionally contain GNU/glibc host executables because
+the CLI, CRI service, and VM shim dynamically load the bundled `libkrun`. The
+separately downloadable `containerd-shim-a3s-box-v2-linux-<arch>` and the guest
+init are built for the corresponding static musl target.
+
+For a Windows source build, build the Linux guest PID 1 with Zig before the
+native binaries:
+
+```powershell
+winget install --id zig.zig --exact --version 0.16.0
+cd src
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File deps/libkrun-sys/vendor/libkrun/scripts/build-windows-init.ps1
+cargo install cargo-zigbuild
+cargo zigbuild --release -p a3s-box-guest-init --target x86_64-unknown-linux-musl
+cargo build --release -p a3s-box-cli -p a3s-box-shim
+```
+
+The nested script creates libkrun's stripped Linux init payload; `cargo
+zigbuild` creates A3S Box's static Linux guest-init executable. Neither generated
+binary is committed. The Linux kernel is supplied by the packaged
+`libkrunfw.dll`; A3S Box does not compile a kernel during this build. See
+[docs/windows-whpx.md](docs/windows-whpx.md) for package layout, validation
+commands, and current platform limits.
 
 Always run `a3s-box info` before host-backed tests. It reports virtualization,
-networking, package cache, TEE, virtio-fs, and warm-pool availability without
-starting a workload.
+platform, networking and port-publishing support, package caches, TEE,
+virtio-fs, and warm-pool availability without starting a workload.
 
 ### Run a MicroVM
 
@@ -240,6 +264,9 @@ a3s-box rm web
 Omitting `--isolation` is the only public way to select the default MicroVM
 backend. An explicit `--isolation microvm` value is rejected so scripts cannot
 confuse a backend name with a user-selectable compatibility mode.
+
+On Windows, omit `--cpus` or use `--cpus 1`; higher counts are rejected before
+the image is pulled until the WHPX SMP path is reliable.
 
 ### Run a shared-kernel Sandbox
 
@@ -472,6 +499,7 @@ a3s-box cp ./input.txt app:/data/input.txt
 a3s-box diff app
 a3s-box export app -o rootfs.tar
 a3s-box commit app app:checkpoint
+a3s-box stop app
 a3s-box snapshot create app --name checkpoint-1
 a3s-box snapshot restore checkpoint-1 --name restored-app
 ```
@@ -483,7 +511,9 @@ short-lived Node.js workloads, and tmpfs is useful for high-churn dependency
 trees.
 
 Filesystem snapshots capture configuration and rootfs state, not live RAM or
-device state. On overlay-capable hosts, restore uses a read-only snapshot lower
+device state. Direct CLI/SDK snapshots require a stopped source box so a guest
+cannot race host filesystem traversal; managed Sandbox snapshots quiesce the
+backend before capture. On overlay-capable hosts, restore uses a read-only snapshot lower
 plus a private writable upper; in-use snapshots are protected from pruning.
 Snapshots created by current builds also retain resolved OCI image defaults
 and Unix rootfs metadata. Older records missing those defaults remain visible

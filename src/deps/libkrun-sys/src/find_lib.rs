@@ -39,14 +39,19 @@ pub fn has_library(dir: &Path, prefix: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Checks if `dir` contains a library named exactly `lib<name>.<ext>`.
+/// Checks if `dir` contains a library named exactly `lib<name>.<ext>` on
+/// Unix, or `<name>.dll` on Windows.
 /// This is stricter than `has_library`: it prevents matching sibling
 /// libraries like `libkrun-efi.dylib` when looking for `libkrun.dylib`.
 /// Both unversioned (`libkrun.dylib`) and versioned (`libkrun.so.1`)
 /// library names are accepted.
 pub fn has_exact_library(dir: &Path, name: &str) -> bool {
     let extensions = library_extensions();
-    let prefix = format!("lib{name}");
+    let prefix = if cfg!(target_os = "windows") {
+        name.to_owned()
+    } else {
+        format!("lib{name}")
+    };
 
     dir.read_dir()
         .ok()
@@ -116,7 +121,12 @@ mod tests {
         #[cfg(target_os = "windows")]
         let temp = create_temp_lib_dir(&["krun.dll"]);
 
-        assert!(has_library(temp.path(), "libkrun"));
+        #[cfg(not(target_os = "windows"))]
+        let prefix = "libkrun";
+        #[cfg(target_os = "windows")]
+        let prefix = "krun";
+
+        assert!(has_library(temp.path(), prefix));
     }
 
     #[test]
@@ -125,9 +135,16 @@ mod tests {
         let temp = create_temp_lib_dir(&["libkrun.dylib", "libkrun-efi.dylib"]);
         #[cfg(target_os = "linux")]
         let temp = create_temp_lib_dir(&["libkrun.so", "libkrun-efi.so"]);
+        #[cfg(target_os = "windows")]
+        let temp = create_temp_lib_dir(&["krun.dll", "krun-efi.dll"]);
+
+        #[cfg(not(target_os = "windows"))]
+        let prefix = "libkrun";
+        #[cfg(target_os = "windows")]
+        let prefix = "krun";
 
         // Should match both exact and sibling
-        assert!(has_library(temp.path(), "libkrun"));
+        assert!(has_library(temp.path(), prefix));
     }
 
     #[test]
@@ -149,6 +166,8 @@ mod tests {
         let temp = create_temp_lib_dir(&["libkrun.dylib", "libkrun-efi.dylib"]);
         #[cfg(target_os = "linux")]
         let temp = create_temp_lib_dir(&["libkrun.so", "libkrun-efi.so"]);
+        #[cfg(target_os = "windows")]
+        let temp = create_temp_lib_dir(&["krun.dll", "krun-efi.dll"]);
 
         // Searching for "krun" should find libkrun.dylib
         assert!(has_exact_library(temp.path(), "krun"));
@@ -162,6 +181,8 @@ mod tests {
         let temp = create_temp_lib_dir(&["libkrun.dylib", "libkrun.1.dylib"]);
         #[cfg(target_os = "linux")]
         let temp = create_temp_lib_dir(&["libkrun.so.1", "libkrun.so.1.0"]);
+        #[cfg(target_os = "windows")]
+        let temp = create_temp_lib_dir(&["krun.dll"]);
 
         assert!(has_exact_library(temp.path(), "krun"));
     }
@@ -172,6 +193,8 @@ mod tests {
         let temp = create_temp_lib_dir(&["libkrun-efi.dylib", "libkrun-efi.1.dylib"]);
         #[cfg(target_os = "linux")]
         let temp = create_temp_lib_dir(&["libkrun-efi.so", "libkrun-efi.so.1"]);
+        #[cfg(target_os = "windows")]
+        let temp = create_temp_lib_dir(&["krun-efi.dll"]);
 
         // Should NOT match libkrun-efi when looking for libkrun
         assert!(!has_exact_library(temp.path(), "krun"));

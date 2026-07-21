@@ -907,45 +907,49 @@ fn real_core_lifecycle_pull_run_exec_logs_stop_rm() {
         "--",
         "/bin/sh",
         "-c",
-        "printf 'core-smoke-booted:%s:%s:%s\\n' \"$A3S_SMOKE_FROM_FILE\" \"$A3S_SMOKE_OVERRIDE\" \"$A3S_SMOKE_INLINE\"; sleep 3600",
+        "hostname_value=$(cat /etc/hostname); hosts_value=$(grep -q '^127\\.0\\.0\\.2[[:space:]].*db\\.local' /etc/hosts && printf hosts-ok || printf hosts-missing); printf 'core-smoke-booted:%s:%s:%s:%s:%s\\n' \"$A3S_SMOKE_FROM_FILE\" \"$A3S_SMOKE_OVERRIDE\" \"$A3S_SMOKE_INLINE\" \"$hostname_value\" \"$hosts_value\"; sleep 3600",
     ]);
 
     smoke.wait_for_running();
 
-    let exec_env = smoke.ok(&[
-        "exec",
-        &smoke.name,
-        "--env",
-        "A3S_EXEC_SMOKE=ok",
-        "--",
-        "/bin/sh",
-        "-c",
-        "printf '%s' \"$A3S_EXEC_SMOKE\"",
-    ]);
-    assert_eq!(exec_env.trim(), "ok");
+    #[cfg(not(target_os = "windows"))]
+    {
+        let exec_env = smoke.ok(&[
+            "exec",
+            &smoke.name,
+            "--env",
+            "A3S_EXEC_SMOKE=ok",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf '%s' \"$A3S_EXEC_SMOKE\"",
+        ]);
+        assert_eq!(exec_env.trim(), "ok");
 
-    let hostname = smoke.ok(&[
-        "exec",
-        &smoke.name,
-        "--",
-        "/bin/sh",
-        "-c",
-        "cat /etc/hostname",
-    ]);
-    assert_eq!(hostname.trim(), "smoke-box");
+        let hostname = smoke.ok(&[
+            "exec",
+            &smoke.name,
+            "--",
+            "/bin/sh",
+            "-c",
+            "cat /etc/hostname",
+        ]);
+        assert_eq!(hostname.trim(), "smoke-box");
 
-    let hosts = smoke.ok(&[
-        "exec",
-        &smoke.name,
-        "--",
-        "/bin/sh",
-        "-c",
-        "grep -q '^127\\.0\\.0\\.2[[:space:]].*db\\.local' /etc/hosts && printf hosts-ok",
-    ]);
-    assert_eq!(hosts.trim(), "hosts-ok");
+        let hosts = smoke.ok(&[
+            "exec",
+            &smoke.name,
+            "--",
+            "/bin/sh",
+            "-c",
+            "grep -q '^127\\.0\\.0\\.2[[:space:]].*db\\.local' /etc/hosts && printf hosts-ok",
+        ]);
+        assert_eq!(hosts.trim(), "hosts-ok");
+    }
 
-    let logs = smoke.wait_for_logs("core-smoke-booted:file:cli:inline");
-    assert_contains(&logs, "core-smoke-booted:file:cli:inline", "box logs");
+    let marker = "core-smoke-booted:file:cli:inline:smoke-box:hosts-ok";
+    let logs = smoke.wait_for_logs(marker);
+    assert_contains(&logs, marker, "box logs");
 
     smoke.ok(&["stop", &smoke.name]);
     let stopped = smoke.ok(&["ps", "-a"]);
@@ -1054,31 +1058,34 @@ fn real_core_utility_commands_cp_top_stats() {
     assert_contains(&stats, &smoke.name, "stats output");
     assert_contains(&stats, "running", "stats output");
 
-    let top = smoke.ok(&["top", &smoke.name, "--", "-o", "pid,comm"]);
-    assert_contains(&top, "PID", "top output");
-    assert_contains(&top, "sleep", "top output");
+    #[cfg(not(target_os = "windows"))]
+    {
+        let top = smoke.ok(&["top", &smoke.name, "--", "-o", "pid,comm"]);
+        assert_contains(&top, "PID", "top output");
+        assert_contains(&top, "sleep", "top output");
 
-    let host_src = smoke.home_path().join("host-to-box.txt");
-    std::fs::write(&host_src, "cp-smoke-ok\n").expect("write host source file");
-    let host_src_arg = host_src.to_string_lossy().to_string();
-    let box_path = format!("{}:/tmp/a3s-box-cp-smoke.txt", smoke.name);
-    smoke.ok(&["cp", &host_src_arg, &box_path]);
+        let host_src = smoke.home_path().join("host-to-box.txt");
+        std::fs::write(&host_src, "cp-smoke-ok\n").expect("write host source file");
+        let host_src_arg = host_src.to_string_lossy().to_string();
+        let box_path = format!("{}:/tmp/a3s-box-cp-smoke.txt", smoke.name);
+        smoke.ok(&["cp", &host_src_arg, &box_path]);
 
-    let copied_in_box = smoke.ok(&[
-        "exec",
-        &smoke.name,
-        "--",
-        "/bin/sh",
-        "-c",
-        "cat /tmp/a3s-box-cp-smoke.txt",
-    ]);
-    assert_eq!(copied_in_box, "cp-smoke-ok\n");
+        let copied_in_box = smoke.ok(&[
+            "exec",
+            &smoke.name,
+            "--",
+            "/bin/sh",
+            "-c",
+            "cat /tmp/a3s-box-cp-smoke.txt",
+        ]);
+        assert_eq!(copied_in_box, "cp-smoke-ok\n");
 
-    let host_dst = smoke.home_path().join("box-to-host.txt");
-    let host_dst_arg = host_dst.to_string_lossy().to_string();
-    smoke.ok(&["cp", &box_path, &host_dst_arg]);
-    let copied_back = std::fs::read_to_string(&host_dst).expect("read copied-back file");
-    assert_eq!(copied_back, "cp-smoke-ok\n");
+        let host_dst = smoke.home_path().join("box-to-host.txt");
+        let host_dst_arg = host_dst.to_string_lossy().to_string();
+        smoke.ok(&["cp", &box_path, &host_dst_arg]);
+        let copied_back = std::fs::read_to_string(&host_dst).expect("read copied-back file");
+        assert_eq!(copied_back, "cp-smoke-ok\n");
+    }
 
     smoke.ok(&["stop", &smoke.name]);
     smoke.ok(&["rm", &smoke.name]);
@@ -1117,8 +1124,14 @@ fn real_core_published_port_http_smoke() {
         "port output",
     );
 
-    let response = smoke.wait_for_tcp_text(host_port, "core-smoke-port-ok");
-    assert_contains(&response, "core-smoke-port-ok", "published port response");
+    for request in 1..=2 {
+        let response = smoke.wait_for_tcp_text(host_port, "core-smoke-port-ok");
+        assert_contains(
+            &response,
+            "core-smoke-port-ok",
+            &format!("published port response #{request}"),
+        );
+    }
 
     smoke.ok(&["stop", &smoke.name]);
     smoke.ok(&["rm", &smoke.name]);
@@ -1211,6 +1224,60 @@ fn real_core_virtiofs_tar_closes_every_source_file_cleanly() {
 
 #[test]
 #[ignore]
+fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+    let host_dir = tempfile::tempdir().expect("temporary bind-mount source");
+    let directory_file = host_dir.path().join("directory.txt");
+    let single_file = host_dir.path().join("single.txt");
+    std::fs::write(&directory_file, "directory-bind-ok").expect("write directory bind fixture");
+    std::fs::write(&single_file, "single-file-bind-ok").expect("write single-file bind fixture");
+
+    seed_smoke_image(&smoke, &image);
+
+    let directory_mount = format!("{}:/mnt/a3s-bind:ro", host_dir.path().display());
+    let directory_result = smoke.ok(&[
+        "run",
+        "--rm",
+        "--name",
+        &format!("{}-dir", smoke.name),
+        "-v",
+        &directory_mount,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "test \"$(cat /mnt/a3s-bind/directory.txt)\" = directory-bind-ok || exit 31; if printf changed >/mnt/a3s-bind/directory.txt 2>/dev/null; then exit 32; fi; printf directory-bind-ro-ok",
+    ]);
+    assert_contains(
+        &directory_result,
+        "directory-bind-ro-ok",
+        "directory bind output",
+    );
+
+    let single_file_mount = format!("{}:/etc/a3s-bind-test.txt:ro", single_file.display());
+    let single_file_result = smoke.ok(&[
+        "run",
+        "--rm",
+        "--name",
+        &format!("{}-file", smoke.name),
+        "-v",
+        &single_file_mount,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "test \"$(cat /etc/a3s-bind-test.txt)\" = single-file-bind-ok || exit 41; if printf changed >/etc/a3s-bind-test.txt 2>/dev/null; then exit 42; fi; printf single-file-bind-ro-ok",
+    ]);
+    assert_contains(
+        &single_file_result,
+        "single-file-bind-ro-ok",
+        "single-file bind output",
+    );
+}
+
+#[test]
+#[ignore]
 fn real_core_named_volume_persists_across_stop_start() {
     let smoke = CoreSmoke::new();
     let image = smoke_image();
@@ -1235,29 +1302,32 @@ fn real_core_named_volume_persists_across_stop_start() {
         "--",
         "/bin/sh",
         "-c",
-        "mkdir -p /data; if [ ! -f /data/value ]; then printf first >/data/value; fi; echo core-smoke-volume-ready; sleep 3600",
+        "mkdir -p /data; if [ ! -f /data/value ]; then printf first >/data/value; echo core-smoke-volume-ready; else printf 'core-smoke-volume-restarted:%s\\n' \"$(cat /data/value)\"; fi; sleep 3600",
     ]);
     smoke.wait_for_running();
     smoke.wait_for_logs("core-smoke-volume-ready");
 
-    let first = smoke.ok(&[
-        "exec",
-        &smoke.name,
-        "--",
-        "/bin/sh",
-        "-c",
-        "cat /data/value",
-    ]);
-    assert_eq!(first, "first");
+    #[cfg(not(target_os = "windows"))]
+    {
+        let first = smoke.ok(&[
+            "exec",
+            &smoke.name,
+            "--",
+            "/bin/sh",
+            "-c",
+            "cat /data/value",
+        ]);
+        assert_eq!(first, "first");
 
-    smoke.ok(&[
-        "exec",
-        &smoke.name,
-        "--",
-        "/bin/sh",
-        "-c",
-        "printf ':live' >>/data/value",
-    ]);
+        smoke.ok(&[
+            "exec",
+            &smoke.name,
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf ':live' >>/data/value",
+        ]);
+    }
     smoke.ok(&["stop", &smoke.name]);
 
     let volume_after_stop = smoke.ok(&["volume", "ls", "--quiet"]);
@@ -1266,15 +1336,28 @@ fn real_core_named_volume_persists_across_stop_start() {
     smoke.ok(&["start", &smoke.name]);
     smoke.wait_for_running();
 
-    let persisted = smoke.ok(&[
-        "exec",
-        &smoke.name,
-        "--",
-        "/bin/sh",
-        "-c",
-        "cat /data/value",
-    ]);
-    assert_eq!(persisted, "first:live");
+    #[cfg(target_os = "windows")]
+    {
+        let logs = smoke.wait_for_logs("core-smoke-volume-restarted:first");
+        assert_contains(
+            &logs,
+            "core-smoke-volume-restarted:first",
+            "named volume restart logs",
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let persisted = smoke.ok(&[
+            "exec",
+            &smoke.name,
+            "--",
+            "/bin/sh",
+            "-c",
+            "cat /data/value",
+        ]);
+        assert_eq!(persisted, "first:live");
+    }
 
     smoke.ok(&["stop", &smoke.name]);
     smoke.ok(&["rm", &smoke.name]);
@@ -1541,18 +1624,10 @@ fn real_core_filesystem_image_snapshot_commands() {
         "--",
         "/bin/sh",
         "-c",
-        "sleep 3600",
+        "if [ -f /tmp/core-smoke-storage.txt ]; then echo core-smoke-storage-restored; else printf core-smoke-storage-ok >/tmp/core-smoke-storage.txt; echo core-smoke-storage-ready; fi; sleep 3600",
     ]);
     smoke.wait_for_running();
-
-    smoke.ok(&[
-        "exec",
-        &smoke.name,
-        "--",
-        "/bin/sh",
-        "-c",
-        "printf core-smoke-storage-ok >/tmp/core-smoke-storage.txt",
-    ]);
+    smoke.wait_for_logs("core-smoke-storage-ready");
 
     let diff = smoke.ok(&["diff", &smoke.name]);
     assert_contains(&diff, "A /tmp/core-smoke-storage.txt", "diff output");
@@ -1563,6 +1638,12 @@ fn real_core_filesystem_image_snapshot_commands() {
     let exported_text =
         tar_entry_text(&export_tar, "/tmp/core-smoke-storage.txt").expect("read exported file");
     assert_eq!(exported_text, "core-smoke-storage-ok");
+
+    // WHPX intentionally has no post-boot exec/archive channel. A clean stop
+    // persists the authoritative guest metadata used by Windows commit; Unix
+    // keeps exercising the live, pause-capable guest archive path here.
+    #[cfg(windows)]
+    smoke.ok(&["stop", &smoke.name]);
 
     let commit = smoke.ok(&[
         "commit",
@@ -1586,6 +1667,17 @@ fn real_core_filesystem_image_snapshot_commands() {
         "core-smoke-storage-ok",
         "committed image run",
     );
+
+    #[cfg(windows)]
+    {
+        smoke.ok(&["start", &smoke.name]);
+        smoke.wait_for_running();
+        smoke.wait_for_logs("core-smoke-storage-restored");
+    }
+
+    // Host-path snapshot traversal is safe only while the guest cannot mutate
+    // the rootfs. The CLI therefore requires a stopped source box.
+    smoke.ok(&["stop", &smoke.name]);
 
     let snapshot_id = smoke
         .ok(&[
@@ -1620,14 +1712,13 @@ fn real_core_filesystem_image_snapshot_commands() {
 
     smoke.ok(&["start", &restored_box]);
     smoke.wait_for_named_running(&restored_box);
-    let restored_text = smoke.ok(&[
-        "exec",
-        &restored_box,
-        "--",
-        "/bin/sh",
-        "-c",
-        "cat /tmp/core-smoke-storage.txt",
-    ]);
+    smoke.wait_for_named_logs(&restored_box, "core-smoke-storage-restored");
+
+    let restored_tar = smoke.home_path().join("core-smoke-restored.tar");
+    let restored_tar_arg = restored_tar.to_string_lossy().to_string();
+    smoke.ok(&["export", &restored_box, "--output", &restored_tar_arg]);
+    let restored_text =
+        tar_entry_text(&restored_tar, "/tmp/core-smoke-storage.txt").expect("read restored file");
     assert_eq!(restored_text, "core-smoke-storage-ok");
 
     smoke.ok(&["stop", &restored_box]);
@@ -1635,11 +1726,9 @@ fn real_core_filesystem_image_snapshot_commands() {
     smoke.ok(&["snapshot", "rm", &snapshot_id]);
     snapshot_cleanup.id = None;
 
-    smoke.ok(&["stop", &smoke.name]);
     smoke.ok(&["rm", &smoke.name]);
 }
 
-#[cfg(unix)]
 #[test]
 #[ignore]
 fn real_core_commit_preserves_guest_ownership_and_modes_after_stop() {
@@ -1755,6 +1844,7 @@ fn real_core_snapshot_cow_isolation_and_rm_guard() {
         "-c",
         "printf BASE >/tmp/cow-shared.txt",
     ]);
+    smoke.ok(&["stop", &base]);
     let snapshot_id = smoke
         .ok(&["snapshot", "create", &base, "--name", &snapshot_name])
         .trim()
@@ -1764,7 +1854,6 @@ fn real_core_snapshot_cow_isolation_and_rm_guard() {
         "snapshot id: {snapshot_id}"
     );
     snapshot_cleanup.id = Some(snapshot_id.clone());
-    smoke.ok(&["stop", &base]);
     smoke.ok(&["rm", &base]);
 
     // Fork A: sees the warmed state, then writes to its own upper.

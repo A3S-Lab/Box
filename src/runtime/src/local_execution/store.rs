@@ -16,7 +16,7 @@ use crate::{
 impl LocalExecutionManager {
     pub(super) async fn reserve(
         &self,
-        record: BoxRecord,
+        mut record: BoxRecord,
     ) -> ExecutionManagerResult<ManagedExecutionReservation> {
         let store = self.store.clone();
         let Some(snapshot_id) = record
@@ -62,6 +62,34 @@ impl LocalExecutionManager {
                     "filesystem snapshot {snapshot_id} cannot be restored: {error}"
                 ))
             })?;
+
+            let health_check = record
+                .health_check
+                .clone()
+                .or_else(|| metadata.health_check.clone());
+            let healthcheck_disabled =
+                record.healthcheck_disabled || metadata.healthcheck_disabled;
+            record.health_check = health_check.clone();
+            record.healthcheck_disabled = healthcheck_disabled;
+            if let Some(managed) = record.managed_execution.as_mut() {
+                managed.request.policy.health_check = health_check;
+                managed.request.policy.healthcheck_disabled = healthcheck_disabled;
+            }
+            super::record::validate_record_health(&record)?;
+
+            #[cfg(windows)]
+            if !healthcheck_disabled
+                && metadata
+                    .image_config
+                    .as_ref()
+                    .and_then(|config| config.health_check.as_ref())
+                    .is_some_and(a3s_box_core::SnapshotImageHealthCheck::is_enabled)
+            {
+                return Err(ExecutionManagerError::InvalidRequest(
+                    "container health checks are not supported on Windows; the snapshot image defines an effective health check"
+                        .to_string(),
+                ));
+            }
             store.reserve(record).map_err(map_store_error)
         })
         .await

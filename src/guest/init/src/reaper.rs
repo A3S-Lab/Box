@@ -105,8 +105,19 @@ mod tests {
         // A child that exits immediately is the worst case the lock-across-spawn
         // protects: it must still be MANAGED for the handler (here, the test) to
         // reap, never the supervision loop.
-        let (mut child, guard) =
-            spawn_managed(|| std::process::Command::new("true").spawn()).expect("spawn true");
+        let (mut child, guard) = spawn_managed(|| {
+            #[cfg(windows)]
+            {
+                std::process::Command::new("cmd")
+                    .args(["/D", "/S", "/C", "exit 0"])
+                    .spawn()
+            }
+            #[cfg(not(windows))]
+            {
+                std::process::Command::new("true").spawn()
+            }
+        })
+        .expect("spawn immediate child");
         let pid = child.id() as i32;
         assert!(
             is_managed(pid),

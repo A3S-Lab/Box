@@ -22,6 +22,12 @@ dirs = { workspace = true }
 flate2 = "1.0"
 base64 = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.48", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [lib]
 name = "a3s_box_core"
 path = "src/lib.rs"

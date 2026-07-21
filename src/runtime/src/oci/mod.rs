@@ -33,7 +33,7 @@ mod limited_reader;
 mod pull;
 pub mod reference;
 pub mod registry;
-mod rootfs;
+pub(crate) mod rootfs;
 pub mod signing;
 pub mod store;
 

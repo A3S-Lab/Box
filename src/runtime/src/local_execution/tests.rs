@@ -369,6 +369,123 @@ async fn create_persists_trusted_identity_and_returns_running_lease() {
     assert_eq!(record.anonymous_volumes, vec!["anonymous-1"]);
 }
 
+#[tokio::test]
+async fn create_rejects_unsupported_microvm_security_before_store_or_backend() {
+    let (_directory, manager, backend) = harness();
+
+    for (index, (security_option, expected)) in [
+        ("apparmor=runtime/default", "AppArmor"),
+        ("label=type:container_t", "SELinux"),
+        ("seccomp=/profiles/restricted.json", "custom seccomp"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut create_request = request(&format!("unsupported-security-{index}"));
+        create_request.config.isolation = ExecutionIsolation::Microvm;
+        create_request.config.security_opt = vec![security_option.to_string()];
+
+        let error = manager
+            .create_and_start(
+                create_request,
+                &operation(&format!("unsupported-security-operation-{index}")),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ExecutionManagerError::InvalidRequest(message) if message.contains(expected)
+        ));
+        assert!(!manager.state_path().exists());
+        assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+        assert!(backend.executions.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn create_rejects_health_check_before_store_or_backend() {
+    let (_directory, manager, backend) = harness();
+    let mut create_request = request("unsupported-windows-health");
+    create_request.policy.health_check = Some(ExecutionHealthCheck {
+        cmd: vec!["true".to_string()],
+        interval_secs: 30,
+        timeout_secs: 5,
+        retries: 3,
+        start_period_secs: 0,
+    });
+    create_request.rootfs_snapshot_id = Some(ExecutionSnapshotId::new("restore-source").unwrap());
+
+    let error = manager
+        .create(
+            create_request,
+            &operation("unsupported-windows-health-operation"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("health checks are not supported on Windows")
+    ));
+    assert!(!manager.state_path().exists());
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+    assert!(backend.executions.lock().unwrap().is_empty());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn start_rejects_a_persisted_health_check_before_claim_or_backend() {
+    let (_directory, manager, backend) = harness();
+    let execution_id = ExecutionId::new("persisted-windows-health").unwrap();
+    let mut create_request = request("persisted-windows-health");
+    create_request.policy.health_check = Some(ExecutionHealthCheck {
+        cmd: vec!["true".to_string()],
+        interval_secs: 30,
+        timeout_secs: 5,
+        retries: 3,
+        start_period_secs: 0,
+    });
+    // Disabled health metadata is safe to persist on Windows. Flip the stored
+    // effective policy afterward to model a record written by an older client.
+    create_request.policy.healthcheck_disabled = true;
+    let mut record = build_managed_record(
+        &manager.home_dir,
+        &execution_id,
+        operation("persisted-windows-health-operation"),
+        create_request,
+        Utc::now(),
+    )
+    .unwrap();
+    record.healthcheck_disabled = false;
+    record
+        .managed_execution
+        .as_mut()
+        .unwrap()
+        .request
+        .policy
+        .healthcheck_disabled = false;
+    manager.reserve(record).await.unwrap();
+
+    let error = manager
+        .start(&execution_id, ExecutionGeneration::INITIAL)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("health checks are not supported on Windows")
+    ));
+    assert_eq!(
+        persisted(&manager, &execution_id).managed_state().unwrap(),
+        Some(ManagedExecutionState::Created)
+    );
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn process_session_inherits_environment_from_persisted_record() {
@@ -535,6 +652,7 @@ async fn create_reserves_without_start_and_start_is_generation_fenced() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn create_preserves_complete_caller_record_policy() {
     let (_directory, manager, backend) = harness();
@@ -597,6 +715,7 @@ async fn create_preserves_complete_caller_record_policy() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn first_start_initializes_health_state_from_persisted_policy() {
     let (_directory, manager, _backend) = harness();

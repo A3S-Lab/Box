@@ -2,37 +2,54 @@
 
 本文档说明如何将 a3s-box 发布到 Windows Package Manager (winget)。
 
-## 方法 1: 自动发布 (推荐)
+> `.winget/` 中提交到仓库的 `0.8.0`、URL 与 SHA256 是发布工具会重写的
+> seed 值，并不表示该 release 存在。发布时必须输入一个已经包含
+> `a3s-box-v<VERSION>-windows-x86_64.zip` 的实际 tag；不能为缺少 Windows
+> ZIP 的 release 复用模板哈希。
+
+## 方法 1: GitHub Actions 发布 (推荐)
 
 ### 前提条件
 
 1. **创建 GitHub Personal Access Token**
    - 访问 https://github.com/settings/tokens
-   - 创建 token，权限: `public_repo`, `workflow`
+   - 创建 token，权限: `public_repo`
    - 保存 token
 
 2. **配置 GitHub Secrets**
    - 在仓库设置中添加 secrets:
      - `WINGET_TOKEN`: 你的 GitHub token
-     - `WINGET_FORK_USER`: 你的 GitHub 用户名
 
 ### 触发发布
 
-发布会在创建 GitHub Release 时自动触发，或手动运行：
+发布工作流当前需要手动运行：
 
 ```bash
 # 在 GitHub Actions 页面手动触发
 # Actions -> Publish to winget -> Run workflow
 ```
 
+输入必须是严格的 SemVer 2.0.0，且不能带前导 `v`。例如输入 `3.0.12`，
+而不是 `v3.0.12`。工作流先验证该输入，再构造唯一的 `v<VERSION>` tag，
+因此不会接受重复 `v` 或把输入内容直接插入脚本。
+
+工作流把所有 GitHub Actions 固定到完整 commit SHA，并使用 WinGetCreate
+`1.12.8.0`。它从 Microsoft 官方 GitHub release 下载可执行文件，校验 SHA256
+`8BD738851B524885410112678E3771B341C5C716DE60FBBECB88AB0A363ED85D` 后执行
+该工具的 `info` 自检。manifest 由 `winget validate --manifest` 实际验证；只有
+验证成功后，已校验的 WinGetCreate 才会执行 `submit`。
+
 ## 方法 2: 使用 PowerShell 脚本
+
+本地环境需要可用的 `winget validate` 命令和 .NET 8 Runtime（用于运行固定版本的
+WinGetCreate）。
 
 ```powershell
 # 设置 GitHub token
 $env:GITHUB_TOKEN = "your_github_token_here"
 
 # 运行提交脚本
-.\scripts\submit-to-winget.ps1 -Version "0.8.0"
+.\scripts\submit-to-winget.ps1 -Version "<VERSION>"
 ```
 
 脚本会自动：
@@ -41,6 +58,12 @@ $env:GITHUB_TOKEN = "your_github_token_here"
 3. 更新 manifest 文件
 4. 验证 manifest
 5. 创建 PR 到 microsoft/winget-pkgs
+
+如只需更新并验证 manifest、不要提交 PR，可运行：
+
+```powershell
+.\scripts\submit-to-winget.ps1 -Version "<VERSION>" -ValidateOnly
+```
 
 ## 方法 3: 手动提交
 
@@ -55,7 +78,7 @@ manifest 文件位于 `.winget/` 目录：
 
 ```powershell
 # 下载发布资产
-$Version = "0.8.0"
+$Version = "<VERSION>"
 $Tag = "v$Version"
 $Url = "https://github.com/A3S-Lab/Box/releases/download/$Tag/a3s-box-$Tag-windows-x86_64.zip"
 Invoke-WebRequest -Uri $Url -OutFile "a3s-box.zip"
@@ -66,6 +89,20 @@ $SHA256 = $Hash.Hash
 Write-Host "SHA256: $SHA256"
 ```
 
+ZIP 中必须保留顶层版本目录，并让两个 DLL 与 Windows 可执行文件同级：
+
+```text
+a3s-box-v0.8.0-windows-x86_64/
+├── a3s-box.exe
+├── a3s-box-shim.exe
+├── a3s-box-guest-init
+├── krun.dll
+└── libkrunfw.dll
+```
+
+不要把 DLL 移到 `lib/` 子目录；Windows 加载器需要在可执行文件目录中找到
+`krun.dll`，而 `libkrunfw.dll` 也必须与 `krun.dll` 相邻。
+
 手动更新 `.winget/A3SLab.Box.installer.yaml`:
 - `PackageVersion`: 更新为新版本
 - `InstallerUrl`: 更新 URL
@@ -75,11 +112,8 @@ Write-Host "SHA256: $SHA256"
 ### 步骤 3: 验证 manifest
 
 ```powershell
-# 安装 wingetcreate
-Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile "wingetcreate.exe"
-
-# 验证 manifest
-.\wingetcreate.exe validate .winget\
+# 脚本会校验固定版本的 WinGetCreate，并实际执行 winget validate --manifest。
+.\scripts\submit-to-winget.ps1 -Version "<VERSION>" -ValidateOnly
 ```
 
 ### 步骤 4: 提交到 winget-pkgs
@@ -87,7 +121,8 @@ Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile "wingetcrea
 #### 选项 A: 使用 wingetcreate (推荐)
 
 ```powershell
-.\wingetcreate.exe submit --token YOUR_GITHUB_TOKEN .winget\
+$env:GITHUB_TOKEN = "YOUR_GITHUB_TOKEN"
+.\scripts\submit-to-winget.ps1 -Version "<VERSION>"
 ```
 
 #### 选项 B: 手动创建 PR
@@ -105,7 +140,7 @@ PackageIdentifier: A3SLab.Box
 PackageVersion: 0.8.0
 DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.6.0
+ManifestVersion: 1.9.0
 ```
 
 ### A3SLab.Box.installer.yaml (安装程序)
@@ -121,8 +156,7 @@ NestedInstallerFiles:
 - RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\a3s-box.exe
   PortableCommandAlias: a3s-box
 - RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\a3s-box-shim.exe
-- RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\a3s-box-guest-init
-- RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\lib\krun.dll
+ArchiveBinariesDependOnPath: true
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/A3S-Lab/Box/releases/download/v0.8.0/a3s-box-v0.8.0-windows-x86_64.zip
@@ -131,7 +165,7 @@ Installers:
     WindowsFeatures:
     - HypervisorPlatform
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.9.0
 ```
 
 ### A3SLab.Box.locale.en-US.yaml (本地化)
@@ -159,7 +193,10 @@ winget upgrade A3SLab.Box
    Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
    ```
 
-2. **Portable 安装**: 使用 `portable` 类型，winget 会将 CLI 解压到用户目录并添加到 PATH。
+   运行 a3s-box 的账户还必须启用 Windows Developer Mode，或拥有
+   `SeCreateSymbolicLinkPrivilege`，否则 OCI 层中的符号链接无法被完整还原。
+
+2. **Portable 安装**: 使用 `portable` 类型和 `ArchiveBinariesDependOnPath: true`，winget 会保留归档中的 guest-init 与 DLL，并将安装目录添加到 PATH。`NestedInstallerFiles` 只列出两个 Windows 可执行文件，不能列出 DLL。
 
 3. **审核时间**: PR 提交后，winget 维护者会审核，通常需要 1-3 天。
 
@@ -171,7 +208,7 @@ winget upgrade A3SLab.Box
 确保下载的文件完整，重新计算 SHA256。
 
 ### Manifest 验证失败
-运行 `wingetcreate validate` 查看详细错误信息。
+运行 `winget validate --manifest .winget\ --disable-interactivity` 查看详细错误信息。
 
 ### PR 被拒绝
 查看 PR 评论，根据维护者反馈修改 manifest。

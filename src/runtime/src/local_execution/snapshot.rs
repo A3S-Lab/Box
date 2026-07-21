@@ -619,6 +619,8 @@ fn build_snapshot_metadata(
     metadata.entrypoint = record.entrypoint.clone();
     metadata.workdir = record.workdir.clone();
     metadata.labels = record.labels.clone();
+    metadata.health_check = record.health_check.clone();
+    metadata.healthcheck_disabled = record.healthcheck_disabled;
     metadata.image_config = crate::load_resolved_image_config(&record.box_dir)
         .map_err(|error| snapshot_error(record, "load resolved image configuration", error))?;
     if metadata.image_config.is_none() {

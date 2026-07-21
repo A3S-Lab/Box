@@ -16,7 +16,7 @@ pub mod network;
 pub mod port_forward;
 pub mod pty_server;
 pub mod reaper;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod rootfs_archive;
 pub mod user;
 

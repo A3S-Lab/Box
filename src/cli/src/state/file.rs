@@ -206,6 +206,32 @@ impl StateFile {
                 // rootfs (`/.a3s_exit_code`) on exit. Resolve the provider-specific
                 // host path so overlay, copy fallback, and APFS-backed rootfses all
                 // report the real code; liveness polling alone would yield exit 0.
+                #[cfg(target_os = "windows")]
+                {
+                    let persisted =
+                        a3s_box_runtime::rootfs::read_persisted_exit_code(&record.box_dir);
+                    if record.box_dir.join("rootfs").is_dir() {
+                        let fallback = record.exit_code.or(persisted).unwrap_or(0);
+                        match a3s_box_runtime::vm::collect_windows_guest_result(
+                            &record.box_dir,
+                            &record.log_config,
+                            fallback,
+                        ) {
+                            Ok(code) => record.exit_code = Some(code),
+                            Err(error) => {
+                                tracing::warn!(
+                                    box_id = %record.id,
+                                    %error,
+                                    "Failed to collect completed Windows guest result"
+                                );
+                                record.exit_code = Some(if fallback == 0 { 1 } else { fallback });
+                            }
+                        }
+                    } else if record.exit_code.is_none() {
+                        record.exit_code = persisted;
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
                 if record.exit_code.is_none() {
                     record.exit_code =
                         a3s_box_runtime::rootfs::read_persisted_exit_code(&record.box_dir);

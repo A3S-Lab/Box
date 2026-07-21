@@ -22,7 +22,7 @@ pub async fn execute(args: UnpauseArgs) -> Result<(), Box<dyn std::error::Error>
     let mut errors: Vec<String> = Vec::new();
 
     for query in &args.boxes {
-        if let Err(e) = unpause_one(&state, query) {
+        if let Err(e) = unpause_one(&state, query).await {
             errors.push(format!("{query}: {e}"));
         }
     }
@@ -34,18 +34,15 @@ pub async fn execute(args: UnpauseArgs) -> Result<(), Box<dyn std::error::Error>
     }
 }
 
-fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let record = resolve::resolve(state, query)?;
+async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let box_id = resolve::resolve(state, query)?.id.clone();
+    let _lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+    let current_state = StateFile::load_default()?;
+    let record = select_unpause_record(&current_state, &box_id)
+        .map_err(|error| format!("Box {query} changed while waiting to unpause: {error}"))?;
+    drop(current_state);
 
-    if record.status != "paused" {
-        return Err(format!(
-            "Cannot unpause box {} because it is {}. Use `a3s-box ps -a` to inspect state.",
-            record.name, record.status
-        )
-        .into());
-    }
-
-    let pid = lifecycle::require_live_pid(record, "unpause")?;
+    let pid = lifecycle::require_live_pid(&record, "unpause")?;
 
     #[cfg(windows)]
     {
@@ -58,20 +55,30 @@ fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error:
 
     #[cfg(unix)]
     {
-        let box_id = record.id.clone();
         let name = record.name.clone();
 
         process::send_signal(pid, libc::SIGCONT)
             .map_err(|err| format!("Failed to unpause box {name} with SIGCONT: {err}"))?;
 
-        // Persist the status flip atomically under the state lock so it cannot
-        // clobber a concurrent writer with our pre-signal snapshot.
-        StateFile::modify(|s| {
-            if let Some(record) = s.find_by_id_mut(&box_id) {
-                record.status = "running".to_string();
-            }
-            Ok::<(), std::io::Error>(())
+        let expected_pid_start_time = record.pid_start_time;
+        let persisted = StateFile::modify(|s| {
+            let updated = match s.find_by_id_mut(&box_id) {
+                Some(record)
+                    if lifecycle::matches_execution(record, pid, expected_pid_start_time) =>
+                {
+                    record.status = "running".to_string();
+                    true
+                }
+                _ => false,
+            };
+            Ok::<bool, std::io::Error>(updated)
         })?;
+        if !persisted {
+            return Err(format!(
+                "Box {name} changed execution while it was unpausing; did not overwrite the replacement state"
+            )
+            .into());
+        }
 
         println!("{name}");
         Ok(())
@@ -82,6 +89,24 @@ fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error:
         let _ = pid;
         Err("'unpause' requires host process resume support".into())
     }
+}
+
+fn select_unpause_record(
+    state: &StateFile,
+    query: &str,
+) -> Result<crate::state::BoxRecord, Box<dyn std::error::Error>> {
+    let record = resolve::resolve(state, query)?;
+
+    if record.status != "paused" {
+        return Err(format!(
+            "Cannot unpause box {} because it is {}. Use `a3s-box ps -a` to inspect state.",
+            record.name, record.status
+        )
+        .into());
+    }
+
+    lifecycle::require_live_pid(record, "unpause")?;
+    Ok(record.clone())
 }
 
 #[cfg(test)]
@@ -97,7 +122,7 @@ mod tests {
             "running",
             Some(99999),
         )]);
-        let result = unpause_one(&state, "running_box");
+        let result = select_unpause_record(&state, "running_box");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cannot unpause"));
     }
@@ -105,7 +130,7 @@ mod tests {
     #[test]
     fn test_unpause_rejects_stopped() {
         let (_tmp, state) = setup_state(vec![make_record("id-1", "stopped_box", "stopped", None)]);
-        let result = unpause_one(&state, "stopped_box");
+        let result = select_unpause_record(&state, "stopped_box");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Cannot unpause"));
     }
@@ -114,7 +139,7 @@ mod tests {
     fn test_unpause_rejects_paused_without_pid() {
         let (_tmp, state) = setup_state(vec![make_record("id-1", "paused_box", "paused", None)]);
 
-        let result = unpause_one(&state, "paused_box");
+        let result = select_unpause_record(&state, "paused_box");
 
         assert!(result.is_err());
         let error = result.unwrap_err().to_string();
@@ -130,7 +155,7 @@ mod tests {
     #[test]
     fn test_unpause_not_found() {
         let (_tmp, state) = setup_state(vec![]);
-        let result = unpause_one(&state, "nonexistent");
+        let result = select_unpause_record(&state, "nonexistent");
         assert!(result.is_err());
     }
 }

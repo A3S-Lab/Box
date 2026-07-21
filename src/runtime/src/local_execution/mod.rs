@@ -3,6 +3,10 @@
 mod api;
 mod backend;
 mod create;
+mod lifecycle_lock;
+pub use lifecycle_lock::{
+    acquire_blocking as acquire_execution_lifecycle_lock, ExecutionLifecycleLock,
+};
 mod logs;
 mod operations;
 mod port;

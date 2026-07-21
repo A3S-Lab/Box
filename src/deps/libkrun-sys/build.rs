@@ -41,6 +41,31 @@ const LIBKRUNFW_SHA256: &str = "8b5b9211da5445d9301dafb2201431f4392ab96455512bce
 // since the `tee` feature in libkrun requires amd-sev or tdx to compile properly.
 const LIBKRUN_BUILD_FEATURES: &[(&str, &str)] = &[("NET", "1"), ("BLK", "1")];
 
+// Deterministic `git archive` of the nested libkrun commit used by this Box
+// revision. Cargo does not recurse into Git submodules when creating a .crate,
+// so the archive is the source fallback for crates.io consumers.
+const LIBKRUN_SOURCE_ARCHIVE_SHA256: &str =
+    "fd4a6e929f18d1eab5cf143930f11b2792fdfcfd3208d59a9283061ce9bdd315";
+
+// Deterministic XZ archive containing the exact krun.dll, krun.lib, and
+// libkrunfw.dll combination exercised by the Windows WHPX test matrix.
+const KRUN_WINDOWS_ARCHIVE_SHA256: &str =
+    "cf79104f91f84f3efc282edce6a64e94a47cae426a2e62ed282ddf2abd86c4ba";
+const KRUN_WINDOWS_FILE_SHA256: &[(&str, &str)] = &[
+    (
+        "krun.dll",
+        "28f7e2e2fd5d65123369570e144229204b89295abb877d3ba4f272482507949c",
+    ),
+    (
+        "krun.lib",
+        "3ac760758158bd4d2d6570db58037d47cd370a8e6ea04ccf54a8b24fd1fdec3d",
+    ),
+    (
+        "libkrunfw.dll",
+        "44f25540f58155c01258fe123617636fdc6cff27873e38e71dbc75f139602077",
+    ),
+];
+
 fn target_os() -> String {
     env::var("CARGO_CFG_TARGET_OS").unwrap_or_default()
 }
@@ -56,6 +81,11 @@ const LIB_DIR: &str = "lib";
 fn main() {
     // Rebuild if vendored sources change
     println!("cargo:rerun-if-changed=vendor/libkrun");
+    println!("cargo:rerun-if-changed=vendor/libkrun-source.tar");
+    println!("cargo:rerun-if-changed=vendor/krun-windows-x64.tar.xz");
+    println!("cargo:rerun-if-changed=prebuilt/x86_64-pc-windows-msvc/krun.dll");
+    println!("cargo:rerun-if-changed=prebuilt/x86_64-pc-windows-msvc/krun.lib");
+    println!("cargo:rerun-if-changed=prebuilt/x86_64-pc-windows-msvc/libkrunfw.dll");
     println!("cargo:rerun-if-env-changed=A3S_DEPS_STUB");
     // Re-evaluate the system-vs-vendored decision when the toggle changes.
     println!("cargo:rerun-if-env-changed=A3S_BUILD_LIBKRUN");
@@ -201,6 +231,14 @@ fn find_sibling_libkrun_windows(triple: &str) -> Option<PathBuf> {
     None
 }
 
+fn has_windows_runtime_bundle(dir: &Path) -> bool {
+    has_windows_krun_pair(dir) && dir.join("libkrunfw.dll").is_file()
+}
+
+fn has_windows_krun_pair(dir: &Path) -> bool {
+    dir.join("krun.lib").is_file() && dir.join("krun.dll").is_file()
+}
+
 fn find_libkrunfw_under_target(target_root: PathBuf) -> Option<PathBuf> {
     let direct_candidates = [
         target_root.join("release/build"),
@@ -325,16 +363,53 @@ fn libkrun_build_env(libkrunfw_install: &Path) -> HashMap<String, String> {
     env
 }
 
-/// Verifies vendored libkrun source exists.
-fn verify_libkrun_source(manifest_dir: &Path) {
+/// Resolve libkrun source from a recursive repository checkout or from the
+/// checksum-verified archive shipped in crates.io packages.
+fn resolve_libkrun_source(manifest_dir: &Path, out_dir: &Path) -> PathBuf {
     let libkrun_src = manifest_dir.join("vendor/libkrun");
-    if !libkrun_src.exists() {
-        eprintln!("ERROR: Vendored libkrun source not found");
-        eprintln!();
-        eprintln!("Initialize git submodule:");
-        eprintln!("  git submodule update --init vendor/libkrun");
-        std::process::exit(1);
+    if libkrun_src.join("Cargo.toml").is_file() {
+        return libkrun_src;
     }
+
+    let archive = manifest_dir.join("vendor/libkrun-source.tar");
+    if !archive.is_file() {
+        panic!(
+            "libkrun source is unavailable: initialize vendor/libkrun in a repository checkout, or use a package containing {}",
+            archive.display()
+        );
+    }
+    verify_sha256(&archive, LIBKRUN_SOURCE_ARCHIVE_SHA256)
+        .unwrap_or_else(|error| panic!("Failed to verify bundled libkrun source: {error}"));
+
+    let extraction_root = out_dir.join(format!(
+        "libkrun-source-{}",
+        &LIBKRUN_SOURCE_ARCHIVE_SHA256[..12]
+    ));
+    let extracted_source = extraction_root.join("libkrun");
+    let marker = extraction_root.join(".source-sha256");
+    if extracted_source.join("Cargo.toml").is_file()
+        && fs::read_to_string(&marker).is_ok_and(|value| value == LIBKRUN_SOURCE_ARCHIVE_SHA256)
+    {
+        return extracted_source;
+    }
+
+    if extraction_root.exists() {
+        fs::remove_dir_all(&extraction_root)
+            .unwrap_or_else(|error| panic!("Failed to clear stale libkrun source: {error}"));
+    }
+    fs::create_dir_all(&extraction_root)
+        .unwrap_or_else(|error| panic!("Failed to create libkrun source directory: {error}"));
+    extract_tar_archive(&archive, &extraction_root)
+        .unwrap_or_else(|error| panic!("Failed to extract bundled libkrun source: {error}"));
+    if !extracted_source.join("Cargo.toml").is_file() {
+        panic!(
+            "Bundled libkrun source archive did not contain {}",
+            extracted_source.join("Cargo.toml").display()
+        );
+    }
+    fs::write(&marker, LIBKRUN_SOURCE_ARCHIVE_SHA256)
+        .unwrap_or_else(|error| panic!("Failed to record libkrun source digest: {error}"));
+    extracted_source
 }
 
 /// Runs a command and panics with a helpful message if it fails.
@@ -555,9 +630,10 @@ fn download_file(url: &str, dest: &Path) -> io::Result<()> {
 fn verify_sha256(file: &Path, expected: &str) -> io::Result<()> {
     let actual = if cfg!(target_os = "windows") {
         // PowerShell is available on all modern Windows
+        let literal_path = file.display().to_string().replace('\'', "''");
         let script = format!(
             "(Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash.ToLower()",
-            file.display()
+            literal_path
         );
         let output = Command::new("powershell.exe")
             .args(["-NoProfile", "-Command", &script])
@@ -594,6 +670,37 @@ fn verify_sha256(file: &Path, expected: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Reuse a download only after verifying it. Failed or interrupted downloads
+/// are written to a side file and never become a trusted cache entry.
+fn ensure_verified_download(url: &str, dest: &Path, expected: &str) -> io::Result<()> {
+    if dest.is_file() {
+        if verify_sha256(dest, expected).is_ok() {
+            return Ok(());
+        }
+        fs::remove_file(dest)?;
+    }
+
+    let file_name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid download path"))?;
+    let partial = dest.with_file_name(format!(".{file_name}.partial"));
+    if partial.exists() {
+        fs::remove_file(&partial)?;
+    }
+
+    if let Err(error) = download_file(url, &partial) {
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
+    if let Err(error) = verify_sha256(&partial, expected) {
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
+    fs::rename(&partial, dest)?;
+    Ok(())
+}
+
 /// Extracts a tarball to the specified directory.
 fn extract_tarball(tarball: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir_all(dest)?;
@@ -611,6 +718,30 @@ fn extract_tarball(tarball: &Path, dest: &Path) -> io::Result<()> {
         return Err(io::Error::other("tar extraction failed"));
     }
 
+    Ok(())
+}
+
+/// Extract a checksum-verified tar archive. bsdtar/GNU tar detect the archive
+/// compression from its contents, including the Windows runtime's XZ stream.
+fn extract_tar_archive(archive: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+
+    let status = Command::new("tar")
+        .args([
+            "-xf",
+            archive.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "non-UTF-8 archive path")
+            })?,
+            "-C",
+            dest.to_str().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "non-UTF-8 extraction path")
+            })?,
+        ])
+        .status()?;
+
+    if !status.success() {
+        return Err(io::Error::other("tar extraction failed"));
+    }
     Ok(())
 }
 
@@ -777,13 +908,8 @@ fn download_libkrunfw_prebuilt(out_dir: &Path) -> PathBuf {
         return src_dir;
     }
 
-    if !tarball_path.exists() {
-        download_file(LIBKRUNFW_PREBUILT_URL, &tarball_path)
-            .unwrap_or_else(|e| panic!("Failed to download libkrunfw: {}", e));
-
-        verify_sha256(&tarball_path, LIBKRUNFW_SHA256)
-            .unwrap_or_else(|e| panic!("Failed to verify libkrunfw checksum: {}", e));
-    }
+    ensure_verified_download(LIBKRUNFW_PREBUILT_URL, &tarball_path, LIBKRUNFW_SHA256)
+        .unwrap_or_else(|e| panic!("Failed to download or verify libkrunfw: {}", e));
 
     if extract_dir.exists() {
         fs::remove_dir_all(&extract_dir).ok();
@@ -796,12 +922,6 @@ fn download_libkrunfw_prebuilt(out_dir: &Path) -> PathBuf {
     println!("cargo:warning=Extracted libkrunfw to {}", src_dir.display());
     src_dir
 }
-
-// Windows: prebuilt krun.dll + krun.lib + libkrunfw.dll bundle
-const KRUN_WINDOWS_URL: &str =
-    "https://github.com/A3S-Lab/libkrun/releases/download/v1.17.5-windows/krun-windows-x64.zip";
-const KRUN_WINDOWS_SHA256: &str =
-    "8d5bd3d2452bb6e36973b8b57d34e16fdee0af677d32f883aa689f22708dbc2a";
 
 /// macOS: Build libkrun from source, use prebuilt libkrunfw
 #[cfg(target_os = "macos")]
@@ -833,10 +953,9 @@ fn build() {
 
     println!("cargo:warning=Building libkrun-sys for macOS (using prebuilt libkrunfw)");
 
-    // Verify vendored libkrun source exists (libkrunfw is downloaded)
-    verify_libkrun_source(&manifest_dir);
-
-    let libkrun_src = manifest_dir.join("vendor/libkrun");
+    // A repository uses its submodule directly; a crates.io package extracts
+    // the checksum-verified source archive into OUT_DIR.
+    let libkrun_src = resolve_libkrun_source(&manifest_dir, &out_dir);
 
     // Setup LIBCLANG_PATH for bindgen if needed
     setup_libclang_path();
@@ -952,13 +1071,8 @@ fn download_libkrunfw_so(install_dir: &Path) {
 
     let tarball_path = install_dir.join(format!("libkrunfw-{}.tgz", &LIBKRUNFW_SHA256[..12]));
 
-    if !tarball_path.exists() {
-        download_file(LIBKRUNFW_SO_URL, &tarball_path)
-            .unwrap_or_else(|e| panic!("Failed to download libkrunfw: {}", e));
-
-        verify_sha256(&tarball_path, LIBKRUNFW_SHA256)
-            .unwrap_or_else(|e| panic!("Failed to verify libkrunfw checksum: {}", e));
-    }
+    ensure_verified_download(LIBKRUNFW_SO_URL, &tarball_path, LIBKRUNFW_SHA256)
+        .unwrap_or_else(|e| panic!("Failed to download or verify libkrunfw: {}", e));
 
     extract_tarball(&tarball_path, install_dir)
         .unwrap_or_else(|e| panic!("Failed to extract libkrunfw: {}", e));
@@ -971,56 +1085,63 @@ fn download_libkrunfw_so(install_dir: &Path) {
     );
 }
 
-/// Windows: Download and extract the prebuilt krun-windows-x64.zip.
-/// Returns the directory containing krun.lib, krun.dll, and libkrunfw.dll.
-fn download_krun_windows_prebuilt(out_dir: &Path) -> PathBuf {
-    let zip_path = out_dir.join("krun-windows-x64.zip");
-    let extract_dir = out_dir.join("krun-windows-x64");
-    let lib_dir = extract_dir.join("krun-windows-x64");
+/// Extract the package's checksum-pinned Windows runtime. Keeping the three
+/// files together prevents accidentally pairing a current krun.dll with an
+/// older guest-kernel companion.
+fn extract_packaged_windows_runtime(manifest_dir: &Path, out_dir: &Path) -> PathBuf {
+    let archive = manifest_dir.join("vendor/krun-windows-x64.tar.xz");
+    if !archive.is_file() {
+        panic!("Bundled Windows runtime is missing: {}", archive.display());
+    }
+    verify_sha256(&archive, KRUN_WINDOWS_ARCHIVE_SHA256)
+        .unwrap_or_else(|error| panic!("Failed to verify bundled Windows runtime: {error}"));
 
-    if lib_dir.join("krun.lib").exists() {
-        println!("cargo:warning=Using cached krun Windows prebuilt");
-        return lib_dir;
+    let extract_dir = out_dir.join(format!(
+        "krun-windows-x64-{}",
+        &KRUN_WINDOWS_ARCHIVE_SHA256[..12]
+    ));
+    let marker = extract_dir.join(".archive-sha256");
+    if has_windows_runtime_bundle(&extract_dir)
+        && fs::read_to_string(&marker).is_ok_and(|value| value == KRUN_WINDOWS_ARCHIVE_SHA256)
+        && packaged_windows_files_match(&extract_dir)
+    {
+        return extract_dir;
     }
 
-    download_file(KRUN_WINDOWS_URL, &zip_path)
-        .unwrap_or_else(|e| panic!("Failed to download krun Windows prebuilt: {}", e));
-
-    verify_sha256(&zip_path, KRUN_WINDOWS_SHA256)
-        .unwrap_or_else(|e| panic!("Failed to verify krun Windows prebuilt checksum: {}", e));
-
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)
+            .unwrap_or_else(|error| panic!("Failed to clear stale Windows runtime: {error}"));
+    }
     fs::create_dir_all(&extract_dir)
-        .unwrap_or_else(|e| panic!("Failed to create extract dir: {}", e));
-
-    // Use PowerShell to unzip (available on all modern Windows)
-    let status = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
-                zip_path.display(),
-                extract_dir.display(),
-            ),
-        ])
-        .status()
-        .unwrap_or_else(|e| panic!("Failed to run PowerShell unzip: {}", e));
-
-    assert!(status.success(), "PowerShell Expand-Archive failed");
-    println!(
-        "cargo:warning=Extracted krun Windows prebuilt to {}",
-        lib_dir.display()
+        .unwrap_or_else(|error| panic!("Failed to create Windows runtime directory: {error}"));
+    extract_tar_archive(&archive, &extract_dir)
+        .unwrap_or_else(|error| panic!("Failed to extract bundled Windows runtime: {error}"));
+    assert!(
+        has_windows_runtime_bundle(&extract_dir),
+        "Bundled Windows runtime is missing krun.dll, krun.lib, or libkrunfw.dll"
     );
-    lib_dir
+    assert!(
+        packaged_windows_files_match(&extract_dir),
+        "Bundled Windows runtime contents do not match their pinned checksums"
+    );
+    fs::write(&marker, KRUN_WINDOWS_ARCHIVE_SHA256)
+        .unwrap_or_else(|error| panic!("Failed to record Windows runtime digest: {error}"));
+    extract_dir
 }
 
-/// Windows: Download and link the prebuilt krun.dll + krun.lib bundle.
+fn packaged_windows_files_match(dir: &Path) -> bool {
+    KRUN_WINDOWS_FILE_SHA256
+        .iter()
+        .all(|(name, expected)| verify_sha256(&dir.join(name), expected).is_ok())
+}
+
+/// Windows: Resolve and link a complete krun.dll + krun.lib + libkrunfw.dll bundle.
 ///
 /// Search order:
 ///   1. LIBKRUN_DIR env var (local build override)
 ///   2. ../libkrun/target/<triple>/{release,debug} (local sibling checkout)
-///   3. deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/ (vendored)
-///   4. Auto-download krun-windows-x64.zip from GitHub Releases into OUT_DIR
+///   3. deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc/ (repository checkout)
+///   4. Checksum-verified vendor/krun-windows-x64.tar.xz (published crate)
 fn build_windows() {
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
     let triple = format!("{}-pc-windows-msvc", target_arch);
@@ -1037,12 +1158,18 @@ fn build_windows() {
     } else {
         let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
         let prebuilt = manifest_dir.join("prebuilt").join(&triple);
-        if prebuilt.join("krun.lib").exists() {
+        if has_windows_runtime_bundle(&prebuilt) {
             prebuilt
         } else {
-            download_krun_windows_prebuilt(&out_dir)
+            extract_packaged_windows_runtime(&manifest_dir, &out_dir)
         }
     };
+
+    assert!(
+        has_windows_runtime_bundle(&lib_dir),
+        "Windows libkrun directory must contain krun.dll, krun.lib, and libkrunfw.dll: {}",
+        lib_dir.display()
+    );
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=dylib=krun");
@@ -1080,14 +1207,11 @@ fn build() {
 
     println!("cargo:warning=Building libkrun-sys for Linux (using prebuilt libkrunfw)");
 
-    // Verify vendored libkrun source exists (libkrunfw is downloaded)
-    verify_libkrun_source(&manifest_dir);
-
     // 1. Download pre-compiled libkrunfw.so directly (no build needed)
     download_libkrunfw_so(&libkrunfw_install);
 
     // 2. Build libkrun from vendored source
-    let libkrun_src = manifest_dir.join("vendor/libkrun");
+    let libkrun_src = resolve_libkrun_source(&manifest_dir, &out_dir);
     build_with_make(
         &libkrun_src,
         &libkrun_install,

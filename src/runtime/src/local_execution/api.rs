@@ -36,10 +36,13 @@ impl ExecutionManager for LocalExecutionManager {
         execution_id: &ExecutionId,
         expected_generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         let record = self
             .get(execution_id)
             .await?
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        super::record::validate_record_health(&record)?;
         require_generation(&record, execution_id, expected_generation)?;
         self.ensure_started(record).await
     }
@@ -69,6 +72,8 @@ impl ExecutionManager for LocalExecutionManager {
         expected_generation: ExecutionGeneration,
         snapshot_id: &ExecutionSnapshotId,
     ) -> ExecutionManagerResult<ExecutionSnapshot> {
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         self.create_snapshot(execution_id, expected_generation, snapshot_id)
             .await
     }
@@ -145,10 +150,13 @@ impl ExecutionManager for LocalExecutionManager {
         operation_id: &OperationId,
         options: RestartExecutionOptions,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         let record = self
             .get(execution_id)
             .await?
             .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+        super::record::validate_record_health(&record)?;
         self.restart_record(record, expected_generation, operation_id, options)
             .await
     }
@@ -192,9 +200,20 @@ impl ExecutionManager for LocalExecutionManager {
         &self,
         operation_id: &OperationId,
     ) -> ExecutionManagerResult<ReconcileOutcome> {
+        let Some(initial_record) = self.get_by_operation(operation_id).await? else {
+            return Ok(ReconcileOutcome::Absent);
+        };
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, &initial_record.id).await?;
         let Some(record) = self.get_by_operation(operation_id).await? else {
             return Ok(ReconcileOutcome::Absent);
         };
+        if record.id != initial_record.id {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "operation {operation_id} changed execution identity while waiting for its lifecycle lock"
+            )));
+        }
+        super::record::validate_record_health(&record)?;
         match managed_state(&record)? {
             ManagedExecutionState::Creating | ManagedExecutionState::Created => Ok(
                 ReconcileOutcome::Created(super::record::reservation_from_record(&record)?),

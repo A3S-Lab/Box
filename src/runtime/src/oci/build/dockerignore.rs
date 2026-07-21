@@ -11,7 +11,7 @@
 //! whole subtree (the caller does not descend into it). Re-including a path
 //! under a pruned directory via `!` is a known limitation (as it is in Docker).
 
-use std::path::Path;
+use std::path::{Component, Path};
 
 /// A single parsed ignore rule.
 struct Rule {
@@ -65,12 +65,15 @@ impl DockerIgnore {
     /// Whether `rel` (a path relative to the context root) is excluded.
     /// Last matching rule wins, so a later `!` rule can re-include.
     pub(crate) fn is_excluded(&self, rel: &Path) -> bool {
-        let path_segs: Vec<&str> = rel
-            .to_str()
-            .unwrap_or_default()
-            .split('/')
-            .filter(|s| !s.is_empty())
+        let path_segments: Vec<String> = rel
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(segment) => Some(segment.to_string_lossy().into_owned()),
+                Component::CurDir => None,
+                _ => None,
+            })
             .collect();
+        let path_segs: Vec<&str> = path_segments.iter().map(String::as_str).collect();
         let mut excluded = false;
         for rule in &self.rules {
             if segments_match(&rule.segments, &path_segs) {
@@ -177,6 +180,10 @@ mod tests {
         let d = ign("*.log\n!keep.log\n");
         assert!(ex(&d, "app.log"));
         assert!(!ex(&d, "keep.log"));
+
+        let nested = ign("**/*.log\n!logs/important.log\n");
+        assert!(ex(&nested, "logs/a.log"));
+        assert!(!ex(&nested, "logs/important.log"));
     }
 
     #[test]

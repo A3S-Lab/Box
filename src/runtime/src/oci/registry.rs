@@ -9,7 +9,9 @@ use std::sync::Arc;
 use a3s_box_core::error::{BoxError, Result};
 use oci_distribution::client::{ClientConfig, ClientProtocol, Config, ImageLayer, PushResponse};
 use oci_distribution::errors::{OciDistributionError, OciErrorCode};
-use oci_distribution::manifest::{ImageIndexEntry, OciImageManifest, OCI_IMAGE_MEDIA_TYPE};
+use oci_distribution::manifest::{
+    ImageIndexEntry, OciImageManifest, IMAGE_MANIFEST_MEDIA_TYPE, OCI_IMAGE_MEDIA_TYPE,
+};
 use oci_distribution::secrets::RegistryAuth as OciRegistryAuth;
 use oci_distribution::{Client, Reference};
 use oci_reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
@@ -28,6 +30,11 @@ mod progress;
 pub use policy::RegistryPullPolicy;
 pub use progress::{PullProgress, PullProgressEventFn, PullProgressState};
 
+use super::image::{
+    canonical_sha256_digest_hex, read_regular_file_bounded, read_verified_oci_blob,
+    validate_plain_directory, MAX_OCI_CONFIG_BYTES, MAX_OCI_INDEX_BYTES, MAX_OCI_LAYER_BLOB_BYTES,
+    MAX_OCI_MANIFEST_BYTES,
+};
 use basic_pull::{BasicImageManifest, BasicPullClient};
 #[cfg(test)]
 use blob_pull::HashingFileWriter;
@@ -79,16 +86,7 @@ impl RegistryProtocol {
 /// config (signature policy is Skip). Require the canonical
 /// `sha256:<64 lowercase hex>` form and reject anything else.
 pub(crate) fn validated_digest_hex(digest: &str) -> Result<&str> {
-    digest
-        .strip_prefix("sha256:")
-        .filter(|hex| {
-            hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
-        .ok_or_else(|| {
-            BoxError::OciImageError(format!(
-                "registry returned a malformed content digest (expected sha256:<64 hex>): {digest:?}"
-            ))
-        })
+    canonical_sha256_digest_hex(digest)
 }
 
 /// Callback type for layer pull progress: `(current, total, digest, size_bytes)`.
@@ -97,7 +95,7 @@ type PullProgressFn = Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>;
 struct PulledImageManifest {
     manifest: OciImageManifest,
     digest: String,
-    bytes: Option<Vec<u8>>,
+    bytes: Vec<u8>,
     used_basic: bool,
 }
 
@@ -364,9 +362,7 @@ impl RegistryPuller {
         // the Docker-Content-Digest header verbatim, and feeding `sha256:../../x`
         // into blobs_dir.join() would write the (attacker-shaped) manifest JSON to
         // an arbitrary host path outside the store.
-        let manifest_json = pulled_manifest
-            .bytes
-            .unwrap_or(serde_json::to_vec(&image_manifest)?);
+        let manifest_json = pulled_manifest.bytes;
         let manifest_digest_hex = validated_digest_hex(&manifest_digest)?;
         std::fs::write(blobs_dir.join(manifest_digest_hex), &manifest_json).map_err(|e| {
             BoxError::RegistryError {
@@ -465,12 +461,36 @@ impl RegistryPuller {
     ) -> Result<PulledImageManifest> {
         let auth = self.auth.to_oci_auth();
         match self.client.pull_image_manifest(oci_ref, &auth).await {
-            Ok((manifest, digest)) => Ok(PulledImageManifest {
-                manifest,
-                digest,
-                bytes: None,
-                used_basic: false,
-            }),
+            Ok((_manifest, digest)) => {
+                // `pull_image_manifest` resolves an image index but returns only
+                // the parsed manifest. Re-serializing that value is not byte-for-
+                // byte stable and therefore cannot be stored under the registry's
+                // content digest. Fetch the selected manifest by immutable digest
+                // so the OCI layout contains the exact verified payload.
+                validated_digest_hex(&digest)?;
+                let selected = Reference::with_digest(
+                    oci_ref.registry().to_string(),
+                    oci_ref.repository().to_string(),
+                    digest.clone(),
+                );
+                let (bytes, _response_digest) = self
+                    .client
+                    .pull_manifest_raw(
+                        &selected,
+                        &auth,
+                        &[OCI_IMAGE_MEDIA_TYPE, IMAGE_MANIFEST_MEDIA_TYPE],
+                    )
+                    .await
+                    .map_err(|error| self.pull_error(reference, &error))?;
+                let manifest = parse_verified_pulled_manifest(&digest, &bytes)?;
+
+                Ok(PulledImageManifest {
+                    manifest,
+                    digest,
+                    bytes,
+                    used_basic: false,
+                })
+            }
             Err(first_error)
                 if is_unauthorized_registry_error(&first_error)
                     && self.auth.basic_credentials().is_some() =>
@@ -497,7 +517,7 @@ impl RegistryPuller {
                 Ok(PulledImageManifest {
                     manifest,
                     digest,
-                    bytes: Some(bytes),
+                    bytes,
                     used_basic: true,
                 })
             }
@@ -630,48 +650,66 @@ impl RegistryPusher {
             "Pushing image to registry"
         );
 
-        // Read index.json to find the manifest digest
+        validate_plain_directory(image_dir, "OCI image root")?;
+
+        // Read index.json through a bounded, no-follow handle and keep the
+        // complete descriptor so size and digest can be verified before upload.
         let index_path = image_dir.join("index.json");
-        let index_data = std::fs::read_to_string(&index_path)
-            .map_err(|e| BoxError::OciImageError(format!("Failed to read index.json: {}", e)))?;
-        let index: serde_json::Value = serde_json::from_str(&index_data)?;
-
-        let manifest_digest = index["manifests"][0]["digest"].as_str().ok_or_else(|| {
-            BoxError::OciImageError("No manifest digest in index.json".to_string())
+        let index_data = read_regular_file_bounded(&index_path, MAX_OCI_INDEX_BYTES, "index.json")?;
+        let index: serde_json::Value = serde_json::from_slice(&index_data).map_err(|error| {
+            BoxError::OciImageError(format!("Failed to parse index.json: {error}"))
         })?;
+        let manifest_descriptor = index
+            .get("manifests")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|manifests| manifests.first())
+            .ok_or_else(|| BoxError::OciImageError("No manifest in index.json".to_string()))?;
+        let manifest_digest = manifest_descriptor
+            .get("digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                BoxError::OciImageError("No manifest digest in index.json".to_string())
+            })?;
+        let manifest_size = manifest_descriptor
+            .get("size")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| BoxError::OciImageError("No manifest size in index.json".to_string()))?;
+        validated_digest_hex(manifest_digest)?;
 
-        // Read manifest blob
-        let manifest_digest_hex = manifest_digest
-            .strip_prefix("sha256:")
-            .unwrap_or(manifest_digest);
         let blobs_dir = image_dir.join("blobs").join("sha256");
-        let manifest_data = std::fs::read(blobs_dir.join(manifest_digest_hex))
-            .map_err(|e| BoxError::OciImageError(format!("Failed to read manifest blob: {}", e)))?;
-        let manifest: OciImageManifest = serde_json::from_slice(&manifest_data)?;
+        validate_plain_directory(&image_dir.join("blobs"), "OCI blobs")?;
+        validate_plain_directory(&blobs_dir, "OCI sha256 blobs")?;
 
-        // Read config blob
-        let config_digest_hex = manifest
-            .config
-            .digest
-            .strip_prefix("sha256:")
-            .unwrap_or(&manifest.config.digest);
-        let config_data = std::fs::read(blobs_dir.join(config_digest_hex))
-            .map_err(|e| BoxError::OciImageError(format!("Failed to read config blob: {}", e)))?;
+        let manifest_data = read_verified_oci_blob(
+            image_dir,
+            manifest_digest,
+            manifest_size,
+            MAX_OCI_MANIFEST_BYTES,
+            "manifest blob",
+        )?;
+        let manifest: OciImageManifest =
+            serde_json::from_slice(&manifest_data).map_err(|error| {
+                BoxError::OciImageError(format!("Failed to parse manifest blob: {error}"))
+            })?;
+
+        let config_data = read_verified_oci_blob(
+            image_dir,
+            &manifest.config.digest,
+            manifest.config.size,
+            MAX_OCI_CONFIG_BYTES,
+            "config blob",
+        )?;
         let config = Config::new(config_data, manifest.config.media_type.clone(), None);
 
-        // Read layer blobs
         let mut layers = Vec::new();
         for layer_desc in &manifest.layers {
-            let layer_digest_hex = layer_desc
-                .digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&layer_desc.digest);
-            let layer_data = std::fs::read(blobs_dir.join(layer_digest_hex)).map_err(|e| {
-                BoxError::OciImageError(format!(
-                    "Failed to read layer blob {}: {}",
-                    layer_desc.digest, e
-                ))
-            })?;
+            let layer_data = read_verified_oci_blob(
+                image_dir,
+                &layer_desc.digest,
+                layer_desc.size,
+                MAX_OCI_LAYER_BLOB_BYTES,
+                "layer blob",
+            )?;
 
             tracing::debug!(
                 digest = %layer_desc.digest,
@@ -987,8 +1025,31 @@ fn registry_base_url(
     protocol: RegistryProtocol,
     reference: &ImageReference,
 ) -> std::result::Result<oci_reqwest::Url, OciDistributionError> {
-    oci_reqwest::Url::parse(&format!("{}://{}", protocol.scheme(), reference.registry))
-        .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))
+    // `docker.io` is the canonical image-reference host, but it is not the
+    // Docker Registry API host. Requests to `https://docker.io/v2/...` are
+    // redirected to the marketing site and can return HTTP 200 HTML; the blob
+    // verifier then (correctly) reports a size/digest mismatch. Match Docker's
+    // established registry normalization used by `oci-distribution`.
+    let mut base =
+        oci_reqwest::Url::parse(&format!("{}://{}", protocol.scheme(), reference.registry))
+            .map_err(|e| OciDistributionError::UrlParseError(e.to_string()))?;
+
+    // URL parsing lower-cases DNS names and removes an explicitly supplied
+    // default port. Preserve non-default ports because `docker.io:5000` can be
+    // an intentionally distinct registry endpoint.
+    let is_docker_hub_alias = base.port().is_none()
+        && base.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("docker.io") || host.eq_ignore_ascii_case("index.docker.io")
+        });
+    if is_docker_hub_alias {
+        base.set_host(Some("registry-1.docker.io")).map_err(|_| {
+            OciDistributionError::UrlParseError(
+                "failed to normalize the Docker Hub registry host".to_string(),
+            )
+        })?;
+    }
+
+    Ok(base)
 }
 
 fn registry_blob_upload_url(
@@ -1080,6 +1141,50 @@ fn manifest_digest_from_bytes(bytes: &[u8]) -> String {
     use sha2::Digest as _;
 
     format!("sha256:{:x}", sha2::Sha256::digest(bytes))
+}
+
+fn verify_pulled_manifest_bytes(expected_digest: &str, bytes: &[u8]) -> Result<()> {
+    validated_digest_hex(expected_digest)?;
+    if bytes.len() as u64 > MAX_OCI_MANIFEST_BYTES {
+        return Err(BoxError::OciImageError(format!(
+            "refusing manifest {expected_digest}: payload size {} exceeds the {} byte limit",
+            bytes.len(),
+            MAX_OCI_MANIFEST_BYTES
+        )));
+    }
+
+    let actual_digest = manifest_digest_from_bytes(bytes);
+    if !manifest_digests_match(expected_digest, &actual_digest) {
+        return Err(BoxError::OciImageError(format!(
+            "refusing manifest {expected_digest}: descriptor digest does not match actual bytes ({actual_digest})"
+        )));
+    }
+
+    Ok(())
+}
+
+fn parse_verified_pulled_manifest(expected_digest: &str, bytes: &[u8]) -> Result<OciImageManifest> {
+    verify_pulled_manifest_bytes(expected_digest, bytes)?;
+    let manifest: OciImageManifest = serde_json::from_slice(bytes).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "failed to parse verified manifest {expected_digest}: {error}"
+        ))
+    })?;
+    if manifest.schema_version != 2 {
+        return Err(BoxError::OciImageError(format!(
+            "refusing manifest {expected_digest}: unsupported schema version {}",
+            manifest.schema_version
+        )));
+    }
+    if let Some(media_type) = manifest.media_type.as_deref() {
+        if media_type != OCI_IMAGE_MEDIA_TYPE && media_type != IMAGE_MANIFEST_MEDIA_TYPE {
+            return Err(BoxError::OciImageError(format!(
+                "refusing manifest {expected_digest}: unsupported media type {media_type}"
+            )));
+        }
+    }
+
+    Ok(manifest)
 }
 
 async fn ensure_registry_status(
@@ -1297,6 +1402,7 @@ fn platform_resolver_for(arch: String) -> impl Fn(&[ImageIndexEntry]) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::sync::{Mutex, OnceLock};
 
     fn test_image_reference() -> ImageReference {
@@ -1311,6 +1417,82 @@ mod tests {
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    fn push_test_digest(bytes: &[u8]) -> String {
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    fn push_test_digest_hex(digest: &str) -> &str {
+        digest.strip_prefix("sha256:").unwrap()
+    }
+
+    fn write_push_blob(image_dir: &Path, bytes: &[u8]) -> String {
+        let digest = push_test_digest(bytes);
+        let blobs = image_dir.join("blobs/sha256");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::write(blobs.join(push_test_digest_hex(&digest)), bytes).unwrap();
+        digest
+    }
+
+    fn write_push_index(image_dir: &Path, digest: &str, size: usize) {
+        std::fs::write(
+            image_dir.join("index.json"),
+            serde_json::json!({
+                "schemaVersion": 2,
+                "manifests": [{"digest": digest, "size": size}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn write_push_manifest(image_dir: &Path, manifest: &OciImageManifest) -> (String, Vec<u8>) {
+        let bytes = serde_json::to_vec(manifest).unwrap();
+        let digest = write_push_blob(image_dir, &bytes);
+        write_push_index(image_dir, &digest, bytes.len());
+        (digest, bytes)
+    }
+
+    #[cfg(unix)]
+    fn push_test_file_symlink(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn push_test_file_symlink(target: &Path, link: &Path) -> bool {
+        push_test_windows_symlink(|| std::os::windows::fs::symlink_file(target, link))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn push_test_file_symlink(_target: &Path, _link: &Path) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn push_test_dir_symlink(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn push_test_dir_symlink(target: &Path, link: &Path) -> bool {
+        push_test_windows_symlink(|| std::os::windows::fs::symlink_dir(target, link))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn push_test_dir_symlink(_target: &Path, _link: &Path) -> bool {
+        false
+    }
+
+    #[cfg(windows)]
+    fn push_test_windows_symlink(create: impl FnOnce() -> std::io::Result<()>) -> bool {
+        match create() {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) => panic!("failed to create Windows test symlink: {error}"),
+        }
     }
 
     #[test]
@@ -1509,6 +1691,64 @@ mod tests {
     }
 
     #[test]
+    fn registry_base_url_uses_docker_registry_api_host() {
+        let mut reference = test_image_reference();
+        reference.registry = "docker.io".to_string();
+
+        assert_eq!(
+            registry_base_url(RegistryProtocol::Https, &reference)
+                .unwrap()
+                .as_str(),
+            "https://registry-1.docker.io/"
+        );
+        reference.registry = "index.docker.io".to_string();
+        assert_eq!(
+            registry_base_url(RegistryProtocol::Https, &reference)
+                .unwrap()
+                .as_str(),
+            "https://registry-1.docker.io/"
+        );
+
+        reference.registry = "Docker.IO:443".to_string();
+        assert_eq!(
+            registry_base_url(RegistryProtocol::Https, &reference)
+                .unwrap()
+                .as_str(),
+            "https://registry-1.docker.io/"
+        );
+
+        reference.registry = "INDEX.DOCKER.IO:80".to_string();
+        assert_eq!(
+            registry_base_url(RegistryProtocol::Http, &reference)
+                .unwrap()
+                .as_str(),
+            "http://registry-1.docker.io/"
+        );
+
+        reference.registry = "docker.io:5000".to_string();
+        assert_eq!(
+            registry_base_url(RegistryProtocol::Https, &reference)
+                .unwrap()
+                .as_str(),
+            "https://docker.io:5000/"
+        );
+    }
+
+    #[test]
+    fn docker_registry_blob_url_uses_api_host() {
+        let mut reference = test_image_reference();
+        reference.registry = "Docker.IO:443".to_string();
+        let base = registry_base_url(RegistryProtocol::Https, &reference).unwrap();
+
+        assert_eq!(
+            registry_blob_url(&base, "library/alpine", "sha256:deadbeef")
+                .unwrap()
+                .as_str(),
+            "https://registry-1.docker.io/v2/library/alpine/blobs/sha256:deadbeef"
+        );
+    }
+
+    #[test]
     fn test_repository_exists_push_error_matches_chinese_registry_message() {
         let error = OciDistributionError::ServerError {
             code: 500,
@@ -1546,6 +1786,48 @@ mod tests {
             manifest_digest_from_bytes(b"hello"),
             "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    #[test]
+    fn test_verify_pulled_manifest_bytes_requires_exact_registry_payload() {
+        let bytes = br#"{ "schemaVersion": 2, "config": {} }"#;
+        let digest = manifest_digest_from_bytes(bytes);
+
+        verify_pulled_manifest_bytes(&digest, bytes).unwrap();
+
+        let error = verify_pulled_manifest_bytes(&digest, br#"{"schemaVersion":2}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("descriptor digest does not match actual bytes"));
+    }
+
+    #[test]
+    fn test_parse_verified_pulled_manifest_uses_exact_raw_payload() {
+        let bytes = br#"{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "size": 2
+  },
+  "layers": [],
+  "annotations": {"com.a3s.test": "raw-byte-order"}
+}"#;
+        let digest = manifest_digest_from_bytes(bytes);
+
+        let manifest = parse_verified_pulled_manifest(&digest, bytes).unwrap();
+
+        assert_eq!(manifest.schema_version, 2);
+        assert_eq!(
+            manifest
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get("com.a3s.test"))
+                .map(String::as_str),
+            Some("raw-byte-order")
+        );
+        assert_ne!(serde_json::to_vec(&manifest).unwrap(), bytes);
     }
 
     #[test]
@@ -1641,7 +1923,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("Failed to read index.json"));
+        assert!(err.to_string().contains("index.json"));
     }
 
     #[tokio::test]
@@ -1665,11 +1947,12 @@ mod tests {
     async fn test_push_missing_manifest_blob_fails_before_registry() {
         let dir = tempfile::tempdir().unwrap();
         let manifest_digest = format!("sha256:{}", "a".repeat(64));
+        std::fs::create_dir_all(dir.path().join("blobs/sha256")).unwrap();
         std::fs::write(
             dir.path().join("index.json"),
             serde_json::json!({
                 "schemaVersion": 2,
-                "manifests": [{"digest": manifest_digest}]
+                "manifests": [{"digest": manifest_digest, "size": 1}]
             })
             .to_string(),
         )
@@ -1680,15 +1963,12 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("Failed to read manifest blob"));
+        assert!(err.to_string().contains("manifest blob"));
     }
 
     #[tokio::test]
     async fn test_push_missing_config_blob_fails_before_registry() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = dir.path().join("blobs/sha256");
-        std::fs::create_dir_all(&blobs).unwrap();
-        let manifest_digest_hex = "a".repeat(64);
         let config_digest = format!("sha256:{}", "b".repeat(64));
         let manifest = OciImageManifest {
             config: oci_distribution::manifest::OciDescriptor {
@@ -1699,41 +1979,25 @@ mod tests {
             },
             ..Default::default()
         };
-        std::fs::write(
-            dir.path().join("index.json"),
-            serde_json::json!({
-                "schemaVersion": 2,
-                "manifests": [{"digest": format!("sha256:{manifest_digest_hex}")}]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            blobs.join(&manifest_digest_hex),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
+        write_push_manifest(dir.path(), &manifest);
 
         let err = RegistryPusher::new()
             .push(&test_image_reference(), dir.path())
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("Failed to read config blob"));
+        assert!(err.to_string().contains("config blob"));
     }
 
     #[tokio::test]
     async fn test_push_missing_layer_blob_fails_before_registry() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = dir.path().join("blobs/sha256");
-        std::fs::create_dir_all(&blobs).unwrap();
-        let manifest_digest_hex = "a".repeat(64);
-        let config_digest_hex = "b".repeat(64);
+        let config_digest = write_push_blob(dir.path(), b"{}");
         let layer_digest = format!("sha256:{}", "c".repeat(64));
         let manifest = OciImageManifest {
             config: oci_distribution::manifest::OciDescriptor {
                 media_type: "application/vnd.oci.image.config.v1+json".to_string(),
-                digest: format!("sha256:{config_digest_hex}"),
+                digest: config_digest,
                 size: 2,
                 ..Default::default()
             },
@@ -1745,29 +2009,171 @@ mod tests {
             }],
             ..Default::default()
         };
-        std::fs::write(
-            dir.path().join("index.json"),
-            serde_json::json!({
-                "schemaVersion": 2,
-                "manifests": [{"digest": format!("sha256:{manifest_digest_hex}")}]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            blobs.join(&manifest_digest_hex),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        std::fs::write(blobs.join(config_digest_hex), b"{}").unwrap();
+        write_push_manifest(dir.path(), &manifest);
 
         let err = RegistryPusher::new()
             .push(&test_image_reference(), dir.path())
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("Failed to read layer blob"));
+        assert!(err.to_string().contains("layer blob"));
         assert!(err.to_string().contains(&layer_digest));
+    }
+
+    #[tokio::test]
+    async fn test_push_rejects_noncanonical_manifest_digest_before_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("index.json"),
+            serde_json::json!({
+                "schemaVersion": 2,
+                "manifests": [{"digest": "sha256:../../../../outside", "size": 0}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let err = RegistryPusher::new()
+            .push(&test_image_reference(), dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("malformed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_push_rejects_oversized_index_before_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::File::create(dir.path().join("index.json"))
+            .unwrap()
+            .set_len(MAX_OCI_INDEX_BYTES + 1)
+            .unwrap();
+
+        let err = RegistryPusher::new()
+            .push(&test_image_reference(), dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("limit"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_push_rejects_oversized_manifest_descriptor_before_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("blobs/sha256")).unwrap();
+        let manifest_digest = format!("sha256:{}", "a".repeat(64));
+        write_push_index(
+            dir.path(),
+            &manifest_digest,
+            usize::try_from(MAX_OCI_MANIFEST_BYTES + 1).unwrap(),
+        );
+
+        let err = RegistryPusher::new()
+            .push(&test_image_reference(), dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("limit"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_push_rejects_manifest_descriptor_size_mismatch_before_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = OciImageManifest::default();
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_digest = write_push_blob(dir.path(), &manifest_bytes);
+        write_push_index(
+            dir.path(),
+            &manifest_digest,
+            manifest_bytes.len().saturating_add(1),
+        );
+
+        let err = RegistryPusher::new()
+            .push(&test_image_reference(), dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("descriptor size"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_push_rejects_config_digest_mismatch_before_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let claimed_digest = format!("sha256:{}", "a".repeat(64));
+        let blobs = dir.path().join("blobs/sha256");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::write(blobs.join(push_test_digest_hex(&claimed_digest)), b"{}").unwrap();
+        let manifest = OciImageManifest {
+            config: oci_distribution::manifest::OciDescriptor {
+                media_type: "application/vnd.oci.image.config.v1+json".to_string(),
+                digest: claimed_digest,
+                size: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        write_push_manifest(dir.path(), &manifest);
+
+        let err = RegistryPusher::new()
+            .push(&test_image_reference(), dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("digest"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_push_rejects_index_symlink_before_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_dir = dir.path().join("layout");
+        std::fs::create_dir_all(&image_dir).unwrap();
+        let outside_index = dir.path().join("outside-index.json");
+        std::fs::write(&outside_index, "{}").unwrap();
+        if !push_test_file_symlink(&outside_index, &image_dir.join("index.json")) {
+            return;
+        }
+
+        let err = RegistryPusher::new()
+            .push(&test_image_reference(), &image_dir)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("index.json"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_push_rejects_manifest_blob_symlink_before_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = OciImageManifest::default();
+        let (manifest_digest, manifest_bytes) = write_push_manifest(dir.path(), &manifest);
+        let manifest_path = dir
+            .path()
+            .join("blobs/sha256")
+            .join(push_test_digest_hex(&manifest_digest));
+        let outside_manifest = dir.path().join("outside-manifest.json");
+        std::fs::write(&outside_manifest, manifest_bytes).unwrap();
+        std::fs::remove_file(&manifest_path).unwrap();
+        if !push_test_file_symlink(&outside_manifest, &manifest_path) {
+            return;
+        }
+
+        let err = RegistryPusher::new()
+            .push(&test_image_reference(), dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("manifest blob"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_push_rejects_reparse_root_before_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target-layout");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("index.json"), "{}").unwrap();
+        let linked_root = dir.path().join("linked-layout");
+        if !push_test_dir_symlink(&target, &linked_root) {
+            return;
+        }
+
+        let err = RegistryPusher::new()
+            .push(&test_image_reference(), &linked_root)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("plain directory"), "{err}");
     }
 }
 

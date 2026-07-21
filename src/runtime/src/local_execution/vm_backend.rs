@@ -104,6 +104,7 @@ impl VmLocalExecutionBackend {
         }
         let mut manager = VmManager::with_box_id(config, EventEmitter::new(256), record.id.clone());
         manager.home_dir = self.home_dir.clone();
+        manager.set_healthcheck_disabled(metadata.request.policy.healthcheck_disabled);
         if let Some(pull_progress_fn) = self.pull_progress_fn.clone() {
             manager.set_pull_progress_fn(pull_progress_fn);
         }
@@ -438,7 +439,24 @@ impl VmLocalExecutionBackend {
 #[async_trait]
 impl LocalExecutionBackend for VmLocalExecutionBackend {
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
+        super::record::validate_record_health(record)?;
         self.metadata(record)?;
+        let box_dir = record.box_dir.clone();
+        let execution_id = record.id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::rootfs::stage_box_terminal_rootfs_metadata(&box_dir)
+        })
+        .await
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "rootfs metadata staging task failed for {execution_id}: {error}"
+            ))
+        })?
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "failed to stage rootfs metadata for {execution_id}: {error}"
+            ))
+        })?;
         let manager = Arc::new(Mutex::new(self.new_manager(record)?));
         match self.managers.entry(record.id.clone()) {
             Entry::Occupied(_) => {

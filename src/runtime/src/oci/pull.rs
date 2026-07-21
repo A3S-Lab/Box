@@ -509,7 +509,11 @@ mod tests {
         create_complete_oci_image(source.path());
         let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         store
-            .put("alpine:latest", "sha256:manifestxyz789", source.path())
+            .put(
+                "alpine:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                source.path(),
+            )
             .await
             .unwrap();
 
@@ -524,10 +528,14 @@ mod tests {
     async fn test_pull_uses_cached_short_alias_for_full_reference() {
         let tmp = TempDir::new().unwrap();
         let source = TempDir::new().unwrap();
-        create_complete_oci_image(source.path());
+        let manifest_digest = create_complete_oci_image(source.path());
         let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         store
-            .put("alpine:latest", "sha256:manifestxyz789", source.path())
+            .put(
+                "alpine:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                source.path(),
+            )
             .await
             .unwrap();
         let puller = ImagePuller::new(store, RegistryAuth::anonymous());
@@ -537,24 +545,31 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(image.manifest_digest(), "sha256:manifestxyz789");
+        assert_eq!(image.manifest_digest(), manifest_digest);
     }
 
     #[tokio::test]
     async fn test_pull_uses_cached_digest_reference_without_registry_parse() {
         let tmp = TempDir::new().unwrap();
         let source = TempDir::new().unwrap();
-        create_complete_oci_image(source.path());
+        let manifest_digest = create_complete_oci_image(source.path());
         let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         store
-            .put("alpine:latest", "sha256:manifestxyz789", source.path())
+            .put(
+                "alpine:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                source.path(),
+            )
             .await
             .unwrap();
         let puller = ImagePuller::new(store, RegistryAuth::anonymous());
 
-        let image = puller.pull("sha256:manifestxyz789").await.unwrap();
+        let image = puller
+            .pull("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .await
+            .unwrap();
 
-        assert_eq!(image.manifest_digest(), "sha256:manifestxyz789");
+        assert_eq!(image.manifest_digest(), manifest_digest);
     }
 
     #[tokio::test]
@@ -564,12 +579,16 @@ mod tests {
         create_complete_oci_image(source.path());
         let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         store
-            .put("alpine:latest", "sha256:manifestxyz789", source.path())
+            .put(
+                "alpine:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                source.path(),
+            )
             .await
             .unwrap();
         let puller = ImagePuller::new(store, RegistryAuth::anonymous());
 
-        assert!(puller.is_cached("sha256:manifest").await);
+        assert!(puller.is_cached("sha256:aaaaaaaa").await);
     }
 
     #[tokio::test]
@@ -590,16 +609,24 @@ mod tests {
         create_complete_oci_image(source.path());
         let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         store
-            .put("alpine:latest", "sha256:manifestaaa", source.path())
+            .put(
+                "alpine:latest",
+                "sha256:ccccccccaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                source.path(),
+            )
             .await
             .unwrap();
         store
-            .put("busybox:latest", "sha256:manifestbbb", source.path())
+            .put(
+                "busybox:latest",
+                "sha256:ccccccccbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                source.path(),
+            )
             .await
             .unwrap();
         let puller = ImagePuller::new(store, RegistryAuth::anonymous());
 
-        let error = puller.pull("sha256:manifest").await.unwrap_err();
+        let error = puller.pull("sha256:cccccccc").await.unwrap_err();
 
         assert!(error.to_string().contains("ambiguous"));
         assert!(error.to_string().contains("alpine:latest"));
@@ -613,7 +640,11 @@ mod tests {
         create_complete_oci_image(source.path());
         let store = Arc::new(ImageStore::new(tmp.path(), 10 * 1024 * 1024).unwrap());
         store
-            .put("alpine:latest", "sha256:manifestxyz789", source.path())
+            .put(
+                "alpine:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                source.path(),
+            )
             .await
             .unwrap();
         let puller = ImagePuller::new(store.clone(), RegistryAuth::anonymous());
@@ -677,7 +708,24 @@ mod tests {
             .contains("abc123"));
     }
 
-    fn create_complete_oci_image(path: &Path) {
+    fn test_sha256_digest(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    fn write_test_blob(path: &Path, bytes: &[u8]) -> String {
+        let digest = test_sha256_digest(bytes);
+        std::fs::write(
+            path.join("blobs/sha256")
+                .join(digest.strip_prefix("sha256:").unwrap()),
+            bytes,
+        )
+        .unwrap();
+        digest
+    }
+
+    fn create_complete_oci_image(path: &Path) -> String {
         std::fs::create_dir_all(path.join("blobs/sha256")).unwrap();
         std::fs::write(path.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
 
@@ -692,15 +740,14 @@ mod tests {
             },
             "rootfs": {
                 "type": "layers",
-                "diff_ids": ["sha256:layerdiff"]
+                "diff_ids": ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]
             },
             "history": []
         }"#;
-        let config_hash = "configabc123";
-        std::fs::write(path.join("blobs/sha256").join(config_hash), config_content).unwrap();
+        let config_digest = write_test_blob(path, config_content.as_bytes());
 
-        let layer_hash = "layerdef456";
-        std::fs::write(path.join("blobs/sha256").join(layer_hash), b"layer").unwrap();
+        let layer_content = b"layer";
+        let layer_digest = write_test_blob(path, layer_content);
 
         let manifest_content = format!(
             r#"{{
@@ -708,27 +755,23 @@ mod tests {
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "config": {{
                 "mediaType": "application/vnd.oci.image.config.v1+json",
-                "digest": "sha256:{}",
+                "digest": "{}",
                 "size": {}
             }},
             "layers": [
                 {{
                     "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                    "digest": "sha256:{}",
-                    "size": 5
+                    "digest": "{}",
+                    "size": {}
                 }}
             ]
         }}"#,
-            config_hash,
+            config_digest,
             config_content.len(),
-            layer_hash
+            layer_digest,
+            layer_content.len()
         );
-        let manifest_hash = "manifestxyz789";
-        std::fs::write(
-            path.join("blobs/sha256").join(manifest_hash),
-            &manifest_content,
-        )
-        .unwrap();
+        let manifest_digest = write_test_blob(path, manifest_content.as_bytes());
 
         let index_content = format!(
             r#"{{
@@ -737,14 +780,15 @@ mod tests {
             "manifests": [
                 {{
                     "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "digest": "sha256:{}",
+                    "digest": "{}",
                     "size": {}
                 }}
             ]
         }}"#,
-            manifest_hash,
+            manifest_digest,
             manifest_content.len()
         );
         std::fs::write(path.join("index.json"), index_content).unwrap();
+        manifest_digest
     }
 }

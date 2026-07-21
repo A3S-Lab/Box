@@ -9,8 +9,7 @@ use super::super::dockerfile::{
 };
 use super::super::dockerignore::DockerIgnore;
 use super::super::layer::{
-    create_layer_from_dir_with_chown, create_layer_with_chown, create_layer_with_deletions,
-    sha256_bytes, LayerInfo,
+    create_layer_with_chown, create_layer_with_deletions, sha256_bytes, LayerInfo,
 };
 use super::stages::resolve_stage_rootfs;
 use super::utils::{
@@ -22,6 +21,156 @@ use super::BuildState;
 #[cfg(target_os = "macos")]
 const UNSAFE_HOST_RUN_ENV: &str = "A3S_BOX_UNSAFE_HOST_RUN";
 const RUN_OUTPUT_CONTEXT_BYTES: usize = 16 * 1024;
+
+fn resolve_guest_child(
+    rootfs_dir: &Path,
+    parent: &Path,
+    name: &std::ffi::OsStr,
+) -> Result<PathBuf> {
+    let relative = parent
+        .strip_prefix(rootfs_dir)
+        .map_err(|_| {
+            BoxError::BuildError(format!(
+                "Guest destination parent escapes rootfs: {}",
+                parent.display()
+            ))
+        })?
+        .join(name);
+    let relative = relative.to_str().ok_or_else(|| {
+        BoxError::BuildError(format!(
+            "Guest destination is not UTF-8: {}",
+            relative.display()
+        ))
+    })?;
+    crate::oci::rootfs::resolve_guest_file_path(rootfs_dir, relative)
+}
+
+fn record_guest_change(rootfs_dir: &Path, path: &Path, changed: &mut Vec<PathBuf>) -> Result<()> {
+    let relative = path.strip_prefix(rootfs_dir).map_err(|_| {
+        BoxError::BuildError(format!(
+            "Changed guest path escapes rootfs: {}",
+            path.display()
+        ))
+    })?;
+    if !relative.as_os_str().is_empty() {
+        changed.push(relative.to_path_buf());
+    }
+    Ok(())
+}
+
+/// Copy a context directory into an image rootfs while resolving every
+/// pre-existing destination symlink with Linux guest semantics. The generic
+/// copy helper cannot safely do this: host APIs interpret `/target` symlinks as
+/// host-absolute and a dangling final link can evade `Path::exists` checks.
+fn copy_dir_filtered_to_guest_rootfs(
+    src: &Path,
+    dst: &Path,
+    rootfs_dir: &Path,
+    rel_base: &Path,
+    ignore: Option<&DockerIgnore>,
+    changed: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let destination_existed = std::fs::symlink_metadata(dst).is_ok();
+    std::fs::create_dir_all(dst).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to create guest COPY directory {}: {error}",
+            dst.display()
+        ))
+    })?;
+    if !destination_existed {
+        record_guest_change(rootfs_dir, dst, changed)?;
+    }
+
+    for entry in std::fs::read_dir(src).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to read COPY source directory {}: {error}",
+            src.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            BoxError::BuildError(format!("Failed to read COPY source entry: {error}"))
+        })?;
+        let src_path = entry.path();
+        let entry_rel = rel_base.join(entry.file_name());
+        if ignore.is_some_and(|rules| rules.is_excluded(&entry_rel)) {
+            continue;
+        }
+
+        let file_type = entry.file_type().map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to inspect COPY source {}: {error}",
+                src_path.display()
+            ))
+        })?;
+
+        if file_type.is_symlink() {
+            // `dst` has already been safely resolved. Operate on the final
+            // directory entry itself so an existing link is replaced rather
+            // than followed.
+            let dst_path = dst.join(entry.file_name());
+            let _target = std::fs::read_link(&src_path).map_err(|error| {
+                BoxError::BuildError(format!(
+                    "Failed to read COPY symlink {}: {error}",
+                    src_path.display()
+                ))
+            })?;
+            match std::fs::symlink_metadata(&dst_path) {
+                Ok(metadata) if metadata.is_dir() => {
+                    return Err(BoxError::BuildError(format!(
+                        "Cannot replace COPY destination directory {} with a symlink",
+                        dst_path.display()
+                    )));
+                }
+                Ok(_) => std::fs::remove_file(&dst_path).map_err(|error| {
+                    BoxError::BuildError(format!(
+                        "Failed to replace COPY destination {}: {error}",
+                        dst_path.display()
+                    ))
+                })?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(BoxError::BuildError(format!(
+                        "Failed to inspect COPY destination {}: {error}",
+                        dst_path.display()
+                    )));
+                }
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&_target, &dst_path).map_err(|error| {
+                BoxError::BuildError(format!(
+                    "Failed to create COPY symlink {} -> {}: {error}",
+                    dst_path.display(),
+                    _target.display()
+                ))
+            })?;
+            #[cfg(not(unix))]
+            std::fs::write(&dst_path, []).map_err(|error| {
+                BoxError::BuildError(format!(
+                    "Failed to create COPY symlink placeholder {}: {error}",
+                    dst_path.display()
+                ))
+            })?;
+            record_guest_change(rootfs_dir, &dst_path, changed)?;
+        } else {
+            let dst_path = resolve_guest_child(rootfs_dir, dst, &entry.file_name())?;
+            if file_type.is_dir() {
+                copy_dir_filtered_to_guest_rootfs(
+                    &src_path, &dst_path, rootfs_dir, &entry_rel, ignore, changed,
+                )?;
+            } else {
+                std::fs::copy(&src_path, &dst_path).map_err(|error| {
+                    BoxError::BuildError(format!(
+                        "Failed to copy {} to {}: {error}",
+                        src_path.display(),
+                        dst_path.display()
+                    ))
+                })?;
+                record_guest_change(rootfs_dir, &dst_path, changed)?;
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Whether a COPY/ADD source contains shell glob metacharacters.
 fn has_glob_meta(s: &str) -> bool {
@@ -131,17 +280,22 @@ pub(super) fn handle_copy(
 ) -> Result<LayerInfo> {
     // Expand any glob source patterns against the context (Docker semantics).
     let src_patterns = &resolve_source_patterns(context_dir, src_patterns)?;
+    let mut changed = Vec::new();
 
     // Resolve destination path
     let resolved_dst = resolve_path(workdir, dst);
     reject_path_traversal(&resolved_dst)?;
-    let dst_in_rootfs = rootfs_dir.join(resolved_dst.trim_start_matches('/'));
-    // The destination must not escape the rootfs via `..` or a base-image
-    // symlink whose target leaves it (a write would land on the host).
-    assert_within(rootfs_dir, &dst_in_rootfs)?;
+    let destination_relative = resolved_dst.trim_start_matches('/');
+    let dst_in_rootfs =
+        if destination_relative.is_empty() || dst.ends_with('/') || src_patterns.len() > 1 {
+            crate::oci::rootfs::resolve_guest_directory_path(rootfs_dir, destination_relative)?
+        } else {
+            crate::oci::rootfs::resolve_guest_file_path(rootfs_dir, destination_relative)?
+        };
 
     // Ensure destination directory exists
     if dst.ends_with('/') || src_patterns.len() > 1 {
+        let destination_existed = std::fs::symlink_metadata(&dst_in_rootfs).is_ok();
         std::fs::create_dir_all(&dst_in_rootfs).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to create COPY destination {}: {}",
@@ -149,6 +303,9 @@ pub(super) fn handle_copy(
                 e
             ))
         })?;
+        if !destination_existed {
+            record_guest_change(rootfs_dir, &dst_in_rootfs, &mut changed)?;
+        }
     } else if let Some(parent) = dst_in_rootfs.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             BoxError::BuildError(format!("Failed to create parent directory: {}", e))
@@ -191,15 +348,24 @@ pub(super) fn handle_copy(
         }
 
         if src_path.is_dir() {
-            copy_dir_filtered(&src_path, &dst_in_rootfs, &rel, ignore)?;
+            copy_dir_filtered_to_guest_rootfs(
+                &src_path,
+                &dst_in_rootfs,
+                rootfs_dir,
+                &rel,
+                ignore,
+                &mut changed,
+            )?;
         } else {
             // If dst ends with / or is a directory, copy into it
             let target = if dst_in_rootfs.is_dir() {
-                dst_in_rootfs.join(
+                resolve_guest_child(
+                    rootfs_dir,
+                    &dst_in_rootfs,
                     src_path
                         .file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new(src)),
-                )
+                )?
             } else {
                 dst_in_rootfs.clone()
             };
@@ -211,6 +377,7 @@ pub(super) fn handle_copy(
                     e
                 ))
             })?;
+            record_guest_change(rootfs_dir, &target, &mut changed)?;
         }
     }
 
@@ -224,24 +391,15 @@ pub(super) fn handle_copy(
 
     // Create a layer from the copied files
     let layer_path = layers_dir.join(format!("layer_{}.tar.gz", layer_index));
-    let target_prefix = Path::new(resolved_dst.trim_start_matches('/'));
-    if dst_in_rootfs.is_dir() {
-        create_layer_from_dir_with_chown(&dst_in_rootfs, target_prefix, &layer_path, chown_ids)
-    } else if dst_in_rootfs.parent().is_some() {
-        let changed = vec![PathBuf::from(
-            dst_in_rootfs
-                .strip_prefix(rootfs_dir)
-                .unwrap_or(target_prefix),
-        )];
-        create_layer_with_chown(rootfs_dir, &changed, &[], &layer_path, chown_ids)
-    } else {
-        Err(BoxError::BuildError("Invalid COPY destination".to_string()))
-    }
+    changed.sort();
+    changed.dedup();
+    create_layer_with_chown(rootfs_dir, &changed, &[], &layer_path, chown_ids)
 }
 
 /// Handle RUN: execute a command in the rootfs.
 ///
-/// On Linux, uses chroot. On macOS, isolated RUN execution is not implemented yet.
+/// On Linux, uses a private mount/PID namespace plus chroot. On macOS,
+/// isolated RUN execution is not implemented yet.
 /// Returns Some(LayerInfo) if a layer was created, None if skipped.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn handle_run(
@@ -289,7 +447,7 @@ pub(super) fn handle_run(
         )
     }
 
-    // Linux: execute via chroot
+    // Linux: execute in a private mount/PID namespace and chroot.
     #[cfg(target_os = "linux")]
     {
         use super::super::layer::DirSnapshot;
@@ -398,7 +556,7 @@ pub(super) async fn handle_run_with_pool(
     user: Option<&str>,
     layer_index: usize,
     quiet: bool,
-    session: &super::BuildRunPoolSession,
+    session: super::BuildRunPoolSession,
     ignore: Option<&DockerIgnore>,
 ) -> Result<Option<LayerInfo>> {
     use super::super::layer::DirSnapshot;
@@ -424,7 +582,7 @@ pub(super) async fn handle_run_with_pool(
         &session.run_cache_dir,
         completed_stages,
     )?;
-    let output = match session
+    let output = session
         .lease
         .exec(crate::pool::PoolLeaseExec {
             cmd: build_pool_run_cmd(command, shell, workdir),
@@ -435,8 +593,24 @@ pub(super) async fn handle_run_with_pool(
             stdin: None,
             user: user.map(str::to_string),
         })
-        .await
-    {
+        .await;
+
+    // The guest rootfs is a writable host share. Destroy this one-RUN lease
+    // before restoring temporary overlays or inspecting the tree: a successful
+    // exec response only proves that the direct child exited, not that a
+    // daemonized descendant stopped writing. Pool release waits for VM destroy,
+    // which is the lifecycle fence for every process and namespace in that VM.
+    if let Err(error) = session.release().await {
+        // Without a confirmed VM teardown the cache contents are not a stable
+        // RUN result. Restore the image-visible paths but never publish the
+        // possibly still-mutating cache staging tree.
+        cache_mount_guard.restore_without_sync()?;
+        tmpfs_mount_guard.restore()?;
+        bind_mount_guard.restore()?;
+        return Err(error);
+    }
+
+    let output = match output {
         Ok(output) => output,
         Err(error) => {
             cache_mount_guard.restore_without_sync()?;
@@ -506,7 +680,7 @@ pub(super) async fn handle_run_with_pool(
     _user: Option<&str>,
     _layer_index: usize,
     _quiet: bool,
-    _session: &super::BuildRunPoolSession,
+    _session: super::BuildRunPoolSession,
     _ignore: Option<&DockerIgnore>,
 ) -> Result<Option<LayerInfo>> {
     Err(BoxError::BuildError(format!(
@@ -587,7 +761,10 @@ fn validate_run_shell_preconditions(rootfs_dir: &Path, shell: &[String]) -> Resu
             shell_path
         )));
     }
-    let shell_in_rootfs = rootfs_dir.join(shell_path.trim_start_matches('/'));
+    let shell_in_rootfs = crate::oci::rootfs::resolve_guest_file_path(
+        rootfs_dir,
+        shell_path.trim_start_matches('/'),
+    )?;
     if std::fs::symlink_metadata(&shell_in_rootfs).is_err() {
         return Err(BoxError::BuildError(format!(
             "Dockerfile RUN shell '{}' was not found in rootfs at {}; the base image must contain the configured shell",
@@ -609,7 +786,10 @@ fn validate_run_exec_preconditions(rootfs_dir: &Path, exec: &[String]) -> Result
         ));
     }
     if executable.starts_with('/') {
-        let executable_in_rootfs = rootfs_dir.join(executable.trim_start_matches('/'));
+        let executable_in_rootfs = crate::oci::rootfs::resolve_guest_file_path(
+            rootfs_dir,
+            executable.trim_start_matches('/'),
+        )?;
         if std::fs::symlink_metadata(&executable_in_rootfs).is_err() {
             return Err(BoxError::BuildError(format!(
                 "Dockerfile RUN exec form executable '{}' was not found in rootfs at {}",
@@ -660,15 +840,7 @@ fn ensure_linux_run_workdir(rootfs_dir: &Path, workdir: &str) -> Result<PathBuf>
         )));
     }
 
-    let workdir_path = rootfs_dir.join(workdir.trim_start_matches('/'));
-    std::fs::create_dir_all(&workdir_path).map_err(|e| {
-        BoxError::BuildError(format!(
-            "Failed to create RUN workdir {}: {}",
-            workdir_path.display(),
-            e
-        ))
-    })?;
-    Ok(workdir_path)
+    crate::oci::rootfs::ensure_guest_directory(rootfs_dir, workdir.trim_start_matches('/'))
 }
 
 #[cfg_attr(all(not(feature = "pool"), not(test)), allow(dead_code))]
@@ -719,10 +891,66 @@ fn execute_linux_run_command(
     env: &[(String, String)],
     shell: &[String],
 ) -> Result<std::process::Output> {
+    let unshare = find_linux_run_unshare()?;
+    let mut cmd = isolated_linux_run_command(&unshare, rootfs_dir, command, workdir, env, shell);
+    cmd.output().map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to execute Dockerfile RUN in an isolated PID namespace with {}: {error}",
+            unshare.display()
+        ))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn find_linux_run_unshare() -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&path).map(|directory| directory.join("unshare")));
+    }
+    candidates.extend([
+        PathBuf::from("/usr/bin/unshare"),
+        PathBuf::from("/bin/unshare"),
+    ]);
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            BoxError::BuildError(
+                "Dockerfile RUN on Linux requires util-linux 2.36+ `unshare` with mount/PID namespace support; refusing to capture a rootfs while background RUN processes may still be alive"
+                    .to_string(),
+            )
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn isolated_linux_run_command(
+    unshare: &Path,
+    rootfs_dir: &Path,
+    command: &RunCommand,
+    workdir: &str,
+    env: &[(String, String)],
+    shell: &[String],
+) -> std::process::Command {
+    // `--kill-child` plus a PID namespace makes the RUN command namespace PID 1.
+    // When it exits, Linux kills every remaining namespace member before
+    // `unshare` returns. A private mount namespace prevents RUN mount changes
+    // from propagating to the host, while a fresh procfs exposes only the
+    // namespace-local process tree. Layer capture begins only after return.
+    let mut cmd = std::process::Command::new(unshare);
+    cmd.arg("--mount")
+        .arg("--pid")
+        .arg("--fork")
+        .arg("--kill-child=SIGKILL")
+        .arg("--mount-proc")
+        .arg("--propagation=private")
+        .arg("--root")
+        .arg(rootfs_dir)
+        .arg("--wd")
+        .arg(normalized_run_workdir(workdir))
+        .arg("--");
+
     match command {
         RunCommand::Shell(command) => {
-            let mut cmd = std::process::Command::new("chroot");
-            cmd.arg(rootfs_dir);
             if shell.len() >= 2 {
                 cmd.arg(&shell[0]);
                 for arg in &shell[1..] {
@@ -734,47 +962,16 @@ fn execute_linux_run_command(
                 cmd.arg("/bin/sh");
                 cmd.arg("-c");
             }
-            let run_command = shell_command_in_workdir(workdir, command);
-            cmd.arg(&run_command);
-            configure_run_command_env(&mut cmd, env);
-            cmd.output()
-                .map_err(|e| BoxError::BuildError(format!("Failed to execute RUN command: {}", e)))
+            cmd.arg(command);
         }
-        RunCommand::Exec(exec) => execute_linux_run_exec_form(rootfs_dir, exec, workdir, env),
+        RunCommand::Exec(exec) => {
+            if let Some((executable, args)) = exec.split_first() {
+                cmd.arg(executable).args(args);
+            }
+        }
     }
-}
-
-#[cfg(target_os = "linux")]
-fn execute_linux_run_exec_form(
-    rootfs_dir: &Path,
-    exec: &[String],
-    workdir: &str,
-    env: &[(String, String)],
-) -> Result<std::process::Output> {
-    use std::os::unix::process::CommandExt;
-
-    validate_run_exec_preconditions(rootfs_dir, exec)?;
-    let mut cmd = std::process::Command::new(&exec[0]);
-    cmd.args(&exec[1..]);
     configure_run_command_env(&mut cmd, env);
-
-    let rootfs = path_cstring(rootfs_dir, "RUN rootfs")?;
-    let workdir = std::ffi::CString::new(normalized_run_workdir(workdir))
-        .map_err(|_| BoxError::BuildError("Dockerfile RUN workdir contains NUL".to_string()))?;
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::chroot(rootfs.as_ptr()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::chdir(workdir.as_ptr()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-
-    cmd.output()
-        .map_err(|e| BoxError::BuildError(format!("Failed to execute RUN exec form: {}", e)))
+    cmd
 }
 
 #[cfg(target_os = "linux")]
@@ -845,9 +1042,23 @@ fn run_bind_mount_target(
             mount.target
         )));
     }
-    let target = rootfs_dir.join(&rel);
-    assert_within(rootfs_dir, &target)?;
-    Ok((target, rel))
+    let relative = rel.to_str().ok_or_else(|| {
+        BoxError::BuildError(format!(
+            "RUN bind mount target is not UTF-8: {}",
+            rel.display()
+        ))
+    })?;
+    let target = crate::oci::rootfs::resolve_guest_file_path(rootfs_dir, relative)?;
+    let resolved_rel = target
+        .strip_prefix(rootfs_dir)
+        .map_err(|_| {
+            BoxError::BuildError(format!(
+                "Resolved RUN bind mount target escapes rootfs: {}",
+                target.display()
+            ))
+        })?
+        .to_path_buf();
+    Ok((target, resolved_rel))
 }
 
 fn run_tmpfs_mount_target(
@@ -864,9 +1075,23 @@ fn run_tmpfs_mount_target(
             mount.target
         )));
     }
-    let target = rootfs_dir.join(&rel);
-    assert_within(rootfs_dir, &target)?;
-    Ok((target, rel))
+    let relative = rel.to_str().ok_or_else(|| {
+        BoxError::BuildError(format!(
+            "RUN tmpfs mount target is not UTF-8: {}",
+            rel.display()
+        ))
+    })?;
+    let target = crate::oci::rootfs::resolve_guest_directory_path(rootfs_dir, relative)?;
+    let resolved_rel = target
+        .strip_prefix(rootfs_dir)
+        .map_err(|_| {
+            BoxError::BuildError(format!(
+                "Resolved RUN tmpfs mount target escapes rootfs: {}",
+                target.display()
+            ))
+        })?
+        .to_path_buf();
+    Ok((target, resolved_rel))
 }
 
 fn normalized_context_rel(path: &str) -> PathBuf {
@@ -969,9 +1194,10 @@ fn copy_symlink(source: &Path, target: &Path) -> Result<()> {
 
 fn run_cache_mount_target(rootfs_dir: &Path, mount: &RunCacheMount) -> Result<PathBuf> {
     reject_path_traversal(&mount.target)?;
-    let target = rootfs_dir.join(mount.target.trim_start_matches('/'));
-    assert_within(rootfs_dir, &target)?;
-    Ok(target)
+    crate::oci::rootfs::resolve_guest_directory_path(
+        rootfs_dir,
+        mount.target.trim_start_matches('/'),
+    )
 }
 
 #[cfg_attr(not(feature = "pool"), allow(dead_code))]
@@ -1182,6 +1408,26 @@ fn sync_run_cache_mount(target: &Path, cache_dir: &Path) -> Result<()> {
     })
 }
 
+/// Create one private overlay backup directory as a fresh rootfs entry.
+///
+/// A fixed image-visible parent such as `.a3s-box-run-*-overlays` is unsafe:
+/// an OCI layer can pre-create that entry as a symlink and make the host move
+/// guest files outside the rootfs. `create_dir` creates the random final entry
+/// atomically and fails instead of following a pre-existing link.
+fn create_run_overlay_staging_dir(rootfs_dir: &Path, kind: &str) -> Result<PathBuf> {
+    let staging_dir = rootfs_dir.join(format!(
+        ".a3s-box-run-{kind}-overlay-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir(&staging_dir).map_err(|error| {
+        BoxError::BuildError(format!(
+            "Failed to create RUN {kind} mount staging dir {}: {error}",
+            staging_dir.display()
+        ))
+    })?;
+    Ok(staging_dir)
+}
+
 #[cfg_attr(not(feature = "pool"), allow(dead_code))]
 struct PoolRunCacheMounts {
     staging_dir: Option<PathBuf>,
@@ -1224,16 +1470,7 @@ impl PoolRunCacheMounts {
                 e
             ))
         })?;
-        let staging_dir = rootfs_dir
-            .join(".a3s-box-run-cache-overlays")
-            .join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&staging_dir).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to create RUN cache mount staging dir {}: {}",
-                staging_dir.display(),
-                e
-            ))
-        })?;
+        let staging_dir = create_run_overlay_staging_dir(rootfs_dir, "cache")?;
         mounts.staging_dir = Some(staging_dir.clone());
 
         for (idx, mount) in cache_mounts.iter().enumerate() {
@@ -1343,23 +1580,6 @@ impl PoolRunCacheMounts {
             }) {
                 first_error.get_or_insert(error);
             }
-            if let Some(parent) = staging_dir.parent() {
-                match std::fs::remove_dir(parent) {
-                    Ok(()) => {}
-                    Err(err)
-                        if matches!(
-                            err.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                        ) => {}
-                    Err(err) => {
-                        first_error.get_or_insert(BoxError::BuildError(format!(
-                            "Failed to remove RUN cache mount staging parent {}: {}",
-                            parent.display(),
-                            err
-                        )));
-                    }
-                }
-            }
         }
 
         match first_error {
@@ -1423,16 +1643,7 @@ impl RunBindMountOverlays {
             return Ok(mounts);
         }
 
-        let staging_dir = rootfs_dir
-            .join(".a3s-box-run-bind-overlays")
-            .join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&staging_dir).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to create RUN bind mount staging dir {}: {}",
-                staging_dir.display(),
-                e
-            ))
-        })?;
+        let staging_dir = create_run_overlay_staging_dir(rootfs_dir, "bind")?;
         mounts.staging_dir = Some(staging_dir.clone());
 
         for (idx, mount) in bind_mounts.iter().enumerate() {
@@ -1519,23 +1730,6 @@ impl RunBindMountOverlays {
             }) {
                 first_error.get_or_insert(error);
             }
-            if let Some(parent) = staging_dir.parent() {
-                match std::fs::remove_dir(parent) {
-                    Ok(()) => {}
-                    Err(err)
-                        if matches!(
-                            err.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                        ) => {}
-                    Err(err) => {
-                        first_error.get_or_insert(BoxError::BuildError(format!(
-                            "Failed to remove RUN bind mount staging parent {}: {}",
-                            parent.display(),
-                            err
-                        )));
-                    }
-                }
-            }
         }
 
         match first_error {
@@ -1581,16 +1775,7 @@ impl RunTmpfsMountOverlays {
             return Ok(mounts);
         }
 
-        let staging_dir = rootfs_dir
-            .join(".a3s-box-run-tmpfs-overlays")
-            .join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&staging_dir).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to create RUN tmpfs mount staging dir {}: {}",
-                staging_dir.display(),
-                e
-            ))
-        })?;
+        let staging_dir = create_run_overlay_staging_dir(rootfs_dir, "tmpfs")?;
         mounts.staging_dir = Some(staging_dir.clone());
 
         for (idx, mount) in tmpfs_mounts.iter().enumerate() {
@@ -1665,23 +1850,6 @@ impl RunTmpfsMountOverlays {
                 ))
             }) {
                 first_error.get_or_insert(error);
-            }
-            if let Some(parent) = staging_dir.parent() {
-                match std::fs::remove_dir(parent) {
-                    Ok(()) => {}
-                    Err(err)
-                        if matches!(
-                            err.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                        ) => {}
-                    Err(err) => {
-                        first_error.get_or_insert(BoxError::BuildError(format!(
-                            "Failed to remove RUN tmpfs mount staging parent {}: {}",
-                            parent.display(),
-                            err
-                        )));
-                    }
-                }
             }
         }
 
@@ -1841,20 +2009,14 @@ fn run_command_failed_error_message(
 #[cfg_attr(all(not(feature = "pool"), not(test)), allow(dead_code))]
 fn prepare_pool_run_filesystem(rootfs_dir: &Path) -> Result<()> {
     for dir in ["dev", "proc", "sys", "tmp", "var/tmp", "etc"] {
-        std::fs::create_dir_all(rootfs_dir.join(dir)).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to prepare RUN directory {}: {}",
-                rootfs_dir.join(dir).display(),
-                e
-            ))
-        })?;
+        crate::oci::rootfs::ensure_guest_directory(rootfs_dir, dir)?;
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         for dir in ["tmp", "var/tmp"] {
-            let path = rootfs_dir.join(dir);
+            let path = crate::oci::rootfs::resolve_guest_directory_path(rootfs_dir, dir)?;
             let mut perms = std::fs::metadata(&path)
                 .map_err(|e| {
                     BoxError::BuildError(format!("Failed to inspect {}: {}", path.display(), e))
@@ -1869,10 +2031,11 @@ fn prepare_pool_run_filesystem(rootfs_dir: &Path) -> Result<()> {
                 ))
             })?;
         }
-        ensure_run_symlink(rootfs_dir.join("dev/fd"), "/proc/self/fd")?;
-        ensure_run_symlink(rootfs_dir.join("dev/stdin"), "/proc/self/fd/0")?;
-        ensure_run_symlink(rootfs_dir.join("dev/stdout"), "/proc/self/fd/1")?;
-        ensure_run_symlink(rootfs_dir.join("dev/stderr"), "/proc/self/fd/2")?;
+        let dev = crate::oci::rootfs::resolve_guest_directory_path(rootfs_dir, "dev")?;
+        ensure_run_symlink(dev.join("fd"), "/proc/self/fd")?;
+        ensure_run_symlink(dev.join("stdin"), "/proc/self/fd/0")?;
+        ensure_run_symlink(dev.join("stdout"), "/proc/self/fd/1")?;
+        ensure_run_symlink(dev.join("stderr"), "/proc/self/fd/2")?;
     }
 
     ensure_run_resolv_conf(rootfs_dir)
@@ -1912,17 +2075,11 @@ fn prepare_linux_run_filesystem(rootfs_dir: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     for dir in ["dev", "proc", "tmp", "var/tmp", "etc"] {
-        std::fs::create_dir_all(rootfs_dir.join(dir)).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to prepare RUN directory {}: {}",
-                rootfs_dir.join(dir).display(),
-                e
-            ))
-        })?;
+        crate::oci::rootfs::ensure_guest_directory(rootfs_dir, dir)?;
     }
 
     for dir in ["tmp", "var/tmp"] {
-        let path = rootfs_dir.join(dir);
+        let path = crate::oci::rootfs::resolve_guest_directory_path(rootfs_dir, dir)?;
         let mut perms = std::fs::metadata(&path)
             .map_err(|e| {
                 BoxError::BuildError(format!("Failed to inspect {}: {}", path.display(), e))
@@ -1939,7 +2096,8 @@ fn prepare_linux_run_filesystem(rootfs_dir: &Path) -> Result<()> {
     }
 
     for dev in ["null", "zero", "random", "urandom"] {
-        let target = rootfs_dir.join("dev").join(dev);
+        let relative = format!("dev/{dev}");
+        let target = crate::oci::rootfs::resolve_guest_file_path(rootfs_dir, &relative)?;
         if !target.exists() {
             std::fs::File::create(&target).map_err(|e| {
                 BoxError::BuildError(format!("Failed to create {}: {}", target.display(), e))
@@ -1947,10 +2105,11 @@ fn prepare_linux_run_filesystem(rootfs_dir: &Path) -> Result<()> {
         }
     }
 
-    ensure_run_symlink(rootfs_dir.join("dev/fd"), "/proc/self/fd")?;
-    ensure_run_symlink(rootfs_dir.join("dev/stdin"), "/proc/self/fd/0")?;
-    ensure_run_symlink(rootfs_dir.join("dev/stdout"), "/proc/self/fd/1")?;
-    ensure_run_symlink(rootfs_dir.join("dev/stderr"), "/proc/self/fd/2")?;
+    let dev = crate::oci::rootfs::resolve_guest_directory_path(rootfs_dir, "dev")?;
+    ensure_run_symlink(dev.join("fd"), "/proc/self/fd")?;
+    ensure_run_symlink(dev.join("stdin"), "/proc/self/fd/0")?;
+    ensure_run_symlink(dev.join("stdout"), "/proc/self/fd/1")?;
+    ensure_run_symlink(dev.join("stderr"), "/proc/self/fd/2")?;
     ensure_run_resolv_conf(rootfs_dir)?;
 
     Ok(())
@@ -1990,7 +2149,7 @@ fn ensure_run_symlink(path: PathBuf, target: &str) -> Result<()> {
     allow(dead_code)
 )]
 fn ensure_run_resolv_conf(rootfs_dir: &Path) -> Result<()> {
-    let path = rootfs_dir.join("etc/resolv.conf");
+    let path = crate::oci::rootfs::resolve_guest_file_path(rootfs_dir, "etc/resolv.conf")?;
     if std::fs::metadata(&path)
         .map(|m| m.len() > 0)
         .unwrap_or(false)
@@ -2000,8 +2159,7 @@ fn ensure_run_resolv_conf(rootfs_dir: &Path) -> Result<()> {
 
     let content = std::fs::read_to_string("/etc/resolv.conf")
         .unwrap_or_else(|_| "nameserver 8.8.8.8\nnameserver 8.8.4.4\n".to_string());
-    std::fs::write(&path, content)
-        .map_err(|e| BoxError::BuildError(format!("Failed to write {}: {}", path.display(), e)))
+    crate::oci::rootfs::write_guest_file(rootfs_dir, "etc/resolv.conf", content).map(|_| ())
 }
 
 #[cfg(target_os = "linux")]
@@ -2018,12 +2176,10 @@ impl LinuxRunMounts {
             cache_dirs: Vec::new(),
         };
 
-        mounts.mount_proc(&rootfs_dir.join("proc"))?;
         for dev in ["null", "zero", "random", "urandom"] {
-            mounts.bind_mount(
-                Path::new("/dev").join(dev),
-                rootfs_dir.join("dev").join(dev),
-            )?;
+            let relative = format!("dev/{dev}");
+            let target = crate::oci::rootfs::resolve_guest_file_path(rootfs_dir, &relative)?;
+            mounts.bind_mount(Path::new("/dev").join(dev), target)?;
         }
 
         Ok(mounts)
@@ -2045,22 +2201,11 @@ impl LinuxRunMounts {
             if let Some(seed_source) = run_cache_mount_seed_source(completed_stages, mount)? {
                 copy_run_cache_seed_to(&seed_source, cache_dir.path())?;
             }
-            let target = rootfs_dir.join(mount.target.trim_start_matches('/'));
+            let target = run_cache_mount_target(rootfs_dir, mount)?;
             self.bind_mount(cache_dir.path().to_path_buf(), target)?;
             self.cache_dirs.push(cache_dir);
         }
         Ok(self)
-    }
-
-    fn mount_proc(&mut self, target: &Path) -> Result<()> {
-        mount_linux(
-            Some(Path::new("proc")),
-            target,
-            Some("proc"),
-            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
-        )?;
-        self.mounted.push(target.to_path_buf());
-        Ok(())
     }
 
     fn bind_mount(&mut self, source: PathBuf, target: PathBuf) -> Result<()> {
@@ -2220,18 +2365,15 @@ fn handle_run_on_host_unsafe(
     let workdir_path = if workdir.is_empty() || workdir == "/" {
         rootfs_dir.to_path_buf()
     } else {
-        rootfs_dir.join(workdir.trim_start_matches('/'))
+        crate::oci::rootfs::resolve_guest_directory_path(
+            rootfs_dir,
+            workdir.trim_start_matches('/'),
+        )?
     };
 
     // Ensure workdir exists
     if !workdir_path.exists() {
-        std::fs::create_dir_all(&workdir_path).map_err(|e| {
-            BoxError::BuildError(format!(
-                "Failed to create workdir {}: {}",
-                workdir_path.display(),
-                e
-            ))
-        })?;
+        crate::oci::rootfs::ensure_guest_directory(rootfs_dir, workdir.trim_start_matches('/'))?;
     }
     ensure_run_cache_mount_targets(rootfs_dir, cache_mounts)?;
 
@@ -2323,15 +2465,21 @@ pub(super) fn handle_add(
     // Expand any glob source patterns against the context (Docker semantics);
     // remote URL sources pass through untouched.
     let src_patterns = &resolve_source_patterns(context_dir, src_patterns)?;
+    let mut changed = Vec::new();
 
     let resolved_dst = resolve_path(workdir, dst);
     reject_path_traversal(&resolved_dst)?;
-    let dst_in_rootfs = rootfs_dir.join(resolved_dst.trim_start_matches('/'));
-    // The destination must not escape the rootfs via `..` or a base-image symlink.
-    assert_within(rootfs_dir, &dst_in_rootfs)?;
+    let destination_relative = resolved_dst.trim_start_matches('/');
+    let dst_in_rootfs =
+        if destination_relative.is_empty() || dst.ends_with('/') || src_patterns.len() > 1 {
+            crate::oci::rootfs::resolve_guest_directory_path(rootfs_dir, destination_relative)?
+        } else {
+            crate::oci::rootfs::resolve_guest_file_path(rootfs_dir, destination_relative)?
+        };
 
     // Ensure destination directory exists
     if dst.ends_with('/') || src_patterns.len() > 1 {
+        let destination_existed = std::fs::symlink_metadata(&dst_in_rootfs).is_ok();
         std::fs::create_dir_all(&dst_in_rootfs).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to create ADD destination {}: {}",
@@ -2339,6 +2487,9 @@ pub(super) fn handle_add(
                 e
             ))
         })?;
+        if !destination_existed {
+            record_guest_change(rootfs_dir, &dst_in_rootfs, &mut changed)?;
+        }
     } else if let Some(parent) = dst_in_rootfs.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             BoxError::BuildError(format!("Failed to create parent directory: {}", e))
@@ -2358,7 +2509,7 @@ pub(super) fn handle_add(
                 .filter(|s| !s.is_empty())
                 .unwrap_or("downloaded");
             let dest_file = if dst_in_rootfs.is_dir() || src.ends_with('/') {
-                dst_in_rootfs.join(filename)
+                resolve_guest_child(rootfs_dir, &dst_in_rootfs, std::ffi::OsStr::new(filename))?
             } else {
                 dst_in_rootfs.clone()
             };
@@ -2370,6 +2521,7 @@ pub(super) fn handle_add(
             std::fs::write(&dest_file, &bytes).map_err(|e| {
                 BoxError::BuildError(format!("Failed to write downloaded file: {}", e))
             })?;
+            record_guest_change(rootfs_dir, &dest_file, &mut changed)?;
             tracing::info!(url = src.as_str(), dest = %dest_file.display(), "ADD URL downloaded");
             continue;
         }
@@ -2404,16 +2556,42 @@ pub(super) fn handle_add(
 
         // Check if it's a tar archive that should be auto-extracted
         if is_tar_archive(src) && !src_path.is_dir() {
-            extract_tar_to_dst(&src_path, &dst_in_rootfs)?;
+            // Unpack away from the image first, then copy each entry through
+            // the guest-path resolver. Direct `tar::unpack(dst)` can follow a
+            // pre-existing image symlink and interpret its absolute target as
+            // a host path.
+            let extracted = tempfile::tempdir().map_err(|error| {
+                BoxError::BuildError(format!(
+                    "Failed to create secure ADD extraction directory: {error}"
+                ))
+            })?;
+            extract_tar_to_dst(&src_path, extracted.path())?;
+            copy_dir_filtered_to_guest_rootfs(
+                extracted.path(),
+                &dst_in_rootfs,
+                rootfs_dir,
+                Path::new(""),
+                None,
+                &mut changed,
+            )?;
         } else if src_path.is_dir() {
-            copy_dir_filtered(&src_path, &dst_in_rootfs, &rel, ignore)?;
+            copy_dir_filtered_to_guest_rootfs(
+                &src_path,
+                &dst_in_rootfs,
+                rootfs_dir,
+                &rel,
+                ignore,
+                &mut changed,
+            )?;
         } else {
             let target = if dst_in_rootfs.is_dir() {
-                dst_in_rootfs.join(
+                resolve_guest_child(
+                    rootfs_dir,
+                    &dst_in_rootfs,
                     src_path
                         .file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new(src)),
-                )
+                )?
             } else {
                 dst_in_rootfs.clone()
             };
@@ -2425,24 +2603,15 @@ pub(super) fn handle_add(
                     e
                 ))
             })?;
+            record_guest_change(rootfs_dir, &target, &mut changed)?;
         }
     }
 
     // Create a layer from the destination, stamping --chown into tar headers.
     let layer_path = layers_dir.join(format!("layer_{}.tar.gz", layer_index));
-    let target_prefix = Path::new(resolved_dst.trim_start_matches('/'));
-    if dst_in_rootfs.is_dir() {
-        create_layer_from_dir_with_chown(&dst_in_rootfs, target_prefix, &layer_path, chown_ids)
-    } else if dst_in_rootfs.parent().is_some() {
-        let changed = vec![PathBuf::from(
-            dst_in_rootfs
-                .strip_prefix(rootfs_dir)
-                .unwrap_or(target_prefix),
-        )];
-        create_layer_with_chown(rootfs_dir, &changed, &[], &layer_path, chown_ids)
-    } else {
-        Err(BoxError::BuildError("Invalid ADD destination".to_string()))
-    }
+    changed.sort();
+    changed.dedup();
+    create_layer_with_chown(rootfs_dir, &changed, &[], &layer_path, chown_ids)
 }
 
 /// Execute an ONBUILD trigger instruction.
@@ -2858,6 +3027,103 @@ mod tests {
         assert_eq!(cmd, vec!["/bin/bash", "-lc", "cd '/app' && echo hi"]);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_run_command_uses_private_pid_and_mount_namespaces() {
+        let command = super::isolated_linux_run_command(
+            std::path::Path::new("/usr/bin/unshare"),
+            std::path::Path::new("/build/rootfs"),
+            &shell_run("echo hi"),
+            "/app",
+            &[],
+            &["/bin/bash".to_string(), "-lc".to_string()],
+        );
+        let args = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "--mount",
+                "--pid",
+                "--fork",
+                "--kill-child=SIGKILL",
+                "--mount-proc",
+                "--propagation=private",
+                "--root",
+                "/build/rootfs",
+                "--wd",
+                "/app",
+                "--",
+                "/bin/bash",
+                "-lc",
+                "echo hi",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_run_waits_for_detached_descendants_to_be_killed() {
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+
+        let temporary = tempfile::TempDir::new().unwrap();
+        let workdir = temporary.path().to_str().unwrap();
+        let probe = super::execute_linux_run_command(
+            std::path::Path::new("/"),
+            &shell_run("true"),
+            workdir,
+            &[],
+            &[],
+        )
+        .expect("util-linux unshare must be installed for Linux RUN");
+        if !probe.status.success() {
+            let stderr = String::from_utf8_lossy(&probe.stderr);
+            if stderr.contains("Operation not permitted")
+                || stderr.contains("operation not permitted")
+            {
+                return;
+            }
+            panic!("isolated RUN probe failed: {stderr}");
+        }
+
+        let output = super::execute_linux_run_command(
+            std::path::Path::new("/"),
+            &shell_run(
+                "setsid /bin/sh -c 'printf started > started.txt; while [ ! -f go.txt ]; do sleep 0.01; done; printf late > late.txt' >/dev/null 2>&1 & i=0; while [ ! -f started.txt ] && [ \"$i\" -lt 100 ]; do sleep 0.01; i=$((i + 1)); done; test -f started.txt",
+            ),
+            workdir,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated RUN failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            temporary.path().join("started.txt").is_file(),
+            "the detached RUN descendant did not start"
+        );
+        // If the detached shell survived, this host-side sentinel lets it make
+        // the late mutation immediately. A fixed sleep in the daemon would
+        // make the regression depend on scheduler timing around parent exit.
+        std::fs::write(temporary.path().join("go.txt"), "go").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            !temporary.path().join("late.txt").exists(),
+            "a detached RUN descendant survived the namespace lifecycle fence"
+        );
+    }
+
     #[test]
     fn test_run_env_entries_includes_defaults_and_build_env() {
         let env = super::run_env_entries(&[("FOO".to_string(), "bar".to_string())]);
@@ -2883,6 +3149,131 @@ mod tests {
         assert!(rootfs.join("sys").is_dir());
         assert!(rootfs.join("tmp").is_dir());
         assert!(rootfs.join("etc/resolv.conf").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_prepare_pool_run_filesystem_rejects_etc_symlink_escape() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink("../outside", rootfs.join("etc")).unwrap();
+
+        let error = super::prepare_pool_run_filesystem(&rootfs)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.join("resolv.conf").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_handle_copy_rejects_dangling_destination_symlink_escape() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let context = tmp.path().join("context");
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        let layers = tmp.path().join("layers");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&layers).unwrap();
+        std::fs::write(context.join("input.txt"), "guest-data").unwrap();
+        std::os::unix::fs::symlink("../outside/copied.txt", rootfs.join("escape")).unwrap();
+
+        let error = super::handle_copy(
+            &["input.txt".to_string()],
+            "/escape",
+            None,
+            &context,
+            &rootfs,
+            &layers,
+            "/",
+            0,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.join("copied.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_handle_copy_rejects_nested_destination_symlink_escape() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let context = tmp.path().join("context");
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        let layers = tmp.path().join("layers");
+        std::fs::create_dir_all(context.join("src")).unwrap();
+        std::fs::create_dir_all(rootfs.join("app")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&layers).unwrap();
+        std::fs::write(context.join("src/config"), "guest-data").unwrap();
+        std::os::unix::fs::symlink("../../outside/config", rootfs.join("app/config")).unwrap();
+
+        let error = super::handle_copy(
+            &["src".to_string()],
+            "/app/",
+            None,
+            &context,
+            &rootfs,
+            &layers,
+            "/",
+            0,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.join("config").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_handle_copy_layers_internal_absolute_symlink_target_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let context = tmp.path().join("context");
+        let rootfs = tmp.path().join("rootfs");
+        let layers = tmp.path().join("layers");
+        std::fs::create_dir_all(&context).unwrap();
+        std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
+        std::fs::create_dir_all(&layers).unwrap();
+        std::fs::write(context.join("tool"), "guest-tool").unwrap();
+        std::os::unix::fs::symlink("/usr/bin", rootfs.join("bin")).unwrap();
+
+        let layer = super::handle_copy(
+            &["tool".to_string()],
+            "/bin/",
+            None,
+            &context,
+            &rootfs,
+            &layers,
+            "/",
+            0,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(rootfs.join("usr/bin/tool")).unwrap(),
+            "guest-tool"
+        );
+        let decoder = flate2::read::GzDecoder::new(std::fs::File::open(layer.path).unwrap());
+        let mut archive = tar::Archive::new(decoder);
+        let paths: Vec<_> = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().into_owned())
+            .collect();
+        assert!(paths.contains(&PathBuf::from("usr/bin/tool")), "{paths:?}");
+        assert!(!paths.contains(&PathBuf::from("bin/tool")), "{paths:?}");
     }
 
     #[test]
@@ -2977,6 +3368,46 @@ mod tests {
         assert!(!target.join("generated.txt").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_run_bind_mount_overlay_staging_does_not_follow_image_symlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let context = tmp.path().join("context");
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        let target = rootfs.join("work");
+        std::fs::create_dir_all(context.join("src")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(context.join("src/input.txt"), "context").unwrap();
+        std::fs::write(target.join("original.txt"), "rootfs").unwrap();
+        std::os::unix::fs::symlink(&outside, rootfs.join(".a3s-box-run-bind-overlays")).unwrap();
+        let mounts = vec![RunBindMount {
+            from: None,
+            raw: "--mount=type=bind,source=src,target=/work".to_string(),
+            source: "src".to_string(),
+            target: "/work".to_string(),
+            read_write: false,
+        }];
+
+        let guard =
+            super::RunBindMountOverlays::activate_context(&rootfs, &context, &mounts, "/", None)
+                .unwrap();
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        guard.restore().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("original.txt")).unwrap(),
+            "rootfs"
+        );
+        assert!(
+            std::fs::symlink_metadata(rootfs.join(".a3s-box-run-bind-overlays"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
     #[test]
     fn test_filter_run_mount_paths_excludes_bind_target() {
         let mounts = vec![RunBindMount {
@@ -3049,6 +3480,38 @@ mod tests {
         assert!(!target.join("generated.txt").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_run_tmpfs_mount_overlay_staging_does_not_follow_image_symlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        let target = rootfs.join("work/tmp");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(target.join("original.txt"), "rootfs").unwrap();
+        std::os::unix::fs::symlink(&outside, rootfs.join(".a3s-box-run-tmpfs-overlays")).unwrap();
+        let mounts = vec![RunTmpfsMount {
+            raw: "--mount=type=tmpfs,target=/work/tmp".to_string(),
+            target: "/work/tmp".to_string(),
+        }];
+
+        let guard = super::RunTmpfsMountOverlays::activate(&rootfs, &mounts, "/").unwrap();
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        guard.restore().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("original.txt")).unwrap(),
+            "rootfs"
+        );
+        assert!(
+            std::fs::symlink_metadata(rootfs.join(".a3s-box-run-tmpfs-overlays"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
     #[test]
     fn test_filter_run_mount_paths_excludes_tmpfs_target() {
         let mounts = vec![RunTmpfsMount {
@@ -3100,6 +3563,49 @@ mod tests {
             "original"
         );
         assert!(!target.join("cache-only.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pool_run_cache_overlay_staging_does_not_follow_image_symlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        let target = rootfs.join("root/.cache");
+        let cache_root = tmp.path().join("run-cache");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(target.join("original.txt"), "rootfs").unwrap();
+        std::os::unix::fs::symlink(&outside, rootfs.join(".a3s-box-run-cache-overlays")).unwrap();
+        let mounts = vec![RunCacheMount {
+            raw: "--mount=type=cache,target=/root/.cache".to_string(),
+            id: None,
+            from: None,
+            source: ".".to_string(),
+            sharing: RunCacheSharing::Locked,
+            mode: None,
+            uid: None,
+            gid: None,
+            target: "/root/.cache".to_string(),
+        }];
+
+        super::ensure_run_cache_mount_targets(&rootfs, &mounts).unwrap();
+        let guard =
+            super::PoolRunCacheMounts::activate_with_cache_root(&rootfs, &mounts, &cache_root, &[])
+                .unwrap();
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        guard.restore().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target.join("original.txt")).unwrap(),
+            "rootfs"
+        );
+        assert!(
+            std::fs::symlink_metadata(rootfs.join(".a3s-box-run-cache-overlays"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]
@@ -3920,6 +4426,24 @@ mod tests {
             .to_string();
 
         assert!(err.contains("is not absolute"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_linux_run_workdir_rejects_symlink_escape() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink("../outside", rootfs.join("app")).unwrap();
+
+        let error = super::ensure_linux_run_workdir(&rootfs, "/app/build")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.join("build").exists());
     }
 
     #[cfg(target_os = "macos")]

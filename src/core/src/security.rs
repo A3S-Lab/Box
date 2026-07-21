@@ -60,9 +60,14 @@ impl SecurityConfig {
         Ok(())
     }
 
-    /// Parse security config from CLI-style options.
+    /// Parse guest-enforceable security config from CLI-style options.
+    ///
+    /// Backend compatibility is validated by [`crate::resolve_execution`]
+    /// before the MicroVM specification is built. This parser only translates
+    /// options that guest-init can enforce.
     ///
     /// Accepts the same format as Docker:
+    /// - `seccomp=default` — apply the built-in profile
     /// - `seccomp=unconfined` — disable seccomp
     /// - `seccomp=<path>` — custom profile
     /// - `no-new-privileges` or `no-new-privileges=true` — enable (default)
@@ -91,26 +96,30 @@ impl SecurityConfig {
 
         for opt in security_opt {
             let opt = opt.trim();
-            if let Some(value) = opt.strip_prefix("seccomp=") {
-                config.seccomp = if value == "unconfined" {
+            if opt.eq_ignore_ascii_case("no-new-privileges") {
+                config.no_new_privileges = true;
+                continue;
+            }
+
+            let Some((key, value)) = opt.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if key.eq_ignore_ascii_case("seccomp") {
+                config.seccomp = if value.eq_ignore_ascii_case("default") {
+                    SeccompMode::Default
+                } else if value.eq_ignore_ascii_case("unconfined") {
                     SeccompMode::Unconfined
                 } else {
                     SeccompMode::Custom(value.to_string())
                 };
-            } else if opt == "no-new-privileges" || opt == "no-new-privileges=true" {
-                config.no_new_privileges = true;
-            } else if opt == "no-new-privileges=false" {
-                config.no_new_privileges = false;
-            } else if opt.starts_with("apparmor=") {
-                tracing::warn!(
-                    opt = %opt,
-                    "AppArmor profiles are not supported in a3s-box; option ignored"
-                );
-            } else if opt.starts_with("label=") {
-                tracing::warn!(
-                    opt = %opt,
-                    "SELinux labels are not supported in a3s-box; option ignored"
-                );
+            } else if key.eq_ignore_ascii_case("no-new-privileges") {
+                if value.eq_ignore_ascii_case("true") {
+                    config.no_new_privileges = true;
+                } else if value.eq_ignore_ascii_case("false") {
+                    config.no_new_privileges = false;
+                }
             }
         }
 
@@ -229,6 +238,13 @@ mod tests {
         let opts = vec!["seccomp=unconfined".to_string()];
         let config = SecurityConfig::from_options(&opts, &[], &[], false);
         assert_eq!(config.seccomp, SeccompMode::Unconfined);
+    }
+
+    #[test]
+    fn test_from_options_explicit_seccomp_default() {
+        let opts = vec![" SECCOMP=DEFAULT ".to_string()];
+        let config = SecurityConfig::from_options(&opts, &[], &[], false);
+        assert_eq!(config.seccomp, SeccompMode::Default);
     }
 
     #[test]
@@ -385,37 +401,5 @@ mod tests {
     fn test_validate_privileged_ok() {
         let config = SecurityConfig::from_options(&[], &[], &[], true);
         assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_from_options_apparmor_ignored() {
-        // AppArmor options should be accepted (not panic) but have no effect
-        let opts = vec!["apparmor=docker-default".to_string()];
-        let config = SecurityConfig::from_options(&opts, &[], &[], false);
-        // Config should still be default — apparmor is ignored
-        assert_eq!(config.seccomp, SeccompMode::Default);
-        assert!(config.no_new_privileges);
-    }
-
-    #[test]
-    fn test_from_options_selinux_ignored() {
-        // SELinux label options should be accepted (not panic) but have no effect
-        let opts = vec!["label=type:container_t".to_string()];
-        let config = SecurityConfig::from_options(&opts, &[], &[], false);
-        assert_eq!(config.seccomp, SeccompMode::Default);
-        assert!(config.no_new_privileges);
-    }
-
-    #[test]
-    fn test_from_options_mixed_with_apparmor_selinux() {
-        let opts = vec![
-            "seccomp=unconfined".to_string(),
-            "apparmor=unconfined".to_string(),
-            "label=disable".to_string(),
-            "no-new-privileges=false".to_string(),
-        ];
-        let config = SecurityConfig::from_options(&opts, &[], &[], false);
-        assert_eq!(config.seccomp, SeccompMode::Unconfined);
-        assert!(!config.no_new_privileges);
     }
 }

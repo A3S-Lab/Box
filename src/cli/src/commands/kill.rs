@@ -95,15 +95,25 @@ async fn kill_one(
     query: &str,
     signal: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let record = resolve::resolve(state, query)?.clone();
+    let box_id = resolve::resolve(state, query)?.id.clone();
+    let _lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+    // Select the status and PID from fresh state while holding the same lock as
+    // start/restart/commit. Keep it through signal delivery and persistence so
+    // the stopped transition cannot overwrite a concurrently booted PID.
+    let current_state = StateFile::load_default()?;
+    let record = current_state
+        .find_by_id(&box_id)
+        .ok_or_else(|| format!("Box {query} was removed while waiting to send a signal"))?
+        .clone();
+    drop(current_state);
 
     status::require_active(&record, "send a signal to")
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     let pid = lifecycle::require_live_pid(&record, "send a signal to")
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
 
-    let box_id = record.id.clone();
     let name = record.name.clone();
+    let expected_pid_start_time = record.pid_start_time;
 
     // Resume a paused box before terminating it. This now also applies to
     // SIGKILL: a paused box is SIGSTOP'd, and leaving it frozen would otherwise
@@ -178,24 +188,48 @@ async fn kill_one(
         cleanup::cleanup_stopped_box(&record)?;
 
         let exit_code = signaled_exit_code(signal);
-        StateFile::modify(|s| {
-            if let Some(state_record) = s.find_by_id_mut(&box_id) {
-                state_record.status = "stopped".to_string();
-                state_record.pid = None;
-                state_record.stopped_by_user = true;
-                state_record.exit_code = Some(exit_code);
-                state_record.health_status = "none".to_string();
-                state_record.health_retries = 0;
-            }
-            Ok::<(), std::io::Error>(())
+        let persisted = StateFile::modify(|s| {
+            let updated = match s.find_by_id_mut(&box_id) {
+                Some(state_record)
+                    if lifecycle::matches_execution(state_record, pid, expected_pid_start_time) =>
+                {
+                    state_record.status = "stopped".to_string();
+                    state_record.pid = None;
+                    state_record.stopped_by_user = true;
+                    state_record.exit_code = Some(exit_code);
+                    state_record.health_status = "none".to_string();
+                    state_record.health_retries = 0;
+                    true
+                }
+                _ => false,
+            };
+            Ok::<bool, std::io::Error>(updated)
         })?;
+        if !persisted {
+            return Err(format!(
+                "Box {name} changed execution while signal {signal} was being delivered; did not overwrite the replacement state"
+            )
+            .into());
+        }
     } else if let Some(new_status) = signal_status_transition(signal) {
-        StateFile::modify(|s| {
-            if let Some(state_record) = s.find_by_id_mut(&box_id) {
-                state_record.status = new_status.to_string();
-            }
-            Ok::<(), std::io::Error>(())
+        let persisted = StateFile::modify(|s| {
+            let updated = match s.find_by_id_mut(&box_id) {
+                Some(state_record)
+                    if lifecycle::matches_execution(state_record, pid, expected_pid_start_time) =>
+                {
+                    state_record.status = new_status.to_string();
+                    true
+                }
+                _ => false,
+            };
+            Ok::<bool, std::io::Error>(updated)
         })?;
+        if !persisted {
+            return Err(format!(
+                "Box {name} changed execution while signal {signal} was being delivered; did not overwrite the replacement state"
+            )
+            .into());
+        }
     }
 
     println!("{name}");

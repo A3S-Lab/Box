@@ -575,9 +575,7 @@ pub struct ExecListener;
 ///
 /// The descriptor must refer to an already-bound, listening AF_UNIX stream
 /// socket. It is validated and marked `CLOEXEC` before the workload is forked.
-pub fn adopt_inherited_exec_listener(
-    fd: std::os::fd::RawFd,
-) -> Result<ExecListener, Box<dyn std::error::Error>> {
+pub fn adopt_inherited_exec_listener(fd: i32) -> Result<ExecListener, Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         Ok(ExecListener(crate::listener::adopt_unix_listener(
@@ -2470,6 +2468,22 @@ fn bounded_exec_output_with_truncation(
 mod tests {
     use super::*;
 
+    fn spawn_long_running_test_child() -> std::process::Child {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/D", "/S", "/C", "ping 127.0.0.1 -n 31 >NUL"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        command.spawn().expect("spawn long-running test child")
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn truncated_exec_frame_returns_error_without_double_closing_fd() {
@@ -2493,10 +2507,7 @@ mod tests {
         // A disconnected host input channel (a3s-box-cri died, or a client
         // disconnect) must be treated as a cancel so the command is killed
         // rather than left running orphaned.
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
+        let mut child = spawn_long_running_test_child();
         let (tx, rx) = mpsc::channel::<ExecInputEvent>();
         drop(tx); // host gone
         let outcome = drain_exec_input_events(&mut child, Some(&rx));
@@ -2511,10 +2522,7 @@ mod tests {
     #[test]
     fn test_drain_exec_input_empty_does_not_cancel() {
         use std::sync::mpsc;
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
+        let mut child = spawn_long_running_test_child();
         let (_tx, rx) = mpsc::channel::<ExecInputEvent>(); // sender alive, no events
         let outcome = drain_exec_input_events(&mut child, Some(&rx));
         assert!(
@@ -2683,6 +2691,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_echo() {
         let output = execute_command(
             &["echo".to_string(), "hello".to_string()],
@@ -2721,6 +2730,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_non_zero_exit() {
         let output = execute_command(
             &["sh".to_string(), "-c".to_string(), "exit 42".to_string()],
@@ -2735,6 +2745,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_with_env() {
         let output = execute_command(
             &[
@@ -2757,6 +2768,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_with_working_dir() {
         let output = execute_command(&["pwd".to_string()], 0, &[], Some("/tmp"), None, None, None);
         assert_eq!(output.exit_code, 0);
@@ -2813,6 +2825,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_build_command_uses_selected_users_home_unless_overridden() {
         let rootfs = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
@@ -2876,6 +2889,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_with_stdin() {
         let output = execute_command(
             &["cat".to_string()],

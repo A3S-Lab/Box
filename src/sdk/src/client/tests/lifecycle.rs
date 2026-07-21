@@ -224,3 +224,129 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
         } if request == &request_json && operation_id == "sdk-operation-id"
     ));
 }
+
+#[tokio::test]
+async fn sdk_create_rejects_unsupported_microvm_security_before_persistence() {
+    let temp = tempfile::tempdir().unwrap();
+    let client = A3sBoxClient::from_home(temp.path());
+
+    for (index, (security_option, expected)) in [
+        ("apparmor=runtime/default", "AppArmor"),
+        ("label=type:container_t", "SELinux"),
+        ("seccomp=/profiles/restricted.json", "custom seccomp"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request = a3s_box_core::CreateExecutionRequest {
+            external_sandbox_id: format!("sdk-unsupported-security-{index}"),
+            config: a3s_box_core::BoxConfig {
+                image: "alpine:3.20".to_string(),
+                isolation: a3s_box_core::ExecutionIsolation::Microvm,
+                security_opt: vec![security_option.to_string()],
+                ..Default::default()
+            },
+            labels: Default::default(),
+            policy: Default::default(),
+            rootfs_snapshot_id: None,
+        };
+        let operation_id =
+            a3s_box_core::OperationId::new(format!("sdk-unsupported-security-operation-{index}"))
+                .unwrap();
+
+        let error = client.create_box(request, &operation_id).await.unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ClientError::Execution(a3s_box_core::ExecutionManagerError::InvalidRequest(message))
+                if message.contains(expected)
+        ));
+        assert!(!client.paths().boxes_file.exists());
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn sdk_create_rejects_windows_health_check_before_persistence() {
+    let temp = tempfile::tempdir().unwrap();
+    let client = A3sBoxClient::from_home(temp.path());
+    let mut request = a3s_box_core::CreateExecutionRequest {
+        external_sandbox_id: "sdk-windows-health".to_string(),
+        config: a3s_box_core::BoxConfig {
+            image: "alpine:3.20".to_string(),
+            ..Default::default()
+        },
+        labels: Default::default(),
+        policy: Default::default(),
+        rootfs_snapshot_id: None,
+    };
+    request.policy.health_check = Some(a3s_box_core::ExecutionHealthCheck {
+        cmd: vec!["true".to_string()],
+        interval_secs: 30,
+        timeout_secs: 5,
+        retries: 3,
+        start_period_secs: 0,
+    });
+    let operation_id = a3s_box_core::OperationId::new("sdk-windows-health-operation").unwrap();
+
+    let error = client.create_box(request, &operation_id).await.unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ClientError::Execution(a3s_box_core::ExecutionManagerError::InvalidRequest(message))
+            if message.contains("health checks are not supported on Windows")
+    ));
+    assert!(!client.paths().boxes_file.exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn sdk_start_rejects_persisted_windows_health_check_without_claiming() {
+    let temp = tempfile::tempdir().unwrap();
+    let client = A3sBoxClient::from_home(temp.path());
+    let mut request = a3s_box_core::CreateExecutionRequest {
+        external_sandbox_id: "sdk-persisted-windows-health".to_string(),
+        config: a3s_box_core::BoxConfig {
+            image: "alpine:3.20".to_string(),
+            ..Default::default()
+        },
+        labels: Default::default(),
+        policy: Default::default(),
+        rootfs_snapshot_id: None,
+    };
+    request.policy.health_check = Some(a3s_box_core::ExecutionHealthCheck {
+        cmd: vec!["true".to_string()],
+        interval_secs: 30,
+        timeout_secs: 5,
+        retries: 3,
+        start_period_secs: 0,
+    });
+    request.policy.healthcheck_disabled = true;
+    let operation_id =
+        a3s_box_core::OperationId::new("sdk-persisted-windows-health-operation").unwrap();
+    let reservation = client.create_box(request, &operation_id).await.unwrap();
+
+    let state_path = &client.paths().boxes_file;
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
+    let record = state.as_array_mut().unwrap().first_mut().unwrap();
+    record["healthcheck_disabled"] = serde_json::json!(false);
+    record["managed_execution"]["request"]["policy"]["healthcheck_disabled"] =
+        serde_json::json!(false);
+    std::fs::write(state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+
+    let error = client
+        .start_box(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ClientError::Execution(a3s_box_core::ExecutionManagerError::InvalidRequest(message))
+            if message.contains("health checks are not supported on Windows")
+    ));
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
+    assert_eq!(persisted[0]["status"], "created");
+    assert!(persisted[0]["managed_execution"]["pending_operation"].is_null());
+}

@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use a3s_box_core::config::{ExecutionIsolation, ResourceLimits};
+use a3s_box_core::config::{
+    validate_vcpu_count, ExecutionIsolation, ResourceLimits, DEFAULT_VCPUS,
+};
 use a3s_box_runtime::oci::{OciHealthCheck, OciImageConfig};
 use clap::{Args, ValueEnum};
 
@@ -65,7 +67,7 @@ pub struct CommonBoxArgs {
     pub name: Option<String>,
 
     /// Number of CPUs
-    #[arg(long, default_value = "2")]
+    #[arg(long, default_value_t = DEFAULT_VCPUS)]
     pub cpus: u32,
 
     /// Memory (e.g., "512m", "2g")
@@ -315,6 +317,9 @@ pub(crate) fn effective_health_check(
 
 /// Convert Docker-compatible image healthcheck metadata into exec command form.
 pub(crate) fn health_check_from_oci(health_check: &OciHealthCheck) -> Option<HealthCheck> {
+    if !health_check.is_enabled() {
+        return None;
+    }
     let cmd = health_check_command(&health_check.test)?;
     Some(HealthCheck {
         cmd,
@@ -409,6 +414,19 @@ fn resolve_auto_host_port(entry: String) -> Result<String, String> {
 
 /// Reject runtime options that a3s-box cannot enforce yet.
 pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), String> {
+    #[cfg(windows)]
+    if common.health_cmd.is_some()
+        || common.health_interval != 30
+        || common.health_timeout != 5
+        || common.health_retries != 3
+        || common.health_start_period != 0
+    {
+        return Err(
+            "container health checks are not supported on Windows; remove the --health-* options (or use --no-healthcheck to disable an image-defined health check)"
+                .to_string(),
+        );
+    }
+
     if !common.device.is_empty() {
         return Err(
             "--device is not supported by the libkrun backend; device passthrough is not available"
@@ -419,14 +437,7 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
         return Err("--gpus is not implemented; GPU passthrough is not available".to_string());
     }
 
-    // CPUs must fit the microVM sizing contract: `vcpus as u8` (spec.rs) turned 0
-    // into a non-bootable VM and >= 256 into a wrapped/truncated count.
-    if common.cpus == 0 {
-        return Err("--cpus must be at least 1".to_string());
-    }
-    if common.cpus > 255 {
-        return Err(format!("--cpus {} exceeds the maximum of 255", common.cpus));
-    }
+    validate_vcpu_count(common.cpus).map_err(|error| format!("--cpus: {error}"))?;
 
     // OOM controls are accepted for Docker-CLI compatibility but not enforced by
     // the libkrun backend; warn instead of silently misleading an operator who
@@ -457,48 +468,43 @@ pub(crate) fn validate_runtime_options(common: &CommonBoxArgs) -> Result<(), Str
     a3s_box_core::dns::parse_add_host_entries(&common.add_host)
         .map_err(|e| format!("Invalid --add-host: {e}"))?;
 
-    for opt in &common.security_opt {
-        let opt = opt.trim();
-        if opt.starts_with("apparmor=") {
-            return Err(format!(
-                "AppArmor security options are not supported by a3s-box: {opt}"
-            ));
-        }
-        if opt.starts_with("label=") {
-            return Err(format!(
-                "SELinux label security options are not supported by a3s-box: {opt}"
-            ));
-        }
+    let network = match common.network.as_ref() {
+        Some(network) => a3s_box_core::NetworkMode::Bridge {
+            network: network.clone(),
+        },
+        None => a3s_box_core::NetworkMode::Tsi,
+    };
+    let compatibility_config = a3s_box_core::BoxConfig {
+        isolation: execution_isolation(common),
+        port_map: common.publish.clone(),
+        network,
+        cap_add: common.cap_add.clone(),
+        cap_drop: common.cap_drop.clone(),
+        security_opt: common.security_opt.clone(),
+        privileged: common.privileged,
+        ..Default::default()
+    };
+    a3s_box_core::resolve_execution(&compatibility_config).map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+/// Reject an effective health check on hosts where the guest exec transport
+/// cannot run it. This second gate covers image metadata and persisted records,
+/// while [`validate_runtime_options`] rejects explicit CLI flags before a pull.
+pub(crate) fn validate_health_check_support(
+    health_check: Option<&HealthCheck>,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    if health_check.is_some() {
+        return Err(
+            "container health checks are not supported on Windows; use --no-healthcheck to disable the image-defined health check"
+                .to_string(),
+        );
     }
 
-    let security = a3s_box_core::SecurityConfig::from_options(
-        &common.security_opt,
-        &common.cap_add,
-        &common.cap_drop,
-        common.privileged,
-    );
-    security.validate()?;
-
-    if execution_isolation(common).is_sandbox() {
-        let network = match common.network.as_ref() {
-            Some(network) => a3s_box_core::NetworkMode::Bridge {
-                network: network.clone(),
-            },
-            None => a3s_box_core::NetworkMode::Tsi,
-        };
-        let compatibility_config = a3s_box_core::BoxConfig {
-            isolation: a3s_box_core::ExecutionIsolation::Sandbox,
-            port_map: common.publish.clone(),
-            network,
-            cap_add: common.cap_add.clone(),
-            cap_drop: common.cap_drop.clone(),
-            security_opt: common.security_opt.clone(),
-            privileged: common.privileged,
-            ..Default::default()
-        };
-        a3s_box_core::validate_sandbox_compatibility(&compatibility_config)
-            .map_err(|error| error.to_string())?;
-    }
+    #[cfg(not(windows))]
+    let _ = health_check;
 
     Ok(())
 }
@@ -751,7 +757,7 @@ mod tests {
     #[test]
     fn test_validate_rejects_zero_and_excessive_cpus() {
         let mut args = default_common_args();
-        args.cpus = 2;
+        args.cpus = DEFAULT_VCPUS;
         assert!(validate_runtime_options(&args).is_ok());
         args.cpus = 0;
         assert!(validate_runtime_options(&args)
@@ -759,6 +765,16 @@ mod tests {
             .contains("cpus"));
         args.cpus = 256;
         assert!(validate_runtime_options(&args).unwrap_err().contains("255"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_validate_rejects_windows_smp() {
+        let mut args = default_common_args();
+        args.cpus = 2;
+        assert!(validate_runtime_options(&args)
+            .unwrap_err()
+            .contains("WHPX"));
     }
 
     #[test]
@@ -908,7 +924,7 @@ mod tests {
             image: "test".to_string(),
             isolation: None,
             name: None,
-            cpus: 2,
+            cpus: DEFAULT_VCPUS,
             memory: "512m".to_string(),
             volumes: vec![],
             env: vec![],
@@ -1008,6 +1024,25 @@ mod tests {
     }
 
     #[test]
+    fn test_health_check_from_oci_ignores_non_effective_commands() {
+        for test in [
+            Vec::new(),
+            vec!["NONE".to_string()],
+            vec!["CMD".to_string()],
+            vec!["CMD-SHELL".to_string(), "   ".to_string()],
+        ] {
+            assert!(health_check_from_oci(&OciHealthCheck {
+                test,
+                interval: None,
+                timeout: None,
+                retries: None,
+                start_period: None,
+            })
+            .is_none());
+        }
+    }
+
+    #[test]
     fn test_effective_health_check_cli_overrides_image() {
         let mut args = default_common_args();
         args.health_cmd = Some("test -f /ready".to_string());
@@ -1098,6 +1133,43 @@ mod tests {
         let err = validate_runtime_options(&args).unwrap_err();
 
         assert!(err.contains("--gpus is not implemented"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_explicit_health_options_before_runtime_setup() {
+        let configurations: [fn(&mut CommonBoxArgs); 5] = [
+            |args: &mut CommonBoxArgs| args.health_cmd = Some("true".to_string()),
+            |args: &mut CommonBoxArgs| args.health_interval = 10,
+            |args: &mut CommonBoxArgs| args.health_timeout = 10,
+            |args: &mut CommonBoxArgs| args.health_retries = 4,
+            |args: &mut CommonBoxArgs| args.health_start_period = 1,
+        ];
+        for configure in configurations {
+            let mut args = default_common_args();
+            configure(&mut args);
+            let error = validate_runtime_options(&args).unwrap_err();
+            assert!(error.contains("health checks are not supported on Windows"));
+        }
+
+        let mut disabled = default_common_args();
+        disabled.no_healthcheck = true;
+        validate_runtime_options(&disabled).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rejects_effective_image_or_persisted_health_check() {
+        let health_check = HealthCheck {
+            cmd: vec!["true".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        };
+        let error = validate_health_check_support(Some(&health_check)).unwrap_err();
+        assert!(error.contains("health checks are not supported on Windows"));
+        validate_health_check_support(None).unwrap();
     }
 
     #[test]
@@ -1203,6 +1275,7 @@ mod tests {
     fn test_validate_runtime_options_accepts_enforceable_security_opts() {
         let mut args = default_common_args();
         args.security_opt = vec![
+            "seccomp=default".to_string(),
             "seccomp=unconfined".to_string(),
             "no-new-privileges".to_string(),
         ];

@@ -239,12 +239,13 @@ mod tests {
 
     #[test]
     fn install_paths_are_user_scoped() {
-        assert!(systemd_unit_path()
-            .to_string_lossy()
-            .contains("systemd/user/a3s-box-monitor.service"));
+        assert!(systemd_unit_path().ends_with(
+            Path::new("systemd")
+                .join("user")
+                .join("a3s-box-monitor.service")
+        ));
         assert!(launchd_plist_path()
-            .to_string_lossy()
-            .contains("LaunchAgents/com.a3s-box.monitor.plist"));
+            .ends_with(Path::new("LaunchAgents").join("com.a3s-box.monitor.plist")));
     }
 
     #[test]

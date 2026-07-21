@@ -1,14 +1,23 @@
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
+#[cfg(target_os = "linux")]
 use std::net::{Shutdown, TcpStream};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use a3s_box_core::PORT_FWD_VSOCK_PORT;
+#[cfg(target_os = "linux")]
 use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
-use tracing::{debug, info, warn};
+use tracing::info;
+#[cfg(target_os = "linux")]
+use tracing::{debug, warn};
 
 const HOST_CID: u32 = 2;
 const ENV_WINDOWS_ENABLED: &str = "BOX_WINDOWS_PORT_FWD";
@@ -20,8 +29,10 @@ const FRAME_DATA: u8 = 3;
 const FRAME_CLOSE: u8 = 4;
 
 type SharedWriter = Arc<Mutex<std::fs::File>>;
+#[cfg(target_os = "linux")]
 type StreamMap = Arc<Mutex<HashMap<u32, TcpStream>>>;
 
+#[cfg(target_os = "linux")]
 pub fn run_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var(ENV_WINDOWS_ENABLED).as_deref() == Ok("1") {
         return run_windows_port_forward_client();
@@ -34,6 +45,13 @@ pub fn run_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn run_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
+    info!("Guest port forwarding is unavailable on non-Linux development hosts");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn run_windows_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
     let mut backoff = Duration::from_millis(250);
     loop {
@@ -108,12 +126,7 @@ fn run_cri_port_forward_server() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn run_cri_port_forward_server() -> Result<(), Box<dyn std::error::Error>> {
-    info!("CRI port-forward server not available on non-Linux guest platform");
-    Ok(())
-}
-
+#[cfg(target_os = "linux")]
 fn connect_control() -> io::Result<std::fs::File> {
     let fd = socket(
         AddressFamily::Vsock,
@@ -135,16 +148,13 @@ fn connect_control() -> io::Result<std::fs::File> {
     Ok(std::fs::File::from(owned))
 }
 
+#[cfg(target_os = "linux")]
 fn serve_control(control: std::fs::File) -> io::Result<()> {
     let writer = Arc::new(Mutex::new(control.try_clone()?));
     let streams: StreamMap = Arc::new(Mutex::new(HashMap::new()));
     let mut reader = control;
 
     loop {
-        if !wait_readable(reader.as_raw_fd(), Duration::from_secs(1))? {
-            continue;
-        }
-
         let frame = match read_frame(&mut reader)? {
             Some(frame) => frame,
             None => {
@@ -237,26 +247,7 @@ fn serve_control(control: std::fs::File) -> io::Result<()> {
     }
 }
 
-fn wait_readable(fd: i32, timeout: Duration) -> io::Result<bool> {
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let timeout_ms = timeout.as_millis().clamp(0, i32::MAX as u128) as i32;
-    let rc = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if rc > 0 && (pollfd.revents & (libc::POLLHUP | libc::POLLERR)) != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::BrokenPipe,
-            "vsock connection closed",
-        ));
-    }
-    Ok(rc > 0 && (pollfd.revents & libc::POLLIN) != 0)
-}
-
+#[cfg(target_os = "linux")]
 fn spawn_guest_reader(
     stream_id: u32,
     mut stream: TcpStream,
@@ -293,6 +284,7 @@ fn spawn_guest_reader(
     });
 }
 
+#[cfg(target_os = "linux")]
 fn close_stream(stream_id: u32, streams: &StreamMap) {
     if let Some(stream) = streams.lock().unwrap().remove(&stream_id) {
         let _ = stream.shutdown(Shutdown::Both);
@@ -344,7 +336,8 @@ mod tests {
 
     #[test]
     fn write_then_read_frame_round_trips_kind_stream_and_payload() {
-        let file = tempfile::tempfile().unwrap();
+        let backing_file = tempfile::NamedTempFile::new().unwrap();
+        let file = backing_file.reopen().unwrap();
         let writer = Arc::new(Mutex::new(file));
 
         write_frame(&writer, FRAME_DATA, 0x0102_0304, b"hello").unwrap();
@@ -360,7 +353,8 @@ mod tests {
 
     #[test]
     fn write_then_read_frame_supports_empty_payload() {
-        let file = tempfile::tempfile().unwrap();
+        let backing_file = tempfile::NamedTempFile::new().unwrap();
+        let file = backing_file.reopen().unwrap();
         let writer = Arc::new(Mutex::new(file));
 
         write_frame(&writer, FRAME_CLOSE, 7, &[]).unwrap();
@@ -396,5 +390,28 @@ mod tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn read_frame_consumes_coalesced_frames_without_an_extra_readiness_edge() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[FRAME_CLOSE]);
+        bytes.extend_from_slice(&1_u32.to_be_bytes());
+        bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(&[FRAME_OPEN]);
+        bytes.extend_from_slice(&2_u32.to_be_bytes());
+        bytes.extend_from_slice(&2_u32.to_be_bytes());
+        bytes.extend_from_slice(&8080_u16.to_be_bytes());
+        let mut cursor = Cursor::new(bytes);
+
+        let close = read_frame(&mut cursor).unwrap().unwrap();
+        let open = read_frame(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(close.kind, FRAME_CLOSE);
+        assert_eq!(close.stream_id, 1);
+        assert!(close.payload.is_empty());
+        assert_eq!(open.kind, FRAME_OPEN);
+        assert_eq!(open.stream_id, 2);
+        assert_eq!(open.payload, 8080_u16.to_be_bytes());
     }
 }
