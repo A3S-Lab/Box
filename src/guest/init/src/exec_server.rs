@@ -2479,10 +2479,8 @@ fn signal_child_process_group(child: &std::process::Child, signal: i32) {
     #[cfg(unix)]
     unsafe {
         let pid = child.id() as i32;
-        if pid > 0 {
-            if libc::kill(-pid, signal) != 0 {
-                let _ = libc::kill(pid, signal);
-            }
+        if pid > 0 && libc::kill(-pid, signal) != 0 {
+            let _ = libc::kill(pid, signal);
         }
     }
     #[cfg(not(unix))]
@@ -3364,7 +3362,7 @@ mod tests {
                 cmd: &[
                     "sh".to_string(),
                     "-c".to_string(),
-                    "trap 'printf terminated; exit 42' TERM; printf ready; while :; do sleep 1; done"
+                    "trap 'printf terminated; exit 42' TERM; printf ready; while :; do :; done"
                         .to_string(),
                 ],
                 timeout_ns: 5_000_000_000,

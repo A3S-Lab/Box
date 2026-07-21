@@ -777,11 +777,9 @@ fn parse_pty_process_signal(payload: &[u8]) -> Option<i32> {
 #[cfg(target_os = "linux")]
 fn signal_pty_child(child: nix::unistd::Pid, signal: i32) {
     let pid = child.as_raw();
-    if pid > 0 {
-        unsafe {
-            if libc::kill(-pid, signal) != 0 {
-                let _ = libc::kill(pid, signal);
-            }
+    unsafe {
+        if pid > 0 && libc::kill(-pid, signal) != 0 {
+            let _ = libc::kill(pid, signal);
         }
     }
 }
