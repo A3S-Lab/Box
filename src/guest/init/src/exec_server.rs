@@ -3348,7 +3348,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_execute_command_streaming_delivers_sigterm_to_process_group() {
+    fn test_execute_command_streaming_sigterm_terminates_process_group() {
         let (input_tx, input_rx) = std::sync::mpsc::channel();
         let mut buf = Vec::new();
 
@@ -3357,13 +3357,13 @@ mod tests {
             input_tx.send(ExecInputEvent::Signal(15)).unwrap();
         });
 
+        let started = std::time::Instant::now();
         execute_command_streaming(
             ExecCommandSpec {
                 cmd: &[
                     "sh".to_string(),
                     "-c".to_string(),
-                    "trap 'printf terminated; exit 42' TERM; printf ready; while :; do :; done"
-                        .to_string(),
+                    "printf ready; sleep 3 & wait".to_string(),
                 ],
                 timeout_ns: 5_000_000_000,
                 env: &[],
@@ -3397,8 +3397,12 @@ mod tests {
             }
         }
 
-        assert_eq!(stdout, b"readyterminated");
-        assert_eq!(exit_code, Some(42));
+        assert_eq!(stdout, b"ready");
+        assert_eq!(exit_code, Some(143));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "SIGTERM did not terminate the complete process group"
+        );
     }
 
     #[test]
