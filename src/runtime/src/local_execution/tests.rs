@@ -6,8 +6,8 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionGeneration,
     ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
-    ExecutionSnapshotId, ExecutionState, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
-    RestartExecutionOptions, SnapshotImageConfig,
+    ExecutionSnapshotId, ExecutionState, KillExecutionOptions, KillOutcome, NetworkMode,
+    OperationId, ReconcileOutcome, RestartExecutionOptions, SnapshotImageConfig,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -40,6 +40,8 @@ struct FakeBackend {
     fail_pause: AtomicBool,
     fail_pause_after_effect: AtomicBool,
     last_keep_memory: Mutex<Option<bool>>,
+    last_kill_signal: Mutex<Option<Option<i32>>>,
+    last_kill_timeout: Mutex<Option<Option<u64>>>,
     last_restart_timeout: Mutex<Option<Option<u64>>>,
 }
 
@@ -208,6 +210,13 @@ impl LocalExecutionBackend for FakeBackend {
 
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         self.kills.fetch_add(1, Ordering::Relaxed);
+        *self.last_kill_signal.lock().unwrap() = Some(
+            record
+                .stop_signal
+                .as_deref()
+                .map(a3s_box_core::vmm::parse_signal_name),
+        );
+        *self.last_kill_timeout.lock().unwrap() = Some(record.stop_timeout);
         if self.fail_kill.load(Ordering::Relaxed) {
             return Err(ExecutionManagerError::Unavailable(
                 "fake kill is unavailable".to_string(),
@@ -1296,6 +1305,67 @@ async fn kill_is_generation_fenced_and_idempotent() {
     assert_eq!(
         manager.inspect(&running.execution_id).await.unwrap().state,
         ExecutionState::Stopped
+    );
+    assert!(persisted(&manager, &running.execution_id).stopped_by_user);
+}
+
+#[tokio::test]
+async fn option_aware_kill_persists_intent_and_replays_it_after_a_crash() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("operation-option-aware-kill");
+    let running = manager
+        .create_and_start(request("option-aware-kill"), &create_operation)
+        .await
+        .unwrap();
+    let options = KillExecutionOptions {
+        signal: Some(2),
+        timeout_secs: Some(4),
+    };
+    backend.fail_kill.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .kill_with_options(&running.execution_id, running.generation, options)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    let claimed = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        claimed
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .pending_operation,
+        Some(ManagedExecutionOperation::Kill {
+            signal: Some(2),
+            timeout_secs: Some(4),
+        })
+    );
+    assert_eq!(
+        claimed.managed_state().unwrap(),
+        Some(ManagedExecutionState::Killing)
+    );
+
+    backend.fail_kill.store(false, Ordering::Relaxed);
+    *backend.last_kill_signal.lock().unwrap() = None;
+    *backend.last_kill_timeout.lock().unwrap() = None;
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+
+    assert!(matches!(
+        restarted.reconcile(&create_operation).await.unwrap(),
+        ReconcileOutcome::Failed
+    ));
+    assert_eq!(*backend.last_kill_signal.lock().unwrap(), Some(Some(2)));
+    assert_eq!(*backend.last_kill_timeout.lock().unwrap(), Some(Some(4)));
+    let stopped = persisted(&restarted, &running.execution_id);
+    assert!(stopped.stopped_by_user);
+    assert_eq!(
+        stopped.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
     );
 }
 

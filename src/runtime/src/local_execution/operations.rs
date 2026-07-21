@@ -4,7 +4,9 @@ use a3s_box_core::{
 
 use super::record::{execution_id, lease_from_record};
 use super::store::RuntimeUpdate;
-use super::support::{paused_with_memory, pending_pause_policy, required_handle};
+use super::support::{
+    paused_with_memory, pending_kill_options, pending_pause_policy, required_handle,
+};
 use super::{BoxRecord, LocalExecutionManager, ManagedExecutionState};
 
 impl LocalExecutionManager {
@@ -291,14 +293,23 @@ impl LocalExecutionManager {
         &self,
         record: BoxRecord,
     ) -> ExecutionManagerResult<KillOutcome> {
-        match self.backend.kill(&record).await {
+        let execution_id = execution_id(&record)?;
+        let options = pending_kill_options(&record, &execution_id)?;
+        let mut backend_record = record.clone();
+        if let Some(signal) = options.signal {
+            backend_record.stop_signal = Some(signal.to_string());
+        }
+        if let Some(timeout_secs) = options.timeout_secs {
+            backend_record.stop_timeout = Some(timeout_secs);
+        }
+        match self.backend.kill(&backend_record).await {
             Ok(outcome) => {
                 self.release_execution_resources(&record).await?;
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::Terminal(None),
+                    RuntimeUpdate::KillTerminal(None),
                 )
                 .await?;
                 Ok(outcome)
@@ -309,7 +320,7 @@ impl LocalExecutionManager {
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::Terminal(None),
+                    RuntimeUpdate::KillTerminal(None),
                 )
                 .await?;
                 Ok(KillOutcome::AlreadyStopped)
@@ -344,7 +355,7 @@ impl LocalExecutionManager {
             &record,
             ManagedExecutionState::Killing,
             ManagedExecutionState::Stopped,
-            RuntimeUpdate::Terminal(None),
+            RuntimeUpdate::KillTerminal(None),
         )
         .await
         .ok()?;

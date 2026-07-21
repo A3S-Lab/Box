@@ -1,6 +1,6 @@
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionSnapshotId, OperationId, RestartExecutionOptions,
+    ExecutionSnapshotId, KillExecutionOptions, OperationId, RestartExecutionOptions,
 };
 
 use super::record::{
@@ -133,11 +133,23 @@ impl LocalExecutionManager {
                 RuntimeUpdate::Handle(handle) => apply_handle(record, &handle),
                 RuntimeUpdate::StartHandle(handle) => apply_start_handle(record, &handle),
                 RuntimeUpdate::Terminal(exit_code) => clear_live_runtime(record, exit_code),
+                RuntimeUpdate::KillTerminal(exit_code) => {
+                    clear_live_runtime(record, exit_code);
+                    record.stopped_by_user = true;
+                }
                 RuntimeUpdate::ColdPause => clear_live_runtime_for_cold_pause(record),
                 RuntimeUpdate::PauseClaim(keep_memory) => {
                     if let Some(metadata) = record.managed_execution.as_mut() {
                         metadata.pending_operation =
                             Some(ManagedExecutionOperation::Pause { keep_memory });
+                    }
+                }
+                RuntimeUpdate::KillClaim(options) => {
+                    if let Some(metadata) = record.managed_execution.as_mut() {
+                        metadata.pending_operation = Some(ManagedExecutionOperation::Kill {
+                            signal: options.signal,
+                            timeout_secs: options.timeout_secs,
+                        });
                     }
                 }
                 RuntimeUpdate::SnapshotClaim {
@@ -239,8 +251,10 @@ pub(super) enum RuntimeUpdate {
     Handle(LocalExecutionHandle),
     StartHandle(LocalExecutionHandle),
     Terminal(Option<i32>),
+    KillTerminal(Option<i32>),
     ColdPause,
     PauseClaim(bool),
+    KillClaim(KillExecutionOptions),
     SnapshotClaim {
         snapshot_id: ExecutionSnapshotId,
         source_state: ManagedExecutionState,

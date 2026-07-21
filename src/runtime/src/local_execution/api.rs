@@ -1,8 +1,8 @@
 use a3s_box_core::{
     CreateExecutionRequest, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManager,
     ExecutionManagerError, ExecutionManagerResult, ExecutionReservation, ExecutionSnapshot,
-    ExecutionSnapshotId, ExecutionState, ExecutionStatus, KillOutcome, OperationId,
-    ReconcileOutcome, RestartExecutionOptions,
+    ExecutionSnapshotId, ExecutionState, ExecutionStatus, KillExecutionOptions, KillOutcome,
+    OperationId, ReconcileOutcome, RestartExecutionOptions,
 };
 use async_trait::async_trait;
 
@@ -172,6 +172,21 @@ impl ExecutionManager for LocalExecutionManager {
         execution_id: &ExecutionId,
         expected_generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<KillOutcome> {
+        self.kill_with_options(
+            execution_id,
+            expected_generation,
+            KillExecutionOptions::default(),
+        )
+        .await
+    }
+
+    async fn kill_with_options(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+        options: KillExecutionOptions,
+    ) -> ExecutionManagerResult<KillOutcome> {
+        validate_kill_options(options)?;
         let _lifecycle_lock =
             super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         let record = self
@@ -197,7 +212,7 @@ impl ExecutionManager for LocalExecutionManager {
                 &record,
                 state,
                 ManagedExecutionState::Killing,
-                RuntimeUpdate::None,
+                RuntimeUpdate::KillClaim(options),
             )
             .await?
         };
@@ -270,4 +285,21 @@ impl ExecutionManager for LocalExecutionManager {
             }
         }
     }
+}
+
+fn validate_kill_options(options: KillExecutionOptions) -> ExecutionManagerResult<()> {
+    if options.signal.is_some_and(|signal| signal <= 0) {
+        return Err(ExecutionManagerError::InvalidRequest(
+            "kill signal must be positive".to_string(),
+        ));
+    }
+    if options
+        .timeout_secs
+        .is_some_and(|timeout| timeout.checked_mul(1_000).is_none())
+    {
+        return Err(ExecutionManagerError::InvalidRequest(
+            "kill timeout is too large".to_string(),
+        ));
+    }
+    Ok(())
 }

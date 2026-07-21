@@ -164,7 +164,7 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | MicroVM runtime | libkrun-backed OCI execution on Linux/KVM and Apple Silicon/HVF | Primary local runtime. Each box has its own guest kernel. Host-backed validation is required for releases. |
 | OCI Sandbox | Explicit `--isolation sandbox` execution through certified `crun 1.28` on Linux | Preview. Shares the host kernel, never replaces or emulates MicroVM isolation, and still has open security-negative and performance release gates. |
 | A3S Runtime provider | Sandbox-backed Task and Service lifecycle, recovery, `none` networking, bounded tmpfs mounts, CPU/memory/PID controls, structured logs, idempotent exec, and security fencing | The real-provider R17 suite passes Base, Recovery, Networking, Mounts, Resources, Logs, Exec, and Security profiles. Artifacts must be digest-pinned; the provider advertises only `tmpfs` mounts and `none` networking. |
-| Lifecycle and exec | Foreground/detached runs, managed create/start/restart/kill, exec, PTY, logs, health, wait, and cleanup | Implemented for MicroVM. The managed Sandbox path and its structured logs are implemented, while complete parity and adversarial validation remain in progress. |
+| Lifecycle and exec | Foreground/detached runs, managed create/start/restart/kill/pause/resume, exec, PTY, logs, health, wait, and cleanup | Implemented for MicroVM. The managed Sandbox path uses certified `crun` lifecycle operations, including freezer-backed pause/resume, while complete parity and adversarial validation remain in progress. |
 | OCI images | Resumable bounded registry pulls, concurrent layers, verified cross-image blob reuse, push, credentials, digest verification, optional cosign verification/signing, indexed archive selection, and tag operations | Implemented. `pull` validates declared size and SHA-256 before atomic blob publication; `load` selects one Linux platform from direct or nested OCI indexes and verifies the selected manifest, config, and layers before publishing it. Registry throughput and redirect behavior still require validation against each production registry. |
 | Dockerfile builds | Built-in Dockerfile subset, layer cache, BuildKit-in-MicroVM, and warm-pool `RUN` execution | Implemented subset, not a full Buildx replacement. One target platform is recorded per build. |
 | Storage | Bind mounts, named volumes, tmpfs, `cp`, `diff`, `export`, `commit`, filesystem snapshots, and CoW restore | Implemented. Filesystem snapshots do not contain live VM RAM or device state. |
@@ -281,8 +281,8 @@ a3s-box run --rm \
 This command is Linux-only and fails closed unless the complete certified host
 capability probe succeeds. The current Sandbox surface rejects VM-only or
 unsafe combinations, including TEE, warm pools, snapshot-fork, privileged
-mode, pause/unpause, published ports, named bridge networking, custom sysctls,
-vsock sidecars, and unconfined seccomp.
+mode, published ports, named bridge networking, custom sysctls, vsock sidecars,
+and unconfined seccomp.
 
 ### Compose a local workload
 

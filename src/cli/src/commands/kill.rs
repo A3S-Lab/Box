@@ -2,6 +2,9 @@
 
 use clap::Args;
 
+use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager, KillExecutionOptions};
+use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionState};
+
 use crate::cleanup;
 use crate::lifecycle;
 use crate::process;
@@ -96,16 +99,69 @@ async fn kill_one(
     signal: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let box_id = resolve::resolve(state, query)?.id.clone();
-    let _lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
-    // Select the status and PID from fresh state while holding the same lock as
-    // start/restart/commit. Keep it through signal delivery and persistence so
-    // the stopped transition cannot overwrite a concurrently booted PID.
+    let mut lifecycle_lock = Some(lifecycle::acquire_box_lifecycle_lock(&box_id).await?);
+    // Select fresh lifecycle metadata while holding the same lock as
+    // start/restart/commit. Managed operations release this guard and enter the
+    // execution manager, which acquires the same cross-process lock itself.
     let current_state = StateFile::load_default()?;
     let record = current_state
         .find_by_id(&box_id)
         .ok_or_else(|| format!("Box {query} was removed while waiting to send a signal"))?
         .clone();
     drop(current_state);
+
+    match kill_plan(&record, signal)? {
+        KillPlan::Direct => {}
+        KillPlan::ManagedPause {
+            execution_id,
+            generation,
+        } => {
+            drop(lifecycle_lock.take());
+            let home = a3s_box_core::dirs_home();
+            let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+            manager.pause(&execution_id, generation, true).await?;
+            println!("{}", record.name);
+            return Ok(());
+        }
+        KillPlan::ManagedResume {
+            execution_id,
+            generation,
+        } => {
+            drop(lifecycle_lock.take());
+            let home = a3s_box_core::dirs_home();
+            let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+            manager.resume(&execution_id, generation).await?;
+            println!("{}", record.name);
+            return Ok(());
+        }
+        KillPlan::ManagedTerminate {
+            execution_id,
+            generation,
+        } => {
+            let name = record.name.clone();
+            let auto_remove = record.auto_remove;
+            drop(lifecycle_lock.take());
+            let home = a3s_box_core::dirs_home();
+            let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+            manager
+                .kill_with_options(
+                    &execution_id,
+                    generation,
+                    KillExecutionOptions {
+                        signal: Some(signal),
+                        timeout_secs: Some(0),
+                    },
+                )
+                .await?;
+            if auto_remove {
+                manager.remove_execution(&execution_id, generation).await?;
+                println!("{name} (auto-removed)");
+            } else {
+                println!("{name}");
+            }
+            return Ok(());
+        }
+    }
 
     status::require_active(&record, "send a signal to")
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
@@ -236,6 +292,82 @@ async fn kill_one(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KillPlan {
+    Direct,
+    ManagedPause {
+        execution_id: ExecutionId,
+        generation: ExecutionGeneration,
+    },
+    ManagedResume {
+        execution_id: ExecutionId,
+        generation: ExecutionGeneration,
+    },
+    ManagedTerminate {
+        execution_id: ExecutionId,
+        generation: ExecutionGeneration,
+    },
+}
+
+fn kill_plan(
+    record: &crate::state::BoxRecord,
+    signal: i32,
+) -> Result<KillPlan, Box<dyn std::error::Error>> {
+    let Some(metadata) = record.managed_execution.as_ref() else {
+        return Ok(KillPlan::Direct);
+    };
+    let state = record
+        .managed_state()?
+        .ok_or_else(|| format!("Box {} lost managed lifecycle metadata", record.name))?;
+    let execution_id = ExecutionId::new(record.id.clone())?;
+    let generation = metadata.generation;
+    if signal == SIGSTOP {
+        if state != ManagedExecutionState::Running {
+            return Err(format!("Cannot pause box {} because it is {state}", record.name).into());
+        }
+        return Ok(KillPlan::ManagedPause {
+            execution_id,
+            generation,
+        });
+    }
+    if signal == SIGCONT {
+        if state != ManagedExecutionState::Paused {
+            return Err(format!("Cannot resume box {} because it is {state}", record.name).into());
+        }
+        return Ok(KillPlan::ManagedResume {
+            execution_id,
+            generation,
+        });
+    }
+    if is_stopping_signal(signal) {
+        if !matches!(
+            state,
+            ManagedExecutionState::Running
+                | ManagedExecutionState::Paused
+                | ManagedExecutionState::Killing
+        ) {
+            return Err(
+                format!("Cannot terminate box {} because it is {state}", record.name).into(),
+            );
+        }
+        return Ok(KillPlan::ManagedTerminate {
+            execution_id,
+            generation,
+        });
+    }
+    if !matches!(
+        state,
+        ManagedExecutionState::Running | ManagedExecutionState::Paused
+    ) {
+        return Err(format!(
+            "Cannot send signal {signal} to box {} because it is {state}",
+            record.name
+        )
+        .into());
+    }
+    Ok(KillPlan::Direct)
+}
+
 fn is_stopping_signal(signal: i32) -> bool {
     matches!(signal, SIGKILL | SIGTERM | SIGINT | SIGHUP | SIGQUIT)
 }
@@ -255,6 +387,35 @@ fn signal_status_transition(signal: i32) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_box_core::{BoxConfig, CreateExecutionRequest, ExecutionIsolation, OperationId};
+    use a3s_box_runtime::ManagedExecutionMetadata;
+    use std::collections::BTreeMap;
+
+    fn managed_record(state: ManagedExecutionState) -> crate::state::BoxRecord {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut record =
+            crate::test_helpers::fixtures::make_record(id, "managed", state.as_status(), None);
+        record.isolation = ExecutionIsolation::Sandbox;
+        record.managed_execution = Some(
+            ManagedExecutionMetadata::new(
+                OperationId::new("operation-create").unwrap(),
+                ExecutionGeneration::INITIAL,
+                CreateExecutionRequest {
+                    external_sandbox_id: "external-1".to_string(),
+                    config: BoxConfig {
+                        isolation: ExecutionIsolation::Sandbox,
+                        image: record.image.clone(),
+                        ..Default::default()
+                    },
+                    labels: BTreeMap::new(),
+                    policy: Default::default(),
+                    rootfs_snapshot_id: None,
+                },
+            )
+            .unwrap(),
+        );
+        record
+    }
 
     #[test]
     fn test_parse_signal_kill() {
@@ -346,5 +507,44 @@ mod tests {
         let record = crate::test_helpers::fixtures::make_record("id", "box", "paused", Some(1));
 
         assert!(status::require_active(&record, "send a signal to").is_ok());
+    }
+
+    #[test]
+    fn managed_stop_and_continue_signals_use_durable_pause_lifecycle() {
+        let expected_id = ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        assert_eq!(
+            kill_plan(&managed_record(ManagedExecutionState::Running), SIGSTOP).unwrap(),
+            KillPlan::ManagedPause {
+                execution_id: expected_id.clone(),
+                generation: ExecutionGeneration::INITIAL,
+            }
+        );
+        assert_eq!(
+            kill_plan(&managed_record(ManagedExecutionState::Paused), SIGCONT).unwrap(),
+            KillPlan::ManagedResume {
+                execution_id: expected_id,
+                generation: ExecutionGeneration::INITIAL,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_terminating_signal_uses_execution_manager_without_a_host_pid() {
+        assert_eq!(
+            kill_plan(&managed_record(ManagedExecutionState::Paused), SIGKILL).unwrap(),
+            KillPlan::ManagedTerminate {
+                execution_id: ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+                generation: ExecutionGeneration::INITIAL,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_signal_rejects_incompatible_lifecycle_state() {
+        let error = kill_plan(&managed_record(ManagedExecutionState::Stopped), SIGTERM)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("because it is stopped"));
     }
 }

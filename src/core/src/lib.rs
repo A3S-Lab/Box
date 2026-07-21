@@ -70,8 +70,8 @@ pub use traits::{
     ExecutionPortIo, ExecutionPortStream, ExecutionProcess, ExecutionProcessInput,
     ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation, ExecutionRestartPolicy,
     ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
-    ExecutionStatus, ImageRegistry, ImageStoreBackend, KillOutcome, MetricsCollector,
-    NetworkStoreBackend, NoopMetrics, OperationId, PulledImage, ReconcileOutcome,
+    ExecutionStatus, ImageRegistry, ImageStoreBackend, KillExecutionOptions, KillOutcome,
+    MetricsCollector, NetworkStoreBackend, NoopMetrics, OperationId, PulledImage, ReconcileOutcome,
     RestartExecutionOptions, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
 };
 pub use vmm::{

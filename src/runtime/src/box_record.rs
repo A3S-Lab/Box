@@ -371,7 +371,12 @@ pub enum ManagedExecutionOperation {
         snapshot_id: ExecutionSnapshotId,
         source_state: ManagedExecutionState,
     },
-    Kill,
+    Kill {
+        #[serde(default)]
+        signal: Option<i32>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
     Remove,
     Restart {
         operation_id: OperationId,
@@ -447,7 +452,7 @@ impl ManagedExecutionMetadata {
                     completed.operation_id
                 )));
             }
-            validate_restart_timeout(completed.stop_timeout_secs)?;
+            validate_stop_timeout(completed.stop_timeout_secs)?;
         }
         Ok(())
     }
@@ -474,7 +479,7 @@ fn validate_pending_operation(
             Some(ManagedExecutionOperation::Snapshot { .. })
         ) | (
             ManagedExecutionState::Killing,
-            Some(ManagedExecutionOperation::Kill)
+            Some(ManagedExecutionOperation::Kill { .. })
         ) | (
             ManagedExecutionState::Removing,
             Some(ManagedExecutionOperation::Remove)
@@ -532,7 +537,7 @@ fn validate_pending_operation(
                 expected.get()
             )));
         }
-        validate_restart_timeout(*stop_timeout_secs)?;
+        validate_stop_timeout(*stop_timeout_secs)?;
     }
     if let Some(ManagedExecutionOperation::Snapshot { source_state, .. }) = operation {
         if state != ManagedExecutionState::Snapshotting
@@ -545,6 +550,18 @@ fn validate_pending_operation(
                 "snapshot operation has an invalid source state".to_string(),
             ));
         }
+    }
+    if let Some(ManagedExecutionOperation::Kill {
+        signal,
+        timeout_secs,
+    }) = operation
+    {
+        if signal.is_some_and(|signal| signal <= 0) {
+            return Err(a3s_box_core::BoxError::StateError(
+                "kill signal must be positive".to_string(),
+            ));
+        }
+        validate_stop_timeout(*timeout_secs)?;
     }
     if !metadata.paused_with_memory {
         let valid_cold_pause_state = match (state, operation) {
@@ -574,10 +591,10 @@ fn validate_pending_operation(
     Ok(())
 }
 
-fn validate_restart_timeout(timeout_secs: Option<u64>) -> a3s_box_core::Result<()> {
+fn validate_stop_timeout(timeout_secs: Option<u64>) -> a3s_box_core::Result<()> {
     if timeout_secs.is_some_and(|timeout| timeout.checked_mul(1_000).is_none()) {
         Err(a3s_box_core::BoxError::StateError(
-            "restart stop timeout is too large".to_string(),
+            "managed stop timeout is too large".to_string(),
         ))
     } else {
         Ok(())
@@ -694,6 +711,20 @@ mod tests {
         );
         assert_eq!(encoded["managed_execution"]["generation"], 1);
         assert_eq!(encoded["managed_execution"]["paused_with_memory"], true);
+    }
+
+    #[test]
+    fn legacy_kill_operation_defaults_new_termination_options() {
+        let operation: ManagedExecutionOperation =
+            serde_json::from_value(serde_json::json!({ "kind": "kill" })).unwrap();
+
+        assert_eq!(
+            operation,
+            ManagedExecutionOperation::Kill {
+                signal: None,
+                timeout_secs: None,
+            }
+        );
     }
 
     #[test]

@@ -256,7 +256,10 @@ async fn terminal_kill_cleans_a_cold_paused_rootfs_without_runtime_evidence() {
     record.status = ManagedExecutionState::Killing.as_status().to_string();
     let metadata = record.managed_execution.as_mut().unwrap();
     metadata.paused_with_memory = false;
-    metadata.pending_operation = Some(crate::ManagedExecutionOperation::Kill);
+    metadata.pending_operation = Some(crate::ManagedExecutionOperation::Kill {
+        signal: None,
+        timeout_secs: None,
+    });
     let sentinel = record.box_dir.join("rootfs/workspace/cold-pause.txt");
     std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
     std::fs::write(&sentinel, b"retained").unwrap();

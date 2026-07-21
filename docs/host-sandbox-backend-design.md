@@ -93,7 +93,6 @@ an arbitrary host `crun` or `runc` binary.
 - Named bridge networking, TSI, inbound port publishing, or sidecar/vsock
   services.
 - CRI RuntimeClass support before the standalone lifecycle is stable.
-- Pause/unpause before cgroup v2 freezer semantics are implemented and tested.
 - Automatic backend selection or fallback.
 - gVisor/runsc or any user-space-kernel backend.
 - Running a nested OCI runtime inside a fully privileged Docker container as the
@@ -590,7 +589,7 @@ explicitly unsafe execution posture and cannot satisfy production acceptance.
 | isolated outbound egress | Supported modes | Post-MVP pasta/slirp or proxy |
 | published ports, named bridge | Supported modes | Deferred |
 | commit and diff | Supported | Post-MVP parity gate |
-| pause/unpause | Supported behavior | Deferred until freezer support |
+| pause/unpause | Supported behavior | Implemented through certified `crun pause`/`crun resume`, with durable generation fencing and cgroup v2 freezer validation |
 | TEE/attestation/sealing | MicroVM-only | Rejected |
 | snapshot-fork/warm VM pool | MicroVM-only | Rejected |
 | device/GPU/privileged | Restricted/roadmap | Rejected |
@@ -652,12 +651,13 @@ The E2B-compatible control and data planes described in
 the backend-neutral `ExecutionManager`; they are not part of the OCI backend.
 They must never call `crun` or the sandbox shim directly.
 
-The host-sandbox MVP can support lifecycle, commands, PTY, files, and Code
-Interpreter incrementally, but it is not certified for the complete remote SDK
-surface while required observable semantics such as memory-preserving
-pause/resume remain deferred. Protocol compatibility and backend certification
-are recorded separately so a matching HTTP shape cannot conceal a missing
-runtime guarantee.
+The host-sandbox backend supports lifecycle, commands, PTY, files, Code
+Interpreter, memory-preserving pause/resume, and filesystem-only pause/resume
+incrementally, but it is not certified for the complete remote SDK surface.
+Protocol compatibility and backend certification are recorded separately so a
+matching HTTP shape cannot conceal a missing runtime guarantee. The warm-pause
+path has certified A3S OS evidence; the extended cold-pause client matrix still
+requires its next certified-host run.
 
 ## Delivery phases and gates
 

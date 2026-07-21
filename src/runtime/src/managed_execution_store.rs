@@ -390,7 +390,13 @@ impl ManagedExecutionStore {
                     )))
                     }
                 },
-                ManagedExecutionState::Killing => Some(ManagedExecutionOperation::Kill),
+                ManagedExecutionState::Killing => match metadata.pending_operation.take() {
+                    Some(operation @ ManagedExecutionOperation::Kill { .. }) => Some(operation),
+                    _ => Some(ManagedExecutionOperation::Kill {
+                        signal: None,
+                        timeout_secs: None,
+                    }),
+                },
                 ManagedExecutionState::Removing => Some(ManagedExecutionOperation::Remove),
                 ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => {
                     match metadata.pending_operation.take() {

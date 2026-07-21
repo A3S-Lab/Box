@@ -403,6 +403,19 @@ pub enum KillOutcome {
     AlreadyStopped,
 }
 
+/// Per-operation controls persisted with an explicit termination request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KillExecutionOptions {
+    /// POSIX signal delivered before forced termination. `None` uses the
+    /// persisted execution policy or the backend default.
+    #[serde(default)]
+    pub signal: Option<i32>,
+    /// Grace period before forced termination. `None` uses the persisted
+    /// execution policy or the backend default.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
 /// Per-operation controls persisted with an idempotent restart.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestartExecutionOptions {
@@ -601,6 +614,18 @@ pub trait ExecutionManager: Send + Sync {
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<KillOutcome>;
+
+    /// Terminate one execution with controls that survive lifecycle recovery.
+    ///
+    /// Managers without option-aware termination may delegate to [`Self::kill`].
+    async fn kill_with_options(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        _options: KillExecutionOptions,
+    ) -> ExecutionManagerResult<KillOutcome> {
+        self.kill(execution_id, generation).await
+    }
 
     async fn reconcile(
         &self,

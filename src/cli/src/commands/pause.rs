@@ -1,7 +1,10 @@
 //! `a3s-box pause` command — Pause one or more running boxes.
 //!
-//! Sends SIGSTOP to the box process and updates the status to "paused".
+//! Uses the durable execution manager for managed boxes and SIGSTOP only for
+//! legacy state records.
 
+use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager};
+use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionState};
 use clap::Args;
 
 use crate::lifecycle;
@@ -36,11 +39,27 @@ pub async fn execute(args: PauseArgs) -> Result<(), Box<dyn std::error::Error>> 
 
 async fn pause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
     let box_id = resolve::resolve(state, query)?.id.clone();
-    let _lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+    let lifecycle_lock = lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let current_state = StateFile::load_default()?;
     let record = select_pause_record(&current_state, &box_id)
         .map_err(|error| format!("Box {query} changed while waiting to pause: {error}"))?;
     drop(current_state);
+
+    if let PausePlan::Managed {
+        execution_id,
+        generation,
+    } = pause_plan(&record)?
+    {
+        // The managed lifecycle uses the same cross-process lock. Release the
+        // command guard before entering it so Sandbox pause is performed by
+        // crun and the durable generation advances exactly once.
+        drop(lifecycle_lock);
+        let home = a3s_box_core::dirs_home();
+        let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+        manager.pause(&execution_id, generation, true).await?;
+        println!("{}", record.name);
+        return Ok(());
+    }
 
     let pid = lifecycle::require_live_pid(&record, "pause")?;
 
@@ -100,6 +119,37 @@ fn select_pause_record(
 ) -> Result<crate::state::BoxRecord, Box<dyn std::error::Error>> {
     let record = resolve::resolve(state, query)?;
 
+    pause_plan(record)?;
+    Ok(record.clone())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PausePlan {
+    Legacy,
+    Managed {
+        execution_id: ExecutionId,
+        generation: ExecutionGeneration,
+    },
+}
+
+fn pause_plan(record: &crate::state::BoxRecord) -> Result<PausePlan, Box<dyn std::error::Error>> {
+    if let Some(metadata) = record.managed_execution.as_ref() {
+        let state = record
+            .managed_state()?
+            .ok_or_else(|| format!("Box {} lost managed lifecycle metadata", record.name))?;
+        if state != ManagedExecutionState::Running {
+            return Err(format!(
+                "Cannot pause box {} because it is {state}. Use `a3s-box ps -a` to inspect state.",
+                record.name
+            )
+            .into());
+        }
+        return Ok(PausePlan::Managed {
+            execution_id: ExecutionId::new(record.id.clone())?,
+            generation: metadata.generation,
+        });
+    }
+
     if record.status != "running" {
         return Err(format!(
             "Cannot pause box {} because it is {}. Use `a3s-box start {}` to start it or `a3s-box ps -a` to inspect state.",
@@ -107,15 +157,42 @@ fn select_pause_record(
         )
         .into());
     }
-
     lifecycle::require_live_pid(record, "pause")?;
-    Ok(record.clone())
+    Ok(PausePlan::Legacy)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_helpers::fixtures::{make_record, setup_state};
+    use a3s_box_core::{BoxConfig, CreateExecutionRequest, ExecutionIsolation, OperationId};
+    use a3s_box_runtime::ManagedExecutionMetadata;
+    use std::collections::BTreeMap;
+
+    fn managed_record(state: ManagedExecutionState) -> crate::state::BoxRecord {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut record = make_record(id, "managed", state.as_status(), None);
+        record.isolation = ExecutionIsolation::Sandbox;
+        record.managed_execution = Some(
+            ManagedExecutionMetadata::new(
+                OperationId::new("operation-create").unwrap(),
+                ExecutionGeneration::INITIAL,
+                CreateExecutionRequest {
+                    external_sandbox_id: "external-1".to_string(),
+                    config: BoxConfig {
+                        isolation: ExecutionIsolation::Sandbox,
+                        image: record.image.clone(),
+                        ..Default::default()
+                    },
+                    labels: BTreeMap::new(),
+                    policy: Default::default(),
+                    rootfs_snapshot_id: None,
+                },
+            )
+            .unwrap(),
+        );
+        record
+    }
 
     #[test]
     fn test_pause_rejects_non_running() {
@@ -167,5 +244,25 @@ mod tests {
         let (_tmp, state) = setup_state(vec![]);
         let result = select_pause_record(&state, "nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn managed_pause_uses_the_execution_manager_generation() {
+        assert_eq!(
+            pause_plan(&managed_record(ManagedExecutionState::Running)).unwrap(),
+            PausePlan::Managed {
+                execution_id: ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+                generation: ExecutionGeneration::INITIAL,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_pause_rejects_non_running_state_without_using_a_host_pid() {
+        let error = pause_plan(&managed_record(ManagedExecutionState::Paused))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("because it is paused"));
     }
 }

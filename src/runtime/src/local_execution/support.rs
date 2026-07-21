@@ -1,6 +1,6 @@
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionState, ReconcileOutcome,
+    ExecutionState, KillExecutionOptions, ReconcileOutcome,
 };
 
 use super::record::{lease_from_record, reservation_from_record};
@@ -90,6 +90,28 @@ pub(super) fn pending_pause_policy(
         Some(ManagedExecutionOperation::Pause { keep_memory }) => Ok(*keep_memory),
         _ => Err(ExecutionManagerError::Internal(format!(
             "pausing execution {execution_id} has no persisted pause policy"
+        ))),
+    }
+}
+
+pub(super) fn pending_kill_options(
+    record: &BoxRecord,
+    execution_id: &ExecutionId,
+) -> ExecutionManagerResult<KillExecutionOptions> {
+    match record
+        .managed_execution
+        .as_ref()
+        .and_then(|metadata| metadata.pending_operation.as_ref())
+    {
+        Some(ManagedExecutionOperation::Kill {
+            signal,
+            timeout_secs,
+        }) => Ok(KillExecutionOptions {
+            signal: *signal,
+            timeout_secs: *timeout_secs,
+        }),
+        _ => Err(ExecutionManagerError::Internal(format!(
+            "killing execution {execution_id} has no persisted termination policy"
         ))),
     }
 }
