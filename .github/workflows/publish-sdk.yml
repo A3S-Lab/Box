@@ -1,0 +1,261 @@
+name: Publish SDK packages
+
+on:
+  workflow_run:
+    workflows:
+      - Release
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable release tag to publish (for example, v3.0.11)
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: publish-sdk-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.workflow_run.head_branch }}
+
+jobs:
+  prepare:
+    name: Validate release and prepare SDK packages
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      npm_exists: ${{ steps.metadata.outputs.npm_exists }}
+      pypi_exists: ${{ steps.metadata.outputs.pypi_exists }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Resolve successful Release run
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a stable release tag such as v3.0.11, got '$RELEASE_TAG'"
+            exit 1
+          fi
+
+          TAG_SHA=$(git rev-parse HEAD)
+          RELEASE_JSON=$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease,publishedAt,tagName)
+          IS_DRAFT=$(jq -r '.isDraft' <<< "$RELEASE_JSON")
+          IS_PRERELEASE=$(jq -r '.isPrerelease' <<< "$RELEASE_JSON")
+          PUBLISHED_AT=$(jq -r '.publishedAt // empty' <<< "$RELEASE_JSON")
+          RELEASE_TAG_NAME=$(jq -r '.tagName' <<< "$RELEASE_JSON")
+
+          if [ "$RELEASE_TAG_NAME" != "$RELEASE_TAG" ] || \
+             [ "$IS_DRAFT" != "false" ] || \
+             [ "$IS_PRERELEASE" != "false" ] || \
+             [ -z "$PUBLISHED_AT" ]; then
+            echo "::error::$RELEASE_TAG is not a published, stable GitHub Release"
+            exit 1
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ "${{ github.event.workflow_run.event }}" != "push" ]; then
+              echo "::error::The triggering Release workflow was not a tag push"
+              exit 1
+            fi
+            RUN_ID="${{ github.event.workflow_run.id }}"
+            RUN_HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+          else
+            RUN_JSON=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow release.yml \
+              --event push \
+              --limit 100 \
+              --json databaseId,headBranch,headSha,status,conclusion | \
+              jq -c --arg tag "$RELEASE_TAG" --arg sha "$TAG_SHA" \
+                '[.[] | select(.headBranch == $tag and .headSha == $sha and .status == "completed" and .conclusion == "success")] | first')
+            if [ -z "$RUN_JSON" ] || [ "$RUN_JSON" = "null" ]; then
+              echo "::error::No successful Release workflow run found for $RELEASE_TAG at $TAG_SHA"
+              exit 1
+            fi
+            RUN_ID=$(jq -r '.databaseId' <<< "$RUN_JSON")
+            RUN_HEAD_SHA=$(jq -r '.headSha' <<< "$RUN_JSON")
+          fi
+
+          if [ "$RUN_HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "::error::Release run commit $RUN_HEAD_SHA does not match tag commit $TAG_SHA"
+            exit 1
+          fi
+
+          SDK_ARTIFACT_ID=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "sdk-packages" and .expired == false)] | first | .id // empty')
+          if [ -z "$SDK_ARTIFACT_ID" ]; then
+            echo "::error::Release run $RUN_ID has no unexpired sdk-packages artifact"
+            exit 1
+          fi
+
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Using verified SDK artifact $SDK_ARTIFACT_ID from Release run $RUN_ID"
+
+      - name: Download verified SDK packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "${{ steps.release.outputs.run_id }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name sdk-packages \
+            --dir verified-sdk
+
+      - name: Validate package metadata and registry state
+        id: metadata
+        run: |
+          EXPECTED_VERSION="${RELEASE_TAG#v}"
+          NPM_NAME=$(node -p "require('./sdk/typescript/package.json').name")
+          NPM_VERSION=$(node -p "require('./sdk/typescript/package.json').version")
+          PYPI_NAME=$(python -c "import tomllib; print(tomllib.load(open('sdk/python/pyproject.toml', 'rb'))['project']['name'])")
+          PYPI_VERSION=$(python -c "import tomllib; print(tomllib.load(open('sdk/python/pyproject.toml', 'rb'))['project']['version'])")
+
+          if [ "$NPM_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::$NPM_NAME version $NPM_VERSION does not match tag $RELEASE_TAG"
+            exit 1
+          fi
+          if [ "$PYPI_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::$PYPI_NAME version $PYPI_VERSION does not match tag $RELEASE_TAG"
+            exit 1
+          fi
+
+          NPM_FILE="verified-sdk/a3s-lab-box-$EXPECTED_VERSION.tgz"
+          PYPI_WHEEL="verified-sdk/a3s_box-$EXPECTED_VERSION-py3-none-any.whl"
+          PYPI_SDIST="verified-sdk/a3s_box-$EXPECTED_VERSION.tar.gz"
+          for package in "$NPM_FILE" "$PYPI_WHEEL" "$PYPI_SDIST"; do
+            if [ ! -f "$package" ]; then
+              echo "::error::Expected verified release artifact $package"
+              exit 1
+            fi
+          done
+
+          PACKED_NPM_NAME=$(tar -xOf "$NPM_FILE" package/package.json | \
+            node -e "const p=JSON.parse(require('fs').readFileSync(0, 'utf8')); process.stdout.write(p.name)")
+          PACKED_NPM_VERSION=$(tar -xOf "$NPM_FILE" package/package.json | \
+            node -e "const p=JSON.parse(require('fs').readFileSync(0, 'utf8')); process.stdout.write(p.version)")
+          if [ "$PACKED_NPM_NAME" != "$NPM_NAME" ] || [ "$PACKED_NPM_VERSION" != "$NPM_VERSION" ]; then
+            echo "::error::Packed npm metadata does not match the release source"
+            exit 1
+          fi
+
+          NPM_ESCAPED=$(node -e "process.stdout.write(encodeURIComponent(process.argv[1]))" "$NPM_NAME")
+          NPM_STATUS=$(curl --retry 3 --retry-all-errors --silent --show-error \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://registry.npmjs.org/$NPM_ESCAPED/$NPM_VERSION")
+          case "$NPM_STATUS" in
+            200) NPM_EXISTS=true ;;
+            404) NPM_EXISTS=false ;;
+            *)
+              echo "::error::npm registry returned HTTP $NPM_STATUS for $NPM_NAME@$NPM_VERSION"
+              exit 1
+              ;;
+          esac
+
+          PYPI_STATUS=$(curl --retry 3 --retry-all-errors --silent --show-error \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/$PYPI_NAME/$PYPI_VERSION/json")
+          case "$PYPI_STATUS" in
+            200) PYPI_EXISTS=true ;;
+            404) PYPI_EXISTS=false ;;
+            *)
+              echo "::error::PyPI returned HTTP $PYPI_STATUS for $PYPI_NAME==$PYPI_VERSION"
+              exit 1
+              ;;
+          esac
+
+          mkdir -p publish/npm publish/pypi
+          cp "$NPM_FILE" publish/npm/
+          cp "$PYPI_WHEEL" "$PYPI_SDIST" publish/pypi/
+
+          echo "npm_exists=$NPM_EXISTS" >> "$GITHUB_OUTPUT"
+          echo "pypi_exists=$PYPI_EXISTS" >> "$GITHUB_OUTPUT"
+          echo "$NPM_NAME@$NPM_VERSION already published: $NPM_EXISTS"
+          echo "$PYPI_NAME==$PYPI_VERSION already published: $PYPI_EXISTS"
+
+      - name: Upload npm package
+        if: steps.metadata.outputs.npm_exists != 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: npm-package
+          path: publish/npm/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload PyPI package
+        if: steps.metadata.outputs.pypi_exists != 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: pypi-package
+          path: publish/pypi/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-npm:
+    name: Publish to npm
+    needs: prepare
+    if: needs.prepare.outputs.npm_exists != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Verify npm supports trusted publishing
+        run: |
+          npm --version
+          node -e "const v=process.argv[1].split('.').map(Number); if (v[0] < 11 || (v[0] === 11 && v[1] < 5) || (v[0] === 11 && v[1] === 5 && v[2] < 1)) process.exit(1)" "$(npm --version)"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: npm-package
+          path: publish/npm
+
+      - name: Publish npm package
+        run: npm publish publish/npm/*.tgz --access public
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: prepare
+    if: needs.prepare.outputs.pypi_exists != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: pypi-package
+          path: publish/pypi
+
+      - name: Publish PyPI package
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
+        with:
+          packages-dir: publish/pypi
