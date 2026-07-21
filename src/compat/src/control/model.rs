@@ -163,6 +163,7 @@ pub struct NewSandboxRecord {
     pub metadata: BTreeMap<String, String>,
     pub envd_version: String,
     pub envd_mode: EnvdMode,
+    pub runtime_env_vars: BTreeMap<String, String>,
     pub secure: bool,
     pub allow_internet_access: Option<bool>,
     pub credentials: SandboxCredentials,
@@ -182,6 +183,8 @@ pub struct SandboxRecord {
     resources: ResourceConfig,
     lifecycle: LifecyclePolicy,
     state: LifecycleState,
+    #[serde(default = "default_paused_with_memory")]
+    paused_with_memory: bool,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
     expires_at: DateTime<Utc>,
@@ -189,6 +192,8 @@ pub struct SandboxRecord {
     envd_version: String,
     #[serde(default)]
     envd_mode: EnvdMode,
+    #[serde(default)]
+    runtime_env_vars: BTreeMap<String, String>,
     secure: bool,
     allow_internet_access: Option<bool>,
     credentials: SandboxCredentials,
@@ -234,12 +239,14 @@ impl SandboxRecord {
             resources: new.resources,
             lifecycle: new.lifecycle,
             state: LifecycleState::Creating,
+            paused_with_memory: true,
             created_at: new.created_at,
             started_at: None,
             expires_at: new.expires_at,
             metadata: new.metadata,
             envd_version: new.envd_version,
             envd_mode: new.envd_mode,
+            runtime_env_vars: new.runtime_env_vars,
             secure: new.secure,
             allow_internet_access: new.allow_internet_access,
             credentials: new.credentials,
@@ -293,6 +300,10 @@ impl SandboxRecord {
         self.state
     }
 
+    pub const fn paused_with_memory(&self) -> bool {
+        self.paused_with_memory
+    }
+
     pub const fn created_at(&self) -> DateTime<Utc> {
         self.created_at
     }
@@ -315,6 +326,10 @@ impl SandboxRecord {
 
     pub const fn envd_mode(&self) -> EnvdMode {
         self.envd_mode
+    }
+
+    pub fn runtime_env_vars(&self) -> &BTreeMap<String, String> {
+        &self.runtime_env_vars
     }
 
     pub const fn secure(&self) -> bool {
@@ -369,6 +384,7 @@ impl SandboxRecord {
         self.resources = lease.resources;
         self.started_at.get_or_insert(lease.started_at);
         self.state = LifecycleState::Running;
+        self.paused_with_memory = true;
         self.failure = None;
         self.generation = next;
         Ok(next)
@@ -392,13 +408,16 @@ impl SandboxRecord {
         self.started_at = Some(ready_at);
         self.expires_at = expires_at;
         self.state = LifecycleState::Running;
+        self.paused_with_memory = true;
         self.failure = None;
         self.generation = next;
         Ok(next)
     }
 
-    pub fn begin_pause(&mut self) -> Result<SandboxGeneration, LifecycleError> {
-        self.transition(&[LifecycleState::Running], LifecycleState::Pausing)
+    pub fn begin_pause(&mut self, keep_memory: bool) -> Result<SandboxGeneration, LifecycleError> {
+        let generation = self.transition(&[LifecycleState::Running], LifecycleState::Pausing)?;
+        self.paused_with_memory = keep_memory;
+        Ok(generation)
     }
 
     pub fn mark_paused(
@@ -418,7 +437,9 @@ impl SandboxRecord {
     }
 
     pub fn abort_pause(&mut self) -> Result<SandboxGeneration, LifecycleError> {
-        self.transition(&[LifecycleState::Pausing], LifecycleState::Running)
+        let generation = self.transition(&[LifecycleState::Pausing], LifecycleState::Running)?;
+        self.paused_with_memory = true;
+        Ok(generation)
     }
 
     pub fn begin_resume(&mut self) -> Result<SandboxGeneration, LifecycleError> {
@@ -433,7 +454,7 @@ impl SandboxRecord {
     }
 
     pub fn begin_kill(&mut self) -> Result<SandboxGeneration, LifecycleError> {
-        self.transition(
+        let generation = self.transition(
             &[
                 LifecycleState::Creating,
                 LifecycleState::Running,
@@ -443,11 +464,15 @@ impl SandboxRecord {
                 LifecycleState::Failed,
             ],
             LifecycleState::Killing,
-        )
+        )?;
+        self.paused_with_memory = true;
+        Ok(generation)
     }
 
     pub fn mark_killed(&mut self) -> Result<SandboxGeneration, LifecycleError> {
-        self.transition(&[LifecycleState::Killing], LifecycleState::Killed)
+        let generation = self.transition(&[LifecycleState::Killing], LifecycleState::Killed)?;
+        self.paused_with_memory = true;
+        Ok(generation)
     }
 
     pub fn mark_failed(
@@ -463,6 +488,7 @@ impl SandboxRecord {
         ])?;
         let next = self.generation.next()?;
         self.state = LifecycleState::Failed;
+        self.paused_with_memory = true;
         self.failure = Some(failure);
         self.generation = next;
         Ok(next)
@@ -520,6 +546,10 @@ impl SandboxRecord {
             allowed: allowed.to_vec(),
         })
     }
+}
+
+const fn default_paused_with_memory() -> bool {
+    true
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

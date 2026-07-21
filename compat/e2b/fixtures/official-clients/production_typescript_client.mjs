@@ -332,6 +332,44 @@ try {
   trace('snapshot.source-running')
   assert.equal(await sandbox.isRunning(), true)
 
+  const coldPauseContent = `${clientLabel}-cold-pause`
+  trace('sandbox.cold-pause-write-state')
+  await sandbox.files.write('a3s-cold-pause-state.txt', coldPauseContent)
+  trace('sandbox.cold-pause-process-start')
+  const coldProcess = await sandbox.commands.run('sleep 300', {
+    background: true,
+    timeoutMs: 310_000,
+  })
+  trace('sandbox.cold-pause')
+  assert.equal(await sandbox.pause({ keepMemory: false }), true)
+  trace('sandbox.cold-pause-connect')
+  const coldResumed = await sandbox.connect({ timeoutMs: 60_000 })
+  assert.equal(coldResumed.sandboxId, sandbox.sandboxId)
+  trace('sandbox.cold-pause-read-state')
+  assert.equal(
+    await sandbox.files.read('a3s-cold-pause-state.txt'),
+    coldPauseContent
+  )
+  trace('sandbox.cold-pause-process-gone')
+  assert.equal(
+    (await sandbox.commands.list()).some(
+      (process) => process.pid === coldProcess.pid
+    ),
+    false
+  )
+  trace('sandbox.cold-pause-environment')
+  const coldEnvironment = await sandbox.commands.run(
+    'printf \'%s\' "$OFFICIAL_CLIENT"'
+  )
+  assert.equal(coldEnvironment.stdout, 'typescript')
+  assert.equal(coldEnvironment.stderr, '')
+  trace('sandbox.cold-pause-volume')
+  const coldMounted = await sandbox.commands.run(
+    'cat /mnt/data/shared/from-api.txt'
+  )
+  assert.equal(coldMounted.stdout, apiContent)
+  assert.equal(coldMounted.stderr, '')
+
   trace('sandbox.set-timeout')
   await sandbox.setTimeout(30_000)
   trace('sandbox.kill')

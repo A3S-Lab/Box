@@ -167,9 +167,10 @@ impl SandboxRepository for MemorySandboxRepository {
                     "expired memory record disappeared during claim: {sandbox_id}"
                 ))
             })?;
+            let keep_memory_on_pause = record.lifecycle().keep_memory_on_pause;
             match action {
                 OnTimeoutAction::Kill => record.begin_kill(),
-                OnTimeoutAction::Pause => record.begin_pause(),
+                OnTimeoutAction::Pause => record.begin_pause(keep_memory_on_pause),
             }
             .map_err(|error| {
                 RepositoryError::Corrupt(format!(

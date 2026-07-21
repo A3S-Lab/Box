@@ -388,7 +388,7 @@ async fn router_serves_the_pinned_official_lifecycle_shape() {
         "allow_internet_access": false,
         "autoPause": true,
         "autoPauseMemory": false,
-        "autoResume": {"enabled": false},
+        "autoResume": {"enabled": true},
         "envVars": {"ALPHA": "one", "BETA": "two"},
         "metadata": {"purpose": "fixture", "team": "alpha beta"},
         "secure": true,
@@ -474,7 +474,14 @@ async fn router_serves_the_pinned_official_lifecycle_shape() {
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
 
-    let response = send(&app, Method::POST, "/sandboxes/sandbox-1/pause", None, true).await;
+    let response = send(
+        &app,
+        Method::POST,
+        "/sandboxes/sandbox-1/pause",
+        Some(json!({"memory": false})),
+        true,
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let response = send(

@@ -113,9 +113,11 @@ health methods through the TLS gateway before and after kill, and verifies
 cleanup of every real `crun` execution. The clients exercise foreground and
 background commands, process listing, stdin send/close, wait, PTY
 create/resize/input/wait, Filesystem remove/mkdir/write/read/stat/list/rename,
-current Sandbox metrics with historical-range filtering, memory-preserving
-pause, paused-state listing, connect-based resume, survival of the same
-background process, owner-scoped Volume create/connect/list/content/delete,
+current Sandbox metrics with historical-range filtering, memory-preserving and
+filesystem-only pause, paused-state listing, connect-based resume, warm-pause
+survival of the same background process, cold-pause rootfs persistence and
+process replacement, environment reinitialization, Volume remounting,
+owner-scoped Volume create/connect/list/content/delete,
 bidirectional Sandbox mounts, UID/GID mapping, in-use deletion conflicts, and
 owner-scoped filesystem Snapshot capture/list/restore/delete. Snapshot clients
 prove that the source remains running after capture, restored files retain
@@ -134,10 +136,11 @@ fail closed on restore.
 
 With `A3S_BOX_E2B_NATIVE_SDKS=1`, the harness repeats that matrix through the
 A3S Python sync/async and TypeScript packages after removing every `E2B_*`
-connection variable and configuring only `A3S_BOX_*`. This production subset
-passes on A3S OS with certified `crun`, but it does not establish full protocol
-compatibility. Templates/builds, signed files, filesystem-only pause,
-historical metrics, MCP, additional signals, reconnect, cancellation,
+connection variable and configuring only `A3S_BOX_*`. The previously certified
+subset passes on A3S OS with `crun`; the newly added filesystem-only pause
+assertions require the next certified-host run. This does not establish full protocol
+compatibility. Templates/builds, signed files, historical metrics, MCP,
+additional signals, reconnect, cancellation,
 backpressure, multi-file and large-file behavior, deeper Snapshot and Volume
 failure/recovery cases, and other pinned edge cases remain outside the matrix,
 so `full_compatibility=false` remains mandatory.

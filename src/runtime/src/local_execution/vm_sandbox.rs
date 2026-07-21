@@ -232,12 +232,19 @@ impl VmLocalExecutionBackend {
         &self,
         record: &BoxRecord,
         remove_anonymous_volumes: bool,
+        force_preserve_rootfs: bool,
         timeout_secs: Option<u64>,
     ) -> ExecutionManagerResult<KillOutcome> {
         self.inspect_sandbox(record).await?;
         if let Some(manager) = self.manager(&record.id) {
             return self
-                .destroy_registered(record, manager, remove_anonymous_volumes, timeout_secs)
+                .destroy_registered(
+                    record,
+                    manager,
+                    remove_anonymous_volumes,
+                    force_preserve_rootfs,
+                    timeout_secs,
+                )
                 .await;
         }
         if remove_anonymous_volumes {
@@ -264,10 +271,17 @@ impl VmLocalExecutionBackend {
         .map_err(|error| runtime_error("kill", record, error))?;
 
         let mut manager = self.new_manager(record)?;
-        manager
-            .destroy()
-            .await
-            .map_err(|error| runtime_error("clean up", record, error))?;
+        if should_force_rootfs_preservation(record)? {
+            manager
+                .destroy_preserving_rootfs()
+                .await
+                .map_err(|error| runtime_error("clean up", record, error))?;
+        } else {
+            manager
+                .destroy()
+                .await
+                .map_err(|error| runtime_error("clean up", record, error))?;
+        }
         Ok(())
     }
 }

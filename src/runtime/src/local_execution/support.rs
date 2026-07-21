@@ -94,6 +94,21 @@ pub(super) fn pending_pause_policy(
     }
 }
 
+pub(super) fn paused_with_memory(
+    record: &BoxRecord,
+    execution_id: &ExecutionId,
+) -> ExecutionManagerResult<bool> {
+    record
+        .managed_execution
+        .as_ref()
+        .map(|metadata| metadata.paused_with_memory)
+        .ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "execution {execution_id} has no persisted pause mode"
+            ))
+        })
+}
+
 pub(super) fn pending_restart_source_state(
     record: &BoxRecord,
     execution_id: &ExecutionId,

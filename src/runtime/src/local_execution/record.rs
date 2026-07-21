@@ -146,6 +146,7 @@ pub(crate) fn apply_handle(record: &mut BoxRecord, handle: &LocalExecutionHandle
     record.exit_code = None;
     if let Some(metadata) = record.managed_execution.as_mut() {
         metadata.finished_at = None;
+        metadata.paused_with_memory = true;
     }
 }
 
@@ -179,6 +180,20 @@ pub(crate) fn clear_live_runtime(record: &mut BoxRecord, exit_code: Option<i32>)
     record.health_retries = 0;
     if let Some(metadata) = record.managed_execution.as_mut() {
         metadata.finished_at = Some(Utc::now());
+        metadata.paused_with_memory = true;
+    }
+}
+
+pub(crate) fn clear_live_runtime_for_cold_pause(record: &mut BoxRecord) {
+    record.pid = None;
+    record.pid_start_time = None;
+    record.exit_code = None;
+    record.health_status = "none".to_string();
+    record.health_retries = 0;
+    record.health_last_check = None;
+    if let Some(metadata) = record.managed_execution.as_mut() {
+        metadata.finished_at = None;
+        metadata.paused_with_memory = false;
     }
 }
 

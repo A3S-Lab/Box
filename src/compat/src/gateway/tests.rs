@@ -234,6 +234,7 @@ impl Harness {
             metadata: BTreeMap::new(),
             envd_version: "0.1.3".to_string(),
             envd_mode,
+            runtime_env_vars: BTreeMap::new(),
             secure: true,
             allow_internet_access: Some(false),
             credentials: SandboxCredentials {

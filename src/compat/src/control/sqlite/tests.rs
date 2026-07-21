@@ -77,6 +77,7 @@ fn running_record_at(
         metadata,
         envd_version: "0.1.3".to_string(),
         envd_mode: EnvdMode::Broker,
+        runtime_env_vars: BTreeMap::new(),
         secure: true,
         allow_internet_access: Some(false),
         credentials: SandboxCredentials {
@@ -328,7 +329,7 @@ async fn claims_expired_records_by_action_in_one_transaction() {
         BTreeMap::new(),
         OnTimeoutAction::Pause,
     );
-    already_paused.begin_pause().unwrap();
+    already_paused.begin_pause(false).unwrap();
     already_paused
         .mark_paused(ExecutionLease {
             execution_id: already_paused.execution_id().unwrap().clone(),

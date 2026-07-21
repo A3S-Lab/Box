@@ -7,7 +7,7 @@ pub mod reap;
 mod sandbox;
 mod spec;
 
-pub(crate) use layout::runtime_socket_dir;
+pub(crate) use layout::{persistent_rootfs_generation_exists, runtime_socket_dir};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1390,6 +1390,33 @@ impl VmManager {
     /// to exit gracefully before sending SIGKILL.
     #[tracing::instrument(skip(self), fields(box_id = %self.box_id))]
     pub async fn destroy_with_options(&mut self, signal: i32, timeout_ms: u64) -> Result<()> {
+        let preserve_rootfs = self.config.persistent;
+        self.destroy_with_rootfs_policy(signal, timeout_ms, preserve_rootfs)
+            .await
+    }
+
+    /// Stop the runtime while retaining its writable rootfs for a managed
+    /// restart or filesystem-only pause.
+    pub(crate) async fn destroy_preserving_rootfs_with_options(
+        &mut self,
+        signal: i32,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        self.destroy_with_rootfs_policy(signal, timeout_ms, true)
+            .await
+    }
+
+    pub(crate) async fn destroy_preserving_rootfs(&mut self) -> Result<()> {
+        self.destroy_with_rootfs_policy(default_stop_signal(), DEFAULT_SHUTDOWN_TIMEOUT_MS, true)
+            .await
+    }
+
+    async fn destroy_with_rootfs_policy(
+        &mut self,
+        signal: i32,
+        timeout_ms: u64,
+        preserve_rootfs: bool,
+    ) -> Result<()> {
         let mut state = self.state.write().await;
 
         if *state == BoxState::Stopped {
@@ -1423,10 +1450,7 @@ impl VmManager {
 
         // Cleanup rootfs provider (unmount overlay if applicable)
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
-        if let Err(e) = self
-            .rootfs_provider
-            .cleanup(&box_dir, self.config.persistent)
-        {
+        if let Err(e) = self.rootfs_provider.cleanup(&box_dir, preserve_rootfs) {
             tracing::warn!(
                 box_id = %self.box_id,
                 error = %e,
@@ -1450,7 +1474,7 @@ impl VmManager {
         // accumulation slows later RunPodSandbox calls until they time out
         // (observed: pod #21 after churning 20). Persistent boxes keep their
         // dir intentionally.
-        if !self.config.persistent {
+        if !preserve_rootfs {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

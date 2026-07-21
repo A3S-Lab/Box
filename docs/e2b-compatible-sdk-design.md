@@ -18,11 +18,11 @@ unversioned claim.
 | Area | Implemented evidence | Remaining gate |
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
-| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass against both the Rust fixture server and the production service with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Complete templates/builds, filesystem-only pause, network updates, historical metrics, pagination edge cases, and host-reboot recovery |
+| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving and filesystem-only pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; durable cold-pause and crash-window behavior has in-process coverage, while unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass the previously certified production matrix with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Run the extended filesystem-only pause client matrix on a certified A3S OS host; complete templates/builds, network updates, historical metrics, pagination edge cases, and host-reboot recovery |
 | Volumes | Owner-scoped create, connect/get, list, and delete use durable SQLite records, encrypted scope-bound tokens, startup reconciliation, and runtime-managed storage; the authenticated volume-content routes implement directory, file, path, and metadata operations with descriptor-relative path safety; all six production clients pass bidirectional Sandbox mounts, UID/GID mapping, public mount metadata, in-use deletion conflicts, and cleanup against real `crun` executions | Complete large-file, concurrent-mutation, service-crash, host-reboot, and negative-path breadth before treating Volume coverage as a standalone compatibility claim |
 | Filesystem Snapshots | Owner-scoped capture, source-filtered list, restore, and delete use durable SQLite records, startup reconciliation, generation-fenced runtime operations, quiesced rootfs capture, and copy-on-write restore; all six production clients preserve captured content, Unix ownership/mode, resolved OCI defaults, source liveness, restored writability, in-use conflicts, and final cleanup | Complete named-reference and pagination edge cases, large-rootfs and concurrent-mutation behavior, service-crash and host-reboot recovery, and broader negative-path coverage; this surface captures filesystems, not process memory or device state |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
-| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; A3S OS smoke coverage and unchanged official clients create through HTTP, start through certified `crun`, pause in memory, resume through connect, prove the same process survives, replace timeout, kill, and verify box, runtime-state, and socket cleanup | Complete host-reboot recovery, filesystem-only pause, and the unimplemented control-plane surfaces |
+| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; existing A3S OS smoke evidence and unchanged official clients create through HTTP, start through certified `crun`, pause in memory, resume through connect, prove the same process survives, replace timeout, kill, and verify box, runtime-state, and socket cleanup. The gate is now extended with filesystem-only stop/restart assertions for rootfs persistence, old-process removal, environment reinitialization, and Volume remounting | Run the extended gate on a certified host; complete host-reboot recovery and the unimplemented control-plane surfaces |
 | Sandbox logs | Generation-fenced v1/v2 control routes read bounded current and rotated runtime JSON logs, tolerate a live partial tail, stably order concurrent stdout/stderr entries by timestamp, and implement cursor, direction, level, search, and limit filters; the real-`crun` A3S OS gate validates both response schemas and forward/backward ordering | Exercise retention limits and rotation races under sustained concurrent output in the complete black-box matrix |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
 | envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
@@ -38,11 +38,15 @@ Interpreter packages unchanged against the ACL-configured service, then repeats
 the same matrix through the A3S Python sync/async and TypeScript packages after
 removing every `E2B_*` connection variable. Both paths cover lifecycle, health,
 Filesystem operations, foreground/background Process operations, stdin, PTY,
-memory-preserving pause, paused-state listing, connect-based resume, survival
-of the same background process, owner-scoped Volume control/content,
+memory-preserving and filesystem-only pause, paused-state listing,
+connect-based resume, warm-pause survival of the same background process,
+cold-pause rootfs persistence and process replacement, environment
+reinitialization and Volume remounting, owner-scoped Volume control/content,
 bidirectional Sandbox mounts, UID/GID mapping, in-use deletion conflicts,
 filesystem Snapshot capture/list/restore/delete after source termination,
 Python execution, interpreter contexts, restart recovery, and cleanup. The
+filesystem-only pause assertions are newly added and await the next certified
+A3S OS run; the other listed paths have existing host evidence. The
 same production gate validates current control-plane metrics for every
 official and A3S client, an empty historical range, v1 running-list behavior,
 monotonic refresh, batch metrics,
@@ -51,8 +55,8 @@ the initialized environment, and metadata-preserving HTTP upload/download.
 Current metrics are read through the generation-fenced runtime-envd connection;
 `memCache` is reported as zero because the pinned envd metrics response has no
 cache-usage field. Historical retention remains open. Remaining control,
-filesystem-only pause, deeper Snapshot and Volume failure/recovery,
-signed-file, public-port, streaming edge-case, interpreter, and MCP surfaces
+deeper Snapshot and Volume failure/recovery, signed-file, public-port,
+streaming edge-case, interpreter, and MCP surfaces
 are not covered.
 This is production evidence for a useful subset, not the full black-box
 compatibility matrix, so `full_compatibility=false` remains mandatory.
@@ -168,10 +172,11 @@ following are true for a published compatibility manifest:
 The conformance report is published per template and isolation profile. A
 shared-kernel template cannot inherit a passing MicroVM result. Memory-
 preserving pause and resume now have matching observable behavior on the
-Sandbox backend, and filesystem Snapshot capture/restore has matching behavior
-for the tested subset. Filesystem-only pause and the rest of the pinned
-lifecycle surface remain gates. The backend is therefore still reported as a
-preview subset rather than fully compatible.
+Sandbox backend. Filesystem-only pause retains the rootfs while replacing the
+runtime generation, reinitializing envd, and remounting Volumes; filesystem
+Snapshot capture/restore also has matching behavior for the tested subset. The
+rest of the pinned lifecycle surface remains gated, so the backend is still
+reported as a preview subset rather than fully compatible.
 
 ## Compatibility architecture
 
@@ -459,9 +464,8 @@ class, the server returns the matching protocol error and does not switch
 backends. That configuration is then listed as partial rather than fully
 compatible unless the pinned upstream contract rejects the same request. For
 example, shared-kernel execution still cannot be certified for the full
-lifecycle surface while filesystem-only pause lacks matching observable
-semantics and the implemented filesystem Snapshot subset retains explicit
-conformance gates.
+lifecycle surface while the implemented filesystem Snapshot subset and
+filesystem-only pause retain explicit host and edge-case conformance gates.
 
 ## Command and PTY compatibility
 
@@ -1067,14 +1071,16 @@ Phase 2 is delivered as small, immediately merged changes:
 7. **Complete for the production-tested subset:** unmodified official clients
    pass lifecycle and health through the production listeners, then official
    and A3S Python sync/async and TypeScript packages pass Filesystem,
-   foreground/background Process, stdin, PTY, memory-preserving pause/resume,
-   same-process survival, owner-scoped Volume control/content and bidirectional
+   foreground/background Process, stdin, PTY, memory-preserving and
+   filesystem-only pause/resume, warm-pause same-process survival, cold-pause
+   rootfs persistence and process replacement, environment reinitialization,
+   Volume remounting, owner-scoped Volume control/content and bidirectional
    mounts, filesystem Snapshot capture/list/restore/delete, Python execution,
    and context lifecycle plus current metrics against real Sandboxes. The
    enclosing smoke passes v1 listing, paused-state listing, monotonic refresh,
    and batch metrics. Complete the remaining pinned control, envd,
-   filesystem-only pause, deeper Snapshot and Volume failure/recovery,
-   signed-file, public-port, streaming edge-case, interpreter, and MCP matrices
+   deeper Snapshot and Volume failure/recovery, signed-file, public-port,
+   streaming edge-case, interpreter, and MCP matrices
    without broadening this subset into a full compatibility claim.
 
 The runtime foundation of slice 4 is complete. The persisted execution record
@@ -1118,8 +1124,9 @@ The production VM/Sandbox backend is also complete for this slice. It owns live
 runtime handles, reconstructs MicroVM processes with PID identity fencing,
 reconstructs running and paused Sandbox executions from validated durable
 `crun` evidence, implements idempotent memory-preserving `crun pause` and
-`crun resume`, rejects filesystem-only pause without falling back to MicroVM,
-and owns terminal cleanup. The opt-in A3S OS smoke harness has proven that
+`crun resume`, implements durable filesystem-only stop/restart without backend
+fallback while retaining the rootfs, and owns terminal cleanup. The opt-in A3S
+OS smoke harness has proven that
 Sandbox `create` persists a `created` reservation without allocating a Box
 directory, runtime root, or sockets; manager reconstruction reconciles the same
 unstarted reservation; and explicit `start` launches through `crun`. It also
@@ -1224,7 +1231,7 @@ implementation begins.
 ### Phase 2: lifecycle and routing (in progress)
 
 - Implemented authentication, create/connect/get/v1-v2-list/kill/timeout,
-  memory-preserving pause/connect-resume, monotonic refresh, current
+  memory-preserving and filesystem-only pause/connect-resume, monotonic refresh, current
   single/batch metrics, filtered running/paused listing, durable mappings,
   wildcard routing, and traffic tokens.
 - Every create routes through A3S execution resolution and persists its plan.
@@ -1233,8 +1240,9 @@ implementation begins.
   recovery, and certificate rotation remain open.
 
 Gate: unmodified official SDKs create, pause, resume, reconnect to, list,
-refresh, read current metrics from, time out, and kill an A3S sandbox while an
-already-running process survives the pause cycle.
+refresh, read current metrics from, time out, and kill an A3S sandbox while a
+warm-paused process survives and a filesystem-only pause preserves files but
+replaces processes and reinitializes runtime services.
 
 ### Phase 3: commands, files, and PTY (in progress)
 
@@ -1274,8 +1282,8 @@ patches.
   and passes the six-client A3S OS matrix; named-reference, pagination,
   large-rootfs, concurrent-mutation, crash/reboot recovery, and negative-path
   breadth remains open.
-- Implement templates/builds, filesystem-only pause, historical metrics,
-  network policy, routed ports, and remaining public helpers.
+- Implement templates/builds, historical metrics, network policy, routed ports,
+  and remaining public helpers.
 - Run compatibility across every supported SDK/version tuple.
 
 Gate: the complete public SDK inventory has an observed passing test or an

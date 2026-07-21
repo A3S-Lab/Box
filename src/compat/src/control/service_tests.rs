@@ -211,6 +211,7 @@ async fn cold_start_gets_the_full_usable_timeout_after_readiness() {
     let supervisor = LifecycleSupervisor::new(LifecycleSupervisorDependencies {
         repository: harness.repository.clone(),
         executions: harness.executions.clone(),
+        ports: harness.executions.clone(),
         clock: harness.clock.clone(),
     });
     let report = supervisor
@@ -302,6 +303,55 @@ async fn runtime_envd_is_ready_before_the_sandbox_is_published() {
     assert_eq!(requests[0].2["envVars"]["BETA"], "two");
     assert_eq!(requests[0].2["timestamp"], "2026-07-14T12:00:00Z");
     assert!(requests[0].2.get("accessToken").is_none());
+}
+
+#[tokio::test]
+async fn filesystem_only_resume_reinitializes_runtime_envd_with_persisted_environment() {
+    let harness = TestHarness::new();
+    let mut request = create_request("owner-1");
+    request.template_id = "runtime-envd-template".to_string();
+    let created = harness.service.create(request).await.unwrap();
+    let sandbox_id = created.record.sandbox_id().clone();
+
+    harness
+        .service
+        .pause("owner-1", &sandbox_id, false)
+        .await
+        .unwrap();
+    let paused = harness.service.get("owner-1", &sandbox_id).await.unwrap();
+    assert_eq!(paused.state(), LifecycleState::Paused);
+    assert!(!paused.paused_with_memory());
+    assert_eq!(paused.runtime_env_vars()["ALPHA"], "one");
+
+    let resumed = harness
+        .service
+        .connect("owner-1", &sandbox_id, 600)
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.disposition, ConnectionDisposition::Resumed);
+    assert!(resumed.record.paused_with_memory());
+    assert_eq!(resumed.record.execution_generation().unwrap().get(), 3);
+    assert_eq!(
+        harness.executions.port_requests(),
+        vec![
+            (
+                "execution-operation-1".to_string(),
+                1,
+                crate::routing::ENVD_PORT,
+            ),
+            (
+                "execution-operation-1".to_string(),
+                3,
+                crate::routing::ENVD_PORT,
+            ),
+        ]
+    );
+    let requests = harness.executions.runtime_envd_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].2["lifecycleID"], "sandbox-1");
+    assert_eq!(requests[1].2["envVars"]["ALPHA"], "one");
+    assert_eq!(requests[1].2["envVars"]["BETA"], "two");
 }
 
 #[tokio::test]

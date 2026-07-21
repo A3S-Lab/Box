@@ -39,7 +39,7 @@ fn registry_auth_for_image(home_dir: &Path, reference: &str) -> Result<crate::oc
     ))
 }
 
-pub(super) fn persistent_rootfs_generation_exists(box_dir: &Path) -> Result<bool> {
+pub(crate) fn persistent_rootfs_generation_exists(box_dir: &Path) -> Result<bool> {
     for directory in [box_dir.join("rootfs"), box_dir.join("upper")] {
         match std::fs::read_dir(&directory) {
             Ok(mut entries) => {
@@ -627,6 +627,59 @@ impl VmManager {
             .unwrap_or_else(|| self.home_dir.join("cache"))
     }
 
+    /// Mount or expose a rootfs generation retained by a managed restart or
+    /// filesystem-only pause without pulling an image or starting a runtime.
+    pub(crate) fn prepare_preserved_rootfs(&self) -> Result<PathBuf> {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        let rootfs = box_dir.join("rootfs");
+        let populated_rootfs = std::fs::read_dir(&rootfs)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+        let lower = if populated_rootfs {
+            rootfs.clone()
+        } else if let Some(snapshot_lower) = snapshot_lower_dir(&box_dir) {
+            if !snapshot_lower.is_dir() {
+                return Err(BoxError::StateError(format!(
+                    "Retained snapshot lower is missing for {}: {}",
+                    self.box_id,
+                    snapshot_lower.display()
+                )));
+            }
+            snapshot_lower
+        } else if let Some(cache_key) = retained_rootfs_cache_key(&box_dir)? {
+            self.try_rootfs_cache_path(&cache_key)?.ok_or_else(|| {
+                BoxError::StateError(format!(
+                    "Retained rootfs cache entry {cache_key} is missing for {}",
+                    self.box_id
+                ))
+            })?
+        } else if let Some(cached) = self.try_rootfs_cache_path(&RootfsCache::compute_key(
+            &self.config.image,
+            &[],
+            &[],
+            &[],
+        ))? {
+            cached
+        } else {
+            #[cfg(target_os = "macos")]
+            if box_dir.join("rootfs-apfs-v2.sparseimage").is_file() {
+                return self.rootfs_provider.prepare(&box_dir, &rootfs);
+            }
+            return Err(BoxError::StateError(format!(
+                "Retained rootfs lower is missing for {}",
+                self.box_id
+            )));
+        };
+        self.rootfs_provider.prepare(&box_dir, &lower)
+    }
+
+    /// Unmount a rootfs exposed for a quiescent operation while keeping its
+    /// writable generation available for a later resume.
+    pub(crate) fn cleanup_preserved_rootfs(&self) -> Result<()> {
+        self.rootfs_provider
+            .cleanup(&self.home_dir.join("boxes").join(&self.box_id), true)
+    }
+
     /// Generate TEE configuration file if TEE is enabled.
     #[cfg(unix)]
     pub(crate) fn generate_tee_config(&self, box_dir: &Path) -> Result<Option<TeeInstanceConfig>> {
@@ -962,6 +1015,28 @@ fn snapshot_lower_dir(box_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+fn retained_rootfs_cache_key(box_dir: &Path) -> Result<Option<String>> {
+    let marker = box_dir.join(".rootfs-cache-key");
+    let value = match std::fs::read_to_string(&marker) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(BoxError::StateError(format!(
+                "Failed to read retained rootfs cache marker {}: {error}",
+                marker.display()
+            )))
+        }
+    };
+    let key = value.trim();
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(BoxError::StateError(format!(
+            "Retained rootfs cache marker is invalid for {}",
+            box_dir.display()
+        )));
+    }
+    Ok(Some(key.to_ascii_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::BoxState;
@@ -1081,6 +1156,23 @@ mod tests {
         assert_eq!(
             snapshot_lower_dir(box_dir),
             Some(PathBuf::from("/root/.a3s/snapshots/snap-1/rootfs"))
+        );
+    }
+
+    #[test]
+    fn retained_rootfs_cache_marker_is_strict_and_canonical() {
+        let temporary = TempDir::new().unwrap();
+        let box_dir = temporary.path();
+        assert_eq!(retained_rootfs_cache_key(box_dir).unwrap(), None);
+
+        std::fs::write(box_dir.join(".rootfs-cache-key"), "not-a-digest\n").unwrap();
+        assert!(retained_rootfs_cache_key(box_dir).is_err());
+
+        let uppercase = "A".repeat(64);
+        std::fs::write(box_dir.join(".rootfs-cache-key"), format!(" {uppercase}\n")).unwrap();
+        assert_eq!(
+            retained_rootfs_cache_key(box_dir).unwrap(),
+            Some("a".repeat(64))
         );
     }
 

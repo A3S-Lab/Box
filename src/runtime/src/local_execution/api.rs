@@ -48,6 +48,8 @@ impl ExecutionManager for LocalExecutionManager {
     }
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus> {
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         let record = self
             .get(execution_id)
             .await?
@@ -98,6 +100,8 @@ impl ExecutionManager for LocalExecutionManager {
         expected_generation: ExecutionGeneration,
         keep_memory: bool,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         let record = self
             .get(execution_id)
             .await?
@@ -123,6 +127,8 @@ impl ExecutionManager for LocalExecutionManager {
         execution_id: &ExecutionId,
         expected_generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         let record = self
             .get(execution_id)
             .await?
@@ -166,6 +172,8 @@ impl ExecutionManager for LocalExecutionManager {
         execution_id: &ExecutionId,
         expected_generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<KillOutcome> {
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         let record = self
             .get(execution_id)
             .await?

@@ -4,7 +4,8 @@ use a3s_box_core::{
 };
 
 use super::record::{
-    apply_handle, apply_restart_handle, apply_start_handle, clear_live_runtime, execution_id,
+    apply_handle, apply_restart_handle, apply_start_handle, clear_live_runtime,
+    clear_live_runtime_for_cold_pause, execution_id,
 };
 use super::support::{generation, managed_state};
 use super::{LocalExecutionHandle, LocalExecutionManager};
@@ -132,6 +133,7 @@ impl LocalExecutionManager {
                 RuntimeUpdate::Handle(handle) => apply_handle(record, &handle),
                 RuntimeUpdate::StartHandle(handle) => apply_start_handle(record, &handle),
                 RuntimeUpdate::Terminal(exit_code) => clear_live_runtime(record, exit_code),
+                RuntimeUpdate::ColdPause => clear_live_runtime_for_cold_pause(record),
                 RuntimeUpdate::PauseClaim(keep_memory) => {
                     if let Some(metadata) = record.managed_execution.as_mut() {
                         metadata.pending_operation =
@@ -177,6 +179,22 @@ impl LocalExecutionManager {
         to: ManagedExecutionState,
         handle: LocalExecutionHandle,
     ) -> ExecutionManagerResult<BoxRecord> {
+        let update =
+            if from == ManagedExecutionState::Starting && to == ManagedExecutionState::Running {
+                RuntimeUpdate::StartHandle(handle)
+            } else {
+                RuntimeUpdate::Handle(handle)
+            };
+        self.complete_transition(record, from, to, update).await
+    }
+
+    pub(super) async fn complete_transition(
+        &self,
+        record: &BoxRecord,
+        from: ManagedExecutionState,
+        to: ManagedExecutionState,
+        update: RuntimeUpdate,
+    ) -> ExecutionManagerResult<BoxRecord> {
         let execution_id = execution_id(record)?;
         let current_generation = generation(record, &execution_id)?;
         let expected_generation = if matches!(
@@ -197,12 +215,6 @@ impl LocalExecutionManager {
         } else {
             current_generation
         };
-        let update =
-            if from == ManagedExecutionState::Starting && to == ManagedExecutionState::Running {
-                RuntimeUpdate::StartHandle(handle)
-            } else {
-                RuntimeUpdate::Handle(handle)
-            };
         match self.transition(record, from, to, update).await {
             Ok(record) => Ok(record),
             Err(error @ ExecutionManagerError::Conflict { .. }) => {
@@ -227,6 +239,7 @@ pub(super) enum RuntimeUpdate {
     Handle(LocalExecutionHandle),
     StartHandle(LocalExecutionHandle),
     Terminal(Option<i32>),
+    ColdPause,
     PauseClaim(bool),
     SnapshotClaim {
         snapshot_id: ExecutionSnapshotId,

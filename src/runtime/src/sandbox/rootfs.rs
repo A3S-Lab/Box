@@ -3,6 +3,8 @@
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 use std::io::Read;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 #[cfg(any(target_os = "linux", test))]
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -22,6 +24,10 @@ use base64::Engine;
 use super::capability::{IdMapping, SandboxIdMappingPlan};
 
 const MAX_ROOTFS_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const SNAPSHOT_ID_MAPPING_FILE: &str = "sandbox/rootfs-id-mappings.json";
+#[cfg(target_os = "linux")]
+const MAX_SNAPSHOT_ID_MAPPING_BYTES: u64 = 64 * 1024;
 
 /// Container IDs discovered in the authoritative rootfs metadata manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +35,76 @@ pub struct RootfsIdentityRequirements {
     pub maximum_uid: u32,
     pub maximum_gid: u32,
     pub manifest_path: PathBuf,
+}
+
+/// Persist the exact user-namespace mapping needed to translate a stopped
+/// Sandbox rootfs back to container ownership during filesystem snapshots.
+#[cfg(target_os = "linux")]
+pub(crate) fn persist_snapshot_id_mappings(
+    box_dir: &Path,
+    plan: &SandboxIdMappingPlan,
+) -> Result<()> {
+    let destination = box_dir.join(SNAPSHOT_ID_MAPPING_FILE);
+    let parent = destination.parent().ok_or_else(|| {
+        BoxError::ConfigError(format!(
+            "Sandbox snapshot mapping path has no parent: {}",
+            destination.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent).map_err(BoxError::IoError)?;
+    let mut encoded = serde_json::to_vec_pretty(plan).map_err(|error| {
+        BoxError::SerializationError(format!(
+            "Failed to encode Sandbox snapshot ID mappings: {error}"
+        ))
+    })?;
+    encoded.push(b'\n');
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(BoxError::IoError)?;
+    temporary.write_all(&encoded).map_err(BoxError::IoError)?;
+    temporary.as_file().sync_all().map_err(BoxError::IoError)?;
+    temporary
+        .persist(&destination)
+        .map_err(|error| BoxError::IoError(error.error))?;
+    if let Ok(directory) = std::fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+    Ok(())
+}
+
+/// Load a persisted snapshot mapping, rejecting links, oversized artifacts,
+/// and malformed JSON before it can influence host ownership translation.
+#[cfg(target_os = "linux")]
+pub(crate) fn load_snapshot_id_mappings(box_dir: &Path) -> Result<Option<SandboxIdMappingPlan>> {
+    let path = box_dir.join(SNAPSHOT_ID_MAPPING_FILE);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(BoxError::IoError(error)),
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_SNAPSHOT_ID_MAPPING_BYTES {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox snapshot ID mapping artifact is not a bounded regular file: {}",
+            path.display()
+        )));
+    }
+    let mut encoded = Vec::with_capacity(metadata.len() as usize);
+    std::fs::File::open(&path)
+        .map_err(BoxError::IoError)?
+        .take(MAX_SNAPSHOT_ID_MAPPING_BYTES + 1)
+        .read_to_end(&mut encoded)
+        .map_err(BoxError::IoError)?;
+    if encoded.len() as u64 > MAX_SNAPSHOT_ID_MAPPING_BYTES {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox snapshot ID mapping artifact exceeds {} bytes: {}",
+            MAX_SNAPSHOT_ID_MAPPING_BYTES,
+            path.display()
+        )));
+    }
+    serde_json::from_slice(&encoded).map(Some).map_err(|error| {
+        BoxError::SerializationError(format!(
+            "Failed to decode Sandbox snapshot ID mappings {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Host IDs representing container root for one mapping plan.
