@@ -1,5 +1,7 @@
 //! Minimal Connect JSON framing for the pinned E2B envd clients.
 
+use std::marker::PhantomData;
+
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderValue, Request, Response, StatusCode};
@@ -93,28 +95,130 @@ pub(super) async fn decode_stream<T>(request: Request<Body>) -> Result<T, Connec
 where
     T: DeserializeOwned,
 {
+    let mut stream = decode_client_stream(request)?;
+    let message = stream.next().await?.ok_or_else(|| {
+        ConnectFailure::invalid_argument("Connect stream request is missing its envelope")
+    })?;
+    if stream.next().await?.is_some() {
+        return Err(ConnectFailure::invalid_argument(
+            "Connect procedure expects exactly one request envelope",
+        ));
+    }
+    Ok(message)
+}
+
+pub(super) fn decode_client_stream<T>(
+    request: Request<Body>,
+) -> Result<ConnectJsonStream<T>, ConnectFailure>
+where
+    T: DeserializeOwned,
+{
     require_content_type(&request, CONTENT_TYPE_STREAM_JSON)?;
-    let bytes = read_body(request.into_body()).await?;
-    if bytes.len() < 5 {
-        return Err(ConnectFailure::invalid_argument(
-            "Connect stream request is missing its envelope",
-        ));
-    }
-    let flags = bytes[0];
-    if flags != 0 {
-        return Err(ConnectFailure::invalid_argument(format!(
-            "unsupported Connect request envelope flags: {flags:#04x}"
-        )));
-    }
-    let length = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
-    if length != bytes.len() - 5 {
-        return Err(ConnectFailure::invalid_argument(
-            "Connect request envelope length does not match its payload",
-        ));
-    }
-    serde_json::from_slice(&bytes[5..]).map_err(|error| {
-        ConnectFailure::invalid_argument(format!("invalid Connect JSON request: {error}"))
+    Ok(ConnectJsonStream {
+        body: request.into_body(),
+        chunk: Bytes::new(),
+        header: [0; 5],
+        header_len: 0,
+        message: PhantomData,
     })
+}
+
+pub(super) struct ConnectJsonStream<T> {
+    body: Body,
+    chunk: Bytes,
+    header: [u8; 5],
+    header_len: usize,
+    message: PhantomData<T>,
+}
+
+impl<T> ConnectJsonStream<T>
+where
+    T: DeserializeOwned,
+{
+    /// Decode one envelope without buffering the complete request stream.
+    ///
+    /// Only the current transport chunk and one bounded message payload are
+    /// retained. Awaiting each message before reading the next one propagates
+    /// backpressure to long-lived stdin streams.
+    pub(super) async fn next(&mut self) -> Result<Option<T>, ConnectFailure> {
+        while self.header_len < self.header.len() {
+            if self.chunk.is_empty() {
+                self.chunk = match self.body.data().await {
+                    Some(Ok(chunk)) if !chunk.is_empty() => chunk,
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => {
+                        return Err(ConnectFailure::invalid_argument(format!(
+                            "failed to read request body: {error}"
+                        )))
+                    }
+                    None if self.header_len == 0 => return Ok(None),
+                    None => {
+                        return Err(ConnectFailure::invalid_argument(
+                            "Connect request ended inside an envelope header",
+                        ))
+                    }
+                };
+            }
+            let count = (self.header.len() - self.header_len).min(self.chunk.len());
+            self.header[self.header_len..self.header_len + count]
+                .copy_from_slice(&self.chunk[..count]);
+            self.header_len += count;
+            self.chunk = self.chunk.slice(count..);
+        }
+
+        let flags = self.header[0];
+        if flags & END_STREAM_FLAG != 0 {
+            self.header_len = 0;
+            return Err(ConnectFailure::invalid_argument(
+                "Connect request streams cannot contain end-stream envelopes",
+            ));
+        }
+        if flags != 0 {
+            self.header_len = 0;
+            return Err(ConnectFailure::invalid_argument(format!(
+                "unsupported Connect request envelope flags: {flags:#04x}"
+            )));
+        }
+        let length = u32::from_be_bytes([
+            self.header[1],
+            self.header[2],
+            self.header[3],
+            self.header[4],
+        ]) as usize;
+        self.header_len = 0;
+        if length > MAX_REQUEST_BYTES {
+            return Err(ConnectFailure::invalid_argument(format!(
+                "Connect request envelope exceeds the {MAX_REQUEST_BYTES}-byte limit"
+            )));
+        }
+
+        let mut payload = Vec::with_capacity(length);
+        while payload.len() < length {
+            if self.chunk.is_empty() {
+                self.chunk = match self.body.data().await {
+                    Some(Ok(chunk)) if !chunk.is_empty() => chunk,
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => {
+                        return Err(ConnectFailure::invalid_argument(format!(
+                            "failed to read request body: {error}"
+                        )))
+                    }
+                    None => {
+                        return Err(ConnectFailure::invalid_argument(
+                            "Connect request ended inside an envelope payload",
+                        ))
+                    }
+                };
+            }
+            let count = (length - payload.len()).min(self.chunk.len());
+            payload.extend_from_slice(&self.chunk[..count]);
+            self.chunk = self.chunk.slice(count..);
+        }
+
+        serde_json::from_slice(&payload).map(Some).map_err(|error| {
+            ConnectFailure::invalid_argument(format!("invalid Connect JSON request: {error}"))
+        })
+    }
 }
 
 pub(super) fn unary_ok<T>(value: &T) -> Response<Body>
@@ -136,6 +240,22 @@ pub(super) fn stream_response(body: Body) -> Response<Body> {
 
 pub(super) fn stream_error(error: &ConnectFailure) -> Response<Body> {
     stream_response(Body::from(error.end_stream_frame()))
+}
+
+pub(super) fn stream_unary_ok<T>(value: &T) -> Response<Body>
+where
+    T: Serialize,
+{
+    match serde_json::to_value(value) {
+        Ok(value) => {
+            let mut body = encode_json_frame(0, &value);
+            body.extend_from_slice(&success_end_stream_frame());
+            stream_response(Body::from(body))
+        }
+        Err(error) => stream_error(&ConnectFailure::internal(format!(
+            "failed to serialize Connect JSON response: {error}"
+        ))),
+    }
 }
 
 pub(super) fn data_frame(value: &Value) -> Bytes {

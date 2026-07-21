@@ -21,8 +21,8 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, RwLock};
 
 use super::connect::{
-    data_frame, decode_stream, decode_unary, stream_error, stream_response,
-    success_end_stream_frame, unary_ok, ConnectFailure,
+    data_frame, decode_client_stream, decode_stream, decode_unary, stream_error, stream_response,
+    stream_unary_ok, success_end_stream_frame, unary_ok, ConnectFailure,
 };
 
 const DEFAULT_PROCESS_TIMEOUT_MS: u64 = 60_000;
@@ -69,9 +69,7 @@ impl ProcessBroker {
             "/process.Process/CloseStdin" => self.close_stdin(request, &key).await,
             "/process.Process/SendSignal" => self.send_signal(request, &key).await,
             "/process.Process/Update" => self.update(request, &key).await,
-            "/process.Process/StreamInput" => stream_error(&ConnectFailure::unimplemented(
-                "ordered client-streaming process input is not implemented",
-            )),
+            "/process.Process/StreamInput" => self.stream_input(request, &key).await,
             _ => ConnectFailure::not_found("Process procedure not found").unary_response(),
         }
     }
@@ -203,30 +201,50 @@ impl ProcessBroker {
             Ok(entry) => entry,
             Err(error) => return error.unary_response(),
         };
-        let input = match request.input.and_then(|input| input.into_input()) {
-            Some(input) => input,
-            None => {
-                return ConnectFailure::invalid_argument(
-                    "SendInputRequest.input must contain stdin or PTY data",
-                )
-                .unary_response()
-            }
-        };
-        let data = match input.decode() {
-            Ok(data) => data,
-            Err(error) => return error.unary_response(),
-        };
-        if input.is_pty() != entry.pty {
-            return ConnectFailure::failed_precondition(if entry.pty {
-                "PTY processes require PTY input"
-            } else {
-                "non-PTY processes require stdin input"
-            })
-            .unary_response();
-        }
-        match entry.input.write_stdin(&data).await {
+        match write_process_input(&entry, request.input, "SendInputRequest.input").await {
             Ok(()) => unary_ok(&EmptyResponse {}),
-            Err(error) => manager_failure(error).unary_response(),
+            Err(error) => error.unary_response(),
+        }
+    }
+
+    async fn stream_input(
+        &self,
+        request: Request<Body>,
+        key: &ProcessGeneration,
+    ) -> Response<Body> {
+        let mut stream = match decode_client_stream::<StreamInputRequest>(request) {
+            Ok(stream) => stream,
+            Err(error) => return stream_error(&error),
+        };
+        let mut entry = None;
+        loop {
+            let request = match stream.next().await {
+                Ok(Some(request)) => request,
+                Ok(None) => return stream_unary_ok(&EmptyResponse {}),
+                Err(error) => return stream_error(&error),
+            };
+            match request.into_event() {
+                Ok(StreamInputEvent::Start(selector)) => {
+                    entry = match self.entry(key, &selector).await {
+                        Ok(entry) => Some(entry),
+                        Err(error) => return stream_error(&error),
+                    };
+                }
+                Ok(StreamInputEvent::Data(input)) => {
+                    let Some(entry) = entry.as_ref() else {
+                        return stream_error(&ConnectFailure::failed_precondition(
+                            "StreamInput data requires a preceding start event",
+                        ));
+                    };
+                    if let Err(error) =
+                        write_process_input(entry, input, "StreamInputRequest.data.input").await
+                    {
+                        return stream_error(&error);
+                    }
+                }
+                Ok(StreamInputEvent::KeepAlive) => {}
+                Err(error) => return stream_error(&error),
+            }
         }
     }
 
@@ -642,6 +660,31 @@ fn encode(data: &[u8]) -> String {
     STANDARD.encode(data)
 }
 
+async fn write_process_input(
+    entry: &ProcessEntry,
+    input: Option<ProcessInput>,
+    field: &'static str,
+) -> Result<(), ConnectFailure> {
+    let input = input.and_then(ProcessInput::into_input).ok_or_else(|| {
+        ConnectFailure::invalid_argument(format!(
+            "{field} must contain exactly one stdin or PTY value"
+        ))
+    })?;
+    let data = input.decode()?;
+    if input.is_pty() != entry.pty {
+        return Err(ConnectFailure::failed_precondition(if entry.pty {
+            "PTY processes require PTY input"
+        } else {
+            "non-PTY processes require stdin input"
+        }));
+    }
+    entry
+        .input
+        .write_stdin(&data)
+        .await
+        .map_err(manager_failure)
+}
+
 fn manager_failure(error: ExecutionManagerError) -> ConnectFailure {
     match error {
         ExecutionManagerError::InvalidRequest(message) => ConnectFailure::invalid_argument(message),
@@ -877,6 +920,47 @@ struct SendInputRequest {
     process: Option<ProcessSelector>,
     #[serde(default)]
     input: Option<ProcessInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamInputRequest {
+    #[serde(default)]
+    start: Option<StreamInputStart>,
+    #[serde(default)]
+    data: Option<StreamInputData>,
+    #[serde(default)]
+    keepalive: Option<EmptyRequest>,
+}
+
+impl StreamInputRequest {
+    fn into_event(self) -> Result<StreamInputEvent, ConnectFailure> {
+        match (self.start, self.data, self.keepalive) {
+            (Some(start), None, None) => Ok(StreamInputEvent::Start(start.process)),
+            (None, Some(data), None) => Ok(StreamInputEvent::Data(data.input)),
+            (None, None, Some(_)) => Ok(StreamInputEvent::KeepAlive),
+            _ => Err(ConnectFailure::invalid_argument(
+                "StreamInputRequest must contain exactly one start, data, or keepalive event",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamInputStart {
+    #[serde(default)]
+    process: Option<ProcessSelector>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamInputData {
+    #[serde(default)]
+    input: Option<ProcessInput>,
+}
+
+enum StreamInputEvent {
+    Start(Option<ProcessSelector>),
+    Data(Option<ProcessInput>),
+    KeepAlive,
 }
 
 #[derive(Debug, Deserialize)]

@@ -482,22 +482,25 @@ The target process service contract includes:
 - preserve detached process handles after the initiating client disconnects.
 
 The broker allocates synthetic process IDs within one execution generation and
-supports Start, JSON-framed Process Connect, List, SendInput, CloseStdin,
-SIGKILL, PTY Start/resize, and ordered start, stdout, stderr, PTY, keepalive,
-and end events. On real `crun` Sandboxes, the production A3S OS gate proves
+supports Start, JSON-framed Process Connect, List, SendInput, ordered
+client-streaming StreamInput, CloseStdin, SIGKILL, PTY Start/resize, and
+ordered start, stdout, stderr, PTY, keepalive, and end events. StreamInput
+incrementally decodes bounded Connect envelopes, permits upstream keepalives
+and process reselection, and awaits each backend write before receiving the
+next message. On real `crun` Sandboxes, the production A3S OS gate proves
 foreground and background commands, process listing, stdin send/close, wait,
 PTY create/resize/input/wait, observable terminal sizing, ordered output, and
 successful exit as the image's default non-root user. It runs this matrix
 through the pinned official Python sync/async and TypeScript clients and the
 corresponding A3S packages.
 
-This is not full Process compatibility. Client-streaming `StreamInput`, binary
-Connect framing, SIGTERM and other signals, reconnect, backpressure,
-cancellation, adversarial concurrent streams, and durable process recovery
-across a compatibility-service restart remain open. The internal
-session layer must eventually provide independent stdin, stdout, stderr,
-signal, wait, and PTY channels on every advertised backend; the compatibility
-broker must continue to depend only on that backend-neutral interface.
+This is not full Process compatibility. Binary Connect framing, SIGTERM and
+other signals, reconnect, transport-cancellation and backpressure stress,
+adversarial concurrent streams, and durable process recovery across a
+compatibility-service restart remain open. The internal session layer must
+eventually provide independent stdin, stdout, stderr, signal, wait, and PTY
+channels on every advertised backend; the compatibility broker must continue
+to depend only on that backend-neutral interface.
 
 ## Volume compatibility
 
@@ -1248,14 +1251,15 @@ replaces processes and reinitializes runtime services.
 
 - The production-tested Process subset covers foreground/background commands,
   list, stdin send/close, wait, and PTY create/resize/input/wait across official
-  and A3S Python sync/async and TypeScript clients.
+  and A3S Python sync/async and TypeScript clients. The host broker additionally
+  has wire-level coverage for bounded, fragmented, ordered JSON StreamInput.
 - The production-tested Filesystem subset covers remove, make directory, write,
   read, stat, list, rename, exists, and cleanup across the same clients.
 - The production envd HTTP gate covers metrics, initialized environment, a
   metadata-bearing multipart upload, and byte-identical download.
 - Remaining gates include binary framing, additional signals, reconnect,
-  cancellation/backpressure, durable process recovery, watches, multi-file and
-  large-file behavior, signed URLs, and edge-case breadth.
+  cancellation/backpressure stress, durable process recovery, watches,
+  multi-file and large-file behavior, signed URLs, and edge-case breadth.
 
 Gate: upstream command/filesystem contract suites pass in Python sync, Python
 async, and TypeScript clients on both A3S backends where supported.

@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Request, StatusCode};
-use hyper::body::{to_bytes, HttpBody};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use hyper::body::{to_bytes, Bytes, HttpBody};
 use serde_json::{json, Value};
 
 use super::{process_user, ProcessBroker};
@@ -144,17 +146,51 @@ fn execution_id() -> ExecutionId {
 }
 
 fn stream_request(path: &str, value: Value) -> Request<Body> {
-    let payload = serde_json::to_vec(&value).unwrap();
-    let mut body = Vec::with_capacity(payload.len() + 5);
-    body.push(0);
-    body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    body.extend_from_slice(&payload);
+    stream_request_many(path, &[value])
+}
+
+fn stream_request_many(path: &str, values: &[Value]) -> Request<Body> {
+    raw_stream_request(path, encode_request_frames(values))
+}
+
+fn chunked_stream_request(path: &str, bytes: Vec<u8>, chunk_size: usize) -> Request<Body> {
+    let (mut sender, body) = Body::channel();
+    let chunks = bytes
+        .chunks(chunk_size)
+        .map(Bytes::copy_from_slice)
+        .collect::<Vec<_>>();
+    tokio::spawn(async move {
+        for chunk in chunks {
+            if sender.send_data(chunk).await.is_err() {
+                return;
+            }
+        }
+    });
+    connect_stream_request(path, body)
+}
+
+fn raw_stream_request(path: &str, body: Vec<u8>) -> Request<Body> {
+    connect_stream_request(path, Body::from(body))
+}
+
+fn connect_stream_request(path: &str, body: Body) -> Request<Body> {
     Request::post(path)
         .header(CONTENT_TYPE, "application/connect+json")
         .header(AUTHORIZATION, "Basic dXNlcjo=")
         .header("connect-timeout-ms", "2500")
-        .body(Body::from(body))
+        .body(body)
         .unwrap()
+}
+
+fn encode_request_frames(values: &[Value]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for value in values {
+        let payload = serde_json::to_vec(value).unwrap();
+        body.push(0);
+        body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        body.extend_from_slice(&payload);
+    }
+    body
 }
 
 fn unary_request(path: &str, value: Value) -> Request<Body> {
@@ -196,6 +232,24 @@ fn missing_user_header_selects_the_pinned_envd_default() {
 fn pid_from_start_frame(bytes: &[u8]) -> u32 {
     let frames = decode_frames(bytes);
     frames[0].1["event"]["start"]["pid"].as_u64().unwrap() as u32
+}
+
+async fn start_running_process(broker: &ProcessBroker, command: &str) -> u32 {
+    let mut response = broker
+        .handle(
+            stream_request(
+                "/process.Process/Start",
+                json!({
+                    "process": {"cmd": command, "args": [], "envs": {}},
+                    "stdin": true
+                }),
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    let start = response.body_mut().data().await.unwrap().unwrap();
+    pid_from_start_frame(&start)
 }
 
 #[tokio::test]
@@ -317,4 +371,166 @@ async fn list_and_input_are_scoped_to_the_exact_execution_generation() {
         )
         .await;
     assert_eq!(stale.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn stream_input_decodes_fragmented_frames_in_order_and_can_reselect() {
+    let sessions = Arc::new(TestSessions::default());
+    let broker = ProcessBroker::new(sessions.clone());
+
+    let first_pid = start_running_process(&broker, "/bin/cat").await;
+    let first_input = sessions.latest_input();
+    let second_pid = start_running_process(&broker, "/bin/sh").await;
+    let second_input = sessions.latest_input();
+
+    let body = encode_request_frames(&[
+        json!({"keepalive": {}}),
+        json!({"start": {"process": {"pid": first_pid}}}),
+        json!({"data": {"input": {"stdin": "Zmlyc3Q="}}}),
+        json!({"start": {"process": {"pid": second_pid}}}),
+        json!({"data": {"input": {"stdin": "c2Vjb25k"}}}),
+        json!({"keepalive": {}}),
+    ]);
+    let response = broker
+        .handle(
+            chunked_stream_request("/process.Process/StreamInput", body, 3),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CONTENT_TYPE], "application/connect+json");
+    assert_eq!(
+        decode_frames(&to_bytes(response.into_body()).await.unwrap()),
+        [(0, json!({})), (2, json!({}))]
+    );
+    assert_eq!(&*first_input.writes.lock().unwrap(), &[b"first".to_vec()]);
+    assert_eq!(&*second_input.writes.lock().unwrap(), &[b"second".to_vec()]);
+
+    let empty = broker
+        .handle(
+            raw_stream_request("/process.Process/StreamInput", Vec::new()),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    assert_eq!(
+        decode_frames(&to_bytes(empty.into_body()).await.unwrap()),
+        [(0, json!({})), (2, json!({}))]
+    );
+}
+
+#[tokio::test]
+async fn stream_input_bounds_each_frame_instead_of_the_complete_stream() {
+    let sessions = Arc::new(TestSessions::default());
+    let broker = ProcessBroker::new(sessions.clone());
+    let pid = start_running_process(&broker, "/bin/cat").await;
+    let input = sessions.latest_input();
+    let first = vec![b'a'; 400_000];
+    let second = vec![b'b'; 400_000];
+    let body = encode_request_frames(&[
+        json!({"start": {"process": {"pid": pid}}}),
+        json!({"data": {"input": {"stdin": STANDARD.encode(&first)}}}),
+        json!({"data": {"input": {"stdin": STANDARD.encode(&second)}}}),
+    ]);
+    assert!(body.len() > 1024 * 1024);
+
+    let response = broker
+        .handle(
+            raw_stream_request("/process.Process/StreamInput", body),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    assert_eq!(
+        decode_frames(&to_bytes(response.into_body()).await.unwrap()),
+        [(0, json!({})), (2, json!({}))]
+    );
+    let writes = input.writes.lock().unwrap();
+    assert_eq!(writes.len(), 2);
+    assert_eq!(writes[0], first);
+    assert_eq!(writes[1], second);
+}
+
+#[tokio::test]
+async fn stream_input_rejects_data_before_start_and_invalid_oneof_events() {
+    let sessions = Arc::new(TestSessions::default());
+    let broker = ProcessBroker::new(sessions);
+    let response = broker
+        .handle(
+            stream_request(
+                "/process.Process/StreamInput",
+                json!({"data": {"input": {"stdin": "eA=="}}}),
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    let frames = decode_frames(&to_bytes(response.into_body()).await.unwrap());
+    assert_eq!(frames[0].0, 2);
+    assert_eq!(frames[0].1["error"]["code"], "failed_precondition");
+
+    for event in [
+        json!({}),
+        json!({
+            "start": {"process": {"pid": 1}},
+            "keepalive": {}
+        }),
+    ] {
+        let response = broker
+            .handle(
+                stream_request("/process.Process/StreamInput", event),
+                &execution_id(),
+                ExecutionGeneration::INITIAL,
+            )
+            .await;
+        let frames = decode_frames(&to_bytes(response.into_body()).await.unwrap());
+        assert_eq!(frames[0].0, 2);
+        assert_eq!(frames[0].1["error"]["code"], "invalid_argument");
+    }
+
+    let pid = start_running_process(&broker, "/bin/cat").await;
+    let response = broker
+        .handle(
+            stream_request_many(
+                "/process.Process/StreamInput",
+                &[
+                    json!({"start": {"process": {"pid": pid}}}),
+                    json!({"data": {"input": {"stdin": "eA==", "pty": "eQ=="}}}),
+                ],
+            ),
+            &execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await;
+    let frames = decode_frames(&to_bytes(response.into_body()).await.unwrap());
+    assert_eq!(frames[0].0, 2);
+    assert_eq!(frames[0].1["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn connect_stream_decoder_rejects_invalid_and_oversized_envelopes() {
+    let broker = ProcessBroker::new(Arc::new(TestSessions::default()));
+    let oversized_length = (1024_u32 * 1024 + 1).to_be_bytes();
+    let cases = [
+        vec![0, 0, 0, 0],
+        vec![0, 0, 0, 0, 2, b'{'],
+        [vec![2], 2_u32.to_be_bytes().to_vec(), b"{}".to_vec()].concat(),
+        [vec![0], oversized_length.to_vec()].concat(),
+    ];
+    for body in cases {
+        let response = broker
+            .handle(
+                raw_stream_request("/process.Process/StreamInput", body),
+                &execution_id(),
+                ExecutionGeneration::INITIAL,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let frames = decode_frames(&to_bytes(response.into_body()).await.unwrap());
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, 2);
+        assert_eq!(frames[0].1["error"]["code"], "invalid_argument");
+    }
 }
