@@ -141,7 +141,7 @@ pub enum BootOutcome {
 enum LockedBootRecord {
     Removed,
     AlreadyRunning,
-    Ready(BoxRecord),
+    Ready(Box<BoxRecord>),
     Conflict(String),
 }
 
@@ -164,7 +164,7 @@ fn select_locked_boot_record(record: Option<&BoxRecord>) -> LockedBootRecord {
             record.name, record.status
         ));
     }
-    LockedBootRecord::Ready(record.clone())
+    LockedBootRecord::Ready(Box::new(record.clone()))
 }
 
 /// Boot a box from its record and persist the result, SERIALIZED per box so
@@ -185,7 +185,7 @@ pub async fn boot_and_record(
         LockedBootRecord::Removed => return Ok(BootOutcome::RemovedDuringBoot),
         LockedBootRecord::AlreadyRunning => return Ok(BootOutcome::AlreadyRunning),
         LockedBootRecord::Conflict(error) => return Err(error.into()),
-        LockedBootRecord::Ready(record) => record,
+        LockedBootRecord::Ready(record) => *record,
     };
     drop(fresh_state);
 

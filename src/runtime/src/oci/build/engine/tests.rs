@@ -1284,6 +1284,7 @@ RUN --mount=type=cache,id=warm,target=/root/.cache cat /root/.cache/cache-only.t
         let daemon = tokio::spawn(async move {
             let mut rootfs_host: Option<PathBuf> = None;
             let mut exec_count = 0usize;
+            let mut release_count = 0usize;
 
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -1347,14 +1348,17 @@ RUN --mount=type=cache,id=warm,target=/root/.cache cat /root/.cache/cache-only.t
                     }
                     PoolRequest::Release(req) => {
                         assert_eq!(req.lease_id, "lease-cache");
+                        release_count += 1;
+                        assert_eq!(exec_count, release_count);
                         write_frame(
                             &mut stream,
                             &serde_json::to_vec(&PoolLeaseReleaseResponse { error: None }).unwrap(),
                         )
                         .await
                         .unwrap();
-                        assert_eq!(exec_count, 2);
-                        break;
+                        if release_count == 2 {
+                            break;
+                        }
                     }
                     other => panic!(
                         "unexpected pool request: {:?}",

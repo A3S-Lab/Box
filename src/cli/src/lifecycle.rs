@@ -91,12 +91,7 @@ pub async fn acquire_box_lifecycle_lock(box_id: &str) -> std::io::Result<BoxLife
     let box_id = box_id.to_string();
     tokio::task::spawn_blocking(move || BoxLifecycleLock::acquire(&box_id))
         .await
-        .map_err(|error| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("lifecycle lock task failed: {error}"),
-            )
-        })?
+        .map_err(|error| std::io::Error::other(format!("lifecycle lock task failed: {error}")))?
 }
 
 /// Invalidate the previous terminal completion marker before launching a box.
