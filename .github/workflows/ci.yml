@@ -303,6 +303,9 @@ jobs:
   integration-kvm:
     name: Integration (real microVM, KVM)
     needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages]
+    # Never execute arbitrary pull-request code on a persistent self-hosted
+    # runner. After review, maintainers can dispatch this workflow against the
+    # PR branch explicitly.
     if: github.event_name != 'pull_request' && vars.KVM_CI == 'true'
     runs-on: [self-hosted, linux, kvm]
     timeout-minutes: 75
