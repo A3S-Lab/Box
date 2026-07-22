@@ -81,6 +81,7 @@ the Cargo target directory.
 | Foreground and detached `run` | Validated |
 | `ps`, `logs`, `inspect`, and read-only `attach` | Validated, including separated stdout/stderr and structured JSON logs |
 | Workload exit codes | Validated for foreground and detached workloads |
+| Graceful stop and cleanup | Validated through the guest control channel with configured signal delivery, bounded force termination, and no residual shim or forwarding worker |
 | vCPUs | Exactly one; omitting `--cpus` selects the Windows default of 1 |
 | Published TCP ports | Validated through the Windows named-pipe bridge, including sequential connections |
 | Bind mounts | Validated for drive-letter directory and single-file sources, including read-only enforcement |
@@ -98,7 +99,7 @@ image-defined health check.
 
 ## Smoke test
 
-The following paths were validated on July 20–21, 2026, on Windows 11 Pro build
+The following paths were validated on July 20–22, 2026, on Windows 11 Pro build
 26200 with an AMD Ryzen 7 9800X3D and `HypervisorPlatform` enabled:
 
 ```powershell
@@ -124,8 +125,8 @@ Zig-cross-linked guest-init byte for byte. Foreground exit 7 and detached exit
 3 both reached the host unchanged. The validation also ran all 113 Linux
 guest-init unit tests inside a real WHPX guest, sent multiple requests through
 the same published TCP port, exercised Windows directory and single-file bind
-mounts, restarted a named volume, and restored and restarted a filesystem
-snapshot.
+mounts, verified graceful and forced-stop cleanup without orphan processes,
+restarted a named volume, and restored and restarted a filesystem snapshot.
 
 Standard Compose services create a bridge network by default. Because native
 WHPX bridge networking is not implemented, Compose workload startup remains

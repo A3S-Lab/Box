@@ -15,11 +15,21 @@ mod linux {
         attest_server, exec_server, host_config, namespace, network, port_forward, pty_server,
     };
     use std::process;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicI32, Ordering};
     use tracing::{error, info, warn};
 
-    /// Global flag set by the SIGTERM handler to request graceful shutdown.
-    static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+    /// Signal forwarded to the container process group during graceful shutdown.
+    /// Zero means no shutdown has been requested.
+    static SHUTDOWN_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+    fn request_shutdown(signal: i32) {
+        let signal = if (1..=64).contains(&signal) {
+            signal
+        } else {
+            libc::SIGTERM
+        };
+        let _ = SHUTDOWN_SIGNAL.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
+    }
 
     /// Bootstrap environment selected by the host execution backend.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -465,8 +475,8 @@ mod linux {
     }
 
     #[cfg(target_os = "linux")]
-    extern "C" fn sigterm_handler(_: libc::c_int) {
-        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    extern "C" fn sigterm_handler(signal: libc::c_int) {
+        request_shutdown(signal);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -904,7 +914,7 @@ mod linux {
         // Step 8.25: Start Windows host-port forward control client when enabled.
         if !bootstrap_mode.is_host_sandbox() {
             std::thread::spawn(|| {
-                if let Err(e) = port_forward::run_port_forward_client() {
+                if let Err(e) = port_forward::run_port_forward_client(request_shutdown) {
                     error!("Port-forward client failed: {}", e);
                 }
             });
@@ -1676,9 +1686,13 @@ mod linux {
         );
 
         loop {
-            if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
-                info!("SIGTERM received, initiating graceful shutdown");
-                graceful_shutdown(CHILD_SHUTDOWN_TIMEOUT_MS);
+            let shutdown_signal = SHUTDOWN_SIGNAL.load(Ordering::SeqCst);
+            if shutdown_signal != 0 {
+                info!(
+                    shutdown_signal,
+                    "Shutdown requested, initiating graceful shutdown"
+                );
+                graceful_shutdown(CHILD_SHUTDOWN_TIMEOUT_MS, shutdown_signal);
                 return Ok(());
             }
 
@@ -1784,7 +1798,7 @@ mod linux {
         use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 
         loop {
-            if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            if SHUTDOWN_SIGNAL.load(Ordering::SeqCst) != 0 {
                 return Ok(());
             }
             match waitpid(container_pid, Some(WaitPidFlag::WNOHANG)) {
@@ -1820,18 +1834,18 @@ mod linux {
         }
     }
 
-    /// Perform graceful shutdown: forward SIGTERM to children, wait, then force-kill.
+    /// Perform graceful shutdown: forward the requested signal to children,
+    /// wait, then force-kill.
     /// Only the Linux supervision loop drives this (the non-Linux dev stub exits the
     /// process directly), so it is gated to avoid a dead-code warning on macOS.
     #[cfg(target_os = "linux")]
-    fn graceful_shutdown(timeout_ms: u64) {
-        // Step 1: Send SIGTERM to all processes (except ourselves, PID 1)
+    fn graceful_shutdown(timeout_ms: u64, signal: i32) {
+        // Step 1: Send the requested signal to all processes except PID 1.
         #[cfg(target_os = "linux")]
         {
-            info!("Forwarding SIGTERM to all child processes");
-            // kill(-1, SIGTERM) sends to all processes except PID 1
+            info!(signal, "Forwarding stop signal to all child processes");
             unsafe {
-                libc::kill(-1, libc::SIGTERM);
+                libc::kill(-1, signal);
             }
         }
 

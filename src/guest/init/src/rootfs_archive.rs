@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use a3s_box_core::rootfs_metadata::IMAGE_ROOTFS_METADATA_PATH;
 use a3s_box_core::rootfs_metadata::{
-    runtime_managed_rootfs_mode, stage_terminal_rootfs_metadata_for_boot, RootfsEntryKind,
-    RootfsMetadataEntry, RootfsMetadataManifest, PREVIOUS_ROOTFS_METADATA_PATH,
-    ROOTFS_METADATA_PATH,
+    is_runtime_internal_rootfs_path, runtime_managed_rootfs_mode,
+    stage_terminal_rootfs_metadata_for_boot, RootfsEntryKind, RootfsMetadataEntry,
+    RootfsMetadataManifest, PREVIOUS_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
 };
 use base64::Engine;
 
@@ -137,11 +137,7 @@ fn apply_metadata_manifest(
         let raw = base64::engine::general_purpose::STANDARD.decode(&entry.path_base64)?;
         let relative = PathBuf::from(std::ffi::OsString::from_vec(raw));
         let relative = safe_relative_path(&relative)?;
-        if relative == Path::new(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
-            || relative == Path::new(ROOTFS_METADATA_PATH.trim_start_matches('/'))
-            || relative == Path::new(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'))
-            || !unique.insert(relative.clone())
-        {
+        if is_runtime_internal_rootfs_path(&relative) || !unique.insert(relative.clone()) {
             return Err("duplicate or reserved rootfs metadata path".into());
         }
         let unresolved_target = root.join(&relative);
@@ -395,19 +391,7 @@ fn should_skip(root: &Path, source: &Path, excluded_mounts: &HashSet<PathBuf>) -
     let Ok(relative) = source.strip_prefix(root) else {
         return true;
     };
-    matches!(
-        relative.to_str(),
-        Some(".a3s_rootfs_metadata_v1.json")
-            | Some(".a3s_rootfs_metadata_v1.json.tmp")
-            | Some(".a3s_rootfs_metadata_v1.previous.json")
-            | Some(".a3s_image_metadata_v1.json")
-            | Some(".a3s_image_metadata_v1.json.tmp")
-            | Some(".a3s_exit_code")
-            // Written by libkrun's pre-PID1 init on every boot, before
-            // guest-init can replay terminal metadata. It is runtime
-            // diagnostics, not persistent container filesystem state.
-            | Some("init.trace.log")
-    )
+    is_runtime_internal_rootfs_path(relative)
 }
 
 fn nested_mount_points(root: &Path) -> Result<HashSet<PathBuf>, std::io::Error> {
@@ -590,6 +574,7 @@ mod tests {
         std::fs::write(&executable, b"probe").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(directory.path().join(".a3s_exit_code"), b"0").unwrap();
+        std::fs::write(directory.path().join("init-rust.log"), b"runtime log").unwrap();
         std::fs::write(directory.path().join("init.trace.log"), b"runtime trace").unwrap();
 
         persist_rootfs_metadata(directory.path()).unwrap();
@@ -609,6 +594,11 @@ mod tests {
             base64::engine::general_purpose::STANDARD
                 .decode(&entry.path_base64)
                 .is_ok_and(|path| path.ends_with(b".a3s_exit_code"))
+        }));
+        assert!(!manifest.entries.iter().any(|entry| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&entry.path_base64)
+                .is_ok_and(|path| path.ends_with(b"init-rust.log"))
         }));
         assert!(!manifest.entries.iter().any(|entry| {
             base64::engine::general_purpose::STANDARD

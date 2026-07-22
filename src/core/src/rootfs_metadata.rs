@@ -24,6 +24,51 @@ pub const RUNTIME_ENV_PATH: &str = "/.a3s-box-env";
 /// Stable manifest schema identifier.
 pub const ROOTFS_METADATA_SCHEMA: &str = "a3s.box.rootfs-metadata.v1";
 
+#[cfg(windows)]
+const MAX_TERMINAL_ROOTFS_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(windows)]
+const MAX_TERMINAL_ROOTFS_METADATA_ENTRIES: usize = 1_000_000;
+
+/// Return whether a relative rootfs path belongs to runtime bookkeeping rather
+/// than the container filesystem captured by commit or Snapshot.
+pub fn is_runtime_internal_rootfs_path(path: &Path) -> bool {
+    let mut name = None;
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(component) if name.is_none() => name = Some(component),
+            _ => return false,
+        }
+    }
+    let Some(name) = name.and_then(|name| name.to_str()) else {
+        return false;
+    };
+    const INTERNAL: &[&str] = &[
+        ".a3s_rootfs_metadata_v1.json",
+        ".a3s_rootfs_metadata_v1.json.tmp",
+        ".a3s_rootfs_metadata_v1.previous.json",
+        ".a3s_image_metadata_v1.json",
+        ".a3s_image_metadata_v1.json.tmp",
+        ".a3s_exit_code",
+        ".a3s_host_live_logs_drained",
+        ".a3s_host_result_collected",
+        // Written by libkrun around PID 1 startup and exit. These files can
+        // change after guest-init captures terminal metadata.
+        "init-rust.log",
+        "init.krun.log",
+        "init.trace.log",
+        // Raw WHPX guest streams consumed by the host logging pipeline.
+        "guest-init.stdout.log",
+        "guest-init.stderr.log",
+    ];
+    #[cfg(windows)]
+    return INTERNAL
+        .iter()
+        .any(|internal| name.eq_ignore_ascii_case(internal));
+    #[cfg(not(windows))]
+    INTERNAL.contains(&name)
+}
+
 /// Atomically invalidate the last terminal manifest before boot while retaining
 /// it at the one-shot replay path.
 ///
@@ -33,6 +78,12 @@ pub const ROOTFS_METADATA_SCHEMA: &str = "a3s.box.rootfs-metadata.v1";
 /// exported rootfs.
 pub fn stage_terminal_rootfs_metadata_for_boot(root: &Path) -> std::io::Result<bool> {
     validate_plain_root(root)?;
+
+    // A temporary manifest is scoped to exactly one guest generation. Remove
+    // leftovers before every boot so a later forced stop can never publish a
+    // fully-written temporary manifest from an older generation.
+    let temporary = root.join(ROOTFS_METADATA_TEMP_PATH.trim_start_matches('/'));
+    remove_path_no_follow(&temporary)?;
 
     let terminal = root.join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
     let terminal_metadata = match std::fs::symlink_metadata(&terminal) {
@@ -73,6 +124,93 @@ pub fn stage_terminal_rootfs_metadata_for_boot(root: &Path) -> std::io::Result<b
     }
 
     durable_stage_rename(root, &terminal, &previous)?;
+    Ok(true)
+}
+
+/// Validate and publish terminal metadata that a Windows WHPX guest durably
+/// wrote but could not rename through virtio-fs.
+///
+/// This must run only after the guest process has exited. Invalid or partial
+/// metadata remains unpublished so stopped-box commit continues to fail closed.
+#[cfg(windows)]
+pub fn finalize_terminal_rootfs_metadata(root: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+
+    validate_plain_root(root)?;
+
+    let temporary = root.join(ROOTFS_METADATA_TEMP_PATH.trim_start_matches('/'));
+    let (mut file, _) = match crate::windows_file::open_regular_file(&temporary, None) {
+        Ok(opened) => opened,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let length = file.metadata()?.len();
+    if length > MAX_TERMINAL_ROOTFS_METADATA_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "terminal rootfs metadata {} exceeds the {} byte limit",
+                temporary.display(),
+                MAX_TERMINAL_ROOTFS_METADATA_BYTES
+            ),
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(length as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_TERMINAL_ROOTFS_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_TERMINAL_ROOTFS_METADATA_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "terminal rootfs metadata grew beyond the byte limit while reading",
+        ));
+    }
+
+    let manifest: RootfsMetadataManifest = serde_json::from_slice(&bytes).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "invalid terminal rootfs metadata {}: {error}",
+                temporary.display()
+            ),
+        )
+    })?;
+    manifest.validate().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid terminal rootfs metadata: {error}"),
+        )
+    })?;
+    if manifest.entries.len() > MAX_TERMINAL_ROOTFS_METADATA_ENTRIES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "terminal rootfs metadata has {} entries, exceeding the {} entry limit",
+                manifest.entries.len(),
+                MAX_TERMINAL_ROOTFS_METADATA_ENTRIES
+            ),
+        ));
+    }
+    drop(file);
+
+    let terminal = root.join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
+    match std::fs::symlink_metadata(&terminal) {
+        Ok(metadata) if !metadata.is_file() || metadata_is_reparse_point(&metadata) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "terminal rootfs metadata target is not a plain file: {}",
+                    terminal.display()
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    durable_stage_rename(root, &temporary, &terminal)?;
     Ok(true)
 }
 
@@ -158,7 +296,11 @@ fn remove_path_no_follow(path: &Path) -> std::io::Result<()> {
 
 #[cfg(not(windows))]
 fn remove_path_no_follow(path: &Path) -> std::io::Result<()> {
-    std::fs::remove_file(path)
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Return the canonical mode for rootfs files generated by the runtime.
@@ -246,6 +388,31 @@ mod tests {
     }
 
     #[test]
+    fn runtime_internal_rootfs_paths_are_single_root_entries() {
+        for path in [
+            ".a3s_rootfs_metadata_v1.json",
+            ".a3s_rootfs_metadata_v1.json.tmp",
+            ".a3s_exit_code",
+            ".a3s_host_live_logs_drained",
+            "guest-init.stdout.log",
+            "init-rust.log",
+            "init.krun.log",
+            "./init.trace.log",
+        ] {
+            assert!(is_runtime_internal_rootfs_path(Path::new(path)), "{path}");
+        }
+        assert!(!is_runtime_internal_rootfs_path(Path::new(
+            "var/log/init-rust.log"
+        )));
+        assert!(!is_runtime_internal_rootfs_path(Path::new(
+            "/init-rust.log"
+        )));
+
+        #[cfg(windows)]
+        assert!(is_runtime_internal_rootfs_path(Path::new("INIT-RUST.LOG")));
+    }
+
+    #[test]
     fn boot_staging_moves_terminal_metadata_to_one_shot_replay_path() {
         let root = tempfile::tempdir().unwrap();
         let terminal = root
@@ -261,6 +428,64 @@ mod tests {
         assert!(!terminal.exists());
         assert_eq!(std::fs::read(previous).unwrap(), b"new generation");
         assert!(!stage_terminal_rootfs_metadata_for_boot(root.path()).unwrap());
+    }
+
+    #[test]
+    fn boot_staging_removes_stale_temporary_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let temporary = root
+            .path()
+            .join(ROOTFS_METADATA_TEMP_PATH.trim_start_matches('/'));
+        std::fs::write(&temporary, b"stale generation").unwrap();
+
+        assert!(!stage_terminal_rootfs_metadata_for_boot(root.path()).unwrap());
+        assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn boot_staging_accepts_an_absent_temporary_manifest() {
+        let root = tempfile::tempdir().unwrap();
+
+        assert!(!stage_terminal_rootfs_metadata_for_boot(root.path()).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finalization_publishes_valid_temporary_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let temporary = root
+            .path()
+            .join(ROOTFS_METADATA_TEMP_PATH.trim_start_matches('/'));
+        let terminal = root
+            .path()
+            .join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
+        let manifest = RootfsMetadataManifest::new(Vec::new());
+        std::fs::write(&temporary, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        assert!(finalize_terminal_rootfs_metadata(root.path()).unwrap());
+        assert!(!temporary.exists());
+        let published: RootfsMetadataManifest =
+            serde_json::from_slice(&std::fs::read(terminal).unwrap()).unwrap();
+        assert_eq!(published, manifest);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_finalization_rejects_partial_temporary_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let temporary = root
+            .path()
+            .join(ROOTFS_METADATA_TEMP_PATH.trim_start_matches('/'));
+        let terminal = root
+            .path()
+            .join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
+        std::fs::write(&temporary, br#"{"schema":"#).unwrap();
+
+        let error = finalize_terminal_rootfs_metadata(root.path()).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(temporary.exists());
+        assert!(!terminal.exists());
     }
 
     #[cfg(unix)]

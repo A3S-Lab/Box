@@ -17,6 +17,8 @@ mod krun;
 #[cfg(target_os = "windows")]
 use a3s_box_core::config::validate_vcpu_count;
 use a3s_box_core::error::{BoxError, Result};
+#[cfg(target_os = "windows")]
+use a3s_box_core::exec::WINDOWS_STOP_REQUEST_FILE;
 use a3s_box_core::vmm::InstanceSpec;
 use a3s_box_core::EXEC_VSOCK_PORT;
 #[cfg(target_os = "windows")]
@@ -72,6 +74,10 @@ struct Args {
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
     ready_file: Option<PathBuf>,
+
+    #[cfg(target_os = "windows")]
+    #[arg(long, hide = true)]
+    stop_request: Option<PathBuf>,
 
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
@@ -149,11 +155,16 @@ fn run() -> Result<()> {
             message: "Missing --ready-file for Windows port-forward worker".to_string(),
             hint: None,
         })?;
+        let stop_request = args.stop_request.ok_or_else(|| BoxError::BoxBootError {
+            message: "Missing --stop-request for Windows port-forward worker".to_string(),
+            hint: None,
+        })?;
         return windows_port_forward::run_port_forward_worker(
             &box_id,
             &args.port_map,
             parent_pid,
             &ready_file,
+            &stop_request,
         );
     }
 
@@ -836,17 +847,32 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.add_vsock_port_windows(EXEC_VSOCK_PORT, &pipe_name)?;
 
         // Note: PTY and attestation channels are not yet implemented on Windows.
-        if !spec.port_map.is_empty() {
-            let port_fwd_pipe =
-                windows_port_forward::spawn_port_forward_manager(&spec.box_id, &spec.port_map)?;
-            tracing::info!(
-                port_map = ?spec.port_map,
-                pipe_name = %port_fwd_pipe,
-                guest_port = PORT_FWD_VSOCK_PORT,
-                "Configuring Windows published-port control channel"
-            );
-            ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, &port_fwd_pipe)?;
-        }
+        // The 4093 channel also carries lifecycle signals, so it must exist even
+        // when the box has no published ports.
+        let socket_dir = spec
+            .exec_socket_path
+            .parent()
+            .ok_or_else(|| BoxError::BoxBootError {
+                message: format!(
+                    "Windows exec socket path has no parent: {}",
+                    spec.exec_socket_path.display()
+                ),
+                hint: None,
+            })?;
+        let stop_request = socket_dir.join(WINDOWS_STOP_REQUEST_FILE);
+        let port_fwd_pipe = windows_port_forward::spawn_port_forward_manager(
+            &spec.box_id,
+            &spec.port_map,
+            &stop_request,
+        )?;
+        tracing::info!(
+            port_map = ?spec.port_map,
+            pipe_name = %port_fwd_pipe,
+            guest_port = PORT_FWD_VSOCK_PORT,
+            stop_request = %stop_request.display(),
+            "Configuring Windows host-control channel"
+        );
+        ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, &port_fwd_pipe)?;
     }
 
     // Note: A3S_TEE_SIMULATE is already included in spec.entrypoint.env

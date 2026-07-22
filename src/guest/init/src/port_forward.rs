@@ -12,6 +12,8 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
+use a3s_box_core::exec::WINDOWS_CONTROL_SIGNAL_FRAME;
+#[cfg(target_os = "linux")]
 use a3s_box_core::PORT_FWD_VSOCK_PORT;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, VsockAddr};
@@ -28,14 +30,22 @@ const FRAME_OPEN_ACK: u8 = 2;
 const FRAME_DATA: u8 = 3;
 const FRAME_CLOSE: u8 = 4;
 
+fn decode_stop_signal_payload(payload: &[u8]) -> Option<i32> {
+    let bytes: [u8; 4] = payload.try_into().ok()?;
+    let signal = i32::from_be_bytes(bytes);
+    (1..=64).contains(&signal).then_some(signal)
+}
+
 type SharedWriter = Arc<Mutex<std::fs::File>>;
 #[cfg(target_os = "linux")]
 type StreamMap = Arc<Mutex<HashMap<u32, TcpStream>>>;
 
 #[cfg(target_os = "linux")]
-pub fn run_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_port_forward_client(
+    request_shutdown: fn(i32),
+) -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var(ENV_WINDOWS_ENABLED).as_deref() == Ok("1") {
-        return run_windows_port_forward_client();
+        return run_windows_port_forward_client(request_shutdown);
     }
 
     if std::env::var(ENV_CRI_ENABLED).as_deref() == Ok("1") {
@@ -46,13 +56,17 @@ pub fn run_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn run_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_port_forward_client(
+    _request_shutdown: fn(i32),
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("Guest port forwarding is unavailable on non-Linux development hosts");
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn run_windows_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
+fn run_windows_port_forward_client(
+    request_shutdown: fn(i32),
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut backoff = Duration::from_millis(250);
     loop {
         match connect_control() {
@@ -63,7 +77,7 @@ fn run_windows_port_forward_client() -> Result<(), Box<dyn std::error::Error>> {
                     "Windows port-forward control channel connected"
                 );
                 backoff = Duration::from_millis(250);
-                if let Err(err) = serve_control(control) {
+                if let Err(err) = serve_control(control, Some(request_shutdown)) {
                     warn!(error = %err, "Windows port-forward control channel dropped");
                 }
             }
@@ -113,7 +127,7 @@ fn run_cri_port_forward_server() -> Result<(), Box<dyn std::error::Error>> {
                 let client = unsafe { OwnedFd::from_raw_fd(client_fd) };
                 std::thread::spawn(move || {
                     let file = std::fs::File::from(client);
-                    if let Err(err) = serve_control(file) {
+                    if let Err(err) = serve_control(file, None) {
                         warn!(error = %err, "CRI port-forward control connection dropped");
                     }
                 });
@@ -149,7 +163,7 @@ fn connect_control() -> io::Result<std::fs::File> {
 }
 
 #[cfg(target_os = "linux")]
-fn serve_control(control: std::fs::File) -> io::Result<()> {
+fn serve_control(control: std::fs::File, request_shutdown: Option<fn(i32)>) -> io::Result<()> {
     let writer = Arc::new(Mutex::new(control.try_clone()?));
     let streams: StreamMap = Arc::new(Mutex::new(HashMap::new()));
     let mut reader = control;
@@ -239,6 +253,29 @@ fn serve_control(control: std::fs::File) -> io::Result<()> {
             }
             FRAME_CLOSE => {
                 close_stream(frame.stream_id, &streams);
+            }
+            WINDOWS_CONTROL_SIGNAL_FRAME if request_shutdown.is_some() => {
+                let Some(signal) = decode_stop_signal_payload(&frame.payload) else {
+                    warn!(
+                        stream_id = frame.stream_id,
+                        payload_len = frame.payload.len(),
+                        "Ignoring invalid Windows stop control frame"
+                    );
+                    continue;
+                };
+                if frame.stream_id != 0 {
+                    warn!(
+                        stream_id = frame.stream_id,
+                        signal, "Ignoring Windows stop control frame with a nonzero stream ID"
+                    );
+                    continue;
+                }
+
+                request_shutdown.expect("guarded by is_some")(signal);
+                info!(signal, "Windows host stop signal accepted by guest init");
+            }
+            WINDOWS_CONTROL_SIGNAL_FRAME => {
+                debug!("Ignoring Windows lifecycle frame on CRI port-forward channel");
             }
             _ => {
                 debug!(kind = frame.kind, "Ignoring unknown port-forward frame");
@@ -413,5 +450,14 @@ mod tests {
         assert_eq!(open.kind, FRAME_OPEN);
         assert_eq!(open.stream_id, 2);
         assert_eq!(open.payload, 8080_u16.to_be_bytes());
+    }
+
+    #[test]
+    fn stop_signal_payload_requires_one_valid_big_endian_signal() {
+        assert_eq!(decode_stop_signal_payload(&15_i32.to_be_bytes()), Some(15));
+        assert_eq!(decode_stop_signal_payload(&64_i32.to_be_bytes()), Some(64));
+        assert_eq!(decode_stop_signal_payload(&0_i32.to_be_bytes()), None);
+        assert_eq!(decode_stop_signal_payload(&65_i32.to_be_bytes()), None);
+        assert_eq!(decode_stop_signal_payload(&[15]), None);
     }
 }

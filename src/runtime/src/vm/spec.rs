@@ -421,7 +421,10 @@ impl VmManager {
         }
 
         #[cfg(target_os = "windows")]
-        if !self.config.port_map.is_empty() {
+        {
+            // WHPX named-pipe mappings are guest-initiated. Keep the shared
+            // Windows host-control channel connected even without published
+            // ports so stop requests can reach guest init.
             entrypoint
                 .env
                 .push(("BOX_WINDOWS_PORT_FWD".to_string(), "1".to_string()));
@@ -946,6 +949,19 @@ mod tests {
         let spec = vm.build_instance_spec(&layout).unwrap();
 
         assert_eq!(env_value(&spec, "BOX_PERSIST_ROOTFS_METADATA"), Some("1"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_box_enables_host_control_without_published_ports() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), Some(test_oci_config(None, None)), true);
+        let mut vm = test_vm_manager(BoxConfig::default());
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert!(spec.port_map.is_empty());
+        assert_eq!(env_value(&spec, "BOX_WINDOWS_PORT_FWD"), Some("1"));
     }
 
     #[test]

@@ -6,6 +6,8 @@ mod ready;
 pub mod reap;
 mod sandbox;
 mod spec;
+#[cfg(windows)]
+mod windows_stop;
 
 pub(crate) use layout::{persistent_rootfs_generation_exists, runtime_socket_dir};
 
@@ -85,6 +87,10 @@ const WINDOWS_GUEST_EXIT_CODE: &str = ".a3s_exit_code";
 const WINDOWS_GUEST_STDOUT: &str = "guest-init.stdout.log";
 #[cfg(target_os = "windows")]
 const WINDOWS_GUEST_STDERR: &str = "guest-init.stderr.log";
+#[cfg(target_os = "windows")]
+const WINDOWS_STOP_DELIVERY_TIMEOUT_MS: u64 = 1_000;
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS: u64 = 30_000;
 #[cfg(target_os = "windows")]
 const WINDOWS_GUEST_RESULT_MARKER: &str = ".a3s_host_result_collected";
 #[cfg(target_os = "windows")]
@@ -1435,11 +1441,127 @@ impl VmManager {
         // error and surface it after teardown instead of returning early.
         let mut stop_error = None;
         if let Some(mut handler) = self.handler.write().await.take() {
-            if let Err(e) = handler.stop(signal, timeout_ms) {
-                tracing::error!(box_id = %self.box_id, error = %e, "Failed to stop VM handler; continuing teardown");
-                stop_error = Some(e);
-            }
+            #[cfg(windows)]
+            let stop_request = match windows_stop::stage(&self.socket_dir(), signal) {
+                Ok(path) => {
+                    tracing::debug!(
+                        box_id = %self.box_id,
+                        signal,
+                        path = %path.display(),
+                        "Staged Windows guest stop request"
+                    );
+                    Some(path)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        box_id = %self.box_id,
+                        signal,
+                        error = %error,
+                        "Failed to stage Windows guest stop request; force-stop fallback remains active"
+                    );
+                    None
+                }
+            };
+
+            #[cfg(windows)]
+            let handler_timeout_ms = if timeout_ms == 0 {
+                0
+            } else if let Some(request) = stop_request.as_deref() {
+                let delivery_started = std::time::Instant::now();
+                let delivery_timeout = std::time::Duration::from_millis(
+                    timeout_ms.min(WINDOWS_STOP_DELIVERY_TIMEOUT_MS),
+                );
+                let delivered =
+                    match windows_stop::wait_until_delivered(request, delivery_timeout).await {
+                        Ok(delivered) => delivered,
+                        Err(error) => {
+                            tracing::warn!(
+                                box_id = %self.box_id,
+                                error = %error,
+                                "Failed while waiting for Windows guest stop request delivery"
+                            );
+                            false
+                        }
+                    };
+                let delivery_elapsed_ms =
+                    u64::try_from(delivery_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let remaining_timeout_ms = timeout_ms.saturating_sub(delivery_elapsed_ms);
+                if delivered {
+                    let finalization_timeout_ms = if self.config.persistent {
+                        WINDOWS_GUEST_FINALIZATION_TIMEOUT_MS
+                    } else {
+                        0
+                    };
+                    let handler_timeout_ms =
+                        remaining_timeout_ms.saturating_add(finalization_timeout_ms);
+                    tracing::debug!(
+                        box_id = %self.box_id,
+                        delivery_elapsed_ms,
+                        handler_timeout_ms,
+                        "Delivered Windows stop request to the guest"
+                    );
+                    handler_timeout_ms
+                } else {
+                    tracing::warn!(
+                        box_id = %self.box_id,
+                        delivery_elapsed_ms,
+                        "Windows guest stop request was not delivered before the forwarding deadline"
+                    );
+                    remaining_timeout_ms
+                }
+            } else {
+                timeout_ms
+            };
+            #[cfg(not(windows))]
+            let handler_timeout_ms = timeout_ms;
+
+            let _handler_stopped = match handler.stop(signal, handler_timeout_ms) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(box_id = %self.box_id, error = %e, "Failed to stop VM handler; continuing teardown");
+                    stop_error = Some(e);
+                    false
+                }
+            };
             self.shim_exit_code = handler.exit_code();
+
+            #[cfg(windows)]
+            if stop_request.is_some() {
+                if let Err(error) = windows_stop::clear(&self.socket_dir()) {
+                    tracing::warn!(
+                        box_id = %self.box_id,
+                        error = %error,
+                        "Failed to clear Windows guest stop request"
+                    );
+                }
+            }
+
+            #[cfg(windows)]
+            if _handler_stopped && self.config.persistent {
+                let rootfs = self
+                    .home_dir
+                    .join("boxes")
+                    .join(&self.box_id)
+                    .join("rootfs");
+                match a3s_box_core::rootfs_metadata::finalize_terminal_rootfs_metadata(&rootfs) {
+                    Ok(true) => tracing::info!(
+                        box_id = %self.box_id,
+                        path = %rootfs.display(),
+                        "Published terminal rootfs metadata after Windows guest exit"
+                    ),
+                    Ok(false) => tracing::debug!(
+                        box_id = %self.box_id,
+                        path = %rootfs.display(),
+                        "No Windows terminal rootfs metadata required host finalization"
+                    ),
+                    Err(error) => tracing::warn!(
+                        box_id = %self.box_id,
+                        path = %rootfs.display(),
+                        error = %error,
+                        "Refused to publish invalid Windows terminal rootfs metadata"
+                    ),
+                }
+            }
         }
 
         // Stop network backend if running

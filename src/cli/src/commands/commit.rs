@@ -303,7 +303,7 @@ fn create_tar_from_guest_metadata(
                 .into());
             }
         }
-        if is_reserved_rootfs_path(&path) {
+        if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(&path) {
             return Err(format!("Reserved rootfs metadata path: {}", path.display()).into());
         }
         if !paths.insert(path.clone()) {
@@ -632,37 +632,6 @@ fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 #[cfg(not(windows))]
 fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
-}
-
-fn is_reserved_rootfs_path(path: &Path) -> bool {
-    let mut normal = path.components().filter_map(|component| match component {
-        std::path::Component::Normal(name) => Some(name),
-        _ => None,
-    });
-    let Some(name) = normal.next() else {
-        return false;
-    };
-    if normal.next().is_some() {
-        return false;
-    }
-    let Some(name) = name.to_str() else {
-        return false;
-    };
-    const RESERVED: &[&str] = &[
-        ".a3s_rootfs_metadata_v1.json",
-        ".a3s_rootfs_metadata_v1.json.tmp",
-        ".a3s_rootfs_metadata_v1.previous.json",
-        ".a3s_image_metadata_v1.json",
-        ".a3s_image_metadata_v1.json.tmp",
-        ".a3s_exit_code",
-        "init.trace.log",
-    ];
-    #[cfg(windows)]
-    return RESERVED
-        .iter()
-        .any(|reserved| name.eq_ignore_ascii_case(reserved));
-    #[cfg(not(windows))]
-    RESERVED.contains(&name)
 }
 
 fn validate_archive_path(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1178,12 +1147,21 @@ mod tests {
 
     #[test]
     fn reserved_metadata_path_is_detected_after_curdir_normalization() {
-        assert!(is_reserved_rootfs_path(Path::new(
-            "./.a3s_rootfs_metadata_v1.json"
-        )));
-        assert!(is_reserved_rootfs_path(Path::new(
-            ".a3s_rootfs_metadata_v1.previous.json"
-        )));
+        assert!(
+            a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(Path::new(
+                "./.a3s_rootfs_metadata_v1.json"
+            ))
+        );
+        assert!(
+            a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(Path::new(
+                ".a3s_rootfs_metadata_v1.previous.json"
+            ))
+        );
+        assert!(
+            a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(Path::new(
+                "init-rust.log"
+            ))
+        );
     }
 
     #[cfg(windows)]

@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
@@ -15,6 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::exec::WINDOWS_CONTROL_SIGNAL_FRAME;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE,
     INVALID_HANDLE_VALUE,
@@ -34,6 +35,9 @@ const OPEN_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const OPEN_RETRY_WINDOW: Duration = Duration::from_secs(60);
 const OPEN_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 const PORT_FWD_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const STOP_CONTROL_WAIT: Duration = Duration::from_secs(1);
+const STOP_REQUEST_POLL: Duration = Duration::from_millis(50);
+const MAX_STOP_REQUEST_BYTES: u64 = 16;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PROCESS_SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
 
@@ -51,13 +55,12 @@ struct SharedControlState {
 
 type SharedControl = Arc<SharedControlState>;
 
-pub fn spawn_port_forward_manager(box_id: &str, port_map: &[String]) -> Result<String> {
-    if parse_port_map(port_map)?.is_empty() {
-        return Err(BoxError::NetworkError(
-            "Windows port-forward manager requires at least one mapping".to_string(),
-        ));
-    }
-
+pub fn spawn_port_forward_manager(
+    box_id: &str,
+    port_map: &[String],
+    stop_request: &Path,
+) -> Result<String> {
+    parse_port_map(port_map)?;
     let pipe_base_name = format!("a3s-box-portfwd-{}", box_id.replace('-', ""));
     let ready_file = std::env::temp_dir().join(format!(
         "a3s-box-portfwd-{}-{}.ready",
@@ -80,6 +83,8 @@ pub fn spawn_port_forward_manager(box_id: &str, port_map: &[String]) -> Result<S
         .arg(std::process::id().to_string())
         .arg("--ready-file")
         .arg(&ready_file)
+        .arg("--stop-request")
+        .arg(stop_request)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -143,17 +148,9 @@ pub fn run_port_forward_worker(
     port_map: &[String],
     parent_pid: u32,
     ready_file: &Path,
+    stop_request: &Path,
 ) -> Result<()> {
     let mappings = parse_port_map(port_map)?;
-    if mappings.is_empty() {
-        write_ready_file(
-            ready_file,
-            "Windows port-forward worker requires at least one mapping",
-        );
-        return Err(BoxError::NetworkError(
-            "Windows port-forward worker requires at least one mapping".to_string(),
-        ));
-    }
 
     spawn_parent_watchdog(parent_pid);
 
@@ -164,6 +161,7 @@ pub fn run_port_forward_worker(
         cvar: Condvar::new(),
         next_stream_id: AtomicU32::new(1),
     });
+    spawn_stop_request_forwarder(stop_request.to_path_buf(), shared_control.clone());
 
     let initial_server = match NamedPipeServer::create(&pipe_path) {
         Ok(server) => server,
@@ -213,6 +211,99 @@ pub fn run_port_forward_worker(
     write_ready_file(ready_file, "ok");
     pipe_server_loop(initial_server, pipe_path, shared_control);
     Ok(())
+}
+
+fn decode_stop_signal(bytes: &[u8]) -> io::Result<i32> {
+    let value = std::str::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        .trim()
+        .parse::<i32>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if !(1..=64).contains(&value) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Windows stop signal must be between 1 and 64, got {value}"),
+        ));
+    }
+    Ok(value)
+}
+
+fn read_stop_signal(path: &Path) -> io::Result<Option<i32>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if metadata.len() > MAX_STOP_REQUEST_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Windows stop request {} exceeds {MAX_STOP_REQUEST_BYTES} bytes",
+                path.display()
+            ),
+        ));
+    }
+    fs::read(path).and_then(|bytes| decode_stop_signal(&bytes).map(Some))
+}
+
+fn spawn_stop_request_forwarder(path: PathBuf, shared_control: SharedControl) {
+    thread::spawn(move || {
+        let mut last_error = None;
+        loop {
+            match read_stop_signal(&path) {
+                Ok(None) => last_error = None,
+                Ok(Some(signal)) => match wait_for_control(&shared_control, STOP_CONTROL_WAIT) {
+                    Ok(control) => match control.send_frame(
+                        WINDOWS_CONTROL_SIGNAL_FRAME,
+                        0,
+                        &signal.to_be_bytes(),
+                    ) {
+                        Ok(()) => {
+                            match fs::remove_file(&path) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                                Err(error) => tracing::warn!(
+                                    error = %error,
+                                    path = %path.display(),
+                                    "Failed to remove delivered Windows stop request"
+                                ),
+                            }
+                            tracing::info!(
+                                signal,
+                                path = %path.display(),
+                                "Forwarded Windows stop request to guest init"
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                error = %error,
+                                signal,
+                                "Failed to send Windows stop request; retrying"
+                            );
+                        }
+                    },
+                    Err(error) => tracing::debug!(
+                        error = %error,
+                        signal,
+                        "Windows guest control channel is not ready for stop request"
+                    ),
+                },
+                Err(error) => {
+                    let message = error.to_string();
+                    if last_error.as_deref() != Some(message.as_str()) {
+                        tracing::warn!(
+                            error = %error,
+                            path = %path.display(),
+                            "Invalid Windows stop request"
+                        );
+                        last_error = Some(message);
+                    }
+                }
+            }
+            thread::sleep(STOP_REQUEST_POLL);
+        }
+    });
 }
 
 fn write_ready_file(path: &Path, contents: &str) {
@@ -781,4 +872,52 @@ fn wide(s: &str) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_port_map_is_valid_for_lifecycle_only_control() {
+        assert!(parse_port_map(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_signal_decoder_accepts_the_linux_signal_range() {
+        assert_eq!(decode_stop_signal(b"15").unwrap(), 15);
+        assert_eq!(decode_stop_signal(b"64\n").unwrap(), 64);
+    }
+
+    #[test]
+    fn stop_signal_decoder_rejects_invalid_values() {
+        for value in [b"0".as_slice(), b"65", b"term", b""] {
+            assert_eq!(
+                decode_stop_signal(value).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn stop_signal_reader_distinguishes_missing_and_valid_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = directory.path().join("stop.signal");
+
+        assert_eq!(read_stop_signal(&request).unwrap(), None);
+        fs::write(&request, "2").unwrap();
+        assert_eq!(read_stop_signal(&request).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn stop_signal_reader_rejects_oversized_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let request = directory.path().join("stop.signal");
+        fs::write(&request, vec![b'1'; MAX_STOP_REQUEST_BYTES as usize + 1]).unwrap();
+
+        assert_eq!(
+            read_stop_signal(&request).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 }

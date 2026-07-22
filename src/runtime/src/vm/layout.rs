@@ -95,6 +95,15 @@ impl VmManager {
             hint: None,
         })?;
 
+        #[cfg(windows)]
+        super::windows_stop::clear(&socket_dir).map_err(|error| BoxError::BoxBootError {
+            message: format!(
+                "Failed to clear stale Windows stop request in {}: {error}",
+                socket_dir.display()
+            ),
+            hint: None,
+        })?;
+
         std::fs::create_dir_all(&logs_dir).map_err(|e| BoxError::BoxBootError {
             message: format!("Failed to create logs directory: {}", e),
             hint: None,

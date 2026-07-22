@@ -1670,7 +1670,9 @@ fn real_core_filesystem_image_snapshot_commands() {
 
     #[cfg(windows)]
     {
-        smoke.ok(&["start", &smoke.name]);
+        // A stopped managed execution is terminal for its current generation;
+        // restart advances the generation while retaining the persistent rootfs.
+        smoke.ok(&["restart", &smoke.name]);
         smoke.wait_for_running();
         smoke.wait_for_logs("core-smoke-storage-restored");
     }

@@ -38,6 +38,13 @@ All notable changes to A3S Box will be documented in this file.
   expose stdout and stderr while they are still running, and the guest drains
   coalesced control frames so a published TCP port accepts sequential
   connections instead of stalling after the first request.
+- **Windows graceful stop and clean persistent capture.** Reattached CLI
+  managers now deliver the configured stop signal over the WHPX host-control
+  channel, wait for guest shutdown, and force-terminate an unresponsive shim
+  without leaving orphan processes. Persistent shutdown gets a bounded metadata
+  finalization window; the host validates and atomically publishes manifests
+  that virtio-fs cannot rename, while runtime-owned logs remain outside commits
+  and filesystem snapshots.
 - **Windows bind-mount parsing.** Drive-letter and UNC sources are classified as
   bind mounts and retain their Linux guest target through runtime preparation,
   including read-only single-file mounts.

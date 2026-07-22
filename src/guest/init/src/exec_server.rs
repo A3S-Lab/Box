@@ -86,8 +86,13 @@ fn signal_main_process(sig: i32) {
             pid,
             sig, "Delivering graceful stop signal to container main process"
         );
-        unsafe {
-            libc::kill(pid, sig);
+        if unsafe { libc::kill(pid, sig) } != 0 {
+            warn!(
+                pid,
+                sig,
+                error = %std::io::Error::last_os_error(),
+                "Failed to signal container main process"
+            );
         }
     } else {
         warn!(sig, "Graceful stop requested but container PID is unknown");

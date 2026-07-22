@@ -342,16 +342,7 @@ fn collect_snapshot_rootfs_metadata(
     let relative = source
         .strip_prefix(root)
         .map_err(|_| BoxError::OciImageError("Sandbox Snapshot walk escaped its root".into()))?;
-    if matches!(
-        relative.to_str(),
-        Some(".a3s_rootfs_metadata_v1.json")
-            | Some(".a3s_rootfs_metadata_v1.json.tmp")
-            | Some(".a3s_rootfs_metadata_v1.previous.json")
-            | Some(".a3s_image_metadata_v1.json")
-            | Some(".a3s_image_metadata_v1.json.tmp")
-            | Some(".a3s_exit_code")
-            | Some("init.trace.log")
-    ) {
+    if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(relative) {
         return Ok(());
     }
 
@@ -598,9 +589,7 @@ fn decode_and_validate_entries(
         // platform path bytes can be reconstructed losslessly.
         let encoded = unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(raw) };
         let relative = safe_relative_path(Path::new(&encoded))?;
-        if relative == Path::new(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
-            || relative == Path::new(ROOTFS_METADATA_PATH.trim_start_matches('/'))
-            || relative == Path::new(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+        if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(&relative)
             || !unique.insert(relative.clone())
         {
             return Err(BoxError::OciImageError(
