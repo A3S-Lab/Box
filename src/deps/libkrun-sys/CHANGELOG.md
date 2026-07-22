@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve guest-visible POSIX mode, UID, and GID values in the Windows
+  virtiofs inode table so callers can capture and replay them across VM
+  generations.
 - Verify cached firmware downloads on every use and replace partial or corrupt
   downloads instead of extracting them as trusted inputs.
 - Keep the Windows runtime trio version-locked instead of combining a current

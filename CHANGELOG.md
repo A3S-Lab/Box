@@ -10,6 +10,10 @@ All notable changes to A3S Box will be documented in this file.
   `libkrunfw.dll` companion kernel alongside `krun.dll`, and the native path is
   documented and validated with Alpine foreground/detached workloads, separated
   output streams, structured logs, and real workload exit codes.
+- **Windows WHPX soak runner.** `scripts/windows-whpx-soak.ps1` repeatedly runs
+  the supported real lifecycle, storage, bind-mount, port, stats, and virtio-fs
+  stress paths, retains per-test logs and a JSON summary, and fails when an
+  iteration leaves an `a3s-box` or shim process behind.
 
 ### Changed
 
@@ -45,6 +49,13 @@ All notable changes to A3S Box will be documented in this file.
   finalization window; the host validates and atomically publishes manifests
   that virtio-fs cannot rename, while runtime-owned logs remain outside commits
   and filesystem snapshots.
+- **Windows virtio-fs POSIX metadata.** Guest `chmod`, `chown`, and umask-derived
+  modes now remain visible for the VM lifetime, while Box terminal metadata
+  capture and boot replay preserve them through stop, restart, and commit.
+- **Windows soak lifecycle coverage.** Named-volume validation now advances a
+  terminal managed execution with `restart`, and the unchanged 2,048-file,
+  five-pass virtio-fs tar stress keeps its full workload with a separate WHPX
+  timeout and per-pass progress markers.
 - **Windows bind-mount parsing.** Drive-letter and UNC sources are classified as
   bind mounts and retain their Linux guest target through runtime preparation,
   including read-only single-file mounts.

@@ -221,6 +221,11 @@ The Windows build script always creates a real stripped Linux `init/init`
 payload first and remaps host source/profile paths out of the Rust release
 artifacts; the generated payload remains ignored by Git.
 
+Windows virtiofs retains guest-created and guest-updated POSIX mode, UID, and
+GID values for the VM lifetime. A runtime that needs cross-generation
+persistence must capture these values before shutdown and replay them after
+boot; A3S Box performs that handoff with its rootfs metadata manifests.
+
 ## Architecture
 
 The Windows WHPX backend includes:

@@ -85,7 +85,8 @@ the Cargo target directory.
 | vCPUs | Exactly one; omitting `--cpus` selects the Windows default of 1 |
 | Published TCP ports | Validated through the Windows named-pipe bridge, including sequential connections |
 | Bind mounts | Validated for drive-letter directory and single-file sources, including read-only enforcement |
-| Named volumes | Validated across `stop` and `start`, including explicit removal |
+| Named volumes | Validated across `stop` and `restart`, including explicit removal |
+| POSIX ownership and modes | Validated for `chmod`, `chown`, and umask-created files and directories across clean stop, restart, and commit |
 | `diff`, `export`, stopped-box `commit`, and stopped-box filesystem snapshots | Validated through clean-stop metadata capture, committed-image re-run, snapshot restore, restart, and re-export. Running-box host-path capture remains unavailable because WHPX has no post-boot guest archive channel. |
 | `stats --no-stream` | Validated |
 | Container health checks | Not currently supported; `--health-*` requests and persisted health checks fail before workload start |
@@ -132,6 +133,39 @@ Standard Compose services create a bridge network by default. Because native
 WHPX bridge networking is not implemented, Compose workload startup remains
 outside the current Windows support boundary even when a Compose file contains
 only one service.
+
+## WHPX soak validation
+
+Run the Windows-specific soak harness from the Box repository root on an
+otherwise idle WHPX host. It builds the current guest-init and Windows binaries,
+then repeatedly exercises the supported lifecycle, logs, exit-code, stats,
+published-port, bind-mount, named-volume, commit, snapshot, and virtio-fs paths.
+
+```powershell
+.\scripts\windows-whpx-soak.ps1 `
+  -ImageTar C:\images\alpine-3.20.tar `
+  -Iterations 1
+
+# Two-hour gate. The current iteration is allowed to finish after the deadline.
+.\scripts\windows-whpx-soak.ps1 `
+  -ImageTar C:\images\alpine-3.20.tar `
+  -Iterations 0 `
+  -DurationSeconds 7200
+```
+
+Evidence is written under `src/target/a3s-box-whpx-soak/` by default. Each test
+has its own log, while `summary.json` records the commit, image digest, timings,
+failure, and any residual process details. The runner requires no active
+`a3s-box` or `a3s-box-shim` processes at startup and verifies the same invariant
+after every test.
+
+The ten-test default matrix includes POSIX ownership and mode replay through
+restart and commit. Use `-ListTests` to inspect the exact selection.
+
+The virtio-fs case intentionally scans 2,048 files five times with cache mode
+`none`. Real WHPX validation took 373 seconds on the host described above, so
+that test has an independent 900-second default budget. `-SkipVirtiofsStress`
+is suitable for a short functional rehearsal, not for release soak evidence.
 
 ## Diagnostics and kernel override
 
