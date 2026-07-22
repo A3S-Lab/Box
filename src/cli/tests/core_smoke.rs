@@ -27,6 +27,24 @@ use std::time::{Duration, Instant};
 const DEFAULT_IMAGE: &str = "docker.io/library/alpine:latest";
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
+fn terminate_command_tree(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    {
+        // `Child::kill` terminates only the foreground CLI. A timed-out `run`
+        // otherwise leaves its shim and Windows port-forward worker alive with
+        // inherited capture handles, which also prevents the soak runner from
+        // reaching EOF. taskkill resolves the exact still-live child tree first;
+        // the direct kill below remains a best-effort fallback.
+        let pid = child.id().to_string();
+        let _ = Command::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+}
+
 struct CommandResult {
     stdout: String,
     stderr: String,
@@ -65,7 +83,7 @@ impl BackgroundCommand {
 
     fn kill_and_output(mut self) -> CommandResult {
         let mut child = self.child.take().expect("background command child");
-        let _ = child.kill();
+        terminate_command_tree(&mut child);
         let output = child
             .wait_with_output()
             .unwrap_or_else(|e| panic!("failed to collect `a3s-box {}` output: {e}", self.args));
@@ -82,7 +100,7 @@ impl BackgroundCommand {
 impl Drop for BackgroundCommand {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            terminate_command_tree(&mut child);
             let _ = child.wait();
         }
     }
@@ -154,7 +172,7 @@ impl CoreSmoke {
             }
 
             if start.elapsed() >= timeout {
-                let _ = child.kill();
+                terminate_command_tree(&mut child);
                 let _ = child.wait().map_err(|e| {
                     format!(
                         "timed out and failed to reap `a3s-box {}`: {e}",
@@ -1285,6 +1303,17 @@ fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
     std::fs::write(&directory_file, "directory-bind-ok").expect("write directory bind fixture");
     std::fs::write(&single_file, "single-file-bind-ok").expect("write single-file bind fixture");
 
+    let directory_name = format!("{}-dir", smoke.name);
+    let single_file_name = format!("{}-file", smoke.name);
+    let _directory_cleanup = NamedBoxCleanup {
+        smoke: &smoke,
+        name: directory_name.clone(),
+    };
+    let _single_file_cleanup = NamedBoxCleanup {
+        smoke: &smoke,
+        name: single_file_name.clone(),
+    };
+
     seed_smoke_image(&smoke, &image);
 
     let directory_mount = format!("{}:/mnt/a3s-bind:ro", host_dir.path().display());
@@ -1292,7 +1321,7 @@ fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
         "run",
         "--rm",
         "--name",
-        &format!("{}-dir", smoke.name),
+        &directory_name,
         "-v",
         &directory_mount,
         &image,
@@ -1312,7 +1341,7 @@ fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
         "run",
         "--rm",
         "--name",
-        &format!("{}-file", smoke.name),
+        &single_file_name,
         "-v",
         &single_file_mount,
         &image,

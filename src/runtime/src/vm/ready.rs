@@ -7,18 +7,35 @@ use crate::grpc::ExecClient;
 
 use super::VmManager;
 
+#[cfg(any(unix, test))]
 const DEFAULT_EXEC_READY_TIMEOUT_MS: u64 = 15_000;
+#[cfg(target_os = "windows")]
+const DEFAULT_WINDOWS_GUEST_READY_TIMEOUT_MS: u64 = 30_000;
 const EXEC_READY_PROGRESS_LOG_MS: u64 = 5_000;
 
-fn parse_exec_ready_timeout_ms(value: Option<&str>) -> u64 {
+fn parse_ready_timeout_ms(value: Option<&str>, default: u64) -> u64 {
     value
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|timeout| *timeout > 0)
-        .unwrap_or(DEFAULT_EXEC_READY_TIMEOUT_MS)
+        .unwrap_or(default)
 }
 
+#[cfg(any(unix, test))]
+fn parse_exec_ready_timeout_ms(value: Option<&str>) -> u64 {
+    parse_ready_timeout_ms(value, DEFAULT_EXEC_READY_TIMEOUT_MS)
+}
+
+#[cfg(unix)]
 fn exec_ready_timeout_ms() -> u64 {
     parse_exec_ready_timeout_ms(std::env::var("A3S_EXEC_READY_TIMEOUT_MS").ok().as_deref())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_guest_ready_timeout_ms() -> u64 {
+    parse_ready_timeout_ms(
+        std::env::var("A3S_EXEC_READY_TIMEOUT_MS").ok().as_deref(),
+        DEFAULT_WINDOWS_GUEST_READY_TIMEOUT_MS,
+    )
 }
 
 impl VmManager {
@@ -66,6 +83,99 @@ impl VmManager {
 
         tracing::debug!("VM process is running");
         Ok(())
+    }
+
+    /// Wait until Windows guest-init publishes this boot's unique readiness token.
+    ///
+    /// WHPX has no host-side exec transport, so process liveness alone cannot
+    /// distinguish a running guest from a VMM whose vCPU is wedged before PID 1.
+    /// The token is written through the shared rootfs after guest filesystem and
+    /// network setup. A per-boot value prevents a stale persistent-rootfs marker
+    /// from satisfying a new launch while the shim is still initializing.
+    #[cfg(target_os = "windows")]
+    pub(crate) async fn wait_for_windows_guest_ready(
+        &self,
+        rootfs_path: &std::path::Path,
+        expected_token: &str,
+    ) -> Result<()> {
+        self.wait_for_windows_guest_ready_with_timeout(
+            rootfs_path,
+            expected_token,
+            windows_guest_ready_timeout_ms(),
+        )
+        .await
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn wait_for_windows_guest_ready_with_timeout(
+        &self,
+        rootfs_path: &std::path::Path,
+        expected_token: &str,
+        max_wait_ms: u64,
+    ) -> Result<()> {
+        use a3s_box_core::guest_boot::{validate_guest_ready_token, GUEST_READY_PATH};
+        use tokio::time::Duration;
+
+        const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+        validate_guest_ready_token(expected_token).map_err(|message| BoxError::BoxBootError {
+            message: format!("Invalid Windows guest readiness token: {message}"),
+            hint: None,
+        })?;
+
+        let marker = rootfs_path.join(GUEST_READY_PATH.trim_start_matches('/'));
+        let start = std::time::Instant::now();
+        let mut next_progress_log_ms = EXEC_READY_PROGRESS_LOG_MS;
+
+        loop {
+            if super::windows_marker_matches(&marker, expected_token.as_bytes()) {
+                tracing::debug!(path = %marker.display(), "Windows guest bootstrap token matched");
+                return Ok(());
+            }
+
+            let handler_exited = self
+                .handler
+                .read()
+                .await
+                .as_ref()
+                .map(|handler| handler.has_exited())
+                .unwrap_or(true);
+            if handler_exited {
+                return Err(BoxError::BoxBootError {
+                    message: "WHPX stopped before guest-init published bootstrap readiness"
+                        .to_string(),
+                    hint: Some(
+                        "The guest failed before completing filesystem and network setup"
+                            .to_string(),
+                    ),
+                });
+            }
+
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            if elapsed_ms >= max_wait_ms {
+                return Err(BoxError::BoxBootError {
+                    message: format!(
+                        "WHPX guest did not publish bootstrap readiness within {max_wait_ms} ms"
+                    ),
+                    hint: Some(
+                        "The VMM remained alive but the guest was wedged before completing guest-init bootstrap"
+                            .to_string(),
+                    ),
+                });
+            }
+            if elapsed_ms >= next_progress_log_ms {
+                tracing::warn!(
+                    elapsed_ms,
+                    timeout_ms = max_wait_ms,
+                    marker = %marker.display(),
+                    "Still waiting for Windows guest bootstrap readiness"
+                );
+                next_progress_log_ms =
+                    next_progress_log_ms.saturating_add(EXEC_READY_PROGRESS_LOG_MS);
+            }
+
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     /// Wait for the exec server to become ready (a Frame Heartbeat round-trip).
@@ -197,6 +307,32 @@ impl VmManager {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    struct RunningHandler;
+
+    #[cfg(target_os = "windows")]
+    impl a3s_box_core::VmHandler for RunningHandler {
+        fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> a3s_box_core::Result<()> {
+            Ok(())
+        }
+
+        fn metrics(&self) -> a3s_box_core::VmMetrics {
+            a3s_box_core::VmMetrics::default()
+        }
+
+        fn is_running(&self) -> bool {
+            true
+        }
+
+        fn has_exited(&self) -> bool {
+            false
+        }
+
+        fn pid(&self) -> u32 {
+            42
+        }
+    }
+
     #[test]
     fn test_parse_exec_ready_timeout_ms() {
         assert_eq!(
@@ -212,5 +348,48 @@ mod tests {
             DEFAULT_EXEC_READY_TIMEOUT_MS
         );
         assert_eq!(parse_exec_ready_timeout_ms(Some("2500")), 2500);
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            parse_ready_timeout_ms(None, DEFAULT_WINDOWS_GUEST_READY_TIMEOUT_MS),
+            DEFAULT_WINDOWS_GUEST_READY_TIMEOUT_MS
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    async fn windows_guest_readiness_requires_the_current_boot_token() {
+        let rootfs = tempfile::tempdir().unwrap();
+        let vm = VmManager::with_box_id(
+            a3s_box_core::BoxConfig::default(),
+            a3s_box_core::EventEmitter::new(4),
+            "windows-ready-test".to_string(),
+        );
+        let marker = rootfs
+            .path()
+            .join(a3s_box_core::guest_boot::GUEST_READY_PATH.trim_start_matches('/'));
+        std::fs::write(&marker, b"stale-token").unwrap();
+
+        let error = vm
+            .wait_for_windows_guest_ready_with_timeout(rootfs.path(), "current-token", 25)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("stopped before guest-init"), "{error}");
+
+        *vm.handler.write().await = Some(Box::new(RunningHandler));
+        let error = vm
+            .wait_for_windows_guest_ready_with_timeout(rootfs.path(), "current-token", 25)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("did not publish bootstrap readiness"),
+            "{error}"
+        );
+
+        std::fs::write(&marker, b"current-token").unwrap();
+        vm.wait_for_windows_guest_ready_with_timeout(rootfs.path(), "current-token", 25)
+            .await
+            .unwrap();
     }
 }

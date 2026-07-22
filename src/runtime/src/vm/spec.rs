@@ -457,10 +457,17 @@ impl VmManager {
         {
             // WHPX named-pipe mappings are guest-initiated. Keep the shared
             // Windows host-control channel connected even without published
-            // ports so stop requests can reach guest init.
-            entrypoint
-                .env
-                .push(("BOX_WINDOWS_PORT_FWD".to_string(), "1".to_string()));
+            // ports so stop requests can reach guest init. A unique token lets
+            // the host distinguish this boot's readiness marker from any stale
+            // rootfs artifact while the shim is still starting.
+            let overrides = [
+                ("BOX_WINDOWS_PORT_FWD".to_string(), "1".to_string()),
+                (
+                    a3s_box_core::guest_boot::GUEST_READY_TOKEN_ENV.to_string(),
+                    uuid::Uuid::new_v4().simple().to_string(),
+                ),
+            ];
+            a3s_box_core::env::merge_env_pairs(&mut entrypoint.env, &overrides);
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -1000,6 +1007,10 @@ mod tests {
 
         assert!(spec.port_map.is_empty());
         assert_eq!(env_value(&spec, "BOX_WINDOWS_PORT_FWD"), Some("1"));
+        let token = env_value(&spec, a3s_box_core::guest_boot::GUEST_READY_TOKEN_ENV)
+            .expect("Windows boot must carry a guest readiness token");
+        assert!(a3s_box_core::guest_boot::validate_guest_ready_token(token).is_ok());
+        assert_eq!(token.len(), 32);
     }
 
     #[test]

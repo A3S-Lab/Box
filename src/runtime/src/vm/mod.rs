@@ -1250,6 +1250,24 @@ impl VmManager {
             spec.network = Some(net_config);
         }
 
+        #[cfg(target_os = "windows")]
+        let windows_guest_ready_token = match spec
+            .entrypoint
+            .env
+            .iter()
+            .find(|(key, _)| key == a3s_box_core::guest_boot::GUEST_READY_TOKEN_ENV)
+            .map(|(_, value)| value.clone())
+        {
+            Some(token) => token,
+            None => {
+                self.cleanup_boot_failure().await;
+                return Err(BoxError::BoxBootError {
+                    message: "Windows VM spec is missing its guest readiness token".to_string(),
+                    hint: None,
+                });
+            }
+        };
+
         // 3. Initialize VMM provider (use injected provider or default to VmController)
         if self.provider.is_none() {
             let shim_path = match VmController::find_shim() {
@@ -1310,6 +1328,9 @@ impl VmManager {
                 } else {
                     self.wait_for_exec_ready(&layout.exec_socket_path).await?;
                 }
+                #[cfg(target_os = "windows")]
+                self.wait_for_windows_guest_ready(&layout.rootfs_path, &windows_guest_ready_token)
+                    .await?;
                 Ok::<(), BoxError>(())
             }
             .instrument(wait_span)

@@ -13,6 +13,7 @@ pub mod event;
 pub mod exec;
 pub mod execution;
 pub mod fs_atomic;
+pub mod guest_boot;
 pub mod guest_exec;
 pub mod lifecycle_profile;
 pub mod log;

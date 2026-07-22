@@ -28,6 +28,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Bounded WHPX guest readiness.** Windows now promotes a VM to Running only
+  after guest-init publishes a unique per-boot token following filesystem and
+  network setup. A wedged-but-live VMM fails through boot rollback instead of
+  being reported as started indefinitely, while smoke-test command timeouts
+  terminate the complete CLI/shim/forwarder process tree.
 - **Bounded guest entrypoint transport.** Workload executable, arguments,
   working directory, user, and stdin mode are now carried in a validated,
   size-limited rootfs file instead of libkrun's bounded guest kernel command

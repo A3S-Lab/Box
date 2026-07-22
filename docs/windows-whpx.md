@@ -129,6 +129,9 @@ guest-init unit tests inside a real WHPX guest, sent multiple requests through
 the same published TCP port, exercised Windows directory and single-file bind
 mounts, verified graceful and forced-stop cleanup without orphan processes,
 restarted a named volume, and restored and restarted a filesystem snapshot.
+The bind-mount path also passed five consecutive focused repetitions after the
+readiness fence was added; injected readiness and command timeouts both left no
+CLI, shim, or forwarding worker behind.
 
 Standard Compose services create a bridge network by default. Because native
 WHPX bridge networking is not implemented, Compose workload startup remains
@@ -163,12 +166,30 @@ after every test.
 
 The eleven-test default matrix includes a 4,096-byte workload argument and
 POSIX ownership and mode replay through restart and commit. Use `-ListTests` to
-inspect the exact selection.
+inspect the exact selection. On July 22, 2026, the final production-binary gate
+completed two consecutive full iterations (22/22) in 1,619.346 seconds with no
+residual CLI or shim process.
 
 The virtio-fs case intentionally scans 2,048 files five times with cache mode
-`none`. Real WHPX validation took 373 seconds on the host described above, so
-that test has an independent 900-second default budget. `-SkipVirtiofsStress`
-is suitable for a short functional rehearsal, not for release soak evidence.
+`none`. The two final-gate samples took 378.000 and 373.551 seconds on the host
+described above, so that test has an independent 900-second default budget.
+`-SkipVirtiofsStress` is suitable for a short functional rehearsal, not for
+release soak evidence.
+
+Each cold boot carries a unique readiness token. guest-init publishes that
+token only after its rootfs metadata replay, virtio-fs mounts, and network setup
+complete. The host does not report the box as Running until the current token is
+visible. The Windows default safety cap is 30 seconds; a live shim that never
+reaches guest-init is then force-cleaned through normal boot rollback. Slow-host
+debugging can override the cap in milliseconds, for example:
+
+```powershell
+$env:A3S_EXEC_READY_TIMEOUT_MS = '45000'
+```
+
+The soak test harness also terminates the full Windows child process tree when
+a command-level timeout expires, so a failed sample can finish its summary
+instead of waiting on stdout/stderr handles inherited by an orphan shim.
 
 ## Diagnostics and kernel override
 
@@ -188,6 +209,8 @@ additional Windows kernel command line. When it is absent, A3S Box supplies
 `noapic`; an explicitly set value, including an empty value, replaces that
 default.
 
-If a boot fails, inspect the per-box files below
-`$env:A3S_HOME\boxes\<id>\logs\` and `rootfs\init-rust.log`. A package missing
-either `krun.dll` or `libkrunfw.dll` is incomplete.
+If a running or retained box fails, inspect the per-box files below
+`$env:A3S_HOME\boxes\<id>\logs\` and `rootfs\init-rust.log`. A startup readiness
+failure removes the incomplete box during rollback, so retain the CLI stderr or
+the soak sample log containing its bounded readiness diagnostic. A package
+missing either `krun.dll` or `libkrunfw.dll` is incomplete.

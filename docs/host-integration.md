@@ -424,6 +424,11 @@ Use `-ListTests` to inspect the matrix. `-SkipBuild` is intended only when the
 matching musl guest-init and Windows binaries were already built from the same
 commit.
 
+WHPX startup is gated by a unique guest-init readiness token with a 30-second
+default safety cap. The harness additionally terminates the complete Windows
+child process tree on a command timeout, so a wedged VM is recorded as a bounded
+failure and cannot keep the PowerShell log pipeline open.
+
 ## Result recording
 
 When a host-backed run passes, record:

@@ -11,6 +11,9 @@
 #[cfg(target_os = "linux")]
 mod linux {
 
+    use a3s_box_core::guest_boot::{
+        validate_guest_ready_token, GUEST_READY_PATH, GUEST_READY_TOKEN_ENV,
+    };
     use a3s_box_core::guest_exec::{
         GuestExecConfig, MAX_RUNTIME_EXEC_CONFIG_BYTES, RUNTIME_EXEC_CONFIG_PATH,
     };
@@ -795,6 +798,13 @@ mod linux {
         // Step 3.25: Apply hostname while the rootfs is still writable.
         if !bootstrap_mode.is_host_sandbox() {
             host_config::apply_from_env()?;
+
+            // Windows cannot probe the in-guest exec socket from the host. Its
+            // runtime therefore waits for this per-boot token before publishing
+            // the VM as Running. Emit it only after all filesystem shares and
+            // network configuration are complete, while the rootfs is still
+            // writable for --read-only containers.
+            persist_guest_ready_marker()?;
         }
 
         // Step 3.5: Remount rootfs read-only if BOX_READONLY=1.
@@ -1740,6 +1750,49 @@ mod linux {
                 "Could not remount rootfs read-only; container runs writable"
             ),
         }
+        Ok(())
+    }
+
+    /// Publish the host-provided readiness token without following a pre-existing
+    /// guest path. The Windows shim removes this internal marker before every boot;
+    /// `create_new` keeps an unexpected image/runtime collision fail-closed.
+    #[cfg(target_os = "linux")]
+    fn persist_guest_ready_marker() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let Some(token) = std::env::var(GUEST_READY_TOKEN_ENV)
+            .ok()
+            .filter(|token| !token.is_empty())
+        else {
+            return Ok(());
+        };
+        validate_guest_ready_token(&token).map_err(|message| {
+            format!("invalid {GUEST_READY_TOKEN_ENV} readiness token: {message}")
+        })?;
+
+        let mut marker = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(GUEST_READY_PATH)?;
+        marker.write_all(token.as_bytes())?;
+        // The Windows virtiofs backend can report EIO for fsync even though the
+        // just-written bytes are already visible to the host. Readiness only
+        // requires that shared visibility (the host compares the full token),
+        // so keep durability best-effort like the terminal exit-code marker.
+        if let Err(error) = marker.sync_all() {
+            warn!(
+                path = GUEST_READY_PATH,
+                %error,
+                "Could not sync guest readiness marker; continuing with visible contents"
+            );
+        }
+        info!(
+            path = GUEST_READY_PATH,
+            "Guest bootstrap readiness published"
+        );
         Ok(())
     }
 

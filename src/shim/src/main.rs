@@ -19,6 +19,8 @@ use a3s_box_core::config::validate_vcpu_count;
 use a3s_box_core::error::{BoxError, Result};
 #[cfg(target_os = "windows")]
 use a3s_box_core::exec::WINDOWS_STOP_REQUEST_FILE;
+#[cfg(target_os = "windows")]
+use a3s_box_core::guest_boot::GUEST_READY_PATH;
 use a3s_box_core::vmm::InstanceSpec;
 use a3s_box_core::EXEC_VSOCK_PORT;
 #[cfg(target_os = "windows")]
@@ -541,6 +543,7 @@ fn prepare_windows_guest(spec: &InstanceSpec) -> Result<()> {
         WINDOWS_GUEST_STDERR,
         WINDOWS_GUEST_RESULT_MARKER,
         WINDOWS_LIVE_LOGS_DRAINED_MARKER,
+        GUEST_READY_PATH.trim_start_matches('/'),
     ] {
         let path = spec.rootfs_path.join(name);
         if let Err(error) = a3s_box_core::windows_file::remove_path_no_follow(&path) {
@@ -1469,6 +1472,7 @@ mod tests {
             WINDOWS_GUEST_STDERR,
             WINDOWS_GUEST_RESULT_MARKER,
             WINDOWS_LIVE_LOGS_DRAINED_MARKER,
+            GUEST_READY_PATH.trim_start_matches('/'),
         ] {
             fs::write(rootfs.join(name), b"stale").unwrap();
         }
@@ -1482,6 +1486,7 @@ mod tests {
             WINDOWS_GUEST_EXIT_CODE,
             WINDOWS_GUEST_RESULT_MARKER,
             WINDOWS_LIVE_LOGS_DRAINED_MARKER,
+            GUEST_READY_PATH.trim_start_matches('/'),
         ] {
             assert!(!rootfs.join(name).exists());
         }
