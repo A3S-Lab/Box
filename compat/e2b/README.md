@@ -148,6 +148,8 @@ so `full_compatibility=false` remains mandatory.
 
 Broker-mode MicroVMs additionally support generation-fenced binary
 `GET /files`, raw octet-stream upload, and multi-file multipart upload through
-the guest session transport. The 11 MiB per-file bound, missing Filesystem
-Protobuf procedures, metadata/xattrs, compression, ranges, signed URLs, and
-large-file streaming keep `full_compatibility=false` mandatory.
+the guest session transport. They also implement the pinned unary Filesystem
+Stat, MakeDir, Move, ListDir, and Remove procedures over Connect JSON and
+Protobuf. The 11 MiB per-file bound, missing watches, xattr metadata,
+compression, ranges, signed URLs, and large-file streaming keep
+`full_compatibility=false` mandatory.

@@ -64,6 +64,14 @@ impl ConnectFailure {
         Self::new("not_found", message, StatusCode::NOT_FOUND)
     }
 
+    pub(super) fn already_exists(message: impl Into<String>) -> Self {
+        Self::new("already_exists", message, StatusCode::CONFLICT)
+    }
+
+    pub(super) fn unauthenticated(message: impl Into<String>) -> Self {
+        Self::new("unauthenticated", message, StatusCode::UNAUTHORIZED)
+    }
+
     pub(super) fn failed_precondition(message: impl Into<String>) -> Self {
         Self::new("failed_precondition", message, StatusCode::BAD_REQUEST)
     }

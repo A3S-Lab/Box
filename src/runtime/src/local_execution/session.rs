@@ -8,7 +8,7 @@ use a3s_box_core::{
     BoxError, ExecEvent, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
     ExecutionManagerError, ExecutionManagerResult, ExecutionProcess, ExecutionProcessInput,
     ExecutionProcessSignal, ExecutionProcessStream, ExecutionSessionManager, FileRequest,
-    FileResponse,
+    FileResponse, FilesystemRequest, FilesystemResponse,
 };
 use async_trait::async_trait;
 
@@ -113,6 +113,19 @@ impl ExecutionSessionManager for LocalExecutionManager {
             .file_transfer_on_stream(stream, &request)
             .await
             .map_err(|error| session_error(execution_id, "transfer file", error))
+    }
+
+    async fn filesystem(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: FilesystemRequest,
+    ) -> ExecutionManagerResult<FilesystemResponse> {
+        let (_record, client, stream) = self.bind_exec(execution_id, generation).await?;
+        client
+            .filesystem_on_stream(stream, &request)
+            .await
+            .map_err(|error| session_error(execution_id, "access filesystem", error))
     }
 }
 

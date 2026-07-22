@@ -727,7 +727,7 @@ fn process_timeout_ns(headers: &HeaderMap) -> Result<u64, ConnectFailure> {
     })
 }
 
-fn process_user(headers: &HeaderMap) -> Result<Option<String>, ConnectFailure> {
+pub(super) fn process_user(headers: &HeaderMap) -> Result<Option<String>, ConnectFailure> {
     let Some(value) = headers.get(AUTHORIZATION) else {
         // envd 0.4.0 and newer applies the user selected during /init when a
         // request omits Basic authentication. The pinned A3S E2B runtime uses

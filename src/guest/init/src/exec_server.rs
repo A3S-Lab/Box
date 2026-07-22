@@ -5,7 +5,7 @@
 //! discriminated guest-session request such as file transfer, then sends the
 //! corresponding framed response.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,8 +17,9 @@ use std::time::Duration;
 #[cfg(any(target_os = "linux", test))]
 use a3s_box_core::exec::GuestSessionRequest;
 use a3s_box_core::exec::{
-    ExecChunk, ExecExit, ExecOutput, ExecRequest, FileOp, FileRequest, FileResponse, StreamType,
-    DEFAULT_EXEC_TIMEOUT_NS, EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES,
+    ExecChunk, ExecExit, ExecOutput, ExecRequest, FileOp, FileRequest, FileResponse,
+    FilesystemEntry, FilesystemEntryKind, FilesystemOp, FilesystemRequest, FilesystemResponse,
+    StreamType, DEFAULT_EXEC_TIMEOUT_NS, EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES,
 };
 use a3s_transport::{FrameType, MAX_PAYLOAD_SIZE};
 use base64::engine::general_purpose::STANDARD;
@@ -767,6 +768,11 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
             write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
             return Ok(());
         }
+        Ok(GuestSessionRequest::Filesystem(request)) => {
+            let response_payload = serde_json::to_vec(&handle_filesystem_request(request))?;
+            write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
+            return Ok(());
+        }
         Err(error) if declares_guest_session_request(&payload) => {
             send_error_frame(
                 &mut stream,
@@ -953,6 +959,342 @@ fn handle_file_request(request: FileRequest) -> FileResponse {
     })
 }
 
+const MAX_FILESYSTEM_DEPTH: u32 = 64;
+const MAX_FILESYSTEM_ENTRIES: usize = 4096;
+const MAX_FILESYSTEM_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+
+fn handle_filesystem_request(request: FilesystemRequest) -> FilesystemResponse {
+    let result = (|| {
+        let (owner, home) = resolve_file_owner(request.user.as_deref())?;
+        let path = resolve_file_path(&request.path, &home)?;
+        match request.op {
+            FilesystemOp::Stat => Ok((Some(filesystem_entry(&path, &path)?), Vec::new())),
+            FilesystemOp::MakeDir => {
+                match std::fs::metadata(&path) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        return Err(format!("directory already exists: {}", path.display()))
+                    }
+                    Ok(_) => {
+                        return Err(format!(
+                            "path already exists but is not a directory: {}",
+                            path.display()
+                        ))
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("failed to stat {}: {error}", path.display()))
+                    }
+                }
+                ensure_file_directories(&path, owner)?;
+                Ok((Some(filesystem_entry(&path, &path)?), Vec::new()))
+            }
+            FilesystemOp::Move => {
+                if is_guest_root(&path) {
+                    return Err("refusing to move the guest root directory".to_string());
+                }
+                let destination = request
+                    .destination
+                    .as_deref()
+                    .ok_or_else(|| "move request is missing destination".to_string())?;
+                let destination = resolve_file_path(destination, &home)?;
+                if is_guest_root(&destination) {
+                    return Err("refusing to replace the guest root directory".to_string());
+                }
+                let parent = destination.parent().ok_or_else(|| {
+                    format!("move destination has no parent: {}", destination.display())
+                })?;
+                ensure_file_directories(parent, owner)?;
+                std::fs::rename(&path, &destination).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        format!("source file not found: {}", path.display())
+                    } else {
+                        format!(
+                            "failed to rename {} to {}: {error}",
+                            path.display(),
+                            destination.display()
+                        )
+                    }
+                })?;
+                Ok((
+                    Some(filesystem_entry(&destination, &destination)?),
+                    Vec::new(),
+                ))
+            }
+            FilesystemOp::ListDir => {
+                let depth = if request.depth == 0 { 1 } else { request.depth };
+                if depth > MAX_FILESYSTEM_DEPTH {
+                    return Err(format!(
+                        "directory depth exceeds the {MAX_FILESYSTEM_DEPTH}-level limit"
+                    ));
+                }
+                Ok((None, list_filesystem_entries(&path, depth)?))
+            }
+            FilesystemOp::Remove => {
+                if is_guest_root(&path) {
+                    return Err("refusing to remove the guest root directory".to_string());
+                }
+                match std::fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                        std::fs::remove_dir_all(&path).map_err(|error| {
+                            format!("failed to remove directory {}: {error}", path.display())
+                        })?;
+                    }
+                    Ok(_) => {
+                        std::fs::remove_file(&path).map_err(|error| {
+                            format!("failed to remove file {}: {error}", path.display())
+                        })?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("failed to stat {}: {error}", path.display()))
+                    }
+                }
+                Ok((None, Vec::new()))
+            }
+        }
+    })();
+
+    match result {
+        Ok((entry, entries)) => FilesystemResponse {
+            success: true,
+            entry,
+            entries,
+            error: None,
+        },
+        Err(error) => FilesystemResponse {
+            success: false,
+            entry: None,
+            entries: Vec::new(),
+            error: Some(error),
+        },
+    }
+}
+
+fn list_filesystem_entries(path: &Path, depth: u32) -> Result<Vec<FilesystemEntry>, String> {
+    let real_root = std::fs::canonicalize(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("directory not found: {}", path.display())
+        } else {
+            format!("failed to resolve directory {}: {error}", path.display())
+        }
+    })?;
+    if !std::fs::metadata(&real_root)
+        .map_err(|error| format!("failed to stat directory {}: {error}", path.display()))?
+        .is_dir()
+    {
+        return Err(format!("path is not a directory: {}", path.display()));
+    }
+
+    let mut pending = directory_children(&real_root, path, 1)?;
+    let mut entries = Vec::new();
+    let mut response_bytes = 0_usize;
+    while let Some((real_path, display_path, current_depth, is_directory)) = pending.pop() {
+        if entries.len() >= MAX_FILESYSTEM_ENTRIES {
+            return Err(format!(
+                "directory listing exceeds the {MAX_FILESYSTEM_ENTRIES}-entry limit"
+            ));
+        }
+        let entry = filesystem_entry(&real_path, &display_path)?;
+        response_bytes = response_bytes.saturating_add(
+            serde_json::to_vec(&entry)
+                .map_err(|error| format!("failed to size directory entry: {error}"))?
+                .len(),
+        );
+        if response_bytes > MAX_FILESYSTEM_RESPONSE_BYTES {
+            return Err(format!(
+                "directory listing exceeds the {MAX_FILESYSTEM_RESPONSE_BYTES}-byte response limit"
+            ));
+        }
+        entries.push(entry);
+        if is_directory && current_depth < depth {
+            let mut children = directory_children(&real_path, &display_path, current_depth + 1)?;
+            pending.append(&mut children);
+        }
+    }
+    Ok(entries)
+}
+
+fn directory_children(
+    real_directory: &Path,
+    display_directory: &Path,
+    depth: u32,
+) -> Result<Vec<(PathBuf, PathBuf, u32, bool)>, String> {
+    let mut children = std::fs::read_dir(real_directory)
+        .map_err(|error| {
+            format!(
+                "failed to read directory {}: {error}",
+                display_directory.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "failed to read directory {}: {error}",
+                display_directory.display()
+            )
+        })?;
+    children.sort_by_key(|child| std::cmp::Reverse(child.file_name()));
+    children
+        .into_iter()
+        .map(|child| {
+            let real_path = child.path();
+            let display_path = display_directory.join(child.file_name());
+            let is_directory = child
+                .file_type()
+                .map_err(|error| format!("failed to inspect {}: {error}", display_path.display()))?
+                .is_dir();
+            Ok((real_path, display_path, depth, is_directory))
+        })
+        .collect()
+}
+
+fn filesystem_entry(real_path: &Path, display_path: &Path) -> Result<FilesystemEntry, String> {
+    let metadata = std::fs::symlink_metadata(real_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("file not found: {}", display_path.display())
+        } else {
+            format!("failed to stat {}: {error}", display_path.display())
+        }
+    })?;
+    let is_symlink = metadata.file_type().is_symlink();
+    let target_metadata = is_symlink
+        .then(|| std::fs::metadata(real_path).ok())
+        .flatten();
+    let represented = target_metadata.as_ref().unwrap_or(&metadata);
+    let kind = if represented.is_file() {
+        FilesystemEntryKind::File
+    } else if represented.is_dir() {
+        FilesystemEntryKind::Directory
+    } else {
+        FilesystemEntryKind::Unspecified
+    };
+    let mode = filesystem_mode(represented);
+    let (uid, gid) = filesystem_ownership(&metadata);
+    let (modified_seconds, modified_nanos) = filesystem_modified(&metadata);
+    let symlink_target = is_symlink.then(|| {
+        std::fs::canonicalize(real_path)
+            .or_else(|_| std::fs::read_link(real_path))
+            .unwrap_or_else(|_| real_path.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    });
+    let name = display_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".to_string());
+
+    Ok(FilesystemEntry {
+        name,
+        kind,
+        path: display_path.to_string_lossy().into_owned(),
+        size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+        mode,
+        permissions: filesystem_permissions(&metadata, is_symlink),
+        owner: filesystem_user_name(uid),
+        group: filesystem_group_name(gid),
+        modified_seconds,
+        modified_nanos,
+        symlink_target,
+        metadata: BTreeMap::new(),
+    })
+}
+
+fn is_guest_root(path: &Path) -> bool {
+    path == Path::new("/")
+}
+
+#[cfg(unix)]
+fn filesystem_mode(metadata: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mode() & 0o7777
+}
+
+#[cfg(not(unix))]
+fn filesystem_mode(metadata: &std::fs::Metadata) -> u32 {
+    if metadata.permissions().readonly() {
+        0o444
+    } else {
+        0o666
+    }
+}
+
+#[cfg(unix)]
+fn filesystem_ownership(metadata: &std::fs::Metadata) -> (u32, u32) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.uid(), metadata.gid())
+}
+
+#[cfg(not(unix))]
+fn filesystem_ownership(_metadata: &std::fs::Metadata) -> (u32, u32) {
+    (0, 0)
+}
+
+#[cfg(unix)]
+fn filesystem_modified(metadata: &std::fs::Metadata) -> (i64, i32) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.mtime(), metadata.mtime_nsec() as i32)
+}
+
+#[cfg(not(unix))]
+fn filesystem_modified(metadata: &std::fs::Metadata) -> (i64, i32) {
+    use std::time::UNIX_EPOCH;
+
+    match metadata.modified().and_then(|modified| {
+        modified
+            .duration_since(UNIX_EPOCH)
+            .map_err(std::io::Error::other)
+    }) {
+        Ok(duration) => (
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+            duration.subsec_nanos() as i32,
+        ),
+        Err(_) => (0, 0),
+    }
+}
+
+fn filesystem_permissions(metadata: &std::fs::Metadata, is_symlink: bool) -> String {
+    let mode = filesystem_mode(metadata);
+    let kind = if is_symlink {
+        'L'
+    } else if metadata.is_dir() {
+        'd'
+    } else if metadata.is_file() {
+        '-'
+    } else {
+        '?'
+    };
+    let mut value = String::with_capacity(10);
+    value.push(kind);
+    for (read, write, execute) in [
+        (0o400, 0o200, 0o100),
+        (0o040, 0o020, 0o010),
+        (0o004, 0o002, 0o001),
+    ] {
+        value.push(if mode & read != 0 { 'r' } else { '-' });
+        value.push(if mode & write != 0 { 'w' } else { '-' });
+        value.push(if mode & execute != 0 { 'x' } else { '-' });
+    }
+    value
+}
+
+fn filesystem_user_name(uid: u32) -> String {
+    account_name("/etc/passwd", uid).unwrap_or_else(|| uid.to_string())
+}
+
+fn filesystem_group_name(gid: u32) -> String {
+    account_name("/etc/group", gid).unwrap_or_else(|| gid.to_string())
+}
+
+fn account_name(path: &str, id: u32) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        fields.next()?;
+        (fields.next()?.parse::<u32>().ok()? == id).then(|| name.to_string())
+    })
+}
+
 fn resolve_file_owner(user: Option<&str>) -> Result<(Option<ProcessUser>, PathBuf), String> {
     let Some(user) = user else {
         return Ok((None, PathBuf::from("/root")));
@@ -974,19 +1316,43 @@ fn resolve_file_path(path: &str, home: &Path) -> Result<PathBuf, String> {
         return Err("file path contains NUL".to_string());
     }
     if path.is_empty() || path == "~" {
-        return Ok(home.to_path_buf());
+        return Ok(normalize_guest_path(home.to_path_buf()));
     }
     if let Some(relative) = path.strip_prefix("~/") {
-        return Ok(home.join(relative));
+        return Ok(normalize_guest_path(home.join(relative)));
     }
     if path.starts_with('~') {
         return Err("user-specific home expansion is not supported".to_string());
     }
     let path = Path::new(path);
     if path.is_absolute() {
-        Ok(path.to_path_buf())
+        Ok(normalize_guest_path(path.to_path_buf()))
     } else {
-        Ok(home.join(path))
+        Ok(normalize_guest_path(home.join(path)))
+    }
+}
+
+fn normalize_guest_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        use std::path::Component;
+
+        let mut normalized = PathBuf::from("/");
+        for component in path.components() {
+            match component {
+                Component::RootDir | Component::CurDir => {}
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                Component::Normal(component) => normalized.push(component),
+                Component::Prefix(_) => {}
+            }
+        }
+        normalized
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        path
     }
 }
 
@@ -3243,6 +3609,134 @@ mod tests {
         );
         assert!(resolve_file_path("~other/data", home).is_err());
         assert!(resolve_file_path("bad\0path", home).is_err());
+    }
+
+    #[test]
+    fn filesystem_session_round_trips_metadata_mutations_and_depth() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("work");
+        let request = |op, path: &Path, destination: Option<&Path>, depth| FilesystemRequest {
+            op,
+            path: path.to_string_lossy().into_owned(),
+            destination: destination.map(|path| path.to_string_lossy().into_owned()),
+            depth,
+            user: None,
+        };
+
+        let created = handle_filesystem_request(request(
+            FilesystemOp::MakeDir,
+            &root.join("nested"),
+            None,
+            0,
+        ));
+        assert!(created.success, "{:?}", created.error);
+        let created = created.entry.unwrap();
+        assert_eq!(created.kind, FilesystemEntryKind::Directory);
+        assert_eq!(created.name, "nested");
+
+        std::fs::write(root.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(root.join("nested/b.txt"), b"beta").unwrap();
+        std::fs::write(root.join("z.txt"), b"omega").unwrap();
+        let stat =
+            handle_filesystem_request(request(FilesystemOp::Stat, &root.join("a.txt"), None, 0));
+        assert!(stat.success, "{:?}", stat.error);
+        let stat = stat.entry.unwrap();
+        assert_eq!(stat.kind, FilesystemEntryKind::File);
+        assert_eq!(stat.size, 5);
+        assert_eq!(stat.name, "a.txt");
+
+        let shallow = handle_filesystem_request(request(FilesystemOp::ListDir, &root, None, 0));
+        assert!(shallow.success, "{:?}", shallow.error);
+        assert_eq!(
+            shallow
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "nested", "z.txt"]
+        );
+        let deep = handle_filesystem_request(request(FilesystemOp::ListDir, &root, None, 2));
+        assert!(deep.success, "{:?}", deep.error);
+        assert_eq!(
+            deep.entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "nested", "b.txt", "z.txt"]
+        );
+
+        let destination = root.join("moved/a.txt");
+        let moved = handle_filesystem_request(request(
+            FilesystemOp::Move,
+            &root.join("a.txt"),
+            Some(&destination),
+            0,
+        ));
+        assert!(moved.success, "{:?}", moved.error);
+        assert_eq!(moved.entry.unwrap().path, destination.to_string_lossy());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"alpha");
+
+        let too_deep = handle_filesystem_request(request(
+            FilesystemOp::ListDir,
+            &root,
+            None,
+            MAX_FILESYSTEM_DEPTH + 1,
+        ));
+        assert!(!too_deep.success);
+        assert!(too_deep.error.unwrap().contains("depth"));
+
+        let removed = handle_filesystem_request(request(FilesystemOp::Remove, &root, None, 0));
+        assert!(removed.success, "{:?}", removed.error);
+        assert!(!root.exists());
+        let idempotent = handle_filesystem_request(request(FilesystemOp::Remove, &root, None, 0));
+        assert!(idempotent.success, "{:?}", idempotent.error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_stat_reports_symlink_target_without_following_its_identity() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.txt");
+        let link = directory.path().join("link.txt");
+        std::fs::write(&target, b"target").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let response = handle_filesystem_request(FilesystemRequest {
+            op: FilesystemOp::Stat,
+            path: link.to_string_lossy().into_owned(),
+            destination: None,
+            depth: 0,
+            user: None,
+        });
+        assert!(response.success, "{:?}", response.error);
+        let entry = response.entry.unwrap();
+        assert_eq!(entry.kind, FilesystemEntryKind::File);
+        assert_eq!(entry.symlink_target.as_deref(), target.to_str());
+        assert!(entry.permissions.starts_with('L'));
+    }
+
+    #[test]
+    fn filesystem_session_envelope_cannot_be_parsed_as_exec() {
+        let envelope = serde_json::to_vec(&GuestSessionRequest::Filesystem(FilesystemRequest {
+            op: FilesystemOp::Stat,
+            path: "/tmp/data".to_string(),
+            destination: None,
+            depth: 0,
+            user: None,
+        }))
+        .unwrap();
+        assert!(declares_guest_session_request(&envelope));
+        assert!(serde_json::from_slice::<ExecRequest>(&envelope).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_normalizes_parent_segments_before_guarding_guest_root() {
+        let resolved = resolve_file_path("/tmp/../", Path::new("/home/user")).unwrap();
+        assert_eq!(resolved, Path::new("/"));
+        assert!(is_guest_root(&resolved));
     }
 
     #[test]

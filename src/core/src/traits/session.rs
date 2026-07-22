@@ -4,7 +4,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::exec::{ExecEvent, ExecOutput, ExecRequest, FileRequest, FileResponse};
+use crate::exec::{
+    ExecEvent, ExecOutput, ExecRequest, FileRequest, FileResponse, FilesystemRequest,
+    FilesystemResponse,
+};
 use crate::pty::PtyRequest;
 
 use super::execution::{
@@ -101,6 +104,17 @@ pub trait ExecutionSessionManager: Send + Sync {
         generation: ExecutionGeneration,
         request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse>;
+
+    async fn filesystem(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: FilesystemRequest,
+    ) -> ExecutionManagerResult<FilesystemResponse> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution session does not support filesystem metadata operations".to_string(),
+        ))
+    }
 }
 
 #[cfg(test)]

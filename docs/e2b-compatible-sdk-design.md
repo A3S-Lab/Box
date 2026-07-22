@@ -575,10 +575,12 @@ substitute for the missing historical configuration.
 Broker-mode MicroVMs now translate binary `GET /files`, raw octet-stream
 upload, and multi-file multipart upload through the generation-fenced
 `ExecutionSessionManager`. A discriminated guest-session envelope separates
-file requests from legacy bare JSON exec requests. Transfers are currently
-bounded to 11 MiB per file; Broker-side Filesystem Protobuf procedures,
-metadata/xattrs, compression, ranges, signed URLs, and large-file streaming
-remain explicit gaps.
+file and Filesystem requests from legacy bare JSON exec requests. The broker
+also implements the pinned unary Stat, MakeDir, Move, ListDir, and Remove
+procedures over Connect JSON and Protobuf, including bounded recursive listing
+and generation fencing. Transfers are currently bounded to 11 MiB per file;
+watches, xattr metadata, compression, ranges, signed URLs, and large-file
+streaming remain explicit gaps.
 
 The production-tested Filesystem subset implements remove, make directory,
 write, read, stat, list, rename, exists, and cleanup. Official and A3S Python
@@ -1267,7 +1269,9 @@ replaces processes and reinitializes runtime services.
   has wire-level coverage for bounded, fragmented, ordered JSON and Protobuf
   Connect framing across every pinned Process procedure and raw binary stdio.
 - The production-tested Filesystem subset covers remove, make directory, write,
-  read, stat, list, rename, exists, and cleanup across the same clients.
+  read, stat, list, rename, exists, and cleanup across the same clients. The
+  host broker additionally has wire-level Connect JSON and Protobuf coverage
+  for the pinned unary Stat, MakeDir, Move, ListDir, and Remove procedures.
 - The production envd HTTP gate covers metrics, initialized environment, a
   metadata-bearing multipart upload, and byte-identical download.
 - Remaining gates include signals outside the pinned contract, reconnect,
