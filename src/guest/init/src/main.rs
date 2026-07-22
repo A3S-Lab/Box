@@ -11,6 +11,9 @@
 #[cfg(target_os = "linux")]
 mod linux {
 
+    use a3s_box_core::guest_exec::{
+        GuestExecConfig, MAX_RUNTIME_EXEC_CONFIG_BYTES, RUNTIME_EXEC_CONFIG_PATH,
+    };
     use a3s_box_guest_init::{
         attest_server, exec_server, host_config, namespace, network, port_forward, pty_server,
     };
@@ -277,55 +280,74 @@ mod linux {
         /// Parse container entrypoint configuration from environment variables.
         ///
         /// Expected environment variables:
-        /// - BOX_EXEC_EXEC: container executable path
-        /// - BOX_EXEC_ARGC: number of arguments
-        /// - BOX_EXEC_ARG_<n>: individual argument values
+        /// - BOX_EXEC_CONFIG_FILE: fixed runtime-owned JSON process configuration
         /// - BOX_EXEC_ENV_*: container environment variables
-        /// - BOX_EXEC_WORKDIR: working directory (defaults to "/")
-        fn from_env() -> Self {
-            // The runtime always sets BOX_EXEC_EXEC when guest-init is PID 1
-            // (runtime/src/vm/spec.rs), so this default is only a defensive fallback.
-            // Use /bin/sh — universal across distros — never /sbin/init, which does
-            // not exist on Alpine and was the original cause of issue #3.
-            // BOX_EXEC_* values are base64-encoded (URL-safe, no pad) by the runtime
-            // when BOX_EXEC_B64=1, so arbitrary bytes (quotes, spaces, `$`, …) survive
-            // libkrun's env serialization. Some libkrun init builds import BOX_EXEC_*
-            // values from /proc/cmdline but miss the marker; in that case, infer the
-            // encoded form from BOX_EXEC_EXEC so current runtimes still boot.
+        ///
+        /// Legacy runtimes may instead pass BOX_EXEC_EXEC, BOX_EXEC_ARGC,
+        /// BOX_EXEC_ARG_<n>, BOX_EXEC_WORKDIR, BOX_EXEC_USER, and BOX_EXEC_STDIN.
+        fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+            Self::from_env_with_staged_file_consumption(true)
+        }
+
+        fn from_env_without_consuming_staged_file() -> Result<Self, Box<dyn std::error::Error>> {
+            Self::from_env_with_staged_file_consumption(false)
+        }
+
+        fn from_env_with_staged_file_consumption(
+            consume_staged_file: bool,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            // Legacy BOX_EXEC_* values are base64-encoded (URL-safe, no pad) by
+            // the runtime when BOX_EXEC_B64=1. Some libkrun init builds import
+            // those values from /proc/cmdline but miss the marker; infer the old
+            // encoded form from BOX_EXEC_EXEC so old runtimes still boot.
             let b64 = should_decode_box_exec_values();
             let decode = |s: String| decode_box_exec_value(s, b64);
 
-            let executable = std::env::var("BOX_EXEC_EXEC")
-                .map(&decode)
-                .unwrap_or_else(|_| "/bin/sh".to_string());
-
-            // Parse args from individual env vars (BOX_EXEC_ARGC + BOX_EXEC_ARG_0..N)
-            let args: Vec<String> = match std::env::var("BOX_EXEC_ARGC")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-            {
-                Some(argc) => (0..argc)
-                    .filter_map(|i| {
-                        std::env::var(format!("BOX_EXEC_ARG_{}", i))
+            let (executable, args, workdir, user, stdin_null) =
+                match std::env::var("BOX_EXEC_CONFIG_FILE") {
+                    Ok(path) => {
+                        let staged = read_staged_exec_config(&path, consume_staged_file)?;
+                        (
+                            staged.executable,
+                            staged.args,
+                            staged.workdir,
+                            staged.user,
+                            staged.stdin_null,
+                        )
+                    }
+                    Err(std::env::VarError::NotPresent) => {
+                        let executable = std::env::var("BOX_EXEC_EXEC")
+                            .map(&decode)
+                            .unwrap_or_else(|_| "/bin/sh".to_string());
+                        let args = match std::env::var("BOX_EXEC_ARGC")
+                            .ok()
+                            .and_then(|value| value.parse::<usize>().ok())
+                        {
+                            Some(argc) => (0..argc)
+                                .filter_map(|index| {
+                                    std::env::var(format!("BOX_EXEC_ARG_{index}"))
+                                        .ok()
+                                        .map(&decode)
+                                })
+                                .collect(),
+                            None => vec![],
+                        };
+                        let workdir = std::env::var("BOX_EXEC_WORKDIR")
+                            .map(&decode)
+                            .unwrap_or_else(|_| "/".to_string());
+                        let user = std::env::var("BOX_EXEC_USER")
                             .ok()
                             .map(&decode)
-                    })
-                    .collect(),
-                None => vec![],
-            };
-
-            let workdir = std::env::var("BOX_EXEC_WORKDIR")
-                .map(&decode)
-                .unwrap_or_else(|_| "/".to_string());
-
-            // Optional container user (image USER directive or CLI --user).
-            let user = std::env::var("BOX_EXEC_USER")
-                .ok()
-                .map(&decode)
-                .filter(|u| !u.is_empty());
-            let stdin_null = std::env::var("BOX_EXEC_STDIN")
-                .map(|value| value.eq_ignore_ascii_case("null"))
-                .unwrap_or(false);
+                            .filter(|value| !value.is_empty());
+                        let stdin_null = std::env::var("BOX_EXEC_STDIN")
+                            .map(|value| value.eq_ignore_ascii_case("null"))
+                            .unwrap_or(false);
+                        (executable, args, workdir, user, stdin_null)
+                    }
+                    Err(error) => {
+                        return Err(format!("BOX_EXEC_CONFIG_FILE is invalid: {error}").into());
+                    }
+                };
 
             // Collect BOX_EXEC_ENV_* variables (values decoded as above). Skip
             // BOX_EXEC_ENV_FILE — it's the pointer to the staged env file, not a
@@ -357,15 +379,73 @@ mod linux {
                 }
             }
 
-            Self {
+            Ok(Self {
                 executable,
                 args,
                 env,
                 workdir,
                 user,
                 stdin_null,
-            }
+            })
         }
+    }
+
+    fn read_staged_exec_config(
+        path: &str,
+        consume: bool,
+    ) -> Result<GuestExecConfig, Box<dyn std::error::Error>> {
+        if path != RUNTIME_EXEC_CONFIG_PATH {
+            return Err(format!("unsupported BOX_EXEC_CONFIG_FILE path {path:?}").into());
+        }
+        let path = std::path::Path::new(path);
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "guest exec config is not a regular file: {}",
+                path.display()
+            )
+            .into());
+        }
+        if metadata.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES as u64 {
+            return Err(format!(
+                "guest exec config is {} bytes; limit is {} bytes",
+                metadata.len(),
+                MAX_RUNTIME_EXEC_CONFIG_BYTES
+            )
+            .into());
+        }
+        let bytes = std::fs::read(path)?;
+        if bytes.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES {
+            return Err(format!(
+                "guest exec config grew to {} bytes; limit is {} bytes",
+                bytes.len(),
+                MAX_RUNTIME_EXEC_CONFIG_BYTES
+            )
+            .into());
+        }
+        let config = parse_staged_exec_config(&bytes)?;
+        if consume {
+            std::fs::remove_file(path)?;
+        }
+        Ok(config)
+    }
+
+    fn parse_staged_exec_config(
+        bytes: &[u8],
+    ) -> Result<GuestExecConfig, Box<dyn std::error::Error>> {
+        if bytes.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES {
+            return Err(format!(
+                "guest exec config is {} bytes; limit is {} bytes",
+                bytes.len(),
+                MAX_RUNTIME_EXEC_CONFIG_BYTES
+            )
+            .into());
+        }
+        let config: GuestExecConfig = serde_json::from_slice(bytes)?;
+        config
+            .validate()
+            .map_err(|message| format!("invalid guest exec config: {message}"))?;
+        Ok(config)
     }
 
     fn should_decode_box_exec_values() -> bool {
@@ -647,6 +727,24 @@ mod linux {
             a3s_box_guest_init::rootfs_archive::restore_rootfs_metadata(std::path::Path::new("/"))?;
         }
 
+        // Load runtime-owned process and environment files before any user mount
+        // can cover their fixed paths. MicroVM roots are writable here, so consume
+        // the process file before a later read-only remount. An OCI runtime may
+        // mount a Sandbox root read-only before PID 1 starts, so retain that copy;
+        // runtime-internal paths are excluded from snapshots and commits.
+        let exec_config = if bootstrap_mode.is_host_sandbox() {
+            ExecConfig::from_env_without_consuming_staged_file()?
+        } else {
+            ExecConfig::from_env()?
+        };
+        info!(
+            executable = %exec_config.executable,
+            args = ?exec_config.args,
+            workdir = %exec_config.workdir,
+            env_count = exec_config.env.len(),
+            "Container entrypoint configuration loaded"
+        );
+
         if !bootstrap_mode.is_host_sandbox() {
             // The MicroVM backend owns its in-guest filesystem setup. The OCI
             // backend has already installed all of these mounts before PID 1 runs.
@@ -700,23 +798,14 @@ mod linux {
         }
 
         // Step 3.5: Remount rootfs read-only if BOX_READONLY=1.
-        // All writes to / (mount point creation, resolv.conf) must complete first.
+        // All writes to / (mount point creation, resolv.conf, staged config
+        // removal) must complete first.
         if !bootstrap_mode.is_host_sandbox() {
             remount_rootfs_readonly()?;
         }
 
         // Step 4: Register SIGTERM handler before spawning any children
         register_sigterm_handler()?;
-
-        // Step 5: Parse container entrypoint configuration from environment
-        let exec_config = ExecConfig::from_env();
-        info!(
-            executable = %exec_config.executable,
-            args = ?exec_config.args,
-            workdir = %exec_config.workdir,
-            env_count = exec_config.env.len(),
-            "Container entrypoint configuration loaded"
-        );
 
         // Step 6: Create namespace config (isolation disabled inside the MicroVM —
         // the VM boundary itself provides isolation, and unshare can interfere with
@@ -2009,6 +2098,32 @@ mod linux {
             );
             assert!(decode_box_exec_value_if_valid("/bin/sh").is_none());
             assert!(!is_plausible_exec(""));
+        }
+
+        #[test]
+        fn staged_exec_config_accepts_long_arguments_and_rejects_invalid_input() {
+            let config = GuestExecConfig::new(
+                "/bin/echo".to_string(),
+                vec!["x".repeat(4096)],
+                "/workspace".to_string(),
+                Some("1000:1000".to_string()),
+                true,
+            );
+            let bytes = serde_json::to_vec(&config).unwrap();
+            assert_eq!(parse_staged_exec_config(&bytes).unwrap(), config);
+
+            let mut wrong_schema = config;
+            wrong_schema.schema = "a3s.box.guest-exec.v2".to_string();
+            let error = parse_staged_exec_config(&serde_json::to_vec(&wrong_schema).unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("unsupported guest exec schema"), "{error}");
+
+            let oversized = vec![b' '; MAX_RUNTIME_EXEC_CONFIG_BYTES + 1];
+            let error = parse_staged_exec_config(&oversized)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("limit"), "{error}");
         }
 
         /// All sidecar env tests run sequentially in a single test to avoid

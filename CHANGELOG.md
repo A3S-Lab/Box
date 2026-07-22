@@ -28,6 +28,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Bounded guest entrypoint transport.** Workload executable, arguments,
+  working directory, user, and stdin mode are now carried in a validated,
+  size-limited rootfs file instead of libkrun's bounded guest kernel command
+  line, preventing long valid arguments from hanging WHPX boot.
+- **WHPX soak launch directory.** The Windows soak runner now enters the Cargo
+  workspace before its build phase, so the documented repository-root command
+  works without `-SkipBuild`.
 - **WHPX vCPU register access.** Hypervisor register buffers now satisfy WHPX
   alignment requirements, preventing the host-side crash seen during vCPU
   setup.

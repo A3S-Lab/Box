@@ -24,6 +24,7 @@ $tests = @(
     'real_core_lifecycle_pull_run_exec_logs_stop_rm',
     'real_core_create_start_preserves_command_override',
     'real_core_foreground_run_returns_exit_code_and_logs',
+    'real_core_long_argument_avoids_kernel_cmdline_overflow',
     'real_core_utility_commands_cp_top_stats',
     'real_core_published_port_http_smoke',
     'real_core_bind_mounts_preserve_host_paths_and_read_only_mode',
@@ -192,6 +193,7 @@ try {
             Join-Path $evidenceDirectory 'host.json'
         ) -Encoding utf8
 
+    Set-Location -LiteralPath $workspace
     if (-not $SkipBuild) {
         Invoke-LoggedNative -Label 'guest-init build' `
             -LogPath (Join-Path $evidenceDirectory 'build-guest-init.log') `
@@ -209,7 +211,6 @@ try {
     $env:A3S_BOX_SMOKE_IMAGE_TAR = $resolvedImageTar
     $env:A3S_BOX_SMOKE_TIMEOUT_SECS = $CommandTimeoutSeconds.ToString()
     $env:A3S_BOX_VIRTIOFS_TAR_TIMEOUT_SECS = $VirtiofsTimeoutSeconds.ToString()
-    Set-Location -LiteralPath $workspace
     $soakStartedAt = [DateTime]::UtcNow
 
     while ($true) {

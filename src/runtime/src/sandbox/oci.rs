@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use a3s_box_core::config::BoxConfig;
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::guest_exec::RUNTIME_EXEC_CONFIG_PATH;
 use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
 use oci_spec::runtime::{
     Arch, Capabilities, Capability, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxCpuBuilder,
@@ -792,6 +793,7 @@ fn validate_user_mount(mount: &SandboxMount) -> Result<()> {
         "/run/a3s-box",
         "/sbin/init",
         "/sys",
+        RUNTIME_EXEC_CONFIG_PATH,
         RUNTIME_ENV_PATH,
         "/.a3s_image_metadata_v1.json",
         "/.a3s_image_metadata_v1.json.tmp",
@@ -1396,6 +1398,8 @@ mod tests {
     #[test]
     fn compiler_rejects_mounts_at_or_below_metadata_temp_paths() {
         for destination in [
+            "/.a3s-box-exec.json",
+            "/.a3s-box-exec.json/child",
             "/.a3s_image_metadata_v1.json.tmp",
             "/.a3s_image_metadata_v1.json.tmp/child",
             "/.a3s_rootfs_metadata_v1.json.tmp",

@@ -81,6 +81,7 @@ the Cargo target directory.
 | Foreground and detached `run` | Validated |
 | `ps`, `logs`, `inspect`, and read-only `attach` | Validated, including separated stdout/stderr and structured JSON logs |
 | Workload exit codes | Validated for foreground and detached workloads |
+| Long workload arguments | Validated with a 4,096-byte argument staged outside the bounded guest kernel command line |
 | Graceful stop and cleanup | Validated through the guest control channel with configured signal delivery, bounded force termination, and no residual shim or forwarding worker |
 | vCPUs | Exactly one; omitting `--cpus` selects the Windows default of 1 |
 | Published TCP ports | Validated through the Windows named-pipe bridge, including sequential connections |
@@ -138,8 +139,9 @@ only one service.
 
 Run the Windows-specific soak harness from the Box repository root on an
 otherwise idle WHPX host. It builds the current guest-init and Windows binaries,
-then repeatedly exercises the supported lifecycle, logs, exit-code, stats,
-published-port, bind-mount, named-volume, commit, snapshot, and virtio-fs paths.
+then repeatedly exercises the supported lifecycle, logs, exit-code, long-argv,
+stats, published-port, bind-mount, named-volume, commit, snapshot, and virtio-fs
+paths.
 
 ```powershell
 .\scripts\windows-whpx-soak.ps1 `
@@ -159,8 +161,9 @@ failure, and any residual process details. The runner requires no active
 `a3s-box` or `a3s-box-shim` processes at startup and verifies the same invariant
 after every test.
 
-The ten-test default matrix includes POSIX ownership and mode replay through
-restart and commit. Use `-ListTests` to inspect the exact selection.
+The eleven-test default matrix includes a 4,096-byte workload argument and
+POSIX ownership and mode replay through restart and commit. Use `-ListTests` to
+inspect the exact selection.
 
 The virtio-fs case intentionally scans 2,048 files five times with cache mode
 `none`. Real WHPX validation took 373 seconds on the host described above, so

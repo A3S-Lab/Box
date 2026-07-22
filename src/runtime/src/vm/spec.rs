@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 use a3s_box_core::config::{validate_vcpu_count, TeeConfig};
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::guest_exec::{
+    GuestExecConfig, MAX_RUNTIME_EXEC_CONFIG_BYTES, RUNTIME_EXEC_CONFIG_PATH,
+};
 use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
 
 use crate::oci::OciImageConfig;
@@ -25,6 +28,26 @@ struct ParsedVolumeMount {
 /// Read an environment variable, returning `None` if unset or empty.
 fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+fn secure_guest_control_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |error| BoxError::BoxBootError {
+                message: format!(
+                    "failed to secure guest control file {}: {error}",
+                    path.display()
+                ),
+                hint: None,
+            },
+        )?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 impl VmManager {
@@ -124,20 +147,21 @@ impl VmManager {
             }
         }
 
-        // Determine whether guest init is installed (it becomes PID 1 and passes
-        // BOX_EXEC_* env vars to the container entrypoint).
+        // Determine whether guest init is installed (it becomes PID 1 and
+        // launches the container entrypoint from runtime control data).
         let guest_init_exec = Self::guest_init_exec_path(&layout.rootfs_path);
-        // When guest init is PID 1 it applies the container user to the main
-        // process itself (via BOX_EXEC_USER below); the shim must then NOT call
-        // libkrun set_uid (which would drop PID 1 and break init). Only the
-        // legacy no-guest-init path falls back to the shim's set_uid.
+        // When guest init is PID 1 it applies the staged container user to the
+        // main process itself; the shim must then NOT call libkrun set_uid
+        // (which would drop PID 1 and break init). Only the legacy
+        // no-guest-init path falls back to the shim's set_uid.
         let has_guest_init = guest_init_exec.is_some();
         let workdir = Self::effective_workdir(&self.config, layout.oci_config.as_ref());
         let user = Self::effective_user(&self.config, layout.oci_config.as_ref());
 
         // Build entrypoint
         let mut entrypoint = if let Some(guest_init_exec) = guest_init_exec {
-            // Guest init is PID 1. Pass container entrypoint/env via BOX_EXEC_* env vars.
+            // Guest init is PID 1. Pass fixed control pointers inline and stage
+            // user-controlled process and environment data in the rootfs.
             let (exec, args, mut container_env) = match &layout.oci_config {
                 Some(oci_config) => {
                     let (exec, args) = Self::resolve_oci_entrypoint(
@@ -157,21 +181,57 @@ impl VmManager {
             };
             a3s_box_core::env::merge_env_pairs(&mut container_env, &self.config.extra_env);
 
-            // Pass exec + args as individual env vars, base64-encoded (URL-safe, no
-            // padding) so arbitrary bytes — spaces, quotes, `$`, `;` — survive
-            // libkrun's env serialization intact (a raw `"` in a value was being
-            // corrupted). `BOX_EXEC_B64=1` tells guest-init to decode them.
+            // Stage process configuration in the guest rootfs instead of adding
+            // user-controlled exec/argv strings to libkrun's kernel command line.
+            // Linux truncates that command line at COMMAND_LINE_SIZE, which made
+            // sufficiently long but valid commands silently fail during WHPX boot.
+            let exec_config = GuestExecConfig::new(
+                exec,
+                args,
+                workdir.clone(),
+                user.clone(),
+                !self.config.stdin_open,
+            );
+            exec_config
+                .validate()
+                .map_err(|message| BoxError::BoxBootError {
+                    message,
+                    hint: Some("shorten the command or correct its process settings".to_string()),
+                })?;
+            let exec_config_bytes =
+                serde_json::to_vec(&exec_config).map_err(|error| BoxError::BoxBootError {
+                    message: format!("failed to serialize guest exec configuration: {error}"),
+                    hint: None,
+                })?;
+            if exec_config_bytes.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES {
+                return Err(BoxError::BoxBootError {
+                    message: format!(
+                        "guest exec configuration is {} bytes; limit is {} bytes",
+                        exec_config_bytes.len(),
+                        MAX_RUNTIME_EXEC_CONFIG_BYTES
+                    ),
+                    hint: Some("shorten the command arguments".to_string()),
+                });
+            }
+            let exec_config_host_path = crate::oci::rootfs::replace_guest_file_no_follow(
+                &layout.rootfs_path,
+                RUNTIME_EXEC_CONFIG_PATH.trim_start_matches('/'),
+                exec_config_bytes,
+            )?;
+            secure_guest_control_file(&exec_config_host_path)?;
+
+            // Container environment values remain base64-encoded in their own
+            // staged file. Keep the marker for old guest-init fallback decoding.
             use base64::Engine;
             let b64 =
                 |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
             let mut env: Vec<(String, String)> = vec![
                 ("BOX_EXEC_B64".to_string(), "1".to_string()),
-                ("BOX_EXEC_EXEC".to_string(), b64(&exec)),
-                ("BOX_EXEC_ARGC".to_string(), args.len().to_string()),
+                (
+                    "BOX_EXEC_CONFIG_FILE".to_string(),
+                    RUNTIME_EXEC_CONFIG_PATH.to_string(),
+                ),
             ];
-            for (i, arg) in args.iter().enumerate() {
-                env.push((format!("BOX_EXEC_ARG_{}", i), b64(arg)));
-            }
 
             // Prototype: deferred-main-spawn. If the host set BOX_DEFERRED_MAIN=1,
             // tell guest init to boot IDLE; the runtime then sends a spawn-main
@@ -184,21 +244,6 @@ impl VmManager {
                 env.push(("BOX_DEFERRED_MAIN".to_string(), "1".to_string()));
             }
 
-            // Pass the effective working directory to guest init so PID 1 and
-            // the container entrypoint agree even when no OCI WORKDIR is set.
-            env.push(("BOX_EXEC_WORKDIR".to_string(), b64(&workdir)));
-
-            // Pass the container user (image USER / --user) to guest init, which
-            // applies it (setgroups+setgid+setuid) to the MAIN process right
-            // before exec — after PID 1 has done its root-only setup. This must
-            // NOT go through the shim's libkrun set_uid, which would drop guest
-            // PID 1 to the user and break init (mount/chroot need root).
-            if let Some(user) = &user {
-                env.push(("BOX_EXEC_USER".to_string(), b64(user)));
-            }
-            if !self.config.stdin_open {
-                env.push(("BOX_EXEC_STDIN".to_string(), "null".to_string()));
-            }
             if let Some(cache_mode) = self
                 .config
                 .virtiofs_cache
@@ -222,23 +267,12 @@ impl VmManager {
                 .map(|(key, value)| format!("{}={}\n", key, b64(value)))
                 .collect();
             if !env_file_body.is_empty() {
-                let _host_path = crate::oci::rootfs::write_guest_file(
+                let host_path = crate::oci::rootfs::write_guest_file(
                     &layout.rootfs_path,
                     RUNTIME_ENV_PATH.trim_start_matches('/'),
                     env_file_body,
                 )?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&_host_path, std::fs::Permissions::from_mode(0o600))
-                        .map_err(|error| BoxError::BoxBootError {
-                        message: format!(
-                            "failed to secure guest env file {}: {error}",
-                            _host_path.display()
-                        ),
-                        hint: None,
-                    })?;
-                }
+                secure_guest_control_file(&host_path)?;
                 env.push((
                     "BOX_EXEC_ENV_FILE".to_string(),
                     RUNTIME_ENV_PATH.to_string(),
@@ -359,11 +393,10 @@ impl VmManager {
             #[cfg(target_os = "windows")]
             env.push(("KRUN_INIT_PID1".to_string(), "1".to_string()));
 
-            // Log only the count, never the values: `env` carries one
-            // BOX_EXEC_ENV_<KEY>=base64(value) entry per container env var, which
-            // on the CRI path includes Kubernetes secret-sourced values
-            // (secretKeyRef / envFrom). The no-guest-init branch already logs a
-            // count for the same reason.
+            // Log only the count, never values. Runtime controls can include
+            // user-supplied hostname and sidecar settings, while staged container
+            // environment may contain Kubernetes secretKeyRef/envFrom values.
+            // The no-guest-init branch logs only a count for the same reason.
             tracing::debug!(env_count = env.len(), "Using guest init as PID 1");
 
             Entrypoint {
@@ -486,8 +519,8 @@ impl VmManager {
             workdir,
             tee_config: layout.tee_instance_config.clone(),
             port_map: self.config.port_map.clone(),
-            // Guest init applies the user to the main process (BOX_EXEC_USER);
-            // only the legacy no-guest-init path uses the shim's set_uid.
+            // Guest init applies the staged user to the main process; only the
+            // legacy no-guest-init path uses the shim's set_uid.
             user: if has_guest_init { None } else { user },
             network: None, // Network config is set by CLI when --network is specified
             resource_limits: self.config.resource_limits.clone(),
@@ -858,8 +891,8 @@ mod tests {
         }
     }
 
-    /// Decode a base64 (URL-safe, no pad) `BOX_EXEC_*` value the way guest-init
-    /// does, so assertions can compare against the original raw value.
+    /// Decode a base64 (URL-safe, no pad) staged environment value the way
+    /// guest-init does, so assertions can compare against the original value.
     fn b64d(s: &str) -> String {
         use base64::Engine;
         base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -921,6 +954,11 @@ mod tests {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    fn staged_exec_config(layout: &BoxLayout) -> GuestExecConfig {
+        serde_json::from_slice(&fs::read(layout.rootfs_path.join(".a3s-box-exec.json")).unwrap())
+            .unwrap()
     }
 
     #[test]
@@ -1385,24 +1423,93 @@ mod tests {
         let spec = vm.build_instance_spec(&layout).unwrap();
 
         assert_eq!(spec.entrypoint.executable, "/sbin/init");
-        assert_eq!(
-            env_value(&spec, "BOX_EXEC_EXEC").map(b64d).as_deref(),
-            Some("/bin/sh")
-        );
-        assert_eq!(env_value(&spec, "BOX_EXEC_ARGC"), Some("2"));
-        assert_eq!(
-            env_value(&spec, "BOX_EXEC_ARG_0").map(b64d).as_deref(),
-            Some("-c")
-        );
-        assert_eq!(
-            env_value(&spec, "BOX_EXEC_ARG_1").map(b64d).as_deref(),
-            Some("sleep 3600")
-        );
+        let staged = staged_exec_config(&layout);
+        assert_eq!(staged.executable, "/bin/sh");
+        assert_eq!(staged.args, ["-c", "sleep 3600"]);
         assert!(!spec
             .entrypoint
             .env
             .iter()
             .any(|(_, value)| value.contains("No command specified")));
+    }
+
+    #[test]
+    fn test_build_instance_spec_stages_large_exec_config_off_kernel_cmdline() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), None, true);
+        let long_arg = "x".repeat(4096);
+        let mut vm = test_vm_manager(BoxConfig {
+            cmd: vec!["/bin/echo".to_string(), long_arg.clone()],
+            ..Default::default()
+        });
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(
+            env_value(&spec, "BOX_EXEC_CONFIG_FILE"),
+            Some("/.a3s-box-exec.json")
+        );
+        assert!(!spec.entrypoint.env.iter().any(|(key, _)| {
+            key == "BOX_EXEC_EXEC"
+                || key == "BOX_EXEC_ARGC"
+                || key == "BOX_EXEC_WORKDIR"
+                || key == "BOX_EXEC_USER"
+                || key == "BOX_EXEC_STDIN"
+                || key.starts_with("BOX_EXEC_ARG_")
+        }));
+
+        let staged = staged_exec_config(&layout);
+        assert_eq!(staged.schema, "a3s.box.guest-exec.v1");
+        assert_eq!(staged.executable, "/bin/echo");
+        assert_eq!(staged.args[0], long_arg);
+    }
+
+    #[test]
+    fn test_build_instance_spec_rejects_oversized_exec_config() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), None, true);
+        let mut vm = test_vm_manager(BoxConfig {
+            cmd: vec![
+                "/bin/echo".to_string(),
+                "x".repeat(MAX_RUNTIME_EXEC_CONFIG_BYTES),
+            ],
+            ..Default::default()
+        });
+
+        let error = vm.build_instance_spec(&layout).unwrap_err().to_string();
+
+        assert!(error.contains("guest exec configuration"), "{error}");
+        assert!(error.contains("limit"), "{error}");
+        assert!(!layout.rootfs_path.join(".a3s-box-exec.json").exists());
+    }
+
+    #[test]
+    fn test_build_instance_spec_replaces_exec_config_symlink_without_following_target() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), None, true);
+        let outside = dir.path().join("outside-exec-config");
+        fs::write(&outside, "unchanged").unwrap();
+        if !create_file_symlink(
+            Path::new("../outside-exec-config"),
+            &layout.rootfs_path.join(".a3s-box-exec.json"),
+        ) {
+            return;
+        }
+        let mut vm = test_vm_manager(BoxConfig {
+            cmd: vec!["/bin/echo".to_string(), "safe".to_string()],
+            ..Default::default()
+        });
+
+        vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(fs::read_to_string(outside).unwrap(), "unchanged");
+        assert!(
+            fs::symlink_metadata(layout.rootfs_path.join(".a3s-box-exec.json"))
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
+        assert_eq!(staged_exec_config(&layout).args, ["safe"]);
     }
 
     #[test]
@@ -1440,19 +1547,12 @@ mod tests {
         let spec = vm.build_instance_spec(&layout).unwrap();
 
         assert_eq!(spec.workdir, "/override");
-        // With guest init present, the user is applied by the guest (via
-        // BOX_EXEC_USER), not the shim's set_uid — so spec.user is None.
+        // With guest init present, the user is applied from the staged process
+        // config, not by the shim's set_uid, so spec.user is None.
         assert_eq!(spec.user, None);
-        assert!(spec
-            .entrypoint
-            .env
-            .iter()
-            .any(|(key, value)| key == "BOX_EXEC_USER" && b64d(value) == "1000:1000"));
-        assert!(spec
-            .entrypoint
-            .env
-            .iter()
-            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && b64d(value) == "/override"));
+        let staged = staged_exec_config(&layout);
+        assert_eq!(staged.user.as_deref(), Some("1000:1000"));
+        assert_eq!(staged.workdir, "/override");
     }
 
     #[test]
@@ -1495,16 +1595,9 @@ mod tests {
 
         assert_eq!(spec.workdir, "/oci");
         assert_eq!(spec.user, None);
-        assert!(spec
-            .entrypoint
-            .env
-            .iter()
-            .any(|(key, value)| key == "BOX_EXEC_USER" && b64d(value) == "2000:2000"));
-        assert!(spec
-            .entrypoint
-            .env
-            .iter()
-            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && b64d(value) == "/oci"));
+        let staged = staged_exec_config(&layout);
+        assert_eq!(staged.user.as_deref(), Some("2000:2000"));
+        assert_eq!(staged.workdir, "/oci");
     }
 
     #[test]
@@ -1516,11 +1609,7 @@ mod tests {
         let spec = vm.build_instance_spec(&layout).unwrap();
 
         assert_eq!(spec.workdir, GUEST_WORKDIR);
-        assert!(spec
-            .entrypoint
-            .env
-            .iter()
-            .any(|(key, value)| key == "BOX_EXEC_WORKDIR" && b64d(value) == GUEST_WORKDIR));
+        assert_eq!(staged_exec_config(&layout).workdir, GUEST_WORKDIR);
     }
 
     #[test]
@@ -1536,20 +1625,11 @@ mod tests {
             ..Default::default()
         });
 
-        let spec = vm.build_instance_spec(&layout).unwrap();
+        vm.build_instance_spec(&layout).unwrap();
 
-        assert_eq!(
-            env_value(&spec, "BOX_EXEC_EXEC").map(b64d),
-            Some("/bin/sh".to_string())
-        );
-        assert_eq!(
-            env_value(&spec, "BOX_EXEC_ARG_0").map(b64d),
-            Some("-c".to_string())
-        );
-        assert_eq!(
-            env_value(&spec, "BOX_EXEC_ARG_1").map(b64d),
-            Some("printf snapshot-restored".to_string())
-        );
+        let staged = staged_exec_config(&layout);
+        assert_eq!(staged.executable, "/bin/sh");
+        assert_eq!(staged.args, ["-c", "printf snapshot-restored"]);
     }
 
     #[test]

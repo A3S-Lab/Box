@@ -6,6 +6,9 @@ use std::path::{Component, Path, PathBuf};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::BoxEvent;
 use a3s_box_core::execution::ResolvedExecutionPlan;
+use a3s_box_core::guest_exec::{
+    GuestExecConfig, MAX_RUNTIME_EXEC_CONFIG_BYTES, RUNTIME_EXEC_CONFIG_PATH,
+};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
@@ -110,12 +113,9 @@ impl VmManager {
             if !matches!(
                 instance_spec.entrypoint.executable.as_str(),
                 "/sbin/init" | "/usr/sbin/init"
-            ) || !instance_spec
-                .entrypoint
-                .env
-                .iter()
-                .any(|(key, _)| key == "BOX_EXEC_EXEC")
-            {
+            ) || !instance_spec.entrypoint.env.iter().any(|(key, value)| {
+                key == "BOX_EXEC_CONFIG_FILE" && value == RUNTIME_EXEC_CONFIG_PATH
+            }) {
                 return Err(BoxError::BoxBootError {
                     message: "Sandbox requires the packaged a3s-box guest init as OCI PID 1"
                         .to_string(),
@@ -131,7 +131,8 @@ impl VmManager {
                 layout.prefer_image_rootfs_metadata,
             )?;
             let (account_uid, account_gid) = maximum_account_ids(&layout.rootfs_path)?;
-            let (process_uid, process_gid) = maximum_process_ids(&instance_spec.entrypoint.env)?;
+            let (process_uid, process_gid) =
+                maximum_process_ids(&layout.rootfs_path, &instance_spec.entrypoint.env)?;
             let maximum_uid = rootfs_ids.maximum_uid.max(account_uid).max(process_uid);
             let maximum_gid = rootfs_ids.maximum_gid.max(account_gid).max(process_gid);
             let id_mappings = plan_id_mappings(user_namespace, maximum_uid, maximum_gid)?;
@@ -619,18 +620,64 @@ fn maximum_account_ids(rootfs: &Path) -> Result<(u32, u32)> {
     Ok((maximum_uid, maximum_gid))
 }
 
-fn maximum_process_ids(environment: &[(String, String)]) -> Result<(u32, u32)> {
-    let Some(encoded) = environment
+fn maximum_process_ids(rootfs: &Path, environment: &[(String, String)]) -> Result<(u32, u32)> {
+    let user = if let Some(path) = environment
+        .iter()
+        .find_map(|(key, value)| (key == "BOX_EXEC_CONFIG_FILE").then_some(value.as_str()))
+    {
+        if path != RUNTIME_EXEC_CONFIG_PATH {
+            return Err(BoxError::ConfigError(format!(
+                "Unsupported Sandbox guest exec config path {path:?}"
+            )));
+        }
+        let host_path = rootfs.join(RUNTIME_EXEC_CONFIG_PATH.trim_start_matches('/'));
+        let metadata = std::fs::symlink_metadata(&host_path).map_err(BoxError::IoError)?;
+        if !metadata.file_type().is_file() {
+            return Err(BoxError::ConfigError(format!(
+                "Sandbox guest exec config is not a regular file: {}",
+                host_path.display()
+            )));
+        }
+        if metadata.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES as u64 {
+            return Err(BoxError::ConfigError(format!(
+                "Sandbox guest exec config is {} bytes; limit is {} bytes",
+                metadata.len(),
+                MAX_RUNTIME_EXEC_CONFIG_BYTES
+            )));
+        }
+        let bytes = std::fs::read(&host_path).map_err(BoxError::IoError)?;
+        if bytes.len() > MAX_RUNTIME_EXEC_CONFIG_BYTES {
+            return Err(BoxError::ConfigError(format!(
+                "Sandbox guest exec config grew to {} bytes; limit is {} bytes",
+                bytes.len(),
+                MAX_RUNTIME_EXEC_CONFIG_BYTES
+            )));
+        }
+        let config: GuestExecConfig = serde_json::from_slice(&bytes).map_err(|error| {
+            BoxError::ConfigError(format!("Invalid Sandbox guest exec config: {error}"))
+        })?;
+        config.validate().map_err(|error| {
+            BoxError::ConfigError(format!("Invalid Sandbox guest exec config: {error}"))
+        })?;
+        config.user
+    } else if let Some(encoded) = environment
         .iter()
         .find_map(|(key, value)| (key == "BOX_EXEC_USER").then_some(value))
-    else {
+    {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|error| {
+                BoxError::ConfigError(format!("Invalid encoded Sandbox user: {error}"))
+            })?;
+        Some(String::from_utf8(bytes).map_err(|error| {
+            BoxError::ConfigError(format!("Sandbox user is not UTF-8: {error}"))
+        })?)
+    } else {
+        None
+    };
+    let Some(user) = user.as_deref() else {
         return Ok((0, 0));
     };
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|error| BoxError::ConfigError(format!("Invalid encoded Sandbox user: {error}")))?;
-    let user = String::from_utf8(bytes)
-        .map_err(|error| BoxError::ConfigError(format!("Sandbox user is not UTF-8: {error}")))?;
     let mut parts = user.split(':');
     let parse_numeric = |value: &str| -> Result<u32> {
         if value == "root" {
@@ -693,6 +740,32 @@ mod tests {
         assert!(parse_sandbox_tmpfs("/scratch:exec").is_err());
         assert!(normalized_container_path("relative", "test path").is_err());
         assert!(normalized_container_path("/work/../escape", "test path").is_err());
+    }
+
+    #[test]
+    fn staged_exec_config_contributes_sandbox_process_ids() {
+        let rootfs = tempfile::tempdir().unwrap();
+        let config = GuestExecConfig::new(
+            "/bin/true".to_string(),
+            vec![],
+            "/".to_string(),
+            Some("1234:5678".to_string()),
+            false,
+        );
+        std::fs::write(
+            rootfs.path().join(".a3s-box-exec.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let environment = vec![(
+            "BOX_EXEC_CONFIG_FILE".to_string(),
+            RUNTIME_EXEC_CONFIG_PATH.to_string(),
+        )];
+
+        assert_eq!(
+            maximum_process_ids(rootfs.path(), &environment).unwrap(),
+            (1234, 5678)
+        );
     }
 
     #[cfg(unix)]
