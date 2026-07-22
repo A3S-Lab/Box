@@ -17,6 +17,8 @@
 //! - `A3S_BOX_TEST_ALPINE_TAR`: fallback OCI archive path shared with host smoke coverage
 //! - `A3S_BOX_SMOKE_SKIP_PULL=1`: skip the explicit `pull` step for cached images
 //! - `A3S_BOX_SMOKE_TIMEOUT_SECS`: command and polling timeout (default: 300)
+//! - `A3S_BOX_VIRTIOFS_TAR_TIMEOUT_SECS`: Windows timeout for the high-intensity
+//!   virtio-fs tar test (default: 900; never shorter than the general timeout)
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -195,7 +197,13 @@ impl CoreSmoke {
     }
 
     fn ok(&self, args: &[&str]) -> String {
-        let result = self.output(args);
+        self.ok_with_timeout(args, self.timeout)
+    }
+
+    fn ok_with_timeout(&self, args: &[&str], timeout: Duration) -> String {
+        let result = self
+            .try_output(args, timeout)
+            .unwrap_or_else(|error| panic!("{error}"));
         assert!(
             result.success,
             "`a3s-box {}` failed\nstdout:\n{}\nstderr:\n{}",
@@ -1206,9 +1214,22 @@ fn real_core_virtiofs_tar_closes_every_source_file_cleanly() {
     let mount = format!("{}:/source:ro", source.path().display());
 
     seed_smoke_image(&smoke, &image);
-    smoke.ok(&[
+    #[cfg(target_os = "windows")]
+    let tar_timeout = smoke.timeout.max(Duration::from_secs(
+        std::env::var("A3S_BOX_VIRTIOFS_TAR_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|seconds| *seconds > 0)
+            .unwrap_or(900),
+    ));
+    #[cfg(not(target_os = "windows"))]
+    let tar_timeout = smoke.timeout;
+
+    let output = smoke.ok_with_timeout(&[
         "run",
         "--rm",
+        "--name",
+        &smoke.name,
         "--virtiofs-cache=none",
         "-v",
         &mount,
@@ -1218,8 +1239,9 @@ fn real_core_virtiofs_tar_closes_every_source_file_cleanly() {
         "--",
         "/bin/sh",
         "-c",
-        "set -eu; for pass in 1 2 3 4 5; do tar -cf /dev/null .; done",
-    ]);
+        "set -eu; for pass in 1 2 3 4 5; do tar -cf /dev/null .; echo virtiofs-tar-pass-$pass; done",
+    ], tar_timeout);
+    assert_contains(&output, "virtiofs-tar-pass-5", "virtiofs tar output");
 }
 
 #[test]
@@ -1278,7 +1300,7 @@ fn real_core_bind_mounts_preserve_host_paths_and_read_only_mode() {
 
 #[test]
 #[ignore]
-fn real_core_named_volume_persists_across_stop_start() {
+fn real_core_named_volume_persists_across_stop_restart() {
     let smoke = CoreSmoke::new();
     let image = smoke_image();
     let volume = format!("{}-data", smoke.name);
@@ -1333,6 +1355,14 @@ fn real_core_named_volume_persists_across_stop_start() {
     let volume_after_stop = smoke.ok(&["volume", "ls", "--quiet"]);
     assert_contains(&volume_after_stop, &volume, "volume ls after stop");
 
+    #[cfg(target_os = "windows")]
+    {
+        // A stopped managed execution is terminal for its current generation.
+        // Restart advances the generation while retaining the named-volume
+        // attachment that this test is exercising.
+        smoke.ok(&["restart", &smoke.name]);
+    }
+    #[cfg(not(target_os = "windows"))]
     smoke.ok(&["start", &smoke.name]);
     smoke.wait_for_running();
 
@@ -1756,14 +1786,41 @@ fn real_core_commit_preserves_guest_ownership_and_modes_after_stop() {
         "--",
         "/bin/sh",
         "-c",
-        "cp /bin/busybox /tmp/root-exec; chmod 0755 /tmp/root-exec; \
-         cp /bin/busybox /tmp/user-exec; chown 123:456 /tmp/user-exec; chmod 0750 /tmp/user-exec; \
-         printf config >/tmp/config; chmod 0644 /tmp/config; \
-         printf secret >/tmp/secret; chmod 0600 /tmp/secret; \
-         mkdir /tmp/mode-dir; chmod 0711 /tmp/mode-dir; \
-         ln -s root-exec /tmp/root-link",
+        "if [ -f /tmp/g ]; then \
+             actual=\"$(stat -c '%u:%g:%a' /tmp/re /tmp/ue /tmp/c /tmp/s /tmp/d /tmp/uf /tmp/ud)\"; \
+             expected='0:0:755
+123:456:750
+0:0:644
+0:0:600
+0:0:711
+0:0:640
+0:0:750'; \
+             test \"$actual\" = \"$expected\"; test \"$(readlink /tmp/l)\" = re; \
+             echo core-smoke-metadata-restart-ok; \
+             sleep 3600; \
+         else \
+             cp /bin/busybox /tmp/re; chmod 0755 /tmp/re; \
+             cp /bin/busybox /tmp/ue; chown 123:456 /tmp/ue; chmod 0750 /tmp/ue; \
+             printf c >/tmp/c; printf s >/tmp/s; chmod 0600 /tmp/s; \
+             mkdir /tmp/d; chmod 0711 /tmp/d; \
+             (umask 027; printf u >/tmp/uf; mkdir /tmp/ud); \
+             ln -s re /tmp/l; : >/tmp/g; \
+         fi",
     ]);
     smoke.wait_for_named_status(&smoke.name, "stopped");
+
+    #[cfg(target_os = "windows")]
+    {
+        smoke.ok(&["restart", &smoke.name]);
+        let logs = smoke.wait_for_named_logs(&smoke.name, "core-smoke-metadata-restart-ok");
+        assert_contains(
+            &logs,
+            "core-smoke-metadata-restart-ok",
+            "POSIX metadata restart logs",
+        );
+        smoke.ok(&["stop", &smoke.name]);
+        smoke.wait_for_named_status(&smoke.name, "stopped");
+    }
 
     smoke.ok(&["commit", &smoke.name, &committed_image]);
     let output = smoke.ok(&[
@@ -1773,8 +1830,8 @@ fn real_core_commit_preserves_guest_ownership_and_modes_after_stop() {
         "--",
         "/bin/sh",
         "-c",
-        "stat -c '%u:%g:%a' /tmp/root-exec /tmp/user-exec /tmp/config /tmp/secret /tmp/mode-dir; \
-         test -x /tmp/root-exec; test \"$(readlink /tmp/root-link)\" = root-exec",
+        "stat -c '%u:%g:%a' /tmp/re /tmp/ue /tmp/c /tmp/s /tmp/d /tmp/uf /tmp/ud; \
+         test -x /tmp/re; test \"$(readlink /tmp/l)\" = re",
     ]);
 
     let lines: Vec<_> = output
@@ -1788,7 +1845,15 @@ fn real_core_commit_preserves_guest_ownership_and_modes_after_stop() {
         .collect();
     assert_eq!(
         lines,
-        ["0:0:755", "123:456:750", "0:0:644", "0:0:600", "0:0:711"]
+        [
+            "0:0:755",
+            "123:456:750",
+            "0:0:644",
+            "0:0:600",
+            "0:0:711",
+            "0:0:640",
+            "0:0:750"
+        ]
     );
 }
 
