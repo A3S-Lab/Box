@@ -414,9 +414,10 @@ boundaries. Run it on an otherwise idle host:
   -DurationSeconds 7200
 ```
 
-The ten-test default matrix contains only Windows-supported real tests,
-including POSIX ownership and mode replay through restart and commit, and keeps
-the full 2,048-file, five-pass virtio-fs stress. It writes per-test logs plus a
+The eleven-test default matrix contains only Windows-supported real tests,
+including a 4,096-byte workload argument, POSIX ownership and mode replay
+through restart and commit, and the full 2,048-file, five-pass virtio-fs stress.
+It writes per-test logs plus a
 machine-readable `summary.json` beneath `src/target/a3s-box-whpx-soak/` and
 fails if any test leaves an A3S Box CLI, VM shim, or forwarding worker alive.
 Use `-ListTests` to inspect the matrix. `-SkipBuild` is intended only when the

@@ -1043,6 +1043,36 @@ fn real_core_foreground_run_returns_exit_code_and_logs() {
 
 #[test]
 #[ignore]
+fn real_core_long_argument_avoids_kernel_cmdline_overflow() {
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+
+    seed_smoke_image(&smoke, &image);
+
+    let long_argument = "x".repeat(4096);
+    let output = smoke.ok(&[
+        "run",
+        "--rm",
+        "--name",
+        &smoke.name,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "test \"${#1}\" -eq 4096; case \"$1\" in *[!x]*) exit 41;; esac; printf 'core-smoke-long-argv-ok:%s\\n' \"${#1}\"",
+        "a3s-long-argv",
+        &long_argument,
+    ]);
+
+    assert_contains(
+        &output,
+        "core-smoke-long-argv-ok:4096",
+        "long argv foreground output",
+    );
+}
+
+#[test]
+#[ignore]
 fn real_core_utility_commands_cp_top_stats() {
     let smoke = CoreSmoke::new();
     let image = smoke_image();

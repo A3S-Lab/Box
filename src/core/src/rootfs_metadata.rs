@@ -4,6 +4,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::guest_exec::RUNTIME_EXEC_CONFIG_PATH;
+
 /// Location written inside a persistent rootfs before guest shutdown.
 pub const ROOTFS_METADATA_PATH: &str = "/.a3s_rootfs_metadata_v1.json";
 /// Temporary sibling used while publishing terminal metadata atomically.
@@ -43,6 +45,15 @@ pub fn is_runtime_internal_rootfs_path(path: &Path) -> bool {
     let Some(name) = name.and_then(|name| name.to_str()) else {
         return false;
     };
+    let exec_config_name = RUNTIME_EXEC_CONFIG_PATH.trim_start_matches('/');
+    #[cfg(windows)]
+    if name.eq_ignore_ascii_case(exec_config_name) {
+        return true;
+    }
+    #[cfg(not(windows))]
+    if name == exec_config_name {
+        return true;
+    }
     const INTERNAL: &[&str] = &[
         ".a3s_rootfs_metadata_v1.json",
         ".a3s_rootfs_metadata_v1.json.tmp",
@@ -315,6 +326,7 @@ pub fn runtime_managed_rootfs_mode(path: &Path) -> Option<u32> {
         Some("etc/hostname" | "etc/hosts" | "etc/resolv.conf") => Some(0o644),
         Some("sbin/init" | "usr/sbin/init") => Some(0o755),
         Some(".a3s-box-env") => Some(0o600),
+        Some(path) if path == RUNTIME_EXEC_CONFIG_PATH.trim_start_matches('/') => Some(0o600),
         _ => None,
     }
 }
@@ -384,6 +396,10 @@ mod tests {
             runtime_managed_rootfs_mode(Path::new(".a3s-box-env")),
             Some(0o600)
         );
+        assert_eq!(
+            runtime_managed_rootfs_mode(Path::new(".a3s-box-exec.json")),
+            Some(0o600)
+        );
         assert_eq!(runtime_managed_rootfs_mode(Path::new("etc/passwd")), None);
     }
 
@@ -394,6 +410,7 @@ mod tests {
             ".a3s_rootfs_metadata_v1.json.tmp",
             ".a3s_exit_code",
             ".a3s_host_live_logs_drained",
+            ".a3s-box-exec.json",
             "guest-init.stdout.log",
             "init-rust.log",
             "init.krun.log",
