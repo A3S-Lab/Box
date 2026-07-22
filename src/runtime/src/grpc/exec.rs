@@ -282,7 +282,7 @@ impl ExecClient {
 
     /// Transfer a file to/from the guest.
     ///
-    /// Sends a Data frame with JSON FileRequest, reads a Data frame with JSON FileResponse.
+    /// Sends a discriminated JSON file request and reads a JSON FileResponse.
     pub async fn file_transfer(
         &self,
         request: &a3s_box_core::exec::FileRequest,
@@ -296,7 +296,7 @@ impl ExecClient {
         mut stream: UnixStream,
         request: &a3s_box_core::exec::FileRequest,
     ) -> Result<a3s_box_core::exec::FileResponse> {
-        let payload = serde_json::to_vec(request)
+        let payload = serde_json::to_vec(&a3s_box_core::GuestSessionRequest::File(request.clone()))
             .map_err(|e| BoxError::ExecError(format!("Failed to serialize file request: {}", e)))?;
 
         let request_frame = a3s_transport::Frame::data(payload);
@@ -826,6 +826,61 @@ mod tests {
         };
         let result = client.heartbeat().await.unwrap();
         assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn file_transfer_uses_the_discriminated_guest_request() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("file_transfer.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            // ExecClient::connect performs one reachability connection first.
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, write) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(read);
+            let mut writer = a3s_transport::FrameWriter::new(write);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            let request: a3s_box_core::GuestSessionRequest =
+                serde_json::from_slice(&frame.payload).unwrap();
+            match request {
+                a3s_box_core::GuestSessionRequest::File(request) => {
+                    assert_eq!(request.op, a3s_box_core::FileOp::Upload);
+                    assert_eq!(request.guest_path, "~/data.bin");
+                    assert_eq!(request.data.as_deref(), Some("AAEC"));
+                    assert_eq!(request.user.as_deref(), Some("user"));
+                }
+            }
+            writer
+                .write_data(
+                    &serde_json::to_vec(&a3s_box_core::FileResponse {
+                        success: true,
+                        data: None,
+                        size: 3,
+                        error: None,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let response = client
+            .file_transfer(&a3s_box_core::FileRequest {
+                op: a3s_box_core::FileOp::Upload,
+                guest_path: "~/data.bin".to_string(),
+                data: Some("AAEC".to_string()),
+                user: Some("user".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(response.success);
+        assert_eq!(response.size, 3);
     }
 
     #[tokio::test]

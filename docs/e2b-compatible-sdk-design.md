@@ -572,6 +572,14 @@ substitute for the missing historical configuration.
 
 ## Filesystem compatibility
 
+Broker-mode MicroVMs now translate binary `GET /files`, raw octet-stream
+upload, and multi-file multipart upload through the generation-fenced
+`ExecutionSessionManager`. A discriminated guest-session envelope separates
+file requests from legacy bare JSON exec requests. Transfers are currently
+bounded to 11 MiB per file; Broker-side Filesystem Protobuf procedures,
+metadata/xattrs, compression, ranges, signed URLs, and large-file streaming
+remain explicit gaps.
+
 The production-tested Filesystem subset implements remove, make directory,
 write, read, stat, list, rename, exists, and cleanup. Official and A3S Python
 sync/async and TypeScript clients exercise those operations through wildcard

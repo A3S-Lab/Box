@@ -145,3 +145,9 @@ signed files, historical metrics, MCP, signals outside the pinned contract, reco
 backpressure, multi-file and large-file behavior, deeper Snapshot and Volume
 failure/recovery cases, and other pinned edge cases remain outside the matrix,
 so `full_compatibility=false` remains mandatory.
+
+Broker-mode MicroVMs additionally support generation-fenced binary
+`GET /files`, raw octet-stream upload, and multi-file multipart upload through
+the guest session transport. The 11 MiB per-file bound, missing Filesystem
+Protobuf procedures, metadata/xattrs, compression, ranges, signed URLs, and
+large-file streaming keep `full_compatibility=false` mandatory.

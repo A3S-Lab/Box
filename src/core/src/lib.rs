@@ -40,7 +40,7 @@ pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
 pub use exec::{ExecChunk, ExecEvent, ExecExit, ExecMetrics, StreamType};
 pub use exec::{ExecOutput, ExecRequest};
-pub use exec::{FileOp, FileRequest, FileResponse};
+pub use exec::{FileOp, FileRequest, FileResponse, GuestSessionRequest};
 pub use exec::{EXEC_VSOCK_PORT, PORT_FWD_VSOCK_PORT};
 pub use execution::{
     resolve_execution, validate_microvm_compatibility, validate_sandbox_compatibility,

@@ -163,6 +163,9 @@ pub struct FileRequest {
     /// File content (for upload only, base64-encoded).
     #[serde(default)]
     pub data: Option<String>,
+    /// User that owns newly created files and parent directories.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// File transfer operation type.
@@ -188,6 +191,18 @@ pub struct FileResponse {
     /// Error message if the operation failed.
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// Versioned non-exec request sent over the guest execution session.
+///
+/// Exec requests predate this envelope and remain bare JSON for wire
+/// compatibility. File requests use an explicit discriminator so the guest
+/// never attempts to deserialize them as commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "request_type", content = "request", rename_all = "snake_case")]
+pub enum GuestSessionRequest {
+    /// Upload or download one file.
+    File(FileRequest),
 }
 
 #[cfg(test)]
@@ -513,6 +528,7 @@ mod tests {
             op: FileOp::Upload,
             guest_path: "/tmp/test.txt".to_string(),
             data: Some("aGVsbG8=".to_string()),
+            user: Some("1000:1000".to_string()),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: FileRequest = serde_json::from_str(&json).unwrap();
@@ -527,6 +543,7 @@ mod tests {
             op: FileOp::Download,
             guest_path: "/etc/hostname".to_string(),
             data: None,
+            user: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: FileRequest = serde_json::from_str(&json).unwrap();
@@ -561,6 +578,22 @@ mod tests {
         let parsed: FileResponse = serde_json::from_str(&json).unwrap();
         assert!(!parsed.success);
         assert_eq!(parsed.error.as_deref(), Some("file not found"));
+    }
+
+    #[test]
+    fn file_session_request_has_an_unambiguous_wire_discriminator() {
+        let request = GuestSessionRequest::File(FileRequest {
+            op: FileOp::Download,
+            guest_path: "/tmp/data.bin".to_string(),
+            data: None,
+            user: None,
+        });
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["request_type"], "file");
+        assert_eq!(value["request"]["op"], "Download");
+        assert_eq!(value["request"]["guest_path"], "/tmp/data.bin");
+        assert!(serde_json::from_value::<GuestSessionRequest>(value).is_ok());
     }
 
     #[test]

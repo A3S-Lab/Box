@@ -1,24 +1,28 @@
 //! Guest exec server for executing commands inside the VM.
 //!
 //! Listens on vsock port 4089 and accepts Frame-based requests.
-//! Each connection: read a Data frame (JSON ExecRequest), execute,
-//! then send either a one-shot `ExecOutput` or streaming chunk/exit frames.
+//! Each connection reads either a legacy bare JSON `ExecRequest` or a
+//! discriminated guest-session request such as file transfer, then sends the
+//! corresponding framed response.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::io::Write;
-#[cfg(target_os = "linux")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(any(target_os = "linux", test))]
+use a3s_box_core::exec::GuestSessionRequest;
 use a3s_box_core::exec::{
-    ExecChunk, ExecExit, ExecOutput, ExecRequest, StreamType, DEFAULT_EXEC_TIMEOUT_NS,
-    EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES,
+    ExecChunk, ExecExit, ExecOutput, ExecRequest, FileOp, FileRequest, FileResponse, StreamType,
+    DEFAULT_EXEC_TIMEOUT_NS, EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES,
 };
 use a3s_transport::{FrameType, MAX_PAYLOAD_SIZE};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
@@ -757,6 +761,22 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
 
     debug!("Exec request received ({} bytes)", payload.len());
 
+    match serde_json::from_slice::<GuestSessionRequest>(&payload) {
+        Ok(GuestSessionRequest::File(request)) => {
+            let response_payload = serde_json::to_vec(&handle_file_request(request))?;
+            write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
+            return Ok(());
+        }
+        Err(error) if declares_guest_session_request(&payload) => {
+            send_error_frame(
+                &mut stream,
+                &format!("Invalid guest session request: {error}"),
+            )?;
+            return Ok(());
+        }
+        Err(_) => {}
+    }
+
     // Parse ExecRequest from JSON payload
     let exec_req: ExecRequest = match serde_json::from_slice(&payload) {
         Ok(req) => req,
@@ -854,6 +874,176 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
         write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
     }
 
+    Ok(())
+}
+
+fn declares_guest_session_request(payload: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| value.get("request_type").cloned())
+        .is_some()
+}
+
+fn handle_file_request(request: FileRequest) -> FileResponse {
+    let result = (|| {
+        let (owner, home) = resolve_file_owner(request.user.as_deref())?;
+        let path = resolve_file_path(&request.guest_path, &home)?;
+        match request.op {
+            FileOp::Upload => {
+                let encoded = request
+                    .data
+                    .as_deref()
+                    .ok_or_else(|| "upload request is missing base64 data".to_string())?;
+                let data = STANDARD
+                    .decode(encoded)
+                    .map_err(|error| format!("upload data is not valid base64: {error}"))?;
+                let parent = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .ok_or_else(|| "upload path has no parent directory".to_string())?;
+                ensure_file_directories(parent, owner)?;
+                if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                    return Err(format!("path is a directory: {}", path.display()));
+                }
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&path)
+                    .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+                file.write_all(&data)
+                    .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+                chown_file_path(&path, owner)
+                    .map_err(|error| format!("failed to set ownership: {error}"))?;
+                Ok(FileResponse {
+                    success: true,
+                    data: None,
+                    size: data.len() as u64,
+                    error: None,
+                })
+            }
+            FileOp::Download => {
+                let metadata = std::fs::metadata(&path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        format!("file not found: {}", path.display())
+                    } else {
+                        format!("failed to stat {}: {error}", path.display())
+                    }
+                })?;
+                if metadata.is_dir() {
+                    return Err(format!("path is a directory: {}", path.display()));
+                }
+                let data = std::fs::read(&path)
+                    .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+                Ok(FileResponse {
+                    success: true,
+                    data: Some(STANDARD.encode(&data)),
+                    size: data.len() as u64,
+                    error: None,
+                })
+            }
+        }
+    })();
+
+    result.unwrap_or_else(|error| FileResponse {
+        success: false,
+        data: None,
+        size: 0,
+        error: Some(error),
+    })
+}
+
+fn resolve_file_owner(user: Option<&str>) -> Result<(Option<ProcessUser>, PathBuf), String> {
+    let Some(user) = user else {
+        return Ok((None, PathBuf::from("/root")));
+    };
+    let resolved = crate::user::resolve_named_user(user, "/");
+    let mut owner = parse_process_user(resolved.as_deref().or(Some(user)))?
+        .ok_or_else(|| "file user is required".to_string())?;
+    if owner.gid.is_none() {
+        owner.gid = crate::user::primary_gid_for_uid("/", owner.uid);
+    }
+    let home = crate::user::home_dir_for_uid("/", owner.uid)
+        .or_else(|| (owner.uid == 0).then(|| "/root".to_string()))
+        .ok_or_else(|| format!("user {user:?} has no valid home directory"))?;
+    Ok((Some(owner), PathBuf::from(home)))
+}
+
+fn resolve_file_path(path: &str, home: &Path) -> Result<PathBuf, String> {
+    if path.contains('\0') {
+        return Err("file path contains NUL".to_string());
+    }
+    if path.is_empty() || path == "~" {
+        return Ok(home.to_path_buf());
+    }
+    if let Some(relative) = path.strip_prefix("~/") {
+        return Ok(home.join(relative));
+    }
+    if path.starts_with('~') {
+        return Err("user-specific home expansion is not supported".to_string());
+    }
+    let path = Path::new(path);
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(home.join(path))
+    }
+}
+
+fn ensure_file_directories(path: &Path, owner: Option<ProcessUser>) -> Result<(), String> {
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        cursor = cursor
+            .parent()
+            .ok_or_else(|| format!("directory has no existing ancestor: {}", path.display()))?;
+    }
+    if !cursor.is_dir() {
+        return Err(format!("path is a file: {}", cursor.display()));
+    }
+    for directory in missing.iter().rev() {
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !directory.is_dir() {
+                    return Err(format!("path is a file: {}", directory.display()));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to create directory {}: {error}",
+                    directory.display()
+                ))
+            }
+        }
+        chown_file_path(directory, owner)
+            .map_err(|error| format!("failed to set directory ownership: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn chown_file_path(path: &Path, owner: Option<ProcessUser>) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(owner) = owner else {
+        return Ok(());
+    };
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let gid = owner.gid.unwrap_or(owner.uid);
+    let result = unsafe { libc::chown(path.as_ptr(), owner.uid, gid) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn chown_file_path(_path: &Path, _owner: Option<ProcessUser>) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -2976,6 +3166,83 @@ mod tests {
         let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
         let result = read_frame(&mut cursor).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn file_session_upload_and_download_round_trip_binary_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested/data.bin");
+        let data = vec![0, 0xff, b'a', 0];
+
+        let uploaded = handle_file_request(FileRequest {
+            op: FileOp::Upload,
+            guest_path: path.to_string_lossy().into_owned(),
+            data: Some(STANDARD.encode(&data)),
+            user: None,
+        });
+        assert!(uploaded.success, "{:?}", uploaded.error);
+        assert_eq!(uploaded.size, data.len() as u64);
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+
+        let downloaded = handle_file_request(FileRequest {
+            op: FileOp::Download,
+            guest_path: path.to_string_lossy().into_owned(),
+            data: None,
+            user: None,
+        });
+        assert!(downloaded.success, "{:?}", downloaded.error);
+        assert_eq!(downloaded.size, data.len() as u64);
+        assert_eq!(STANDARD.decode(downloaded.data.unwrap()).unwrap(), data);
+    }
+
+    #[test]
+    fn file_session_returns_bounded_errors_instead_of_parsing_as_exec() {
+        let invalid = handle_file_request(FileRequest {
+            op: FileOp::Upload,
+            guest_path: "/tmp/never-written".to_string(),
+            data: Some("not-base64!".to_string()),
+            user: None,
+        });
+        assert!(!invalid.success);
+        assert!(invalid.error.unwrap().contains("valid base64"));
+
+        let missing = handle_file_request(FileRequest {
+            op: FileOp::Download,
+            guest_path: "/path/that/does/not/exist".to_string(),
+            data: None,
+            user: None,
+        });
+        assert!(!missing.success);
+        assert!(missing.error.unwrap().contains("file not found"));
+
+        let envelope = serde_json::to_vec(&GuestSessionRequest::File(FileRequest {
+            op: FileOp::Download,
+            guest_path: "/tmp/data".to_string(),
+            data: None,
+            user: None,
+        }))
+        .unwrap();
+        assert!(declares_guest_session_request(&envelope));
+        assert!(serde_json::from_slice::<ExecRequest>(&envelope).is_err());
+    }
+
+    #[test]
+    fn file_paths_use_the_selected_users_home_without_host_path_rules() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            resolve_file_path("data/file", home).unwrap(),
+            home.join("data/file")
+        );
+        assert_eq!(
+            resolve_file_path("~/data", home).unwrap(),
+            home.join("data")
+        );
+        assert_eq!(
+            resolve_file_path("/tmp/data", home).unwrap(),
+            Path::new("/tmp/data")
+        );
+        assert!(resolve_file_path("~other/data", home).is_err());
+        assert!(resolve_file_path("bad\0path", home).is_err());
     }
 
     #[test]
