@@ -31,7 +31,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-a3s-libkrun-sys = "0.1.5"
+a3s-libkrun-sys = "3"
 ```
 
 ### Windows Requirements
@@ -165,13 +165,24 @@ cargo run --example nginx_test --target x86_64-pc-windows-msvc
 
 ### Linux and macOS
 
-The build script compiles the vendored libkrun automatically when a compatible
-system or cached library is unavailable. Because libkrun invokes Cargo from
-inside the outer Cargo build, the nested process uses a target-local Cargo home
-next to the build outputs. That location is deliberately not configurable:
-Cargo does not reliably expose the outer `CARGO_HOME` to build scripts, so an
-override could accidentally reuse the package-cache lock and restore the
-deadlock this isolation prevents.
+The build script compiles libkrun automatically when a compatible system or
+cached library is unavailable. A recursive repository checkout uses the
+`vendor/libkrun` submodule directly. Because Cargo does not package submodule
+contents, the crates.io archive instead carries a deterministic,
+checksum-verified `vendor/libkrun-source.tar` and extracts it under `OUT_DIR`.
+Regenerate and verify that archive after changing the submodule with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-source.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-source.ps1 -Check
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-windows.ps1 -Check
+```
+
+Because libkrun invokes Cargo from inside the outer Cargo build, the nested
+process uses a target-local Cargo home next to the build outputs. That location
+is deliberately not configurable: reusing the outer package-cache lock can
+deadlock the nested build.
 
 ### Windows
 
@@ -182,15 +193,33 @@ cd Box/src/deps/libkrun-sys
 
 # Build libkrun
 cd vendor/libkrun
-cargo build --release --target x86_64-pc-windows-msvc
+winget install --id zig.zig --exact --version 0.16.0
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Packages libkrun
 
-# Copy DLL
+# Copy the runtime DLL and MSVC import library
 Copy-Item target\x86_64-pc-windows-msvc\release\krun.dll ..\..\prebuilt\x86_64-pc-windows-msvc\
+Copy-Item target\x86_64-pc-windows-msvc\release\krun.dll.lib ..\..\prebuilt\x86_64-pc-windows-msvc\krun.lib
 
 # Run tests
 cd ..\..
 cargo test --target x86_64-pc-windows-msvc --lib -- --test-threads=1
 ```
+
+The Windows runtime bundle is complete only when the prebuilt directory also
+contains `libkrunfw.dll`. That companion DLL supplies the Linux guest kernel;
+building `krun.dll` does not build a kernel. Repository and GitHub release
+bundles contain all three files. The crates.io package carries the exact tested
+trio in a checksum-pinned, deterministic `vendor/krun-windows-x64.tar.xz`.
+That archive plus the reduced Unix source archive keeps the universal crate
+below crates.io's 10 MiB limit without mixing runtime versions or requiring a
+Windows build-time download.
+The native files have additional license and source-delivery obligations; see
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) and
+[`SOURCE-PROVENANCE.md`](SOURCE-PROVENANCE.md). The crate's MIT metadata covers
+the A3S Rust wrapper and does not relicense the bundled native components.
+The Windows build script always creates a real stripped Linux `init/init`
+payload first and remaps host source/profile paths out of the Rust release
+artifacts; the generated payload remains ignored by Git.
 
 ## Architecture
 
@@ -225,7 +254,9 @@ cargo test --target x86_64-pc-windows-msvc --lib test_krun_create_ctx -- --test-
 
 ## License
 
-MIT License - see [LICENSE](../../LICENSE) for details.
+The A3S Rust wrapper is MIT licensed; see [LICENSE](LICENSE). Bundled native
+components retain their own licenses and notices as documented in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Contributing
 

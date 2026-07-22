@@ -104,6 +104,7 @@ impl VmLocalExecutionBackend {
         }
         let mut manager = VmManager::with_box_id(config, EventEmitter::new(256), record.id.clone());
         manager.home_dir = self.home_dir.clone();
+        manager.set_healthcheck_disabled(metadata.request.policy.healthcheck_disabled);
         if let Some(pull_progress_fn) = self.pull_progress_fn.clone() {
             manager.set_pull_progress_fn(pull_progress_fn);
         }
@@ -176,6 +177,7 @@ impl VmLocalExecutionBackend {
         shared: SharedVm,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
         let mut manager = shared.lock().await;
+        let preserve_rootfs = should_force_rootfs_preservation(record)?;
         let exit_code = manager
             .try_wait_exit()
             .await
@@ -183,7 +185,7 @@ impl VmLocalExecutionBackend {
         let mut state = manager.state().await;
         let terminal = exit_code.is_some() || state == crate::BoxState::Stopped;
         if terminal {
-            let cleanup = manager.destroy().await;
+            let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
             let exit_code = manager.exit_code().or(exit_code);
             drop(manager);
             self.remove_manager(&record.id, &shared);
@@ -197,7 +199,7 @@ impl VmLocalExecutionBackend {
 
         if state == crate::BoxState::Created {
             if manager.has_exited().await {
-                let cleanup = manager.destroy().await;
+                let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
                 let exit_code = manager.exit_code();
                 drop(manager);
                 self.remove_manager(&record.id, &shared);
@@ -223,7 +225,7 @@ impl VmLocalExecutionBackend {
             .await
             .map_err(|error| runtime_error("inspect", record, error))?
         {
-            let cleanup = manager.destroy().await;
+            let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
             let exit_code = manager.exit_code();
             drop(manager);
             self.remove_manager(&record.id, &shared);
@@ -339,6 +341,7 @@ impl VmLocalExecutionBackend {
         record: &BoxRecord,
         shared: SharedVm,
         remove_anonymous_volumes: bool,
+        force_preserve_rootfs: bool,
         timeout_secs: Option<u64>,
     ) -> ExecutionManagerResult<KillOutcome> {
         let mut manager = shared.lock().await;
@@ -347,9 +350,20 @@ impl VmLocalExecutionBackend {
         } else {
             manager.anonymous_volumes().to_vec()
         };
-        let result = match graceful_stop_options(record, timeout_secs)? {
-            Some((signal, timeout_ms)) => manager.destroy_with_options(signal, timeout_ms).await,
-            None => manager.destroy().await,
+        let result = match (
+            graceful_stop_options(record, timeout_secs)?,
+            force_preserve_rootfs,
+        ) {
+            (Some((signal, timeout_ms)), true) => {
+                manager
+                    .destroy_preserving_rootfs_with_options(signal, timeout_ms)
+                    .await
+            }
+            (Some((signal, timeout_ms)), false) => {
+                manager.destroy_with_options(signal, timeout_ms).await
+            }
+            (None, true) => manager.destroy_preserving_rootfs().await,
+            (None, false) => manager.destroy().await,
         };
         drop(manager);
         self.remove_manager(&record.id, &shared);
@@ -435,11 +449,47 @@ impl VmLocalExecutionBackend {
     }
 }
 
+async fn destroy_after_observation(
+    manager: &mut VmManager,
+    preserve_rootfs: bool,
+) -> a3s_box_core::Result<()> {
+    if preserve_rootfs {
+        manager.destroy_preserving_rootfs().await
+    } else {
+        manager.destroy().await
+    }
+}
+
 #[async_trait]
 impl LocalExecutionBackend for VmLocalExecutionBackend {
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
+        super::record::validate_record_health(record)?;
         self.metadata(record)?;
-        let manager = Arc::new(Mutex::new(self.new_manager(record)?));
+        let box_dir = record.box_dir.clone();
+        let execution_id = record.id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::rootfs::stage_box_terminal_rootfs_metadata(&box_dir)
+        })
+        .await
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "rootfs metadata staging task failed for {execution_id}: {error}"
+            ))
+        })?
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "failed to stage rootfs metadata for {execution_id}: {error}"
+            ))
+        })?;
+        let mut manager = self.new_manager(record)?;
+        let requested_persistence = manager.config.persistent;
+        if should_reuse_preserved_rootfs(record)?
+            && crate::vm::persistent_rootfs_generation_exists(&record.box_dir)
+                .map_err(|error| runtime_error("inspect retained rootfs", record, error))?
+        {
+            manager.config.persistent = true;
+        }
+        let manager = Arc::new(Mutex::new(manager));
         match self.managers.entry(record.id.clone()) {
             Entry::Occupied(_) => {
                 return Err(ExecutionManagerError::Unavailable(format!(
@@ -488,6 +538,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             }
             return Err(runtime_error("start", record, error));
         }
+        guard.config.persistent = requested_persistence;
         resources.disarm();
         self.handle_from_manager(record, &guard).await
     }
@@ -555,24 +606,64 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         self.handle_from_manager(record, &manager).await
     }
 
+    async fn prepare_quiescent_rootfs(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.new_manager(record)?
+            .prepare_preserved_rootfs()
+            .map(|_| ())
+            .map_err(|error| runtime_error("prepare quiescent rootfs", record, error))
+    }
+
+    async fn cleanup_quiescent_rootfs(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.new_manager(record)?
+            .cleanup_preserved_rootfs()
+            .map_err(|error| runtime_error("clean up quiescent rootfs", record, error))
+    }
+
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         let metadata = self.metadata(record)?;
         let remove_anonymous_volumes = record.auto_remove;
         let timeout_secs = record.stop_timeout;
         if let Some(manager) = self.manager(&record.id) {
             return self
-                .destroy_registered(record, manager, remove_anonymous_volumes, timeout_secs)
+                .destroy_registered(
+                    record,
+                    manager,
+                    remove_anonymous_volumes,
+                    false,
+                    timeout_secs,
+                )
+                .await;
+        }
+        // A filesystem-only pause deliberately has no live provider evidence,
+        // but a later terminal kill must still apply the configured rootfs and
+        // anonymous-volume cleanup policy to the retained generation.
+        if !metadata.paused_with_memory {
+            let manager = Arc::new(Mutex::new(self.new_manager(record)?));
+            return self
+                .destroy_registered(
+                    record,
+                    manager,
+                    remove_anonymous_volumes,
+                    false,
+                    timeout_secs,
+                )
                 .await;
         }
         match metadata.plan.backend {
             ExecutionBackend::Crun => {
-                self.destroy_detached_sandbox(record, remove_anonymous_volumes, timeout_secs)
+                self.destroy_detached_sandbox(record, remove_anonymous_volumes, false, timeout_secs)
                     .await
             }
             ExecutionBackend::Krun => {
                 let manager = self.recover_microvm(record).await?;
-                self.destroy_registered(record, manager, remove_anonymous_volumes, timeout_secs)
-                    .await
+                self.destroy_registered(
+                    record,
+                    manager,
+                    remove_anonymous_volumes,
+                    false,
+                    timeout_secs,
+                )
+                .await
             }
         }
     }
@@ -583,24 +674,54 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         timeout_secs: Option<u64>,
     ) -> ExecutionManagerResult<KillOutcome> {
         let metadata = self.metadata(record)?;
+        #[cfg(target_os = "linux")]
+        if metadata.plan.backend == ExecutionBackend::Crun {
+            super::snapshot::persist_sandbox_snapshot_mappings(record)?;
+        }
         let timeout_secs = timeout_secs.or(record.stop_timeout);
         if let Some(manager) = self.manager(&record.id) {
             return self
-                .destroy_registered(record, manager, false, timeout_secs)
+                .destroy_registered(record, manager, false, true, timeout_secs)
                 .await;
         }
         match metadata.plan.backend {
             ExecutionBackend::Crun => {
-                self.destroy_detached_sandbox(record, false, timeout_secs)
+                self.destroy_detached_sandbox(record, false, true, timeout_secs)
                     .await
             }
             ExecutionBackend::Krun => {
                 let manager = self.recover_microvm(record).await?;
-                self.destroy_registered(record, manager, false, timeout_secs)
+                self.destroy_registered(record, manager, false, true, timeout_secs)
                     .await
             }
         }
     }
+}
+
+pub(super) fn should_force_rootfs_preservation(record: &BoxRecord) -> ExecutionManagerResult<bool> {
+    let state = super::support::managed_state(record)?;
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        ExecutionManagerError::Internal(format!(
+            "execution {} has no managed lifecycle metadata",
+            record.id
+        ))
+    })?;
+    Ok(match state {
+        ManagedExecutionState::Pausing => matches!(
+            metadata.pending_operation.as_ref(),
+            Some(ManagedExecutionOperation::Pause { keep_memory: false })
+        ),
+        ManagedExecutionState::Resuming => !metadata.paused_with_memory,
+        ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => true,
+        _ => false,
+    })
+}
+
+fn should_reuse_preserved_rootfs(record: &BoxRecord) -> ExecutionManagerResult<bool> {
+    Ok(matches!(
+        super::support::managed_state(record)?,
+        ManagedExecutionState::Resuming | ManagedExecutionState::RestartStarting
+    ) && should_force_rootfs_preservation(record)?)
 }
 
 fn graceful_stop_options(
@@ -646,8 +767,22 @@ async fn require_recorded_pid(
 
 fn visible_active_state(record: &BoxRecord) -> ExecutionManagerResult<ExecutionState> {
     match managed_state(record)? {
-        ManagedExecutionState::Paused | ManagedExecutionState::Resuming => {
-            Ok(ExecutionState::Paused)
+        ManagedExecutionState::Paused => Ok(ExecutionState::Paused),
+        ManagedExecutionState::Resuming => {
+            let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+                ExecutionManagerError::Internal(format!(
+                    "execution {} has no managed lifecycle metadata",
+                    record.id
+                ))
+            })?;
+            if metadata.paused_with_memory {
+                Ok(ExecutionState::Paused)
+            } else {
+                // A cold-paused execution has no provider process. Any live
+                // process observed while its resume is pending is therefore
+                // the replacement generation started before record commit.
+                Ok(ExecutionState::Running)
+            }
         }
         ManagedExecutionState::Starting
         | ManagedExecutionState::RestartStarting

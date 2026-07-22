@@ -3,6 +3,8 @@
 //! Shared request/response types used by both the guest exec server
 //! and the host exec client.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Vsock port for the exec server.
@@ -10,6 +12,19 @@ pub const EXEC_VSOCK_PORT: u32 = a3s_transport::ports::EXEC_SERVER;
 
 /// Vsock port for the Windows host-port forward control channel.
 pub const PORT_FWD_VSOCK_PORT: u32 = 4093;
+
+/// Host-control frame that asks guest init to signal the container main process.
+///
+/// Windows shares the existing long-lived port-forward channel because WHPX
+/// named-pipe mappings are guest-initiated. The payload is one big-endian `i32`
+/// Linux signal number.
+pub const WINDOWS_CONTROL_SIGNAL_FRAME: u8 = 5;
+
+/// Host-only request file watched by the Windows control worker.
+pub const WINDOWS_STOP_REQUEST_FILE: &str = "stop.signal";
+
+/// Temporary sibling used to publish a Windows stop request atomically.
+pub const WINDOWS_STOP_REQUEST_TEMP_FILE: &str = "stop.signal.tmp";
 
 /// Default exec timeout: 5 seconds.
 pub const DEFAULT_EXEC_TIMEOUT_NS: u64 = 5_000_000_000;
@@ -163,6 +178,9 @@ pub struct FileRequest {
     /// File content (for upload only, base64-encoded).
     #[serde(default)]
     pub data: Option<String>,
+    /// User that owns newly created files and parent directories.
+    #[serde(default)]
+    pub user: Option<String>,
 }
 
 /// File transfer operation type.
@@ -188,6 +206,95 @@ pub struct FileResponse {
     /// Error message if the operation failed.
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// Metadata operation performed inside a managed workload filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilesystemOp {
+    /// Inspect one path without modifying it.
+    Stat,
+    /// Recursively create one directory.
+    MakeDir,
+    /// Rename one entry, creating destination parents when necessary.
+    Move,
+    /// List descendants to a bounded depth.
+    ListDir,
+    /// Recursively remove one entry.
+    Remove,
+}
+
+/// Generation-fenced filesystem request sent to the workload guest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilesystemRequest {
+    /// Requested operation.
+    pub op: FilesystemOp,
+    /// Source or primary path.
+    pub path: String,
+    /// Destination path for [`FilesystemOp::Move`].
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// Requested descendant depth for [`FilesystemOp::ListDir`].
+    #[serde(default)]
+    pub depth: u32,
+    /// Guest user used for home expansion and ownership.
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// Entry type returned by a workload filesystem operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilesystemEntryKind {
+    /// Entry type could not be represented by the pinned contract.
+    Unspecified,
+    /// Regular file, or a symlink whose target is a regular file.
+    File,
+    /// Directory, or a symlink whose target is a directory.
+    Directory,
+}
+
+/// Portable guest metadata used by compatibility protocol adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FilesystemEntry {
+    pub name: String,
+    pub kind: FilesystemEntryKind,
+    pub path: String,
+    pub size: i64,
+    pub mode: u32,
+    pub permissions: String,
+    pub owner: String,
+    pub group: String,
+    pub modified_seconds: i64,
+    pub modified_nanos: i32,
+    #[serde(default)]
+    pub symlink_target: Option<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+}
+
+/// Result of one workload filesystem metadata or mutation operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilesystemResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub entry: Option<FilesystemEntry>,
+    #[serde(default)]
+    pub entries: Vec<FilesystemEntry>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Versioned non-exec request sent over the guest execution session.
+///
+/// Exec requests predate this envelope and remain bare JSON for wire
+/// compatibility. File requests use an explicit discriminator so the guest
+/// never attempts to deserialize them as commands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "request_type", content = "request", rename_all = "snake_case")]
+pub enum GuestSessionRequest {
+    /// Upload or download one file.
+    File(FileRequest),
+    /// Inspect or mutate workload filesystem metadata.
+    Filesystem(FilesystemRequest),
 }
 
 #[cfg(test)]
@@ -513,6 +620,7 @@ mod tests {
             op: FileOp::Upload,
             guest_path: "/tmp/test.txt".to_string(),
             data: Some("aGVsbG8=".to_string()),
+            user: Some("1000:1000".to_string()),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: FileRequest = serde_json::from_str(&json).unwrap();
@@ -527,6 +635,7 @@ mod tests {
             op: FileOp::Download,
             guest_path: "/etc/hostname".to_string(),
             data: None,
+            user: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: FileRequest = serde_json::from_str(&json).unwrap();
@@ -561,6 +670,39 @@ mod tests {
         let parsed: FileResponse = serde_json::from_str(&json).unwrap();
         assert!(!parsed.success);
         assert_eq!(parsed.error.as_deref(), Some("file not found"));
+    }
+
+    #[test]
+    fn file_session_request_has_an_unambiguous_wire_discriminator() {
+        let request = GuestSessionRequest::File(FileRequest {
+            op: FileOp::Download,
+            guest_path: "/tmp/data.bin".to_string(),
+            data: None,
+            user: None,
+        });
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["request_type"], "file");
+        assert_eq!(value["request"]["op"], "Download");
+        assert_eq!(value["request"]["guest_path"], "/tmp/data.bin");
+        assert!(serde_json::from_value::<GuestSessionRequest>(value).is_ok());
+    }
+
+    #[test]
+    fn filesystem_session_request_has_an_unambiguous_wire_discriminator() {
+        let request = GuestSessionRequest::Filesystem(FilesystemRequest {
+            op: FilesystemOp::Move,
+            path: "~/before".to_string(),
+            destination: Some("~/after".to_string()),
+            depth: 0,
+            user: Some("user".to_string()),
+        });
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["request_type"], "filesystem");
+        assert_eq!(value["request"]["op"], "Move");
+        assert_eq!(value["request"]["destination"], "~/after");
+        assert!(serde_json::from_value::<GuestSessionRequest>(value).is_ok());
     }
 
     #[test]

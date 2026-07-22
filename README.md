@@ -164,17 +164,17 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | MicroVM runtime | libkrun-backed OCI execution on Linux/KVM and Apple Silicon/HVF | Primary local runtime. Each box has its own guest kernel. Host-backed validation is required for releases. |
 | OCI Sandbox | Explicit `--isolation sandbox` execution through certified `crun 1.28` on Linux | Preview. Shares the host kernel, never replaces or emulates MicroVM isolation, and still has open security-negative and performance release gates. |
 | A3S Runtime provider | Sandbox-backed Task and Service lifecycle, recovery, `none` networking, bounded tmpfs mounts, CPU/memory/PID controls, structured logs, idempotent exec, and security fencing | The real-provider R17 suite passes Base, Recovery, Networking, Mounts, Resources, Logs, Exec, and Security profiles. Artifacts must be digest-pinned; the provider advertises only `tmpfs` mounts and `none` networking. |
-| Lifecycle and exec | Foreground/detached runs, managed create/start/restart/kill, exec, PTY, logs, health, wait, and cleanup | Implemented for MicroVM. The managed Sandbox path and its structured logs are implemented, while complete parity and adversarial validation remain in progress. |
+| Lifecycle and exec | Foreground/detached runs, managed create/start/restart/kill/pause/resume, exec, PTY, logs, health, wait, and cleanup | Implemented for MicroVM. The managed Sandbox path uses certified `crun` lifecycle operations, including freezer-backed pause/resume, while complete parity and adversarial validation remain in progress. |
 | OCI images | Resumable bounded registry pulls, concurrent layers, verified cross-image blob reuse, push, credentials, digest verification, optional cosign verification/signing, indexed archive selection, and tag operations | Implemented. `pull` validates declared size and SHA-256 before atomic blob publication; `load` selects one Linux platform from direct or nested OCI indexes and verifies the selected manifest, config, and layers before publishing it. Registry throughput and redirect behavior still require validation against each production registry. |
 | Dockerfile builds | Built-in Dockerfile subset, layer cache, BuildKit-in-MicroVM, and warm-pool `RUN` execution | Implemented subset, not a full Buildx replacement. One target platform is recorded per build. |
 | Storage | Bind mounts, named volumes, tmpfs, `cp`, `diff`, `export`, `commit`, filesystem snapshots, and CoW restore | Implemented. Filesystem snapshots do not contain live VM RAM or device state. |
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
 | Rust SDK | Typed, direct runtime-backed management and guest-control APIs | Implemented in `a3s-box-sdk`. The optional `pipeline-cli` feature retains the CLI-driven programmable pipeline. |
-| E2B protocol and language SDKs | Pinned contracts, durable lifecycle, memory-preserving pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | Production-tested preview subset on A3S OS with certified `crun`: pinned official Python sync/async and TypeScript clients, plus A3S Python sync/async and TypeScript packages, pass the same matrix, including Snapshot capture/list/restore/delete, filesystem and OCI-default fidelity, bidirectional Volume mounts, pause/resume process survival, and generation-fenced logs. Templates/builds, filesystem-only pause, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. PyPI/npm publication is also pending. |
+| E2B protocol and language SDKs | Pinned contracts, durable lifecycle, memory-preserving and filesystem-only pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | The last certified A3S OS run proves the pinned official Python sync/async and TypeScript clients, plus the A3S Python sync/async and TypeScript packages, against the existing matrix, including Snapshot capture/list/restore/delete, filesystem and OCI-default fidelity, bidirectional Volume mounts, warm-pause process survival, and generation-fenced logs. The production gate is now extended to check cold-pause rootfs persistence, process replacement, environment reinitialization, and Volume remounting; that extension still requires its certified-host run. Templates/builds, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. PyPI/npm publication is also pending. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
-| Windows | Native x86_64 WHPX/libkrun code paths | Integration surface requiring host-specific validation. Current standard release automation focuses on Linux and macOS; Windows CRI is out of scope. |
+| Windows | Native x86_64 WHPX/libkrun MicroVM execution | Host-specific. Foreground and detached workloads, live split logs, exit codes, TCP publishing, bind mounts, named-volume persistence, stats, stopped-box commit, and stopped-box filesystem snapshot flows have passed real-host validation. Running-box commit has no guest archive channel. The reliable path is currently limited to one vCPU; container health checks, bridge networking, interactive execution, TEE, snapshot-fork, and CRI remain unsupported. |
 
 An implemented API is not automatically a production guarantee for every host
 or threat model. Real-runtime validation evidence and remaining platform gaps
@@ -212,11 +212,35 @@ Host requirements:
 | Linux | KVM and libkrun | The current primary production-host path |
 | macOS | Apple Silicon and Hypervisor.framework | Intel macOS is unsupported |
 | Linux Sandbox | Certified `crun 1.28`, user namespaces, subordinate IDs, seccomp, and delegated cgroup v2 | Does not require KVM; explicitly select `--isolation sandbox` |
-| Windows | x86_64, WHPX, and matching libkrun assets | Host-specific integration path; not part of the current standard release matrix |
+| Windows | x86_64, Windows Hypervisor Platform, Developer Mode (or `SeCreateSymbolicLinkPrivilege`), and matching `krun.dll`/`libkrunfw.dll` assets | Native release path; currently one vCPU, with the command boundaries documented below |
+
+Linux release archives intentionally contain GNU/glibc host executables because
+the CLI, CRI service, and VM shim dynamically load the bundled `libkrun`. The
+separately downloadable `containerd-shim-a3s-box-v2-linux-<arch>` and the guest
+init are built for the corresponding static musl target.
+
+For a Windows source build, build the Linux guest PID 1 with Zig before the
+native binaries:
+
+```powershell
+winget install --id zig.zig --exact --version 0.16.0
+cd src
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File deps/libkrun-sys/vendor/libkrun/scripts/build-windows-init.ps1
+cargo install cargo-zigbuild
+cargo zigbuild --release -p a3s-box-guest-init --target x86_64-unknown-linux-musl
+cargo build --release -p a3s-box-cli -p a3s-box-shim
+```
+
+The nested script creates libkrun's stripped Linux init payload; `cargo
+zigbuild` creates A3S Box's static Linux guest-init executable. Neither generated
+binary is committed. The Linux kernel is supplied by the packaged
+`libkrunfw.dll`; A3S Box does not compile a kernel during this build. See
+[docs/windows-whpx.md](docs/windows-whpx.md) for package layout, validation
+commands, and current platform limits.
 
 Always run `a3s-box info` before host-backed tests. It reports virtualization,
-networking, package cache, TEE, virtio-fs, and warm-pool availability without
-starting a workload.
+platform, networking and port-publishing support, package caches, TEE,
+virtio-fs, and warm-pool availability without starting a workload.
 
 ### Run a MicroVM
 
@@ -241,6 +265,9 @@ Omitting `--isolation` is the only public way to select the default MicroVM
 backend. An explicit `--isolation microvm` value is rejected so scripts cannot
 confuse a backend name with a user-selectable compatibility mode.
 
+On Windows, omit `--cpus` or use `--cpus 1`; higher counts are rejected before
+the image is pulled until the WHPX SMP path is reliable.
+
 ### Run a shared-kernel Sandbox
 
 ```bash
@@ -254,8 +281,8 @@ a3s-box run --rm \
 This command is Linux-only and fails closed unless the complete certified host
 capability probe succeeds. The current Sandbox surface rejects VM-only or
 unsafe combinations, including TEE, warm pools, snapshot-fork, privileged
-mode, pause/unpause, published ports, named bridge networking, custom sysctls,
-vsock sidecars, and unconfined seccomp.
+mode, published ports, named bridge networking, custom sysctls, vsock sidecars,
+and unconfined seccomp.
 
 ### Compose a local workload
 
@@ -472,6 +499,7 @@ a3s-box cp ./input.txt app:/data/input.txt
 a3s-box diff app
 a3s-box export app -o rootfs.tar
 a3s-box commit app app:checkpoint
+a3s-box stop app
 a3s-box snapshot create app --name checkpoint-1
 a3s-box snapshot restore checkpoint-1 --name restored-app
 ```
@@ -483,7 +511,9 @@ short-lived Node.js workloads, and tmpfs is useful for high-churn dependency
 trees.
 
 Filesystem snapshots capture configuration and rootfs state, not live RAM or
-device state. On overlay-capable hosts, restore uses a read-only snapshot lower
+device state. Direct CLI/SDK snapshots require a stopped source box so a guest
+cannot race host filesystem traversal; managed Sandbox snapshots quiesce the
+backend before capture. On overlay-capable hosts, restore uses a read-only snapshot lower
 plus a private writable upper; in-use snapshots are protected from pruning.
 Snapshots created by current builds also retain resolved OCI image defaults
 and Unix rootfs metadata. Older records missing those defaults remain visible
@@ -616,13 +646,13 @@ compatibility:
 
 | Surface | Implemented preview | Not yet a release claim |
 | --- | --- | --- |
-| Control plane | Owner-scoped create, connect, get, memory-preserving pause, connect/resume, v1 running list, v2 filtered running/paused list, timeout replacement, monotonic refresh, kill, current single/batch metrics, and structured v1/v2 logs for runtime-envd Sandboxes, with SQLite WAL persistence, restart reconciliation, cleanup, and a complete requested timeout measured from runtime and envd readiness | Templates/builds, filesystem-only pause, network updates, historical metric retention, cache attribution, full pagination edge cases, and host-reboot recovery semantics |
+| Control plane | Owner-scoped create, connect, get, memory-preserving and filesystem-only pause, connect/resume, v1 running list, v2 filtered running/paused list, timeout replacement, monotonic refresh, kill, current single/batch metrics, and structured v1/v2 logs for runtime-envd Sandboxes, with SQLite WAL persistence, restart reconciliation, cleanup, and a complete requested timeout measured from runtime and envd readiness | Templates/builds, network updates, historical metric retention, cache attribution, full pagination edge cases, and host-reboot recovery semantics |
 | Credentials and routing | PBKDF2 account-key hashes, encrypted scope-bound Sandbox tokens, generation-fenced leases, wildcard TLS, direct/shared routes, CORS, HTTP/2, and PID-fenced Sandbox access | Certificate rotation and the complete streaming, upgrade, signed-file, and public-port route matrix |
 | Volumes | Owner-scoped create, connect/get, list, and delete with durable records, encrypted tokens, startup reconciliation, authenticated content operations, and named Sandbox mounts; all six production clients pass bidirectional I/O, UID/GID mapping, public mount metadata, in-use deletion conflicts, and cleanup | Complete large-file, concurrent-mutation, service-crash, host-reboot, and negative-path breadth before treating Volume coverage as a standalone compatibility claim |
 | Filesystem Snapshots | Owner-scoped capture, source-filtered list, restore, and delete with durable records, startup reconciliation, quiesced rootfs capture, copy-on-write restore, OCI image-default and Unix metadata fidelity, and active-use deletion conflicts; all six production clients restore captured state after deleting the source Sandbox | Filesystem only: no process memory or device state. Named-reference, pagination, large-rootfs, concurrent mutation, service-crash, host-reboot, and broader negative-path coverage remain release gates |
-| envd | Authenticated running/terminal health; fail-closed runtime initialization; production-validated `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
-| Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground and background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output on real Sandboxes | Additional signals, binary framing, reconnect, cancellation, backpressure, and adversarial concurrent-stream coverage |
-| Filesystem | The same six clients pass remove, make-directory, write, read, stat, list, rename, exists, and cleanup through production TLS routing; the envd HTTP path separately passes upload/download with metadata | Watch, multi-file and ownership edge cases, signed URLs, large-file behavior, and negative-path breadth |
+| envd | Authenticated health and production runtime-envd coverage; Broker-mode MicroVMs expose generation-fenced, binary-safe `GET /files`, raw or multipart `POST /files`, and the pinned unary Filesystem Stat/MakeDir/Move/ListDir/Remove procedures over Connect JSON and Protobuf through the guest session transport | Broker transfers are capped at 11 MiB per file; compression, ranges, xattr metadata, signed URLs, Filesystem watches, and production edge-case validation remain gates |
+| Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground and background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output on real Sandboxes; the host broker also has bounded, fragmented, ordered JSON and Protobuf Connect framing coverage across every pinned Process procedure, including raw binary stdio, while the shared Exec/PTY transport implements the pinned SIGTERM and SIGKILL semantics with wire and guest process-group tests | Signals outside the pinned contract, reconnect, cancellation/backpressure stress, and adversarial concurrent-stream coverage |
+| Filesystem | The same six clients pass the production runtime-envd subset; the host broker has bounded binary download, octet-stream upload, multi-file multipart, and JSON/Protobuf Stat, MakeDir, Move, ListDir, and Remove coverage with user-relative POSIX paths and generation fencing | Watches, xattr metadata, streaming large files, ownership edge cases, and negative-path breadth |
 | Code Interpreter and MCP | Official and A3S Python sync/async and TypeScript clients execute Python, validate stdout/results, and pass context create/list/run/restart/remove | Other languages, rich MIME/error/cancellation breadth, MCP execution, and the rest of the pinned interpreter contract |
 | Python and TypeScript packages | Typed packages re-export the pinned official surfaces, use `A3S_BOX_*` connection configuration, and pass the production matrix with all `E2B_*` connection variables removed | PyPI/npm publication and conformance for the unimplemented protocol surfaces above |
 
@@ -635,8 +665,11 @@ partially usable Sandbox.
 Memory-preserving pause maps to certified `crun pause`; a later `connect` or
 deprecated `resume` request maps to `crun resume`. The production matrix starts
 a background process before pausing and proves that the same process continues
-after resume. Filesystem-only pause (`memory: false`) is rejected explicitly
-until cold-pause semantics are implemented.
+after resume. Filesystem-only pause (`memory: false`) instead tears down the
+runtime while retaining its rootfs. Connect starts a new generation with the
+same Sandbox ID, preserved files, reinitialized environment and Volume mounts,
+and no process from the previous runtime. Both modes are durable,
+generation-fenced, and recover interrupted transitions after service restart.
 
 ```bash
 cd src

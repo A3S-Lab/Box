@@ -3,7 +3,7 @@ use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use a3s_box_core::{
-    resolve_execution, CreateExecutionRequest, ExecutionBackend, ExecutionLease, ExecutionManager,
+    resolve_execution, CreateExecutionRequest, ExecutionLease, ExecutionManager,
     ExecutionManagerError, ExecutionPortConnector, NetworkMode,
 };
 use chrono::{DateTime, Utc};
@@ -233,6 +233,7 @@ impl ControlService {
                 metadata: request.metadata.clone(),
                 envd_version: template.envd_version,
                 envd_mode: template.envd_mode,
+                runtime_env_vars: runtime_env_vars.clone(),
                 secure: request.secure,
                 allow_internet_access: request.allow_internet_access,
                 credentials: SandboxCredentials {
@@ -369,63 +370,14 @@ impl ControlService {
         lifecycle_id: &str,
         env_vars: &BTreeMap<String, String>,
     ) -> Result<(), ExecutionManagerError> {
-        let port = NonZeroU16::new(ENVD_PORT).ok_or_else(|| {
-            ExecutionManagerError::Internal("envd port must be non-zero".to_string())
-        })?;
-        let deadline = tokio::time::Instant::now() + RUNTIME_ENVD_READY_TIMEOUT;
-        loop {
-            let last_error = match self
-                .ports
-                .connect_port(
-                    &lease.execution_id,
-                    lease.generation,
-                    port,
-                    RUNTIME_ENVD_CONNECT_TIMEOUT,
-                )
-                .await
-            {
-                Ok(stream) => match tokio::time::timeout(
-                    RUNTIME_ENVD_REQUEST_TIMEOUT,
-                    send_runtime_envd_init(
-                        stream,
-                        RuntimeEnvdInitRequest {
-                            lifecycle_id,
-                            env_vars,
-                            timestamp: self.clock.now(),
-                            default_user: RUNTIME_ENVD_DEFAULT_USER,
-                        },
-                    ),
-                )
-                .await
-                {
-                    Ok(Ok(StatusCode::NO_CONTENT)) => return Ok(()),
-                    Ok(Ok(status)) if status.is_client_error() => {
-                        return Err(ExecutionManagerError::Internal(format!(
-                            "runtime envd initialization returned HTTP {status}"
-                        )))
-                    }
-                    Ok(Ok(status)) => {
-                        format!("runtime envd initialization returned HTTP {status}")
-                    }
-                    Ok(Err(error)) => error,
-                    Err(_) => format!(
-                        "runtime envd initialization timed out after {} ms",
-                        RUNTIME_ENVD_REQUEST_TIMEOUT.as_millis()
-                    ),
-                },
-                Err(error @ ExecutionManagerError::InvalidRequest(_))
-                | Err(error @ ExecutionManagerError::Internal(_)) => return Err(error),
-                Err(error) => error.to_string(),
-            };
-            if tokio::time::Instant::now() >= deadline {
-                return Err(ExecutionManagerError::Unavailable(format!(
-                    "runtime envd did not become ready within {} seconds: {}",
-                    RUNTIME_ENVD_READY_TIMEOUT.as_secs(),
-                    last_error
-                )));
-            }
-            tokio::time::sleep(RUNTIME_ENVD_RETRY_INTERVAL).await;
-        }
+        initialize_runtime_envd_for_lease(
+            self.ports.as_ref(),
+            self.clock.as_ref(),
+            lease,
+            lifecycle_id,
+            env_vars,
+        )
+        .await
     }
 
     pub async fn connect(
@@ -438,6 +390,7 @@ impl ControlService {
         let disposition = match record.state() {
             LifecycleState::Running => ConnectionDisposition::AlreadyRunning,
             LifecycleState::Paused => {
+                let cold_resume = !record.paused_with_memory();
                 let execution_id = record
                     .execution_id()
                     .cloned()
@@ -462,6 +415,37 @@ impl ControlService {
                         return Err(error.into());
                     }
                 };
+                if cold_resume && record.envd_mode() == EnvdMode::Runtime {
+                    if let Err(readiness_error) = self
+                        .initialize_runtime_envd(
+                            &lease,
+                            record.sandbox_id().as_str(),
+                            record.runtime_env_vars(),
+                        )
+                        .await
+                    {
+                        error!(
+                            sandbox_id = %record.sandbox_id(),
+                            execution_id = %lease.execution_id,
+                            error = %readiness_error,
+                            "Cold-resumed Sandbox runtime envd initialization failed"
+                        );
+                        let cleanup = self
+                            .executions
+                            .kill(&lease.execution_id, lease.generation)
+                            .await;
+                        let expected = record.generation();
+                        record.mark_failed(LifecycleFailure::RuntimeFailed)?;
+                        self.replace(expected, record).await?;
+                        return Err(match cleanup {
+                            Ok(_) => readiness_error,
+                            Err(cleanup_error) => ExecutionManagerError::Internal(format!(
+                                "{readiness_error}; cold-resume runtime cleanup failed: {cleanup_error}"
+                            )),
+                        }
+                        .into());
+                    }
+                }
                 let expected = record.generation();
                 record.mark_running(lease)?;
                 self.replace(expected, record.clone()).await?;
@@ -489,16 +473,6 @@ impl ControlService {
         if record.state() != LifecycleState::Running {
             return Err(ControlServiceError::Conflict(sandbox_id.clone()));
         }
-        if !keep_memory
-            && matches!(
-                record.plan().backend,
-                ExecutionBackend::Crun | ExecutionBackend::Krun
-            )
-        {
-            return Err(ControlServiceError::InvalidRequest(
-                "filesystem-only pause is not implemented for this execution backend".to_string(),
-            ));
-        }
         let execution_id = record
             .execution_id()
             .cloned()
@@ -507,7 +481,7 @@ impl ControlService {
             .execution_generation()
             .ok_or_else(|| ControlServiceError::Conflict(sandbox_id.clone()))?;
         let expected = record.generation();
-        record.begin_pause()?;
+        record.begin_pause(keep_memory)?;
         self.replace(expected, record.clone()).await?;
 
         let lease = match self
@@ -781,6 +755,70 @@ impl ControlService {
             CompareAndSwapResult::NotFound => Err(ControlServiceError::NotFound(sandbox_id)),
             CompareAndSwapResult::Conflict { .. } => Err(ControlServiceError::Conflict(sandbox_id)),
         }
+    }
+}
+
+pub(super) async fn initialize_runtime_envd_for_lease(
+    ports: &dyn ExecutionPortConnector,
+    clock: &dyn Clock,
+    lease: &ExecutionLease,
+    lifecycle_id: &str,
+    env_vars: &BTreeMap<String, String>,
+) -> Result<(), ExecutionManagerError> {
+    let port = NonZeroU16::new(ENVD_PORT)
+        .ok_or_else(|| ExecutionManagerError::Internal("envd port must be non-zero".to_string()))?;
+    let deadline = tokio::time::Instant::now() + RUNTIME_ENVD_READY_TIMEOUT;
+    loop {
+        let last_error = match ports
+            .connect_port(
+                &lease.execution_id,
+                lease.generation,
+                port,
+                RUNTIME_ENVD_CONNECT_TIMEOUT,
+            )
+            .await
+        {
+            Ok(stream) => match tokio::time::timeout(
+                RUNTIME_ENVD_REQUEST_TIMEOUT,
+                send_runtime_envd_init(
+                    stream,
+                    RuntimeEnvdInitRequest {
+                        lifecycle_id,
+                        env_vars,
+                        timestamp: clock.now(),
+                        default_user: RUNTIME_ENVD_DEFAULT_USER,
+                    },
+                ),
+            )
+            .await
+            {
+                Ok(Ok(StatusCode::NO_CONTENT)) => return Ok(()),
+                Ok(Ok(status)) if status.is_client_error() => {
+                    return Err(ExecutionManagerError::Internal(format!(
+                        "runtime envd initialization returned HTTP {status}"
+                    )))
+                }
+                Ok(Ok(status)) => {
+                    format!("runtime envd initialization returned HTTP {status}")
+                }
+                Ok(Err(error)) => error,
+                Err(_) => format!(
+                    "runtime envd initialization timed out after {} ms",
+                    RUNTIME_ENVD_REQUEST_TIMEOUT.as_millis()
+                ),
+            },
+            Err(error @ ExecutionManagerError::InvalidRequest(_))
+            | Err(error @ ExecutionManagerError::Internal(_)) => return Err(error),
+            Err(error) => error.to_string(),
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "runtime envd did not become ready within {} seconds: {}",
+                RUNTIME_ENVD_READY_TIMEOUT.as_secs(),
+                last_error
+            )));
+        }
+        tokio::time::sleep(RUNTIME_ENVD_RETRY_INTERVAL).await;
     }
 }
 

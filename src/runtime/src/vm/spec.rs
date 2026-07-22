@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use a3s_box_core::config::TeeConfig;
+use a3s_box_core::config::{validate_vcpu_count, TeeConfig};
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
 
@@ -13,8 +13,14 @@ use crate::vmm::{Entrypoint, FsMount, InstanceSpec};
 use super::{fnv1a_hash, BoxLayout, VmManager};
 
 const SBIN_INIT: &str = "/sbin/init";
-#[cfg(target_os = "windows")]
 const USR_SBIN_INIT: &str = "/usr/sbin/init";
+
+#[derive(Debug)]
+struct ParsedVolumeMount {
+    host_path: PathBuf,
+    guest_path: String,
+    read_only: bool,
+}
 
 /// Read an environment variable, returning `None` if unset or empty.
 fn env_nonempty(name: &str) -> Option<String> {
@@ -33,23 +39,27 @@ impl VmManager {
 
         // Add user-specified volume mounts (-v host:guest or -v host:guest:ro).
         // Single-file binds are staged under this per-box dir (cleaned with the
-        // box) since virtio-fs can only share directories — see parse_volume_mount.
+        // box) since virtio-fs can only share directories — see prepare_volume_mount.
         let filemounts_dir = self
             .home_dir
             .join("boxes")
             .join(&self.box_id)
             .join(".filemounts");
-        for (i, vol) in self.config.volumes.iter().enumerate() {
-            let mount = Self::parse_volume_mount(vol, i, &filemounts_dir)?;
+        let parsed_volumes = self
+            .config
+            .volumes
+            .iter()
+            .map(|volume| Self::parse_volume_spec(volume))
+            .collect::<Result<Vec<_>>>()?;
+        for (i, volume) in parsed_volumes.iter().enumerate() {
+            let mount = Self::prepare_volume_mount(volume, i, &filemounts_dir)?;
             fs_mounts.push(mount);
         }
 
         // Auto-create anonymous volumes for OCI VOLUME directives
-        let user_guest_paths: std::collections::HashSet<String> = self
-            .config
-            .volumes
+        let user_guest_paths: std::collections::HashSet<String> = parsed_volumes
             .iter()
-            .filter_map(|v| v.split(':').nth(1).map(String::from))
+            .map(|volume| volume.guest_path.clone())
             .collect();
         let mut anon_vol_offset = self.config.volumes.len();
         let mut seen_anonymous_volumes = std::collections::HashSet::new();
@@ -212,28 +222,22 @@ impl VmManager {
                 .map(|(key, value)| format!("{}={}\n", key, b64(value)))
                 .collect();
             if !env_file_body.is_empty() {
-                let host_path = layout
-                    .rootfs_path
-                    .join(RUNTIME_ENV_PATH.trim_start_matches('/'));
-                std::fs::write(&host_path, env_file_body).map_err(|e| BoxError::BoxBootError {
-                    message: format!(
-                        "failed to stage guest env file {}: {}",
-                        host_path.display(),
-                        e
-                    ),
-                    hint: None,
-                })?;
+                let _host_path = crate::oci::rootfs::write_guest_file(
+                    &layout.rootfs_path,
+                    RUNTIME_ENV_PATH.trim_start_matches('/'),
+                    env_file_body,
+                )?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&host_path, std::fs::Permissions::from_mode(0o600))
+                    std::fs::set_permissions(&_host_path, std::fs::Permissions::from_mode(0o600))
                         .map_err(|error| BoxError::BoxBootError {
-                            message: format!(
-                                "failed to secure guest env file {}: {error}",
-                                host_path.display()
-                            ),
-                            hint: None,
-                        })?;
+                        message: format!(
+                            "failed to secure guest env file {}: {error}",
+                            _host_path.display()
+                        ),
+                        hint: None,
+                    })?;
                 }
                 env.push((
                     "BOX_EXEC_ENV_FILE".to_string(),
@@ -243,30 +247,22 @@ impl VmManager {
 
             // Pass user volume mounts to guest init for mounting inside the VM.
             // Format: BOX_VOL_<index>=<tag>:<guest_path>[:ro]
-            for (i, vol) in self.config.volumes.iter().enumerate() {
-                let parts: Vec<&str> = vol.split(':').collect();
-                if parts.len() >= 2 {
-                    let guest_path = parts[1];
-                    let mode = if parts.len() >= 3 && parts[2] == "ro" {
-                        ":ro"
-                    } else {
-                        ""
-                    };
-                    // Mark single-file bind mounts so the guest binds the file onto
-                    // guest_path instead of mounting the virtio-fs share over its
-                    // parent directory (which would clobber e.g. /etc). The host is
-                    // authoritative here (it can stat the path); the guest must not
-                    // re-guess from the guest path's shape.
-                    let file_flag = if std::path::Path::new(parts[0]).is_file() {
-                        ":file"
-                    } else {
-                        ""
-                    };
-                    env.push((
-                        format!("BOX_VOL_{}", i),
-                        format!("vol{}:{}{}{}", i, guest_path, mode, file_flag),
-                    ));
-                }
+            for (i, volume) in parsed_volumes.iter().enumerate() {
+                let mode = if volume.read_only { ":ro" } else { "" };
+                // Mark single-file bind mounts so the guest binds the file onto
+                // guest_path instead of mounting the virtio-fs share over its
+                // parent directory (which would clobber e.g. /etc). The host is
+                // authoritative here (it can stat the path); the guest must not
+                // re-guess from the guest path's shape.
+                let file_flag = if volume.host_path.is_file() {
+                    ":file"
+                } else {
+                    ""
+                };
+                env.push((
+                    format!("BOX_VOL_{}", i),
+                    format!("vol{}:{}{}{}", i, volume.guest_path, mode, file_flag),
+                ));
             }
 
             // Pass anonymous volume mounts (from OCI VOLUME directives) to guest init
@@ -406,7 +402,6 @@ impl VmManager {
                         &self.config.cmd,
                         self.config.entrypoint_override.as_deref(),
                     );
-
                     Entrypoint {
                         executable,
                         args,
@@ -426,7 +421,10 @@ impl VmManager {
         }
 
         #[cfg(target_os = "windows")]
-        if !self.config.port_map.is_empty() {
+        {
+            // WHPX named-pipe mappings are guest-initiated. Keep the shared
+            // Windows host-control channel connected even without published
+            // ports so stop requests can reach guest init.
             entrypoint
                 .env
                 .push(("BOX_WINDOWS_PORT_FWD".to_string(), "1".to_string()));
@@ -464,10 +462,9 @@ impl VmManager {
             ));
         }
 
-        // Fail closed instead of truncating: `vcpus as u8` turned 256 into 0
-        // (a 0-vCPU microVM fails to boot) and 260 into 4, silently violating the
-        // requested sizing. The CLI validates the range up front; this guards the
-        // compose/CRI paths too.
+        // The CLI validates this up front; this also guards compose, CRI, SDK,
+        // and direct runtime callers against unsupported platform sizing.
+        validate_vcpu_count(self.config.resources.vcpus).map_err(BoxError::ConfigError)?;
         let vcpus = u8::try_from(self.config.resources.vcpus).map_err(|_| {
             BoxError::ConfigError(format!(
                 "vcpus {} exceeds the maximum of 255",
@@ -598,28 +595,16 @@ impl VmManager {
     }
 
     fn guest_init_exec_path(rootfs_path: &Path) -> Option<&'static str> {
-        let sbin_init = rootfs_path.join("sbin").join("init");
-        if sbin_init.exists() {
+        if crate::oci::rootfs::resolve_guest_file_path(rootfs_path, "sbin/init")
+            .is_ok_and(|path| path.is_file())
+        {
             return Some(SBIN_INIT);
         }
 
-        #[cfg(target_os = "windows")]
+        if crate::oci::rootfs::resolve_guest_file_path(rootfs_path, "usr/sbin/init")
+            .is_ok_and(|path| path.is_file())
         {
-            let sbin_link = rootfs_path.join("sbin");
-            if let Ok(target) = std::fs::read_link(&sbin_link) {
-                let resolved = if target.is_absolute() {
-                    target
-                } else {
-                    rootfs_path.join(target)
-                };
-                if resolved.join("init").exists() {
-                    return Some(SBIN_INIT);
-                }
-            }
-
-            if rootfs_path.join("usr").join("sbin").join("init").exists() {
-                return Some(USR_SBIN_INIT);
-            }
+            return Some(USR_SBIN_INIT);
         }
 
         None
@@ -667,108 +652,48 @@ impl VmManager {
             })
     }
 
-    /// Parse a volume mount string into a FsMount.
-    ///
-    /// Supported formats:
-    /// - `host_path:guest_path` (read-write)
-    /// - `host_path:guest_path:ro` (read-only)
-    /// - `host_path:guest_path:rw` (read-write, explicit)
-    ///
-    /// Handles Windows paths with drive letters (e.g. `C:\Users\Temp:/data:ro`) by
-    /// using the colon-split parts array to reliably determine the host/guest boundary.
-    fn parse_volume_mount(volume: &str, index: usize, filemounts_dir: &Path) -> Result<FsMount> {
-        let parts: Vec<&str> = volume.split(':').collect();
-
-        // A valid volume must have at least 2 colon-separated parts (host:guest)
-        if parts.len() < 2 {
-            return Err(BoxError::ConfigError(format!(
-                "Invalid volume format (expected host:guest[:ro|rw]): {}",
-                volume
-            )));
-        }
-
-        // Detect whether a mode suffix is present by checking if the LAST
-        // colon-separated segment is "ro" or "rw".
-        let last = parts.last();
-        let has_mode = last.is_some_and(|s| s == &"ro" || s == &"rw");
-
-        // If the last segment is NOT a valid mode (ro/rw), check if it looks like
-        // a path component. If it does NOT, it's an invalid mode suffix (e.g. :invalid).
-        // Path-like segments start with /, \, ./, ../, or (on Windows) a drive letter.
-        let looks_like_path = |s: &&str| -> bool {
-            s.starts_with('/')
-                || s.starts_with('\\')
-                || s.starts_with("./")
-                || s.starts_with("../")
-                || (s.len() == 2
-                    && s.chars().next().is_some_and(|c| c.is_alphabetic())
-                    && s.ends_with(':'))
-        };
-        if parts.len() >= 2 && !has_mode && !last.is_some_and(looks_like_path) {
-            return Err(BoxError::ConfigError(format!(
-                "Invalid volume mode '{}' (expected 'ro' or 'rw'): {}",
-                last.unwrap(),
-                volume
-            )));
-        }
-
-        // Determine the guest path and mode based on whether a mode suffix exists.
-        // With mode: guest = parts[parts.len() - 2], mode = parts[parts.len() - 1]
-        // Without mode: guest = parts[parts.len() - 1]
-        let (guest_path_str, mode_str) = if has_mode {
-            let guest = parts[parts.len() - 2];
-            let mode = parts[parts.len() - 1];
-            (guest, mode)
-        } else {
-            (parts[parts.len() - 1], "")
-        };
-
-        // Validate guest path is not empty or a mode keyword
-        if guest_path_str.is_empty() || guest_path_str == "ro" || guest_path_str == "rw" {
-            return Err(BoxError::ConfigError(format!(
-                "Invalid volume format (expected host:guest[:ro|rw]): {}",
-                volume
-            )));
-        }
-
-        // Determine read_only from mode string
-        let read_only = match mode_str {
-            "ro" => true,
-            "rw" => false,
-            other if !other.is_empty() => {
+    /// Parse a volume mount string from the right so colons in a host path do
+    /// not consume the host/guest separator. The guest always uses an absolute
+    /// Linux path, even when the host path is a Windows drive or UNC path.
+    fn parse_volume_spec(volume: &str) -> Result<ParsedVolumeMount> {
+        let (mount, read_only) = match volume.rsplit_once(':') {
+            Some((mount, "ro")) => (mount, true),
+            Some((mount, "rw")) => (mount, false),
+            Some((mount, mode)) if mount.contains(':') && !mode.starts_with('/') => {
                 return Err(BoxError::ConfigError(format!(
                     "Invalid volume mode '{}' (expected 'ro' or 'rw'): {}",
-                    other, volume
+                    mode, volume
                 )));
             }
-            _ => false,
+            _ => (volume, false),
         };
 
-        // Reconstruct the host path from parts:
-        // - If parts[0] is a single-letter (Windows drive letter), reconstruct the
-        //   Windows path by joining parts[0..guest_idx] with colons.
-        // - Otherwise (Unix), join parts[0..guest_idx] with colons.
-        let guest_idx = if has_mode {
-            parts.len() - 2
-        } else {
-            parts.len() - 1
-        };
-        let host_path_str = if parts[0].len() == 1 {
-            // Windows drive letter — parts[0] is "C", parts[1..] is the rest of the path
-            let host_parts = &parts[..guest_idx];
-            let reconstructed = host_parts.join(":");
-            // If the reconstructed path ends with a trailing colon (from a trailing
-            // backslash in the original Windows path like "C:\path\:"), strip it.
-            reconstructed
-                .strip_suffix(':')
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| reconstructed)
-        } else {
-            parts[..guest_idx].join(":")
-        };
+        let (host_path, guest_path) = mount.rsplit_once(':').ok_or_else(|| {
+            BoxError::ConfigError(format!(
+                "Invalid volume format (expected host:guest[:ro|rw]): {}",
+                volume
+            ))
+        })?;
+        if host_path.is_empty() || !guest_path.starts_with('/') {
+            return Err(BoxError::ConfigError(format!(
+                "Invalid volume format (expected host:guest[:ro|rw]): {}",
+                volume
+            )));
+        }
 
-        // Resolve and validate host path
-        let host_path = PathBuf::from(&host_path_str);
+        Ok(ParsedVolumeMount {
+            host_path: PathBuf::from(host_path),
+            guest_path: guest_path.to_string(),
+            read_only,
+        })
+    }
+
+    fn prepare_volume_mount(
+        volume: &ParsedVolumeMount,
+        index: usize,
+        filemounts_dir: &Path,
+    ) -> Result<FsMount> {
+        let host_path = volume.host_path.clone();
         if !host_path.exists() {
             std::fs::create_dir_all(&host_path).map_err(|e| BoxError::BoxBootError {
                 message: format!(
@@ -790,34 +715,32 @@ impl VmManager {
                 hint: None,
             })?;
 
-        // virtio-fs can only share a directory, so a single-file bind (host path
-        // is a file) is staged into a per-box directory and that directory is
-        // shared instead. The file is hard-linked in (so the bind stays live in
-        // both directions), falling back to a copy across filesystems. It is named
-        // with the guest path's basename — exactly what the guest looks for inside
-        // the share (see mount_user_volumes' `file` branch).
         let host_path = if host_path.is_file() {
-            Self::stage_single_file_mount(&host_path, guest_path_str, index, filemounts_dir)?
+            Self::stage_single_file_mount(&host_path, &volume.guest_path, index, filemounts_dir)?
         } else {
             host_path
         };
-
-        // Use a unique tag for each user volume
         let tag = format!("vol{}", index);
 
         tracing::info!(
             tag = %tag,
             host = %host_path.display(),
-            guest = guest_path_str,
-            read_only,
+            guest = %volume.guest_path,
+            read_only = volume.read_only,
             "Adding user volume mount"
         );
 
         Ok(FsMount {
             tag,
             host_path,
-            read_only,
+            read_only: volume.read_only,
         })
+    }
+
+    #[cfg(test)]
+    fn parse_volume_mount(volume: &str, index: usize, filemounts_dir: &Path) -> Result<FsMount> {
+        let parsed_volume = Self::parse_volume_spec(volume)?;
+        Self::prepare_volume_mount(&parsed_volume, index, filemounts_dir)
     }
 
     /// Stage a single-file bind source into a per-box directory so virtio-fs (which
@@ -896,6 +819,7 @@ impl VmManager {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
 
     use a3s_box_core::config::BoxConfig;
     use a3s_box_core::event::EventEmitter;
@@ -903,6 +827,36 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(unix)]
+    fn create_file_symlink(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn create_file_symlink(target: &Path, link: &Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) => panic!("failed to create Windows test symlink: {error}"),
+        }
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) => panic!("failed to create Windows test symlink: {error}"),
+        }
+    }
 
     /// Decode a base64 (URL-safe, no pad) `BOX_EXEC_*` value the way guest-init
     /// does, so assertions can compare against the original raw value.
@@ -952,6 +906,7 @@ mod tests {
             workspace_path: base.join("workspace"),
             console_output: None,
             oci_config,
+            prefer_image_rootfs_metadata: false,
             tee_instance_config: None,
         }
     }
@@ -994,6 +949,19 @@ mod tests {
         let spec = vm.build_instance_spec(&layout).unwrap();
 
         assert_eq!(env_value(&spec, "BOX_PERSIST_ROOTFS_METADATA"), Some("1"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_box_enables_host_control_without_published_ports() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), Some(test_oci_config(None, None)), true);
+        let mut vm = test_vm_manager(BoxConfig::default());
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert!(spec.port_map.is_empty());
+        assert_eq!(env_value(&spec, "BOX_WINDOWS_PORT_FWD"), Some("1"));
     }
 
     #[test]
@@ -1097,6 +1065,54 @@ mod tests {
             VmManager::parse_volume_mount(&volume, 2, std::path::Path::new("/tmp")).unwrap();
         assert_eq!(mount.tag, "vol2");
         assert!(!mount.read_only);
+    }
+
+    #[test]
+    fn test_parse_volume_spec_preserves_windows_drive_path() {
+        for (volume, host) in [
+            (r"C:\Users\Temp:/data:ro", r"C:\Users\Temp"),
+            (r"C:/Users/Temp:/data:ro", r"C:/Users/Temp"),
+        ] {
+            let parsed = VmManager::parse_volume_spec(volume).unwrap();
+
+            assert_eq!(parsed.host_path, PathBuf::from(host));
+            assert_eq!(parsed.guest_path, "/data");
+            assert!(parsed.read_only);
+        }
+    }
+
+    #[test]
+    fn test_parse_volume_spec_preserves_windows_unc_path() {
+        let parsed = VmManager::parse_volume_spec(r"\\server\share\folder:/workspace:rw").unwrap();
+
+        assert_eq!(parsed.host_path, PathBuf::from(r"\\server\share\folder"));
+        assert_eq!(parsed.guest_path, "/workspace");
+        assert!(!parsed.read_only);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_build_instance_spec_windows_bind_uses_linux_guest_target() {
+        let home = tempdir().unwrap();
+        let host = tempdir().unwrap();
+        let layout_dir = tempdir().unwrap();
+        let mut oci_config = test_oci_config(None, None);
+        oci_config.volumes = vec!["/tests".to_string()];
+        let layout = test_layout(layout_dir.path(), Some(oci_config), true);
+        let mut vm = test_vm_manager(BoxConfig {
+            volumes: vec![format!(r"{}:/tests:ro", host.path().display())],
+            ..Default::default()
+        });
+        vm.home_dir = home.path().to_path_buf();
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(env_value(&spec, "BOX_VOL_0"), Some("vol0:/tests:ro"));
+        assert!(
+            vm.anonymous_volumes.is_empty(),
+            "the user bind must cover the matching OCI volume"
+        );
+        assert_eq!(spec.fs_mounts.len(), 2);
     }
 
     #[test]
@@ -1302,6 +1318,17 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_config_entrypoint_preserves_overrides() {
+        let entrypoint = vec!["/custom".to_string(), "--flag".to_string()];
+        let cmd = vec!["echo".to_string(), "restored".to_string()];
+
+        let (exec, args) = VmManager::resolve_config_entrypoint(&cmd, Some(&entrypoint));
+
+        assert_eq!(exec, "/custom");
+        assert_eq!(args, vec!["--flag", "echo", "restored"]);
+    }
+
+    #[test]
     fn test_guest_init_exec_path_prefers_sbin() {
         let dir = tempdir().unwrap();
         let rootfs = dir.path();
@@ -1309,6 +1336,37 @@ mod tests {
         fs::write(rootfs.join("sbin").join("init"), b"guest-init").unwrap();
 
         assert_eq!(VmManager::guest_init_exec_path(rootfs), Some("/sbin/init"));
+    }
+
+    #[test]
+    fn test_guest_init_exec_path_resolves_multi_hop_guest_sbin_symlink() {
+        let dir = tempdir().unwrap();
+        let rootfs = dir.path();
+        fs::create_dir_all(rootfs.join("usr")).unwrap();
+        fs::create_dir_all(rootfs.join("shared/sbin")).unwrap();
+        fs::write(rootfs.join("shared/sbin/init"), b"guest-init").unwrap();
+        if !create_dir_symlink(Path::new("/usr/sbin"), &rootfs.join("sbin"))
+            || !create_dir_symlink(Path::new("../shared/sbin"), &rootfs.join("usr/sbin"))
+        {
+            return;
+        }
+
+        assert_eq!(VmManager::guest_init_exec_path(rootfs), Some("/sbin/init"));
+    }
+
+    #[test]
+    fn test_guest_init_exec_path_rejects_sbin_escape() {
+        let dir = tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&rootfs).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("init"), b"host-init").unwrap();
+        if !create_dir_symlink(Path::new("../outside"), &rootfs.join("sbin")) {
+            return;
+        }
+
+        assert_eq!(VmManager::guest_init_exec_path(&rootfs), None);
     }
 
     #[test]
@@ -1466,6 +1524,35 @@ mod tests {
     }
 
     #[test]
+    fn test_build_instance_spec_without_oci_uses_persisted_command() {
+        let dir = tempdir().unwrap();
+        let layout = test_layout(dir.path(), None, true);
+        let mut vm = test_vm_manager(BoxConfig {
+            cmd: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf snapshot-restored".to_string(),
+            ],
+            ..Default::default()
+        });
+
+        let spec = vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(
+            env_value(&spec, "BOX_EXEC_EXEC").map(b64d),
+            Some("/bin/sh".to_string())
+        );
+        assert_eq!(
+            env_value(&spec, "BOX_EXEC_ARG_0").map(b64d),
+            Some("-c".to_string())
+        );
+        assert_eq!(
+            env_value(&spec, "BOX_EXEC_ARG_1").map(b64d),
+            Some("printf snapshot-restored".to_string())
+        );
+    }
+
+    #[test]
     fn test_build_instance_spec_passes_hostname_to_guest_init() {
         let dir = tempdir().unwrap();
         let layout = test_layout(dir.path(), Some(test_oci_config(None, None)), true);
@@ -1527,6 +1614,56 @@ mod tests {
         assert_eq!(entries.get("FOO").map(String::as_str), Some("cli"));
         assert_eq!(entries.get("BAR").map(String::as_str), Some("image"));
         assert_eq!(entries.get("BAZ").map(String::as_str), Some("cli"));
+    }
+
+    #[test]
+    fn test_build_instance_spec_stages_env_through_internal_guest_symlink() {
+        let dir = tempdir().unwrap();
+        let mut oci_config = test_oci_config(None, None);
+        oci_config.env = vec![("FOO".to_string(), "safe".to_string())];
+        let layout = test_layout(dir.path(), Some(oci_config), true);
+        fs::create_dir_all(layout.rootfs_path.join("shared")).unwrap();
+        if !create_file_symlink(
+            Path::new("shared/env"),
+            &layout.rootfs_path.join(".a3s-box-env"),
+        ) {
+            return;
+        }
+        let mut vm = test_vm_manager(BoxConfig::default());
+
+        vm.build_instance_spec(&layout).unwrap();
+
+        assert_eq!(
+            b64d(
+                fs::read_to_string(layout.rootfs_path.join("shared/env"))
+                    .unwrap()
+                    .trim_start_matches("FOO=")
+                    .trim()
+            ),
+            "safe"
+        );
+    }
+
+    #[test]
+    fn test_build_instance_spec_rejects_env_file_symlink_escape() {
+        let dir = tempdir().unwrap();
+        let rootfs_parent = dir.path().join("layout");
+        let mut oci_config = test_oci_config(None, None);
+        oci_config.env = vec![("FOO".to_string(), "unsafe".to_string())];
+        let layout = test_layout(&rootfs_parent, Some(oci_config), true);
+        let outside = rootfs_parent.join("outside-env");
+        if !create_file_symlink(
+            Path::new("../outside-env"),
+            &layout.rootfs_path.join(".a3s-box-env"),
+        ) {
+            return;
+        }
+        let mut vm = test_vm_manager(BoxConfig::default());
+
+        let error = vm.build_instance_spec(&layout).unwrap_err().to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.exists());
     }
 
     #[test]
@@ -1611,7 +1748,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn test_guest_init_exec_path_supports_usr_sbin_without_sbin() {
         let dir = tempdir().unwrap();

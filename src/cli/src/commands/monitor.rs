@@ -277,7 +277,7 @@ async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::erro
     candidates.extend(unhealthy);
 
     for box_id in candidates {
-        let record = match state.find_by_id(&box_id) {
+        let mut record = match state.find_by_id(&box_id) {
             Some(r) => r.clone(),
             None => continue,
         };
@@ -293,15 +293,40 @@ async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::erro
 
         // If unhealthy, kill the process first before restarting
         if is_unhealthy {
+            let lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
+            // The candidate and its PID may have changed while this monitor was
+            // waiting for a user lifecycle operation. Re-load and re-validate
+            // under the shared lock before signalling anything.
+            let locked_state = StateFile::load_default()?;
+            let Some(locked_record) = locked_state.find_by_id(&box_id).cloned() else {
+                continue;
+            };
+            drop(locked_state);
+            if !is_unhealthy_restart_candidate(&locked_record)
+                || !health_restart_still_wanted(&locked_record)
+            {
+                println!(
+                    "monitor: health-restart for {} ({}) is no longer needed; skipping",
+                    locked_record.name, locked_record.short_id,
+                );
+                continue;
+            }
+            let Some(pid) = locked_record.pid.filter(|pid| {
+                crate::process::is_process_alive_with_identity(*pid, locked_record.pid_start_time)
+            }) else {
+                eprintln!(
+                    "monitor: health-restart for {} ({}) lost its original shim; deferring to state reconciliation",
+                    locked_record.name, locked_record.short_id,
+                );
+                continue;
+            };
+            record = locked_record;
             println!("{}", restart_log_line(&record, RestartReason::Unhealthy));
             // Only signal a PID we can confirm is still this box's shim — a
             // reused PID after a crash/reboot must never be SIGTERM'd.
-            if let Some(pid) = record.pid {
-                if crate::process::is_process_alive_with_identity(pid, record.pid_start_time) {
-                    crate::process::graceful_stop(pid, libc::SIGTERM, 10).await;
-                }
-            }
-            tracker.mark_dead(&box_id);
+            crate::process::graceful_stop(pid, libc::SIGTERM, 10).await;
+            let expected_pid = record.pid;
+            let expected_pid_start_time = record.pid_start_time;
             // Mark as dead so boot_from_record works; re-load fresh under the lock.
             // graceful_stop above can take up to 10s, during which the user may have
             // `stop`ped (or `rm`ed) the box. Re-validate fresh state and ABORT the
@@ -309,7 +334,13 @@ async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::erro
             // explicitly stopped (overwriting their stopped/stopped_by_user record).
             let proceed = StateFile::modify(|s| {
                 Ok::<bool, std::io::Error>(match s.find_by_id_mut(&box_id) {
-                    Some(rec) if health_restart_still_wanted(rec) => {
+                    Some(rec)
+                        if health_restart_matches_execution(
+                            rec,
+                            expected_pid,
+                            expected_pid_start_time,
+                        ) =>
+                    {
                         rec.status = "dead".to_string();
                         rec.pid = None;
                         rec.health_status = "none".to_string();
@@ -322,12 +353,16 @@ async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::erro
             })?;
             if !proceed {
                 println!(
-                    "monitor: box {name} ({short_id}) health-restart aborted — stopped by the user during shutdown",
+                    "monitor: box {name} ({short_id}) health-restart aborted because its lifecycle state changed during shutdown",
                     name = record.name,
                     short_id = record.short_id,
                 );
                 continue;
             }
+            tracker.mark_dead(&box_id);
+            // `boot_and_record` acquires this same lock. Drop ours first to
+            // avoid a re-entrant deadlock.
+            drop(lifecycle_lock);
         } else {
             tracker.mark_dead(&box_id);
             println!("{}", restart_log_line(&record, RestartReason::Dead));
@@ -399,6 +434,17 @@ fn is_unhealthy_restart_candidate(record: &BoxRecord) -> bool {
 /// must abort so we don't resurrect a box the user explicitly stopped.
 fn health_restart_still_wanted(record: &BoxRecord) -> bool {
     record.status != "stopped" && !record.stopped_by_user
+}
+
+fn health_restart_matches_execution(
+    record: &BoxRecord,
+    expected_pid: Option<u32>,
+    expected_pid_start_time: Option<u64>,
+) -> bool {
+    is_unhealthy_restart_candidate(record)
+        && health_restart_still_wanted(record)
+        && record.pid == expected_pid
+        && record.pid_start_time == expected_pid_start_time
 }
 
 fn restart_log_line(record: &BoxRecord, reason: RestartReason) -> String {
@@ -518,8 +564,31 @@ where
 }
 
 #[cfg(windows)]
-async fn run_due_health_checks(_state: &StateFile) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
+async fn run_due_health_checks(state: &StateFile) -> Result<(), Box<dyn std::error::Error>> {
+    let unsupported = state
+        .records()
+        .iter()
+        .filter(|record| {
+            let managed_health_enabled =
+                record.managed_execution.as_ref().is_some_and(|metadata| {
+                    metadata.request.policy.health_check.is_some()
+                        && !metadata.request.policy.healthcheck_disabled
+                });
+            record.is_active()
+                && ((!record.healthcheck_disabled && record.health_check.is_some())
+                    || managed_health_enabled)
+        })
+        .map(|record| record.name.as_str())
+        .collect::<Vec<_>>();
+    if unsupported.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "container health checks are not supported on Windows; active boxes with unsupported health checks: {}",
+            unsupported.join(", ")
+        )
+        .into())
+    }
 }
 
 #[cfg(test)]
@@ -540,6 +609,29 @@ mod tests {
         let mut by_user = make_record("id-1", "box", "running", Some(1));
         by_user.stopped_by_user = true;
         assert!(!health_restart_still_wanted(&by_user));
+    }
+
+    #[test]
+    fn health_restart_never_marks_a_replacement_execution_dead() {
+        let mut original = make_record("id-1", "box", "running", Some(101));
+        original.health_check = Some(health_check());
+        original.health_status = "unhealthy".to_string();
+        original.restart_policy = "always".to_string();
+        original.pid_start_time = Some(1);
+        assert!(health_restart_matches_execution(
+            &original,
+            Some(101),
+            Some(1)
+        ));
+
+        let mut replacement = original.clone();
+        replacement.pid = Some(202);
+        replacement.pid_start_time = Some(2);
+        assert!(!health_restart_matches_execution(
+            &replacement,
+            Some(101),
+            Some(1)
+        ));
     }
 
     // --- BackoffTracker tests ---
@@ -636,6 +728,37 @@ mod tests {
             retries: 3,
             start_period_secs: 0,
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_monitor_fails_closed_for_active_effective_health_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = StateFile::load(&directory.path().join("boxes.json")).unwrap();
+        let mut active = make_record("id-active", "active-health", "running", Some(1));
+        active.health_check = Some(health_check());
+        state.add(active).unwrap();
+
+        let error = run_due_health_checks(&state).await.unwrap_err().to_string();
+
+        assert!(error.contains("health checks are not supported on Windows"));
+        assert!(error.contains("active-health"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_monitor_allows_inactive_or_disabled_health_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = StateFile::load(&directory.path().join("boxes.json")).unwrap();
+        let mut inactive = make_record("id-inactive", "inactive-health", "stopped", None);
+        inactive.health_check = Some(health_check());
+        state.add(inactive).unwrap();
+        let mut disabled = make_record("id-disabled", "disabled-health", "running", Some(2));
+        disabled.health_check = Some(health_check());
+        disabled.healthcheck_disabled = true;
+        state.add(disabled).unwrap();
+
+        run_due_health_checks(&state).await.unwrap();
     }
 
     #[test]

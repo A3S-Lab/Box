@@ -33,22 +33,35 @@ pub async fn execute(args: StartArgs) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let record = resolve::resolve(state, query)?;
+    let box_id = resolve::resolve(state, query)?.id.clone();
+    let mut lifecycle_lock = Some(crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?);
+    // The caller's state snapshot may have waited behind commit/restart. Reload
+    // under the per-box lock before deciding that this box is still startable.
+    let locked_state = StateFile::load_default()?;
+    let record = locked_state
+        .find_by_id(&box_id)
+        .ok_or_else(|| format!("Box {query} was removed while waiting for its lifecycle lock"))?
+        .clone();
+    let health_check = (!record.healthcheck_disabled)
+        .then_some(record.health_check.as_ref())
+        .flatten();
+    super::common::validate_health_check_support(health_check)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let plan =
-        start_plan(record).map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        start_plan(&record).map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
 
-    let box_id = record.id.clone();
     let name = record.name.clone();
 
     println!("Starting box {name}...");
     let started_record = match plan {
         StartPlan::Legacy => {
-            let result = boot::boot_from_record(record).await?;
+            let result = boot::boot_from_record(&record).await?;
+            let booted_pid = result.pid;
 
             // Persist the boot result atomically (load-fresh + mutate + save under the
             // state lock) so it cannot clobber a concurrent writer with our pre-boot
             // snapshot.
-            StateFile::modify({
+            let persisted = StateFile::modify({
                 let box_id = box_id.clone();
                 move |state| {
                     Ok::<_, std::io::Error>(state.find_by_id_mut(&box_id).map(|record| {
@@ -56,12 +69,28 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
                         record.clone()
                     }))
                 }
-            })?
+            })?;
+            match require_persisted_start_record(persisted, &name) {
+                Ok(record) => Some(record),
+                Err(error) => {
+                    // A writer that does not participate in the lifecycle lock
+                    // may still remove the record while boot is in flight. Never
+                    // leave that newly-started VM orphaned.
+                    if let Some(pid) = booted_pid {
+                        crate::process::graceful_stop(pid, libc::SIGTERM, 5).await;
+                    }
+                    crate::cleanup::cleanup_removed_box(&record)?;
+                    return Err(error.into());
+                }
+            }
         }
         StartPlan::Managed {
             execution_id,
             generation,
         } => {
+            // Managed lifecycle APIs acquire the same cross-process lock in the
+            // runtime crate, covering CLI, SDK, and reconcile entry points.
+            drop(lifecycle_lock.take());
             let home = a3s_box_core::dirs_home();
             let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
             manager.start(&execution_id, generation).await?;
@@ -94,6 +123,7 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
             StateFile::load_default()?.find_by_id(&box_id).cloned()
         }
     };
+    drop(lifecycle_lock);
     if let Some(record) = started_record {
         crate::health::spawn_detached_health_checker(&record)
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
@@ -101,6 +131,14 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
 
     println!("{name}");
     Ok(())
+}
+
+fn require_persisted_start_record(
+    persisted: Option<crate::state::BoxRecord>,
+    name: &str,
+) -> Result<crate::state::BoxRecord, String> {
+    persisted
+        .ok_or_else(|| format!("Box {name} was removed during start; stopped the untracked VM"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,5 +278,13 @@ mod tests {
             start_plan(&make_record("legacy", "legacy", "stopped", None)).unwrap(),
             StartPlan::Legacy
         );
+    }
+
+    #[test]
+    fn missing_persisted_boot_record_is_not_a_successful_start() {
+        let error = require_persisted_start_record(None, "web").unwrap_err();
+
+        assert!(error.contains("removed during start"));
+        assert!(error.contains("stopped the untracked VM"));
     }
 }

@@ -75,12 +75,15 @@ const SANDBOX_ALLOWED_ADDED_CAPABILITIES: &[&str] = &[
 /// before image pulls, rootfs mounts, state changes, or runtime processes.
 pub fn resolve_execution(config: &BoxConfig) -> Result<ResolvedExecutionPlan> {
     match config.isolation {
-        ExecutionIsolation::Microvm => Ok(ResolvedExecutionPlan {
-            requested_isolation: ExecutionIsolation::Microvm,
-            backend: ExecutionBackend::Krun,
-            isolation_class: IsolationClass::HardwareVm,
-            required_controls: Vec::new(),
-        }),
+        ExecutionIsolation::Microvm => {
+            validate_microvm_compatibility(config)?;
+            Ok(ResolvedExecutionPlan {
+                requested_isolation: ExecutionIsolation::Microvm,
+                backend: ExecutionBackend::Krun,
+                isolation_class: IsolationClass::HardwareVm,
+                required_controls: Vec::new(),
+            })
+        }
         ExecutionIsolation::Sandbox => {
             validate_sandbox_compatibility(config)?;
             Ok(ResolvedExecutionPlan {
@@ -96,11 +99,22 @@ pub fn resolve_execution(config: &BoxConfig) -> Result<ResolvedExecutionPlan> {
     }
 }
 
+/// Validate features that cannot be represented safely by the MicroVM backend.
+pub fn validate_microvm_compatibility(config: &BoxConfig) -> Result<()> {
+    if config.isolation != ExecutionIsolation::Microvm {
+        return Ok(());
+    }
+
+    validate_security_options(config, SecurityBackend::Microvm)
+}
+
 /// Validate features that cannot be represented safely by the sandbox MVP.
 pub fn validate_sandbox_compatibility(config: &BoxConfig) -> Result<()> {
     if !config.isolation.is_sandbox() {
         return Ok(());
     }
+
+    validate_security_options(config, SecurityBackend::Sandbox)?;
 
     let mut unsupported = Vec::new();
 
@@ -137,14 +151,6 @@ pub fn validate_sandbox_compatibility(config: &BoxConfig) -> Result<()> {
     if !config.sysctls.is_empty() {
         unsupported.push("custom sysctls");
     }
-    if config
-        .security_opt
-        .iter()
-        .any(|option| option.trim().eq_ignore_ascii_case("seccomp=unconfined"))
-    {
-        unsupported.push("unconfined seccomp");
-    }
-
     let disallowed_capabilities: Vec<String> = config
         .cap_add
         .iter()
@@ -166,6 +172,116 @@ pub fn validate_sandbox_compatibility(config: &BoxConfig) -> Result<()> {
             unsupported.join(", ")
         )))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SecurityBackend {
+    Microvm,
+    Sandbox,
+}
+
+impl SecurityBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Microvm => "microVM",
+            Self::Sandbox => "sandbox",
+        }
+    }
+}
+
+fn validate_security_options(config: &BoxConfig, backend: SecurityBackend) -> Result<()> {
+    for raw_option in &config.security_opt {
+        let option = raw_option.trim();
+        if option.is_empty() {
+            return Err(BoxError::ConfigError(format!(
+                "{} isolation does not accept an empty security option",
+                backend.label()
+            )));
+        }
+
+        if option.eq_ignore_ascii_case("no-new-privileges") {
+            continue;
+        }
+
+        let Some((key, value)) = option.split_once('=') else {
+            return Err(unsupported_security_option(backend, option));
+        };
+        let key = key.trim();
+        let value = value.trim();
+
+        if key.eq_ignore_ascii_case("seccomp") {
+            if value.eq_ignore_ascii_case("default") {
+                continue;
+            }
+            if value.eq_ignore_ascii_case("unconfined") {
+                if matches!(backend, SecurityBackend::Microvm) {
+                    continue;
+                }
+                return Err(BoxError::ConfigError(
+                    "sandbox isolation does not support unconfined seccomp".to_string(),
+                ));
+            }
+            if value.is_empty() {
+                return Err(BoxError::ConfigError(format!(
+                    "{} isolation requires a seccomp mode",
+                    backend.label()
+                )));
+            }
+            return Err(BoxError::ConfigError(format!(
+                "{} isolation does not support custom seccomp profile '{}'",
+                backend.label(),
+                value
+            )));
+        }
+
+        if key.eq_ignore_ascii_case("no-new-privileges") {
+            if value.eq_ignore_ascii_case("true") {
+                continue;
+            }
+            if value.eq_ignore_ascii_case("false") {
+                if matches!(backend, SecurityBackend::Microvm) {
+                    continue;
+                }
+                return Err(BoxError::ConfigError(
+                    "sandbox isolation requires no-new-privileges and cannot disable it"
+                        .to_string(),
+                ));
+            }
+            return Err(BoxError::ConfigError(format!(
+                "{} isolation requires no-new-privileges to be true or false, got '{}'",
+                backend.label(),
+                value
+            )));
+        }
+
+        if key.eq_ignore_ascii_case("apparmor") {
+            return Err(BoxError::ConfigError(format!(
+                "{} isolation does not support AppArmor security option '{}'",
+                backend.label(),
+                option
+            )));
+        }
+
+        if key.eq_ignore_ascii_case("label") {
+            return Err(BoxError::ConfigError(format!(
+                "{} isolation does not support SELinux label security option '{}'",
+                backend.label(),
+                option
+            )));
+        }
+
+        return Err(unsupported_security_option(backend, option));
+    }
+
+    Ok(())
+}
+
+fn unsupported_security_option(backend: SecurityBackend, option: &str) -> BoxError {
+    BoxError::ConfigError(format!(
+        "{} isolation does not support security option '{}'",
+        backend.label(),
+        option
+    ))
 }
 
 fn normalize_capability(capability: &str) -> String {
@@ -194,6 +310,44 @@ mod tests {
         assert_eq!(plan.backend, ExecutionBackend::Krun);
         assert_eq!(plan.isolation_class, IsolationClass::HardwareVm);
         assert!(plan.required_controls.is_empty());
+    }
+
+    #[test]
+    fn microvm_rejects_host_kernel_and_custom_security_profiles() {
+        for (option, expected) in [
+            ("apparmor=runtime/default", "AppArmor"),
+            ("label=type:container_t", "SELinux"),
+            ("seccomp=/profiles/restricted.json", "custom seccomp"),
+            ("systempaths=unconfined", "security option"),
+        ] {
+            let config = BoxConfig {
+                security_opt: vec![option.to_string()],
+                ..Default::default()
+            };
+            let error = resolve_execution(&config).unwrap_err().to_string();
+            assert!(
+                error.contains(expected),
+                "expected {option:?} rejection to mention {expected:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn microvm_accepts_guest_enforceable_security_options() {
+        let config = BoxConfig {
+            security_opt: vec![
+                " SECCOMP=DEFAULT ".to_string(),
+                "seccomp=unconfined".to_string(),
+                "no-new-privileges".to_string(),
+                "no-new-privileges=false".to_string(),
+            ],
+            cap_add: vec!["NET_ADMIN".to_string()],
+            cap_drop: vec!["NET_RAW".to_string()],
+            privileged: true,
+            ..Default::default()
+        };
+
+        assert!(resolve_execution(&config).is_ok());
     }
 
     #[test]
@@ -242,6 +396,42 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unconfined seccomp"));
+    }
+
+    #[test]
+    fn sandbox_rejects_security_options_not_wired_to_oci() {
+        for (option, expected) in [
+            ("apparmor=runtime/default", "AppArmor"),
+            ("label=type:container_t", "SELinux"),
+            ("seccomp=/profiles/restricted.json", "custom seccomp"),
+            ("no-new-privileges=false", "requires no-new-privileges"),
+        ] {
+            let config = BoxConfig {
+                security_opt: vec![option.to_string()],
+                ..sandbox_config()
+            };
+            let error = resolve_execution(&config).unwrap_err().to_string();
+            assert!(
+                error.contains(expected),
+                "expected {option:?} rejection to mention {expected:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_accepts_security_options_compiled_by_oci_backend() {
+        let config = BoxConfig {
+            security_opt: vec![
+                "seccomp=default".to_string(),
+                "no-new-privileges".to_string(),
+                "no-new-privileges=true".to_string(),
+            ],
+            cap_add: vec!["cap_chown".to_string()],
+            cap_drop: vec!["NET_RAW".to_string()],
+            ..sandbox_config()
+        };
+
+        assert!(resolve_execution(&config).is_ok());
     }
 
     #[test]

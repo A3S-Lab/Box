@@ -55,6 +55,8 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
             .as_ref()
             .and_then(|config| config.health_check.as_ref()),
     );
+    common::validate_health_check_support(health_check.as_ref())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let effective_stop_signal = common::effective_stop_signal(
         args.common.stop_signal.as_deref(),
         image_config

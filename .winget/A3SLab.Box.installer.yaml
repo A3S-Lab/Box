@@ -1,5 +1,5 @@
 # Created using wingetcreate 1.6.1.0
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
 
 PackageIdentifier: A3SLab.Box
 PackageVersion: 0.8.0
@@ -12,8 +12,7 @@ NestedInstallerFiles:
 - RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\a3s-box.exe
   PortableCommandAlias: a3s-box
 - RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\a3s-box-shim.exe
-- RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\a3s-box-guest-init
-- RelativeFilePath: a3s-box-v0.8.0-windows-x86_64\lib\krun.dll
+ArchiveBinariesDependOnPath: true
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/A3S-Lab/Box/releases/download/v0.8.0/a3s-box-v0.8.0-windows-x86_64.zip
@@ -22,4 +21,4 @@ Installers:
     WindowsFeatures:
     - HypervisorPlatform
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.9.0

@@ -126,47 +126,6 @@ pub fn apply_boot_result(
     }
 }
 
-/// Per-box advisory boot lock.
-///
-/// Serializes boots of the SAME box across processes (the `monitor` daemon vs a
-/// user `restart`/`start`). Without it both can run `boot_from_record` — which
-/// creates a real VM OUTSIDE the state lock — concurrently, and the second
-/// post-boot record write overwrites the first's pid, ORPHANING the first VM
-/// (untracked shim + overlay mount, never reaped). Held across the boot AND the
-/// record write so a waiting actor re-checks AFTER the winner records its pid and
-/// skips booting a duplicate. Lives on a per-box `locks/<box_id>.boot.lock`
-/// sibling; `flock` releases on drop or crash, never stranding the lock.
-struct BootLock {
-    #[cfg(unix)]
-    _file: std::fs::File,
-}
-
-impl BootLock {
-    #[cfg(unix)]
-    fn acquire(box_id: &str) -> std::io::Result<Self> {
-        use std::os::unix::io::AsRawFd;
-        let dir = a3s_box_core::dirs_home().join("locks");
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{box_id}.boot.lock"));
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        // Blocking exclusive advisory lock; released when `_file` drops.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self { _file: file })
-    }
-
-    #[cfg(not(unix))]
-    fn acquire(_box_id: &str) -> std::io::Result<Self> {
-        Ok(Self {})
-    }
-}
-
 /// Outcome of [`boot_and_record`].
 pub enum BootOutcome {
     /// Booted a VM and recorded it; carries the (possibly updated) restart count.
@@ -174,48 +133,63 @@ pub enum BootOutcome {
     /// Another actor already (re)started this box (observed running with a live
     /// shim under the per-box lock); no VM was booted — a no-op for the caller.
     AlreadyRunning,
-    /// The record was removed (concurrent `rm`) while the VM booted; the
-    /// just-booted orphan VM has been torn down here.
+    /// The record was removed (concurrent `rm`) while waiting for the lock or
+    /// while the VM booted. Any just-booted orphan VM has been torn down here.
     RemovedDuringBoot,
 }
 
-/// Whether `box_id` is currently running with a live, identity-matched shim.
-/// Loads fresh reconciled state, so a recorded-but-dead pid reads as not-live.
-fn box_already_live(box_id: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    let state = StateFile::load_default()?;
-    Ok(state.find_by_id(box_id).is_some_and(|rec| {
-        rec.status == "running"
-            && rec.pid.is_some_and(|p| {
-                crate::process::is_process_alive_with_identity(p, rec.pid_start_time)
-            })
-    }))
+enum LockedBootRecord {
+    Removed,
+    AlreadyRunning,
+    Ready(Box<BoxRecord>),
+    Conflict(String),
+}
+
+fn select_locked_boot_record(record: Option<&BoxRecord>) -> LockedBootRecord {
+    let Some(record) = record else {
+        return LockedBootRecord::Removed;
+    };
+    if record.pid.is_some_and(|pid| {
+        crate::process::is_process_alive_with_identity(pid, record.pid_start_time)
+    }) {
+        return LockedBootRecord::AlreadyRunning;
+    }
+    if !matches!(
+        record.status.as_str(),
+        "created" | "stopped" | "dead" | "failed" | "running"
+    ) || record.managed_execution.is_some()
+    {
+        return LockedBootRecord::Conflict(format!(
+            "Cannot boot box {} from lifecycle state {}",
+            record.name, record.status
+        ));
+    }
+    LockedBootRecord::Ready(Box::new(record.clone()))
 }
 
 /// Boot a box from its record and persist the result, SERIALIZED per box so
 /// concurrent actors (monitor auto-restart vs user restart/start) cannot boot the
-/// same box twice and orphan a VM. Holds a per-box [`BootLock`] across the boot
+/// same box twice and orphan a VM. Holds the shared per-box lifecycle lock across the boot
 /// and the record write; a loser that finds the box already live skips booting.
 pub async fn boot_and_record(
     record: &BoxRecord,
     count_update: RestartCountUpdate,
 ) -> Result<BootOutcome, Box<dyn std::error::Error>> {
     let box_id = record.id.clone();
-    let _lock = {
-        let id = box_id.clone();
-        tokio::task::spawn_blocking(move || BootLock::acquire(&id))
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error> {
-                format!("boot lock task failed: {e}").into()
-            })??
-    };
+    let _lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
 
     // Re-check fresh state UNDER the per-box lock: if another actor already booted
     // this box, skip — do not create a duplicate VM.
-    if box_already_live(&box_id)? {
-        return Ok(BootOutcome::AlreadyRunning);
-    }
+    let fresh_state = StateFile::load_default()?;
+    let record = match select_locked_boot_record(fresh_state.find_by_id(&box_id)) {
+        LockedBootRecord::Removed => return Ok(BootOutcome::RemovedDuringBoot),
+        LockedBootRecord::AlreadyRunning => return Ok(BootOutcome::AlreadyRunning),
+        LockedBootRecord::Conflict(error) => return Err(error.into()),
+        LockedBootRecord::Ready(record) => *record,
+    };
+    drop(fresh_state);
 
-    let result = boot_from_record(record).await?;
+    let result = boot_from_record(&record).await?;
     let booted_pid = result.pid;
     // Persist atomically; `None` if the record was removed (concurrent rm) mid-boot.
     let restart_count = StateFile::modify(|s| {
@@ -233,7 +207,7 @@ pub async fn boot_and_record(
             if let Some(pid) = booted_pid {
                 crate::process::graceful_stop(pid, libc::SIGTERM, 5).await;
             }
-            crate::cleanup::cleanup_removed_box(record)?;
+            crate::cleanup::cleanup_removed_box(&record)?;
             Ok(BootOutcome::RemovedDuringBoot)
         }
     }
@@ -313,12 +287,14 @@ pub async fn boot_from_record(
     a3s_box_core::resolve_execution(&config)?;
     let emitter = EventEmitter::new(256);
     let mut vm = VmManager::with_box_id(config, emitter, record.id.clone());
+    vm.set_healthcheck_disabled(record.healthcheck_disabled);
 
     // Activate Prometheus metrics collection
     vm.set_metrics(RuntimeMetrics::try_new()?);
     // The shim runs the log processor for the box's lifetime.
     vm.set_log_config(record.log_config.clone());
 
+    crate::lifecycle::stage_box_terminal_rootfs_metadata(&record.box_dir)?;
     let mut resource_guard = ensure_boot_resources(record)?;
     if let Err(error) = vm.boot().await {
         resource_guard.rollback();
@@ -421,6 +397,10 @@ fn config_from_record(record: &BoxRecord) -> Result<BoxConfig, String> {
         cap_drop: record.cap_drop.clone(),
         security_opt: record.security_opt.clone(),
         privileged: record.privileged,
+        // Retained records are Docker-style stopped containers: their writable
+        // rootfs must survive a failed or successful stop/start cycle. Records
+        // created with --rm have no restartable filesystem contract.
+        persistent: !record.auto_remove,
         ..Default::default()
     })
 }
@@ -505,6 +485,51 @@ mod tests {
     }
 
     #[test]
+    fn locked_boot_selection_reports_removed_before_boot() {
+        assert!(matches!(
+            select_locked_boot_record(None),
+            LockedBootRecord::Removed
+        ));
+    }
+
+    #[test]
+    fn locked_boot_selection_clones_the_fresh_configuration() {
+        let mut current = sample_record();
+        current.image = "updated:after-wait".to_string();
+        current.memory_mb = 4096;
+
+        let LockedBootRecord::Ready(selected) = select_locked_boot_record(Some(&current)) else {
+            panic!("stopped record should be ready to boot");
+        };
+        assert_eq!(selected.image, "updated:after-wait");
+        assert_eq!(selected.memory_mb, 4096);
+    }
+
+    #[test]
+    fn locked_boot_selection_never_boots_over_a_live_paused_process() {
+        let mut current = sample_record();
+        current.status = "paused".to_string();
+        current.pid = Some(std::process::id());
+        current.pid_start_time = crate::process::pid_start_time(std::process::id());
+
+        assert!(matches!(
+            select_locked_boot_record(Some(&current)),
+            LockedBootRecord::AlreadyRunning
+        ));
+    }
+
+    #[test]
+    fn locked_boot_selection_rejects_transitional_state_without_a_pid() {
+        let mut current = sample_record();
+        current.status = "starting".to_string();
+
+        assert!(matches!(
+            select_locked_boot_record(Some(&current)),
+            LockedBootRecord::Conflict(_)
+        ));
+    }
+
+    #[test]
     fn test_config_from_record_image() {
         let record = sample_record();
         let config = config_from_record(&record).unwrap();
@@ -533,6 +558,17 @@ mod tests {
 
         assert_eq!(config.resources.vcpus, 4);
         assert_eq!(config.resources.memory_mb, 2048);
+    }
+
+    #[test]
+    fn test_config_from_record_restores_persistence_for_retained_boxes() {
+        let mut record = sample_record();
+
+        record.auto_remove = false;
+        assert!(config_from_record(&record).unwrap().persistent);
+
+        record.auto_remove = true;
+        assert!(!config_from_record(&record).unwrap().persistent);
     }
 
     #[test]

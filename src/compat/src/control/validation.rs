@@ -41,6 +41,17 @@ pub(crate) fn validate_persisted_record(record: &SandboxRecord) -> Result<(), Li
             "a runtime execution requires a start timestamp".to_string(),
         ));
     }
+    if !record.paused_with_memory()
+        && !matches!(
+            record.state(),
+            LifecycleState::Pausing | LifecycleState::Paused | LifecycleState::Resuming
+        )
+    {
+        return Err(LifecycleError::InvalidPersistedState(format!(
+            "state {:?} cannot retain a filesystem-only pause",
+            record.state()
+        )));
+    }
     if record
         .started_at()
         .is_some_and(|started_at| started_at < record.created_at())

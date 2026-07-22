@@ -1564,6 +1564,7 @@ mod tests {
         assert!(v2["user"].is_null());
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn test_timeout_duration_uses_request_or_default() {
         assert_eq!(
@@ -1838,6 +1839,7 @@ mod tests {
             .contains("cannot exceed --max"));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn test_execute_stop_is_ok() {
         let result = execute_stop(PoolStopArgs {

@@ -4,7 +4,8 @@ use a3s_box_core::{
 
 use super::record::{execution_id, lease_from_record};
 use super::support::{
-    managed_state, outcome_from_record, pending_restart_source_state, required_handle,
+    managed_state, outcome_from_record, paused_with_memory, pending_pause_policy,
+    pending_restart_source_state, required_handle,
 };
 use super::{BoxRecord, LocalExecutionManager, ManagedExecutionState, RuntimeUpdate};
 
@@ -14,6 +15,34 @@ impl LocalExecutionManager {
         record: BoxRecord,
     ) -> ExecutionManagerResult<(BoxRecord, ExecutionState)> {
         let internal = managed_state(&record)?;
+        if internal == ManagedExecutionState::Pausing {
+            let id = execution_id(&record)?;
+            if !pending_pause_policy(&record, &id)? {
+                self.finish_pause(record).await?;
+                let current = self
+                    .get(&id)
+                    .await?
+                    .ok_or_else(|| ExecutionManagerError::NotFound(id.clone()))?;
+                return Ok((current, ExecutionState::Paused));
+            }
+        }
+        if internal == ManagedExecutionState::Resuming {
+            let id = execution_id(&record)?;
+            if !paused_with_memory(&record, &id)? {
+                self.finish_resume(record).await?;
+                let current = self
+                    .get(&id)
+                    .await?
+                    .ok_or_else(|| ExecutionManagerError::NotFound(id.clone()))?;
+                return Ok((current, ExecutionState::Running));
+            }
+        }
+        if internal == ManagedExecutionState::Paused {
+            let id = execution_id(&record)?;
+            if !paused_with_memory(&record, &id)? {
+                return Ok((record, ExecutionState::Paused));
+            }
+        }
         match internal {
             ManagedExecutionState::Creating | ManagedExecutionState::Created => {
                 return Ok((record, ExecutionState::Created));

@@ -4,7 +4,9 @@ use a3s_box_core::{
 
 use super::record::{execution_id, lease_from_record};
 use super::store::RuntimeUpdate;
-use super::support::{pending_pause_policy, required_handle};
+use super::support::{
+    paused_with_memory, pending_kill_options, pending_pause_policy, required_handle,
+};
 use super::{BoxRecord, LocalExecutionManager, ManagedExecutionState};
 
 impl LocalExecutionManager {
@@ -14,6 +16,9 @@ impl LocalExecutionManager {
     ) -> ExecutionManagerResult<ExecutionLease> {
         let id = execution_id(&record)?;
         let keep_memory = pending_pause_policy(&record, &id)?;
+        if !keep_memory {
+            return self.finish_cold_pause(record).await;
+        }
         match self.backend.pause(&record, keep_memory).await {
             Ok(handle) => {
                 handle.validate(&id)?;
@@ -32,6 +37,53 @@ impl LocalExecutionManager {
                 None => Err(error),
             },
         }
+    }
+
+    async fn finish_cold_pause(&self, record: BoxRecord) -> ExecutionManagerResult<ExecutionLease> {
+        let id = execution_id(&record)?;
+        let stopped = match self
+            .backend
+            .stop_for_restart(&record, record.stop_timeout)
+            .await
+        {
+            Ok(_) | Err(ExecutionManagerError::NotFound(_)) => true,
+            Err(stop_error) => match self.backend.inspect(&record).await {
+                Err(ExecutionManagerError::NotFound(_)) => true,
+                Ok(observation)
+                    if matches!(
+                        observation.state,
+                        ExecutionState::Stopped | ExecutionState::Failed
+                    ) =>
+                {
+                    true
+                }
+                Ok(observation) if observation.state == ExecutionState::Running => {
+                    let _ = self
+                        .transition(
+                            &record,
+                            ManagedExecutionState::Pausing,
+                            ManagedExecutionState::Running,
+                            RuntimeUpdate::None,
+                        )
+                        .await;
+                    return Err(stop_error);
+                }
+                _ => return Err(stop_error),
+            },
+        };
+        debug_assert!(stopped);
+        self.release_execution_resources(&record).await?;
+        let paused = self
+            .complete_transition(
+                &record,
+                ManagedExecutionState::Pausing,
+                ManagedExecutionState::Paused,
+                RuntimeUpdate::ColdPause,
+            )
+            .await?;
+        let lease = lease_from_record(&paused)?;
+        debug_assert_eq!(lease.execution_id, id);
+        Ok(lease)
     }
 
     async fn resolve_pause_error(&self, record: BoxRecord) -> Option<ExecutionLease> {
@@ -75,6 +127,9 @@ impl LocalExecutionManager {
         record: BoxRecord,
     ) -> ExecutionManagerResult<ExecutionLease> {
         let id = execution_id(&record)?;
+        if !paused_with_memory(&record, &id)? {
+            return self.finish_cold_resume(record).await;
+        }
         match self.backend.resume(&record).await {
             Ok(handle) => {
                 handle.validate(&id)?;
@@ -93,6 +148,109 @@ impl LocalExecutionManager {
                 None => Err(error),
             },
         }
+    }
+
+    async fn finish_cold_resume(
+        &self,
+        record: BoxRecord,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let id = execution_id(&record)?;
+        match self.backend.inspect(&record).await {
+            Ok(observation) if observation.state == ExecutionState::Running => {
+                observation.validate(&id)?;
+                let running = self
+                    .complete_transition(
+                        &record,
+                        ManagedExecutionState::Resuming,
+                        ManagedExecutionState::Running,
+                        RuntimeUpdate::StartHandle(required_handle(&observation, &id)?),
+                    )
+                    .await?;
+                return lease_from_record(&running);
+            }
+            Err(ExecutionManagerError::NotFound(_)) => {}
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Stopped | ExecutionState::Failed
+                ) => {}
+            Ok(observation) => {
+                return Err(ExecutionManagerError::Conflict {
+                    execution_id: id,
+                    message: format!(
+                        "filesystem-only resume found unexpected backend state {:?}",
+                        observation.state
+                    ),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+        match self.backend.start(&record).await {
+            Ok(handle) => {
+                handle.validate(&id)?;
+                let running = self
+                    .complete_transition(
+                        &record,
+                        ManagedExecutionState::Resuming,
+                        ManagedExecutionState::Running,
+                        RuntimeUpdate::StartHandle(handle),
+                    )
+                    .await?;
+                lease_from_record(&running)
+            }
+            Err(start_error) => self.resolve_cold_resume_error(record, start_error).await,
+        }
+    }
+
+    async fn resolve_cold_resume_error(
+        &self,
+        record: BoxRecord,
+        start_error: ExecutionManagerError,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        let id = execution_id(&record)?;
+        match self.backend.inspect(&record).await {
+            Ok(observation) if observation.state == ExecutionState::Running => {
+                observation.validate(&id)?;
+                let running = self
+                    .complete_transition(
+                        &record,
+                        ManagedExecutionState::Resuming,
+                        ManagedExecutionState::Running,
+                        RuntimeUpdate::StartHandle(required_handle(&observation, &id)?),
+                    )
+                    .await?;
+                lease_from_record(&running)
+            }
+            Err(ExecutionManagerError::NotFound(_)) => {
+                self.rollback_cold_resume(&record).await?;
+                Err(start_error)
+            }
+            Ok(observation)
+                if matches!(
+                    observation.state,
+                    ExecutionState::Created
+                        | ExecutionState::Paused
+                        | ExecutionState::Stopped
+                        | ExecutionState::Failed
+                ) =>
+            {
+                self.rollback_cold_resume(&record).await?;
+                Err(start_error)
+            }
+            Ok(_) | Err(_) => Err(start_error),
+        }
+    }
+
+    async fn rollback_cold_resume(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.release_execution_resources(record).await?;
+        self.transition(
+            record,
+            ManagedExecutionState::Resuming,
+            ManagedExecutionState::Paused,
+            RuntimeUpdate::None,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn resolve_resume_error(&self, record: BoxRecord) -> Option<ExecutionLease> {
@@ -135,14 +293,23 @@ impl LocalExecutionManager {
         &self,
         record: BoxRecord,
     ) -> ExecutionManagerResult<KillOutcome> {
-        match self.backend.kill(&record).await {
+        let execution_id = execution_id(&record)?;
+        let options = pending_kill_options(&record, &execution_id)?;
+        let mut backend_record = record.clone();
+        if let Some(signal) = options.signal {
+            backend_record.stop_signal = Some(signal.to_string());
+        }
+        if let Some(timeout_secs) = options.timeout_secs {
+            backend_record.stop_timeout = Some(timeout_secs);
+        }
+        match self.backend.kill(&backend_record).await {
             Ok(outcome) => {
                 self.release_execution_resources(&record).await?;
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::Terminal(None),
+                    RuntimeUpdate::KillTerminal(None),
                 )
                 .await?;
                 Ok(outcome)
@@ -153,7 +320,7 @@ impl LocalExecutionManager {
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::Terminal(None),
+                    RuntimeUpdate::KillTerminal(None),
                 )
                 .await?;
                 Ok(KillOutcome::AlreadyStopped)
@@ -188,7 +355,7 @@ impl LocalExecutionManager {
             &record,
             ManagedExecutionState::Killing,
             ManagedExecutionState::Stopped,
-            RuntimeUpdate::Terminal(None),
+            RuntimeUpdate::KillTerminal(None),
         )
         .await
         .ok()?;

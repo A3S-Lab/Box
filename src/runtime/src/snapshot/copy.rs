@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::rootfs_metadata::{
-    RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
+    RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH, PREVIOUS_ROOTFS_METADATA_PATH,
+    ROOTFS_METADATA_PATH,
 };
 
 pub(super) fn install_rootfs_metadata(
@@ -14,7 +15,11 @@ pub(super) fn install_rootfs_metadata(
     metadata: &RootfsMetadataManifest,
 ) -> Result<()> {
     metadata.validate().map_err(BoxError::OciImageError)?;
-    for reserved in [IMAGE_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH] {
+    for reserved in [
+        IMAGE_ROOTFS_METADATA_PATH,
+        ROOTFS_METADATA_PATH,
+        PREVIOUS_ROOTFS_METADATA_PATH,
+    ] {
         let path = rootfs.join(reserved.trim_start_matches('/'));
         match std::fs::symlink_metadata(&path) {
             Ok(existing) if existing.file_type().is_file() || existing.file_type().is_symlink() => {
@@ -294,11 +299,31 @@ pub(super) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+
+    // `Path::metadata` follows the link and cannot classify a dangling link.
+    // The directory attribute belongs to the reparse point itself, so this
+    // remains valid even when the target is outside the snapshot or missing.
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    let metadata = std::fs::symlink_metadata(src).map_err(|e| {
+        BoxError::CacheError(format!(
+            "Failed to inspect symlink {} without following it: {}",
+            src.display(),
+            e
+        ))
+    })?;
+    if !metadata.file_type().is_symlink() {
+        return Err(BoxError::CacheError(format!(
+            "Snapshot path changed while copying symlink: {}",
+            src.display()
+        )));
+    }
+
     let target = std::fs::read_link(src).map_err(|e| {
         BoxError::CacheError(format!("Failed to read symlink {}: {}", src.display(), e))
     })?;
 
-    let is_dir = src.metadata().map(|m| m.is_dir()).unwrap_or(false);
+    let is_dir = metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0;
     let result = if is_dir {
         std::os::windows::fs::symlink_dir(&target, dst)
     } else {
@@ -314,6 +339,75 @@ fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
     })?;
 
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::os::windows::fs::MetadataExt;
+
+    const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+    fn symlink_or_skip(target: &Path, link: &Path, directory: bool) -> bool {
+        let result = if directory {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => {
+                eprintln!(
+                    "skipping Windows snapshot symlink test: creating {} requires symlink privilege",
+                    link.display()
+                );
+                false
+            }
+            Err(error) => panic!(
+                "failed to create Windows test symlink {} -> {}: {error}",
+                link.display(),
+                target.display()
+            ),
+        }
+    }
+
+    #[test]
+    fn copies_external_file_and_dangling_directory_symlinks_without_following_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let dst = temp.path().join("dst");
+        let outside = temp.path().join("outside-file");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+
+        let external_target = Path::new(r"..\outside-file");
+        let missing_target = Path::new(r"..\missing-directory");
+        if !symlink_or_skip(external_target, &src.join("external-file"), false) {
+            return;
+        }
+        if !symlink_or_skip(missing_target, &src.join("missing-dir"), true) {
+            return;
+        }
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        for (name, target, directory) in [
+            ("external-file", external_target, false),
+            ("missing-dir", missing_target, true),
+        ] {
+            let copied = dst.join(name);
+            let metadata = std::fs::symlink_metadata(&copied).unwrap();
+            assert!(metadata.file_type().is_symlink());
+            assert_eq!(
+                metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0,
+                directory,
+                "{name} must preserve its file-vs-directory symlink type"
+            );
+            assert_eq!(std::fs::read_link(copied).unwrap(), target);
+        }
+        assert_eq!(std::fs::read(outside).unwrap(), b"outside");
+    }
 }
 
 /// Calculate Snapshot payload bytes without following symlinks or counting one

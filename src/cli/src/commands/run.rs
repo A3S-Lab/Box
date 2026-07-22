@@ -183,13 +183,14 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    ctx.health_checker = ctx.record.health_check.as_ref().map(|health_check| {
-        crate::health::spawn_health_checker(
+    ctx.health_checker = match ctx.record.health_check.as_ref() {
+        Some(health_check) => Some(crate::health::spawn_health_checker(
             ctx.box_id.clone(),
             ctx.exec_socket_path.clone(),
             health_check.clone(),
-        )
-    });
+        )?),
+        None => None,
+    };
 
     if args.tty {
         return run_tty(ctx, &args).await;
@@ -540,20 +541,52 @@ async fn run_foreground(
         BoxRecord::make_short_id(&ctx.box_id)
     );
 
-    let console_log = ctx.box_dir.join("logs").join("console.log");
-    let console_err = ctx.box_dir.join("logs").join("console.err.log");
+    #[cfg(target_os = "windows")]
+    let (console_log, console_err) = {
+        // WHPX persists workload output in the shared rootfs. The shim tails
+        // these files into container.json, while the conventional raw console
+        // files only receive a completed-stream fallback after exit.
+        let rootfs = ctx.box_dir.join("rootfs");
+        (
+            rootfs.join("guest-init.stdout.log"),
+            rootfs.join("guest-init.stderr.log"),
+        )
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (console_log, console_err) = (
+        ctx.box_dir.join("logs").join("console.log"),
+        ctx.box_dir.join("logs").join("console.err.log"),
+    );
     let stdout_pos = Arc::new(AtomicU64::new(0));
     let stderr_pos = Arc::new(AtomicU64::new(0));
     let tail_stdout_pos = Arc::clone(&stdout_pos);
     let tail_stderr_pos = Arc::clone(&stderr_pos);
+    let tail_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stdout_tail_stop = Arc::clone(&tail_stop);
+    let stderr_tail_stop = Arc::clone(&tail_stop);
     let tail_console_log = console_log.clone();
     let tail_console_err = console_err.clone();
-    let log_handle = tokio::spawn(async move {
-        // Stream the container's stdout (console.log) and stderr
-        // (console.err.log, split console) to the terminal's stdout/stderr.
+    let runtime_filter = cfg!(target_os = "windows")
+        .then(|| Arc::new(a3s_box_core::log::RuntimeConsoleFilter::new()));
+    let stdout_runtime_filter = runtime_filter.clone();
+    let stderr_runtime_filter = runtime_filter;
+    let mut log_handle = tokio::spawn(async move {
+        // Stream the selected raw stdout/stderr sources to the terminal.
         tokio::join!(
-            super::tail_file_stream_positioned(&tail_console_log, false, Some(tail_stdout_pos)),
-            super::tail_file_stream_positioned(&tail_console_err, true, Some(tail_stderr_pos)),
+            super::tail_file_stream_positioned(
+                &tail_console_log,
+                false,
+                Some(tail_stdout_pos),
+                Some(stdout_tail_stop),
+                stdout_runtime_filter,
+            ),
+            super::tail_file_stream_positioned(
+                &tail_console_err,
+                true,
+                Some(tail_stderr_pos),
+                Some(stderr_tail_stop),
+                stderr_runtime_filter,
+            ),
         );
     });
 
@@ -629,7 +662,13 @@ async fn run_foreground(
         "foreground.raw_log_drain",
         raw_log_drain_start.elapsed(),
     );
-    log_handle.abort();
+    tail_stop.store(true, Ordering::Release);
+    if tokio::time::timeout(std::time::Duration::from_secs(1), &mut log_handle)
+        .await
+        .is_err()
+    {
+        log_handle.abort();
+    }
 
     if stop_reason == ForegroundStopReason::ProcessExited && !sandbox_natural_exit {
         let structured_log_drain_start = std::time::Instant::now();
@@ -754,7 +793,11 @@ fn foreground_log_lengths(paths: &[(&std::path::Path, &AtomicU64)]) -> Vec<u64> 
 
 fn foreground_exit_code(reason: ForegroundStopReason, vm_exit_code: Option<i32>) -> Option<i32> {
     match reason {
-        ForegroundStopReason::ProcessExited => vm_exit_code,
+        // A dead runtime without a persisted guest result is not evidence of a
+        // successful command. This happens when the VM/shim fails before
+        // guest-init can write `.a3s_exit_code`; returning `None` here used to
+        // make foreground `run --rm` fall through to CLI exit status 0.
+        ForegroundStopReason::ProcessExited => vm_exit_code.or(Some(1)),
         ForegroundStopReason::UserInterrupted(signal) => vm_exit_code.or(Some(128 + signal)),
         ForegroundStopReason::VmUnhealthy => vm_exit_code.or(Some(1)),
         ForegroundStopReason::TimedOut => Some(124),

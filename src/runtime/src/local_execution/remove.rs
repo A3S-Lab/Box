@@ -32,11 +32,13 @@ impl LocalExecutionManager {
     ///
     /// A failed cleanup deliberately leaves the record in `removing`. Retrying
     /// the same generation resumes cleanup before the record is forgotten.
-    pub(crate) async fn remove_execution(
+    pub async fn remove_execution(
         &self,
         execution_id: &ExecutionId,
         expected_generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<bool> {
+        let _lifecycle_lock =
+            super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
         let store = self.store.clone();
         let claimed_id = execution_id.clone();
         let claimed =

@@ -136,15 +136,18 @@ fn is_valid_cpuset(cpuset: &str) -> bool {
     cpuset.split(',').all(|element| {
         let element = element.trim();
         match element.split_once('-') {
-            Some((lo, hi)) => {
-                !lo.is_empty()
-                    && !hi.is_empty()
-                    && lo.bytes().all(|b| b.is_ascii_digit())
-                    && hi.bytes().all(|b| b.is_ascii_digit())
-            }
-            None => !element.is_empty() && element.bytes().all(|b| b.is_ascii_digit()),
+            Some((lo, hi)) => parse_cpu_index(lo)
+                .zip(parse_cpu_index(hi))
+                .is_some_and(|(lo, hi)| lo <= hi),
+            None => parse_cpu_index(element).is_some(),
         }
     })
+}
+
+fn parse_cpu_index(value: &str) -> Option<u32> {
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| value.parse().ok())
+        .flatten()
 }
 
 /// Build a `sh` command that writes `value` to cgroup v2 control file `file` in
@@ -183,13 +186,23 @@ pub fn validate_update(update: &ResourceUpdate) -> Result<()> {
             memory_mb
         )));
     }
-    // Reject a malformed cpuset before it can be interpolated into the resize
-    // shell command (cgroup `cpuset.cpus` accepts only indices/ranges anyway).
+    validate_update_values(update)
+}
+
+/// Validate resource values independently from whether they can be changed on
+/// a running VM.
+///
+/// Callers that persist limits for a stopped VM must still call this function:
+/// lifecycle state only controls hot-resize support, not input validity.
+pub fn validate_update_values(update: &ResourceUpdate) -> Result<()> {
+    // Reject a malformed cpuset before it can be persisted or interpolated into
+    // the resize shell command (cgroup `cpuset.cpus` accepts only indices/ranges).
     if let Some(ref cpuset) = update.limits.cpuset_cpus {
         if !is_valid_cpuset(cpuset) {
             return Err(BoxError::ResizeError(format!(
                 "Invalid cpuset.cpus value {cpuset:?}: expected a comma-separated list of CPU \
-                 indices/ranges such as \"0-3\" or \"0,2,4\"."
+                 indices in the range 0..={} or ascending ranges such as \"0-3\" or \"0,2,4\".",
+                u32::MAX
             )));
         }
     }
@@ -378,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_cpuset_valid_forms_accepted() {
-        for ok in ["0", "0,1,3", "0-3", "0-1,4-7", " 0 , 2 "] {
+        for ok in ["0", "0,1,3", "0-3", "0-1,4-7", " 0 , 2 ", "4294967295"] {
             assert!(is_valid_cpuset(ok), "{ok:?} should be valid");
         }
     }
@@ -396,6 +409,8 @@ mod tests {
             "all",
             "0-",
             "-3",
+            "3-1",
+            "4294967296",
         ] {
             assert!(!is_valid_cpuset(bad), "{bad:?} should be rejected");
         }
@@ -414,6 +429,20 @@ mod tests {
         assert!(err.to_string().contains("cpuset"));
         // And the dangerous value never makes it into a shell command.
         assert!(update.build_cgroup_commands().is_empty());
+    }
+
+    #[test]
+    fn test_value_validation_rejects_reversed_cpuset_without_hot_resize() {
+        let update = ResourceUpdate {
+            limits: ResourceLimits {
+                cpuset_cpus: Some("7-3".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let err = validate_update_values(&update).unwrap_err();
+        assert!(err.to_string().contains("ascending ranges"));
     }
 
     #[test]

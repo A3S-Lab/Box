@@ -53,11 +53,6 @@ impl NewSandboxBody {
                 "network and MCP overrides are not available in this preview",
             ));
         }
-        if self.auto_resume.enabled && self.auto_pause && !self.auto_pause_memory {
-            return Err(ApiError::bad_request(
-                "auto-resume requires memory-preserving auto-pause",
-            ));
-        }
         crate::volume::validate_mounts(&self.volume_mounts)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
         Ok((

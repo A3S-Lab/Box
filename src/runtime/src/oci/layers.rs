@@ -5,6 +5,8 @@
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::rootfs_metadata::{
     RootfsEntryKind, RootfsMetadataEntry, RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH,
+    IMAGE_ROOTFS_METADATA_TEMP_PATH, PREVIOUS_ROOTFS_METADATA_PATH, ROOTFS_METADATA_PATH,
+    ROOTFS_METADATA_TEMP_PATH,
 };
 use base64::Engine;
 use flate2::read::GzDecoder;
@@ -168,10 +170,9 @@ fn extract_layer_with_cap(
         let normalized = normalize_layer_path(&path).ok_or_else(|| {
             BoxError::OciImageError(format!("Invalid layer entry path: {}", path.display()))
         })?;
-        if track_metadata && normalized == image_metadata_relative_path() {
+        if let Some(reserved) = reserved_metadata_path(&normalized) {
             return Err(BoxError::OciImageError(format!(
-                "OCI layer contains reserved internal path {}",
-                IMAGE_ROOTFS_METADATA_PATH
+                "OCI layer contains reserved internal path {reserved}"
             )));
         }
 
@@ -212,10 +213,9 @@ fn extract_layer_with_cap(
                     .join(victim_name),
             )
             .ok_or_else(|| BoxError::OciImageError("Invalid whiteout path".to_string()))?;
-            if track_metadata && victim == image_metadata_relative_path() {
+            if let Some(reserved) = reserved_metadata_path(&victim) {
                 return Err(BoxError::OciImageError(format!(
-                    "OCI layer whiteouts reserved internal path {}",
-                    IMAGE_ROOTFS_METADATA_PATH
+                    "OCI layer whiteouts reserved internal path {reserved}"
                 )));
             }
             // Whiteout marker: remove the named sibling from a lower layer. Resolve
@@ -247,6 +247,18 @@ fn extract_layer_with_cap(
             None
         };
         let unpacked = entry.unpack_in(target_dir).map_err(|e| {
+            #[cfg(windows)]
+            if error_chain_has_raw_os_error(&e, WINDOWS_SYMLINK_PRIVILEGE_ERROR) {
+                return BoxError::OciImageError(format!(
+                    "Failed to extract layer to {}: Windows cannot preserve OCI symlink {}: \
+                     enable Developer Mode so a non-elevated process can create symbolic links, \
+                     or grant the service identity SeCreateSymbolicLinkPrivilege; flattening the \
+                     link would corrupt the image (ERROR_PRIVILEGE_NOT_HELD (1314)). See \
+                     https://learn.microsoft.com/windows/advanced-settings/developer-mode",
+                    target_dir.display(),
+                    path.display(),
+                ));
+            }
             // Surface the underlying cause (e.g. the LimitedReader's size-cap
             // error) — tar's wrapper Display alone would just say "failed to
             // unpack <path>" and hide a decompression-bomb abort from the operator.
@@ -329,6 +341,38 @@ fn image_metadata_relative_path() -> PathBuf {
     PathBuf::from(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
 }
 
+fn terminal_metadata_relative_path() -> PathBuf {
+    PathBuf::from(ROOTFS_METADATA_PATH.trim_start_matches('/'))
+}
+
+fn previous_metadata_relative_path() -> PathBuf {
+    PathBuf::from(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'))
+}
+
+fn image_metadata_temp_relative_path() -> PathBuf {
+    PathBuf::from(IMAGE_ROOTFS_METADATA_TEMP_PATH.trim_start_matches('/'))
+}
+
+fn terminal_metadata_temp_relative_path() -> PathBuf {
+    PathBuf::from(ROOTFS_METADATA_TEMP_PATH.trim_start_matches('/'))
+}
+
+fn reserved_metadata_path(path: &Path) -> Option<&'static str> {
+    if path.starts_with(image_metadata_relative_path()) {
+        Some(IMAGE_ROOTFS_METADATA_PATH)
+    } else if path.starts_with(terminal_metadata_relative_path()) {
+        Some(ROOTFS_METADATA_PATH)
+    } else if path.starts_with(previous_metadata_relative_path()) {
+        Some(PREVIOUS_ROOTFS_METADATA_PATH)
+    } else if path.starts_with(image_metadata_temp_relative_path()) {
+        Some(IMAGE_ROOTFS_METADATA_TEMP_PATH)
+    } else if path.starts_with(terminal_metadata_temp_relative_path()) {
+        Some(ROOTFS_METADATA_TEMP_PATH)
+    } else {
+        None
+    }
+}
+
 fn normalize_layer_path(path: &Path) -> Option<PathBuf> {
     use std::path::Component;
 
@@ -357,10 +401,7 @@ fn metadata_from_header<R: Read>(
             .ok_or_else(|| BoxError::OciImageError("Missing symlink target".to_string()))?;
         (
             RootfsEntryKind::Symlink,
-            Some(
-                base64::engine::general_purpose::STANDARD
-                    .encode(target.as_os_str().as_encoded_bytes()),
-            ),
+            Some(base64::engine::general_purpose::STANDARD.encode(guest_path_bytes(&target))),
         )
     } else if entry_type.is_file() || entry_type.is_hard_link() {
         (RootfsEntryKind::Regular, None)
@@ -370,8 +411,8 @@ fn metadata_from_header<R: Read>(
             path.display()
         )));
     };
-    let path_base64 = base64::engine::general_purpose::STANDARD
-        .encode(archive_metadata_path(path).as_os_str().as_encoded_bytes());
+    let path_base64 =
+        base64::engine::general_purpose::STANDARD.encode(archive_metadata_path_bytes(path));
     Ok(RootfsMetadataEntry {
         path_base64,
         kind,
@@ -394,11 +435,34 @@ fn metadata_from_header<R: Read>(
     })
 }
 
-fn archive_metadata_path(path: &Path) -> PathBuf {
-    if path.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        Path::new(".").join(path)
+/// Encode a rootfs path with Linux separators regardless of the host OS.
+///
+/// The manifest is consumed inside a Linux guest, so serializing a Windows
+/// `PathBuf` directly would turn `./usr/bin` into `.\\usr\\bin` and describe a
+/// different Linux filename.
+fn archive_metadata_path_bytes(path: &Path) -> Vec<u8> {
+    let mut encoded = vec![b'.'];
+    for component in path.components() {
+        if let std::path::Component::Normal(name) = component {
+            encoded.push(b'/');
+            encoded.extend_from_slice(name.as_encoded_bytes());
+        }
+    }
+    encoded
+}
+
+fn guest_path_bytes(path: &Path) -> Vec<u8> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    #[cfg(windows)]
+    {
+        bytes
+            .iter()
+            .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        bytes.to_vec()
     }
 }
 
@@ -413,7 +477,10 @@ fn remove_metadata_descendants(
 }
 
 fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMetadataEntry>> {
-    let path = target_dir.join(image_metadata_relative_path());
+    let path = crate::oci::rootfs::resolve_guest_file_path(
+        target_dir,
+        IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'),
+    )?;
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
@@ -439,7 +506,7 @@ fn load_image_metadata(target_dir: &Path) -> Result<BTreeMap<PathBuf, RootfsMeta
         let archive_path = PathBuf::from(os_string_from_encoded_bytes(raw));
         let relative = normalize_layer_path(&archive_path)
             .ok_or_else(|| BoxError::OciImageError("Unsafe path in image metadata".to_string()))?;
-        if relative == image_metadata_relative_path() || result.insert(relative, entry).is_some() {
+        if reserved_metadata_path(&relative).is_some() || result.insert(relative, entry).is_some() {
             return Err(BoxError::OciImageError(
                 "Duplicate or reserved path in image metadata".to_string(),
             ));
@@ -473,7 +540,17 @@ fn prepare_rootless_metadata_replay(
             if entry.kind == RootfsEntryKind::Symlink || entry.mode & 0o200 != 0 {
                 continue;
             }
-            let target = target_dir.join(relative);
+            let relative_path = relative.to_str().ok_or_else(|| {
+                BoxError::OciImageError(format!(
+                    "Metadata replay path is not UTF-8: {}",
+                    relative.display()
+                ))
+            })?;
+            let target = if entry.kind == RootfsEntryKind::Directory {
+                crate::oci::rootfs::resolve_guest_directory_path(target_dir, relative_path)?
+            } else {
+                crate::oci::rootfs::resolve_guest_file_path(target_dir, relative_path)?
+            };
             let current = std::fs::symlink_metadata(&target).map_err(|error| {
                 BoxError::OciImageError(format!(
                     "Failed to prepare metadata replay for {}: {error}",
@@ -512,17 +589,15 @@ fn finalize_image_metadata(
         &mut final_entries,
     )?;
     let manifest = RootfsMetadataManifest::new(final_entries.into_values().collect());
-    let destination = target_dir.join(image_metadata_relative_path());
-    let temporary = destination.with_extension("json.tmp");
+    let destination_relative = IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/');
+    let temporary_relative = ".a3s_image_metadata_v1.json.tmp";
     let bytes = serde_json::to_vec(&manifest).map_err(|error| {
         BoxError::OciImageError(format!("Failed to encode image metadata: {error}"))
     })?;
-    std::fs::write(&temporary, bytes).map_err(|error| {
-        BoxError::OciImageError(format!(
-            "Failed to write image metadata {}: {error}",
-            temporary.display()
-        ))
-    })?;
+    let temporary =
+        crate::oci::rootfs::replace_guest_file_no_follow(target_dir, temporary_relative, bytes)?;
+    let destination =
+        crate::oci::rootfs::remove_guest_entry_no_follow(target_dir, destination_relative)?;
     std::fs::rename(&temporary, &destination).map_err(|error| {
         BoxError::OciImageError(format!(
             "Failed to activate image metadata {}: {error}",
@@ -558,8 +633,10 @@ fn collect_final_metadata(
     desired: &BTreeMap<PathBuf, RootfsMetadataEntry>,
     output: &mut BTreeMap<PathBuf, RootfsMetadataEntry>,
 ) -> Result<()> {
-    if relative == image_metadata_relative_path()
+    if reserved_metadata_path(relative).is_some()
         || relative == Path::new(".a3s_image_metadata_v1.json.tmp")
+        || relative == Path::new(".a3s_rootfs_metadata_v1.json.tmp")
+        || relative == Path::new(".a3s_rootfs_metadata_v1.previous.json")
     {
         return Ok(());
     }
@@ -567,6 +644,7 @@ fn collect_final_metadata(
         BoxError::OciImageError(format!("Failed to inspect {}: {error}", source.display()))
     })?;
     let file_type = filesystem.file_type();
+    let previous = desired.get(relative);
     let (kind, link_target_base64) = if file_type.is_dir() {
         (RootfsEntryKind::Directory, None)
     } else if file_type.is_file() {
@@ -575,17 +653,16 @@ fn collect_final_metadata(
         let target = std::fs::read_link(source).map_err(|error| {
             BoxError::OciImageError(format!("Failed to read {}: {error}", source.display()))
         })?;
-        (
-            RootfsEntryKind::Symlink,
-            Some(
-                base64::engine::general_purpose::STANDARD
-                    .encode(target.as_os_str().as_encoded_bytes()),
-            ),
-        )
+        let target = previous
+            .filter(|entry| entry.kind == RootfsEntryKind::Symlink)
+            .and_then(|entry| entry.link_target_base64.clone())
+            .unwrap_or_else(|| {
+                base64::engine::general_purpose::STANDARD.encode(guest_path_bytes(&target))
+            });
+        (RootfsEntryKind::Symlink, Some(target))
     } else {
         return Ok(());
     };
-    let previous = desired.get(relative);
     #[cfg(unix)]
     let (mode, mtime, size) = {
         use std::os::unix::fs::MetadataExt;
@@ -606,11 +683,8 @@ fn collect_final_metadata(
             )
         });
     let entry = RootfsMetadataEntry {
-        path_base64: base64::engine::general_purpose::STANDARD.encode(
-            archive_metadata_path(relative)
-                .as_os_str()
-                .as_encoded_bytes(),
-        ),
+        path_base64: base64::engine::general_purpose::STANDARD
+            .encode(archive_metadata_path_bytes(relative)),
         kind,
         mode,
         uid: previous.map_or(0, |entry| entry.uid),
@@ -640,6 +714,34 @@ fn collect_final_metadata(
     }
     let _ = root;
     Ok(())
+}
+
+#[cfg(windows)]
+const WINDOWS_SYMLINK_PRIVILEGE_ERROR: i32 = 1314;
+
+#[cfg(windows)]
+fn error_chain_has_raw_os_error(error: &std::io::Error, code: i32) -> bool {
+    if error.raw_os_error() == Some(code) {
+        return true;
+    }
+    // tar 0.4 wraps symlink errors in a new `io::Error` containing only a
+    // formatted message, so the raw code is no longer available in its source
+    // chain. Match the exact rendered OS-code suffix as the final fallback.
+    if error.to_string().contains(&format!("(os error {code})")) {
+        return true;
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.raw_os_error() == Some(code))
+            || current.to_string().contains(&format!("(os error {code})"))
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
 }
 
 fn prepare_symlink_destination(target_dir: &Path, path: &Path) -> Result<()> {
@@ -963,14 +1065,110 @@ mod tests {
     }
 
     #[test]
-    fn tracked_metadata_rejects_reserved_image_path() {
+    fn every_extraction_mode_rejects_reserved_internal_paths() {
+        for (index, reserved) in [
+            ".a3s_image_metadata_v1.json",
+            ".a3s_image_metadata_v1.json/child",
+            ".a3s_image_metadata_v1.json.tmp",
+            ".a3s_image_metadata_v1.json.tmp/child",
+            ".a3s_rootfs_metadata_v1.json",
+            ".a3s_rootfs_metadata_v1.json/child",
+            ".a3s_rootfs_metadata_v1.json.tmp",
+            ".a3s_rootfs_metadata_v1.json.tmp/child",
+            ".a3s_rootfs_metadata_v1.previous.json",
+            ".a3s_rootfs_metadata_v1.previous.json/child",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for track_metadata in [false, true] {
+                let temp_dir = TempDir::new().unwrap();
+                let layer = temp_dir
+                    .path()
+                    .join(format!("reserved-{index}-{track_metadata}.tar.gz"));
+                let target = temp_dir.path().join("rootfs");
+                create_test_layer(&layer, &[(reserved, b"forged")]);
+
+                let error = if track_metadata {
+                    extract_layer_with_metadata(&layer, &target).unwrap_err()
+                } else {
+                    extract_layer(&layer, &target).unwrap_err()
+                };
+                assert!(error.to_string().contains("reserved internal path"));
+                assert!(!target.join(reserved).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn untracked_extraction_rejects_reserved_whiteouts() {
+        for victim in [
+            ".a3s_rootfs_metadata_v1.previous.json",
+            ".a3s_rootfs_metadata_v1.json.tmp",
+        ] {
+            let temp_dir = TempDir::new().unwrap();
+            let layer = temp_dir.path().join("reserved-whiteout.tar.gz");
+            let target = temp_dir.path().join("rootfs");
+            let whiteout = format!(".wh.{victim}");
+            create_test_layer(&layer, &[(&whiteout, b"")]);
+
+            let error = extract_layer(&layer, &target).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("whiteouts reserved internal path"));
+        }
+    }
+
+    #[test]
+    fn tracked_metadata_rejects_reserved_terminal_symlink() {
         let temp_dir = TempDir::new().unwrap();
-        let layer = temp_dir.path().join("reserved.tar.gz");
+        let layer = temp_dir.path().join("reserved-terminal-link.tar.gz");
         let target = temp_dir.path().join("rootfs");
-        create_test_layer(&layer, &[(".a3s_image_metadata_v1.json", b"forged")]);
+        create_layer_with_symlink(
+            &layer,
+            ".a3s_rootfs_metadata_v1.json",
+            Path::new("/dev/zero"),
+            &[],
+        );
 
         let error = extract_layer_with_metadata(&layer, &target).unwrap_err();
         assert!(error.to_string().contains("reserved internal path"));
+        assert!(std::fs::symlink_metadata(target.join(".a3s_rootfs_metadata_v1.json")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_finalization_replaces_temp_symlink_without_touching_outside() {
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(&outside, b"host-secret").unwrap();
+        std::os::unix::fs::symlink("../outside", target.join(".a3s_image_metadata_v1.json.tmp"))
+            .unwrap();
+
+        finalize_rootfs_metadata(&target).unwrap();
+
+        assert_eq!(std::fs::read(&outside).unwrap(), b"host-secret");
+        assert!(target.join(image_metadata_relative_path()).is_file());
+        assert!(!target.join(".a3s_image_metadata_v1.json.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_loading_rejects_destination_symlink_escape() {
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("rootfs");
+        let outside = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(&outside, b"host-secret").unwrap();
+        std::os::unix::fs::symlink("../outside", target.join(image_metadata_relative_path()))
+            .unwrap();
+
+        let error = finalize_rootfs_metadata(&target).unwrap_err().to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"host-secret");
     }
 
     #[cfg(unix)]

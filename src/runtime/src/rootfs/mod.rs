@@ -16,7 +16,7 @@ pub use builder::RootfsBuilder;
 pub use layout::{GuestLayout, GUEST_WORKDIR};
 pub use provider::{default_provider, CopyProvider, OverlayProvider, RootfsProvider};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Read the exit code persisted by guest-init from the active writable rootfs.
 ///
@@ -91,6 +91,46 @@ pub fn attach_persistent_rootfs(
         let _ = box_dir;
         Ok(None)
     }
+}
+
+/// Invalidate the last clean-shutdown metadata generation before launching a
+/// box, retaining it at the one-shot replay path used by guest-init.
+///
+/// Overlay providers can expose the same entry through `merged` and `upper`.
+/// Staging is idempotent when the canonical marker is already absent: an
+/// existing replay marker is retained so a boot that failed before guest replay
+/// can be retried safely.
+pub fn stage_box_terminal_rootfs_metadata(box_dir: &Path) -> a3s_box_core::error::Result<()> {
+    let attached = attach_persistent_rootfs(box_dir)?;
+    let mut roots = Vec::<PathBuf>::new();
+    if let Some(rootfs) = attached.as_ref() {
+        roots.push(rootfs.path().to_path_buf());
+    }
+    roots.extend([
+        box_dir.join("rootfs"),
+        box_dir.join("upper"),
+        box_dir.join("merged"),
+    ]);
+    roots.sort();
+    roots.dedup();
+
+    let mut existing_roots = Vec::new();
+    for root in roots {
+        match std::fs::symlink_metadata(&root) {
+            Ok(_) => existing_roots.push(root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    stage_metadata_roots(&existing_roots)?;
+    Ok(())
+}
+
+fn stage_metadata_roots(roots: &[PathBuf]) -> std::io::Result<()> {
+    for root in roots {
+        a3s_box_core::rootfs_metadata::stage_terminal_rootfs_metadata_for_boot(root)?;
+    }
+    Ok(())
 }
 
 /// Unmount a box's overlayfs `merged` view — best-effort and idempotent.
@@ -213,5 +253,45 @@ mod tests {
         unmount_box_overlay(&merged);
 
         assert!(merged.exists());
+    }
+
+    #[test]
+    fn staging_is_idempotent_until_guest_replay_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        let terminal = root
+            .path()
+            .join(a3s_box_core::rootfs_metadata::ROOTFS_METADATA_PATH.trim_start_matches('/'));
+        let previous = root.path().join(
+            a3s_box_core::rootfs_metadata::PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'),
+        );
+        std::fs::write(&terminal, b"clean generation").unwrap();
+
+        stage_metadata_roots(&[root.path().to_path_buf()]).unwrap();
+        stage_metadata_roots(&[root.path().to_path_buf()]).unwrap();
+
+        assert!(!terminal.exists());
+        assert_eq!(std::fs::read(previous).unwrap(), b"clean generation");
+    }
+
+    #[test]
+    fn staging_one_candidate_never_discards_an_alias_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let merged = directory.path().join("merged");
+        let upper = directory.path().join("upper");
+        std::fs::create_dir_all(&merged).unwrap();
+        std::fs::create_dir_all(&upper).unwrap();
+        let terminal_name =
+            a3s_box_core::rootfs_metadata::ROOTFS_METADATA_PATH.trim_start_matches('/');
+        let previous_name =
+            a3s_box_core::rootfs_metadata::PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/');
+        std::fs::write(merged.join(terminal_name), b"clean generation").unwrap();
+        // Models the view through `upper` immediately after the same overlay
+        // entry was renamed through `merged`.
+        std::fs::write(upper.join(previous_name), b"clean generation").unwrap();
+
+        stage_metadata_roots(&[merged.clone(), upper.clone()]).unwrap();
+
+        assert!(merged.join(previous_name).is_file());
+        assert!(upper.join(previous_name).is_file());
     }
 }

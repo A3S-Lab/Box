@@ -128,25 +128,58 @@ impl ImageStore {
         digest: &str,
         source_dir: &Path,
     ) -> Result<StoredImage> {
-        // Compute target path from digest
-        let digest_hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-        let target_dir = self.store_dir.join("sha256").join(digest_hex);
+        // A digest becomes both a directory name and part of the staging name.
+        // Accept only canonical content digests before either path is built.
+        let digest_hex = super::registry::validated_digest_hex(digest)?;
+        let digest_root = self.store_dir.join("sha256");
+        std::fs::create_dir_all(&digest_root).map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Failed to create image content directory {}: {error}",
+                digest_root.display()
+            ))
+        })?;
+        require_real_directory(&digest_root).map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Unsafe image content directory {}: {error}",
+                digest_root.display()
+            ))
+        })?;
+        let target_dir = digest_root.join(digest_hex);
 
         // Copy source to target if not already present. Stage into a unique temp
         // dir then atomically rename into place, so a concurrent put() for the
         // same digest — or a copy that fails partway — can never leave a
         // half-populated content-addressed dir that a later caller mistakes for a
         // complete image (the bare check-then-copy raced on both counts).
-        if !target_dir.exists() {
-            let seq = PUT_SEQ.fetch_add(1, Ordering::Relaxed);
-            let staging = self.store_dir.join("sha256").join(format!(
-                ".staging-{}-{}-{}",
-                digest_hex,
-                std::process::id(),
-                seq
-            ));
-            let _ = std::fs::remove_dir_all(&staging);
-            copy_dir_recursive(source_dir, &staging).map_err(|e| {
+        if !real_directory_exists(&target_dir).map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Unsafe existing image directory {}: {error}",
+                target_dir.display()
+            ))
+        })? {
+            // Reserve the staging directory atomically. Never remove a guessed
+            // path first: a local reparse point at that name must not turn
+            // cleanup into traversal outside the store.
+            let staging = loop {
+                let seq = PUT_SEQ.fetch_add(1, Ordering::Relaxed);
+                let candidate = digest_root.join(format!(
+                    ".staging-{}-{}-{}",
+                    digest_hex,
+                    std::process::id(),
+                    seq
+                ));
+                match std::fs::create_dir(&candidate) {
+                    Ok(()) => break candidate,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        return Err(BoxError::OciImageError(format!(
+                            "Failed to reserve image staging directory {}: {error}",
+                            candidate.display()
+                        )))
+                    }
+                }
+            };
+            copy_dir_contents_no_follow(source_dir, &staging).map_err(|e| {
                 let _ = std::fs::remove_dir_all(&staging);
                 BoxError::OciImageError(format!("Failed to copy image to store: {}", e))
             })?;
@@ -155,7 +188,12 @@ impl ImageStore {
                 // A concurrent put() may have populated target_dir first (rename
                 // onto a non-empty dir fails); that's fine — only propagate if the
                 // image still isn't there.
-                if !target_dir.exists() {
+                if !real_directory_exists(&target_dir).map_err(|error| {
+                    BoxError::OciImageError(format!(
+                        "Unsafe concurrently published image directory {}: {error}",
+                        target_dir.display()
+                    ))
+                })? {
                     return Err(BoxError::OciImageError(format!(
                         "Failed to publish image to store: {}",
                         e
@@ -212,7 +250,8 @@ impl ImageStore {
     /// fall back to removing every reference that points at the matching
     /// digest.
     pub async fn remove(&self, image: &str) -> Result<()> {
-        self.with_index_lock(|index| {
+        let store_dir = self.store_dir.clone();
+        self.with_index_lock(move |index| {
             // Resolve the reference keys to remove: the exact reference if it is
             // a known key, otherwise every key sharing the requested digest.
             let keys: Vec<String> = if index.contains_key(image) {
@@ -232,6 +271,24 @@ impl ImageStore {
                 )));
             }
 
+            // Stored paths are persisted data. Re-derive every deletion target
+            // from a validated digest instead of trusting a serialized path.
+            for key in &keys {
+                let img = index.get(key).ok_or_else(|| {
+                    BoxError::OciImageError(format!("Image index entry disappeared: {key}"))
+                })?;
+                let digest_hex = super::registry::validated_digest_hex(&img.digest)?;
+                let expected = store_dir.join("sha256").join(digest_hex);
+                if img.path != expected {
+                    return Err(BoxError::OciImageError(format!(
+                        "Refusing unsafe image path {} for digest {} (expected {})",
+                        img.path.display(),
+                        img.digest,
+                        expected.display()
+                    )));
+                }
+            }
+
             let removed: Vec<StoredImage> = keys.iter().filter_map(|k| index.remove(k)).collect();
 
             // Delete each image's on-disk layout once no remaining reference
@@ -239,7 +296,14 @@ impl ImageStore {
             // same directory, so the `path.exists()` guard makes this idempotent.
             for img in removed {
                 let digest_still_used = index.values().any(|other| other.digest == img.digest);
-                if !digest_still_used && img.path.exists() {
+                if !digest_still_used
+                    && real_directory_exists(&img.path).map_err(|error| {
+                        BoxError::OciImageError(format!(
+                            "Refusing unsafe image directory {}: {error}",
+                            img.path.display()
+                        ))
+                    })?
+                {
                     std::fs::remove_dir_all(&img.path).map_err(|e| {
                         BoxError::OciImageError(format!(
                             "Failed to remove image directory {}: {}",
@@ -349,9 +413,30 @@ impl ImageStore {
         let mut skipped = 0usize;
         for value in raw.images {
             match serde_json::from_value::<StoredImage>(value) {
-                Ok(image) => {
-                    if image.path.exists() {
-                        index.insert(image.reference.clone(), image);
+                Ok(mut image) => {
+                    // The serialized path is compatibility metadata, not an
+                    // authority for filesystem access. Windows can persist an
+                    // equivalent 8.3 spelling (for example `WODEDI~1`) and then
+                    // reopen the store through the long spelling. Lexical path
+                    // equality rejects that valid entry. Re-derive the only
+                    // permitted location from the validated digest and replace
+                    // the persisted spelling before exposing the record.
+                    let expected = super::registry::validated_digest_hex(&image.digest)
+                        .map(|digest_hex| self.store_dir.join("sha256").join(digest_hex));
+                    match expected {
+                        Ok(expected) if real_directory_exists(&expected).unwrap_or(false) => {
+                            image.path = expected;
+                            index.insert(image.reference.clone(), image);
+                        }
+                        _ => {
+                            skipped += 1;
+                            tracing::warn!(
+                                reference = %image.reference,
+                                digest = %image.digest,
+                                path = %image.path.display(),
+                                "skipping image index entry with malformed digest or unsafe path"
+                            );
+                        }
                     }
                 }
                 Err(err) => {
@@ -487,36 +572,159 @@ impl ImageStoreBackend for ImageStore {
     }
 }
 
-/// Recursively copy a directory.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    // FILE_ATTRIBUTE_REPARSE_POINT. Keep the value local so runtime does not
+    // need another windows-sys feature solely to classify metadata.
+    metadata.file_attributes() & 0x0000_0400 != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+fn require_real_directory(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing symbolic link or reparse-point directory {}",
+                path.display()
+            ),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected a directory at {}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn real_directory_exists(path: &Path) -> std::io::Result<bool> {
+    match require_real_directory(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn open_regular_source_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected a regular file at {}", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_regular_source_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    a3s_box_core::windows_file::open_regular_file(path, None).map(|(file, _)| file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_source_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected a regular file at {}", path.display()),
+        ));
+    }
+    std::fs::File::open(path)
+}
+
+fn copy_regular_file_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut source = open_regular_source_no_follow(src)?;
+    let mut destination = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)?;
+    std::io::copy(&mut source, &mut destination)?;
+    Ok(())
+}
+
+/// Copy directory contents while rejecting every source link, junction,
+/// reparse point, and special file. OCI layout symlinks are never required:
+/// guest symlinks live inside opaque layer tar blobs instead.
+fn copy_dir_contents_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
+    require_real_directory(src)?;
+    require_real_directory(dst)?;
+
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+        let metadata = std::fs::symlink_metadata(&src_path)?;
+
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "refusing symbolic link or reparse point in OCI layout: {}",
+                    src_path.display()
+                ),
+            ));
+        }
+        if metadata.is_dir() {
+            std::fs::create_dir(&dst_path)?;
+            copy_dir_contents_no_follow(&src_path, &dst_path)?;
+        } else if metadata.is_file() {
+            copy_regular_file_no_follow(&src_path, &dst_path)?;
         } else {
-            std::fs::copy(&src_path, &dst_path)?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "refusing special file in OCI layout: {}",
+                    src_path.display()
+                ),
+            ));
         }
     }
     Ok(())
 }
 
-/// Calculate total size of a directory recursively.
+/// Recursively copy a directory into a newly created destination.
+#[cfg(test)]
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(dst)?;
+    copy_dir_contents_no_follow(src, dst)
+}
+
+/// Calculate total size without following links that may have appeared in a
+/// corrupted or externally modified store.
 fn dir_size(path: &Path) -> u64 {
-    let mut total = 0;
-    if let Ok(entries) = std::fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                total += dir_size(&path);
-            } else if let Ok(meta) = path.metadata() {
-                total += meta.len();
-            }
-        }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+        return 0;
     }
-    total
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+
+    std::fs::read_dir(path)
+        .map(|entries| entries.flatten().map(|entry| dir_size(&entry.path())).sum())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -580,21 +788,36 @@ mod tests {
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
 
         let stored = store
-            .put("nginx:latest", "sha256:abc123", &source_dir)
+            .put(
+                "nginx:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &source_dir,
+            )
             .await
             .unwrap();
 
         assert_eq!(stored.reference, "nginx:latest");
-        assert_eq!(stored.digest, "sha256:abc123");
+        assert_eq!(
+            stored.digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert!(stored.size_bytes > 0);
         assert!(stored.path.exists());
 
         // Get by reference
         let fetched = store.get("nginx:latest").await.unwrap();
-        assert_eq!(fetched.digest, "sha256:abc123");
+        assert_eq!(
+            fetched.digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
 
         // Get by digest
-        let fetched = store.get_by_digest("sha256:abc123").await.unwrap();
+        let fetched = store
+            .get_by_digest(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .await
+            .unwrap();
         assert_eq!(fetched.reference, "nginx:latest");
     }
 
@@ -614,7 +837,11 @@ mod tests {
 
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
         store
-            .put("nginx:latest", "sha256:abc123", &source_dir)
+            .put(
+                "nginx:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &source_dir,
+            )
             .await
             .unwrap();
 
@@ -631,11 +858,19 @@ mod tests {
 
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
         store
-            .put("img:v1", "sha256:shared", &source_dir)
+            .put(
+                "img:v1",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &source_dir,
+            )
             .await
             .unwrap();
         let stored = store
-            .put("img:latest", "sha256:shared", &source_dir)
+            .put(
+                "img:latest",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &source_dir,
+            )
             .await
             .unwrap();
         let path = stored.path.clone();
@@ -660,19 +895,36 @@ mod tests {
 
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
         store
-            .put("app:latest", "sha256:old", &source_dir)
+            .put(
+                "app:latest",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                &source_dir,
+            )
             .await
             .unwrap();
         store
-            .put("app:latest", "sha256:new", &source_dir)
+            .put(
+                "app:latest",
+                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                &source_dir,
+            )
             .await
             .unwrap();
 
         // The tag now resolves to the new digest...
-        assert_eq!(store.get("app:latest").await.unwrap().digest, "sha256:new");
+        assert_eq!(
+            store.get("app:latest").await.unwrap().digest,
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
         // ...and the displaced image survives as a digest-keyed dangling entry.
-        let dangling = store.get("sha256:old").await.unwrap();
-        assert_eq!(dangling.digest, "sha256:old");
+        let dangling = store
+            .get("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+            .await
+            .unwrap();
+        assert_eq!(
+            dangling.digest,
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        );
         assert_eq!(store.list().await.len(), 2);
     }
 
@@ -687,11 +939,19 @@ mod tests {
 
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
         store
-            .put("app:latest", "sha256:same", &source_dir)
+            .put(
+                "app:latest",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                &source_dir,
+            )
             .await
             .unwrap();
         store
-            .put("app:latest", "sha256:same", &source_dir)
+            .put(
+                "app:latest",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                &source_dir,
+            )
             .await
             .unwrap();
 
@@ -709,14 +969,26 @@ mod tests {
 
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
         let stored = store
-            .put("gcr.io/test/img:test", "sha256:deadbeef", &source_dir)
+            .put(
+                "gcr.io/test/img:test",
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                &source_dir,
+            )
             .await
             .unwrap();
         let path = stored.path.clone();
 
-        store.remove("sha256:deadbeef").await.unwrap();
+        store
+            .remove("sha256:2222222222222222222222222222222222222222222222222222222222222222")
+            .await
+            .unwrap();
         assert!(store.get("gcr.io/test/img:test").await.is_none());
-        assert!(store.get_by_digest("sha256:deadbeef").await.is_none());
+        assert!(store
+            .get_by_digest(
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            )
+            .await
+            .is_none());
         assert!(!path.exists(), "on-disk layout should be deleted");
     }
 
@@ -731,16 +1003,27 @@ mod tests {
 
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
         store
-            .put("img:v1", "sha256:shared", &source_dir)
+            .put(
+                "img:v1",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &source_dir,
+            )
             .await
             .unwrap();
         let stored = store
-            .put("img:latest", "sha256:shared", &source_dir)
+            .put(
+                "img:latest",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &source_dir,
+            )
             .await
             .unwrap();
         let path = stored.path.clone();
 
-        store.remove("sha256:shared").await.unwrap();
+        store
+            .remove("sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .await
+            .unwrap();
         assert!(store.get("img:v1").await.is_none());
         assert!(store.get("img:latest").await.is_none());
         assert!(!path.exists(), "shared layout should be deleted");
@@ -757,7 +1040,7 @@ mod tests {
         store
             .put(
                 "gcr.io/x/test-image-predefined-group:latest",
-                "sha256:grp",
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333",
                 &source_dir,
             )
             .await
@@ -774,12 +1057,18 @@ mod tests {
                 .resolve("gcr.io/x/test-image-predefined-group")
                 .await
                 .map(|i| i.digest),
-            Some("sha256:grp".to_string())
+            Some(
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+                    .to_string()
+            )
         );
         // Image id (bare digest) and a name@digest pin.
-        assert!(store.resolve("sha256:grp").await.is_some());
         assert!(store
-            .resolve("gcr.io/x/test-image-predefined-group@sha256:grp")
+            .resolve("sha256:3333333333333333333333333333333333333333333333333333333333333333")
+            .await
+            .is_some());
+        assert!(store
+            .resolve("gcr.io/x/test-image-predefined-group@sha256:3333333333333333333333333333333333333333333333333333333333333333")
             .await
             .is_some());
         // Unknown.
@@ -811,11 +1100,19 @@ mod tests {
 
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
         store
-            .put("nginx:latest", "sha256:aaa", &source_dir)
+            .put(
+                "nginx:latest",
+                "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                &source_dir,
+            )
             .await
             .unwrap();
         store
-            .put("alpine:3.18", "sha256:bbb", &source_dir)
+            .put(
+                "alpine:3.18",
+                "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+                &source_dir,
+            )
             .await
             .unwrap();
 
@@ -832,7 +1129,11 @@ mod tests {
 
         let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
         store
-            .put("nginx:latest", "sha256:aaa", &source_dir)
+            .put(
+                "nginx:latest",
+                "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                &source_dir,
+            )
             .await
             .unwrap();
 
@@ -850,7 +1151,11 @@ mod tests {
         let store = ImageStore::new(&store_dir, 100).unwrap();
 
         store
-            .put("old:v1", "sha256:old1", &source_dir)
+            .put(
+                "old:v1",
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                &source_dir,
+            )
             .await
             .unwrap();
 
@@ -858,7 +1163,11 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         store
-            .put("new:v2", "sha256:new2", &source_dir)
+            .put(
+                "new:v2",
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                &source_dir,
+            )
             .await
             .unwrap();
 
@@ -882,7 +1191,11 @@ mod tests {
         assert!(store.evict().await.unwrap().is_empty());
 
         store
-            .put("tiny:latest", "sha256:tiny", &source_dir)
+            .put(
+                "tiny:latest",
+                "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+                &source_dir,
+            )
             .await
             .unwrap();
         assert!(store.evict().await.unwrap().is_empty());
@@ -900,7 +1213,11 @@ mod tests {
         {
             let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
             store
-                .put("nginx:latest", "sha256:persist", &source_dir)
+                .put(
+                    "nginx:latest",
+                    "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+                    &source_dir,
+                )
                 .await
                 .unwrap();
         }
@@ -910,7 +1227,10 @@ mod tests {
             let store = ImageStore::new(&store_dir, 10 * 1024 * 1024).unwrap();
             let image = store.get("nginx:latest").await;
             assert!(image.is_some());
-            assert_eq!(image.unwrap().digest, "sha256:persist");
+            assert_eq!(
+                image.unwrap().digest,
+                "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+            );
         }
     }
 
@@ -933,11 +1253,27 @@ mod tests {
         let (src1, src2) = (source_dir.clone(), source_dir.clone());
         let h1 = {
             let s1 = Arc::clone(&s1);
-            tokio::spawn(async move { s1.put("img:a", "sha256:aaaa", &src1).await.unwrap() })
+            tokio::spawn(async move {
+                s1.put(
+                    "img:a",
+                    "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+                    &src1,
+                )
+                .await
+                .unwrap()
+            })
         };
         let h2 = {
             let s2 = Arc::clone(&s2);
-            tokio::spawn(async move { s2.put("img:b", "sha256:bbbb", &src2).await.unwrap() })
+            tokio::spawn(async move {
+                s2.put(
+                    "img:b",
+                    "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+                    &src2,
+                )
+                .await
+                .unwrap()
+            })
         };
         h1.await.unwrap();
         h2.await.unwrap();
@@ -953,12 +1289,14 @@ mod tests {
     async fn load_index_skips_missing_paths_and_unreadable_entries() {
         let tmp = tempfile::tempdir().unwrap();
         let store_dir = tmp.path().join("images");
-        let live_path = store_dir.join("sha256/live");
-        let missing_path = store_dir.join("sha256/missing");
+        let live_digest = format!("sha256:{}", "a".repeat(64));
+        let missing_digest = format!("sha256:{}", "b".repeat(64));
+        let live_path = store_dir.join("sha256").join("a".repeat(64));
+        let missing_path = store_dir.join("sha256").join("b".repeat(64));
         create_test_oci_layout(&live_path);
 
-        let live = stored_image("live:latest", "sha256:live", live_path);
-        let missing = stored_image("missing:latest", "sha256:missing", missing_path);
+        let live = stored_image("live:latest", &live_digest, live_path);
+        let missing = stored_image("missing:latest", &missing_digest, missing_path);
         let index = serde_json::json!({
             "images": [
                 serde_json::to_value(&live).unwrap(),
@@ -1048,5 +1386,174 @@ mod tests {
             .expect_err("missing source should fail");
 
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
+    async fn put_rejects_path_shaped_digest_without_touching_host_path() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        let host_dir = tmp.path().join("host-target");
+        create_test_oci_layout(&source_dir);
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::write(host_dir.join("keep.txt"), b"host data").unwrap();
+        let store = ImageStore::new(&store_dir, u64::MAX).unwrap();
+
+        let error = store
+            .put("evil:latest", "sha256:../../host-target", &source_dir)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("malformed content digest"));
+        assert_eq!(
+            std::fs::read(host_dir.join("keep.txt")).unwrap(),
+            b"host data"
+        );
+        assert!(store.list().await.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn put_rejects_source_symlink_without_copying_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let real_source = tmp.path().join("real-source");
+        let source_link = tmp.path().join("source-link");
+        create_test_oci_layout(&real_source);
+        symlink(&real_source, &source_link).unwrap();
+        let store = ImageStore::new(&store_dir, u64::MAX).unwrap();
+
+        let error = store
+            .put(
+                "evil:latest",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &source_link,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("symbolic link"));
+        assert!(store.list().await.is_empty());
+        assert!(real_source.join("index.json").is_file());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn put_rejects_extra_symlink_and_preserves_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        let host_file = tmp.path().join("host-secret.txt");
+        create_test_oci_layout(&source_dir);
+        std::fs::write(&host_file, b"secret").unwrap();
+        symlink(&host_file, source_dir.join("extra-blob")).unwrap();
+        let store = ImageStore::new(&store_dir, u64::MAX).unwrap();
+
+        assert!(store
+            .put(
+                "evil:latest",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &source_dir,
+            )
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&host_file).unwrap(), b"secret");
+        assert!(store.list().await.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn put_rejects_windows_source_reparse_point() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let source_dir = tmp.path().join("source");
+        let host_file = tmp.path().join("host-secret.txt");
+        let link = source_dir.join("extra-blob");
+        create_test_oci_layout(&source_dir);
+        std::fs::write(&host_file, b"secret").unwrap();
+        match std::os::windows::fs::symlink_file(&host_file, &link) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error) => panic!("failed to create Windows test symlink: {error}"),
+        }
+        let store = ImageStore::new(&store_dir, u64::MAX).unwrap();
+
+        assert!(store
+            .put(
+                "evil:latest",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                &source_dir,
+            )
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&host_file).unwrap(), b"secret");
+        assert!(store.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_index_rejects_forged_deletion_path() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let victim = tmp.path().join("host-victim");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
+
+        let forged = stored_image(
+            "evil:latest",
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            victim.clone(),
+        );
+        let index = StoreIndex {
+            images: vec![forged],
+        };
+        std::fs::write(
+            store_dir.join("index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+
+        let store = ImageStore::new(&store_dir, u64::MAX).unwrap();
+        assert!(store.list().await.is_empty());
+        assert!(store.remove("evil:latest").await.is_err());
+        assert_eq!(std::fs::read(victim.join("keep.txt")).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
+    async fn load_index_rederives_path_and_never_uses_forged_spelling() {
+        let tmp = TempDir::new().unwrap();
+        let store_dir = tmp.path().join("store");
+        let digest_hex = "d".repeat(64);
+        let digest = format!("sha256:{digest_hex}");
+        let expected = store_dir.join("sha256").join(&digest_hex);
+        let victim = tmp.path().join("host-victim");
+        create_test_oci_layout(&expected);
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep.txt"), b"keep").unwrap();
+
+        // A persisted path may be an equivalent legacy spelling (notably an
+        // 8.3 path on Windows), or it may be attacker-controlled. In either
+        // case the digest-derived content directory is the only path to use.
+        let forged = stored_image("safe:latest", &digest, victim.clone());
+        let index = StoreIndex {
+            images: vec![forged],
+        };
+        std::fs::write(
+            store_dir.join("index.json"),
+            serde_json::to_vec_pretty(&index).unwrap(),
+        )
+        .unwrap();
+
+        let store = ImageStore::new(&store_dir, u64::MAX).unwrap();
+        let loaded = store.get("safe:latest").await.unwrap();
+        assert_eq!(loaded.path, expected);
+
+        store.remove("safe:latest").await.unwrap();
+        assert!(!expected.exists());
+        assert_eq!(std::fs::read(victim.join("keep.txt")).unwrap(), b"keep");
     }
 }

@@ -10,6 +10,29 @@ keywords = ["libkrun", "microvm", "whpx", "virtualization", "windows"]
 categories = ["api-bindings", "os::windows-apis", "virtualization"]
 readme = "README.md"
 
+# Cargo omits files inside a Git submodule from crates.io packages. A
+# deterministic `git archive` of the required libkrun sources keeps the Unix
+# source fallback real without carrying its 100 MiB SNP sample disk. The three
+# tested Windows runtime files are stored in a deterministic XZ archive so the
+# universal package remains below crates.io's 10 MiB limit.
+include = [
+    "Cargo.toml",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "SOURCE-PROVENANCE.md",
+    "THIRD_PARTY_NOTICES.md",
+    "build.rs",
+    "build_support.rs",
+    "src/**",
+    "tests/**",
+    "examples/**",
+    "firmware/**",
+    "licenses/**",
+    "vendor/libkrun-source.tar",
+    "vendor/krun-windows-x64.tar.xz",
+]
+
 links = "a3s_krun"
 
 [build-dependencies]

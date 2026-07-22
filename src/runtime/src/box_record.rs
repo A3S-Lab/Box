@@ -350,6 +350,12 @@ pub struct ManagedExecutionMetadata {
     /// Provider terminal timestamp retained for deterministic observation replay.
     #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
+    /// Whether a paused execution still owns a live, memory-preserved runtime.
+    ///
+    /// Records written before filesystem-only pause support always represented
+    /// warm pauses, so the backwards-compatible default is `true`.
+    #[serde(default = "default_paused_with_memory")]
+    pub paused_with_memory: bool,
 }
 
 /// Recoverable backend operation associated with a transitional state.
@@ -365,7 +371,12 @@ pub enum ManagedExecutionOperation {
         snapshot_id: ExecutionSnapshotId,
         source_state: ManagedExecutionState,
     },
-    Kill,
+    Kill {
+        #[serde(default)]
+        signal: Option<i32>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
     Remove,
     Restart {
         operation_id: OperationId,
@@ -416,6 +427,7 @@ impl ManagedExecutionMetadata {
             pending_operation: None,
             last_restart: None,
             finished_at: None,
+            paused_with_memory: true,
         })
     }
 
@@ -440,7 +452,7 @@ impl ManagedExecutionMetadata {
                     completed.operation_id
                 )));
             }
-            validate_restart_timeout(completed.stop_timeout_secs)?;
+            validate_stop_timeout(completed.stop_timeout_secs)?;
         }
         Ok(())
     }
@@ -467,7 +479,7 @@ fn validate_pending_operation(
             Some(ManagedExecutionOperation::Snapshot { .. })
         ) | (
             ManagedExecutionState::Killing,
-            Some(ManagedExecutionOperation::Kill)
+            Some(ManagedExecutionOperation::Kill { .. })
         ) | (
             ManagedExecutionState::Removing,
             Some(ManagedExecutionOperation::Remove)
@@ -525,7 +537,7 @@ fn validate_pending_operation(
                 expected.get()
             )));
         }
-        validate_restart_timeout(*stop_timeout_secs)?;
+        validate_stop_timeout(*stop_timeout_secs)?;
     }
     if let Some(ManagedExecutionOperation::Snapshot { source_state, .. }) = operation {
         if state != ManagedExecutionState::Snapshotting
@@ -539,13 +551,50 @@ fn validate_pending_operation(
             ));
         }
     }
+    if let Some(ManagedExecutionOperation::Kill {
+        signal,
+        timeout_secs,
+    }) = operation
+    {
+        if signal.is_some_and(|signal| signal <= 0) {
+            return Err(a3s_box_core::BoxError::StateError(
+                "kill signal must be positive".to_string(),
+            ));
+        }
+        validate_stop_timeout(*timeout_secs)?;
+    }
+    if !metadata.paused_with_memory {
+        let valid_cold_pause_state = match (state, operation) {
+            (
+                ManagedExecutionState::Pausing,
+                Some(ManagedExecutionOperation::Pause { keep_memory }),
+            ) => !keep_memory,
+            (ManagedExecutionState::Paused | ManagedExecutionState::Resuming, _) => true,
+            (
+                ManagedExecutionState::Snapshotting,
+                Some(ManagedExecutionOperation::Snapshot { source_state, .. }),
+            ) => *source_state == ManagedExecutionState::Paused,
+            // These transitions may be claimed from a cold-paused execution.
+            (ManagedExecutionState::Killing | ManagedExecutionState::Removing, _) => true,
+            (
+                ManagedExecutionState::RestartStopping,
+                Some(ManagedExecutionOperation::Restart { source_state, .. }),
+            ) => *source_state == ManagedExecutionState::Paused,
+            _ => false,
+        };
+        if !valid_cold_pause_state {
+            return Err(a3s_box_core::BoxError::StateError(format!(
+                "managed execution state {state} cannot retain a filesystem-only pause"
+            )));
+        }
+    }
     Ok(())
 }
 
-fn validate_restart_timeout(timeout_secs: Option<u64>) -> a3s_box_core::Result<()> {
+fn validate_stop_timeout(timeout_secs: Option<u64>) -> a3s_box_core::Result<()> {
     if timeout_secs.is_some_and(|timeout| timeout.checked_mul(1_000).is_none()) {
         Err(a3s_box_core::BoxError::StateError(
-            "restart stop timeout is too large".to_string(),
+            "managed stop timeout is too large".to_string(),
         ))
     } else {
         Ok(())
@@ -567,6 +616,10 @@ fn default_restart_policy() -> String {
 
 fn default_health_status() -> String {
     "none".to_string()
+}
+
+const fn default_paused_with_memory() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -634,6 +687,10 @@ mod tests {
         .unwrap();
         let mut value = minimal_record();
         value["managed_execution"] = serde_json::to_value(metadata).unwrap();
+        value["managed_execution"]
+            .as_object_mut()
+            .unwrap()
+            .remove("paused_with_memory");
 
         let record: BoxRecord = serde_json::from_value(value).unwrap();
         let encoded = serde_json::to_value(&record).unwrap();
@@ -647,11 +704,55 @@ mod tests {
         assert_eq!(managed.operation_id.as_str(), "create-op-1");
         assert_eq!(managed.generation, ExecutionGeneration::INITIAL);
         assert_eq!(managed.request.external_sandbox_id, "sandbox-1");
+        assert!(managed.paused_with_memory);
         assert_eq!(
             managed.request.config.isolation,
             ExecutionIsolation::Sandbox
         );
         assert_eq!(encoded["managed_execution"]["generation"], 1);
+        assert_eq!(encoded["managed_execution"]["paused_with_memory"], true);
+    }
+
+    #[test]
+    fn legacy_kill_operation_defaults_new_termination_options() {
+        let operation: ManagedExecutionOperation =
+            serde_json::from_value(serde_json::json!({ "kind": "kill" })).unwrap();
+
+        assert_eq!(
+            operation,
+            ManagedExecutionOperation::Kill {
+                signal: None,
+                timeout_secs: None,
+            }
+        );
+    }
+
+    #[test]
+    fn managed_execution_rejects_a_cold_pause_marker_in_running_state() {
+        let config = a3s_box_core::BoxConfig {
+            image: "alpine:latest".to_string(),
+            isolation: ExecutionIsolation::Sandbox,
+            ..Default::default()
+        };
+        let mut metadata = ManagedExecutionMetadata::new(
+            OperationId::new("create-op-cold-invalid").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "sandbox-cold-invalid".to_string(),
+                config,
+                labels: Default::default(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        metadata.paused_with_memory = false;
+        let mut value = minimal_record();
+        value["status"] = serde_json::json!("running");
+        value["managed_execution"] = serde_json::to_value(metadata).unwrap();
+        let record: BoxRecord = serde_json::from_value(value).unwrap();
+
+        assert!(record.managed_state().is_err());
     }
 
     #[test]

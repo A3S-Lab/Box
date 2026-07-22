@@ -7,6 +7,82 @@ use std::process::Child;
 use std::sync::Mutex;
 use sysinfo::{Pid, System};
 
+#[cfg(windows)]
+fn wait_then_terminate_attached_process(pid: u32, box_id: &str, timeout_ms: u64) -> Result<()> {
+    use a3s_box_core::error::BoxError;
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+
+    const TERMINATION_WAIT_MS: u32 = 5_000;
+    const MAX_FINITE_WAIT_MS: u64 = (u32::MAX - 1) as u64;
+
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle == 0 {
+        let error = std::io::Error::last_os_error();
+        if !crate::process::is_process_alive(pid) {
+            return Ok(());
+        }
+        return Err(BoxError::ExecError(format!(
+            "Failed to open attached VM process {pid} for box {box_id}: {error}"
+        )));
+    }
+
+    let result = (|| {
+        let graceful_wait_ms = timeout_ms.min(MAX_FINITE_WAIT_MS) as u32;
+        match unsafe { WaitForSingleObject(handle, graceful_wait_ms) } {
+            WAIT_OBJECT_0 => return Ok(()),
+            WAIT_TIMEOUT => tracing::warn!(
+                pid,
+                box_id,
+                timeout_ms,
+                "Attached VM process did not exit after the guest stop request; forcing termination"
+            ),
+            WAIT_FAILED => tracing::warn!(
+                pid,
+                box_id,
+                error = %std::io::Error::last_os_error(),
+                "Failed while waiting for attached VM process; forcing termination"
+            ),
+            status => tracing::warn!(
+                pid,
+                box_id,
+                status,
+                "Unexpected attached VM wait status; forcing termination"
+            ),
+        }
+
+        if unsafe { TerminateProcess(handle, 1) } == 0 {
+            let error = std::io::Error::last_os_error();
+            if unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0 {
+                return Ok(());
+            }
+            return Err(BoxError::ExecError(format!(
+                "Failed to terminate attached VM process {pid} for box {box_id}: {error}"
+            )));
+        }
+
+        match unsafe { WaitForSingleObject(handle, TERMINATION_WAIT_MS) } {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(BoxError::ExecError(format!(
+                "Attached VM process {pid} for box {box_id} did not exit after termination"
+            ))),
+            WAIT_FAILED => Err(BoxError::ExecError(format!(
+                "Failed to wait for attached VM process {pid} for box {box_id}: {}",
+                std::io::Error::last_os_error()
+            ))),
+            status => Err(BoxError::ExecError(format!(
+                "Unexpected wait status {status} for attached VM process {pid} of box {box_id}"
+            ))),
+        }
+    })();
+    unsafe {
+        CloseHandle(handle);
+    }
+    result
+}
+
 /// Handler for a running VM subprocess (shim process).
 ///
 /// Provides lifecycle operations (stop, metrics, status) for a VM identified by PID.
@@ -205,20 +281,17 @@ impl VmHandler for ShimHandler {
                 }
             }
         } else {
-            // Attached mode: just check if process exists
-            tracing::debug!(pid = self.pid, "Checking attached VM process");
-            let start = std::time::Instant::now();
-            while start.elapsed().as_millis() <= timeout_ms as u128 {
-                if !self.is_running() {
-                    return Ok(());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+            if !self.is_running() {
+                return Ok(());
             }
-            tracing::warn!(
-                pid = self.pid,
-                "Attached VM process still running after timeout"
-            );
-            Ok(())
+
+            // Every CLI invocation reconstructs the managed runtime from its
+            // durable PID, so normal `stop` reaches this attached path. The VM
+            // manager has already sent the guest stop request. Hold a handle to
+            // this exact process object while waiting, then force-terminate it
+            // on timeout so PID reuse cannot target an unrelated process.
+            tracing::debug!(pid = self.pid, box_id = %self.box_id, timeout_ms, "Waiting for attached VM process to stop");
+            wait_then_terminate_attached_process(self.pid, &self.box_id, timeout_ms)
         }
     }
 
@@ -390,6 +463,48 @@ mod tests {
 
         assert!(!handler.is_running());
         assert_eq!(handler.exit_code(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_shim_handler_stop_terminates_attached_child() {
+        let mut child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .spawn()
+            .unwrap();
+        let mut handler = ShimHandler::from_pid(child.id(), "box-attached-stop".to_string());
+
+        assert!(handler.is_running());
+        let stop_result = handler.stop(15, 0);
+        let exited = child.try_wait().unwrap().is_some();
+        if !exited {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+
+        stop_result.unwrap();
+        assert!(exited, "attached Windows process survived handler.stop()");
+        assert!(!handler.is_running());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_shim_handler_stop_allows_attached_child_to_exit_gracefully() {
+        let mut child = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Start-Sleep -Milliseconds 150; exit 0",
+            ])
+            .spawn()
+            .unwrap();
+        let mut handler = ShimHandler::from_pid(child.id(), "box-attached-graceful".to_string());
+
+        handler.stop(15, 2_000).unwrap();
+        let status = child.wait().unwrap();
+
+        assert!(status.success(), "graceful child was force-terminated");
+        assert!(!handler.is_running());
     }
 
     #[test]

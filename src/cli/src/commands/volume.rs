@@ -213,8 +213,9 @@ async fn execute_prune(args: PruneArgs) -> Result<(), Box<dyn std::error::Error>
 
 /// Resolve a volume spec, returning the host path for a named volume.
 ///
-/// If the host part of a volume spec (before `:`) doesn't start with `/` or `.`,
-/// it's treated as a named volume. The volume is auto-created if it doesn't exist.
+/// If the host part of a volume spec is not an absolute or explicitly relative
+/// path, it is treated as a named volume. The volume is auto-created if it
+/// doesn't exist.
 ///
 /// Returns the resolved volume spec (with named volume replaced by host path)
 /// and optionally the named volume name if it was a named volume.
@@ -227,9 +228,18 @@ pub fn resolve_named_volume(
     }
 
     let host_part = parts[0];
+    let bytes = volume_spec.as_bytes();
+    let has_windows_drive_prefix = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
 
-    // If host_part starts with / or . it's a bind mount, not a named volume
-    if host_part.starts_with('/') || host_part.starts_with('.') {
+    // Unix absolute/relative paths and Windows drive/UNC paths are bind mounts.
+    if host_part.starts_with('/')
+        || host_part.starts_with('.')
+        || host_part.starts_with('\\')
+        || has_windows_drive_prefix
+    {
         return Ok((volume_spec.to_string(), None));
     }
 
@@ -452,6 +462,19 @@ mod tests {
         let (resolved, name) = resolve_named_volume("./data:/guest/data").unwrap();
         assert_eq!(resolved, "./data:/guest/data");
         assert!(name.is_none());
+    }
+
+    #[test]
+    fn test_resolve_named_volume_windows_drive_bind_mounts() {
+        for spec in [
+            r"C:\work\tests:/tests:ro",
+            "D:/work/tests:/tests:rw",
+            r"\\server\share:/tests",
+        ] {
+            let (resolved, name) = resolve_named_volume(spec).unwrap();
+            assert_eq!(resolved, spec);
+            assert!(name.is_none(), "{spec} must be treated as a bind mount");
+        }
     }
 
     #[test]

@@ -3,8 +3,274 @@
 //! Handles parsing of OCI image layout including manifest and configuration.
 
 use a3s_box_core::error::{BoxError, Result};
-use oci_spec::image::{ImageConfiguration, ImageIndex, ImageManifest};
+use oci_spec::image::{Descriptor, ImageConfiguration, ImageIndex, ImageManifest};
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+pub(crate) const MAX_OCI_LAYOUT_BYTES: u64 = 64 * 1024;
+pub(crate) const MAX_OCI_INDEX_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_OCI_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_OCI_CONFIG_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_OCI_LAYER_BLOB_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// Validate the only digest form accepted for local OCI blob paths.
+///
+/// Requiring lowercase canonical SHA-256 makes the returned value safe as one
+/// path component and rejects alternate algorithms, separators, and `..`.
+pub(crate) fn canonical_sha256_digest_hex(digest: &str) -> Result<&str> {
+    digest
+        .strip_prefix("sha256:")
+        .filter(|hex| {
+            hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| {
+            BoxError::OciImageError(format!(
+                "malformed content digest (expected canonical OCI sha256:<64 lowercase hex>): {digest:?}"
+            ))
+        })
+}
+
+/// Reject symlink/reparse-backed directories before walking an OCI layout.
+pub(crate) fn validate_plain_directory(path: &Path, what: &str) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Failed to inspect {what} directory {}: {error}",
+            path.display()
+        ))
+    })?;
+
+    #[cfg(windows)]
+    let is_link_or_reparse = {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        metadata.file_type().is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    };
+    #[cfg(not(windows))]
+    let is_link_or_reparse = metadata.file_type().is_symlink();
+
+    if is_link_or_reparse || !metadata.is_dir() {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} directory {} because it is not a plain directory (symlink/reparse or non-directory)",
+            path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+fn open_regular_file_no_follow(path: &Path, what: &str) -> Result<File> {
+    #[cfg(windows)]
+    let opened = a3s_box_core::windows_file::open_regular_file(path, None).map(|(file, _)| file);
+
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)
+    };
+
+    #[cfg(not(any(windows, unix)))]
+    let opened = std::fs::File::open(path);
+
+    let file = opened.map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Failed to open {what} at {} without following links: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Failed to inspect opened {what} at {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} at {} because it is not a regular file",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+fn checked_opened_length(file: &File, path: &Path, what: &str, limit: u64) -> Result<u64> {
+    let length = file
+        .metadata()
+        .map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Failed to inspect {what} at {}: {error}",
+                path.display()
+            ))
+        })?
+        .len();
+    if length > limit {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} at {}: {length} bytes exceeds the {limit}-byte limit",
+            path.display()
+        )));
+    }
+    Ok(length)
+}
+
+/// Read a regular file through a no-follow handle with a hard byte ceiling.
+pub(crate) fn read_regular_file_bounded(path: &Path, limit: u64, what: &str) -> Result<Vec<u8>> {
+    let file = open_regular_file_no_follow(path, what)?;
+    let length = checked_opened_length(&file, path, what, limit)?;
+    let capacity = usize::try_from(length).map_err(|_| {
+        BoxError::OciImageError(format!(
+            "refusing {what} at {}: file length does not fit in memory",
+            path.display()
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(capacity).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "Failed to reserve memory for {what} at {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Failed to read {what} at {}: {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} at {}: content grew beyond the {limit}-byte limit while reading",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn expected_descriptor_size(size: i64, what: &str) -> Result<u64> {
+    u64::try_from(size).map_err(|_| {
+        BoxError::OciImageError(format!(
+            "refusing {what}: descriptor declares a negative size ({size})"
+        ))
+    })
+}
+
+/// Verify descriptor size and SHA-256 against the exact bytes to be consumed.
+pub(crate) fn validate_descriptor_bytes(
+    digest: &str,
+    size: i64,
+    bytes: &[u8],
+    what: &str,
+) -> Result<()> {
+    let expected_hex = canonical_sha256_digest_hex(digest)?;
+    let expected_size = expected_descriptor_size(size, what)?;
+    let actual_size = bytes.len() as u64;
+    if actual_size != expected_size {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} {digest}: descriptor size {expected_size} does not match actual size {actual_size}"
+        )));
+    }
+    let actual_hex = format!("{:x}", Sha256::digest(bytes));
+    if actual_hex != expected_hex {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} {digest}: descriptor digest does not match actual bytes (sha256:{actual_hex})"
+        )));
+    }
+    Ok(())
+}
+
+fn blob_path(root_dir: &Path, digest: &str) -> Result<PathBuf> {
+    let hex = canonical_sha256_digest_hex(digest)?;
+    Ok(root_dir.join("blobs").join("sha256").join(hex))
+}
+
+pub(crate) fn read_verified_oci_blob(
+    root_dir: &Path,
+    digest: &str,
+    size: i64,
+    limit: u64,
+    what: &str,
+) -> Result<Vec<u8>> {
+    canonical_sha256_digest_hex(digest)?;
+    let expected_size = expected_descriptor_size(size, what)?;
+    if expected_size > limit {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} {digest}: descriptor size {expected_size} exceeds the {limit}-byte limit"
+        )));
+    }
+    let path = blob_path(root_dir, digest)?;
+    let bytes = read_regular_file_bounded(&path, limit, what).map_err(|error| {
+        BoxError::OciImageError(format!("Failed to read {what} {digest}: {error}"))
+    })?;
+    validate_descriptor_bytes(digest, size, &bytes, what)?;
+    Ok(bytes)
+}
+
+fn verify_oci_blob_file(
+    root_dir: &Path,
+    digest: &str,
+    size: i64,
+    limit: u64,
+    what: &str,
+) -> Result<PathBuf> {
+    let expected_hex = canonical_sha256_digest_hex(digest)?;
+    let expected_size = expected_descriptor_size(size, what)?;
+    if expected_size > limit {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} {digest}: descriptor size {expected_size} exceeds the {limit}-byte limit"
+        )));
+    }
+
+    let path = blob_path(root_dir, digest)?;
+    let mut file = open_regular_file_no_follow(&path, what).map_err(|error| {
+        BoxError::OciImageError(format!("Failed to open {what} {digest}: {error}"))
+    })?;
+    let opened_size = checked_opened_length(&file, &path, what, limit)?;
+    if opened_size != expected_size {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} {digest}: descriptor size {expected_size} does not match actual size {opened_size}"
+        )));
+    }
+
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            BoxError::OciImageError(format!(
+                "Failed to read {what} at {}: {error}",
+                path.display()
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > expected_size {
+            return Err(BoxError::OciImageError(format!(
+                "refusing {what} {digest}: content grew beyond its descriptor size {expected_size} while reading"
+            )));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if total != expected_size {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} {digest}: descriptor size {expected_size} does not match bytes read {total}"
+        )));
+    }
+    let actual_hex = format!("{:x}", hasher.finalize());
+    if actual_hex != expected_hex {
+        return Err(BoxError::OciImageError(format!(
+            "refusing {what} {digest}: descriptor digest does not match actual bytes (sha256:{actual_hex})"
+        )));
+    }
+    Ok(path)
+}
 
 /// Health check configuration from OCI image config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +280,29 @@ pub struct OciHealthCheck {
     pub timeout: Option<u64>,
     pub retries: Option<u32>,
     pub start_period: Option<u64>,
+}
+
+impl OciHealthCheck {
+    /// Whether this Docker-compatible health check contains an executable test.
+    ///
+    /// `NONE` disables an inherited image health check. Malformed `CMD` and
+    /// `CMD-SHELL` arrays without a non-empty command are also non-effective;
+    /// unknown non-empty forms are kept fail-closed for forward compatibility.
+    pub fn is_enabled(&self) -> bool {
+        let Some(marker) = self.test.first() else {
+            return false;
+        };
+        if marker.eq_ignore_ascii_case("NONE") {
+            return false;
+        }
+        if marker.eq_ignore_ascii_case("CMD") || marker.eq_ignore_ascii_case("CMD-SHELL") {
+            return self
+                .test
+                .get(1..)
+                .is_some_and(|command| command.iter().any(|part| !part.trim().is_empty()));
+        }
+        self.test.iter().any(|part| !part.trim().is_empty())
+    }
 }
 
 /// Represents an OCI image loaded from disk.
@@ -96,27 +385,35 @@ impl OciImage {
         // Load index.json
         let index = Self::load_index(&root_dir)?;
 
-        // Get manifest digest from index
-        let manifest_digest = index
+        // Get the manifest descriptor from index. Its digest and size are both
+        // authenticated before the manifest bytes are parsed.
+        let manifest_descriptor = index
             .manifests()
             .first()
-            .ok_or_else(|| BoxError::OciImageError("No manifests in index.json".to_string()))?
-            .digest()
-            .to_string();
+            .ok_or_else(|| BoxError::OciImageError("No manifests in index.json".to_string()))?;
+        let manifest_digest = manifest_descriptor.digest().to_string();
 
         // Load manifest
-        let manifest = Self::load_manifest(&root_dir, &manifest_digest)?;
+        let manifest = Self::load_manifest(&root_dir, manifest_descriptor)?;
 
         // Load config
-        let config_digest = manifest.config().digest().to_string();
-        let config = Self::load_config(&root_dir, &config_digest)?;
+        let config = Self::load_config(&root_dir, manifest.config())?;
 
-        // Get layer paths
+        // Verify every layer through a no-follow handle before exposing paths
+        // that extraction will subsequently consume.
         let layer_paths = manifest
             .layers()
             .iter()
-            .map(|layer| Self::blob_path(&root_dir, layer.digest()))
-            .collect();
+            .map(|layer| {
+                verify_oci_blob_file(
+                    &root_dir,
+                    layer.digest(),
+                    layer.size(),
+                    MAX_OCI_LAYER_BLOB_BYTES,
+                    "layer blob",
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
             root_dir,
@@ -175,32 +472,19 @@ impl OciImage {
 
     /// Validate that the directory contains a valid OCI layout.
     fn validate_oci_layout(root_dir: &Path) -> Result<()> {
-        // Check oci-layout file exists
+        validate_plain_directory(root_dir, "OCI image root")?;
+
+        // Open the top-level metadata without following links. Reading it here
+        // also prevents oversized metadata from passing an existence-only check.
         let oci_layout_path = root_dir.join("oci-layout");
-        if !oci_layout_path.exists() {
-            return Err(BoxError::OciImageError(format!(
-                "Not a valid OCI layout: missing oci-layout file in {}",
-                root_dir.display()
-            )));
-        }
+        read_regular_file_bounded(&oci_layout_path, MAX_OCI_LAYOUT_BYTES, "oci-layout")?;
 
-        // Check index.json exists
         let index_path = root_dir.join("index.json");
-        if !index_path.exists() {
-            return Err(BoxError::OciImageError(format!(
-                "Not a valid OCI layout: missing index.json in {}",
-                root_dir.display()
-            )));
-        }
+        read_regular_file_bounded(&index_path, MAX_OCI_INDEX_BYTES, "index.json")?;
 
-        // Check blobs directory exists
         let blobs_dir = root_dir.join("blobs");
-        if !blobs_dir.exists() {
-            return Err(BoxError::OciImageError(format!(
-                "Not a valid OCI layout: missing blobs directory in {}",
-                root_dir.display()
-            )));
-        }
+        validate_plain_directory(&blobs_dir, "OCI blobs")?;
+        validate_plain_directory(&blobs_dir.join("sha256"), "OCI sha256 blobs")?;
 
         Ok(())
     }
@@ -208,48 +492,40 @@ impl OciImage {
     /// Load the image index from index.json.
     fn load_index(root_dir: &Path) -> Result<ImageIndex> {
         let index_path = root_dir.join("index.json");
-        let content = std::fs::read_to_string(&index_path).map_err(|e| {
-            BoxError::OciImageError(format!(
-                "Failed to read index.json at {}: {}",
-                index_path.display(),
-                e
-            ))
-        })?;
+        let content = read_regular_file_bounded(&index_path, MAX_OCI_INDEX_BYTES, "index.json")?;
 
-        serde_json::from_str(&content)
+        serde_json::from_slice(&content)
             .map_err(|e| BoxError::OciImageError(format!("Failed to parse index.json: {}", e)))
     }
 
     /// Load the image manifest from blobs.
-    fn load_manifest(root_dir: &Path, digest: &str) -> Result<ImageManifest> {
-        let blob_path = Self::blob_path(root_dir, digest);
-        let content = std::fs::read_to_string(&blob_path).map_err(|e| {
-            BoxError::OciImageError(format!(
-                "Failed to read manifest at {}: {}",
-                blob_path.display(),
-                e
-            ))
-        })?;
+    fn load_manifest(root_dir: &Path, descriptor: &Descriptor) -> Result<ImageManifest> {
+        let content = read_verified_oci_blob(
+            root_dir,
+            descriptor.digest(),
+            descriptor.size(),
+            MAX_OCI_MANIFEST_BYTES,
+            "manifest blob",
+        )?;
 
-        serde_json::from_str(&content)
+        serde_json::from_slice(&content)
             .map_err(|e| BoxError::OciImageError(format!("Failed to parse manifest: {}", e)))
     }
 
     /// Load the image configuration from blobs.
-    fn load_config(root_dir: &Path, digest: &str) -> Result<OciImageConfig> {
-        let blob_path = Self::blob_path(root_dir, digest);
-        let content = std::fs::read_to_string(&blob_path).map_err(|e| {
-            BoxError::OciImageError(format!(
-                "Failed to read config at {}: {}",
-                blob_path.display(),
-                e
-            ))
-        })?;
+    fn load_config(root_dir: &Path, descriptor: &Descriptor) -> Result<OciImageConfig> {
+        let content = read_verified_oci_blob(
+            root_dir,
+            descriptor.digest(),
+            descriptor.size(),
+            MAX_OCI_CONFIG_BYTES,
+            "config blob",
+        )?;
 
-        let oci_config: ImageConfiguration = serde_json::from_str(&content)
+        let oci_config: ImageConfiguration = serde_json::from_slice(&content)
             .map_err(|e| BoxError::OciImageError(format!("Failed to parse config: {}", e)))?;
 
-        let raw_config: serde_json::Value = serde_json::from_str(&content)
+        let raw_config: serde_json::Value = serde_json::from_slice(&content)
             .map_err(|e| BoxError::OciImageError(format!("Failed to parse config JSON: {}", e)))?;
 
         // oci-spec 0.6 does not model OnBuild or Healthcheck, so parse those
@@ -265,19 +541,6 @@ impl OciImage {
         let mut config = OciImageConfig::from_oci_config(&oci_config, onbuild);
         config.health_check = health_check;
         Ok(config)
-    }
-
-    /// Get the path to a blob by digest.
-    fn blob_path(root_dir: &Path, digest: &str) -> PathBuf {
-        // Digest format: "sha256:abc123..."
-        let parts: Vec<&str> = digest.split(':').collect();
-        let (algorithm, hash) = if parts.len() == 2 {
-            (parts[0], parts[1])
-        } else {
-            ("sha256", digest)
-        };
-
-        root_dir.join("blobs").join(algorithm).join(hash)
     }
 
     /// Parse Docker-compatible Healthcheck metadata from raw image config JSON.
@@ -480,12 +743,20 @@ mod tests {
     #[test]
     fn test_blob_path() {
         let root = PathBuf::from("/images/test");
+        let digest = format!("sha256:{}", "a".repeat(64));
 
-        let path = OciImage::blob_path(&root, "sha256:abc123");
-        assert_eq!(path, PathBuf::from("/images/test/blobs/sha256/abc123"));
+        let path = blob_path(&root, &digest).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from(format!("/images/test/blobs/sha256/{}", "a".repeat(64)))
+        );
 
-        let path = OciImage::blob_path(&root, "abc123");
-        assert_eq!(path, PathBuf::from("/images/test/blobs/sha256/abc123"));
+        assert!(blob_path(&root, "abc123").is_err());
+        assert!(blob_path(
+            &root,
+            "sha256:../../../../../../../../windows/system32/drivers/etc/hosts"
+        )
+        .is_err());
     }
 
     #[test]
@@ -532,9 +803,9 @@ mod tests {
     #[test]
     fn test_from_path_exposes_manifest_digest() {
         let temp_dir = TempDir::new().unwrap();
-        create_complete_oci_image(temp_dir.path());
+        let layout = create_complete_oci_image(temp_dir.path());
         let image = OciImage::from_path(temp_dir.path()).unwrap();
-        assert_eq!(image.manifest_digest(), "sha256:manifestxyz789");
+        assert_eq!(image.manifest_digest(), layout.manifest_digest);
     }
 
     #[test]
@@ -542,6 +813,165 @@ mod tests {
         let result = OciImage::from_path("/nonexistent/path");
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_path_rejects_oversized_index() {
+        let temp_dir = TempDir::new().unwrap();
+        create_minimal_oci_layout(temp_dir.path());
+        fs::File::create(temp_dir.path().join("index.json"))
+            .unwrap()
+            .set_len(MAX_OCI_INDEX_BYTES + 1)
+            .unwrap();
+
+        let error = OciImage::from_path(temp_dir.path()).unwrap_err();
+        assert!(error.to_string().contains("limit"), "{error}");
+    }
+
+    #[test]
+    fn test_from_path_rejects_blob_digest_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = create_complete_oci_image(temp_dir.path());
+        let config_path = temp_dir
+            .path()
+            .join("blobs/sha256")
+            .join(digest_hex(&layout.config_digest));
+        let mut content = fs::read(&config_path).unwrap();
+        content[0] ^= 1;
+        fs::write(config_path, content).unwrap();
+
+        let error = OciImage::from_path(temp_dir.path()).unwrap_err();
+        assert!(error.to_string().contains("digest"), "{error}");
+    }
+
+    #[test]
+    fn test_from_path_rejects_noncanonical_manifest_digest() {
+        let temp_dir = TempDir::new().unwrap();
+        create_minimal_oci_layout(temp_dir.path());
+        fs::write(
+            temp_dir.path().join("index.json"),
+            r#"{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:../../../../outside","size":0}]}"#,
+        )
+        .unwrap();
+
+        assert!(OciImage::from_path(temp_dir.path()).is_err());
+    }
+
+    #[test]
+    fn test_from_path_rejects_index_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = temp_dir.path().join("layout");
+        fs::create_dir_all(layout.join("blobs/sha256")).unwrap();
+        fs::write(
+            layout.join("oci-layout"),
+            r#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        let outside = temp_dir.path().join("outside-index.json");
+        fs::write(&outside, "{}").unwrap();
+        if !symlink_file_for_test(&outside, &layout.join("index.json")) {
+            return;
+        }
+
+        let error = OciImage::from_path(&layout).unwrap_err();
+        assert!(error.to_string().contains("index.json"), "{error}");
+    }
+
+    #[test]
+    fn test_from_path_rejects_layer_blob_symlink() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = create_complete_oci_image(temp_dir.path());
+        let layer_path = temp_dir
+            .path()
+            .join("blobs/sha256")
+            .join(digest_hex(&layout.layer_digest));
+        let layer_content = fs::read(&layer_path).unwrap();
+        let outside = temp_dir.path().join("outside-layer.tar.gz");
+        fs::write(&outside, layer_content).unwrap();
+        fs::remove_file(&layer_path).unwrap();
+        if !symlink_file_for_test(&outside, &layer_path) {
+            return;
+        }
+
+        let error = OciImage::from_path(temp_dir.path()).unwrap_err();
+        assert!(error.to_string().contains("layer blob"), "{error}");
+    }
+
+    #[test]
+    fn test_validate_layout_rejects_reparse_blobs_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = temp_dir.path().join("layout");
+        let outside_blobs = temp_dir.path().join("outside-blobs");
+        fs::create_dir_all(&layout).unwrap();
+        fs::create_dir_all(outside_blobs.join("sha256")).unwrap();
+        fs::write(
+            layout.join("oci-layout"),
+            r#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(layout.join("index.json"), "{}").unwrap();
+        if !symlink_dir_for_test(&outside_blobs, &layout.join("blobs")) {
+            return;
+        }
+
+        let error = OciImage::validate_oci_layout(&layout).unwrap_err();
+        assert!(error.to_string().contains("plain directory"), "{error}");
+    }
+
+    #[test]
+    fn test_from_path_rejects_reparse_root_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let target = temp_dir.path().join("target-layout");
+        fs::create_dir_all(&target).unwrap();
+        create_complete_oci_image(&target);
+        let linked_root = temp_dir.path().join("linked-layout");
+        if !symlink_dir_for_test(&target, &linked_root) {
+            return;
+        }
+
+        let error = OciImage::from_path(linked_root).unwrap_err();
+        assert!(error.to_string().contains("plain directory"), "{error}");
+    }
+
+    #[cfg(unix)]
+    fn symlink_file_for_test(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn symlink_file_for_test(target: &Path, link: &Path) -> bool {
+        windows_symlink_for_test(|| std::os::windows::fs::symlink_file(target, link))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn symlink_file_for_test(_target: &Path, _link: &Path) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn symlink_dir_for_test(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn symlink_dir_for_test(target: &Path, link: &Path) -> bool {
+        windows_symlink_for_test(|| std::os::windows::fs::symlink_dir(target, link))
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn symlink_dir_for_test(_target: &Path, _link: &Path) -> bool {
+        false
+    }
+
+    #[cfg(windows)]
+    fn windows_symlink_for_test(create: impl FnOnce() -> std::io::Result<()>) -> bool {
+        match create() {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) => panic!("failed to create Windows test symlink: {error}"),
+        }
     }
 
     // Helper function to create minimal OCI layout structure
@@ -553,8 +983,29 @@ mod tests {
         fs::create_dir_all(path.join("blobs/sha256")).unwrap();
     }
 
-    // Helper function to create a complete OCI image for testing
-    fn create_complete_oci_image(path: &Path) {
+    #[derive(Debug)]
+    struct CompleteLayout {
+        manifest_digest: String,
+        config_digest: String,
+        layer_digest: String,
+    }
+
+    fn sha256_digest(bytes: &[u8]) -> String {
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    fn digest_hex(digest: &str) -> &str {
+        digest.strip_prefix("sha256:").unwrap()
+    }
+
+    fn write_blob(path: &Path, bytes: &[u8]) -> String {
+        let digest = sha256_digest(bytes);
+        fs::write(path.join("blobs/sha256").join(digest_hex(&digest)), bytes).unwrap();
+        digest
+    }
+
+    // Helper function to create a complete, cryptographically consistent OCI image.
+    fn create_complete_oci_image(path: &Path) -> CompleteLayout {
         // Create directory structure
         fs::create_dir_all(path.join("blobs/sha256")).unwrap();
 
@@ -584,16 +1035,18 @@ mod tests {
             },
             "rootfs": {
                 "type": "layers",
-                "diff_ids": ["sha256:layer1hash"]
+                "diff_ids": ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]
             },
             "history": []
         }"#;
-        let config_hash = "configabc123";
-        fs::write(path.join("blobs/sha256").join(config_hash), config_content).unwrap();
+        let config_digest = write_blob(path, config_content.as_bytes());
 
-        // Create layer blob (empty tar.gz for testing)
-        let layer_hash = "layerdef456";
-        create_test_layer(&path.join("blobs/sha256").join(layer_hash));
+        // Create layer blob (minimal tar.gz for testing).
+        let layer_build_path = path.join("fixture-layer.tar.gz");
+        create_test_layer(&layer_build_path);
+        let layer_content = fs::read(&layer_build_path).unwrap();
+        fs::remove_file(layer_build_path).unwrap();
+        let layer_digest = write_blob(path, &layer_content);
 
         // Create manifest blob
         let manifest_content = format!(
@@ -602,27 +1055,23 @@ mod tests {
             "mediaType": "application/vnd.oci.image.manifest.v1+json",
             "config": {{
                 "mediaType": "application/vnd.oci.image.config.v1+json",
-                "digest": "sha256:{}",
+                "digest": "{}",
                 "size": {}
             }},
             "layers": [
                 {{
                     "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                    "digest": "sha256:{}",
-                    "size": 100
+                    "digest": "{}",
+                    "size": {}
                 }}
             ]
         }}"#,
-            config_hash,
+            config_digest,
             config_content.len(),
-            layer_hash
+            layer_digest,
+            layer_content.len()
         );
-        let manifest_hash = "manifestxyz789";
-        fs::write(
-            path.join("blobs/sha256").join(manifest_hash),
-            &manifest_content,
-        )
-        .unwrap();
+        let manifest_digest = write_blob(path, manifest_content.as_bytes());
 
         // Create index.json
         let index_content = format!(
@@ -632,15 +1081,21 @@ mod tests {
             "manifests": [
                 {{
                     "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "digest": "sha256:{}",
+                    "digest": "{}",
                     "size": {}
                 }}
             ]
         }}"#,
-            manifest_hash,
+            manifest_digest,
             manifest_content.len()
         );
         fs::write(path.join("index.json"), index_content).unwrap();
+
+        CompleteLayout {
+            manifest_digest,
+            config_digest,
+            layer_digest,
+        }
     }
 
     #[test]
@@ -748,6 +1203,26 @@ mod tests {
     }
 
     #[test]
+    fn health_check_enabled_semantics_match_docker_forms() {
+        let health_check = |test: &[&str]| OciHealthCheck {
+            test: test.iter().map(|part| (*part).to_string()).collect(),
+            interval: None,
+            timeout: None,
+            retries: None,
+            start_period: None,
+        };
+
+        assert!(health_check(&["CMD", "/bin/true"]).is_enabled());
+        assert!(health_check(&["CMD-SHELL", "test -f /ready"]).is_enabled());
+        assert!(health_check(&["future-form", "probe"]).is_enabled());
+        assert!(!health_check(&[]).is_enabled());
+        assert!(!health_check(&["NONE"]).is_enabled());
+        assert!(!health_check(&["none", "ignored"]).is_enabled());
+        assert!(!health_check(&["CMD"]).is_enabled());
+        assert!(!health_check(&["CMD-SHELL", "  "]).is_enabled());
+    }
+
+    #[test]
     fn test_load_config_parses_onbuild_triggers() {
         // Verify that OnBuild entries in the raw OCI config JSON are parsed
         // and surfaced in OciImageConfig.onbuild (oci-spec 0.6 doesn't model this field).
@@ -768,28 +1243,18 @@ mod tests {
             "rootfs": {"type": "layers", "diff_ids": []},
             "history": []
         }"#;
-        let config_hash = "onbuildcfg001";
-        fs::write(
-            temp_dir.path().join("blobs/sha256").join(config_hash),
-            config_content,
-        )
-        .unwrap();
+        let config_digest = write_blob(temp_dir.path(), config_content.as_bytes());
 
         let manifest_content = format!(
-            r#"{{"schemaVersion":2,"config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:{}","size":{}}},"layers":[]}}"#,
-            config_hash,
+            r#"{{"schemaVersion":2,"config":{{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"{}","size":{}}},"layers":[]}}"#,
+            config_digest,
             config_content.len()
         );
-        let manifest_hash = "onbuildmfst001";
-        fs::write(
-            temp_dir.path().join("blobs/sha256").join(manifest_hash),
-            &manifest_content,
-        )
-        .unwrap();
+        let manifest_digest = write_blob(temp_dir.path(), manifest_content.as_bytes());
 
         let index_content = format!(
-            r#"{{"schemaVersion":2,"manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:{}","size":{}}}]}}"#,
-            manifest_hash,
+            r#"{{"schemaVersion":2,"manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{}","size":{}}}]}}"#,
+            manifest_digest,
             manifest_content.len()
         );
         fs::write(temp_dir.path().join("index.json"), index_content).unwrap();

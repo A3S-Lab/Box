@@ -1,2 +1,3 @@
 *.patch -whitespace
 compat/e2b/spec/** -whitespace
+compat/e2b/** text eol=lf

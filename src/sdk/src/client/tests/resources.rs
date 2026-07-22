@@ -164,7 +164,52 @@
             ClientError::Validation(message)
                 if message.contains("resolved OCI image configuration")
         ));
-        assert!(client.list_boxes(ListBoxesOptions::all()).unwrap().is_empty());
+        assert!(client
+            .list_boxes(ListBoxesOptions::all())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restore_rejects_effective_image_health_before_creating_box_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_for(&dir);
+        let source = dir.path().join("rootfs-source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("app.txt"), "snapshot-data").unwrap();
+        let mut metadata = SnapshotMetadata::new(
+            "windows-health-snapshot".to_string(),
+            "windows-health-snapshot".to_string(),
+            "source-box".to_string(),
+            "alpine:3.20".to_string(),
+        );
+        metadata.image_config = Some(a3s_box_core::SnapshotImageConfig {
+            health_check: Some(a3s_box_core::SnapshotImageHealthCheck {
+                test: vec!["CMD".to_string(), "true".to_string()],
+                interval: Some(30),
+                timeout: Some(5),
+                retries: Some(3),
+                start_period: Some(0),
+            }),
+            ..Default::default()
+        });
+        SnapshotStore::new(&client.paths().snapshots_dir)
+            .unwrap()
+            .save(metadata, &source)
+            .unwrap();
+
+        let error = client
+            .restore_snapshot("windows-health-snapshot", RestoreSnapshot::new())
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ClientError::Validation(message)
+                if message.contains("health checks are not supported on Windows")
+        ));
+        assert!(!client.paths().boxes_file.exists());
+        assert!(!client.paths().home.join("boxes").exists());
     }
 
     #[test]
@@ -196,6 +241,14 @@
             .labels
             .insert("tier".to_string(), "api".to_string());
         metadata.network_mode = Some("bridge".to_string());
+        metadata.health_check = Some(a3s_box_core::ExecutionHealthCheck {
+            cmd: vec!["test".to_string(), "-f".to_string(), "/ready".to_string()],
+            interval_secs: 11,
+            timeout_secs: 3,
+            retries: 7,
+            start_period_secs: 2,
+        });
+        metadata.healthcheck_disabled = true;
         metadata.image_config = Some(a3s_box_core::SnapshotImageConfig::default());
         store.save(metadata, &source).unwrap();
 
@@ -223,6 +276,11 @@
         assert_eq!(record.entrypoint, Some(vec!["/entrypoint.sh".to_string()]));
         assert_eq!(record.workdir.as_deref(), Some("/srv/app"));
         assert_eq!(record.labels.get("tier").map(String::as_str), Some("api"));
+        assert_eq!(
+            record.health_check.as_ref().unwrap().cmd,
+            vec!["test".to_string(), "-f".to_string(), "/ready".to_string()]
+        );
+        assert!(record.healthcheck_disabled);
         assert_eq!(record.pid, None);
         assert_eq!(record.started_at, None);
         assert!(record.exec_socket_path.ends_with("sockets/exec.sock"));
@@ -265,9 +323,7 @@
             "alpine:latest".to_string(),
         );
         metadata.image_config = Some(a3s_box_core::SnapshotImageConfig::default());
-        store
-            .save(metadata, &source)
-            .unwrap();
+        store.save(metadata, &source).unwrap();
 
         let restored = client
             .restore_snapshot("after-migration", RestoreSnapshot::new())

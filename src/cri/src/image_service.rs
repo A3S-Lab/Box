@@ -369,6 +369,11 @@ mod tests {
     use a3s_box_runtime::oci::ImageStore;
     use futures::StreamExt;
 
+    const TEST_DIGEST: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ALT_TEST_DIGEST: &str =
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     /// Create a test ImageStore backed by a temp directory.
     fn make_test_store() -> (Arc<ImageStore>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -428,8 +433,8 @@ mod tests {
     #[tokio::test]
     async fn test_list_images_with_entries() {
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
-        put_test_image(&svc.image_store, "alpine:3.18", "sha256:bbb222").await;
+        put_test_image(&svc.image_store, "nginx:latest", TEST_DIGEST).await;
+        put_test_image(&svc.image_store, "alpine:3.18", ALT_TEST_DIGEST).await;
 
         let resp = svc
             .list_images(Request::new(ListImagesRequest { filter: None }))
@@ -454,9 +459,9 @@ mod tests {
         // Three tags of one digest must collapse into a single image whose
         // repo_tags lists all three (CRI identifies images by digest).
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "img:1", "sha256:same").await;
-        put_test_image(&svc.image_store, "img:2", "sha256:same").await;
-        put_test_image(&svc.image_store, "img:3", "sha256:same").await;
+        put_test_image(&svc.image_store, "img:1", TEST_DIGEST).await;
+        put_test_image(&svc.image_store, "img:2", TEST_DIGEST).await;
+        put_test_image(&svc.image_store, "img:3", TEST_DIGEST).await;
 
         let resp = svc
             .list_images(Request::new(ListImagesRequest { filter: None }))
@@ -468,7 +473,7 @@ mod tests {
         let mut tags = resp.images[0].repo_tags.clone();
         tags.sort();
         assert_eq!(tags, vec!["img:1", "img:2", "img:3"]);
-        assert_eq!(resp.images[0].id, "sha256:same");
+        assert_eq!(resp.images[0].id, TEST_DIGEST);
     }
 
     #[tokio::test]
@@ -476,12 +481,8 @@ mod tests {
         // An image pulled by digest (`repo@sha256:...`) has no repo tag; the
         // pinned reference must be reported as a repo digest.
         let (svc, _tmp) = make_test_service();
-        put_test_image(
-            &svc.image_store,
-            "gcr.io/x/img@sha256:pinned",
-            "sha256:pinned",
-        )
-        .await;
+        let pinned_reference = format!("gcr.io/x/img@{TEST_DIGEST}");
+        put_test_image(&svc.image_store, &pinned_reference, TEST_DIGEST).await;
 
         let resp = svc
             .list_images(Request::new(ListImagesRequest { filter: None }))
@@ -494,9 +495,7 @@ mod tests {
             resp.images[0].repo_tags.is_empty(),
             "no tag for a digest pin"
         );
-        assert!(resp.images[0]
-            .repo_digests
-            .contains(&"gcr.io/x/img@sha256:pinned".to_string()));
+        assert!(resp.images[0].repo_digests.contains(&pinned_reference));
     }
 
     #[tokio::test]
@@ -507,7 +506,7 @@ mod tests {
         put_test_image(
             &svc.image_store,
             "docker.io/library/nginx:latest",
-            "sha256:n1",
+            TEST_DIGEST,
         )
         .await;
 
@@ -524,7 +523,7 @@ mod tests {
             .into_inner();
 
         let image = resp.image.expect("untagged name should resolve");
-        assert_eq!(image.id, "sha256:n1");
+        assert_eq!(image.id, TEST_DIGEST);
         assert!(image
             .repo_tags
             .contains(&"docker.io/library/nginx:latest".to_string()));
@@ -534,12 +533,12 @@ mod tests {
     async fn test_image_status_resolves_by_digest() {
         // ImageStatus queried by image id (digest) must return the image.
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "redis:7", "sha256:r7").await;
+        put_test_image(&svc.image_store, "redis:7", TEST_DIGEST).await;
 
         let resp = svc
             .image_status(Request::new(ImageStatusRequest {
                 image: Some(ImageSpec {
-                    image: "sha256:r7".to_string(),
+                    image: TEST_DIGEST.to_string(),
                     annotations: Default::default(),
                 }),
                 verbose: false,
@@ -549,7 +548,7 @@ mod tests {
             .into_inner();
 
         let image = resp.image.expect("digest should resolve");
-        assert_eq!(image.id, "sha256:r7");
+        assert_eq!(image.id, TEST_DIGEST);
         assert!(image.repo_tags.contains(&"redis:7".to_string()));
     }
 
@@ -557,12 +556,12 @@ mod tests {
     async fn test_image_status_resolves_by_name_at_digest() {
         // ImageStatus queried by a `name@sha256:...` digest pin must resolve.
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "busybox:1.36", "sha256:bb36").await;
+        put_test_image(&svc.image_store, "busybox:1.36", TEST_DIGEST).await;
 
         let resp = svc
             .image_status(Request::new(ImageStatusRequest {
                 image: Some(ImageSpec {
-                    image: "busybox@sha256:bb36".to_string(),
+                    image: format!("busybox@{TEST_DIGEST}"),
                     annotations: Default::default(),
                 }),
                 verbose: false,
@@ -572,14 +571,14 @@ mod tests {
             .into_inner();
 
         let image = resp.image.expect("name@digest should resolve");
-        assert_eq!(image.id, "sha256:bb36");
+        assert_eq!(image.id, TEST_DIGEST);
     }
 
     #[tokio::test]
     async fn test_stream_images_with_filter() {
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
-        put_test_image(&svc.image_store, "alpine:3.18", "sha256:bbb222").await;
+        put_test_image(&svc.image_store, "nginx:latest", TEST_DIGEST).await;
+        put_test_image(&svc.image_store, "alpine:3.18", ALT_TEST_DIGEST).await;
 
         let mut stream = svc
             .stream_images(Request::new(StreamImagesRequest {
@@ -638,7 +637,7 @@ mod tests {
     #[tokio::test]
     async fn test_image_status_found() {
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
+        put_test_image(&svc.image_store, "nginx:latest", TEST_DIGEST).await;
 
         let resp = svc
             .image_status(Request::new(ImageStatusRequest {
@@ -653,7 +652,7 @@ mod tests {
             .into_inner();
 
         let image = resp.image.unwrap();
-        assert_eq!(image.id, "sha256:aaa111");
+        assert_eq!(image.id, TEST_DIGEST);
         assert!(image.repo_tags.contains(&"nginx:latest".to_string()));
     }
 
@@ -687,7 +686,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_image_success() {
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
+        put_test_image(&svc.image_store, "nginx:latest", TEST_DIGEST).await;
 
         svc.remove_image(Request::new(RemoveImageRequest {
             image: Some(ImageSpec {
@@ -721,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn test_image_fs_info_with_images() {
         let (svc, _tmp) = make_test_service();
-        put_test_image(&svc.image_store, "nginx:latest", "sha256:aaa111").await;
+        put_test_image(&svc.image_store, "nginx:latest", TEST_DIGEST).await;
 
         let resp = svc
             .image_fs_info(Request::new(ImageFsInfoRequest {}))

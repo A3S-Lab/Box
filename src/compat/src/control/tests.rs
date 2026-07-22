@@ -48,6 +48,7 @@ fn creating_record_with_timeout_action(id: &str, on_timeout: OnTimeoutAction) ->
         metadata: BTreeMap::from([("team".to_string(), "fixture".to_string())]),
         envd_version: "0.1.3".to_string(),
         envd_mode: EnvdMode::Broker,
+        runtime_env_vars: BTreeMap::new(),
         secure: true,
         allow_internet_access: Some(false),
         credentials: SandboxCredentials {
@@ -78,7 +79,7 @@ async fn memory_repository_claims_only_actionable_expired_records() {
     already_paused
         .mark_running(execution_lease(&already_paused, 1))
         .unwrap();
-    already_paused.begin_pause().unwrap();
+    already_paused.begin_pause(false).unwrap();
     already_paused
         .mark_paused(execution_lease(&already_paused, 2))
         .unwrap();
@@ -176,22 +177,24 @@ fn lifecycle_transitions_are_generation_fenced() {
     record
         .replace_expiry(instant(0) + Duration::seconds(600))
         .unwrap();
-    record.begin_pause().unwrap();
+    record.begin_pause(false).unwrap();
     record.mark_paused(execution_lease(&record, 2)).unwrap();
     assert_eq!(record.public_state(), Some(PublicSandboxState::Paused));
+    assert!(!record.paused_with_memory());
     record.begin_resume().unwrap();
     record.mark_running(execution_lease(&record, 3)).unwrap();
 
     assert_eq!(record.generation(), SandboxGeneration::new(7).unwrap());
     assert_eq!(record.started_at(), started_at);
     assert_eq!(record.execution_generation().unwrap().get(), 3);
+    assert!(record.paused_with_memory());
 }
 
 #[test]
 fn pause_and_resume_reject_stale_execution_generations() {
     let mut record = creating_record("sandbox-1");
     record.mark_running(execution_lease(&record, 1)).unwrap();
-    record.begin_pause().unwrap();
+    record.begin_pause(false).unwrap();
 
     assert_eq!(
         record.mark_paused(execution_lease(&record, 1)).unwrap_err(),
@@ -216,17 +219,19 @@ fn failed_pause_and_resume_attempts_restore_the_stable_state() {
     record.mark_running(execution_lease(&record, 1)).unwrap();
     let running_generation = record.generation();
 
-    record.begin_pause().unwrap();
+    record.begin_pause(false).unwrap();
     record.abort_pause().unwrap();
     assert_eq!(record.state(), LifecycleState::Running);
+    assert!(record.paused_with_memory());
     assert!(record.generation() > running_generation);
     assert_eq!(record.execution_generation().unwrap().get(), 1);
 
-    record.begin_pause().unwrap();
+    record.begin_pause(false).unwrap();
     record.mark_paused(execution_lease(&record, 2)).unwrap();
     record.begin_resume().unwrap();
     record.abort_resume().unwrap();
     assert_eq!(record.state(), LifecycleState::Paused);
+    assert!(!record.paused_with_memory());
     assert_eq!(record.execution_generation().unwrap().get(), 2);
 }
 
@@ -268,9 +273,13 @@ fn records_written_before_route_policies_and_envd_modes_use_broker_defaults() {
     let mut value = serde_json::to_value(record).unwrap();
     value.as_object_mut().unwrap().remove("routing");
     value.as_object_mut().unwrap().remove("envd_mode");
+    value.as_object_mut().unwrap().remove("runtime_env_vars");
+    value.as_object_mut().unwrap().remove("paused_with_memory");
 
     let restored: SandboxRecord = serde_json::from_value(value).unwrap();
     assert_eq!(restored.envd_mode(), EnvdMode::Broker);
+    assert!(restored.runtime_env_vars().is_empty());
+    assert!(restored.paused_with_memory());
     assert_eq!(
         restored.routing().token_scope(crate::routing::ENVD_PORT),
         Some(TokenScope::Envd)

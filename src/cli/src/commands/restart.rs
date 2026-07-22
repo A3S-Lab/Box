@@ -49,11 +49,25 @@ async fn restart_one(
     query: &str,
     timeout: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let record = resolve::resolve(state, query)?;
+    let box_id = resolve::resolve(state, query)?.id.clone();
+    let mut lifecycle_lock = Some(lifecycle::acquire_box_lifecycle_lock(&box_id).await?);
+    // The command-level state snapshot can be arbitrarily old after waiting
+    // behind start/commit/monitor. Reload while holding the per-box lock before
+    // selecting a PID or deciding which restart path is still valid.
+    let current_state = StateFile::load_default()?;
+    let record = current_state
+        .find_by_id(&box_id)
+        .ok_or_else(|| format!("Box {query} was removed while waiting to restart"))?
+        .clone();
+    drop(current_state);
+    let health_check = (!record.healthcheck_disabled)
+        .then_some(record.health_check.as_ref())
+        .flatten();
+    super::common::validate_health_check_support(health_check)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    let box_id = record.id.clone();
     let name = record.name.clone();
-    let restart_plan = restart_plan(record, timeout)?;
+    let restart_plan = restart_plan(&record, timeout)?;
     let box_dir = record.box_dir.clone();
     let exec_socket_path = record.exec_socket_path.clone();
 
@@ -64,6 +78,9 @@ async fn restart_one(
         stop_timeout_secs,
     } = restart_plan
     {
+        // Managed lifecycle operations acquire this same lock in the runtime.
+        // Release the CLI guard before entering them to avoid self-deadlock.
+        drop(lifecycle_lock.take());
         let operation_id = match operation_id {
             Some(operation_id) => operation_id,
             None => OperationId::new(format!("cli-restart-{}", uuid::Uuid::new_v4()))?,
@@ -92,7 +109,7 @@ async fn restart_one(
 
     // Phase 1: Stop the box if it is active.
     if restart_plan == RestartPlan::LegacyStopThenStart {
-        let pid = lifecycle::require_live_pid(record, "restart")
+        let pid = lifecycle::require_live_pid(&record, "restart")
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
         let stop_signal = record
             .stop_signal
@@ -100,7 +117,7 @@ async fn restart_one(
             .map(a3s_box_core::vmm::parse_signal_name)
             .unwrap_or(libc::SIGTERM);
         let effective_timeout = record.stop_timeout.unwrap_or(timeout);
-        lifecycle::resume_paused_for_termination(record, pid, "restart")
+        lifecycle::resume_paused_for_termination(&record, pid, "restart")
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
         // Deliver the stop signal inside the guest so the container honours its
         // STOPSIGNAL and runs its own shutdown (then the VM halts cleanly), as
@@ -114,23 +131,37 @@ async fn restart_one(
         // the lock) so the post-await write cannot clobber a concurrent
         // monitor/run/command writer with our pre-await snapshot.
         crate::cleanup::cleanup_external_socket_dir(&box_dir, &exec_socket_path);
-        StateFile::modify(|s| {
-            if let Some(record) = s.find_by_id_mut(&box_id) {
-                record.status = "stopped".to_string();
-                record.pid = None;
-            }
-            Ok::<(), std::io::Error>(())
+        let expected_pid_start_time = record.pid_start_time;
+        let persisted = StateFile::modify(|s| {
+            let updated = match s.find_by_id_mut(&box_id) {
+                Some(record)
+                    if lifecycle::matches_execution(record, pid, expected_pid_start_time) =>
+                {
+                    record.status = "stopped".to_string();
+                    record.pid = None;
+                    true
+                }
+                _ => false,
+            };
+            Ok::<bool, std::io::Error>(updated)
         })?;
+        if !persisted {
+            return Err(format!(
+                "Box {name} changed execution while it was stopping; did not overwrite the replacement state"
+            )
+            .into());
+        }
     }
 
     // Phase 2: Start the box using shared boot logic. The record's boot config
-    // (image, cmd, dirs) is immutable across the stop, so the in-memory handle is
-    // fine to boot from; only the post-boot status write must be atomic.
-    let record = resolve::resolve(state, &box_id)?;
+    // (image, cmd, dirs) is immutable across the stop, so the locked fresh
+    // record is fine to identify the box. `boot_and_record` re-loads state under
+    // the same lock; release our guard first to avoid a re-entrant deadlock.
+    drop(lifecycle_lock.take());
     // Boot + persist under a per-box boot lock (see boot::boot_and_record): if the
     // monitor (or another concurrent restart) already brought this box back, skip
     // rather than boot a duplicate VM that orphans one of the two.
-    match boot::boot_and_record(record, boot::RestartCountUpdate::Preserve).await? {
+    match boot::boot_and_record(&record, boot::RestartCountUpdate::Preserve).await? {
         boot::BootOutcome::Restarted { .. } => println!("{name}"),
         boot::BootOutcome::AlreadyRunning => println!("{name} (already started)"),
         boot::BootOutcome::RemovedDuringBoot => {

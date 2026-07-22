@@ -1,5 +1,5 @@
 # Created using wingetcreate 1.6.1.0
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
 
 PackageIdentifier: A3SLab.Box
 PackageVersion: 0.8.0
@@ -19,7 +19,7 @@ Description: |-
 
   Key features:
   - Native Windows Hypervisor Platform (WHPX) backend
-  - Bundled a3s-box CLI, shim, Linux guest init, and krun.dll
+  - Bundled a3s-box CLI, shim, Linux guest init, krun.dll, and libkrunfw.dll
   - Docker-like run/create/start/logs/image workflows on Windows
   - Named-pipe host/guest control channel for WHPX guests
   - Windows CRI is not supported
@@ -27,6 +27,7 @@ Description: |-
   Requirements:
   - Windows 10/11 x64 with Windows Hypervisor Platform enabled
   - Run: Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+  - Enable Windows Developer Mode, or grant SeCreateSymbolicLinkPrivilege to the account that runs a3s-box
 Moniker: a3s-box
 Tags:
 - microvm
@@ -39,7 +40,7 @@ Tags:
 ReleaseNotes: |-
   Windows packaging uses the native WHPX backend. The package includes the
   Windows a3s-box CLI, the Windows shim, the Linux guest-init binary that runs
-  inside the MicroVM, and krun.dll.
+  inside the MicroVM, krun.dll, and the libkrunfw.dll companion kernel.
 
   Windows boundaries:
   - Requires Windows Hypervisor Platform.
@@ -47,4 +48,4 @@ ReleaseNotes: |-
   - Windows CRI is unsupported.
 ReleaseNotesUrl: https://github.com/A3S-Lab/Box/releases/tag/v0.8.0
 ManifestType: defaultLocale
-ManifestVersion: 1.6.0
+ManifestVersion: 1.9.0

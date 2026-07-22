@@ -6,6 +6,14 @@
         record.box_dir = dir.path().join("boxes").join(&record.id);
         record.cmd = vec!["sh".to_string(), "-lc".to_string(), "echo ok".to_string()];
         record.env.insert("ENV".to_string(), "test".to_string());
+        record.health_check = Some(a3s_box_core::ExecutionHealthCheck {
+            cmd: vec!["test".to_string(), "-f".to_string(), "/ready".to_string()],
+            interval_secs: 11,
+            timeout_secs: 3,
+            retries: 7,
+            start_period_secs: 2,
+        });
+        record.healthcheck_disabled = true;
         let rootfs = record.box_dir.join("rootfs");
         std::fs::create_dir_all(rootfs.join("etc")).unwrap();
         std::fs::write(rootfs.join("etc").join("hostname"), "api").unwrap();
@@ -46,6 +54,8 @@
             .get(&snapshot.id)
             .unwrap()
             .unwrap();
+        assert_eq!(metadata.health_check, record.health_check);
+        assert!(metadata.healthcheck_disabled);
         let image_config = metadata.image_config.unwrap();
         assert_eq!(
             image_config.entrypoint,
@@ -54,18 +64,45 @@
         assert_eq!(image_config.working_dir.as_deref(), Some("/home/user"));
     }
 
+    #[test]
+    fn create_snapshot_rejects_an_active_box_before_rootfs_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = client_for(&dir);
+        let mut record = box_record(
+            "18181818-1818-4181-8181-181818181818",
+            "active-api",
+            "running",
+        );
+        record.pid = Some(std::process::id());
+        record.box_dir = dir.path().join("boxes").join(&record.id);
+        write_boxes(&client, &[record]);
+
+        let error = client
+            .create_snapshot("active-api", CreateSnapshot::new())
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientError::Validation(message)
+                if message.contains("stop it first")
+                    && message.contains("filesystem traversal")
+        ));
+    }
+
     #[tokio::test]
     async fn lists_images_from_runtime_store_index() {
         let dir = tempfile::tempdir().unwrap();
         let client = client_for(&dir);
-        let image_path = client.paths().images_dir.join("sha256-test");
+        let digest_hex = "a".repeat(64);
+        let digest = format!("sha256:{digest_hex}");
+        let image_path = client.paths().images_dir.join("sha256").join(&digest_hex);
         std::fs::create_dir_all(&image_path).unwrap();
         std::fs::create_dir_all(&client.paths().images_dir).unwrap();
         let now = Utc::now();
         let index = serde_json::json!({
             "images": [{
                 "reference": "docker.io/library/alpine:latest",
-                "digest": "sha256:test",
+                "digest": digest,
                 "size_bytes": 42,
                 "pulled_at": now,
                 "last_used": now,
@@ -91,13 +128,9 @@
         let client = client_for(&dir);
         let store = client.open_image_store().unwrap();
         let source = dir.path().join("image-source");
-        write_minimal_oci_layout(&source);
+        let digest = write_minimal_oci_layout(&source);
         store
-            .put(
-                "docker.io/library/alpine:latest",
-                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                &source,
-            )
+            .put("docker.io/library/alpine:latest", &digest, &source)
             .await
             .unwrap();
 
@@ -147,13 +180,9 @@
         let client = client_for(&dir);
         let store = client.open_image_store().unwrap();
         let source = dir.path().join("image-source");
-        write_minimal_oci_layout(&source);
+        let digest = write_minimal_oci_layout(&source);
         let original = store
-            .put(
-                "docker.io/library/alpine:latest",
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                &source,
-            )
+            .put("docker.io/library/alpine:latest", &digest, &source)
             .await
             .unwrap();
 
@@ -184,7 +213,11 @@
         std::fs::write(source.join("layer"), "image-data").unwrap();
 
         store
-            .put("docker.io/library/alpine:latest", "sha256:one", &source)
+            .put(
+                "docker.io/library/alpine:latest",
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                &source,
+            )
             .await
             .unwrap();
         assert_eq!(client.list_images().await.unwrap().len(), 1);
@@ -197,7 +230,11 @@
 
         let store = client.open_image_store().unwrap();
         store
-            .put("docker.io/library/busybox:latest", "sha256:two", &source)
+            .put(
+                "docker.io/library/busybox:latest",
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                &source,
+            )
             .await
             .unwrap();
         let evicted = client.evict_images().await.unwrap();

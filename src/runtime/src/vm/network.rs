@@ -55,17 +55,11 @@ impl VmManager {
         };
         a3s_box_core::dns::validate_hostname(hostname).map_err(BoxError::ConfigError)?;
 
-        let hostname_path = layout.rootfs_path.join("etc/hostname");
-        if let Some(parent) = hostname_path.parent() {
-            std::fs::create_dir_all(parent).map_err(BoxError::IoError)?;
-        }
-        std::fs::write(&hostname_path, format!("{hostname}\n")).map_err(|e| {
-            BoxError::NetworkError(format!(
-                "Failed to write {}: {}",
-                hostname_path.display(),
-                e
-            ))
-        })?;
+        crate::oci::rootfs::write_guest_file(
+            &layout.rootfs_path,
+            "etc/hostname",
+            format!("{hostname}\n"),
+        )?;
         Ok(())
     }
 
@@ -81,7 +75,8 @@ impl VmManager {
     }
 
     fn ensure_standalone_hosts_readable(&self, layout: &super::BoxLayout) -> Result<()> {
-        let hosts_path = layout.rootfs_path.join("etc/hosts");
+        let hosts_path =
+            crate::oci::rootfs::resolve_guest_file_path(&layout.rootfs_path, "etc/hosts")?;
         if !hosts_path.exists() {
             return self.write_hosts_content(layout, None, &[], &[], &[]);
         }
@@ -282,13 +277,7 @@ impl VmManager {
         let hosts_content = a3s_box_core::dns::generate_hosts_file_with_entries(
             own_ip, own_names, peers, add_hosts,
         );
-        let hosts_path = layout.rootfs_path.join("etc/hosts");
-        if let Some(parent) = hosts_path.parent() {
-            std::fs::create_dir_all(parent).map_err(BoxError::IoError)?;
-        }
-        std::fs::write(&hosts_path, &hosts_content).map_err(|e| {
-            BoxError::NetworkError(format!("Failed to write {}: {}", hosts_path.display(), e))
-        })?;
+        crate::oci::rootfs::write_guest_file(&layout.rootfs_path, "etc/hosts", &hosts_content)?;
         tracing::debug!(hosts = %hosts_content.trim(), "Configured guest /etc/hosts for DNS discovery");
         Ok(())
     }
@@ -328,7 +317,23 @@ pub(crate) fn parse_mac(mac_str: &str) -> std::result::Result<[u8; 6], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &Path, link: &Path) -> bool {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => true,
+            Err(error) if error.raw_os_error() == Some(1314) => false,
+            Err(error) => panic!("failed to create Windows test symlink: {error}"),
+        }
+    }
 
     fn test_layout(rootfs_path: std::path::PathBuf) -> super::super::BoxLayout {
         super::super::BoxLayout {
@@ -340,6 +345,7 @@ mod tests {
             workspace_path: std::path::PathBuf::new(),
             console_output: None,
             oci_config: None,
+            prefer_image_rootfs_metadata: false,
             tee_instance_config: None,
         }
     }
@@ -463,5 +469,65 @@ mod tests {
             std::fs::read_to_string(layout.rootfs_path.join("etc/hostname")).unwrap(),
             "web\n"
         );
+    }
+
+    #[test]
+    fn test_startup_files_follow_guest_symlinks_but_stay_inside_rootfs() {
+        let dir = TempDir::new().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        std::fs::create_dir_all(rootfs.join("usr")).unwrap();
+        std::fs::create_dir_all(rootfs.join("shared/etc")).unwrap();
+        if !create_dir_symlink(Path::new("/usr/etc"), &rootfs.join("etc"))
+            || !create_dir_symlink(Path::new("../shared/etc"), &rootfs.join("usr/etc"))
+        {
+            return;
+        }
+        let layout = test_layout(rootfs.clone());
+        let vm = VmManager::with_box_id(
+            a3s_box_core::config::BoxConfig {
+                hostname: Some("web".to_string()),
+                add_hosts: vec!["db.local:10.88.0.10".to_string()],
+                ..Default::default()
+            },
+            a3s_box_core::event::EventEmitter::new(16),
+            "box-id".to_string(),
+        );
+
+        vm.write_hostname_file(&layout).unwrap();
+        vm.write_standalone_hosts_file(&layout).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(rootfs.join("shared/etc/hostname")).unwrap(),
+            "web\n"
+        );
+        assert!(std::fs::read_to_string(rootfs.join("shared/etc/hosts"))
+            .unwrap()
+            .contains("10.88.0.10 db.local"));
+    }
+
+    #[test]
+    fn test_startup_files_reject_guest_symlink_escape() {
+        let dir = TempDir::new().unwrap();
+        let rootfs = dir.path().join("rootfs");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        if !create_dir_symlink(Path::new("../outside"), &rootfs.join("etc")) {
+            return;
+        }
+        let layout = test_layout(rootfs);
+        let vm = VmManager::with_box_id(
+            a3s_box_core::config::BoxConfig {
+                hostname: Some("web".to_string()),
+                ..Default::default()
+            },
+            a3s_box_core::event::EventEmitter::new(16),
+            "box-id".to_string(),
+        );
+
+        let error = vm.write_hostname_file(&layout).unwrap_err().to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
+        assert!(!outside.join("hostname").exists());
     }
 }

@@ -10,6 +10,7 @@ impl LocalExecutionManager {
         &self,
         record: BoxRecord,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        super::record::validate_record_health(&record)?;
         match managed_state(&record)? {
             state @ (ManagedExecutionState::Creating | ManagedExecutionState::Created) => {
                 self.claim_and_start(record, state).await
@@ -80,6 +81,7 @@ impl LocalExecutionManager {
         record: BoxRecord,
         expected_state: ManagedExecutionState,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        super::record::validate_record_health(&record)?;
         let claimed = match self
             .transition(
                 &record,

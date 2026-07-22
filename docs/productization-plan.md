@@ -704,9 +704,26 @@ Current notes:
 
 - Windows packaging now chooses the native WHPX path explicitly. The Windows
   release package ships `a3s-box.exe`, `a3s-box-shim.exe`, the Linux
-  `a3s-box-guest-init` binary that runs inside the MicroVM, and `krun.dll`.
+  `a3s-box-guest-init` binary that runs inside the MicroVM, `krun.dll`, and the
+  companion-kernel `libkrunfw.dll`.
 - The Windows package requires Windows Hypervisor Platform and does not require
   WSL. Host/guest control uses Windows named pipes where implemented.
+- Native x86_64 Windows validation on July 20–21, 2026 covered Alpine 3.20
+  foreground and detached runs, live stdout/stderr collection, `logs`,
+  read-only `attach`, `inspect`, unchanged success/non-zero workload exit codes,
+  sequential published-port connections, drive-letter directory and read-only
+  single-file binds, named-volume restart persistence, `stats --no-stream`, and the
+  `diff`/`export`/clean-stop `commit`/filesystem-snapshot lifecycle. Running-box
+  commit remains outside the Windows boundary because WHPX has no post-boot
+  guest archive channel. All 113 Linux
+  guest-init unit tests also passed inside a real WHPX guest. The reliable WHPX
+  path currently requires exactly one vCPU.
+- Native WHPX bridge networking is not implemented. Standard Compose services
+  create a bridge network by default, so Compose workload startup is outside
+  the current Windows support boundary along with interactive PTY, post-boot
+  `exec`, memory snapshot-fork, TEE, and CRI.
+- [`windows-whpx.md`](./windows-whpx.md) records the package layout, source
+  build, command support matrix, smoke commands, and current platform limits.
 - Winget metadata advertises native WHPX support and declares
   `HypervisorPlatform` as the Windows feature dependency.
 
@@ -730,5 +747,6 @@ Current notes:
    verifies one-container and multi-container CRI lifecycle paths through a fake
    ready VM and exec server, and `src/cri/tests/crictl_smoke.rs` provides the
    real CRI socket harness.
-5. Add a Windows/WHPX command support matrix and make unsupported Windows
-   commands hidden or explicitly documented.
+5. Add explicit Windows diagnostics for bridge-network/Compose requests and
+   continue closing the documented interactive PTY and post-boot `exec`
+   support gaps.

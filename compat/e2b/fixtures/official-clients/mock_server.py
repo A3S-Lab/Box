@@ -313,7 +313,9 @@ class FixtureHandler(BaseHTTPRequestHandler):
         }
         encoded = json.dumps(record, sort_keys=True, separators=(",", ":"))
         with self.capture_lock:
-            with self.capture_path.open("a", encoding="utf-8") as capture:
+            with self.capture_path.open(
+                "a", encoding="utf-8", newline="\n"
+            ) as capture:
                 capture.write(encoded)
                 capture.write("\n")
 

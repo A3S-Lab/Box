@@ -533,8 +533,6 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
         }
         let mut base_layers: Vec<LayerInfo> = Vec::new();
         let mut base_diff_ids: Vec<String> = Vec::new();
-        let mut run_pool_session: Option<BuildRunPoolSession> = None;
-
         // Layer-level build cache (best-effort; None disables caching).
         let cache = if config.no_cache {
             None
@@ -922,13 +920,11 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                         println!("Step {}/{}: {}", step, total_instructions, created_by);
                     }
                     let layer_opt = if let Some(pool_config) = &config.run_pool {
-                        if run_pool_session.is_none() {
-                            run_pool_session =
-                                Some(BuildRunPoolSession::acquire(pool_config, &rootfs_dir).await?);
-                        }
-                        let session = run_pool_session
-                            .as_ref()
-                            .expect("run pool session was just initialized");
+                        // A lease is deliberately scoped to one RUN. The handler
+                        // destroys its VM before inspecting the shared rootfs, so
+                        // daemonized descendants cannot race layer capture.
+                        let session =
+                            BuildRunPoolSession::acquire(pool_config, &rootfs_dir).await?;
                         handle_run_with_pool(
                             command,
                             cache_mounts,
@@ -996,8 +992,10 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                     // Expand prior ENV/ARG in the WORKDIR path (Docker does too).
                     let expanded_path = expand_args(path, &state.expansion_vars());
                     state.workdir = resolve_path(&state.workdir, &expanded_path);
-                    let full = rootfs_dir.join(state.workdir.trim_start_matches('/'));
-                    let _ = std::fs::create_dir_all(&full);
+                    crate::oci::rootfs::ensure_guest_directory(
+                        &rootfs_dir,
+                        state.workdir.trim_start_matches('/'),
+                    )?;
                     state.history.push(HistoryEntry {
                         created_by: format!("WORKDIR {}", path),
                         empty_layer: true,
@@ -1198,8 +1196,10 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                     }
                     // Create volume directories in rootfs
                     for p in paths {
-                        let full = rootfs_dir.join(p.trim_start_matches('/'));
-                        let _ = std::fs::create_dir_all(&full);
+                        crate::oci::rootfs::ensure_guest_directory(
+                            &rootfs_dir,
+                            p.trim_start_matches('/'),
+                        )?;
                     }
                     state.history.push(HistoryEntry {
                         created_by: format!("VOLUME {}", paths.join(" ")),
@@ -1207,10 +1207,6 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
                     });
                 }
             }
-        }
-
-        if let Some(session) = run_pool_session.take() {
-            session.release().await?;
         }
 
         // Store completed stage rootfs for COPY --from

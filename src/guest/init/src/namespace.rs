@@ -5,11 +5,15 @@
 
 #[cfg(target_os = "linux")]
 use nix::sched::{unshare, CloneFlags};
-
+#[cfg(unix)]
 use nix::unistd::{fork, ForkResult};
+#[cfg(unix)]
 use std::os::fd::RawFd;
+#[cfg(not(unix))]
+type RawFd = i32;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,9 +22,11 @@ use thiserror::Error;
 /// Namespace isolation errors.
 #[derive(Debug, Error)]
 pub enum NamespaceError {
+    #[cfg(unix)]
     #[error("Fork failed: {0}")]
     ForkFailed(#[from] nix::Error),
 
+    #[cfg(target_os = "linux")]
     #[error("Unshare failed: {0}")]
     UnshareFailed(nix::Error),
 
@@ -158,6 +164,7 @@ impl NamespaceConfig {
 ///
 /// Returns error if fork, unshare, or exec fails.
 #[allow(clippy::too_many_arguments)] // syscall-shaped: command + args + env + workdir + user + stdio + cgroup
+#[cfg(unix)]
 pub fn spawn_isolated(
     config: &NamespaceConfig,
     command: &str,
@@ -204,6 +211,46 @@ pub fn spawn_isolated(
             Ok(pid)
         }
     }
+}
+
+/// Development fallback for hosts that cannot provide Unix namespaces.
+///
+/// The production guest is Linux-only. Keeping this path explicit lets the
+/// platform-independent library and its protocol tests compile on Windows
+/// without pretending that namespace isolation is available there.
+#[allow(clippy::too_many_arguments)]
+#[cfg(not(unix))]
+pub fn spawn_isolated(
+    _config: &NamespaceConfig,
+    command: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+    workdir: &str,
+    _user: Option<&str>,
+    stdin_null: bool,
+    _main_stdio: Option<(RawFd, RawFd)>,
+    _cgroup_procs: Option<&str>,
+) -> Result<u32, NamespaceError> {
+    tracing::warn!("Namespace isolation and security enforcement not available on this platform");
+
+    let resolved_command = resolve_command_path(command, env);
+    let mut child = Command::new(
+        resolved_command
+            .as_deref()
+            .unwrap_or_else(|| Path::new(command)),
+    );
+    child.args(args).current_dir(workdir);
+    if stdin_null {
+        child.stdin(std::process::Stdio::null());
+    }
+    for (key, value) in env {
+        child.env(key, value);
+    }
+
+    child
+        .spawn()
+        .map(|child| child.id())
+        .map_err(NamespaceError::ExecFailed)
 }
 
 /// Child process logic: create namespaces and exec command.
@@ -351,8 +398,9 @@ fn child_process(
 }
 
 fn resolve_command_path(command: &str, env: &[(&str, &str)]) -> Option<PathBuf> {
-    if command.contains('/') {
-        let path = PathBuf::from(command);
+    let path = Path::new(command);
+    if path.is_absolute() || path.components().count() > 1 {
+        let path = path.to_path_buf();
         return path.exists().then_some(path);
     }
 
@@ -365,10 +413,9 @@ fn resolve_command_path(command: &str, env: &[(&str, &str)]) -> Option<PathBuf> 
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
         });
 
-    path_env
-        .split(':')
-        .filter(|dir| !dir.is_empty())
-        .map(|dir| PathBuf::from(dir).join(command))
+    std::env::split_paths(&path_env)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(command))
         .find(|path| path.exists())
 }
 
@@ -1128,7 +1175,7 @@ pub(crate) fn syscall_name_to_number(name: &str) -> Option<u32> {
 }
 
 /// Child process logic for non-Linux platforms (development stub).
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 #[allow(clippy::too_many_arguments)] // mirrors spawn_isolated's syscall-shaped parameter list
 fn child_process(
     _config: &NamespaceConfig,
@@ -1208,12 +1255,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_resolve_command_path_absolute() {
         let path = resolve_command_path("/bin/sh", &[]);
         assert_eq!(path, Some(PathBuf::from("/bin/sh")));
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_resolve_command_path_from_env_path() {
         let path = resolve_command_path("sh", &[("PATH", "/bin:/usr/bin")]);
         assert_eq!(path, Some(PathBuf::from("/bin/sh")));

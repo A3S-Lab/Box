@@ -128,6 +128,15 @@ mod tests {
     }
 
     #[cfg(all(feature = "pool", not(windows)))]
+    fn extract_image_rootfs(image: &OciImage) -> tempfile::TempDir {
+        let rootfs = tempfile::TempDir::new().unwrap();
+        for layer in image.layer_paths() {
+            crate::oci::layers::extract_layer(layer, rootfs.path()).unwrap();
+        }
+        rootfs
+    }
+
+    #[cfg(all(feature = "pool", not(windows)))]
     fn tree_contains_file_named(root: &std::path::Path, file_name: &str) -> bool {
         let Ok(entries) = std::fs::read_dir(root) else {
             return false;
@@ -228,7 +237,7 @@ LABEL org.opencontainers.image.title="scratch-smoke"
 
     #[cfg(all(feature = "pool", not(windows)))]
     #[tokio::test]
-    async fn test_build_run_pool_reuses_stage_lease_and_captures_rootfs_diff() {
+    async fn test_build_run_pool_fences_each_run_before_capturing_rootfs_diff() {
         use super::super::BuildRunPoolConfig;
         use crate::pool::client::{read_frame, write_frame};
         use crate::pool::{
@@ -265,6 +274,7 @@ CMD ["cat", "/app/copied.txt"]
             let mut exec_count = 0usize;
             let mut release_count = 0usize;
             let mut rootfs_host: Option<PathBuf> = None;
+            let mut active_lease: Option<String> = None;
 
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -274,7 +284,10 @@ CMD ["cat", "/app/copied.txt"]
                 match req {
                     PoolRequest::Lease(req) => {
                         lease_count += 1;
-                        assert_eq!(lease_count, 1, "stage should lease exactly one VM");
+                        assert!(
+                            active_lease.is_none(),
+                            "the previous RUN VM must be destroyed before another lease"
+                        );
                         assert_eq!(req.image.as_deref(), Some("helper:latest"));
                         assert_eq!(req.vcpus, Some(3));
                         assert_eq!(req.memory_mb, Some(768));
@@ -284,11 +297,13 @@ CMD ["cat", "/app/copied.txt"]
                         assert_eq!(guest, "/run/a3s/test-rootfs");
                         assert_eq!(mode, "rw");
                         rootfs_host = Some(host);
+                        let lease_id = format!("lease-{lease_count}");
+                        active_lease = Some(lease_id.clone());
 
                         write_frame(
                             &mut stream,
                             &serde_json::to_vec(&PoolLeaseResponse {
-                                lease_id: Some("lease-1".to_string()),
+                                lease_id: Some(lease_id),
                                 error: None,
                             })
                             .unwrap(),
@@ -298,7 +313,8 @@ CMD ["cat", "/app/copied.txt"]
                     }
                     PoolRequest::Exec(req) => {
                         exec_count += 1;
-                        assert_eq!(req.lease_id, "lease-1");
+                        assert_eq!(active_lease.as_deref(), Some(req.lease_id.as_str()));
+                        assert_eq!(req.lease_id, format!("lease-{exec_count}"));
                         assert_eq!(req.rootfs.as_deref(), Some("/run/a3s/test-rootfs"));
                         assert_eq!(req.timeout_ns, Some(12_000_000_000));
                         assert_eq!(req.user.as_deref(), Some("1000:1001"));
@@ -316,7 +332,15 @@ CMD ["cat", "/app/copied.txt"]
                                         "cd '/app' && echo \"$HELLO\" > out.txt".to_string(),
                                     ]
                                 );
-                                std::fs::write(rootfs.join("app/out.txt"), "warm\n").unwrap();
+                                // Simulate a daemon which keeps mutating the
+                                // shared rootfs after the direct child exits.
+                                // Release below represents VM teardown and
+                                // publishes its final quiescent value.
+                                std::fs::write(
+                                    rootfs.join("app/out.txt"),
+                                    "daemon-still-running\n",
+                                )
+                                .unwrap();
                             }
                             2 => {
                                 assert_eq!(req.working_dir.as_deref(), Some("/"));
@@ -362,14 +386,21 @@ CMD ["cat", "/app/copied.txt"]
                     }
                     PoolRequest::Release(req) => {
                         release_count += 1;
-                        assert_eq!(req.lease_id, "lease-1");
+                        assert_eq!(active_lease.take().as_deref(), Some(req.lease_id.as_str()));
+                        assert_eq!(req.lease_id, format!("lease-{release_count}"));
+                        if release_count == 1 {
+                            let rootfs = rootfs_host.as_ref().expect("lease records rootfs host");
+                            std::fs::write(rootfs.join("app/out.txt"), "warm\n").unwrap();
+                        }
                         write_frame(
                             &mut stream,
                             &serde_json::to_vec(&PoolLeaseReleaseResponse { error: None }).unwrap(),
                         )
                         .await
                         .unwrap();
-                        break;
+                        if release_count == 3 {
+                            break;
+                        }
                     }
                     other => panic!(
                         "unexpected pool request: {:?}",
@@ -378,9 +409,9 @@ CMD ["cat", "/app/copied.txt"]
                 }
             }
 
-            assert_eq!(lease_count, 1);
+            assert_eq!(lease_count, 3);
             assert_eq!(exec_count, 3);
-            assert_eq!(release_count, 1);
+            assert_eq!(release_count, 3);
         });
 
         let store = Arc::new(ImageStore::new(&store_dir, 1024 * 1024 * 100).unwrap());
@@ -425,6 +456,12 @@ CMD ["cat", "/app/copied.txt"]
         assert!(files.iter().any(|path| path == "app/out.txt"));
         assert!(files.iter().any(|path| path == "app/copied.txt"));
         assert!(files.iter().any(|path| path == "app/exec.txt"));
+        let extracted = extract_image_rootfs(&image);
+        assert_eq!(
+            std::fs::read_to_string(extracted.path().join("app/out.txt")).unwrap(),
+            "warm\n",
+            "layer capture must happen after the RUN VM lifecycle fence"
+        );
     }
 
     #[cfg(all(feature = "pool", not(windows)))]
@@ -1247,6 +1284,7 @@ RUN --mount=type=cache,id=warm,target=/root/.cache cat /root/.cache/cache-only.t
         let daemon = tokio::spawn(async move {
             let mut rootfs_host: Option<PathBuf> = None;
             let mut exec_count = 0usize;
+            let mut release_count = 0usize;
 
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -1310,14 +1348,17 @@ RUN --mount=type=cache,id=warm,target=/root/.cache cat /root/.cache/cache-only.t
                     }
                     PoolRequest::Release(req) => {
                         assert_eq!(req.lease_id, "lease-cache");
+                        release_count += 1;
+                        assert_eq!(exec_count, release_count);
                         write_frame(
                             &mut stream,
                             &serde_json::to_vec(&PoolLeaseReleaseResponse { error: None }).unwrap(),
                         )
                         .await
                         .unwrap();
-                        assert_eq!(exec_count, 2);
-                        break;
+                        if release_count == 2 {
+                            break;
+                        }
                     }
                     other => panic!(
                         "unexpected pool request: {:?}",
@@ -1623,7 +1664,7 @@ RUN --mount=type=cache,id=seeded,sharing=locked,from=builder,source=/seed-cache,
                 quiet: true,
                 platforms: vec![],
                 target: None,
-                no_cache: false,
+                no_cache: true,
                 metrics: None,
                 run_pool: None,
             },
@@ -1648,7 +1689,10 @@ RUN --mount=type=cache,id=seeded,sharing=locked,from=builder,source=/seed-cache,
             .collect();
 
         assert!(names.iter().any(|n| n == "app/keep.txt"));
-        assert!(names.iter().any(|n| n == "app/logs/important.log")); // !negation
+        assert!(
+            names.iter().any(|n| n == "app/logs/important.log"),
+            "re-included log missing from layer: {names:?}"
+        ); // !negation
         assert!(
             !names.iter().any(|n| n.contains(".env")),
             "secret leaked: {names:?}"

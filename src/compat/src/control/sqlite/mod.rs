@@ -433,9 +433,10 @@ impl SandboxRepository for SqliteSandboxRepository {
                             "SQLite expiry generation exceeds signed 64-bit range".into(),
                         )
                     })?;
+                let keep_memory_on_pause = record.lifecycle().keep_memory_on_pause;
                 match record.lifecycle().on_timeout {
                     OnTimeoutAction::Kill => record.begin_kill(),
-                    OnTimeoutAction::Pause => record.begin_pause(),
+                    OnTimeoutAction::Pause => record.begin_pause(keep_memory_on_pause),
                 }
                 .map_err(|error| {
                     RepositoryError::Corrupt(format!(

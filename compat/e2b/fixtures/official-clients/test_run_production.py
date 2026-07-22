@@ -24,7 +24,7 @@ class NativeEnvironmentTests(unittest.TestCase):
 
 
 class PrepareNativeTypescriptTests(unittest.TestCase):
-    def test_compiler_resolves_pinned_official_dependencies(self) -> None:
+    def test_compiler_resolves_dependencies_without_symlink_privilege(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             sdk_root = temp / "sdk"
@@ -57,8 +57,8 @@ class PrepareNativeTypescriptTests(unittest.TestCase):
                 if calls == 2:
                     build_source = Path(str(kwargs["cwd"]))
                     dependencies = build_source / "node_modules"
-                    self.assertTrue(dependencies.is_symlink())
-                    self.assertEqual(dependencies.resolve(), modules.resolve())
+                    self.assertTrue(dependencies.is_dir())
+                    self.assertTrue((dependencies / ".bin" / "tsc").is_file())
                 if calls == 3:
                     tarball = temp / "a3s-lab-box-0.1.0.tgz"
                     tarball.touch()
@@ -71,7 +71,19 @@ class PrepareNativeTypescriptTests(unittest.TestCase):
 
             with (
                 mock.patch.object(run_production, "SDK_ROOT", sdk_root),
+                mock.patch.object(
+                    run_production,
+                    "require_executable",
+                    side_effect=lambda name, _path=None: (
+                        str(compiler) if name == "tsc" else "npm"
+                    ),
+                ),
                 mock.patch.object(run_production.subprocess, "run", side_effect=run),
+                mock.patch.object(
+                    Path,
+                    "symlink_to",
+                    side_effect=OSError("symbolic links are unavailable"),
+                ),
             ):
                 run_production.prepare_native_typescript(temp, client)
 

@@ -639,15 +639,30 @@ impl A3sBoxClient {
         Ok(self.snapshot_store()?.delete(id)?)
     }
 
-    /// Create a VM snapshot from a box's current on-disk root filesystem.
+    /// Create a VM snapshot from a stopped box's on-disk root filesystem.
     pub fn create_snapshot(
         &self,
         box_query: &str,
         request: CreateSnapshot,
     ) -> Result<SnapshotSummary> {
         request.validate()?;
+        let initial_state = self.load_state()?;
+        let record_id = resolve_required_record(&initial_state, box_query)?.id.clone();
+        let _lifecycle_lock = a3s_box_runtime::acquire_execution_lifecycle_lock(
+            &self.paths.home,
+            &record_id,
+        )?;
         let state = self.load_state()?;
-        let record = resolve_required_record(&state, box_query)?.clone();
+        let record = state
+            .find_by_id(&record_id)
+            .cloned()
+            .ok_or_else(|| ClientError::BoxNotFound(record_id.clone()))?;
+        if record.is_active() {
+            return Err(ClientError::Validation(format!(
+                "cannot snapshot active box {}: stop it first; live host-path snapshots are disabled because a running guest can race filesystem traversal",
+                record.name
+            )));
+        }
         let rootfs_path = resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
             ClientError::Validation(format!(
                 "rootfs not found for box {} under {} (looked for merged/ and rootfs/)",
@@ -680,6 +695,8 @@ impl A3sBoxClient {
         metadata.labels = record.labels.clone();
         metadata.network_mode = Some(record.network_mode.to_string());
         metadata.description = request.description.unwrap_or_default();
+        metadata.health_check = record.health_check.clone();
+        metadata.healthcheck_disabled = record.healthcheck_disabled;
         metadata.image_config = load_resolved_image_config(&record.box_dir)?;
         if metadata.image_config.is_none() {
             return Err(ClientError::Validation(format!(
@@ -705,6 +722,13 @@ impl A3sBoxClient {
         metadata
             .require_image_config()
             .map_err(|error| ClientError::Validation(error.to_string()))?;
+        #[cfg(windows)]
+        if metadata.has_effective_health_check() {
+            return Err(ClientError::Validation(
+                "container health checks are not supported on Windows; the snapshot defines an effective health check"
+                    .to_string(),
+            ));
+        }
         let state = self.load_state()?;
         let box_name = request
             .name
@@ -771,8 +795,8 @@ impl A3sBoxClient {
             restart_count: 0,
             max_restart_count: 0,
             exit_code: None,
-            health_check: None,
-            healthcheck_disabled: false,
+            health_check: metadata.health_check.clone(),
+            healthcheck_disabled: metadata.healthcheck_disabled,
             health_status: "none".to_string(),
             health_retries: 0,
             health_last_check: None,

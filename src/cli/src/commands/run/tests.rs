@@ -364,7 +364,7 @@ fn test_build_pool_client_run_plumbs_supported_options() {
 
     let mut args = default_pool_run_args();
     args.common.image = "node:24-bookworm".to_string();
-    args.common.cpus = 4;
+    args.common.cpus = a3s_box_core::config::DEFAULT_VCPUS;
     args.common.memory = "2g".to_string();
     args.common.volumes = vec![bind.clone()];
     args.common.env = vec!["A=cli".to_string(), "B=cli".to_string()];
@@ -382,7 +382,7 @@ fn test_build_pool_client_run_plumbs_supported_options() {
     assert_eq!(req.user.as_deref(), Some("0"));
     assert_eq!(req.workdir.as_deref(), Some("/workspace"));
     assert_eq!(req.volumes, vec![bind]);
-    assert_eq!(req.vcpus, 4);
+    assert_eq!(req.vcpus, a3s_box_core::config::DEFAULT_VCPUS);
     assert_eq!(req.memory_mb, 2048);
     assert!(req.exec);
     assert_eq!(req.timeout_ns, Some(45_000_000_000));
@@ -775,11 +775,16 @@ fn test_foreground_exit_code_preserves_vm_code() {
 }
 
 #[test]
-fn test_foreground_exit_code_has_deterministic_fallbacks() {
+fn test_foreground_natural_exit_without_guest_result_fails_closed() {
     assert_eq!(
         foreground_exit_code(ForegroundStopReason::ProcessExited, None),
-        None
+        Some(1),
+        "a dead runtime without a trusted guest result must not report success"
     );
+}
+
+#[test]
+fn test_foreground_exit_code_has_deterministic_fallbacks() {
     assert_eq!(
         foreground_exit_code(
             ForegroundStopReason::UserInterrupted(FOREGROUND_SIGINT),

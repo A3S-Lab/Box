@@ -29,18 +29,17 @@ pub fn spawn_health_checker(
     box_id: String,
     exec_socket_path: PathBuf,
     health_check: HealthCheck,
-) -> tokio::task::JoinHandle<()> {
+) -> Result<tokio::task::JoinHandle<()>, String> {
     #[cfg(not(windows))]
     {
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             run_health_loop(box_id, exec_socket_path, health_check, None).await;
-        })
+        }))
     }
     #[cfg(windows)]
     {
-        // Health checks require exec socket (Unix domain sockets); no-op on Windows.
         let _ = (box_id, exec_socket_path, health_check);
-        tokio::spawn(async {})
+        Err("container health checks are not supported on Windows".to_string())
     }
 }
 
@@ -88,8 +87,12 @@ fn detached_health_worker_args(box_id: &str, generation: i64) -> Vec<String> {
 }
 
 #[cfg(windows)]
-pub(crate) fn spawn_detached_health_checker(_record: &BoxRecord) -> Result<(), String> {
-    Ok(())
+pub(crate) fn spawn_detached_health_checker(record: &BoxRecord) -> Result<(), String> {
+    if record.healthcheck_disabled || record.health_check.is_none() {
+        Ok(())
+    } else {
+        Err("container health checks are not supported on Windows".to_string())
+    }
 }
 
 /// Run the hidden process-owned health worker for one box generation.
@@ -128,7 +131,7 @@ pub(crate) async fn run_detached_health_worker(
     _box_id: String,
     _generation: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    Ok(())
+    Err("container health checks are not supported on Windows".into())
 }
 
 #[cfg(not(windows))]

@@ -23,12 +23,14 @@ pub use execution::{
     ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
     ExecutionPortIo, ExecutionPortStream, ExecutionRecordPolicy, ExecutionReservation,
     ExecutionRestartPolicy, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
-    ExecutionStatus, KillOutcome, OperationId, ReconcileOutcome, RestartExecutionOptions,
+    ExecutionStatus, KillExecutionOptions, KillOutcome, OperationId, ReconcileOutcome,
+    RestartExecutionOptions,
 };
 pub use metrics::{MetricsCollector, NoopMetrics};
 pub use registry::{ImageRegistry, PulledImage};
 pub use session::{
-    ExecutionProcess, ExecutionProcessInput, ExecutionProcessStream, ExecutionSessionManager,
+    ExecutionProcess, ExecutionProcessInput, ExecutionProcessSignal, ExecutionProcessStream,
+    ExecutionSessionManager,
 };
 pub use store::{
     ImageStoreBackend, NetworkStoreBackend, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,

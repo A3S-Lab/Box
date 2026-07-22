@@ -24,7 +24,8 @@ fn yaml_and_acl_normalize_to_the_same_golden_document() {
     assert_eq!(yaml, acl);
     assert_eq!(
         yaml.to_canonical_json().expect("serialize normalized YAML"),
-        NORMALIZED_FIXTURE
+        NORMALIZED_FIXTURE.replace("\r\n", "\n"),
+        "golden JSON must compare by content regardless of Git's checkout line endings"
     );
     assert_eq!(
         yaml.service_order().expect("deterministic service order"),

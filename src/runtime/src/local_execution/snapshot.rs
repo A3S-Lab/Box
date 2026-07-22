@@ -9,7 +9,9 @@ use a3s_box_core::{
 };
 
 use super::record::lease_from_record;
-use super::support::{managed_state, require_generation, required_handle, state_conflict};
+use super::support::{
+    managed_state, paused_with_memory, require_generation, required_handle, state_conflict,
+};
 use super::{LocalExecutionHandle, LocalExecutionManager, ManagedExecutionState, RuntimeUpdate};
 use crate::{BoxRecord, BoxStateStore, ManagedExecutionOperation, SnapshotStore};
 
@@ -107,6 +109,11 @@ impl LocalExecutionManager {
     async fn drive_snapshot(&self, record: BoxRecord) -> ExecutionManagerResult<ExecutionSnapshot> {
         let (snapshot_id, source_state) = snapshot_operation(&record)?;
         let execution_id = ExecutionId::new(record.id.clone())?;
+        if source_state == ManagedExecutionState::Paused
+            && !paused_with_memory(&record, &execution_id)?
+        {
+            return self.drive_cold_paused_snapshot(record, snapshot_id).await;
+        }
         let observation = self.backend.inspect(&record).await?;
         observation.validate(&execution_id)?;
         let mut handle = required_handle(&observation, &execution_id)?;
@@ -162,6 +169,55 @@ impl LocalExecutionManager {
             state: execution_state(source_state)?,
             lease: lease_from_record(&completed)?,
         })
+    }
+
+    async fn drive_cold_paused_snapshot(
+        &self,
+        record: BoxRecord,
+        snapshot_id: ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<ExecutionSnapshot> {
+        let prepared = self.backend.prepare_quiescent_rootfs(&record).await;
+        let capture = match prepared {
+            Ok(()) => {
+                self.capture_snapshot_rootfs(record.clone(), snapshot_id.clone())
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let cleanup = self.backend.cleanup_quiescent_rootfs(&record).await;
+        if let Err(cleanup_error) = cleanup {
+            return match capture {
+                Ok(_) => Err(cleanup_error),
+                Err(capture_error) => Err(ExecutionManagerError::Internal(format!(
+                    "{capture_error}; failed to clean up quiescent rootfs for {}: {cleanup_error}",
+                    record.id
+                ))),
+            };
+        }
+        let restored = self
+            .complete_transition(
+                &record,
+                ManagedExecutionState::Snapshotting,
+                ManagedExecutionState::Paused,
+                RuntimeUpdate::None,
+            )
+            .await;
+        match (capture, restored) {
+            (Ok(size_bytes), Ok(restored)) => Ok(ExecutionSnapshot {
+                snapshot_id,
+                size_bytes,
+                state: ExecutionState::Paused,
+                lease: lease_from_record(&restored)?,
+            }),
+            (Err(capture_error), Ok(_)) => Err(capture_error),
+            (Ok(_), Err(restore_error)) => Err(restore_error),
+            (Err(capture_error), Err(restore_error)) => {
+                Err(ExecutionManagerError::Internal(format!(
+                    "{capture_error}; failed to restore cold-paused execution {} after snapshot failure: {restore_error}",
+                    record.id
+                )))
+            }
+        }
     }
 
     async fn pause_for_snapshot(
@@ -437,6 +493,77 @@ fn capture_sandbox_rootfs_metadata(
     record: &BoxRecord,
     rootfs: &Path,
 ) -> ExecutionManagerResult<a3s_box_core::rootfs_metadata::RootfsMetadataManifest> {
+    let plan = if sandbox_bundle_config_present(record)? {
+        let plan = sandbox_id_mapping_plan_from_bundle(record, Some(rootfs))?;
+        crate::sandbox::rootfs::persist_snapshot_id_mappings(&record.box_dir, &plan).map_err(
+            |error| snapshot_error(record, "persist Sandbox snapshot ID mappings", error),
+        )?;
+        plan
+    } else {
+        let plan = crate::sandbox::rootfs::load_snapshot_id_mappings(&record.box_dir)
+            .map_err(|error| snapshot_error(record, "load Sandbox snapshot ID mappings", error))?
+            .ok_or_else(|| {
+                snapshot_error(
+                    record,
+                    "load Sandbox snapshot ID mappings",
+                    "neither a live OCI bundle nor a retained mapping artifact exists",
+                )
+            })?;
+        validate_id_mapping_plan(record, &plan)?;
+        plan
+    };
+    crate::sandbox::rootfs::capture_snapshot_rootfs_metadata(rootfs, &plan)
+        .map_err(|error| snapshot_error(record, "capture Sandbox rootfs metadata", error))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn persist_sandbox_snapshot_mappings(record: &BoxRecord) -> ExecutionManagerResult<()> {
+    if sandbox_bundle_config_present(record)? {
+        let plan = sandbox_id_mapping_plan_from_bundle(record, None)?;
+        return crate::sandbox::rootfs::persist_snapshot_id_mappings(&record.box_dir, &plan)
+            .map_err(|error| {
+                snapshot_error(record, "persist Sandbox snapshot ID mappings", error)
+            });
+    }
+    if let Some(plan) = crate::sandbox::rootfs::load_snapshot_id_mappings(&record.box_dir)
+        .map_err(|error| snapshot_error(record, "load Sandbox snapshot ID mappings", error))?
+    {
+        return validate_id_mapping_plan(record, &plan);
+    }
+    Err(snapshot_error(
+        record,
+        "persist Sandbox snapshot ID mappings",
+        "neither a live OCI bundle nor a retained mapping artifact exists",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn sandbox_bundle_config_present(record: &BoxRecord) -> ExecutionManagerResult<bool> {
+    let config_path = record.box_dir.join("sandbox/bundle/config.json");
+    match std::fs::symlink_metadata(&config_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(true),
+        Ok(_) => Err(snapshot_error(
+            record,
+            "validate Sandbox OCI mappings",
+            format!(
+                "OCI configuration is not a regular file: {}",
+                config_path.display()
+            ),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(snapshot_error(
+            record,
+            "inspect Sandbox OCI mappings",
+            format!("{}: {error}", config_path.display()),
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn sandbox_id_mapping_plan_from_bundle(
+    record: &BoxRecord,
+    expected_rootfs: Option<&Path>,
+) -> ExecutionManagerResult<crate::sandbox::SandboxIdMappingPlan> {
     let config_path = record.box_dir.join("sandbox/bundle/config.json");
     let spec = oci_spec::runtime::Spec::load(&config_path).map_err(|error| {
         snapshot_error(
@@ -445,27 +572,29 @@ fn capture_sandbox_rootfs_metadata(
             format!("{}: {error}", config_path.display()),
         )
     })?;
-    let configured_rootfs = spec
-        .root()
-        .as_ref()
-        .map(|root| root.path())
-        .ok_or_else(|| {
-            snapshot_error(
+    if let Some(expected_rootfs) = expected_rootfs {
+        let configured_rootfs = spec
+            .root()
+            .as_ref()
+            .map(|root| root.path())
+            .ok_or_else(|| {
+                snapshot_error(
+                    record,
+                    "validate Sandbox OCI mappings",
+                    "OCI specification has no rootfs",
+                )
+            })?;
+        if configured_rootfs != expected_rootfs {
+            return Err(snapshot_error(
                 record,
                 "validate Sandbox OCI mappings",
-                "OCI specification has no rootfs",
-            )
-        })?;
-    if configured_rootfs != rootfs {
-        return Err(snapshot_error(
-            record,
-            "validate Sandbox OCI mappings",
-            format!(
-                "OCI rootfs {} does not match the active rootfs {}",
-                configured_rootfs.display(),
-                rootfs.display()
-            ),
-        ));
+                format!(
+                    "OCI rootfs {} does not match the active rootfs {}",
+                    configured_rootfs.display(),
+                    expected_rootfs.display()
+                ),
+            ));
+        }
     }
     let linux = spec.linux().as_ref().ok_or_else(|| {
         snapshot_error(
@@ -484,8 +613,27 @@ fn capture_sandbox_rootfs_metadata(
         maximum_container_uid,
         maximum_container_gid,
     };
-    crate::sandbox::rootfs::capture_snapshot_rootfs_metadata(rootfs, &plan)
-        .map_err(|error| snapshot_error(record, "capture Sandbox rootfs metadata", error))
+    validate_id_mapping_plan(record, &plan)?;
+    Ok(plan)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_id_mapping_plan(
+    record: &BoxRecord,
+    plan: &crate::sandbox::SandboxIdMappingPlan,
+) -> ExecutionManagerResult<()> {
+    validate_id_mappings(record, "UID", &plan.uid_mappings)?;
+    validate_id_mappings(record, "GID", &plan.gid_mappings)?;
+    if plan.maximum_container_uid != maximum_container_id(record, "UID", &plan.uid_mappings)?
+        || plan.maximum_container_gid != maximum_container_id(record, "GID", &plan.gid_mappings)?
+    {
+        return Err(snapshot_error(
+            record,
+            "validate Sandbox snapshot ID mappings",
+            "maximum container IDs do not match the persisted mapping ranges",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -619,6 +767,8 @@ fn build_snapshot_metadata(
     metadata.entrypoint = record.entrypoint.clone();
     metadata.workdir = record.workdir.clone();
     metadata.labels = record.labels.clone();
+    metadata.health_check = record.health_check.clone();
+    metadata.healthcheck_disabled = record.healthcheck_disabled;
     metadata.image_config = crate::load_resolved_image_config(&record.box_dir)
         .map_err(|error| snapshot_error(record, "load resolved image configuration", error))?;
     if metadata.image_config.is_none() {

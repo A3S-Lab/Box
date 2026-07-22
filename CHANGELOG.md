@@ -4,6 +4,65 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Runnable native Windows WHPX path.** Windows packages now include the
+  `libkrunfw.dll` companion kernel alongside `krun.dll`, and the native path is
+  documented and validated with Alpine foreground/detached workloads, separated
+  output streams, structured logs, and real workload exit codes.
+
+### Changed
+
+- **Explicit Windows CPU boundary.** Windows defaults to one vCPU and rejects
+  unsupported SMP requests before image pull; Linux and macOS keep their
+  existing two-vCPU default.
+- **Reproducible native dependency releases.** The libkrun-sys crate now ships
+  checksum-pinned Unix source and the exact tested Windows runtime in
+  deterministic archives, stays below the crates.io size limit, and publishes
+  license notices and matching libkrunfw/Linux corresponding source before the
+  crate. Release actions and Cargo dependency resolution are immutable/pinned.
+
+### Fixed
+
+- **WHPX vCPU register access.** Hypervisor register buffers now satisfy WHPX
+  alignment requirements, preventing the host-side crash seen during vCPU
+  setup.
+- **Windows result and rootfs handling.** The parent runtime collects completed
+  guest stdout/stderr and exit status after libkrun terminates the shim, while
+  Windows layer extraction recreates image symlinks instead of dropping them.
+- **Windows persistence and guest paths.** Native cross-process locks now
+  serialize cache, network, volume, and credential updates; cache metadata
+  tolerates transient Windows sharing conflicts, and guest paths remain
+  slash-normalized for Dockerignore, rootfs symlinks, and CLI diff output.
+- **Windows live logs and repeated port forwarding.** Detached workloads now
+  expose stdout and stderr while they are still running, and the guest drains
+  coalesced control frames so a published TCP port accepts sequential
+  connections instead of stalling after the first request.
+- **Windows graceful stop and clean persistent capture.** Reattached CLI
+  managers now deliver the configured stop signal over the WHPX host-control
+  channel, wait for guest shutdown, and force-terminate an unresponsive shim
+  without leaving orphan processes. Persistent shutdown gets a bounded metadata
+  finalization window; the host validates and atomically publishes manifests
+  that virtio-fs cannot rename, while runtime-owned logs remain outside commits
+  and filesystem snapshots.
+- **Windows bind-mount parsing.** Drive-letter and UNC sources are classified as
+  bind mounts and retain their Linux guest target through runtime preparation,
+  including read-only single-file mounts.
+- **Filesystem snapshot command restoration.** Starting a box restored from a
+  filesystem snapshot now preserves its persisted command even when the
+  restored layout has no OCI metadata.
+- **OCI and cache path confinement.** Image layouts, registry pushes, rootfs
+  metadata, layers, and the image store reject traversal, malformed digests,
+  symlinks/reparse points, special files, oversized metadata, and descriptor
+  size/hash mismatches before reading, copying, publishing, or deleting data.
+- **Dockerfile RUN capture fencing.** Linux local builds execute RUN inside a
+  private PID/mount namespace, while pool builds wait for lease release and VM
+  destruction before capturing a layer; detached descendants can no longer
+  mutate a supposedly completed layer or cache entry.
+- **Windows snapshot link safety.** Snapshot copying classifies a link from its
+  own no-follow metadata instead of following its target outside the source
+  tree.
+
 ## [3.0.11] — 2026-07-19
 
 ### Added

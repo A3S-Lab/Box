@@ -94,6 +94,18 @@ pub trait LocalExecutionBackend: Send + Sync {
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle>;
 
+    /// Make a stopped, storage-retained rootfs available for a filesystem
+    /// snapshot without starting the execution runtime.
+    async fn prepare_quiescent_rootfs(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
+    /// Release any transient rootfs mount created by
+    /// [`Self::prepare_quiescent_rootfs`] while retaining guest data.
+    async fn cleanup_quiescent_rootfs(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
+        Ok(())
+    }
+
     /// Stop the current runtime while preserving execution-owned storage for
     /// the replacement generation.
     async fn stop_for_restart(

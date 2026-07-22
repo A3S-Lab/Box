@@ -121,6 +121,41 @@ fn transitional_states_retry_idempotent_pause_and_resume_operations() {
         visible_active_state(&record).unwrap(),
         ExecutionState::Paused
     );
+
+    record
+        .managed_execution
+        .as_mut()
+        .unwrap()
+        .paused_with_memory = false;
+    assert_eq!(
+        visible_active_state(&record).unwrap(),
+        ExecutionState::Running
+    );
+}
+
+#[tokio::test]
+async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Resuming.as_status().to_string();
+    let metadata = record.managed_execution.as_mut().unwrap();
+    metadata.pending_operation = Some(crate::ManagedExecutionOperation::Resume);
+    metadata.paused_with_memory = false;
+    let sentinel = record.box_dir.join("rootfs/cold-resume-state.txt");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, b"retained").unwrap();
+    let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
+    *manager.lock().await.state.write().await = crate::BoxState::Ready;
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let observation = backend.inspect_registered(&record, manager).await.unwrap();
+
+    assert_eq!(observation.state, ExecutionState::Stopped);
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained");
+    assert!(backend.managers.is_empty());
 }
 
 #[test]
@@ -183,16 +218,21 @@ async fn retained_stops_preserve_anonymous_volumes_but_auto_remove_kill_removes_
     );
     volumes.create(VolumeConfig::new(volume_name, "")).unwrap();
     record.anonymous_volumes = vec![volume_name.to_string()];
+    let sentinel = record.box_dir.join("rootfs/workspace/cold-pause.txt");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, b"retained").unwrap();
 
     let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
     backend.managers.insert(record.id.clone(), manager);
     backend.stop_for_restart(&record, Some(0)).await.unwrap();
     assert!(volumes.get(volume_name).unwrap().is_some());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained");
 
     let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
     backend.managers.insert(record.id.clone(), manager);
     backend.kill(&record).await.unwrap();
     assert!(volumes.get(volume_name).unwrap().is_some());
+    assert!(!sentinel.exists());
 
     record.auto_remove = true;
     record
@@ -206,6 +246,27 @@ async fn retained_stops_preserve_anonymous_volumes_but_auto_remove_kill_removes_
     backend.managers.insert(record.id.clone(), manager);
     backend.kill(&record).await.unwrap();
     assert!(volumes.get(volume_name).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn terminal_kill_cleans_a_cold_paused_rootfs_without_runtime_evidence() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Killing.as_status().to_string();
+    let metadata = record.managed_execution.as_mut().unwrap();
+    metadata.paused_with_memory = false;
+    metadata.pending_operation = Some(crate::ManagedExecutionOperation::Kill {
+        signal: None,
+        timeout_secs: None,
+    });
+    let sentinel = record.box_dir.join("rootfs/workspace/cold-pause.txt");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, b"retained").unwrap();
+
+    assert_eq!(backend.kill(&record).await.unwrap(), KillOutcome::Killed);
+    assert!(!record.box_dir.exists());
+    assert!(backend.managers.is_empty());
 }
 
 #[test]

@@ -119,6 +119,8 @@ pub(super) async fn setup_and_boot(
     );
     let health_check =
         common::effective_health_check(&args.common, image_config.health_check.as_ref());
+    common::validate_health_check_support(health_check.as_ref())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let effective_stop_signal = common::effective_stop_signal(
         args.common.stop_signal.as_deref(),
         image_config.stop_signal.as_deref(),

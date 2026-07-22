@@ -4,12 +4,34 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::exec::{ExecEvent, ExecOutput, ExecRequest, FileRequest, FileResponse};
+use crate::exec::{
+    ExecEvent, ExecOutput, ExecRequest, FileRequest, FileResponse, FilesystemRequest,
+    FilesystemResponse,
+};
 use crate::pty::PtyRequest;
 
 use super::execution::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
 };
+
+/// Signals supported by the backend-neutral managed process channel.
+///
+/// A3S workloads always execute in a Linux guest or Linux OCI Sandbox, so the
+/// numeric values are stable even when the host itself is macOS or Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionProcessSignal {
+    Terminate,
+    Kill,
+}
+
+impl ExecutionProcessSignal {
+    pub const fn linux_number(self) -> i32 {
+        match self {
+            Self::Terminate => 15,
+            Self::Kill => 9,
+        }
+    }
+}
 
 /// Cloneable input/control side of one running execution process.
 #[async_trait]
@@ -19,6 +41,15 @@ pub trait ExecutionProcessInput: Send + Sync {
     async fn close_stdin(&self) -> ExecutionManagerResult<()>;
 
     async fn cancel(&self) -> ExecutionManagerResult<()>;
+
+    async fn send_signal(&self, signal: ExecutionProcessSignal) -> ExecutionManagerResult<()> {
+        match signal {
+            ExecutionProcessSignal::Kill => self.cancel().await,
+            ExecutionProcessSignal::Terminate => Err(ExecutionManagerError::InvalidRequest(
+                "process transport does not support graceful termination".to_string(),
+            )),
+        }
+    }
 
     async fn resize_pty(&self, cols: u16, rows: u16) -> ExecutionManagerResult<()> {
         let _ = (cols, rows);
@@ -73,4 +104,26 @@ pub trait ExecutionSessionManager: Send + Sync {
         generation: ExecutionGeneration,
         request: FileRequest,
     ) -> ExecutionManagerResult<FileResponse>;
+
+    async fn filesystem(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        _request: FilesystemRequest,
+    ) -> ExecutionManagerResult<FilesystemResponse> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution session does not support filesystem metadata operations".to_string(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionProcessSignal;
+
+    #[test]
+    fn managed_process_signals_use_linux_guest_numbers() {
+        assert_eq!(ExecutionProcessSignal::Terminate.linux_number(), 15);
+        assert_eq!(ExecutionProcessSignal::Kill.linux_number(), 9);
+    }
 }

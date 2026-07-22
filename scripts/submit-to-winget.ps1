@@ -1,116 +1,165 @@
-# Submit a3s-box to Windows Package Manager (winget)
+# Submit a3s-box to Windows Package Manager (WinGet).
 #
 # Usage:
-#   .\scripts\submit-to-winget.ps1 -Version "0.8.0"
+#   .\scripts\submit-to-winget.ps1 -Version "<VERSION>"
+#   .\scripts\submit-to-winget.ps1 -Version "<VERSION>" -ValidateOnly
 #
-# Prerequisites:
-#   1. Install wingetcreate: https://aka.ms/wingetcreate
-#   2. Fork https://github.com/microsoft/winget-pkgs
-#   3. Set GITHUB_TOKEN environment variable
+# Version must be strict SemVer 2.0.0 without a leading "v". The script
+# downloads the pinned WinGetCreate executable and verifies its SHA256 before
+# using it. Submission requires -GitHubToken or GITHUB_TOKEN.
 
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$Version,
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string] $Version,
 
-    [Parameter(Mandatory=$false)]
-    [string]$GitHubToken = $env:GITHUB_TOKEN
+    [Parameter(Mandatory = $false)]
+    [string] $GitHubToken = $env:GITHUB_TOKEN,
+
+    [Parameter(Mandatory = $false)]
+    [switch] $ValidateOnly
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-# Validate inputs
-if (-not $GitHubToken) {
-    Write-Error "GITHUB_TOKEN environment variable not set. Please set it or pass -GitHubToken parameter."
-    exit 1
+$WingetCreateVersion = '1.12.8.0'
+$WingetCreateUrl = 'https://github.com/microsoft/winget-create/releases/download/v1.12.8.0/wingetcreate.exe'
+$WingetCreateSha256 = '8BD738851B524885410112678E3771B341C5C716DE60FBBECB88AB0A363ED85D'
+$Repository = 'A3S-Lab/Box'
+$SemVerPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z'
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+function Set-SingleManifestValue {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $Key,
+        [Parameter(Mandatory = $true)] [string] $Value
+    )
+
+    $content = [System.IO.File]::ReadAllText($Path)
+    $pattern = "(?m)^(?<indent>[ `t]*)$([regex]::Escape($Key)):[^`r`n]*(?=`r?$)"
+    $matches = [regex]::Matches($content, $pattern)
+    if ($matches.Count -ne 1) {
+        throw "Expected exactly one '$Key' entry in $Path; found $($matches.Count)."
+    }
+
+    $replacement = '${indent}' + "${Key}: $Value"
+    $updated = [regex]::Replace($content, $pattern, $replacement)
+    [System.IO.File]::WriteAllText($Path, $updated, $script:Utf8NoBom)
+}
+
+function Set-NestedInstallerVersion {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $Tag
+    )
+
+    $content = [System.IO.File]::ReadAllText($Path)
+    $pattern = '(?m)^(?<prefix>[ \t]*-[ \t]*RelativeFilePath:[ \t]*)a3s-box-v[^\r\n\\]+-windows-x86_64(?=\\)'
+    $matches = [regex]::Matches($content, $pattern)
+    if ($matches.Count -ne 2) {
+        throw "Expected exactly two nested installer paths in $Path; found $($matches.Count)."
+    }
+
+    $replacement = '${prefix}' + "a3s-box-$Tag-windows-x86_64"
+    $updated = [regex]::Replace($content, $pattern, $replacement)
+    [System.IO.File]::WriteAllText($Path, $updated, $script:Utf8NoBom)
+}
+
+if ($Version -cnotmatch $SemVerPattern) {
+    throw "Version '$Version' is not strict SemVer 2.0.0 without a leading v."
+}
+
+if (-not $ValidateOnly -and [string]::IsNullOrWhiteSpace($GitHubToken)) {
+    throw 'GITHUB_TOKEN is not set. Pass -GitHubToken, set GITHUB_TOKEN, or use -ValidateOnly.'
 }
 
 $Tag = "v$Version"
-$AssetUrl = "https://github.com/A3S-Lab/Box/releases/download/$Tag/a3s-box-$Tag-windows-x86_64.zip"
+$AssetName = "a3s-box-$Tag-windows-x86_64.zip"
+$AssetUrl = "https://github.com/$Repository/releases/download/$Tag/$AssetName"
+$ManifestDir = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\.winget'))
+$VersionManifest = Join-Path $ManifestDir 'A3SLab.Box.yaml'
+$InstallerManifest = Join-Path $ManifestDir 'A3SLab.Box.installer.yaml'
+$LocaleManifest = Join-Path $ManifestDir 'A3SLab.Box.locale.en-US.yaml'
 
-Write-Host "=== Submitting a3s-box $Version to winget ===" -ForegroundColor Cyan
-Write-Host ""
-
-# Check if wingetcreate is installed
-$wingetcreate = Get-Command wingetcreate -ErrorAction SilentlyContinue
-if (-not $wingetcreate) {
-    Write-Host "Installing wingetcreate..." -ForegroundColor Yellow
-    Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile "$env:TEMP\wingetcreate.exe"
-    $wingetcreate = "$env:TEMP\wingetcreate.exe"
-} else {
-    $wingetcreate = $wingetcreate.Source
+foreach ($manifest in @($VersionManifest, $InstallerManifest, $LocaleManifest)) {
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "Required manifest not found: $manifest"
+    }
 }
 
-Write-Host "Using wingetcreate: $wingetcreate" -ForegroundColor Green
-Write-Host ""
+$WingetCreatePath = Join-Path ([System.IO.Path]::GetTempPath()) "a3s-box-wingetcreate-$WingetCreateVersion-$PID.exe"
+$AssetPath = Join-Path ([System.IO.Path]::GetTempPath()) "a3s-box-$Tag-windows-x86_64-$PID.zip"
 
-# Download release asset to compute SHA256
-Write-Host "Downloading release asset..." -ForegroundColor Yellow
-$AssetPath = "$env:TEMP\a3s-box-$Tag-windows-x86_64.zip"
-Invoke-WebRequest -Uri $AssetUrl -OutFile $AssetPath
+try {
+    Write-Host "Downloading WinGetCreate $WingetCreateVersion..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri $WingetCreateUrl -OutFile $WingetCreatePath
+    $actualToolSha256 = (Get-FileHash -LiteralPath $WingetCreatePath -Algorithm SHA256).Hash
+    if (-not [string]::Equals(
+        $actualToolSha256,
+        $WingetCreateSha256,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "WinGetCreate SHA256 mismatch: expected $WingetCreateSha256, got $actualToolSha256."
+    }
+    Write-Host "Verified WinGetCreate SHA256: $actualToolSha256" -ForegroundColor Green
+    & $WingetCreatePath info
+    if ($LASTEXITCODE -ne 0) {
+        throw "The verified WinGetCreate executable failed with exit code $LASTEXITCODE."
+    }
 
-# Compute SHA256
-Write-Host "Computing SHA256..." -ForegroundColor Yellow
-$Hash = Get-FileHash -Path $AssetPath -Algorithm SHA256
-$SHA256 = $Hash.Hash
-Write-Host "SHA256: $SHA256" -ForegroundColor Green
-Write-Host ""
+    Write-Host "Downloading release asset: $AssetUrl" -ForegroundColor Yellow
+    Invoke-WebRequest -Uri $AssetUrl -OutFile $AssetPath
+    $assetSha256 = (Get-FileHash -LiteralPath $AssetPath -Algorithm SHA256).Hash
+    Write-Host "Release asset SHA256: $assetSha256" -ForegroundColor Green
 
-# Update manifest files
-Write-Host "Updating manifest files..." -ForegroundColor Yellow
-$ManifestDir = Join-Path $PSScriptRoot "..\..\.winget"
+    Write-Host 'Updating manifest files...' -ForegroundColor Yellow
+    foreach ($manifest in @($VersionManifest, $InstallerManifest, $LocaleManifest)) {
+        Set-SingleManifestValue -Path $manifest -Key 'PackageVersion' -Value $Version
+    }
 
-# Update version
-(Get-Content "$ManifestDir\A3SLab.Box.yaml") -replace 'PackageVersion: .*', "PackageVersion: $Version" | Set-Content "$ManifestDir\A3SLab.Box.yaml"
-(Get-Content "$ManifestDir\A3SLab.Box.installer.yaml") -replace 'PackageVersion: .*', "PackageVersion: $Version" | Set-Content "$ManifestDir\A3SLab.Box.installer.yaml"
-(Get-Content "$ManifestDir\A3SLab.Box.locale.en-US.yaml") -replace 'PackageVersion: .*', "PackageVersion: $Version" | Set-Content "$ManifestDir\A3SLab.Box.locale.en-US.yaml"
+    Set-SingleManifestValue -Path $InstallerManifest -Key 'InstallerUrl' -Value $AssetUrl
+    Set-SingleManifestValue -Path $InstallerManifest -Key 'InstallerSha256' -Value $assetSha256
+    Set-NestedInstallerVersion -Path $InstallerManifest -Tag $Tag
 
-# Update installer URL and SHA256
-(Get-Content "$ManifestDir\A3SLab.Box.installer.yaml") -replace 'InstallerUrl: .*', "InstallerUrl: $AssetUrl" | Set-Content "$ManifestDir\A3SLab.Box.installer.yaml"
-(Get-Content "$ManifestDir\A3SLab.Box.installer.yaml") -replace 'InstallerSha256: .*', "InstallerSha256: $SHA256" | Set-Content "$ManifestDir\A3SLab.Box.installer.yaml"
+    Set-SingleManifestValue -Path $LocaleManifest -Key 'PublisherUrl' -Value 'https://github.com/A3S-Lab'
+    Set-SingleManifestValue -Path $LocaleManifest -Key 'PublisherSupportUrl' -Value "https://github.com/$Repository/issues"
+    Set-SingleManifestValue -Path $LocaleManifest -Key 'PackageUrl' -Value "https://github.com/$Repository"
+    Set-SingleManifestValue -Path $LocaleManifest -Key 'LicenseUrl' -Value "https://github.com/$Repository/blob/main/LICENSE"
+    Set-SingleManifestValue -Path $LocaleManifest -Key 'ReleaseNotesUrl' -Value "https://github.com/$Repository/releases/tag/$Tag"
 
-# Update nested installer path
-(Get-Content "$ManifestDir\A3SLab.Box.installer.yaml") -replace 'RelativeFilePath: a3s-box-v[0-9.]+-windows-x86_64', "RelativeFilePath: a3s-box-$Tag-windows-x86_64" | Set-Content "$ManifestDir\A3SLab.Box.installer.yaml"
+    $winget = Get-Command winget -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        throw 'WinGet is unavailable; install or repair Windows Package Manager before validating manifests.'
+    }
 
-Write-Host "Manifest files updated." -ForegroundColor Green
-Write-Host ""
+    Write-Host 'Validating manifests with WinGet...' -ForegroundColor Yellow
+    & $winget.Source validate --manifest $ManifestDir --disable-interactivity
+    if ($LASTEXITCODE -ne 0) {
+        throw "WinGet manifest validation failed with exit code $LASTEXITCODE."
+    }
+    Write-Host 'Manifests validated successfully.' -ForegroundColor Green
 
-# Validate manifests
-Write-Host "Validating manifests..." -ForegroundColor Yellow
-& $wingetcreate validate $ManifestDir
+    if ($ValidateOnly) {
+        Write-Host 'Validation-only mode: no pull request was submitted.' -ForegroundColor Cyan
+        return
+    }
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Manifest validation failed!"
-    exit 1
+    Write-Host 'Submitting manifests to microsoft/winget-pkgs...' -ForegroundColor Yellow
+    & $WingetCreatePath submit --no-open --token $GitHubToken $ManifestDir
+    if ($LASTEXITCODE -ne 0) {
+        throw "WinGetCreate submission failed with exit code $LASTEXITCODE. The validated manifests remain in $ManifestDir for manual submission."
+    }
+
+    Write-Host 'WinGetCreate submitted the manifests successfully.' -ForegroundColor Green
+    Write-Host 'Monitor the pull request at https://github.com/microsoft/winget-pkgs/pulls' -ForegroundColor Cyan
 }
-
-Write-Host "Manifests validated successfully." -ForegroundColor Green
-Write-Host ""
-
-# Submit to winget-pkgs
-Write-Host "Submitting to winget-pkgs..." -ForegroundColor Yellow
-Write-Host "This will create a PR to microsoft/winget-pkgs" -ForegroundColor Cyan
-Write-Host ""
-
-& $wingetcreate submit `
-    --token $GitHubToken `
-    $ManifestDir
-
-if ($LASTEXITCODE -eq 0) {
-    Write-Host ""
-    Write-Host "=== Successfully submitted to winget! ===" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "A PR has been created at: https://github.com/microsoft/winget-pkgs/pulls" -ForegroundColor Cyan
-    Write-Host "Please monitor the PR for any feedback from winget maintainers." -ForegroundColor Yellow
-} else {
-    Write-Host ""
-    Write-Host "=== Submission failed ===" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Manual submission steps:" -ForegroundColor Yellow
-    Write-Host "1. Fork https://github.com/microsoft/winget-pkgs" -ForegroundColor White
-    Write-Host "2. Create directory: manifests/a/A3SLab/Box/$Version/" -ForegroundColor White
-    Write-Host "3. Copy manifest files from .winget/ to that directory" -ForegroundColor White
-    Write-Host "4. Create PR to microsoft/winget-pkgs" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Or try using wingetcreate update:" -ForegroundColor Yellow
-    Write-Host "wingetcreate update A3SLab.Box -v $Version -u $AssetUrl -t YOUR_GITHUB_TOKEN" -ForegroundColor White
+finally {
+    foreach ($temporaryFile in @($WingetCreatePath, $AssetPath)) {
+        if (Test-Path -LiteralPath $temporaryFile -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryFile -Force
+        }
+    }
 }

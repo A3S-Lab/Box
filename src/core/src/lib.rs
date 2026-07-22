@@ -28,6 +28,8 @@ pub mod tee;
 pub mod traits;
 pub mod vmm;
 pub mod volume;
+#[cfg(windows)]
+pub mod windows_file;
 pub mod workload;
 
 // Re-export commonly used types
@@ -38,11 +40,14 @@ pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
 pub use exec::{ExecChunk, ExecEvent, ExecExit, ExecMetrics, StreamType};
 pub use exec::{ExecOutput, ExecRequest};
-pub use exec::{FileOp, FileRequest, FileResponse};
+pub use exec::{
+    FileOp, FileRequest, FileResponse, FilesystemEntry, FilesystemEntryKind, FilesystemOp,
+    FilesystemRequest, FilesystemResponse, GuestSessionRequest,
+};
 pub use exec::{EXEC_VSOCK_PORT, PORT_FWD_VSOCK_PORT};
 pub use execution::{
-    resolve_execution, validate_sandbox_compatibility, ExecutionBackend, IsolationClass,
-    ResolvedExecutionPlan,
+    resolve_execution, validate_microvm_compatibility, validate_sandbox_compatibility,
+    ExecutionBackend, IsolationClass, ResolvedExecutionPlan,
 };
 pub use network::{IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode, NetworkPolicy};
 pub use operator::{BoxAutoscaler, BoxAutoscalerSpec, BoxAutoscalerStatus, MetricType};
@@ -66,11 +71,12 @@ pub use traits::{
     EventBus, ExecutionGeneration, ExecutionHealthCheck, ExecutionId, ExecutionLease,
     ExecutionManager, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
     ExecutionPortIo, ExecutionPortStream, ExecutionProcess, ExecutionProcessInput,
-    ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation, ExecutionRestartPolicy,
-    ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
-    ExecutionStatus, ImageRegistry, ImageStoreBackend, KillOutcome, MetricsCollector,
-    NetworkStoreBackend, NoopMetrics, OperationId, PulledImage, ReconcileOutcome,
-    RestartExecutionOptions, SnapshotStoreBackend, StoredImage, VolumeStoreBackend,
+    ExecutionProcessSignal, ExecutionProcessStream, ExecutionRecordPolicy, ExecutionReservation,
+    ExecutionRestartPolicy, ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId,
+    ExecutionState, ExecutionStatus, ImageRegistry, ImageStoreBackend, KillExecutionOptions,
+    KillOutcome, MetricsCollector, NetworkStoreBackend, NoopMetrics, OperationId, PulledImage,
+    ReconcileOutcome, RestartExecutionOptions, SnapshotStoreBackend, StoredImage,
+    VolumeStoreBackend,
 };
 pub use vmm::{
     Entrypoint, FsMount, InstanceSpec, NetworkInstanceConfig, TeeInstanceConfig, VmHandler,

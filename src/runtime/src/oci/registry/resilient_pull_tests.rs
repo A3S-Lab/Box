@@ -56,6 +56,7 @@ struct RegistryState {
 
 struct ResilientRegistryFixture {
     reference: ImageReference,
+    manifest: BlobFixture,
     layers: Vec<BlobFixture>,
     requests: Arc<Mutex<Vec<LayerRequest>>>,
     active_layer_requests: Arc<AtomicUsize>,
@@ -95,6 +96,7 @@ impl ResilientRegistryFixture {
         }))
         .unwrap();
         let manifest = BlobFixture::new(manifest_bytes);
+        let expected_manifest = manifest.clone();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let active_layer_requests = Arc::new(AtomicUsize::new(0));
         let max_active_layer_requests = Arc::new(AtomicUsize::new(0));
@@ -134,6 +136,7 @@ impl ResilientRegistryFixture {
                 tag: Some("latest".to_string()),
                 digest: None,
             },
+            manifest: expected_manifest,
             layers,
             requests,
             active_layer_requests,
@@ -181,7 +184,9 @@ async fn registry_handler(
     if path == "/v2/" {
         return empty_response(StatusCode::OK);
     }
-    if path == "/v2/a3s/resilient/manifests/latest" {
+    if path == "/v2/a3s/resilient/manifests/latest"
+        || path == format!("/v2/a3s/resilient/manifests/{}", state.manifest.digest)
+    {
         return complete_response(
             StatusCode::OK,
             "application/vnd.oci.image.manifest.v1+json",
@@ -402,6 +407,10 @@ async fn interrupted_body_resumes_with_exact_range_and_reports_actual_bytes() {
         .await
         .unwrap();
 
+    assert_eq!(
+        std::fs::read(blob_path(target.path(), &fixture.manifest.digest)).unwrap(),
+        fixture.manifest.bytes
+    );
     let layer = &fixture.layers[0];
     assert_eq!(
         std::fs::read(blob_path(target.path(), &layer.digest)).unwrap(),

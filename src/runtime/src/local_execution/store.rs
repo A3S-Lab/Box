@@ -1,10 +1,11 @@
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
-    ExecutionSnapshotId, OperationId, RestartExecutionOptions,
+    ExecutionSnapshotId, KillExecutionOptions, OperationId, RestartExecutionOptions,
 };
 
 use super::record::{
-    apply_handle, apply_restart_handle, apply_start_handle, clear_live_runtime, execution_id,
+    apply_handle, apply_restart_handle, apply_start_handle, clear_live_runtime,
+    clear_live_runtime_for_cold_pause, execution_id,
 };
 use super::support::{generation, managed_state};
 use super::{LocalExecutionHandle, LocalExecutionManager};
@@ -16,7 +17,7 @@ use crate::{
 impl LocalExecutionManager {
     pub(super) async fn reserve(
         &self,
-        record: BoxRecord,
+        mut record: BoxRecord,
     ) -> ExecutionManagerResult<ManagedExecutionReservation> {
         let store = self.store.clone();
         let Some(snapshot_id) = record
@@ -62,6 +63,34 @@ impl LocalExecutionManager {
                     "filesystem snapshot {snapshot_id} cannot be restored: {error}"
                 ))
             })?;
+
+            let health_check = record
+                .health_check
+                .clone()
+                .or_else(|| metadata.health_check.clone());
+            let healthcheck_disabled =
+                record.healthcheck_disabled || metadata.healthcheck_disabled;
+            record.health_check = health_check.clone();
+            record.healthcheck_disabled = healthcheck_disabled;
+            if let Some(managed) = record.managed_execution.as_mut() {
+                managed.request.policy.health_check = health_check;
+                managed.request.policy.healthcheck_disabled = healthcheck_disabled;
+            }
+            super::record::validate_record_health(&record)?;
+
+            #[cfg(windows)]
+            if !healthcheck_disabled
+                && metadata
+                    .image_config
+                    .as_ref()
+                    .and_then(|config| config.health_check.as_ref())
+                    .is_some_and(a3s_box_core::SnapshotImageHealthCheck::is_enabled)
+            {
+                return Err(ExecutionManagerError::InvalidRequest(
+                    "container health checks are not supported on Windows; the snapshot image defines an effective health check"
+                        .to_string(),
+                ));
+            }
             store.reserve(record).map_err(map_store_error)
         })
         .await
@@ -104,10 +133,23 @@ impl LocalExecutionManager {
                 RuntimeUpdate::Handle(handle) => apply_handle(record, &handle),
                 RuntimeUpdate::StartHandle(handle) => apply_start_handle(record, &handle),
                 RuntimeUpdate::Terminal(exit_code) => clear_live_runtime(record, exit_code),
+                RuntimeUpdate::KillTerminal(exit_code) => {
+                    clear_live_runtime(record, exit_code);
+                    record.stopped_by_user = true;
+                }
+                RuntimeUpdate::ColdPause => clear_live_runtime_for_cold_pause(record),
                 RuntimeUpdate::PauseClaim(keep_memory) => {
                     if let Some(metadata) = record.managed_execution.as_mut() {
                         metadata.pending_operation =
                             Some(ManagedExecutionOperation::Pause { keep_memory });
+                    }
+                }
+                RuntimeUpdate::KillClaim(options) => {
+                    if let Some(metadata) = record.managed_execution.as_mut() {
+                        metadata.pending_operation = Some(ManagedExecutionOperation::Kill {
+                            signal: options.signal,
+                            timeout_secs: options.timeout_secs,
+                        });
                     }
                 }
                 RuntimeUpdate::SnapshotClaim {
@@ -149,6 +191,22 @@ impl LocalExecutionManager {
         to: ManagedExecutionState,
         handle: LocalExecutionHandle,
     ) -> ExecutionManagerResult<BoxRecord> {
+        let update =
+            if from == ManagedExecutionState::Starting && to == ManagedExecutionState::Running {
+                RuntimeUpdate::StartHandle(handle)
+            } else {
+                RuntimeUpdate::Handle(handle)
+            };
+        self.complete_transition(record, from, to, update).await
+    }
+
+    pub(super) async fn complete_transition(
+        &self,
+        record: &BoxRecord,
+        from: ManagedExecutionState,
+        to: ManagedExecutionState,
+        update: RuntimeUpdate,
+    ) -> ExecutionManagerResult<BoxRecord> {
         let execution_id = execution_id(record)?;
         let current_generation = generation(record, &execution_id)?;
         let expected_generation = if matches!(
@@ -169,12 +227,6 @@ impl LocalExecutionManager {
         } else {
             current_generation
         };
-        let update =
-            if from == ManagedExecutionState::Starting && to == ManagedExecutionState::Running {
-                RuntimeUpdate::StartHandle(handle)
-            } else {
-                RuntimeUpdate::Handle(handle)
-            };
         match self.transition(record, from, to, update).await {
             Ok(record) => Ok(record),
             Err(error @ ExecutionManagerError::Conflict { .. }) => {
@@ -199,7 +251,10 @@ pub(super) enum RuntimeUpdate {
     Handle(LocalExecutionHandle),
     StartHandle(LocalExecutionHandle),
     Terminal(Option<i32>),
+    KillTerminal(Option<i32>),
+    ColdPause,
     PauseClaim(bool),
+    KillClaim(KillExecutionOptions),
     SnapshotClaim {
         snapshot_id: ExecutionSnapshotId,
         source_state: ManagedExecutionState,

@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use a3s_box_runtime::sandbox::probe_sandbox_capabilities;
 use a3s_box_runtime::sandbox::{
-    map_container_gid, map_container_uid, probe_sandbox_capabilities, unmap_host_gid,
-    unmap_host_uid, UserNamespaceEvidence,
+    map_container_gid, map_container_uid, unmap_host_gid, unmap_host_uid, UserNamespaceEvidence,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;

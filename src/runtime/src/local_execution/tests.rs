@@ -6,8 +6,8 @@ use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecEvent, ExecRequest, ExecutionGeneration,
     ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionManager, ExecutionManagerError,
     ExecutionManagerResult, ExecutionRecordPolicy, ExecutionRestartPolicy, ExecutionSessionManager,
-    ExecutionSnapshotId, ExecutionState, KillOutcome, NetworkMode, OperationId, ReconcileOutcome,
-    RestartExecutionOptions, SnapshotImageConfig,
+    ExecutionSnapshotId, ExecutionState, KillExecutionOptions, KillOutcome, NetworkMode,
+    OperationId, ReconcileOutcome, RestartExecutionOptions, SnapshotImageConfig,
 };
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -25,16 +25,23 @@ struct FakeExecution {
 #[derive(Default)]
 struct FakeBackend {
     executions: Mutex<HashMap<String, FakeExecution>>,
+    start_attempts: AtomicUsize,
     starts: AtomicUsize,
     pauses: AtomicUsize,
     resumes: AtomicUsize,
     kills: AtomicUsize,
+    quiescent_rootfs_prepares: AtomicUsize,
+    quiescent_rootfs_cleanups: AtomicUsize,
+    fail_quiescent_rootfs_cleanup: AtomicBool,
     fail_start: AtomicBool,
     fail_start_after_effect: AtomicBool,
+    fail_kill: AtomicBool,
     fail_kill_after_effect: AtomicBool,
     fail_pause: AtomicBool,
     fail_pause_after_effect: AtomicBool,
     last_keep_memory: Mutex<Option<bool>>,
+    last_kill_signal: Mutex<Option<Option<i32>>>,
+    last_kill_timeout: Mutex<Option<Option<u64>>>,
     last_restart_timeout: Mutex<Option<Option<u64>>>,
 }
 
@@ -72,6 +79,7 @@ impl FakeBackend {
 #[async_trait]
 impl LocalExecutionBackend for FakeBackend {
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
+        self.start_attempts.fetch_add(1, Ordering::Relaxed);
         let mut executions = self.executions.lock().unwrap();
         if let Some(execution) = executions.get(&record.id) {
             if matches!(
@@ -174,6 +182,23 @@ impl LocalExecutionBackend for FakeBackend {
         Ok(execution.handle.clone())
     }
 
+    async fn prepare_quiescent_rootfs(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.quiescent_rootfs_prepares
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    async fn cleanup_quiescent_rootfs(&self, _record: &BoxRecord) -> ExecutionManagerResult<()> {
+        self.quiescent_rootfs_cleanups
+            .fetch_add(1, Ordering::Relaxed);
+        if self.fail_quiescent_rootfs_cleanup.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake quiescent rootfs cleanup is unavailable".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn stop_for_restart(
         &self,
         record: &BoxRecord,
@@ -185,6 +210,18 @@ impl LocalExecutionBackend for FakeBackend {
 
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
         self.kills.fetch_add(1, Ordering::Relaxed);
+        *self.last_kill_signal.lock().unwrap() = Some(
+            record
+                .stop_signal
+                .as_deref()
+                .map(a3s_box_core::vmm::parse_signal_name),
+        );
+        *self.last_kill_timeout.lock().unwrap() = Some(record.stop_timeout);
+        if self.fail_kill.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake kill is unavailable".to_string(),
+            ));
+        }
         let mut executions = self.executions.lock().unwrap();
         let execution = executions
             .get_mut(&record.id)
@@ -369,6 +406,123 @@ async fn create_persists_trusted_identity_and_returns_running_lease() {
     assert_eq!(record.anonymous_volumes, vec!["anonymous-1"]);
 }
 
+#[tokio::test]
+async fn create_rejects_unsupported_microvm_security_before_store_or_backend() {
+    let (_directory, manager, backend) = harness();
+
+    for (index, (security_option, expected)) in [
+        ("apparmor=runtime/default", "AppArmor"),
+        ("label=type:container_t", "SELinux"),
+        ("seccomp=/profiles/restricted.json", "custom seccomp"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut create_request = request(&format!("unsupported-security-{index}"));
+        create_request.config.isolation = ExecutionIsolation::Microvm;
+        create_request.config.security_opt = vec![security_option.to_string()];
+
+        let error = manager
+            .create_and_start(
+                create_request,
+                &operation(&format!("unsupported-security-operation-{index}")),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            &error,
+            ExecutionManagerError::InvalidRequest(message) if message.contains(expected)
+        ));
+        assert!(!manager.state_path().exists());
+        assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+        assert!(backend.executions.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn create_rejects_health_check_before_store_or_backend() {
+    let (_directory, manager, backend) = harness();
+    let mut create_request = request("unsupported-windows-health");
+    create_request.policy.health_check = Some(ExecutionHealthCheck {
+        cmd: vec!["true".to_string()],
+        interval_secs: 30,
+        timeout_secs: 5,
+        retries: 3,
+        start_period_secs: 0,
+    });
+    create_request.rootfs_snapshot_id = Some(ExecutionSnapshotId::new("restore-source").unwrap());
+
+    let error = manager
+        .create(
+            create_request,
+            &operation("unsupported-windows-health-operation"),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("health checks are not supported on Windows")
+    ));
+    assert!(!manager.state_path().exists());
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+    assert!(backend.executions.lock().unwrap().is_empty());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn start_rejects_a_persisted_health_check_before_claim_or_backend() {
+    let (_directory, manager, backend) = harness();
+    let execution_id = ExecutionId::new("persisted-windows-health").unwrap();
+    let mut create_request = request("persisted-windows-health");
+    create_request.policy.health_check = Some(ExecutionHealthCheck {
+        cmd: vec!["true".to_string()],
+        interval_secs: 30,
+        timeout_secs: 5,
+        retries: 3,
+        start_period_secs: 0,
+    });
+    // Disabled health metadata is safe to persist on Windows. Flip the stored
+    // effective policy afterward to model a record written by an older client.
+    create_request.policy.healthcheck_disabled = true;
+    let mut record = build_managed_record(
+        &manager.home_dir,
+        &execution_id,
+        operation("persisted-windows-health-operation"),
+        create_request,
+        Utc::now(),
+    )
+    .unwrap();
+    record.healthcheck_disabled = false;
+    record
+        .managed_execution
+        .as_mut()
+        .unwrap()
+        .request
+        .policy
+        .healthcheck_disabled = false;
+    manager.reserve(record).await.unwrap();
+
+    let error = manager
+        .start(&execution_id, ExecutionGeneration::INITIAL)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        ExecutionManagerError::InvalidRequest(message)
+            if message.contains("health checks are not supported on Windows")
+    ));
+    assert_eq!(
+        persisted(&manager, &execution_id).managed_state().unwrap(),
+        Some(ManagedExecutionState::Created)
+    );
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 0);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn process_session_inherits_environment_from_persisted_record() {
@@ -535,6 +689,7 @@ async fn create_reserves_without_start_and_start_is_generation_fenced() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn create_preserves_complete_caller_record_policy() {
     let (_directory, manager, backend) = harness();
@@ -597,6 +752,7 @@ async fn create_preserves_complete_caller_record_policy() {
     );
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn first_start_initializes_health_state_from_persisted_policy() {
     let (_directory, manager, _backend) = harness();
@@ -829,7 +985,7 @@ async fn failed_pause_rolls_back_without_changing_backend_or_generation() {
     backend.fail_pause.store(true, Ordering::Relaxed);
 
     let error = manager
-        .pause(&running.execution_id, running.generation, false)
+        .pause(&running.execution_id, running.generation, true)
         .await
         .unwrap_err();
 
@@ -844,6 +1000,261 @@ async fn failed_pause_rolls_back_without_changing_backend_or_generation() {
         ExecutionGeneration::INITIAL
     );
     assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn filesystem_only_pause_restarts_the_runtime_and_preserves_generation_fencing() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(request("cold-pause"), &operation("cold-pause-create"))
+        .await
+        .unwrap();
+
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+
+    assert_eq!(paused.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(backend.kills.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), 0);
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Paused)
+    );
+    let metadata = record.managed_execution.as_ref().unwrap();
+    assert!(!metadata.paused_with_memory);
+    assert!(metadata.finished_at.is_none());
+    assert!(record.pid.is_none());
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Paused
+    );
+
+    let stale = manager
+        .resume(&running.execution_id, running.generation)
+        .await;
+    let resumed = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap();
+
+    assert!(matches!(stale, Err(ExecutionManagerError::Conflict { .. })));
+    assert_eq!(resumed.generation, ExecutionGeneration::new(3).unwrap());
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 2);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), 0);
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Running)
+    );
+    assert!(record.managed_execution.unwrap().paused_with_memory);
+    assert_eq!(record.pid, Some(4242));
+}
+
+#[tokio::test]
+async fn failed_filesystem_only_pause_rolls_back_to_the_running_generation() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("cold-pause-failure"),
+            &operation("cold-pause-failure-create"),
+        )
+        .await
+        .unwrap();
+    backend.fail_kill.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Running)
+    );
+    assert_eq!(
+        record.managed_execution.as_ref().unwrap().generation,
+        running.generation
+    );
+    assert!(record.managed_execution.unwrap().paused_with_memory);
+}
+
+#[tokio::test]
+async fn failed_filesystem_only_resume_remains_retryable_without_advancing_generation() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("cold-resume-failure"),
+            &operation("cold-resume-failure-create"),
+        )
+        .await
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    backend.fail_start.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Paused)
+    );
+    assert_eq!(
+        record.managed_execution.as_ref().unwrap().generation,
+        paused.generation
+    );
+    assert!(!record.managed_execution.unwrap().paused_with_memory);
+    assert_eq!(
+        manager.inspect(&running.execution_id).await.unwrap().state,
+        ExecutionState::Paused
+    );
+}
+
+#[tokio::test]
+async fn filesystem_only_pause_and_resume_publish_ambiguous_backend_successes() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("cold-ambiguous"),
+            &operation("cold-ambiguous-create"),
+        )
+        .await
+        .unwrap();
+    backend
+        .fail_kill_after_effect
+        .store(true, Ordering::Relaxed);
+
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    backend
+        .fail_kill_after_effect
+        .store(false, Ordering::Relaxed);
+    backend
+        .fail_start_after_effect
+        .store(true, Ordering::Relaxed);
+
+    let resumed = manager
+        .resume(&paused.execution_id, paused.generation)
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.generation, ExecutionGeneration::new(3).unwrap());
+    assert_eq!(backend.kills.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), 2);
+    assert!(
+        persisted(&manager, &running.execution_id)
+            .managed_execution
+            .unwrap()
+            .paused_with_memory
+    );
+}
+
+#[tokio::test]
+async fn reconcile_finishes_a_crashed_filesystem_only_pause() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("cold-reconcile-create");
+    let running = manager
+        .create_and_start(request("cold-reconcile"), &create_operation)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::Pausing,
+            RuntimeUpdate::PauseClaim(false),
+        )
+        .await
+        .unwrap();
+    backend
+        .stop_for_restart(&claimed, claimed.stop_timeout)
+        .await
+        .unwrap();
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let outcome = restarted.reconcile(&create_operation).await.unwrap();
+    let ReconcileOutcome::Ready(paused) = outcome else {
+        panic!("expected cold pause reconciliation to publish a ready lease");
+    };
+
+    assert_eq!(paused.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(
+        restarted
+            .inspect(&running.execution_id)
+            .await
+            .unwrap()
+            .state,
+        ExecutionState::Paused
+    );
+    assert!(
+        !persisted(&restarted, &running.execution_id)
+            .managed_execution
+            .unwrap()
+            .paused_with_memory
+    );
+}
+
+#[tokio::test]
+async fn reconcile_publishes_a_cold_resume_started_before_record_commit() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("cold-resume-reconcile-create");
+    let running = manager
+        .create_and_start(request("cold-resume-reconcile"), &create_operation)
+        .await
+        .unwrap();
+    let _paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    let record = persisted(&manager, &running.execution_id);
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Paused,
+            ManagedExecutionState::Resuming,
+            RuntimeUpdate::None,
+        )
+        .await
+        .unwrap();
+    backend.start(&claimed).await.unwrap();
+    assert_eq!(backend.start_attempts.load(Ordering::Relaxed), 2);
+
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+    let outcome = restarted.reconcile(&create_operation).await.unwrap();
+    let ReconcileOutcome::Ready(resumed) = outcome else {
+        panic!("expected cold resume reconciliation to publish a ready lease");
+    };
+
+    assert_eq!(resumed.generation, ExecutionGeneration::new(3).unwrap());
+    assert_eq!(backend.start_attempts.load(Ordering::Relaxed), 2);
+    assert!(
+        persisted(&restarted, &running.execution_id)
+            .managed_execution
+            .unwrap()
+            .paused_with_memory
+    );
 }
 
 #[tokio::test]
@@ -894,6 +1305,67 @@ async fn kill_is_generation_fenced_and_idempotent() {
     assert_eq!(
         manager.inspect(&running.execution_id).await.unwrap().state,
         ExecutionState::Stopped
+    );
+    assert!(persisted(&manager, &running.execution_id).stopped_by_user);
+}
+
+#[tokio::test]
+async fn option_aware_kill_persists_intent_and_replays_it_after_a_crash() {
+    let (directory, manager, backend) = harness();
+    let create_operation = operation("operation-option-aware-kill");
+    let running = manager
+        .create_and_start(request("option-aware-kill"), &create_operation)
+        .await
+        .unwrap();
+    let options = KillExecutionOptions {
+        signal: Some(2),
+        timeout_secs: Some(4),
+    };
+    backend.fail_kill.store(true, Ordering::Relaxed);
+
+    let error = manager
+        .kill_with_options(&running.execution_id, running.generation, options)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    let claimed = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        claimed
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .pending_operation,
+        Some(ManagedExecutionOperation::Kill {
+            signal: Some(2),
+            timeout_secs: Some(4),
+        })
+    );
+    assert_eq!(
+        claimed.managed_state().unwrap(),
+        Some(ManagedExecutionState::Killing)
+    );
+
+    backend.fail_kill.store(false, Ordering::Relaxed);
+    *backend.last_kill_signal.lock().unwrap() = None;
+    *backend.last_kill_timeout.lock().unwrap() = None;
+    let restarted = LocalExecutionManager::new(
+        directory.path().join("boxes.json"),
+        directory.path().join("home"),
+        backend.clone(),
+    );
+
+    assert!(matches!(
+        restarted.reconcile(&create_operation).await.unwrap(),
+        ReconcileOutcome::Failed
+    ));
+    assert_eq!(*backend.last_kill_signal.lock().unwrap(), Some(Some(2)));
+    assert_eq!(*backend.last_kill_timeout.lock().unwrap(), Some(Some(4)));
+    let stopped = persisted(&restarted, &running.execution_id);
+    assert!(stopped.stopped_by_user);
+    assert_eq!(
+        stopped.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
     );
 }
 
@@ -1644,6 +2116,122 @@ async fn paused_snapshot_remains_paused_and_does_not_resume() {
     assert_eq!(snapshot.lease.generation, paused.generation);
     assert_eq!(backend.pauses.load(Ordering::Relaxed), pauses_before);
     assert_eq!(backend.resumes.load(Ordering::Relaxed), resumes_before);
+}
+
+#[tokio::test]
+async fn filesystem_only_paused_snapshot_uses_the_quiescent_rootfs_without_a_runtime() {
+    let (directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("cold-paused-source"),
+            &operation("cold-paused-create"),
+        )
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "cold-paused-state");
+    #[cfg(target_os = "linux")]
+    super::snapshot::persist_sandbox_snapshot_mappings(&persisted(&manager, &running.execution_id))
+        .unwrap();
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    #[cfg(target_os = "linux")]
+    std::fs::remove_dir_all(
+        persisted(&manager, &running.execution_id)
+            .box_dir
+            .join("sandbox/bundle"),
+    )
+    .unwrap();
+    let pauses_before = backend.pauses.load(Ordering::Relaxed);
+    let resumes_before = backend.resumes.load(Ordering::Relaxed);
+    let starts_before = backend.starts.load(Ordering::Relaxed);
+    let snapshot_id = ExecutionSnapshotId::new("cold-paused-snapshot").unwrap();
+
+    let snapshot = manager
+        .create_filesystem_snapshot(&running.execution_id, paused.generation, &snapshot_id)
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.state, ExecutionState::Paused);
+    assert_eq!(snapshot.lease.generation, paused.generation);
+    assert_eq!(backend.pauses.load(Ordering::Relaxed), pauses_before);
+    assert_eq!(backend.resumes.load(Ordering::Relaxed), resumes_before);
+    assert_eq!(backend.starts.load(Ordering::Relaxed), starts_before);
+    assert_eq!(backend.quiescent_rootfs_prepares.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.quiescent_rootfs_cleanups.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        std::fs::read_to_string(
+            directory
+                .path()
+                .join("home/snapshots/cold-paused-snapshot/rootfs/workspace/state.txt")
+        )
+        .unwrap(),
+        "cold-paused-state"
+    );
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Paused)
+    );
+    assert!(!record.managed_execution.unwrap().paused_with_memory);
+}
+
+#[tokio::test]
+async fn cold_paused_snapshot_cleanup_failure_remains_recoverable() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("cold-snapshot-cleanup"),
+            &operation("cold-snapshot-cleanup-create"),
+        )
+        .await
+        .unwrap();
+    populate_rootfs(&manager, &running.execution_id, "recoverable-cold-snapshot");
+    let paused = manager
+        .pause(&running.execution_id, running.generation, false)
+        .await
+        .unwrap();
+    let snapshot_id = ExecutionSnapshotId::new("cold-snapshot-cleanup-retry").unwrap();
+    backend
+        .fail_quiescent_rootfs_cleanup
+        .store(true, Ordering::Relaxed);
+
+    let error = manager
+        .create_filesystem_snapshot(&running.execution_id, paused.generation, &snapshot_id)
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("quiescent rootfs cleanup is unavailable"));
+    assert_eq!(
+        persisted(&manager, &running.execution_id)
+            .managed_state()
+            .unwrap(),
+        Some(ManagedExecutionState::Snapshotting)
+    );
+
+    backend
+        .fail_quiescent_rootfs_cleanup
+        .store(false, Ordering::Relaxed);
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+
+    assert_eq!(status.state, ExecutionState::Paused);
+    assert_eq!(status.generation, paused.generation);
+    assert_eq!(backend.quiescent_rootfs_prepares.load(Ordering::Relaxed), 2);
+    assert_eq!(backend.quiescent_rootfs_cleanups.load(Ordering::Relaxed), 2);
+    assert!(manager
+        .filesystem_snapshot_size(&snapshot_id)
+        .await
+        .unwrap()
+        .is_some());
+    let record = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        record.managed_state().unwrap(),
+        Some(ManagedExecutionState::Paused)
+    );
+    assert!(!record.managed_execution.unwrap().paused_with_memory);
 }
 
 #[tokio::test]

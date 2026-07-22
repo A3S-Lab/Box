@@ -4,121 +4,218 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g., 0.8.0)'
+        description: 'Strict SemVer release version without a v prefix (e.g., 3.0.12)'
         required: true
         type: string
 
 permissions:
   contents: read
 
+env:
+  WINGETCREATE_VERSION: 1.12.8.0
+  WINGETCREATE_URL: https://github.com/microsoft/winget-create/releases/download/v1.12.8.0/wingetcreate.exe
+  WINGETCREATE_SHA256: 8BD738851B524885410112678E3771B341C5C716DE60FBBECB88AB0A363ED85D
+
 jobs:
   publish-winget:
     name: Publish to winget
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v5
+      - name: Check out repository
+        # actions/checkout v5.0.0
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
 
-      - name: Get version
+      - name: Validate release version
         id: version
-        shell: bash
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          # Strict SemVer 2.0.0. In particular, a leading "v", whitespace,
+          # leading zeroes, and additional shell syntax are rejected.
+          $semVerPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z'
+          $version = $env:INPUT_VERSION
+          if ([string]::IsNullOrEmpty($version) -or $version -cnotmatch $semVerPattern) {
+              throw "Version '$version' is not strict SemVer 2.0.0 without a leading v."
+          }
+
+          "version=$version" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag=v$version" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Download release asset
-        shell: pwsh
-        run: |
-          $VERSION = "${{ steps.version.outputs.version }}"
-          $TAG = "${{ steps.version.outputs.tag }}"
-          $ASSET = "a3s-box-$TAG-windows-x86_64.zip"
-          $URL = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$TAG/$ASSET"
-
-          Write-Host "Downloading: $URL"
-          Invoke-WebRequest -Uri $URL -OutFile $ASSET
-
-          # Compute SHA256
-          $SHA256 = (Get-FileHash -Path $ASSET -Algorithm SHA256).Hash
-          Write-Host "SHA256: $SHA256"
-          "sha256=$SHA256" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
         id: download
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          $asset = "a3s-box-$env:RELEASE_TAG-windows-x86_64.zip"
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$asset"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $asset
+
+          $sha256 = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash
+          Write-Host "Release asset SHA256: $sha256"
+          "sha256=$sha256" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Update manifest files
-        shell: bash
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_SHA256: ${{ steps.download.outputs.sha256 }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
-          SHA256="${{ steps.download.outputs.sha256 }}"
-          REPO="${GITHUB_REPOSITORY}"
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
 
-          # Update version in all manifest files
-          sed -i "s/PackageVersion: .*/PackageVersion: $VERSION/" .winget/A3SLab.Box.yaml
-          sed -i "s/PackageVersion: .*/PackageVersion: $VERSION/" .winget/A3SLab.Box.installer.yaml
-          sed -i "s/PackageVersion: .*/PackageVersion: $VERSION/" .winget/A3SLab.Box.locale.en-US.yaml
+          function Set-SingleManifestValue {
+              param(
+                  [Parameter(Mandatory)] [string] $Path,
+                  [Parameter(Mandatory)] [string] $Key,
+                  [Parameter(Mandatory)] [string] $Value
+              )
 
-          # Update installer URL and SHA256
-          sed -i "s|InstallerUrl: .*|InstallerUrl: https://github.com/${REPO}/releases/download/${TAG}/a3s-box-${TAG}-windows-x86_64.zip|" .winget/A3SLab.Box.installer.yaml
-          sed -i "s/InstallerSha256: .*/InstallerSha256: $SHA256/" .winget/A3SLab.Box.installer.yaml
-          sed -i "s|PublisherUrl: .*|PublisherUrl: https://github.com/A3S-Lab|" .winget/A3SLab.Box.locale.en-US.yaml
-          sed -i "s|PublisherSupportUrl: .*|PublisherSupportUrl: https://github.com/${REPO}/issues|" .winget/A3SLab.Box.locale.en-US.yaml
-          sed -i "s|PackageUrl: .*|PackageUrl: https://github.com/${REPO}|" .winget/A3SLab.Box.locale.en-US.yaml
-          sed -i "s|LicenseUrl: .*|LicenseUrl: https://github.com/${REPO}/blob/main/LICENSE|" .winget/A3SLab.Box.locale.en-US.yaml
-          sed -i "s|ReleaseNotesUrl: .*|ReleaseNotesUrl: https://github.com/${REPO}/releases/tag/${TAG}|" .winget/A3SLab.Box.locale.en-US.yaml
+              $content = [System.IO.File]::ReadAllText($Path)
+              $pattern = "(?m)^(?<indent>[ `t]*)$([regex]::Escape($Key)):[^`r`n]*(?=`r?$)"
+              $matches = [regex]::Matches($content, $pattern)
+              if ($matches.Count -ne 1) {
+                  throw "Expected exactly one '$Key' entry in $Path; found $($matches.Count)."
+              }
 
-          # Update nested installer path
-          sed -i "s|RelativeFilePath: a3s-box-v[0-9.]*-windows-x86_64|RelativeFilePath: a3s-box-${TAG}-windows-x86_64|g" .winget/A3SLab.Box.installer.yaml
+              $replacement = '${indent}' + "${Key}: $Value"
+              $updated = [regex]::Replace($content, $pattern, $replacement)
+              [System.IO.File]::WriteAllText(
+                  $Path,
+                  $updated,
+                  [System.Text.UTF8Encoding]::new($false)
+              )
+          }
 
-          echo "Updated manifest files:"
-          cat .winget/A3SLab.Box.yaml
-          cat .winget/A3SLab.Box.installer.yaml
-          cat .winget/A3SLab.Box.locale.en-US.yaml
+          $manifestDir = (Resolve-Path -LiteralPath '.winget').Path
+          $versionManifest = Join-Path $manifestDir 'A3SLab.Box.yaml'
+          $installerManifest = Join-Path $manifestDir 'A3SLab.Box.installer.yaml'
+          $localeManifest = Join-Path $manifestDir 'A3SLab.Box.locale.en-US.yaml'
 
-      - name: Check winget package status
-        id: winget_package
-        shell: bash
+          foreach ($manifest in @($versionManifest, $installerManifest, $localeManifest)) {
+              Set-SingleManifestValue -Path $manifest -Key 'PackageVersion' -Value $env:RELEASE_VERSION
+          }
+
+          $assetName = "a3s-box-$env:RELEASE_TAG-windows-x86_64.zip"
+          $assetUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/$assetName"
+          Set-SingleManifestValue -Path $installerManifest -Key 'InstallerUrl' -Value $assetUrl
+          Set-SingleManifestValue -Path $installerManifest -Key 'InstallerSha256' -Value $env:RELEASE_SHA256
+
+          $installerContent = [System.IO.File]::ReadAllText($installerManifest)
+          $nestedPathPattern = '(?m)^(?<prefix>[ \t]*-[ \t]*RelativeFilePath:[ \t]*)a3s-box-v[^\r\n\\]+-windows-x86_64(?=\\)'
+          $nestedPathMatches = [regex]::Matches($installerContent, $nestedPathPattern)
+          if ($nestedPathMatches.Count -ne 2) {
+              throw "Expected exactly two nested installer paths; found $($nestedPathMatches.Count)."
+          }
+          $nestedPathReplacement = '${prefix}' + "a3s-box-$env:RELEASE_TAG-windows-x86_64"
+          $installerContent = [regex]::Replace($installerContent, $nestedPathPattern, $nestedPathReplacement)
+          [System.IO.File]::WriteAllText(
+              $installerManifest,
+              $installerContent,
+              [System.Text.UTF8Encoding]::new($false)
+          )
+
+          Set-SingleManifestValue -Path $localeManifest -Key 'PublisherUrl' -Value 'https://github.com/A3S-Lab'
+          Set-SingleManifestValue -Path $localeManifest -Key 'PublisherSupportUrl' -Value "https://github.com/$env:GITHUB_REPOSITORY/issues"
+          Set-SingleManifestValue -Path $localeManifest -Key 'PackageUrl' -Value "https://github.com/$env:GITHUB_REPOSITORY"
+          Set-SingleManifestValue -Path $localeManifest -Key 'LicenseUrl' -Value "https://github.com/$env:GITHUB_REPOSITORY/blob/main/LICENSE"
+          Set-SingleManifestValue -Path $localeManifest -Key 'ReleaseNotesUrl' -Value "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$env:RELEASE_TAG"
+
+      - name: Download and verify WinGetCreate
+        id: wingetcreate
+        shell: pwsh
         run: |
-          PACKAGE_URL="https://github.com/microsoft/winget-pkgs/tree/master/manifests/a/A3SLab/Box"
-          STATUS=$(curl -sL -o /dev/null -w "%{http_code}" "$PACKAGE_URL")
-          if [ "$STATUS" = "200" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "A3SLab.Box exists in winget-pkgs; publishing update."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::warning title=winget first submission required::A3SLab.Box is not in winget-pkgs yet. Skipping automatic update; submit the generated manifests as the first package version."
-          fi
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          $toolDir = Join-Path $env:RUNNER_TEMP "wingetcreate-$env:WINGETCREATE_VERSION"
+          New-Item -ItemType Directory -Path $toolDir -Force | Out-Null
+          $toolPath = Join-Path $toolDir 'wingetcreate.exe'
+          Invoke-WebRequest -Uri $env:WINGETCREATE_URL -OutFile $toolPath
+
+          $actualSha256 = (Get-FileHash -LiteralPath $toolPath -Algorithm SHA256).Hash
+          if (-not [string]::Equals(
+              $actualSha256,
+              $env:WINGETCREATE_SHA256,
+              [System.StringComparison]::OrdinalIgnoreCase
+          )) {
+              Remove-Item -LiteralPath $toolPath -Force
+              throw "WinGetCreate SHA256 mismatch: expected $env:WINGETCREATE_SHA256, got $actualSha256."
+          }
+
+          Write-Host "Verified WinGetCreate $env:WINGETCREATE_VERSION ($actualSha256)."
+          & $toolPath info
+          if ($LASTEXITCODE -ne 0) {
+              throw "The verified WinGetCreate executable failed with exit code $LASTEXITCODE."
+          }
+          "path=$toolPath" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Validate manifests with WinGet
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $winget = Get-Command winget -CommandType Application -ErrorAction SilentlyContinue
+          if (-not $winget) {
+              throw 'WinGet is unavailable on the runner; manifest validation cannot be skipped.'
+          }
+
+          $manifestDir = (Resolve-Path -LiteralPath '.winget').Path
+          & $winget.Source validate --manifest $manifestDir --disable-interactivity
+          if ($LASTEXITCODE -ne 0) {
+              throw "WinGet manifest validation failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Upload validated manifests
+        # actions/upload-artifact v6.0.0
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: winget-manifests
+          path: .winget/*.yaml
+          if-no-files-found: error
 
       - name: Submit to winget-pkgs
         id: submit_winget
-        if: steps.winget_package.outputs.exists == 'true'
         continue-on-error: true
-        uses: vedantmgoyal9/winget-releaser@main
-        with:
-          identifier: A3SLab.Box
-          version: ${{ steps.version.outputs.version }}
-          installers-regex: 'a3s-box-v.*-windows-x86_64\.zip$'
-          release-tag: ${{ steps.version.outputs.tag }}
-          release-notes-url: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}
-          token: ${{ secrets.WINGET_TOKEN }}
-          fork-user: ${{ secrets.WINGET_FORK_USER }}
-          max-versions-to-keep: 5
-
-      # Alternative: Manual PR creation if vedantmgoyal9/winget-releaser doesn't work
-      - name: Create winget-pkgs PR (fallback)
-        if: steps.winget_package.outputs.exists != 'true' || steps.submit_winget.outcome == 'failure'
-        shell: bash
+        shell: pwsh
+        env:
+          WINGETCREATE_PATH: ${{ steps.wingetcreate.outputs.path }}
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_TOKEN)) {
+              throw 'WINGET_TOKEN is not configured; use the validated manifest artifact for manual submission.'
+          }
 
-          echo "::warning::Automatic winget submission did not complete. Please manually submit to winget-pkgs:"
-          echo ""
-          echo "1. Fork https://github.com/microsoft/winget-pkgs"
-          echo "2. Create directory: manifests/a/A3SLab/Box/$VERSION/"
-          echo "3. Copy these files to that directory:"
-          echo "   - .winget/A3SLab.Box.yaml"
-          echo "   - .winget/A3SLab.Box.installer.yaml"
-          echo "   - .winget/A3SLab.Box.locale.en-US.yaml"
-          echo "4. Create PR to microsoft/winget-pkgs"
+          $manifestDir = (Resolve-Path -LiteralPath '.winget').Path
+          & $env:WINGETCREATE_PATH submit --no-open --token $env:WINGET_TOKEN $manifestDir
+          if ($LASTEXITCODE -ne 0) {
+              throw "WinGetCreate submission failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Report manual winget-pkgs submission steps
+        if: steps.submit_winget.outcome == 'failure'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          Write-Warning 'Automatic WinGet submission did not complete. Use the validated winget-manifests artifact.'
+          @"
+          ## Manual WinGet submission required
+
+          Automatic submission did not complete for version ``$env:RELEASE_VERSION``.
+
+          1. Download the ``winget-manifests`` artifact from this workflow run.
+          2. Fork [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs).
+          3. Create ``manifests/a/A3SLab/Box/$env:RELEASE_VERSION/`` in the fork.
+          4. Copy the three validated YAML files into that directory.
+          5. Open a pull request against ``microsoft/winget-pkgs``.
+          "@ | Out-File -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

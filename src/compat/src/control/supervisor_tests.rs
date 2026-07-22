@@ -32,6 +32,15 @@ fn stored_token(marker: u8) -> StoredToken {
 }
 
 fn creating_record(sandbox_id: &str, action: OnTimeoutAction) -> (SandboxRecord, BoxConfig) {
+    creating_record_with_envd(sandbox_id, action, EnvdMode::Broker, BTreeMap::new())
+}
+
+fn creating_record_with_envd(
+    sandbox_id: &str,
+    action: OnTimeoutAction,
+    envd_mode: EnvdMode,
+    runtime_env_vars: BTreeMap<String, String>,
+) -> (SandboxRecord, BoxConfig) {
     let config = BoxConfig {
         isolation: ExecutionIsolation::Sandbox,
         ..BoxConfig::default()
@@ -52,7 +61,8 @@ fn creating_record(sandbox_id: &str, action: OnTimeoutAction) -> (SandboxRecord,
         expires_at: instant(10),
         metadata: BTreeMap::new(),
         envd_version: "0.1.3".to_string(),
-        envd_mode: EnvdMode::Broker,
+        envd_mode,
+        runtime_env_vars,
         secure: true,
         allow_internet_access: Some(false),
         credentials: SandboxCredentials {
@@ -148,7 +158,8 @@ fn supervisor(
 ) -> LifecycleSupervisor {
     LifecycleSupervisor::new(LifecycleSupervisorDependencies {
         repository,
-        executions,
+        executions: executions.clone(),
+        ports: executions,
         clock,
     })
 }
@@ -471,7 +482,7 @@ async fn startup_publishes_a_resume_completed_before_database_commit() {
     let (mut record, config) = creating_record("sandbox-1", OnTimeoutAction::Pause);
     let initial = start_runtime(&executions, &record, config).await;
     record.mark_running(initial).unwrap();
-    record.begin_pause().unwrap();
+    record.begin_pause(false).unwrap();
     let paused_lease = executions
         .pause(
             record.execution_id().unwrap(),
@@ -503,5 +514,125 @@ async fn startup_publishes_a_resume_completed_before_database_commit() {
     assert_eq!(
         running.execution_generation(),
         Some(resumed_lease.generation)
+    );
+}
+
+#[tokio::test]
+async fn startup_reinitializes_runtime_envd_before_publishing_a_cold_resume() {
+    let repository = Arc::new(MemorySandboxRepository::default());
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock(instant(20)));
+    let executions = Arc::new(RecordingExecutionManager::new(clock.clone()));
+    let runtime_env_vars = BTreeMap::from([
+        ("ALPHA".to_string(), "one".to_string()),
+        ("BETA".to_string(), "two".to_string()),
+    ]);
+    let (mut record, config) = creating_record_with_envd(
+        "sandbox-runtime-envd",
+        OnTimeoutAction::Pause,
+        EnvdMode::Runtime,
+        runtime_env_vars,
+    );
+    let initial = start_runtime(&executions, &record, config).await;
+    record.mark_running(initial).unwrap();
+    record.begin_pause(false).unwrap();
+    let paused = executions
+        .pause(
+            record.execution_id().unwrap(),
+            record.execution_generation().unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    record.mark_paused(paused).unwrap();
+    record.begin_resume().unwrap();
+    let resumed = executions
+        .resume(
+            record.execution_id().unwrap(),
+            record.execution_generation().unwrap(),
+        )
+        .await
+        .unwrap();
+    repository.insert(record.clone()).await.unwrap();
+
+    let report = supervisor(repository.clone(), executions.clone(), clock)
+        .reconcile_startup(NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(report.completed, 1);
+    assert!(report.failures.is_empty());
+    let running = repository.get(record.sandbox_id()).await.unwrap().unwrap();
+    assert_eq!(running.state(), LifecycleState::Running);
+    assert_eq!(running.execution_generation(), Some(resumed.generation));
+    assert_eq!(
+        executions.port_requests(),
+        vec![(
+            resumed.execution_id.to_string(),
+            resumed.generation.get(),
+            crate::routing::ENVD_PORT,
+        )]
+    );
+    let requests = executions.runtime_envd_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].1, "/init");
+    assert_eq!(requests[0].2["lifecycleID"], "sandbox-runtime-envd");
+    assert_eq!(requests[0].2["envVars"]["ALPHA"], "one");
+    assert_eq!(requests[0].2["envVars"]["BETA"], "two");
+}
+
+#[tokio::test]
+async fn startup_does_not_publish_a_cold_resume_when_runtime_envd_rejects_initialization() {
+    let repository = Arc::new(MemorySandboxRepository::default());
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock(instant(20)));
+    let executions = Arc::new(RecordingExecutionManager::new(clock.clone()));
+    let (mut record, config) = creating_record_with_envd(
+        "sandbox-runtime-envd-failure",
+        OnTimeoutAction::Pause,
+        EnvdMode::Runtime,
+        BTreeMap::from([("ALPHA".to_string(), "one".to_string())]),
+    );
+    let initial = start_runtime(&executions, &record, config).await;
+    record.mark_running(initial).unwrap();
+    record.begin_pause(false).unwrap();
+    let paused = executions
+        .pause(
+            record.execution_id().unwrap(),
+            record.execution_generation().unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    record.mark_paused(paused).unwrap();
+    record.begin_resume().unwrap();
+    let resumed = executions
+        .resume(
+            record.execution_id().unwrap(),
+            record.execution_generation().unwrap(),
+        )
+        .await
+        .unwrap();
+    repository.insert(record.clone()).await.unwrap();
+    executions.fail_runtime_envd_init();
+
+    let report = supervisor(repository.clone(), executions.clone(), clock)
+        .reconcile_startup(NonZeroU32::new(10).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(report.completed, 0);
+    assert_eq!(report.failures.len(), 1);
+    assert!(report.failures[0]
+        .message
+        .contains("runtime envd initialization returned HTTP 400"));
+    let failed = repository.get(record.sandbox_id()).await.unwrap().unwrap();
+    assert_eq!(failed.state(), LifecycleState::Failed);
+    assert_eq!(failed.failure(), Some(LifecycleFailure::RuntimeFailed));
+    assert_eq!(
+        executions
+            .inspect(&resumed.execution_id)
+            .await
+            .unwrap()
+            .state,
+        ExecutionState::Stopped
     );
 }

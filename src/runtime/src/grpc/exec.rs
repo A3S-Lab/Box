@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::ExecutionProcessSignal;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 const EXEC_CONTROL_CANCEL: &[u8] = b"cancel";
 const EXEC_CONTROL_STDIN_CLOSE: &[u8] = b"stdin-close";
+const EXEC_CONTROL_SIGNAL: &[u8] = b"signal:";
 /// Host→guest control: flush all buffered output and reply with a flush-ack.
 const EXEC_CONTROL_FLUSH: &[u8] = b"flush";
 /// Host→guest control: stream a tar archive of the guest-visible rootfs.
@@ -280,7 +282,7 @@ impl ExecClient {
 
     /// Transfer a file to/from the guest.
     ///
-    /// Sends a Data frame with JSON FileRequest, reads a Data frame with JSON FileResponse.
+    /// Sends a discriminated JSON file request and reads a JSON FileResponse.
     pub async fn file_transfer(
         &self,
         request: &a3s_box_core::exec::FileRequest,
@@ -294,7 +296,7 @@ impl ExecClient {
         mut stream: UnixStream,
         request: &a3s_box_core::exec::FileRequest,
     ) -> Result<a3s_box_core::exec::FileResponse> {
-        let payload = serde_json::to_vec(request)
+        let payload = serde_json::to_vec(&a3s_box_core::GuestSessionRequest::File(request.clone()))
             .map_err(|e| BoxError::ExecError(format!("Failed to serialize file request: {}", e)))?;
 
         let request_frame = a3s_transport::Frame::data(payload);
@@ -331,6 +333,62 @@ impl ExecClient {
             _ => Err(BoxError::ExecError(format!(
                 "Unexpected frame type: {:?}",
                 frame.frame_type
+            ))),
+        }
+    }
+
+    /// Perform a filesystem metadata or mutation operation inside the guest.
+    pub async fn filesystem(
+        &self,
+        request: &a3s_box_core::FilesystemRequest,
+    ) -> Result<a3s_box_core::FilesystemResponse> {
+        let stream = self.open_stream().await?;
+        self.filesystem_on_stream(stream, request).await
+    }
+
+    pub(crate) async fn filesystem_on_stream(
+        &self,
+        mut stream: UnixStream,
+        request: &a3s_box_core::FilesystemRequest,
+    ) -> Result<a3s_box_core::FilesystemResponse> {
+        let payload = serde_json::to_vec(&a3s_box_core::GuestSessionRequest::Filesystem(
+            request.clone(),
+        ))
+        .map_err(|error| {
+            BoxError::ExecError(format!("Failed to serialize filesystem request: {error}"))
+        })?;
+        let encoded = a3s_transport::Frame::data(payload)
+            .encode()
+            .map_err(|error| {
+                BoxError::ExecError(format!("Failed to encode filesystem request: {error}"))
+            })?;
+        stream.write_all(&encoded).await.map_err(|error| {
+            BoxError::ExecError(format!("Filesystem request write failed: {error}"))
+        })?;
+
+        let (read, _write) = tokio::io::split(stream);
+        let mut reader = a3s_transport::FrameReader::new(read);
+        let frame = reader
+            .read_frame()
+            .await
+            .map_err(|error| {
+                BoxError::ExecError(format!("Filesystem response read failed: {error}"))
+            })?
+            .ok_or_else(|| {
+                BoxError::ExecError("Exec server closed without filesystem response".to_string())
+            })?;
+        match frame.frame_type {
+            a3s_transport::FrameType::Data => {
+                serde_json::from_slice(&frame.payload).map_err(|error| {
+                    BoxError::ExecError(format!("Failed to parse filesystem response: {error}"))
+                })
+            }
+            a3s_transport::FrameType::Error => Err(BoxError::ExecError(format!(
+                "Filesystem operation failed: {}",
+                String::from_utf8_lossy(&frame.payload)
+            ))),
+            other => Err(BoxError::ExecError(format!(
+                "Unexpected filesystem response frame: {other:?}"
             ))),
         }
     }
@@ -502,6 +560,23 @@ impl StreamingExecInput {
             .write_control(EXEC_CONTROL_CANCEL)
             .await
             .map_err(|e| BoxError::ExecError(format!("Streaming exec cancel write failed: {}", e)))
+    }
+
+    /// Deliver one of the typed Linux workload signals to the command's
+    /// process group. SIGKILL retains the established cancel control for
+    /// compatibility with older guests; SIGTERM uses the signal control.
+    pub async fn send_signal(&self, signal: ExecutionProcessSignal) -> Result<()> {
+        if signal == ExecutionProcessSignal::Kill {
+            return self.cancel().await;
+        }
+        let mut payload = EXEC_CONTROL_SIGNAL.to_vec();
+        payload.extend_from_slice(signal.linux_number().to_string().as_bytes());
+        self.writer
+            .lock()
+            .await
+            .write_control(&payload)
+            .await
+            .map_err(|e| BoxError::ExecError(format!("Streaming exec signal write failed: {}", e)))
     }
 
     /// Request a flush of the guest's buffered output. The guest replies with a
@@ -810,6 +885,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_transfer_uses_the_discriminated_guest_request() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("file_transfer.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            // ExecClient::connect performs one reachability connection first.
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, write) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(read);
+            let mut writer = a3s_transport::FrameWriter::new(write);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            let request: a3s_box_core::GuestSessionRequest =
+                serde_json::from_slice(&frame.payload).unwrap();
+            match request {
+                a3s_box_core::GuestSessionRequest::File(request) => {
+                    assert_eq!(request.op, a3s_box_core::FileOp::Upload);
+                    assert_eq!(request.guest_path, "~/data.bin");
+                    assert_eq!(request.data.as_deref(), Some("AAEC"));
+                    assert_eq!(request.user.as_deref(), Some("user"));
+                }
+                other => panic!("unexpected guest request: {other:?}"),
+            }
+            writer
+                .write_data(
+                    &serde_json::to_vec(&a3s_box_core::FileResponse {
+                        success: true,
+                        data: None,
+                        size: 3,
+                        error: None,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let response = client
+            .file_transfer(&a3s_box_core::FileRequest {
+                op: a3s_box_core::FileOp::Upload,
+                guest_path: "~/data.bin".to_string(),
+                data: Some("AAEC".to_string()),
+                user: Some("user".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(response.success);
+        assert_eq!(response.size, 3);
+    }
+
+    #[tokio::test]
+    async fn filesystem_uses_the_discriminated_guest_request() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock_path = tmp.path().join("filesystem.sock");
+        let Some(listener) = bind_test_listener(&sock_path) else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, write) = tokio::io::split(stream);
+            let mut reader = a3s_transport::FrameReader::new(read);
+            let mut writer = a3s_transport::FrameWriter::new(write);
+            let frame = reader.read_frame().await.unwrap().unwrap();
+            let request: a3s_box_core::GuestSessionRequest =
+                serde_json::from_slice(&frame.payload).unwrap();
+            match request {
+                a3s_box_core::GuestSessionRequest::Filesystem(request) => {
+                    assert_eq!(request.op, a3s_box_core::FilesystemOp::ListDir);
+                    assert_eq!(request.path, "~/data");
+                    assert_eq!(request.depth, 2);
+                    assert_eq!(request.user.as_deref(), Some("user"));
+                }
+                other => panic!("unexpected guest request: {other:?}"),
+            }
+            writer
+                .write_data(
+                    &serde_json::to_vec(&a3s_box_core::FilesystemResponse {
+                        success: true,
+                        entry: None,
+                        entries: Vec::new(),
+                        error: None,
+                    })
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = ExecClient::connect(&sock_path).await.unwrap();
+        let response = client
+            .filesystem(&a3s_box_core::FilesystemRequest {
+                op: a3s_box_core::FilesystemOp::ListDir,
+                path: "~/data".to_string(),
+                destination: None,
+                depth: 2,
+                user: Some("user".to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(response.success);
+        assert!(response.entries.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_archive_rootfs_streams_data_until_done_marker() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sock_path = tmp.path().join("archive.sock");
@@ -1082,7 +1269,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exec_client_exec_stream_input_writes_stdin_and_close() {
+    async fn test_exec_client_exec_stream_input_writes_stdin_close_and_signals() {
         let tmp = tempfile::TempDir::new().unwrap();
         let sock_path = tmp.path().join("exec_stream_stdin.sock");
         let Some(listener) = bind_test_listener(&sock_path) else {
@@ -1110,6 +1297,14 @@ mod tests {
             let close = reader.read_frame().await.unwrap().unwrap();
             assert_eq!(close.frame_type, a3s_transport::FrameType::Control);
             assert_eq!(close.payload, EXEC_CONTROL_STDIN_CLOSE);
+
+            let terminate = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(terminate.frame_type, a3s_transport::FrameType::Control);
+            assert_eq!(terminate.payload, b"signal:15");
+
+            let kill = reader.read_frame().await.unwrap().unwrap();
+            assert_eq!(kill.frame_type, a3s_transport::FrameType::Control);
+            assert_eq!(kill.payload, EXEC_CONTROL_CANCEL);
 
             let exit = a3s_box_core::exec::ExecExit {
                 exit_code: 0,
@@ -1141,6 +1336,14 @@ mod tests {
         let input = stream.input();
         input.write_stdin(b"hello stdin\n").await.unwrap();
         input.close_stdin().await.unwrap();
+        input
+            .send_signal(ExecutionProcessSignal::Terminate)
+            .await
+            .unwrap();
+        input
+            .send_signal(ExecutionProcessSignal::Kill)
+            .await
+            .unwrap();
         let event = stream.next_event().await.unwrap().unwrap();
         match event {
             a3s_box_core::exec::ExecEvent::Exit(exit) => assert_eq!(exit.exit_code, 0),

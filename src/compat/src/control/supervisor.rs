@@ -2,27 +2,30 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use a3s_box_core::{
-    ExecutionLease, ExecutionManager, ExecutionManagerError, ExecutionReservation, ExecutionState,
-    ReconcileOutcome,
+    ExecutionLease, ExecutionManager, ExecutionManagerError, ExecutionPortConnector,
+    ExecutionReservation, ExecutionState, ReconcileOutcome,
 };
 use thiserror::Error;
 
 use super::lifetime::ready_lifetime;
+use super::service::initialize_runtime_envd_for_lease;
 use super::{
-    Clock, CompareAndSwapResult, LifecycleError, LifecycleFailure, LifecycleState, RepositoryError,
-    SandboxGeneration, SandboxId, SandboxRecord, SandboxRepository,
+    Clock, CompareAndSwapResult, EnvdMode, LifecycleError, LifecycleFailure, LifecycleState,
+    RepositoryError, SandboxGeneration, SandboxId, SandboxRecord, SandboxRepository,
 };
 
 #[derive(Clone)]
 pub struct LifecycleSupervisor {
     repository: Arc<dyn SandboxRepository>,
     executions: Arc<dyn ExecutionManager>,
+    ports: Arc<dyn ExecutionPortConnector>,
     clock: Arc<dyn Clock>,
 }
 
 pub struct LifecycleSupervisorDependencies {
     pub repository: Arc<dyn SandboxRepository>,
     pub executions: Arc<dyn ExecutionManager>,
+    pub ports: Arc<dyn ExecutionPortConnector>,
     pub clock: Arc<dyn Clock>,
 }
 
@@ -73,6 +76,7 @@ impl LifecycleSupervisor {
         Self {
             repository: dependencies.repository,
             executions: dependencies.executions,
+            ports: dependencies.ports,
             clock: dependencies.clock,
         }
     }
@@ -285,7 +289,7 @@ impl LifecycleSupervisor {
             .pause(
                 &execution_id,
                 execution_generation,
-                record.lifecycle().keep_memory_on_pause,
+                record.paused_with_memory(),
             )
             .await
         {
@@ -367,6 +371,24 @@ impl LifecycleSupervisor {
         mut record: SandboxRecord,
         lease: ExecutionLease,
     ) -> MaintenanceItemResult<MaintenanceDisposition> {
+        let initialize_runtime_envd = record.envd_mode() == EnvdMode::Runtime
+            && (record.state() == LifecycleState::Creating
+                || (record.state() == LifecycleState::Resuming && !record.paused_with_memory()));
+        if initialize_runtime_envd {
+            if let Err(readiness_error) = initialize_runtime_envd_for_lease(
+                self.ports.as_ref(),
+                self.clock.as_ref(),
+                &lease,
+                record.sandbox_id().as_str(),
+                record.runtime_env_vars(),
+            )
+            .await
+            {
+                return self
+                    .fail_runtime_envd_initialization(record, lease, readiness_error)
+                    .await;
+            }
+        }
         let expected = record.generation();
         if record.state() == LifecycleState::Creating {
             let (ready_at, expires_at) = ready_lifetime(
@@ -380,6 +402,30 @@ impl LifecycleSupervisor {
             record.mark_running(lease)?;
         }
         self.replace(expected, record).await
+    }
+
+    async fn fail_runtime_envd_initialization(
+        &self,
+        mut record: SandboxRecord,
+        lease: ExecutionLease,
+        readiness_error: ExecutionManagerError,
+    ) -> MaintenanceItemResult<MaintenanceDisposition> {
+        let failure = match self
+            .executions
+            .kill(&lease.execution_id, lease.generation)
+            .await
+        {
+            Ok(_) => readiness_error,
+            Err(cleanup_error) => ExecutionManagerError::Internal(format!(
+                "{readiness_error}; recovered runtime envd cleanup failed: {cleanup_error}"
+            )),
+        };
+        let expected = record.generation();
+        record.mark_failed(LifecycleFailure::RuntimeFailed)?;
+        match self.replace(expected, record).await? {
+            MaintenanceDisposition::Deferred => Ok(MaintenanceDisposition::Deferred),
+            MaintenanceDisposition::Completed => Err(failure.into()),
+        }
     }
 
     async fn publish_paused(

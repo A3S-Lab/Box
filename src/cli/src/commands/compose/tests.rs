@@ -329,3 +329,73 @@ fn test_partial_service_cleanup_removes_box_directory() {
 
     assert!(!box_dir.exists());
 }
+
+#[cfg(windows)]
+fn cached_image_config_with_health(
+    health_check: Option<a3s_box_runtime::oci::OciHealthCheck>,
+) -> a3s_box_runtime::oci::OciImageConfig {
+    a3s_box_runtime::oci::OciImageConfig {
+        entrypoint: None,
+        cmd: None,
+        env: Vec::new(),
+        working_dir: None,
+        user: None,
+        exposed_ports: Vec::new(),
+        labels: HashMap::new(),
+        volumes: Vec::new(),
+        stop_signal: None,
+        health_check,
+        onbuild: Vec::new(),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_compose_rejects_declared_health_before_runtime_setup() {
+    let error = validate_known_compose_health(
+        "api",
+        false,
+        Some(HealthCheck {
+            cmd: vec!["true".to_string()],
+            interval_secs: 30,
+            timeout_secs: 5,
+            retries: 3,
+            start_period_secs: 0,
+        }),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(error.contains("Compose service 'api'"));
+    assert!(error.contains("health checks are not supported on Windows"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_compose_rejects_cached_image_health_before_runtime_setup() {
+    let image_config =
+        cached_image_config_with_health(Some(a3s_box_runtime::oci::OciHealthCheck {
+            test: vec!["CMD".to_string(), "true".to_string()],
+            interval: Some(30),
+            timeout: Some(5),
+            retries: Some(3),
+            start_period: Some(0),
+        }));
+
+    let error = validate_known_compose_health("api", false, None, Some(&image_config)).unwrap_err();
+
+    assert!(error.contains("Compose service 'api'"));
+    assert!(error.contains("health checks are not supported on Windows"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_compose_without_declared_health_continues_to_image_resolution() {
+    // `None` means image metadata still needs resolving; it is not itself a
+    // rejection. Production pulls the image before any runtime side effects,
+    // then calls the same helper with the resolved config.
+    assert!(validate_known_compose_health("api", false, None, None).is_ok());
+    assert!(validate_known_compose_health("api", true, None, None).is_ok());
+    let image_config = cached_image_config_with_health(None);
+    assert!(validate_known_compose_health("api", false, None, Some(&image_config)).is_ok());
+}

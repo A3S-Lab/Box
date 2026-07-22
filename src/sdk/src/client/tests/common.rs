@@ -30,17 +30,18 @@
         .unwrap();
     }
 
-    fn write_minimal_oci_layout(path: &Path) {
+    fn write_minimal_oci_layout(path: &Path) -> String {
         let blobs = path.join("blobs").join("sha256");
         std::fs::create_dir_all(&blobs).unwrap();
         std::fs::write(path.join("oci-layout"), r#"{"imageLayoutVersion":"1.0.0"}"#).unwrap();
 
-        let config_digest = "c".repeat(64);
-        let manifest_digest = "d".repeat(64);
-        let layer_digest = "e".repeat(64);
-        let diff_id = "f".repeat(64);
+        // These digests are the SHA-256 values of the exact fixture bytes below.
+        let config_digest = "32a3a68304ee650183e9f39dce911318876f6800f054185363b597e17e6ffeb9";
+        let manifest_digest =
+            "2cf5c06fc51eac5706f7df0bb2a45d45cd1c3da7e91af9310e6fbbb08fe07290";
+        let layer_digest = "d50fdce899b75695aa4d7bfb84396fbe2fdee1c92f0dd621d245156cad6f51c0";
         let layer = b"layer-bytes";
-        std::fs::write(blobs.join(&layer_digest), layer).unwrap();
+        std::fs::write(blobs.join(layer_digest), layer).unwrap();
 
         let config = serde_json::json!({
             "architecture": "amd64",
@@ -66,7 +67,7 @@
             },
             "rootfs": {
                 "type": "layers",
-                "diff_ids": [format!("sha256:{diff_id}")]
+                "diff_ids": [format!("sha256:{layer_digest}")]
             },
             "history": [
                 {
@@ -81,11 +82,8 @@
                 }
             ]
         });
-        std::fs::write(
-            blobs.join(&config_digest),
-            serde_json::to_vec(&config).unwrap(),
-        )
-        .unwrap();
+        let config_bytes = serde_json::to_vec(&config).unwrap();
+        std::fs::write(blobs.join(config_digest), &config_bytes).unwrap();
 
         let manifest = serde_json::json!({
             "schemaVersion": 2,
@@ -93,7 +91,7 @@
             "config": {
                 "mediaType": "application/vnd.oci.image.config.v1+json",
                 "digest": format!("sha256:{config_digest}"),
-                "size": 1
+                "size": config_bytes.len()
             },
             "layers": [{
                 "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
@@ -101,21 +99,20 @@
                 "size": layer.len()
             }]
         });
-        std::fs::write(
-            blobs.join(&manifest_digest),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        std::fs::write(blobs.join(manifest_digest), &manifest_bytes).unwrap();
 
         let index = serde_json::json!({
             "schemaVersion": 2,
             "manifests": [{
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
                 "digest": format!("sha256:{manifest_digest}"),
-                "size": 1
+                "size": manifest_bytes.len()
             }]
         });
         std::fs::write(path.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
+
+        format!("sha256:{manifest_digest}")
     }
 
     fn box_record(id: &str, name: &str, status: &str) -> BoxRecord {

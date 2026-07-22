@@ -136,7 +136,14 @@ fn walk_dir(root: &Path, current: &Path, entries: &mut HashMap<PathBuf, FileEntr
             })?
             .to_path_buf();
 
-        let metadata = entry.metadata().map_err(|e| {
+        let file_type = entry.file_type().map_err(|e| {
+            BoxError::BuildError(format!(
+                "Failed to read file type for {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|e| {
             BoxError::BuildError(format!(
                 "Failed to read metadata for {}: {}",
                 path.display(),
@@ -174,11 +181,11 @@ fn walk_dir(root: &Path, current: &Path, entries: &mut HashMap<PathBuf, FileEntr
                 mode,
                 uid,
                 gid,
-                is_dir: metadata.is_dir(),
+                is_dir: file_type.is_dir(),
             },
         );
 
-        if metadata.is_dir() {
+        if file_type.is_dir() {
             walk_dir(root, &path, entries)?;
         }
     }
@@ -399,8 +406,7 @@ fn add_dir_to_tar<W: std::io::Write>(
         let file_type = entry
             .file_type()
             .map_err(|e| BoxError::BuildError(format!("Failed to stat entry: {}", e)))?;
-        let meta = entry
-            .metadata()
+        let meta = std::fs::symlink_metadata(&path)
             .map_err(|e| BoxError::BuildError(format!("Failed to stat entry: {}", e)))?;
 
         if file_type.is_dir() {
@@ -457,6 +463,25 @@ fn append_file_with_chown<W: std::io::Write>(
         header.set_gid(gid as u64);
         header.set_username("").ok();
         header.set_groupname("").ok();
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(file_path).map_err(|e| {
+                BoxError::BuildError(format!(
+                    "Failed to read layer symlink {}: {}",
+                    file_path.display(),
+                    e
+                ))
+            })?;
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_link_name(&target).map_err(|e| {
+                BoxError::BuildError(format!(
+                    "Failed to encode layer symlink {} -> {}: {}",
+                    file_path.display(),
+                    target.display(),
+                    e
+                ))
+            })?;
+        }
         header.set_cksum();
         // For symlinks, the data is empty (target is in link_name header field).
         let body: Box<dyn std::io::Read> = if meta.file_type().is_symlink() {
@@ -869,6 +894,55 @@ mod tests {
             }
         }
         assert!(found_symlink, "symlink entry must be present in the layer");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_snapshot_does_not_follow_symlink_outside_rootfs() {
+        let tmp = TempDir::new().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&rootfs).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("host-secret"), "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, rootfs.join("escape")).unwrap();
+
+        let snapshot = DirSnapshot::capture(&rootfs).unwrap();
+
+        assert!(snapshot.entries.contains_key(Path::new("escape")));
+        assert!(!snapshot
+            .entries
+            .contains_key(Path::new("escape/host-secret")));
+        assert!(!snapshot.entries[Path::new("escape")].is_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_create_layer_with_chown_preserves_symlink_target() {
+        let rootfs = TempDir::new().unwrap();
+        let output_dir = TempDir::new().unwrap();
+        std::os::unix::fs::symlink("libfoo.so.1", rootfs.path().join("libfoo.so")).unwrap();
+        let out = output_dir.path().join("layer.tar.gz");
+
+        create_layer_with_chown(
+            rootfs.path(),
+            &[PathBuf::from("libfoo.so")],
+            &[],
+            &out,
+            Some((123, 456)),
+        )
+        .unwrap();
+
+        let decoder = flate2::read::GzDecoder::new(fs::File::open(out).unwrap());
+        let mut archive = tar::Archive::new(decoder);
+        let entry = archive.entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.header().entry_type(), tar::EntryType::Symlink);
+        assert_eq!(entry.header().uid().unwrap(), 123);
+        assert_eq!(entry.header().gid().unwrap(), 456);
+        assert_eq!(
+            entry.link_name().unwrap().unwrap().to_string_lossy(),
+            "libfoo.so.1"
+        );
     }
 
     // --- sha256 ---

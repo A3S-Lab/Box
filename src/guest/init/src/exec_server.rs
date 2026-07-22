@@ -1,24 +1,29 @@
 //! Guest exec server for executing commands inside the VM.
 //!
 //! Listens on vsock port 4089 and accepts Frame-based requests.
-//! Each connection: read a Data frame (JSON ExecRequest), execute,
-//! then send either a one-shot `ExecOutput` or streaming chunk/exit frames.
+//! Each connection reads either a legacy bare JSON `ExecRequest` or a
+//! discriminated guest-session request such as file transfer, then sends the
+//! corresponding framed response.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
 use std::io::Write;
-#[cfg(target_os = "linux")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(any(target_os = "linux", test))]
+use a3s_box_core::exec::GuestSessionRequest;
 use a3s_box_core::exec::{
-    ExecChunk, ExecExit, ExecOutput, ExecRequest, StreamType, DEFAULT_EXEC_TIMEOUT_NS,
-    EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES,
+    ExecChunk, ExecExit, ExecOutput, ExecRequest, FileOp, FileRequest, FileResponse,
+    FilesystemEntry, FilesystemEntryKind, FilesystemOp, FilesystemRequest, FilesystemResponse,
+    StreamType, DEFAULT_EXEC_TIMEOUT_NS, EXEC_VSOCK_PORT, MAX_ONE_SHOT_OUTPUT_BYTES,
 };
 use a3s_transport::{FrameType, MAX_PAYLOAD_SIZE};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
@@ -81,8 +86,13 @@ fn signal_main_process(sig: i32) {
             pid,
             sig, "Delivering graceful stop signal to container main process"
         );
-        unsafe {
-            libc::kill(pid, sig);
+        if unsafe { libc::kill(pid, sig) } != 0 {
+            warn!(
+                pid,
+                sig,
+                error = %std::io::Error::last_os_error(),
+                "Failed to signal container main process"
+            );
         }
     } else {
         warn!(sig, "Graceful stop requested but container PID is unknown");
@@ -256,6 +266,7 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
 const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 const EXEC_CONTROL_CANCEL: &[u8] = b"cancel";
 const EXEC_CONTROL_STDIN_CLOSE: &[u8] = b"stdin-close";
+const EXEC_CONTROL_SIGNAL: &[u8] = b"signal:";
 /// Host→guest control: flush all buffered output, then reply with a flush-ack.
 const EXEC_CONTROL_FLUSH: &[u8] = b"flush";
 /// Guest→host marker (in a Control frame) acknowledging a flush: every output
@@ -575,9 +586,7 @@ pub struct ExecListener;
 ///
 /// The descriptor must refer to an already-bound, listening AF_UNIX stream
 /// socket. It is validated and marked `CLOEXEC` before the workload is forked.
-pub fn adopt_inherited_exec_listener(
-    fd: std::os::fd::RawFd,
-) -> Result<ExecListener, Box<dyn std::error::Error>> {
+pub fn adopt_inherited_exec_listener(fd: i32) -> Result<ExecListener, Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
     {
         Ok(ExecListener(crate::listener::adopt_unix_listener(
@@ -758,6 +767,27 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
 
     debug!("Exec request received ({} bytes)", payload.len());
 
+    match serde_json::from_slice::<GuestSessionRequest>(&payload) {
+        Ok(GuestSessionRequest::File(request)) => {
+            let response_payload = serde_json::to_vec(&handle_file_request(request))?;
+            write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
+            return Ok(());
+        }
+        Ok(GuestSessionRequest::Filesystem(request)) => {
+            let response_payload = serde_json::to_vec(&handle_filesystem_request(request))?;
+            write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
+            return Ok(());
+        }
+        Err(error) if declares_guest_session_request(&payload) => {
+            send_error_frame(
+                &mut stream,
+                &format!("Invalid guest session request: {error}"),
+            )?;
+            return Ok(());
+        }
+        Err(_) => {}
+    }
+
     // Parse ExecRequest from JSON payload
     let exec_req: ExecRequest = match serde_json::from_slice(&payload) {
         Ok(req) => req,
@@ -855,6 +885,536 @@ fn handle_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::error:
         write_frame(&mut stream, FrameType::Data as u8, &response_payload)?;
     }
 
+    Ok(())
+}
+
+fn declares_guest_session_request(payload: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| value.get("request_type").cloned())
+        .is_some()
+}
+
+fn handle_file_request(request: FileRequest) -> FileResponse {
+    let result = (|| {
+        let (owner, home) = resolve_file_owner(request.user.as_deref())?;
+        let path = resolve_file_path(&request.guest_path, &home)?;
+        match request.op {
+            FileOp::Upload => {
+                let encoded = request
+                    .data
+                    .as_deref()
+                    .ok_or_else(|| "upload request is missing base64 data".to_string())?;
+                let data = STANDARD
+                    .decode(encoded)
+                    .map_err(|error| format!("upload data is not valid base64: {error}"))?;
+                let parent = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .ok_or_else(|| "upload path has no parent directory".to_string())?;
+                ensure_file_directories(parent, owner)?;
+                if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                    return Err(format!("path is a directory: {}", path.display()));
+                }
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&path)
+                    .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
+                file.write_all(&data)
+                    .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+                chown_file_path(&path, owner)
+                    .map_err(|error| format!("failed to set ownership: {error}"))?;
+                Ok(FileResponse {
+                    success: true,
+                    data: None,
+                    size: data.len() as u64,
+                    error: None,
+                })
+            }
+            FileOp::Download => {
+                let metadata = std::fs::metadata(&path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        format!("file not found: {}", path.display())
+                    } else {
+                        format!("failed to stat {}: {error}", path.display())
+                    }
+                })?;
+                if metadata.is_dir() {
+                    return Err(format!("path is a directory: {}", path.display()));
+                }
+                let data = std::fs::read(&path)
+                    .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+                Ok(FileResponse {
+                    success: true,
+                    data: Some(STANDARD.encode(&data)),
+                    size: data.len() as u64,
+                    error: None,
+                })
+            }
+        }
+    })();
+
+    result.unwrap_or_else(|error| FileResponse {
+        success: false,
+        data: None,
+        size: 0,
+        error: Some(error),
+    })
+}
+
+const MAX_FILESYSTEM_DEPTH: u32 = 64;
+const MAX_FILESYSTEM_ENTRIES: usize = 4096;
+const MAX_FILESYSTEM_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+
+fn handle_filesystem_request(request: FilesystemRequest) -> FilesystemResponse {
+    let result = (|| {
+        let (owner, home) = resolve_file_owner(request.user.as_deref())?;
+        let path = resolve_file_path(&request.path, &home)?;
+        match request.op {
+            FilesystemOp::Stat => Ok((Some(filesystem_entry(&path, &path)?), Vec::new())),
+            FilesystemOp::MakeDir => {
+                match std::fs::metadata(&path) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        return Err(format!("directory already exists: {}", path.display()))
+                    }
+                    Ok(_) => {
+                        return Err(format!(
+                            "path already exists but is not a directory: {}",
+                            path.display()
+                        ))
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("failed to stat {}: {error}", path.display()))
+                    }
+                }
+                ensure_file_directories(&path, owner)?;
+                Ok((Some(filesystem_entry(&path, &path)?), Vec::new()))
+            }
+            FilesystemOp::Move => {
+                if is_guest_root(&path) {
+                    return Err("refusing to move the guest root directory".to_string());
+                }
+                let destination = request
+                    .destination
+                    .as_deref()
+                    .ok_or_else(|| "move request is missing destination".to_string())?;
+                let destination = resolve_file_path(destination, &home)?;
+                if is_guest_root(&destination) {
+                    return Err("refusing to replace the guest root directory".to_string());
+                }
+                let parent = destination.parent().ok_or_else(|| {
+                    format!("move destination has no parent: {}", destination.display())
+                })?;
+                ensure_file_directories(parent, owner)?;
+                std::fs::rename(&path, &destination).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        format!("source file not found: {}", path.display())
+                    } else {
+                        format!(
+                            "failed to rename {} to {}: {error}",
+                            path.display(),
+                            destination.display()
+                        )
+                    }
+                })?;
+                Ok((
+                    Some(filesystem_entry(&destination, &destination)?),
+                    Vec::new(),
+                ))
+            }
+            FilesystemOp::ListDir => {
+                let depth = if request.depth == 0 { 1 } else { request.depth };
+                if depth > MAX_FILESYSTEM_DEPTH {
+                    return Err(format!(
+                        "directory depth exceeds the {MAX_FILESYSTEM_DEPTH}-level limit"
+                    ));
+                }
+                Ok((None, list_filesystem_entries(&path, depth)?))
+            }
+            FilesystemOp::Remove => {
+                if is_guest_root(&path) {
+                    return Err("refusing to remove the guest root directory".to_string());
+                }
+                match std::fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                        std::fs::remove_dir_all(&path).map_err(|error| {
+                            format!("failed to remove directory {}: {error}", path.display())
+                        })?;
+                    }
+                    Ok(_) => {
+                        std::fs::remove_file(&path).map_err(|error| {
+                            format!("failed to remove file {}: {error}", path.display())
+                        })?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("failed to stat {}: {error}", path.display()))
+                    }
+                }
+                Ok((None, Vec::new()))
+            }
+        }
+    })();
+
+    match result {
+        Ok((entry, entries)) => FilesystemResponse {
+            success: true,
+            entry,
+            entries,
+            error: None,
+        },
+        Err(error) => FilesystemResponse {
+            success: false,
+            entry: None,
+            entries: Vec::new(),
+            error: Some(error),
+        },
+    }
+}
+
+fn list_filesystem_entries(path: &Path, depth: u32) -> Result<Vec<FilesystemEntry>, String> {
+    let real_root = std::fs::canonicalize(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("directory not found: {}", path.display())
+        } else {
+            format!("failed to resolve directory {}: {error}", path.display())
+        }
+    })?;
+    if !std::fs::metadata(&real_root)
+        .map_err(|error| format!("failed to stat directory {}: {error}", path.display()))?
+        .is_dir()
+    {
+        return Err(format!("path is not a directory: {}", path.display()));
+    }
+
+    let mut pending = directory_children(&real_root, path, 1)?;
+    let mut entries = Vec::new();
+    let mut response_bytes = 0_usize;
+    while let Some((real_path, display_path, current_depth, is_directory)) = pending.pop() {
+        if entries.len() >= MAX_FILESYSTEM_ENTRIES {
+            return Err(format!(
+                "directory listing exceeds the {MAX_FILESYSTEM_ENTRIES}-entry limit"
+            ));
+        }
+        let entry = filesystem_entry(&real_path, &display_path)?;
+        response_bytes = response_bytes.saturating_add(
+            serde_json::to_vec(&entry)
+                .map_err(|error| format!("failed to size directory entry: {error}"))?
+                .len(),
+        );
+        if response_bytes > MAX_FILESYSTEM_RESPONSE_BYTES {
+            return Err(format!(
+                "directory listing exceeds the {MAX_FILESYSTEM_RESPONSE_BYTES}-byte response limit"
+            ));
+        }
+        entries.push(entry);
+        if is_directory && current_depth < depth {
+            let mut children = directory_children(&real_path, &display_path, current_depth + 1)?;
+            pending.append(&mut children);
+        }
+    }
+    Ok(entries)
+}
+
+fn directory_children(
+    real_directory: &Path,
+    display_directory: &Path,
+    depth: u32,
+) -> Result<Vec<(PathBuf, PathBuf, u32, bool)>, String> {
+    let mut children = std::fs::read_dir(real_directory)
+        .map_err(|error| {
+            format!(
+                "failed to read directory {}: {error}",
+                display_directory.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "failed to read directory {}: {error}",
+                display_directory.display()
+            )
+        })?;
+    children.sort_by_key(|child| std::cmp::Reverse(child.file_name()));
+    children
+        .into_iter()
+        .map(|child| {
+            let real_path = child.path();
+            let display_path = display_directory.join(child.file_name());
+            let is_directory = child
+                .file_type()
+                .map_err(|error| format!("failed to inspect {}: {error}", display_path.display()))?
+                .is_dir();
+            Ok((real_path, display_path, depth, is_directory))
+        })
+        .collect()
+}
+
+fn filesystem_entry(real_path: &Path, display_path: &Path) -> Result<FilesystemEntry, String> {
+    let metadata = std::fs::symlink_metadata(real_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("file not found: {}", display_path.display())
+        } else {
+            format!("failed to stat {}: {error}", display_path.display())
+        }
+    })?;
+    let is_symlink = metadata.file_type().is_symlink();
+    let target_metadata = is_symlink
+        .then(|| std::fs::metadata(real_path).ok())
+        .flatten();
+    let represented = target_metadata.as_ref().unwrap_or(&metadata);
+    let kind = if represented.is_file() {
+        FilesystemEntryKind::File
+    } else if represented.is_dir() {
+        FilesystemEntryKind::Directory
+    } else {
+        FilesystemEntryKind::Unspecified
+    };
+    let mode = filesystem_mode(represented);
+    let (uid, gid) = filesystem_ownership(&metadata);
+    let (modified_seconds, modified_nanos) = filesystem_modified(&metadata);
+    let symlink_target = is_symlink.then(|| {
+        std::fs::canonicalize(real_path)
+            .or_else(|_| std::fs::read_link(real_path))
+            .unwrap_or_else(|_| real_path.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    });
+    let name = display_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "/".to_string());
+
+    Ok(FilesystemEntry {
+        name,
+        kind,
+        path: display_path.to_string_lossy().into_owned(),
+        size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+        mode,
+        permissions: filesystem_permissions(&metadata, is_symlink),
+        owner: filesystem_user_name(uid),
+        group: filesystem_group_name(gid),
+        modified_seconds,
+        modified_nanos,
+        symlink_target,
+        metadata: BTreeMap::new(),
+    })
+}
+
+fn is_guest_root(path: &Path) -> bool {
+    path == Path::new("/")
+}
+
+#[cfg(unix)]
+fn filesystem_mode(metadata: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mode() & 0o7777
+}
+
+#[cfg(not(unix))]
+fn filesystem_mode(metadata: &std::fs::Metadata) -> u32 {
+    if metadata.permissions().readonly() {
+        0o444
+    } else {
+        0o666
+    }
+}
+
+#[cfg(unix)]
+fn filesystem_ownership(metadata: &std::fs::Metadata) -> (u32, u32) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.uid(), metadata.gid())
+}
+
+#[cfg(not(unix))]
+fn filesystem_ownership(_metadata: &std::fs::Metadata) -> (u32, u32) {
+    (0, 0)
+}
+
+#[cfg(unix)]
+fn filesystem_modified(metadata: &std::fs::Metadata) -> (i64, i32) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.mtime(), metadata.mtime_nsec() as i32)
+}
+
+#[cfg(not(unix))]
+fn filesystem_modified(metadata: &std::fs::Metadata) -> (i64, i32) {
+    use std::time::UNIX_EPOCH;
+
+    match metadata.modified().and_then(|modified| {
+        modified
+            .duration_since(UNIX_EPOCH)
+            .map_err(std::io::Error::other)
+    }) {
+        Ok(duration) => (
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+            duration.subsec_nanos() as i32,
+        ),
+        Err(_) => (0, 0),
+    }
+}
+
+fn filesystem_permissions(metadata: &std::fs::Metadata, is_symlink: bool) -> String {
+    let mode = filesystem_mode(metadata);
+    let kind = if is_symlink {
+        'L'
+    } else if metadata.is_dir() {
+        'd'
+    } else if metadata.is_file() {
+        '-'
+    } else {
+        '?'
+    };
+    let mut value = String::with_capacity(10);
+    value.push(kind);
+    for (read, write, execute) in [
+        (0o400, 0o200, 0o100),
+        (0o040, 0o020, 0o010),
+        (0o004, 0o002, 0o001),
+    ] {
+        value.push(if mode & read != 0 { 'r' } else { '-' });
+        value.push(if mode & write != 0 { 'w' } else { '-' });
+        value.push(if mode & execute != 0 { 'x' } else { '-' });
+    }
+    value
+}
+
+fn filesystem_user_name(uid: u32) -> String {
+    account_name("/etc/passwd", uid).unwrap_or_else(|| uid.to_string())
+}
+
+fn filesystem_group_name(gid: u32) -> String {
+    account_name("/etc/group", gid).unwrap_or_else(|| gid.to_string())
+}
+
+fn account_name(path: &str, id: u32) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    contents.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        fields.next()?;
+        (fields.next()?.parse::<u32>().ok()? == id).then(|| name.to_string())
+    })
+}
+
+fn resolve_file_owner(user: Option<&str>) -> Result<(Option<ProcessUser>, PathBuf), String> {
+    let Some(user) = user else {
+        return Ok((None, PathBuf::from("/root")));
+    };
+    let resolved = crate::user::resolve_named_user(user, "/");
+    let mut owner = parse_process_user(resolved.as_deref().or(Some(user)))?
+        .ok_or_else(|| "file user is required".to_string())?;
+    if owner.gid.is_none() {
+        owner.gid = crate::user::primary_gid_for_uid("/", owner.uid);
+    }
+    let home = crate::user::home_dir_for_uid("/", owner.uid)
+        .or_else(|| (owner.uid == 0).then(|| "/root".to_string()))
+        .ok_or_else(|| format!("user {user:?} has no valid home directory"))?;
+    Ok((Some(owner), PathBuf::from(home)))
+}
+
+fn resolve_file_path(path: &str, home: &Path) -> Result<PathBuf, String> {
+    if path.contains('\0') {
+        return Err("file path contains NUL".to_string());
+    }
+    if path.is_empty() || path == "~" {
+        return Ok(normalize_guest_path(home.to_path_buf()));
+    }
+    if let Some(relative) = path.strip_prefix("~/") {
+        return Ok(normalize_guest_path(home.join(relative)));
+    }
+    if path.starts_with('~') {
+        return Err("user-specific home expansion is not supported".to_string());
+    }
+    let path = Path::new(path);
+    if path.is_absolute() {
+        Ok(normalize_guest_path(path.to_path_buf()))
+    } else {
+        Ok(normalize_guest_path(home.join(path)))
+    }
+}
+
+fn normalize_guest_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        use std::path::Component;
+
+        let mut normalized = PathBuf::from("/");
+        for component in path.components() {
+            match component {
+                Component::RootDir | Component::CurDir => {}
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                Component::Normal(component) => normalized.push(component),
+                Component::Prefix(_) => {}
+            }
+        }
+        normalized
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        path
+    }
+}
+
+fn ensure_file_directories(path: &Path, owner: Option<ProcessUser>) -> Result<(), String> {
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        cursor = cursor
+            .parent()
+            .ok_or_else(|| format!("directory has no existing ancestor: {}", path.display()))?;
+    }
+    if !cursor.is_dir() {
+        return Err(format!("path is a file: {}", cursor.display()));
+    }
+    for directory in missing.iter().rev() {
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !directory.is_dir() {
+                    return Err(format!("path is a file: {}", directory.display()));
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to create directory {}: {error}",
+                    directory.display()
+                ))
+            }
+        }
+        chown_file_path(directory, owner)
+            .map_err(|error| format!("failed to set directory ownership: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn chown_file_path(path: &Path, owner: Option<ProcessUser>) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(owner) = owner else {
+        return Ok(());
+    };
+    let path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let gid = owner.gid.unwrap_or(owner.uid);
+    let result = unsafe { libc::chown(path.as_ptr(), owner.uid, gid) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn chown_file_path(_path: &Path, _owner: Option<ProcessUser>) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -1036,6 +1596,7 @@ enum ExecInputEvent {
     Stdin(Vec<u8>),
     StdinClose,
     Cancel,
+    Signal(i32),
     /// Flush buffered output and emit a flush-ack (log-rotation boundary).
     Flush,
 }
@@ -1070,6 +1631,18 @@ fn spawn_exec_input_monitor(
                     break;
                 }
             }
+            Ok(Some((frame_type, payload)))
+                if frame_type == FrameType::Control as u8
+                    && payload.starts_with(EXEC_CONTROL_SIGNAL) =>
+            {
+                if let Some(signal) = parse_exec_process_signal(&payload) {
+                    if tx.send(ExecInputEvent::Signal(signal)).is_err() {
+                        break;
+                    }
+                } else {
+                    warn!("Ignoring invalid exec signal control frame");
+                }
+            }
             Ok(Some((frame_type, payload))) if frame_type == FrameType::Data as u8 => {
                 if tx.send(ExecInputEvent::Stdin(payload)).is_err() {
                     break;
@@ -1089,6 +1662,15 @@ fn spawn_exec_input_monitor(
     });
 
     Ok(rx)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_exec_process_signal(payload: &[u8]) -> Option<i32> {
+    let number = std::str::from_utf8(payload.strip_prefix(EXEC_CONTROL_SIGNAL)?)
+        .ok()?
+        .parse::<i32>()
+        .ok()?;
+    matches!(number, 9 | 15).then_some(number)
 }
 
 /// Serialize a completed command output as streaming exec frames.
@@ -1711,7 +2293,7 @@ fn wait_streaming_child(
         }
 
         match child.try_wait() {
-            Ok(Some(status)) => return Ok((status.code().unwrap_or(1), None)),
+            Ok(Some(status)) => return Ok((process_exit_code(&status), None)),
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     warn!(
@@ -1768,6 +2350,9 @@ fn drain_exec_input_events(
                 let _ = child.stdin.take();
             }
             Ok(ExecInputEvent::Flush) => outcome.flush = true,
+            Ok(ExecInputEvent::Signal(signal)) => {
+                signal_child_process_group(child, signal);
+            }
             Ok(ExecInputEvent::Cancel) => {
                 outcome.cancel = true;
                 return outcome;
@@ -1825,6 +2410,21 @@ fn write_live_child_stdin(child: &mut std::process::Child, data: &[u8]) {
     if close_stdin {
         let _ = child.stdin.take();
     }
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn process_exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
 }
 
 /// Execute a command and emit stdout/stderr chunks while the process is running.
@@ -2435,6 +3035,19 @@ fn kill_child_process_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
+fn signal_child_process_group(child: &std::process::Child, signal: i32) {
+    #[cfg(unix)]
+    unsafe {
+        let pid = child.id() as i32;
+        if pid > 0 && libc::kill(-pid, signal) != 0 {
+            let _ = libc::kill(pid, signal);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (child, signal);
+}
+
 /// Truncate one-shot output to its wire-safe bound.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn truncate_output(mut data: Vec<u8>) -> Vec<u8> {
@@ -2470,6 +3083,22 @@ fn bounded_exec_output_with_truncation(
 mod tests {
     use super::*;
 
+    fn spawn_long_running_test_child() -> std::process::Child {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/D", "/S", "/C", "ping 127.0.0.1 -n 31 >NUL"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = std::process::Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        command.spawn().expect("spawn long-running test child")
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn truncated_exec_frame_returns_error_without_double_closing_fd() {
@@ -2493,10 +3122,7 @@ mod tests {
         // A disconnected host input channel (a3s-box-cri died, or a client
         // disconnect) must be treated as a cancel so the command is killed
         // rather than left running orphaned.
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
+        let mut child = spawn_long_running_test_child();
         let (tx, rx) = mpsc::channel::<ExecInputEvent>();
         drop(tx); // host gone
         let outcome = drain_exec_input_events(&mut child, Some(&rx));
@@ -2511,10 +3137,7 @@ mod tests {
     #[test]
     fn test_drain_exec_input_empty_does_not_cancel() {
         use std::sync::mpsc;
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
+        let mut child = spawn_long_running_test_child();
         let (_tx, rx) = mpsc::channel::<ExecInputEvent>(); // sender alive, no events
         let outcome = drain_exec_input_events(&mut child, Some(&rx));
         assert!(
@@ -2683,6 +3306,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_echo() {
         let output = execute_command(
             &["echo".to_string(), "hello".to_string()],
@@ -2721,6 +3345,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_non_zero_exit() {
         let output = execute_command(
             &["sh".to_string(), "-c".to_string(), "exit 42".to_string()],
@@ -2735,6 +3360,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_with_env() {
         let output = execute_command(
             &[
@@ -2757,6 +3383,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_with_working_dir() {
         let output = execute_command(&["pwd".to_string()], 0, &[], Some("/tmp"), None, None, None);
         assert_eq!(output.exit_code, 0);
@@ -2813,6 +3440,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_build_command_uses_selected_users_home_unless_overridden() {
         let rootfs = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
@@ -2876,6 +3504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_execute_command_with_stdin() {
         let output = execute_command(
             &["cat".to_string()],
@@ -2908,6 +3537,211 @@ mod tests {
         let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
         let result = read_frame(&mut cursor).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn file_session_upload_and_download_round_trip_binary_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("nested/data.bin");
+        let data = vec![0, 0xff, b'a', 0];
+
+        let uploaded = handle_file_request(FileRequest {
+            op: FileOp::Upload,
+            guest_path: path.to_string_lossy().into_owned(),
+            data: Some(STANDARD.encode(&data)),
+            user: None,
+        });
+        assert!(uploaded.success, "{:?}", uploaded.error);
+        assert_eq!(uploaded.size, data.len() as u64);
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+
+        let downloaded = handle_file_request(FileRequest {
+            op: FileOp::Download,
+            guest_path: path.to_string_lossy().into_owned(),
+            data: None,
+            user: None,
+        });
+        assert!(downloaded.success, "{:?}", downloaded.error);
+        assert_eq!(downloaded.size, data.len() as u64);
+        assert_eq!(STANDARD.decode(downloaded.data.unwrap()).unwrap(), data);
+    }
+
+    #[test]
+    fn file_session_returns_bounded_errors_instead_of_parsing_as_exec() {
+        let invalid = handle_file_request(FileRequest {
+            op: FileOp::Upload,
+            guest_path: "/tmp/never-written".to_string(),
+            data: Some("not-base64!".to_string()),
+            user: None,
+        });
+        assert!(!invalid.success);
+        assert!(invalid.error.unwrap().contains("valid base64"));
+
+        let missing = handle_file_request(FileRequest {
+            op: FileOp::Download,
+            guest_path: "/path/that/does/not/exist".to_string(),
+            data: None,
+            user: None,
+        });
+        assert!(!missing.success);
+        assert!(missing.error.unwrap().contains("file not found"));
+
+        let envelope = serde_json::to_vec(&GuestSessionRequest::File(FileRequest {
+            op: FileOp::Download,
+            guest_path: "/tmp/data".to_string(),
+            data: None,
+            user: None,
+        }))
+        .unwrap();
+        assert!(declares_guest_session_request(&envelope));
+        assert!(serde_json::from_slice::<ExecRequest>(&envelope).is_err());
+    }
+
+    #[test]
+    fn file_paths_use_the_selected_users_home_without_host_path_rules() {
+        let home = Path::new("/home/tester");
+        assert_eq!(
+            resolve_file_path("data/file", home).unwrap(),
+            home.join("data/file")
+        );
+        assert_eq!(
+            resolve_file_path("~/data", home).unwrap(),
+            home.join("data")
+        );
+        assert_eq!(
+            resolve_file_path("/tmp/data", home).unwrap(),
+            Path::new("/tmp/data")
+        );
+        assert!(resolve_file_path("~other/data", home).is_err());
+        assert!(resolve_file_path("bad\0path", home).is_err());
+    }
+
+    #[test]
+    fn filesystem_session_round_trips_metadata_mutations_and_depth() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("work");
+        let request = |op, path: &Path, destination: Option<&Path>, depth| FilesystemRequest {
+            op,
+            path: path.to_string_lossy().into_owned(),
+            destination: destination.map(|path| path.to_string_lossy().into_owned()),
+            depth,
+            user: None,
+        };
+
+        let created = handle_filesystem_request(request(
+            FilesystemOp::MakeDir,
+            &root.join("nested"),
+            None,
+            0,
+        ));
+        assert!(created.success, "{:?}", created.error);
+        let created = created.entry.unwrap();
+        assert_eq!(created.kind, FilesystemEntryKind::Directory);
+        assert_eq!(created.name, "nested");
+
+        std::fs::write(root.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(root.join("nested/b.txt"), b"beta").unwrap();
+        std::fs::write(root.join("z.txt"), b"omega").unwrap();
+        let stat =
+            handle_filesystem_request(request(FilesystemOp::Stat, &root.join("a.txt"), None, 0));
+        assert!(stat.success, "{:?}", stat.error);
+        let stat = stat.entry.unwrap();
+        assert_eq!(stat.kind, FilesystemEntryKind::File);
+        assert_eq!(stat.size, 5);
+        assert_eq!(stat.name, "a.txt");
+
+        let shallow = handle_filesystem_request(request(FilesystemOp::ListDir, &root, None, 0));
+        assert!(shallow.success, "{:?}", shallow.error);
+        assert_eq!(
+            shallow
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "nested", "z.txt"]
+        );
+        let deep = handle_filesystem_request(request(FilesystemOp::ListDir, &root, None, 2));
+        assert!(deep.success, "{:?}", deep.error);
+        assert_eq!(
+            deep.entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "nested", "b.txt", "z.txt"]
+        );
+
+        let destination = root.join("moved/a.txt");
+        let moved = handle_filesystem_request(request(
+            FilesystemOp::Move,
+            &root.join("a.txt"),
+            Some(&destination),
+            0,
+        ));
+        assert!(moved.success, "{:?}", moved.error);
+        assert_eq!(moved.entry.unwrap().path, destination.to_string_lossy());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"alpha");
+
+        let too_deep = handle_filesystem_request(request(
+            FilesystemOp::ListDir,
+            &root,
+            None,
+            MAX_FILESYSTEM_DEPTH + 1,
+        ));
+        assert!(!too_deep.success);
+        assert!(too_deep.error.unwrap().contains("depth"));
+
+        let removed = handle_filesystem_request(request(FilesystemOp::Remove, &root, None, 0));
+        assert!(removed.success, "{:?}", removed.error);
+        assert!(!root.exists());
+        let idempotent = handle_filesystem_request(request(FilesystemOp::Remove, &root, None, 0));
+        assert!(idempotent.success, "{:?}", idempotent.error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_stat_reports_symlink_target_without_following_its_identity() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.txt");
+        let link = directory.path().join("link.txt");
+        std::fs::write(&target, b"target").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let response = handle_filesystem_request(FilesystemRequest {
+            op: FilesystemOp::Stat,
+            path: link.to_string_lossy().into_owned(),
+            destination: None,
+            depth: 0,
+            user: None,
+        });
+        assert!(response.success, "{:?}", response.error);
+        let entry = response.entry.unwrap();
+        assert_eq!(entry.kind, FilesystemEntryKind::File);
+        assert_eq!(entry.symlink_target.as_deref(), target.to_str());
+        assert!(entry.permissions.starts_with('L'));
+    }
+
+    #[test]
+    fn filesystem_session_envelope_cannot_be_parsed_as_exec() {
+        let envelope = serde_json::to_vec(&GuestSessionRequest::Filesystem(FilesystemRequest {
+            op: FilesystemOp::Stat,
+            path: "/tmp/data".to_string(),
+            destination: None,
+            depth: 0,
+            user: None,
+        }))
+        .unwrap();
+        assert!(declares_guest_session_request(&envelope));
+        assert!(serde_json::from_slice::<ExecRequest>(&envelope).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_normalizes_parent_segments_before_guarding_guest_root() {
+        let resolved = resolve_file_path("/tmp/../", Path::new("/home/user")).unwrap();
+        assert_eq!(resolved, Path::new("/"));
+        assert!(is_guest_root(&resolved));
     }
 
     #[test]
@@ -3266,5 +4100,86 @@ mod tests {
         assert!(!String::from_utf8_lossy(&stdout).contains("done"));
         assert!(String::from_utf8_lossy(&stderr).contains("stop requested"));
         assert_eq!(exit_code, Some(137));
+    }
+
+    #[test]
+    fn exec_process_signal_control_accepts_only_pinned_signals() {
+        assert_eq!(parse_exec_process_signal(b"signal:15"), Some(15));
+        assert_eq!(parse_exec_process_signal(b"signal:9"), Some(9));
+        assert_eq!(parse_exec_process_signal(b"signal:0"), None);
+        assert_eq!(parse_exec_process_signal(b"signal:64"), None);
+        assert_eq!(parse_exec_process_signal(b"signal:SIGTERM"), None);
+        assert_eq!(parse_exec_process_signal(b"signal-main:15"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_execute_command_streaming_sigterm_terminates_process_group() {
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let mut buf = Vec::new();
+
+        let signal_tx = input_tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            signal_tx.send(ExecInputEvent::Signal(15)).unwrap();
+        });
+
+        let started = std::time::Instant::now();
+        execute_command_streaming(
+            ExecCommandSpec {
+                cmd: &[
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf ready; sleep 3 & wait".to_string(),
+                ],
+                timeout_ns: 5_000_000_000,
+                env: &[],
+                working_dir: None,
+                rootfs: None,
+                stdin_data: None,
+                stdin_streaming: false,
+                user: None,
+            },
+            Some(input_rx),
+            &mut buf,
+        )
+        .unwrap();
+        drop(input_tx);
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let mut stdout = Vec::new();
+        let mut exit_code = None;
+        while let Some((frame_type, payload)) = read_frame(&mut cursor).unwrap() {
+            match frame_type {
+                value if value == FrameType::Data as u8 => {
+                    let chunk: ExecChunk = serde_json::from_slice(&payload).unwrap();
+                    if chunk.stream == StreamType::Stdout {
+                        stdout.extend_from_slice(&chunk.data);
+                    }
+                }
+                value if value == FrameType::Control as u8 => {
+                    let exit: ExecExit = serde_json::from_slice(&payload).unwrap();
+                    exit_code = Some(exit.exit_code);
+                }
+                other => panic!("unexpected frame type: {other}"),
+            }
+        }
+
+        assert_eq!(stdout, b"ready");
+        assert_eq!(exit_code, Some(143));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "SIGTERM did not terminate the complete process group"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn process_exit_code_preserves_terminating_signal() {
+        let status = std::process::Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+        assert_eq!(process_exit_code(&status), 143);
     }
 }

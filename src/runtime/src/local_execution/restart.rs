@@ -36,6 +36,7 @@ impl LocalExecutionManager {
         operation_id: &OperationId,
         options: RestartExecutionOptions,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        super::record::validate_record_health(&record)?;
         let record = self.stabilize_snapshot(record).await?;
         if let Some(result) =
             completed_restart_result(&record, expected_generation, operation_id, options)?

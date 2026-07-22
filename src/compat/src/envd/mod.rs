@@ -1,4 +1,6 @@
 mod connect;
+mod files;
+mod filesystem;
 mod process;
 
 use std::sync::Arc;
@@ -22,6 +24,8 @@ use crate::routing::RouteLease;
 #[derive(Clone)]
 pub struct EnvdBroker {
     executions: Arc<dyn ExecutionManager>,
+    files: files::FileBroker,
+    filesystem: filesystem::FilesystemBroker,
     processes: process::ProcessBroker,
 }
 
@@ -32,6 +36,8 @@ impl EnvdBroker {
     ) -> Self {
         Self {
             executions,
+            files: files::FileBroker::new(sessions.clone()),
+            filesystem: filesystem::FilesystemBroker::new(sessions.clone()),
             processes: process::ProcessBroker::new(sessions),
         }
     }
@@ -45,6 +51,18 @@ impl EnvdBroker {
         if path.starts_with("/process.Process/") {
             return self
                 .processes
+                .handle(request, lease.execution_id(), lease.execution_generation())
+                .await;
+        }
+        if path == "/files" {
+            return self
+                .files
+                .handle(request, lease.execution_id(), lease.execution_generation())
+                .await;
+        }
+        if path.starts_with("/filesystem.Filesystem/") {
+            return self
+                .filesystem
                 .handle(request, lease.execution_id(), lease.execution_generation())
                 .await;
         }
@@ -141,5 +159,7 @@ fn json_response(status: StatusCode, code: &'static str, message: &'static str) 
     response
 }
 
+#[cfg(test)]
+mod file_tests;
 #[cfg(test)]
 mod tests;

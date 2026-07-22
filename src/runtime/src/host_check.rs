@@ -140,36 +140,39 @@ fn check_windows_whpx() -> Result<VirtualizationSupport> {
         ));
     }
 
-    let output = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform).State",
-        ])
-        .output()
-        .map_err(|e| BoxError::ExecError(format!("Failed to query HypervisorPlatform: {}", e)))?;
+    use windows_sys::Win32::Foundation::BOOL;
+    use windows_sys::Win32::System::Hypervisor::{
+        WHvCapabilityCodeHypervisorPresent, WHvGetCapability,
+    };
 
-    if !output.status.success() {
+    let mut present: BOOL = 0;
+    let mut written = 0_u32;
+    // SAFETY: both output pointers refer to initialized, writable values for
+    // the exact buffer sizes passed to the Windows Hypervisor Platform API.
+    let status = unsafe {
+        WHvGetCapability(
+            WHvCapabilityCodeHypervisorPresent,
+            (&mut present as *mut BOOL).cast(),
+            std::mem::size_of::<BOOL>() as u32,
+            &mut written,
+        )
+    };
+    if status < 0 {
         return Err(BoxError::ConfigError(format!(
-            "Failed to query Windows Hypervisor Platform state (exit code {:?})",
-            output.status.code()
+            "Failed to query Windows Hypervisor Platform capability (HRESULT 0x{:08X})",
+            status as u32
         )));
     }
-
-    let state = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_ascii_lowercase();
-    if state == "enabled" {
+    if written == std::mem::size_of::<BOOL>() as u32 && present != 0 {
         Ok(VirtualizationSupport {
             backend: "WHPX".to_string(),
-            details: "Windows Hypervisor Platform is enabled".to_string(),
+            details: "Windows Hypervisor Platform is available".to_string(),
         })
     } else {
-        Err(BoxError::ConfigError(format!(
-            "Windows Hypervisor Platform is not enabled (current state: {}). Enable the 'Windows Hypervisor Platform' optional feature and reboot.",
-            if state.is_empty() { "unknown" } else { &state }
-        )))
+        Err(BoxError::ConfigError(
+            "Windows Hypervisor Platform is not available. Enable the 'Windows Hypervisor Platform' optional feature, verify firmware virtualization, and reboot."
+                .to_string(),
+        ))
     }
 }
 

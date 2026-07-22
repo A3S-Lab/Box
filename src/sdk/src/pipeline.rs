@@ -732,6 +732,7 @@ fn warm_once<'a>(spec: &WarmBase<'a>) -> Result<Base<'a>> {
         wait_ready(&base_box)?;
         let setup = with_env(&spec.setup, &spec.env);
         box_run(&["exec", &base_box, "--", "sh", "-c", &setup])?; // clone + deps ONCE
+        box_run(&["stop", &base_box])?;
         box_run(&["snapshot", "create", &base_box, "--name", &snap])?;
         snapshot_id(&snap)
     })();
@@ -1024,7 +1025,7 @@ mod tests {
     }
 
     // A POSIX-sh stub standing in for `a3s-box`: enough to drive warm_base + step
-    // through their happy paths (run/exec/start/rm succeed; `snapshot create`
+    // through their happy paths (run/exec/start/stop/rm succeed; `snapshot create`
     // records name->id in a state file that `snapshot ls` echoes; an exec whose
     // command contains "boom" exits 7, "emitmetric" prints a `::metric` line;
     // a `snapshot restore` whose target name contains "infrafail" exits 1).
@@ -1032,7 +1033,7 @@ mod tests {
     const FAKE_BOX: &str = r#"#!/bin/sh
 state="$(dirname "$0")/.snaps"
 case "$1" in
-  run|start|rm) exit 0 ;;
+  run|start|stop|rm) exit 0 ;;
   exec) last=""; for a in "$@"; do last="$a"; done
         case "$last" in
           *emitmetric*) printf '::metric score=9\n'; exit 0 ;;

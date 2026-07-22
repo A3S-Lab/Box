@@ -342,7 +342,7 @@ pub(super) fn resolve_chown(spec: &str, rootfs_dir: &Path) -> Result<(u32, u32)>
     let uid = resolve_user(user_part, rootfs_dir)?;
     let gid = match group_part {
         Some(g) => resolve_group(g, rootfs_dir)?,
-        None => uid_to_gid(uid, rootfs_dir).unwrap_or(uid),
+        None => uid_to_gid(uid, rootfs_dir)?.unwrap_or(uid),
     };
     Ok((uid, gid))
 }
@@ -352,7 +352,8 @@ fn resolve_user(user: &str, rootfs: &Path) -> Result<u32> {
         return Ok(n);
     }
     // Look up in rootfs /etc/passwd: root:x:0:0:...
-    let passwd = std::fs::read_to_string(rootfs.join("etc/passwd")).unwrap_or_default();
+    let passwd =
+        crate::oci::rootfs::read_guest_file_to_string(rootfs, "etc/passwd")?.unwrap_or_default();
     for line in passwd.lines() {
         let f: Vec<&str> = line.splitn(4, ':').collect();
         if f.len() >= 3 && f[0] == user {
@@ -371,7 +372,8 @@ fn resolve_group(group: &str, rootfs: &Path) -> Result<u32> {
     if let Ok(n) = group.parse::<u32>() {
         return Ok(n);
     }
-    let etc_group = std::fs::read_to_string(rootfs.join("etc/group")).unwrap_or_default();
+    let etc_group =
+        crate::oci::rootfs::read_guest_file_to_string(rootfs, "etc/group")?.unwrap_or_default();
     for line in etc_group.lines() {
         let f: Vec<&str> = line.splitn(4, ':').collect();
         if f.len() >= 3 && f[0] == group {
@@ -387,15 +389,17 @@ fn resolve_group(group: &str, rootfs: &Path) -> Result<u32> {
 }
 
 /// Get the primary GID for a UID from /etc/passwd (field 4).
-fn uid_to_gid(uid: u32, rootfs: &Path) -> Option<u32> {
-    let passwd = std::fs::read_to_string(rootfs.join("etc/passwd")).ok()?;
+fn uid_to_gid(uid: u32, rootfs: &Path) -> Result<Option<u32>> {
+    let Some(passwd) = crate::oci::rootfs::read_guest_file_to_string(rootfs, "etc/passwd")? else {
+        return Ok(None);
+    };
     for line in passwd.lines() {
         let f: Vec<&str> = line.splitn(5, ':').collect();
         if f.len() >= 4 && f[2].parse::<u32>().ok() == Some(uid) {
-            return f[3].parse::<u32>().ok();
+            return Ok(f[3].parse::<u32>().ok());
         }
     }
-    None
+    Ok(None)
 }
 
 /// Placeholder — no longer used; chown is applied in tar headers, not the
@@ -469,6 +473,22 @@ mod tests {
             std::os::unix::fs::symlink("/etc", &link).unwrap();
             assert!(assert_within(base, &link.join("passwd")).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_chown_rejects_rootfs_passwd_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("passwd"), "hostuser:x:4242:4242::/:/bin/sh\n").unwrap();
+        std::os::unix::fs::symlink("../../outside/passwd", rootfs.join("etc/passwd")).unwrap();
+
+        let error = resolve_chown("hostuser", &rootfs).unwrap_err().to_string();
+
+        assert!(error.contains("escapes rootfs"), "{error}");
     }
 
     // --- is_tar_archive tests ---

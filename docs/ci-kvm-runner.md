@@ -43,8 +43,11 @@ variable*:
 | `KVM_CI_FOREGROUND_MAX_P50_MS` | e.g. `3200` | Maximum cached foreground no-op p50 in milliseconds (optional; defaults to `3200`). Tighten only after calibrating the dedicated runner. |
 
 Once `KVM_CI=true` and a runner with the `kvm` label is online, every push to
-`main`, every PR, every `v*` tag, and manual `workflow_dispatch` runs the real
-microVM gate after the cheap `fmt`/`clippy`/`test` jobs pass.
+`main`, every `v*` tag, and manual `workflow_dispatch` runs the real microVM
+gate after the cheap `fmt`/`clippy`/`test` jobs pass. Pull-request events skip
+the persistent self-hosted runner so untrusted PR code is never executed there.
+After reviewing a PR, a maintainer can dispatch the workflow explicitly against
+that PR branch to run the same gate before merge.
 
 ## What it runs
 

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use a3s_box_core::log::{is_runtime_console_noise, json_log_path, LogDriver, LogEntry};
+use a3s_box_core::log::{json_log_path, LogDriver, LogEntry, RuntimeConsoleFilter};
 use a3s_box_core::network::{IsolationMode, NetworkConfig, NetworkEndpoint, NetworkMode};
 use a3s_box_core::platform::Platform;
 use a3s_box_core::snapshot::SnapshotMetadata;

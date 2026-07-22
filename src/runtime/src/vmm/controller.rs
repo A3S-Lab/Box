@@ -11,6 +11,113 @@ use super::provider::VmmProvider;
 use super::spec::InstanceSpec;
 use super::VmHandler;
 
+#[cfg(target_os = "windows")]
+struct StandardHandleInheritanceGuard {
+    _spawn_lock: std::sync::MutexGuard<'static, ()>,
+    changed_handles: Vec<windows_sys::Win32::Foundation::HANDLE>,
+}
+
+#[cfg(target_os = "windows")]
+impl StandardHandleInheritanceGuard {
+    fn acquire() -> std::io::Result<Self> {
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+
+        static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let spawn_lock = SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = Self {
+            _spawn_lock: spawn_lock,
+            changed_handles: Vec::new(),
+        };
+        for standard_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            let handle = unsafe { GetStdHandle(standard_handle) };
+            match clear_handle_inherit_flag(handle) {
+                Ok(true) => guard.changed_handles.push(handle),
+                Ok(false) => {}
+                Err(error) => {
+                    let error = std::io::Error::new(
+                        error.kind(),
+                        format!(
+                            "failed to clear inheritance for standard handle {standard_handle}: {error}"
+                        ),
+                    );
+                    if let Err(rollback_error) = guard.restore() {
+                        return Err(std::io::Error::new(
+                            error.kind(),
+                            format!("{error}; rollback also failed: {rollback_error}"),
+                        ));
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        Ok(guard)
+    }
+
+    fn restore(&mut self) -> std::io::Result<()> {
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+
+        let mut first_error = None;
+        let mut failed_handles = Vec::new();
+        for handle in std::mem::take(&mut self.changed_handles) {
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                == 0
+            {
+                failed_handles.push(handle);
+                if first_error.is_none() {
+                    first_error = Some(std::io::Error::last_os_error());
+                }
+            }
+        }
+        self.changed_handles = failed_handles;
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for StandardHandleInheritanceGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.restore() {
+            tracing::warn!(
+                %error,
+                "Failed to restore standard-handle inheritance after shim spawn"
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn clear_handle_inherit_flag(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> std::io::Result<bool> {
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+
+    if handle == 0 || handle == INVALID_HANDLE_VALUE {
+        return Ok(false);
+    }
+
+    let mut flags = 0;
+    if unsafe { GetHandleInformation(handle, &mut flags) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if flags & HANDLE_FLAG_INHERIT == 0 {
+        return Ok(false);
+    }
+    if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(true)
+}
+
 /// Controller for spawning VM subprocesses.
 ///
 /// Spawns the `a3s-box-shim` binary in a subprocess and returns a ShimHandler
@@ -492,10 +599,30 @@ impl VmmProvider for VmController {
             }
         }
 
+        #[cfg(target_os = "windows")]
+        let mut standard_handle_guard =
+            StandardHandleInheritanceGuard::acquire().map_err(|e| BoxError::BoxBootError {
+                message: format!("Failed to isolate shim standard handles: {e}"),
+                hint: Some("Retry the command from a fresh terminal".to_string()),
+            })?;
+
         let child = cmd.spawn().map_err(|e| BoxError::BoxBootError {
             message: format!("Failed to spawn shim: {}", e),
             hint: Some(format!("Shim path: {}", self.shim_path.display())),
         })?;
+
+        #[cfg(target_os = "windows")]
+        if let Err(error) = standard_handle_guard.restore() {
+            let mut failed_child = child;
+            let _ = failed_child.kill();
+            let _ = failed_child.wait();
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "Failed to restore standard-handle inheritance after shim spawn: {error}"
+                ),
+                hint: Some("Retry the command from a fresh terminal".to_string()),
+            });
+        }
 
         let pid = child.id();
         tracing::info!(
@@ -568,6 +695,72 @@ exec /bin/sleep 30
         assert!(message.contains("Shim binary not found"));
         assert!(message.contains(&missing.display().to_string()));
         assert!(message.contains("cargo build -p a3s-box-shim"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn clear_handle_inherit_flag_clears_an_inheritable_file_handle() {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+        };
+
+        static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        let file = tempfile::tempfile().unwrap();
+        let handle = file.as_raw_handle() as HANDLE;
+        assert_ne!(
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) },
+            0
+        );
+
+        assert!(clear_handle_inherit_flag(handle).unwrap());
+        let mut flags = 0;
+        assert_ne!(unsafe { GetHandleInformation(handle, &mut flags) }, 0);
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        assert!(!clear_handle_inherit_flag(handle).unwrap());
+
+        let mut guard = StandardHandleInheritanceGuard {
+            _spawn_lock: TEST_LOCK.lock().unwrap(),
+            changed_handles: vec![handle],
+        };
+        guard.restore().unwrap();
+        assert_ne!(unsafe { GetHandleInformation(handle, &mut flags) }, 0);
+        assert_ne!(flags & HANDLE_FLAG_INHERIT, 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn configure_shim_stdio_keeps_explicit_windows_log_handles() {
+        let temp = tempfile::tempdir().unwrap();
+        let controller = VmController {
+            shim_path: PathBuf::from("unused"),
+        };
+        let spec = InstanceSpec {
+            box_id: "box-windows-stdio".to_string(),
+            console_output: Some(temp.path().join("logs").join("console.log")),
+            ..Default::default()
+        };
+        let mut cmd = Command::new("cmd.exe");
+        cmd.arg("/C")
+            .arg("echo fresh-stdout & echo fresh-stderr 1>&2");
+
+        controller.configure_shim_stdio(&mut cmd, &spec);
+        let status = cmd.status().unwrap();
+
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("logs").join("shim.stdout.log"))
+                .unwrap()
+                .trim(),
+            "fresh-stdout"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("logs").join("shim.stderr.log"))
+                .unwrap()
+                .trim(),
+            "fresh-stderr"
+        );
     }
 
     #[cfg(unix)]

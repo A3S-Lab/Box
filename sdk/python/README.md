@@ -37,8 +37,10 @@ The synchronous and asynchronous Code Interpreter exports are available from
 The production-tested Sandbox backend supports memory-preserving pause through
 the unchanged SDK methods: `await sandbox.pause(keep_memory=True)` followed by
 `await sandbox.connect(timeout=60)`. The A3S OS matrix proves that a process
-started before pause continues after resume. `keep_memory=False` remains
-explicitly unsupported until filesystem-only pause is implemented.
+started before pause continues after resume. `keep_memory=False` performs a
+durable filesystem-only pause: it retains the rootfs and replaces the runtime
+generation on connect. Those cold-pause assertions are in the production gate
+and await the next certified A3S OS run.
 
 `A3SConnectionConfig` reads `A3S_BOX_ENDPOINT` and `A3S_BOX_API_KEY` without
 changing process-global environment variables. It derives the Sandbox domain

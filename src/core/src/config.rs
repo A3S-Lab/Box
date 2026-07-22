@@ -547,6 +547,36 @@ fn default_sidecar_vsock_port() -> u32 {
     4092
 }
 
+/// Default virtual CPU count for the current host backend.
+///
+/// The Windows WHPX backend currently supports a reliable single-vCPU boot
+/// path. Linux and macOS retain the existing two-vCPU default.
+pub const DEFAULT_VCPUS: u32 = if cfg!(target_os = "windows") { 1 } else { 2 };
+
+/// Maximum virtual CPU count accepted by the libkrun API.
+pub const MAX_VCPUS: u32 = u8::MAX as u32;
+
+/// Validate a virtual CPU count against the current host backend.
+pub fn validate_vcpu_count(vcpus: u32) -> std::result::Result<(), String> {
+    if vcpus == 0 {
+        return Err("virtual CPU count must be at least 1".to_string());
+    }
+    if vcpus > MAX_VCPUS {
+        return Err(format!(
+            "virtual CPU count {vcpus} exceeds the maximum of {MAX_VCPUS}"
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    if vcpus != 1 {
+        return Err(format!(
+            "the Windows WHPX backend currently supports exactly 1 virtual CPU; requested {vcpus}"
+        ));
+    }
+
+    Ok(())
+}
+
 impl Default for SidecarConfig {
     fn default() -> Self {
         Self {
@@ -576,7 +606,7 @@ pub struct ResourceConfig {
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
-            vcpus: 2,
+            vcpus: DEFAULT_VCPUS,
             memory_mb: 1024,
             disk_mb: 4096,
             timeout: 3600, // 1 hour
@@ -615,7 +645,7 @@ mod tests {
         assert!(config.image.is_empty());
         // Empty workspace signals the runtime to use a per-box directory at boot time.
         assert!(config.workspace.as_os_str().is_empty());
-        assert_eq!(config.resources.vcpus, 2);
+        assert_eq!(config.resources.vcpus, DEFAULT_VCPUS);
         assert!(!config.debug_grpc);
         assert!(!config.read_only);
         assert!(config.user.is_none());
@@ -681,10 +711,24 @@ mod tests {
     fn test_resource_config_default() {
         let config = ResourceConfig::default();
 
-        assert_eq!(config.vcpus, 2);
+        assert_eq!(config.vcpus, DEFAULT_VCPUS);
         assert_eq!(config.memory_mb, 1024);
         assert_eq!(config.disk_mb, 4096);
         assert_eq!(config.timeout, 3600);
+    }
+
+    #[test]
+    fn test_validate_vcpu_count() {
+        assert!(validate_vcpu_count(DEFAULT_VCPUS).is_ok());
+        assert!(validate_vcpu_count(0).unwrap_err().contains("at least 1"));
+        assert!(validate_vcpu_count(MAX_VCPUS + 1)
+            .unwrap_err()
+            .contains("maximum"));
+
+        #[cfg(target_os = "windows")]
+        assert!(validate_vcpu_count(2).unwrap_err().contains("WHPX"));
+        #[cfg(not(target_os = "windows"))]
+        assert!(validate_vcpu_count(2).is_ok());
     }
 
     #[test]

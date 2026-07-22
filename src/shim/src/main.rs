@@ -14,7 +14,11 @@
 
 mod krun;
 
+#[cfg(target_os = "windows")]
+use a3s_box_core::config::validate_vcpu_count;
 use a3s_box_core::error::{BoxError, Result};
+#[cfg(target_os = "windows")]
+use a3s_box_core::exec::WINDOWS_STOP_REQUEST_FILE;
 use a3s_box_core::vmm::InstanceSpec;
 use a3s_box_core::EXEC_VSOCK_PORT;
 #[cfg(target_os = "windows")]
@@ -26,7 +30,15 @@ use a3s_box_netproxy::{spawn_inherited_netproxy, InheritedNetProxyConfig};
 use clap::Parser;
 use krun::KrunContext;
 #[cfg(target_os = "windows")]
-use std::path::PathBuf;
+use libkrun_sys::{KRUN_KERNEL_FORMAT_ELF, KRUN_KERNEL_FORMAT_IMAGE_GZ};
+#[cfg(all(target_os = "windows", test))]
+use std::fs;
+#[cfg(target_os = "windows")]
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 use tracing_subscriber::EnvFilter;
 
 #[cfg(target_os = "windows")]
@@ -62,6 +74,10 @@ struct Args {
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
     ready_file: Option<PathBuf>,
+
+    #[cfg(target_os = "windows")]
+    #[arg(long, hide = true)]
+    stop_request: Option<PathBuf>,
 
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
@@ -139,11 +155,16 @@ fn run() -> Result<()> {
             message: "Missing --ready-file for Windows port-forward worker".to_string(),
             hint: None,
         })?;
+        let stop_request = args.stop_request.ok_or_else(|| BoxError::BoxBootError {
+            message: "Missing --stop-request for Windows port-forward worker".to_string(),
+            hint: None,
+        })?;
         return windows_port_forward::run_port_forward_worker(
             &box_id,
             &args.port_map,
             parent_pid,
             &ready_file,
+            &stop_request,
         );
     }
 
@@ -186,6 +207,9 @@ fn run() -> Result<()> {
             hint: Some("Ensure the guest rootfs is properly set up".to_string()),
         });
     }
+
+    #[cfg(target_os = "windows")]
+    prepare_windows_guest(&spec)?;
 
     // Validate filesystem mounts exist
     for mount in &spec.fs_mounts {
@@ -475,11 +499,91 @@ fn is_auto_assigned_host_port(mapping: &str) -> bool {
         == Some(0)
 }
 
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_EXIT_CODE: &str = ".a3s_exit_code";
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_STDOUT: &str = "guest-init.stdout.log";
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_STDERR: &str = "guest-init.stderr.log";
+#[cfg(target_os = "windows")]
+const WINDOWS_GUEST_RESULT_MARKER: &str = ".a3s_host_result_collected";
+#[cfg(target_os = "windows")]
+const WINDOWS_LIVE_LOGS_DRAINED_MARKER: &str = ".a3s_host_live_logs_drained";
+#[cfg(target_os = "windows")]
+const WINDOWS_RETURN_ON_EXIT_ENV: &str = "LIBKRUN_WINDOWS_RETURN_ON_EXIT";
+
+/// Apply the currently supported WHPX boot contract and clear result files from
+/// an earlier boot before libkrun opens the rootfs.
+#[cfg(target_os = "windows")]
+fn prepare_windows_guest(spec: &InstanceSpec) -> Result<()> {
+    validate_vcpu_count(u32::from(spec.vcpus)).map_err(|message| BoxError::BoxBootError {
+        message,
+        hint: Some("Use --cpus 1 on Windows".to_string()),
+    })?;
+
+    // The checked-in libkrunfw kernel boots reliably through WHPX's legacy PIC
+    // path. An explicitly present value (including an empty one) remains an
+    // expert override for kernel debugging.
+    if std::env::var_os("LIBKRUN_WINDOWS_KERNEL_CMDLINE_APPEND").is_none() {
+        std::env::set_var("LIBKRUN_WINDOWS_KERNEL_CMDLINE_APPEND", "noapic");
+        tracing::debug!("Enabled the Windows WHPX noapic kernel boot path");
+    }
+
+    // A3S owns this dedicated shim process and must regain control after the
+    // workload exits so its live log processor can drain the complete streams.
+    // The bundled libkrun keeps its normal process-takeover contract unless this
+    // internal opt-in is set.
+    std::env::set_var(WINDOWS_RETURN_ON_EXIT_ENV, "1");
+
+    for name in [
+        WINDOWS_GUEST_EXIT_CODE,
+        WINDOWS_GUEST_STDOUT,
+        WINDOWS_GUEST_STDERR,
+        WINDOWS_GUEST_RESULT_MARKER,
+        WINDOWS_LIVE_LOGS_DRAINED_MARKER,
+    ] {
+        let path = spec.rootfs_path.join(name);
+        if let Err(error) = a3s_box_core::windows_file::remove_path_no_follow(&path) {
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "Failed to remove stale Windows guest result {}: {error}",
+                    path.display()
+                ),
+                hint: Some(
+                    "Ensure the extracted rootfs is writable by the current user".to_string(),
+                ),
+            });
+        }
+    }
+
+    // The live log processor must open both streams before start_enter so a
+    // short guest cannot exit before its tailers are ready. The guest wrapper
+    // append-opens the same files after boot; create them empty on the host now
+    // to make that readiness barrier possible and discard any stale output.
+    for name in [WINDOWS_GUEST_STDOUT, WINDOWS_GUEST_STDERR] {
+        let path = spec.rootfs_path.join(name);
+        a3s_box_core::windows_file::replace_regular_file(&path, b"").map_err(|error| {
+            BoxError::BoxBootError {
+                message: format!(
+                    "Failed to create empty Windows guest stream {}: {error}",
+                    path.display()
+                ),
+                hint: Some(
+                    "Ensure the extracted rootfs is writable by the current user".to_string(),
+                ),
+            }
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Configure libkrun context and start the VM.
 ///
 /// # Safety
 /// This function calls unsafe libkrun FFI functions.
-/// It performs process takeover on success - the function never returns.
+/// It performs process takeover on Unix. The bundled Windows backend returns
+/// after guest shutdown so the shim can finish host-side log processing.
 unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // Initialize libkrun logging
     tracing::debug!("Initializing libkrun logging");
@@ -498,6 +602,9 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         "Setting VM config"
     );
     ctx.set_vm_config(spec.vcpus, spec.memory_mib)?;
+
+    #[cfg(target_os = "windows")]
+    configure_windows_kernel(&ctx)?;
 
     // Raise RLIMIT_NOFILE to maximum - CRITICAL for virtio-fs
     #[cfg(unix)]
@@ -740,17 +847,32 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         ctx.add_vsock_port_windows(EXEC_VSOCK_PORT, &pipe_name)?;
 
         // Note: PTY and attestation channels are not yet implemented on Windows.
-        if !spec.port_map.is_empty() {
-            let port_fwd_pipe =
-                windows_port_forward::spawn_port_forward_manager(&spec.box_id, &spec.port_map)?;
-            tracing::info!(
-                port_map = ?spec.port_map,
-                pipe_name = %port_fwd_pipe,
-                guest_port = PORT_FWD_VSOCK_PORT,
-                "Configuring Windows published-port control channel"
-            );
-            ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, &port_fwd_pipe)?;
-        }
+        // The 4093 channel also carries lifecycle signals, so it must exist even
+        // when the box has no published ports.
+        let socket_dir = spec
+            .exec_socket_path
+            .parent()
+            .ok_or_else(|| BoxError::BoxBootError {
+                message: format!(
+                    "Windows exec socket path has no parent: {}",
+                    spec.exec_socket_path.display()
+                ),
+                hint: None,
+            })?;
+        let stop_request = socket_dir.join(WINDOWS_STOP_REQUEST_FILE);
+        let port_fwd_pipe = windows_port_forward::spawn_port_forward_manager(
+            &spec.box_id,
+            &spec.port_map,
+            &stop_request,
+        )?;
+        tracing::info!(
+            port_map = ?spec.port_map,
+            pipe_name = %port_fwd_pipe,
+            guest_port = PORT_FWD_VSOCK_PORT,
+            stop_request = %stop_request.display(),
+            "Configuring Windows host-control channel"
+        );
+        ctx.add_vsock_port_windows(PORT_FWD_VSOCK_PORT, &port_fwd_pipe)?;
     }
 
     // Note: A3S_TEE_SIMULATE is already included in spec.entrypoint.env
@@ -953,6 +1075,8 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // after the launching CLI exits (the processor used to die with that CLI).
     let log_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let log_ready = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    #[cfg(target_os = "windows")]
+    let windows_guest_rootfs = spec.rootfs_path.clone();
     let log_thread = spec.console_output.as_ref().map(|console| {
         let console = console.clone();
         let log_dir = console
@@ -963,6 +1087,23 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         let stop = log_stop.clone();
         let ready = log_ready.clone();
         std::thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                // The Windows init wrapper persists the workload streams in the
+                // shared rootfs because the WHPX console contains only boot
+                // diagnostics. Tail those files directly so `logs` is live.
+                let stdout = windows_guest_rootfs.join(WINDOWS_GUEST_STDOUT);
+                let stderr = windows_guest_rootfs.join(WINDOWS_GUEST_STDERR);
+                a3s_box_core::log::run_log_processor_streams_with_ready(
+                    &stdout,
+                    &stderr,
+                    &log_dir,
+                    &config,
+                    &stop,
+                    Some(&ready),
+                );
+            }
+            #[cfg(not(target_os = "windows"))]
             a3s_box_core::log::run_log_processor_with_ready(
                 &console,
                 &log_dir,
@@ -1005,40 +1146,84 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // drain the remainder and stop, then join so the final lines reach
     // container.json before this process exits (no teardown race).
     log_stop.store(true, std::sync::atomic::Ordering::SeqCst);
-    if let Some(handle) = log_thread {
-        let _ = handle.join();
-    }
+    let _log_thread_drained = log_thread.is_some_and(|handle| handle.join().is_ok());
     if let Some(console) = spec.console_output.as_ref() {
         let structured = a3s_box_core::log::json_log_path(
             console
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new(".")),
         );
-        let stderr_console = a3s_box_core::log::stderr_console_path(console);
-        let structured_empty = structured.metadata().map(|m| m.len() == 0).unwrap_or(true);
-        let raw_has_output = console.metadata().map(|m| m.len() > 0).unwrap_or(false)
-            || stderr_console
-                .metadata()
-                .map(|m| m.len() > 0)
-                .unwrap_or(false);
-        if structured_empty
-            && raw_has_output
-            && spec.log_config.driver == a3s_box_core::log::LogDriver::JsonFile
+        #[cfg(not(target_os = "windows"))]
         {
-            // A very short VM can finish while the first processor is sitting
-            // on a provisional console EOF. Its raw files are authoritative at
-            // this point (start_enter returned and the write fds are closed), so
-            // repair the empty projection synchronously. The empty guard makes
-            // this idempotent and prevents duplicate records.
-            a3s_box_core::log::run_log_processor(
-                console,
-                console
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new(".")),
-                &spec.log_config,
-                &log_stop,
-            );
+            let stderr_console = a3s_box_core::log::stderr_console_path(console);
+            let structured_empty = structured.metadata().map(|m| m.len() == 0).unwrap_or(true);
+            let raw_has_output = console.metadata().map(|m| m.len() > 0).unwrap_or(false)
+                || stderr_console
+                    .metadata()
+                    .map(|m| m.len() > 0)
+                    .unwrap_or(false);
+            if structured_empty
+                && raw_has_output
+                && spec.log_config.driver == a3s_box_core::log::LogDriver::JsonFile
+            {
+                // A very short VM can finish while the first processor is sitting
+                // on a provisional console EOF. Its raw files are authoritative at
+                // this point (start_enter returned and the write fds are closed), so
+                // repair the empty projection synchronously. The empty guard makes
+                // this idempotent and prevents duplicate records.
+                a3s_box_core::log::run_log_processor(
+                    console,
+                    console
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new(".")),
+                    &spec.log_config,
+                    &log_stop,
+                );
+            }
         }
+
+        #[cfg(target_os = "windows")]
+        {
+            let stdout = spec.rootfs_path.join(WINDOWS_GUEST_STDOUT);
+            let stderr = spec.rootfs_path.join(WINDOWS_GUEST_STDERR);
+            let structured_empty = structured.metadata().map(|m| m.len() == 0).unwrap_or(true);
+            let raw_has_output = [&stdout, &stderr].iter().any(|path| {
+                a3s_box_core::windows_file::open_regular_file(path, None)
+                    .and_then(|(file, _)| file.metadata())
+                    .is_ok_and(|metadata| metadata.len() > 0)
+            });
+            if structured_empty
+                && raw_has_output
+                && spec.log_config.driver == a3s_box_core::log::LogDriver::JsonFile
+            {
+                // A short WHPX workload can finish before its live tailers emit
+                // the first record. The completed rootfs streams are authoritative
+                // after start_enter returns, so project them synchronously once.
+                a3s_box_core::log::run_log_processor_streams(
+                    &stdout,
+                    &stderr,
+                    console
+                        .parent()
+                        .unwrap_or_else(|| std::path::Path::new(".")),
+                    &spec.log_config,
+                    &log_stop,
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    if status >= 0 && _log_thread_drained {
+        let marker = spec.rootfs_path.join(WINDOWS_LIVE_LOGS_DRAINED_MARKER);
+        a3s_box_core::windows_file::replace_regular_file(&marker, b"drained\n").map_err(
+            |error| BoxError::BoxBootError {
+                message: format!(
+                    "Failed to mark Windows live logs drained at {}: {error}",
+                    marker.display()
+                ),
+                hint: None,
+            },
+        )?;
     }
 
     // If we reach here, either:
@@ -1059,6 +1244,82 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         // VM started and guest exited — propagate the guest exit code to the host.
         tracing::info!(exit_status = status, "VM exited");
         std::process::exit(status);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_kernel(ctx: &KrunContext) -> Result<()> {
+    let Some(kernel_path) = std::env::var_os("A3S_BOX_KERNEL").map(PathBuf::from) else {
+        return Ok(());
+    };
+
+    if !kernel_path.is_file() {
+        return Err(BoxError::BoxBootError {
+            message: format!(
+                "A3S_BOX_KERNEL does not point to a file: {}",
+                kernel_path.display()
+            ),
+            hint: Some(
+                "Provide an x86_64 ELF vmlinux or the kernel file from an official WSL package"
+                    .to_string(),
+            ),
+        });
+    }
+
+    let kernel_format = detect_windows_kernel_format(&kernel_path)?;
+    let kernel_path_str = kernel_path.to_str().ok_or_else(|| BoxError::BoxBootError {
+        message: format!(
+            "A3S_BOX_KERNEL is not valid UTF-8: {}",
+            kernel_path.display()
+        ),
+        hint: None,
+    })?;
+
+    tracing::info!(
+        kernel = %kernel_path.display(),
+        kernel_format,
+        "Using external Windows guest kernel"
+    );
+    unsafe { ctx.set_kernel(kernel_path_str, kernel_format, None, None) }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_windows_kernel_format(path: &Path) -> Result<u32> {
+    let mut file = File::open(path).map_err(|e| BoxError::BoxBootError {
+        message: format!(
+            "Failed to open Windows guest kernel {}: {e}",
+            path.display()
+        ),
+        hint: None,
+    })?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)
+        .map_err(|e| BoxError::BoxBootError {
+            message: format!(
+                "Failed to read Windows guest kernel {}: {e}",
+                path.display()
+            ),
+            hint: None,
+        })?;
+
+    kernel_format_from_magic(magic).ok_or_else(|| BoxError::BoxBootError {
+        message: format!(
+            "Unsupported Windows guest kernel format in {}",
+            path.display()
+        ),
+        hint: Some(
+            "Expected an ELF vmlinux or the PE/COFF kernel file from an official WSL package"
+                .to_string(),
+        ),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn kernel_format_from_magic(magic: [u8; 4]) -> Option<u32> {
+    match magic {
+        [0x7f, b'E', b'L', b'F'] => Some(KRUN_KERNEL_FORMAT_ELF),
+        [b'M', b'Z', _, _] => Some(KRUN_KERNEL_FORMAT_IMAGE_GZ),
+        _ => None,
     }
 }
 
@@ -1169,6 +1430,94 @@ mod tests {
 
         spec.watched_pid_start_time = 0;
         assert!(validate_sandbox_log_worker_spec(&spec).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_kernel_format_from_magic() {
+        assert_eq!(
+            kernel_format_from_magic([0x7f, b'E', b'L', b'F']),
+            Some(KRUN_KERNEL_FORMAT_ELF)
+        );
+        assert_eq!(
+            kernel_format_from_magic([b'M', b'Z', 0x90, 0x00]),
+            Some(KRUN_KERNEL_FORMAT_IMAGE_GZ)
+        );
+        assert_eq!(kernel_format_from_magic([0, 1, 2, 3]), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_prepare_windows_guest_rejects_smp() {
+        let mut spec = InstanceSpec::default();
+        spec.vcpus = 2;
+
+        let error = prepare_windows_guest(&spec).unwrap_err().to_string();
+        assert!(error.contains("WHPX"));
+        assert!(error.contains("--cpus 1"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_prepare_windows_guest_resets_stale_results_and_streams() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = temp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+        for name in [
+            WINDOWS_GUEST_EXIT_CODE,
+            WINDOWS_GUEST_STDOUT,
+            WINDOWS_GUEST_STDERR,
+            WINDOWS_GUEST_RESULT_MARKER,
+            WINDOWS_LIVE_LOGS_DRAINED_MARKER,
+        ] {
+            fs::write(rootfs.join(name), b"stale").unwrap();
+        }
+
+        let mut spec = InstanceSpec::default();
+        spec.vcpus = 1;
+        spec.rootfs_path = rootfs.clone();
+        prepare_windows_guest(&spec).unwrap();
+
+        for name in [
+            WINDOWS_GUEST_EXIT_CODE,
+            WINDOWS_GUEST_RESULT_MARKER,
+            WINDOWS_LIVE_LOGS_DRAINED_MARKER,
+        ] {
+            assert!(!rootfs.join(name).exists());
+        }
+        for name in [WINDOWS_GUEST_STDOUT, WINDOWS_GUEST_STDERR] {
+            let path = rootfs.join(name);
+            assert!(path.is_file());
+            assert_eq!(fs::metadata(path).unwrap().len(), 0);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_prepare_windows_guest_unlinks_stream_reparse_without_touching_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = temp.path().join("rootfs");
+        fs::create_dir_all(&rootfs).unwrap();
+        let host_target = temp.path().join("host-target.txt");
+        fs::write(&host_target, b"host secret").unwrap();
+        let stream = rootfs.join(WINDOWS_GUEST_STDOUT);
+        match std::os::windows::fs::symlink_file(&host_target, &stream) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => return,
+            Err(error) => panic!("failed to create stream symlink: {error}"),
+        }
+
+        let mut spec = InstanceSpec::default();
+        spec.vcpus = 1;
+        spec.rootfs_path = rootfs;
+        prepare_windows_guest(&spec).unwrap();
+
+        assert_eq!(fs::read(&host_target).unwrap(), b"host secret");
+        assert_eq!(fs::read(&stream).unwrap(), b"");
+        assert!(!fs::symlink_metadata(stream)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

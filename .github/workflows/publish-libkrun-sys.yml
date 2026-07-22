@@ -4,180 +4,466 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to publish (e.g., 0.1.2)'
+        description: 'Exact a3s-libkrun-sys workspace version without a v prefix (e.g., 3.0.11)'
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
+concurrency:
+  group: publish-libkrun-sys-${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
-  # ── Build and test Windows krun.dll ────────────────────────────
   build-windows-dll:
-    name: Build Windows krun.dll
-    runs-on: windows-latest
+    name: Build and test Windows krun.dll
+    runs-on: windows-2025
+    outputs:
+      release_version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           submodules: recursive
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify bundled libkrun source archive
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-source.ps1 -Check
+
+      - name: Verify bundled Windows libkrun archive
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-windows.ps1 -Check
+
+      # dtolnay/rust-toolchain stable (2026-07-16)
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Validate requested package version
+        id: version
+        working-directory: src
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          $semVerPattern = '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z'
+          $version = $env:INPUT_VERSION
+          if ([string]::IsNullOrEmpty($version) -or $version -cnotmatch $semVerPattern) {
+              throw "Version '$version' is not strict SemVer 2.0.0 without a leading v."
+          }
+
+          $metadataJson = cargo metadata --locked --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) {
+              throw "cargo metadata failed with exit code $LASTEXITCODE."
+          }
+          $package = ($metadataJson | ConvertFrom-Json).packages |
+              Where-Object name -eq 'a3s-libkrun-sys' |
+              Select-Object -First 1
+          if (-not $package) {
+              throw 'a3s-libkrun-sys is missing from the Cargo workspace.'
+          }
+          if (-not [string]::Equals(
+              $version,
+              [string]$package.version,
+              [System.StringComparison]::Ordinal
+          )) {
+              throw "Requested version $version does not match workspace package version $($package.version). Update and commit the workspace version first."
+          }
+
+          "version=$version" | Out-File -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Refuse an existing crate version, tag, or release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          function Get-HttpStatus {
+              param(
+                  [Parameter(Mandatory)]
+                  [string]$Uri,
+                  [string[]]$Headers = @()
+              )
+
+              $curlArguments = @(
+                  '--silent',
+                  '--show-error',
+                  '--location',
+                  '--output', 'NUL',
+                  '--write-out', '%{http_code}'
+              )
+              foreach ($header in $Headers) {
+                  $curlArguments += @('--header', $header)
+              }
+
+              $statusOutput = & curl.exe @curlArguments $Uri
+              if ($LASTEXITCODE -ne 0) {
+                  throw "HTTP preflight failed for $Uri with curl exit code $LASTEXITCODE."
+              }
+              $status = ([string]$statusOutput).Trim()
+              if ($status -cnotmatch '^\d{3}$') {
+                  throw "HTTP preflight returned invalid status '$status' for $Uri."
+              }
+              return $status
+          }
+
+          function Assert-RemoteAbsent {
+              param(
+                  [Parameter(Mandatory)]
+                  [string]$Label,
+                  [Parameter(Mandatory)]
+                  [string]$Status
+              )
+
+              if ($Status -ceq '200') {
+                  throw "$Label already exists; refusing to overwrite or republish it."
+              }
+              if ($Status -cne '404') {
+                  throw "Cannot prove that $Label is absent: server returned HTTP $Status."
+              }
+          }
+
+          $crateHeaders = @('User-Agent: A3S-Lab-Box-release-preflight')
+          $crateUri = "https://crates.io/api/v1/crates/a3s-libkrun-sys/$env:RELEASE_VERSION"
+          $crateStatus = Get-HttpStatus -Uri $crateUri -Headers $crateHeaders
+          Assert-RemoteAbsent -Label "a3s-libkrun-sys $env:RELEASE_VERSION on crates.io" -Status $crateStatus
+
+          $tag = "libkrun-sys-v$env:RELEASE_VERSION"
+          $encodedTag = [Uri]::EscapeDataString($tag)
+          $githubApi = "https://api.github.com/repos/$env:GITHUB_REPOSITORY"
+          $githubHeaders = @(
+              'Accept: application/vnd.github+json',
+              "Authorization: Bearer $env:GH_TOKEN",
+              'X-GitHub-Api-Version: 2022-11-28',
+              'User-Agent: A3S-Lab-Box-release-preflight'
+          )
+          $tagStatus = Get-HttpStatus -Uri "$githubApi/git/ref/tags/$encodedTag" -Headers $githubHeaders
+          Assert-RemoteAbsent -Label "Git tag $tag" -Status $tagStatus
+          $releaseStatus = Get-HttpStatus -Uri "$githubApi/releases/tags/$encodedTag" -Headers $githubHeaders
+          Assert-RemoteAbsent -Label "GitHub release $tag" -Status $releaseStatus
+
+      - name: Setup Zig
+        # mlugg/setup-zig v2.2.1
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+
+      # Swatinem/rust-cache v2.9.1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: src
           key: libkrun-windows
 
-      - name: Build krun.dll
+      - name: Build reproducible krun.dll
         working-directory: src/deps/libkrun-sys/vendor/libkrun
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Packages libkrun
 
-      - name: Run Windows API tests
+      - name: Stage and test the Windows runtime bundle
         working-directory: src/deps/libkrun-sys
+        shell: pwsh
         run: |
-          # Copy krun.dll to test location
-          Copy-Item vendor\libkrun\target\x86_64-pc-windows-msvc\release\krun.dll prebuilt\x86_64-pc-windows-msvc\
-          # Run all API tests
-          cargo test --target x86_64-pc-windows-msvc --lib -- --test-threads=1
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
 
-      - name: Package krun.dll
-        run: |
-          $VERSION = "${{ inputs.version }}"
-          $DIR = "a3s-libkrun-sys-$VERSION-windows-x86_64"
-          New-Item -ItemType Directory -Path $DIR\lib -Force
-
-          # Copy DLL
-          Copy-Item src\deps\libkrun-sys\vendor\libkrun\target\x86_64-pc-windows-msvc\release\krun.dll $DIR\lib\
-
-          # Copy headers if any
-          if (Test-Path src\deps\libkrun-sys\vendor\libkrun\include) {
-            Copy-Item -Recurse src\deps\libkrun-sys\vendor\libkrun\include $DIR\
+          $built = Join-Path $PWD 'vendor/libkrun/target/x86_64-pc-windows-msvc/release'
+          $prebuilt = Join-Path $PWD 'prebuilt/x86_64-pc-windows-msvc'
+          $required = @(
+              (Join-Path $built 'krun.dll'),
+              (Join-Path $built 'krun.dll.lib'),
+              (Join-Path $prebuilt 'libkrunfw.dll')
+          )
+          foreach ($path in $required) {
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                  throw "Required Windows runtime artifact is missing: $path"
+              }
           }
 
-          # Create README
-          @"
-          # a3s-libkrun-sys Windows Build
+          Copy-Item -LiteralPath (Join-Path $built 'krun.dll') -Destination (Join-Path $prebuilt 'krun.dll') -Force
+          Copy-Item -LiteralPath (Join-Path $built 'krun.dll.lib') -Destination (Join-Path $prebuilt 'krun.lib') -Force
 
-          Version: $VERSION
+          cargo test --locked --target x86_64-pc-windows-msvc --lib -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) {
+              throw "Windows API tests failed with exit code $LASTEXITCODE."
+          }
+
+          & (Join-Path $PWD '../../../scripts/package-libkrun-windows.ps1') -Check
+
+      - name: Package Windows runtime bundle
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          $directoryName = "a3s-libkrun-sys-$env:RELEASE_VERSION-windows-x86_64"
+          $packageDirectory = Join-Path $PWD $directoryName
+          $libraryDirectory = Join-Path $packageDirectory 'lib'
+          $publishDirectory = Join-Path $PWD 'publish-libs'
+          New-Item -ItemType Directory -Path $libraryDirectory -Force | Out-Null
+          New-Item -ItemType Directory -Path $publishDirectory -Force | Out-Null
+
+          $prebuilt = Join-Path $PWD 'src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc'
+          foreach ($name in @('krun.dll', 'krun.lib', 'libkrunfw.dll')) {
+              $source = Join-Path $prebuilt $name
+              if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                  throw "Required packaged library is missing: $source"
+              }
+              Copy-Item -LiteralPath $source -Destination (Join-Path $libraryDirectory $name)
+              Copy-Item -LiteralPath $source -Destination (Join-Path $publishDirectory $name)
+          }
+
+          $crateRoot = Join-Path $PWD 'src/deps/libkrun-sys'
+          foreach ($name in @('LICENSE', 'THIRD_PARTY_NOTICES.md', 'SOURCE-PROVENANCE.md')) {
+              Copy-Item -LiteralPath (Join-Path $crateRoot $name) -Destination $packageDirectory
+          }
+          Copy-Item -LiteralPath (Join-Path $crateRoot 'licenses') -Destination $packageDirectory -Recurse
+
+          $includeDirectory = 'src/deps/libkrun-sys/vendor/libkrun/include'
+          if (Test-Path -LiteralPath $includeDirectory -PathType Container) {
+              Copy-Item -LiteralPath $includeDirectory -Destination $packageDirectory -Recurse
+          }
+
+          $readme = @"
+          # a3s-libkrun-sys Windows runtime bundle
+
+          Version: $env:RELEASE_VERSION
           Platform: Windows x86_64 (WHPX)
-          Built: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+          Source commit: $env:GITHUB_SHA
 
-          ## Contents
+          The `lib` directory contains `krun.dll`, its MSVC import library
+          `krun.lib`, and the required `libkrunfw.dll` companion runtime.
+          Applications must place both DLLs next to the executable or on PATH.
+          "@
+          $readme | Out-File -LiteralPath (Join-Path $packageDirectory 'README.md') -Encoding utf8
 
-          - lib/krun.dll - libkrun Windows WHPX backend
+          $hashLines = Get-ChildItem -LiteralPath $libraryDirectory -File |
+              Sort-Object Name |
+              ForEach-Object {
+                  $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                  "$hash *lib/$($_.Name)"
+              }
+          $hashLines | Out-File -LiteralPath (Join-Path $packageDirectory 'SHA256SUMS') -Encoding ascii
 
-          ## Usage
+          $archive = "$directoryName.zip"
+          Compress-Archive -LiteralPath $packageDirectory -DestinationPath $archive
+          "ASSET=$archive" | Out-File -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Add to your Cargo.toml:
-
-          ``````toml
-          [dependencies]
-          a3s-libkrun-sys = "$VERSION"
-          ``````
-
-          The krun.dll must be in your PATH or in the same directory as your executable.
-
-          ## Features
-
-          - Windows Hypervisor Platform (WHPX) backend
-          - virtiofs passthrough filesystem
-          - virtio-net TCP backend
-          - virtio-blk block device
-          - virtio-console
-          - TSI (Transparent Socket Impersonation) for vsock
-
-          ## Requirements
-
-          - Windows 10/11 with Hyper-V Platform enabled
-          - Run: ``Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform``
-          "@ | Out-File -FilePath $DIR\README.md -Encoding UTF8
-
-          # Create zip
-          Compress-Archive -Path $DIR -DestinationPath "$DIR.zip"
-          echo "ASSET=$DIR.zip" >> $env:GITHUB_ENV
-
-      - uses: actions/upload-artifact@v6
+      # actions/upload-artifact v6.0.0
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: windows-dll
           path: ${{ env.ASSET }}
+          if-no-files-found: error
 
-  # ── Publish to crates.io ───────────────────────────────────────
+      # Keep crate inputs separate so download-artifact cannot change their
+      # relative path based on the archive's least common ancestor.
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: windows-crate-libs
+          path: publish-libs/*
+          if-no-files-found: error
+
   publish-crate:
     name: Publish a3s-libkrun-sys to crates.io
-    needs: build-windows-dll
-    runs-on: ubuntu-latest
+    needs: [build-windows-dll, create-release]
+    # Cargo verifies a package on the publishing host. Verify on Windows so
+    # the exact bundled WHPX runtime is exercised instead of relying on a
+    # Linux system libkrun that is not part of the .crate archive.
+    runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v5
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           submodules: recursive
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      # dtolnay/rust-toolchain stable (2026-07-16)
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
 
-      - name: Update version in Cargo.toml
+      # actions/download-artifact v7.0.0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: windows-crate-libs
+          path: src/deps/libkrun-sys/prebuilt/x86_64-pc-windows-msvc
+
+      - name: Verify downloaded runtime matches the packaged archive
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-windows.ps1 -Check
+
+      - name: Verify crate contents and publish
         working-directory: src/deps/libkrun-sys
-        run: |
-          VERSION="${{ inputs.version }}"
-          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
-          cat Cargo.toml | grep "^version"
-
-      - name: Publish to crates.io
-        working-directory: src/deps/libkrun-sys
+        shell: pwsh
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.build-windows-dll.outputs.release_version }}
         run: |
-          cargo publish --allow-dirty || echo "Already published or error occurred"
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
 
-  # ── Create GitHub Release ──────────────────────────────────────
+          $runtimeRequired = @('krun.dll', 'krun.lib', 'libkrunfw.dll')
+          $prebuilt = Join-Path $PWD 'prebuilt/x86_64-pc-windows-msvc'
+          foreach ($name in $runtimeRequired) {
+              $path = Join-Path $prebuilt $name
+              if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                  throw "Downloaded crate runtime is missing: $path"
+              }
+          }
+
+          $metadataJson = cargo metadata --locked --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) {
+              throw "cargo metadata failed with exit code $LASTEXITCODE."
+          }
+          $metadata = $metadataJson | ConvertFrom-Json
+          $package = $metadata.packages |
+              Where-Object name -eq 'a3s-libkrun-sys' |
+              Select-Object -First 1
+          if (-not $package -or -not [string]::Equals(
+              [string]$package.version,
+              $env:RELEASE_VERSION,
+              [System.StringComparison]::Ordinal
+          )) {
+              throw "Workspace package version does not match $env:RELEASE_VERSION."
+          }
+
+          $packageList = Join-Path $env:RUNNER_TEMP 'a3s-libkrun-sys-package-list.txt'
+          cargo package --locked --allow-dirty --list |
+              Out-File -LiteralPath $packageList -Encoding utf8
+          if ($LASTEXITCODE -ne 0) {
+              throw "cargo package --list failed with exit code $LASTEXITCODE."
+          }
+          $packageEntries = @(
+              Get-Content -LiteralPath $packageList |
+                  ForEach-Object { $_.Replace('\', '/') }
+          )
+          $packageRequired = @(
+              'LICENSE',
+              'SOURCE-PROVENANCE.md',
+              'THIRD_PARTY_NOTICES.md',
+              'licenses/Apache-2.0.txt',
+              'licenses/EDK2-Sources.txt',
+              'licenses/EDK2.txt',
+              'licenses/GPL-2.0-only.txt',
+              'licenses/LGPL-2.1-only.txt',
+              'licenses/MIT.txt',
+              'vendor/libkrun-source.tar',
+              'vendor/krun-windows-x64.tar.xz'
+          )
+          foreach ($entry in $packageRequired) {
+              if (-not ($packageEntries -ccontains $entry)) {
+                  throw "Packaged crate is missing $entry."
+              }
+          }
+          $forbiddenEntries = @(
+              $packageEntries |
+                  Where-Object {
+                      $_ -match '(^|/)prebuilt(/|$)' -or
+                      $_ -match '(^|/)[^/]+\.(dll|lib)$'
+                  } |
+                  Sort-Object -Unique
+          )
+          if ($forbiddenEntries.Count -ne 0) {
+              throw "Packaged crate unexpectedly contains prebuilt or bare native libraries: $($forbiddenEntries -join ', ')."
+          }
+
+          # `cargo package` performs the same clean-room compilation used by
+          # publish. The server currently limits .crate files to 10 MiB.
+          cargo package --locked --allow-dirty
+          if ($LASTEXITCODE -ne 0) {
+              throw "cargo package verification failed with exit code $LASTEXITCODE."
+          }
+          $cratePath = Join-Path $metadata.target_directory (
+              "package/a3s-libkrun-sys-$env:RELEASE_VERSION.crate"
+          )
+          if (-not (Test-Path -LiteralPath $cratePath -PathType Leaf)) {
+              throw "Verified crate archive is missing: $cratePath"
+          }
+          $crateSize = (Get-Item -LiteralPath $cratePath).Length
+          $crateLimit = 10MB
+          if ($crateSize -gt $crateLimit) {
+              throw "Crate archive is $crateSize bytes; crates.io limit is $crateLimit bytes."
+          }
+
+          cargo publish --locked --allow-dirty
+          if ($LASTEXITCODE -ne 0) {
+              throw "cargo publish failed with exit code $LASTEXITCODE."
+          }
+
   create-release:
-    name: Create GitHub Release
-    needs: [build-windows-dll, publish-crate]
-    runs-on: ubuntu-latest
+    name: Create GitHub release
+    needs: build-windows-dll
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v5
+      # actions/checkout v5.1.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v7
+      # actions/download-artifact v7.0.0
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: windows-dll
           path: artifacts
 
+      - name: Prepare corresponding source assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 5 \
+            --output artifacts/libkrunfw-x86_64-v5.5.0.tgz \
+            https://github.com/libkrun/libkrunfw/releases/download/v5.5.0/libkrunfw-x86_64.tgz
+          curl --fail --location --retry 5 \
+            --output artifacts/libkrunfw-5.5.0-source.tar.gz \
+            https://github.com/libkrun/libkrunfw/archive/refs/tags/v5.5.0.tar.gz
+          curl --fail --location --retry 5 \
+            --output artifacts/linux-6.12.91.tar.xz \
+            https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.91.tar.xz
+
+          cp src/deps/libkrun-sys/vendor/libkrun-source.tar \
+            artifacts/a3s-libkrun-source.tar
+          cp src/deps/libkrun-sys/SOURCE-PROVENANCE.md artifacts/
+          cp src/deps/libkrun-sys/THIRD_PARTY_NOTICES.md artifacts/
+
+          cd artifacts
+          cat > CORRESPONDING-SOURCE-SHA256SUMS.txt <<'EOF'
+          c169206b01c89fbe134f1728bf4f988702bc7f73b4cf73e6fdece447d6fceca1 *libkrunfw-x86_64-v5.5.0.tgz
+          b0cbf1450269c80aea1dccbf440011deb2762a098b338c234079a6ef06456ead *libkrunfw-5.5.0-source.tar.gz
+          0ff2ab9e169f9f1948557471fbb450d3018f8c5b77caf288e1a3982582597969 *linux-6.12.91.tar.xz
+          EOF
+          sha256sum --check CORRESPONDING-SOURCE-SHA256SUMS.txt
+          sha256sum a3s-libkrun-source.tar >> CORRESPONDING-SOURCE-SHA256SUMS.txt
+
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        # softprops/action-gh-release v2.5.0
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
-          tag_name: libkrun-sys-v${{ inputs.version }}
-          name: "a3s-libkrun-sys v${{ inputs.version }} - Windows WHPX Support"
+          tag_name: libkrun-sys-v${{ needs.build-windows-dll.outputs.release_version }}
+          target_commitish: ${{ github.sha }}
+          name: a3s-libkrun-sys v${{ needs.build-windows-dll.outputs.release_version }} - Windows WHPX Support
           body: |
-            ## a3s-libkrun-sys v${{ inputs.version }}
+            Windows x86_64 WHPX runtime bundle for a3s-libkrun-sys.
 
-            Windows WHPX backend support for libkrun.
+            The archive contains the reproducibly built `krun.dll`, its
+            `krun.lib` import library, `libkrunfw.dll`, and SHA256 checksums.
 
-            ### Features
-            - ✅ Windows Hypervisor Platform (WHPX) backend
-            - ✅ virtiofs passthrough filesystem
-            - ✅ virtio-net TCP backend
-            - ✅ virtio-blk block device
-            - ✅ virtio-console
-            - ✅ TSI (Transparent Socket Impersonation)
-
-            ### Installation
-
-            ```toml
-            [dependencies]
-            a3s-libkrun-sys = "${{ inputs.version }}"
-            ```
-
-            ### Requirements
-            - Windows 10/11 with Hyper-V Platform enabled
-            - Run: `Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform`
-
-            ### Downloads
-            - Windows x86_64: See assets below
-
-          files: |
-            artifacts/*.zip
+            The matching libkrun/libkrunfw and Linux kernel corresponding
+            source, licenses, provenance, and checksums are attached to this
+            same immutable release before the crate is published.
+          files: artifacts/*
+          fail_on_unmatched_files: true
           draft: false
           prerelease: false

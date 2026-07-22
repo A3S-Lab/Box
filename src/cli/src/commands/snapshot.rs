@@ -14,7 +14,7 @@ pub struct SnapshotArgs {
 /// Snapshot subcommands.
 #[derive(Subcommand)]
 pub enum SnapshotAction {
-    /// Create a snapshot from a running or stopped box
+    /// Create a snapshot from a stopped box
     Create(SnapshotCreateArgs),
     /// Restore a box from a snapshot
     Restore(SnapshotRestoreArgs),
@@ -132,10 +132,18 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     use a3s_box_core::snapshot::SnapshotMetadata;
     use a3s_box_runtime::SnapshotStore;
 
+    // Resolve once to a stable ID, then serialize with every lifecycle command
+    // that can start, remove, or mutate this rootfs. Reload after acquiring the
+    // lock so a name lookup or status snapshot cannot go stale while waiting.
+    let initial_state = StateFile::load_default()?;
+    let box_id = resolve_box(&initial_state, &args.box_id)?.id.clone();
+    let _lifecycle_lock = crate::lifecycle::acquire_box_lifecycle_lock(&box_id).await?;
     let state = StateFile::load_default()?;
-
-    // Resolve box by ID, short ID, or name
-    let record = resolve_box(&state, &args.box_id)?;
+    let record = state
+        .find_by_id(&box_id)
+        .ok_or_else(|| format!("Box '{box_id}' was removed while waiting to snapshot it"))?;
+    validate_snapshot_source_state(record)
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
 
     // Generate snapshot ID and name
     let snap_id = format!(
@@ -158,6 +166,8 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     meta.workdir = record.workdir.clone();
     meta.port_map = record.port_map.clone();
     meta.labels = record.labels.clone();
+    meta.health_check = record.health_check.clone();
+    meta.healthcheck_disabled = record.healthcheck_disabled;
     meta.image_config = a3s_box_runtime::load_resolved_image_config(&record.box_dir)?;
     if meta.image_config.is_none() {
         return Err(format!(
@@ -175,7 +185,7 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
         format!(
             "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \
-             snapshot a running box",
+             snapshot a stopped box",
             record.name,
             record.box_dir.display()
         )
@@ -206,6 +216,16 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+fn validate_snapshot_source_state(record: &crate::state::BoxRecord) -> Result<(), String> {
+    if record.is_active() {
+        return Err(format!(
+            "Cannot snapshot active box '{}': stop it first. Live host-path snapshots are disabled because a running guest can race filesystem traversal.",
+            record.name
+        ));
+    }
+    Ok(())
+}
+
 /// Restore a box from a snapshot.
 async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::state::{generate_name, BoxRecord, StateFile};
@@ -216,6 +236,13 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
     // Find snapshot by ID or name
     let meta = resolve_snapshot(&store, &args.snapshot)?;
     meta.require_image_config()?;
+    #[cfg(windows)]
+    if meta.has_effective_health_check() {
+        return Err(
+            "container health checks are not supported on Windows; the snapshot defines an effective health check"
+                .into(),
+        );
+    }
 
     // Create a new box record from snapshot metadata
     let box_id = uuid::Uuid::new_v4().to_string();
@@ -284,8 +311,8 @@ async fn execute_restore(args: SnapshotRestoreArgs) -> Result<(), Box<dyn std::e
         restart_count: 0,
         max_restart_count: 0,
         exit_code: None,
-        health_check: None,
-        healthcheck_disabled: false,
+        health_check: meta.health_check.clone(),
+        healthcheck_disabled: meta.healthcheck_disabled,
         health_status: "none".to_string(),
         health_retries: 0,
         health_last_check: None,
@@ -507,6 +534,23 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::fixtures::make_record;
+
+    #[test]
+    fn snapshot_source_state_rejects_active_boxes() {
+        for status in ["running", "paused"] {
+            let record = make_record("id", "box", status, Some(std::process::id()));
+            let error = validate_snapshot_source_state(&record).unwrap_err();
+            assert!(error.contains("stop it first"), "{error}");
+            assert!(error.contains("filesystem traversal"), "{error}");
+        }
+    }
+
+    #[test]
+    fn snapshot_source_state_accepts_stopped_boxes() {
+        let record = make_record("id", "box", "stopped", None);
+        validate_snapshot_source_state(&record).unwrap();
+    }
 
     #[test]
     fn test_box_references_lower() {

@@ -213,7 +213,13 @@ fn test_local_state_command_smoke() {
     cli.ok(&["audit", "--limit", "1"]);
     cli.ok(&["snapshot", "ls"]);
     cli.ok(&["snapshot", "ls", "--json"]);
+    #[cfg(target_os = "windows")]
+    cli.fails(&["pool", "status"], "not supported on Windows");
+    #[cfg(not(target_os = "windows"))]
     cli.ok(&["pool", "status"]);
+    #[cfg(target_os = "windows")]
+    cli.fails(&["pool", "stop"], "not supported on Windows");
+    #[cfg(not(target_os = "windows"))]
     cli.ok(&["pool", "stop"]);
     cli.ok(&["prune", "--force"]);
     cli.ok(&["image-prune", "--force"]);
@@ -395,13 +401,23 @@ fn test_create_persists_rich_runtime_options() {
     let env_file = cli.home_path().join("rich.env");
     std::fs::write(&env_file, "FROM_FILE=kept\nOVERRIDE=file\n").expect("write env file");
     let env_file_arg = env_file.to_string_lossy().to_string();
+    let cpus = if cfg!(target_os = "windows") {
+        "1"
+    } else {
+        "4"
+    };
+    let cpuset = if cfg!(target_os = "windows") {
+        "0"
+    } else {
+        "0,1"
+    };
 
     cli.ok(&[
         "create",
         "--name",
         "cov-rich",
         "--cpus",
-        "4",
+        cpus,
         "--memory",
         "768m",
         "--dns",
@@ -430,20 +446,10 @@ fn test_create_persists_rich_runtime_options() {
         "purpose=coverage",
         "--tmpfs",
         "/tmp:size=64m",
-        "--health-cmd",
-        "test -f /tmp/healthy",
-        "--health-interval",
-        "10s",
-        "--health-timeout",
-        "2s",
-        "--health-retries",
-        "5",
-        "--health-start-period",
-        "3s",
         "--pids-limit",
         "128",
         "--cpuset-cpus",
-        "0,1",
+        cpuset,
         "--ulimit",
         "nofile=1024:2048",
         "--cpu-shares",
@@ -488,7 +494,7 @@ fn test_create_persists_rich_runtime_options() {
     let inspect = parse_inspect(&inspect);
     assert_eq!(inspect["name"], "cov-rich");
     assert_eq!(inspect["status"], "created");
-    assert_eq!(inspect["cpus"], 4);
+    assert_eq!(inspect["cpus"], cpus.parse::<u64>().unwrap());
     assert_eq!(inspect["memory_mb"], 768);
     assert_eq!(inspect["cmd"], serde_json::json!(["sleep", "60"]));
     assert_eq!(inspect["entrypoint"], serde_json::json!(["/bin/sh", "-lc"]));
@@ -515,16 +521,9 @@ fn test_create_persists_rich_runtime_options() {
         "resolved named volume should preserve guest target and mode: {}",
         inspect["volumes"][0]
     );
-    assert_eq!(
-        inspect["health_check"]["cmd"],
-        serde_json::json!(["sh", "-c", "test -f /tmp/healthy"])
-    );
-    assert_eq!(inspect["health_check"]["interval_secs"], 10);
-    assert_eq!(inspect["health_check"]["timeout_secs"], 2);
-    assert_eq!(inspect["health_check"]["retries"], 5);
-    assert_eq!(inspect["health_check"]["start_period_secs"], 3);
+    assert!(inspect["health_check"].is_null());
     assert_eq!(inspect["resource_limits"]["pids_limit"], 128);
-    assert_eq!(inspect["resource_limits"]["cpuset_cpus"], "0,1");
+    assert_eq!(inspect["resource_limits"]["cpuset_cpus"], cpuset);
     assert_eq!(
         inspect["resource_limits"]["ulimits"],
         serde_json::json!(["nofile=1024:2048"])
@@ -595,6 +594,312 @@ fn test_create_persists_rich_runtime_options() {
     cli.ok(&["volume", "rm", "covrichdata"]);
 }
 
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn test_create_persists_health_options_on_supported_hosts() {
+    let cli = CliTest::new();
+    cli.ok(&[
+        "create",
+        "--name",
+        "cov-health",
+        "--health-cmd",
+        "test -f /tmp/healthy",
+        "--health-interval",
+        "10s",
+        "--health-timeout",
+        "2s",
+        "--health-retries",
+        "5",
+        "--health-start-period",
+        "3s",
+        "docker.io/library/alpine:latest",
+    ]);
+
+    let inspect = parse_inspect(&cli.ok(&["inspect", "cov-health"]));
+    assert_eq!(
+        inspect["health_check"]["cmd"],
+        serde_json::json!(["sh", "-c", "test -f /tmp/healthy"])
+    );
+    assert_eq!(inspect["health_check"]["interval_secs"], 10);
+    assert_eq!(inspect["health_check"]["timeout_secs"], 2);
+    assert_eq!(inspect["health_check"]["retries"], 5);
+    assert_eq!(inspect["health_check"]["start_period_secs"], 3);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_windows_health_checks_fail_before_run_create_or_start() {
+    let cli = CliTest::new();
+    let unsupported = "health checks are not supported on Windows";
+
+    cli.fails(
+        &[
+            "run",
+            "--name",
+            "cov-health-foreground",
+            "--health-cmd",
+            "true",
+            "docker.io/library/alpine:latest",
+            "--",
+            "true",
+        ],
+        unsupported,
+    );
+    cli.fails(
+        &[
+            "run",
+            "--detach",
+            "--name",
+            "cov-health-detached",
+            "--health-cmd",
+            "true",
+            "docker.io/library/alpine:latest",
+            "--",
+            "sleep",
+            "60",
+        ],
+        unsupported,
+    );
+    cli.fails(
+        &[
+            "create",
+            "--name",
+            "cov-health-create-rejected",
+            "--health-cmd",
+            "true",
+            "docker.io/library/alpine:latest",
+        ],
+        unsupported,
+    );
+
+    cli.ok(&[
+        "create",
+        "--name",
+        "cov-health-start",
+        "docker.io/library/alpine:latest",
+    ]);
+    let state_path = cli.home_path().join("boxes.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("read state"))
+            .expect("parse state");
+    let record = state
+        .as_array_mut()
+        .expect("state array")
+        .iter_mut()
+        .find(|record| record["name"] == "cov-health-start")
+        .expect("created record");
+    record["health_check"] = serde_json::json!({
+        "cmd": ["true"],
+        "interval_secs": 30,
+        "timeout_secs": 5,
+        "retries": 3,
+        "start_period_secs": 0
+    });
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("serialize state"),
+    )
+    .expect("write state");
+
+    cli.fails(&["start", "cov-health-start"], unsupported);
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("read rejected state"))
+            .expect("parse rejected state");
+    let record = persisted
+        .as_array()
+        .expect("state array")
+        .iter()
+        .find(|record| record["name"] == "cov-health-start")
+        .expect("created record");
+    assert_eq!(record["status"], "created");
+    assert!(record["pid"].is_null());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_windows_compose_health_fails_before_runtime_side_effects() {
+    let cli = CliTest::new();
+    let project = cli.home_path().join("compose-health-rejected");
+    std::fs::create_dir_all(&project).expect("create Compose project directory");
+    let compose = project.join("compose.yaml");
+    std::fs::write(
+        &compose,
+        r#"services:
+  api:
+    image: docker.io/library/alpine:latest
+    healthcheck:
+      test: ["CMD", "true"]
+networks:
+  default: {}
+"#,
+    )
+    .expect("write Compose file");
+    let compose_arg = compose.to_string_lossy().to_string();
+
+    cli.fails(
+        &["compose", "--file", &compose_arg, "up"],
+        "health checks are not supported on Windows",
+    );
+
+    assert!(!cli.home_path().join("boxes.json").exists());
+    assert!(!cli.home_path().join("boxes").exists());
+    assert!(!cli.home_path().join("networks.json").exists());
+}
+
+#[test]
+fn test_stopped_managed_update_rewrites_the_next_start_request() {
+    let cli = CliTest::new();
+    cli.ok(&[
+        "create",
+        "--name",
+        "cov-managed-update",
+        "--memory",
+        "512m",
+        "docker.io/library/alpine:latest",
+    ]);
+
+    cli.ok(&[
+        "container-update",
+        "cov-managed-update",
+        "--memory",
+        "768m",
+        "--cpu-shares",
+        "1024",
+        "--restart",
+        "on-failure:4",
+    ]);
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(cli.home_path().join("boxes.json")).expect("read updated state"),
+    )
+    .expect("parse updated state");
+    let record = state
+        .as_array()
+        .expect("state array")
+        .iter()
+        .find(|record| record["name"] == "cov-managed-update")
+        .expect("updated managed record");
+    assert_eq!(record["memory_mb"], 768);
+    assert_eq!(record["resource_limits"]["cpu_shares"], 1024);
+    assert_eq!(
+        record["managed_execution"]["request"]["config"]["resources"]["memory_mb"],
+        768
+    );
+    assert_eq!(
+        record["managed_execution"]["request"]["config"]["resource_limits"]["cpu_shares"],
+        1024
+    );
+    assert_eq!(
+        record["managed_execution"]["request"]["policy"]["restart_policy"],
+        "on-failure"
+    );
+    assert_eq!(
+        record["managed_execution"]["request"]["policy"]["max_restart_count"],
+        4
+    );
+    let metadata: a3s_box_runtime::ManagedExecutionMetadata =
+        serde_json::from_value(record["managed_execution"].clone())
+            .expect("deserialize managed start intent");
+    metadata
+        .validate()
+        .expect("managed start must accept the updated creation request");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn test_windows_container_update_rejects_live_tier2_without_persisting() {
+    let cli = CliTest::new();
+    cli.ok(&[
+        "create",
+        "--name",
+        "cov-update",
+        "docker.io/library/alpine:latest",
+    ]);
+
+    let state_path = cli.home_path().join("boxes.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("read state"))
+            .expect("parse state");
+    let record = state
+        .as_array_mut()
+        .expect("state array")
+        .iter_mut()
+        .find(|record| record["name"] == "cov-update")
+        .expect("created record");
+    record["managed_execution"] = serde_json::Value::Null;
+    record["status"] = serde_json::json!("stopped");
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("serialize stopped state"),
+    )
+    .expect("write stopped state");
+
+    cli.ok(&[
+        "container-update",
+        "cov-update",
+        "--memory-reservation",
+        "128m",
+        "--restart",
+        "on-failure:2",
+    ]);
+    let inspect = parse_inspect(&cli.ok(&["inspect", "cov-update"]));
+    assert_eq!(
+        inspect["resource_limits"]["memory_reservation"],
+        128 * 1024 * 1024
+    );
+    assert_eq!(inspect["restart_policy"], "on-failure");
+    assert_eq!(inspect["max_restart_count"], 2);
+
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("read updated state"))
+            .expect("parse updated state");
+    let record = state
+        .as_array_mut()
+        .expect("state array")
+        .iter_mut()
+        .find(|record| record["name"] == "cov-update")
+        .expect("updated record");
+    record["status"] = serde_json::json!("running");
+    record["pid"] = serde_json::json!(std::process::id());
+    record["pid_start_time"] = serde_json::Value::Null;
+    std::fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&state).expect("serialize running state"),
+    )
+    .expect("write running state");
+
+    let (stdout, stderr, success) = cli.output(&[
+        "container-update",
+        "cov-update",
+        "--cpu-shares",
+        "2048",
+        "--restart",
+        "always",
+    ]);
+    assert!(
+        !success,
+        "live update unexpectedly succeeded: {stdout}\n{stderr}"
+    );
+    assert!(stderr.contains("live Tier 2 resource updates are not supported on Windows"));
+    assert!(
+        stdout.trim().is_empty(),
+        "rejected update must not print a success name: {stdout:?}"
+    );
+
+    let persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).expect("read rejected state"))
+            .expect("parse rejected state");
+    let record = persisted
+        .as_array()
+        .expect("state array")
+        .iter()
+        .find(|record| record["name"] == "cov-update")
+        .expect("persisted record");
+    assert!(record["resource_limits"]["cpu_shares"].is_null());
+    assert_eq!(record["restart_policy"], "on-failure");
+    assert_eq!(record["max_restart_count"], 2);
+}
+
 #[test]
 fn test_noninteractive_boundary_command_smoke() {
     let cli = CliTest::new();
@@ -604,6 +909,12 @@ fn test_noninteractive_boundary_command_smoke() {
         "not found locally",
     );
     cli.fails(&["attach", "missing-box"], "No such box");
+    #[cfg(target_os = "windows")]
+    cli.fails(
+        &["shell", "missing-box"],
+        "'shell' is not supported on windows/amd64",
+    );
+    #[cfg(not(target_os = "windows"))]
     cli.fails(&["shell", "missing-box"], "No such box");
     cli.fails(&["stats", "--no-stream", "missing-box"], "No such box");
     cli.fails(

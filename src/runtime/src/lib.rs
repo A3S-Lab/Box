@@ -72,7 +72,8 @@ pub use box_state::BoxStateStore;
 #[cfg(feature = "vm")]
 pub use local_execution::VmLocalExecutionBackend;
 pub use local_execution::{
-    LocalExecutionBackend, LocalExecutionHandle, LocalExecutionManager, LocalExecutionObservation,
+    acquire_execution_lifecycle_lock, ExecutionLifecycleLock, LocalExecutionBackend,
+    LocalExecutionHandle, LocalExecutionManager, LocalExecutionObservation,
 };
 pub use managed_execution_store::{
     ManagedExecutionReservation, ManagedExecutionStore, ManagedExecutionStoreError,

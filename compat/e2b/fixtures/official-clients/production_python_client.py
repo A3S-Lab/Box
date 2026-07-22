@@ -496,6 +496,37 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         if not sandbox.is_running():
             raise AssertionError("Snapshot did not restore the running source state")
 
+        cold_pause_content = f"{label}-cold-pause"
+        trace(label, "sandbox.cold-pause-write-state")
+        sandbox.files.write("a3s-cold-pause-state.txt", cold_pause_content)
+        trace(label, "sandbox.cold-pause-process-start")
+        cold_process = sandbox.commands.run(
+            "sleep 300", background=True, timeout=310
+        )
+        trace(label, "sandbox.cold-pause")
+        if not sandbox.pause(keep_memory=False):
+            raise AssertionError("filesystem-only pause did not pause a running sandbox")
+        trace(label, "sandbox.cold-pause-connect")
+        cold_resumed = sandbox.connect(timeout=60)
+        if cold_resumed.sandbox_id != sandbox.sandbox_id:
+            raise AssertionError("filesystem-only resume returned a different sandbox ID")
+        trace(label, "sandbox.cold-pause-read-state")
+        if sandbox.files.read("a3s-cold-pause-state.txt") != cold_pause_content:
+            raise AssertionError("filesystem-only pause lost rootfs state")
+        trace(label, "sandbox.cold-pause-process-gone")
+        if any(process.pid == cold_process.pid for process in sandbox.commands.list()):
+            raise AssertionError("filesystem-only pause preserved an old runtime process")
+        trace(label, "sandbox.cold-pause-environment")
+        cold_environment = sandbox.commands.run("printf '%s' \"$OFFICIAL_CLIENT\"")
+        if cold_environment.stdout != label or cold_environment.stderr:
+            raise AssertionError(
+                f"filesystem-only resume lost the Sandbox environment: {cold_environment!r}"
+            )
+        trace(label, "sandbox.cold-pause-volume")
+        cold_mounted = sandbox.commands.run("cat /mnt/data/shared/from-api.txt")
+        if cold_mounted.stdout != api_content or cold_mounted.stderr:
+            raise AssertionError("filesystem-only resume did not remount the Volume")
+
         trace(label, "sandbox.set-timeout")
         sandbox.set_timeout(30)
         trace(label, "sandbox.kill")
@@ -777,6 +808,46 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         trace(label, "snapshot.source-running")
         if not await sandbox.is_running():
             raise AssertionError("Snapshot did not restore the running source state")
+
+        cold_pause_content = f"{label}-cold-pause"
+        trace(label, "sandbox.cold-pause-write-state")
+        await sandbox.files.write("a3s-cold-pause-state.txt", cold_pause_content)
+        trace(label, "sandbox.cold-pause-process-start")
+        cold_process = await sandbox.commands.run(
+            "sleep 300", background=True, timeout=310
+        )
+        trace(label, "sandbox.cold-pause")
+        if not await sandbox.pause(keep_memory=False):
+            raise AssertionError("filesystem-only pause did not pause a running sandbox")
+        trace(label, "sandbox.cold-pause-connect")
+        cold_resumed = await sandbox.connect(timeout=60)
+        if cold_resumed.sandbox_id != sandbox.sandbox_id:
+            raise AssertionError("filesystem-only resume returned a different sandbox ID")
+        trace(label, "sandbox.cold-pause-read-state")
+        if (
+            await sandbox.files.read("a3s-cold-pause-state.txt")
+            != cold_pause_content
+        ):
+            raise AssertionError("filesystem-only pause lost rootfs state")
+        trace(label, "sandbox.cold-pause-process-gone")
+        if any(
+            process.pid == cold_process.pid
+            for process in await sandbox.commands.list()
+        ):
+            raise AssertionError("filesystem-only pause preserved an old runtime process")
+        trace(label, "sandbox.cold-pause-environment")
+        cold_environment = await sandbox.commands.run(
+            "printf '%s' \"$OFFICIAL_CLIENT\""
+        )
+        if cold_environment.stdout != label or cold_environment.stderr:
+            raise AssertionError(
+                "filesystem-only resume lost the Sandbox environment: "
+                f"{cold_environment!r}"
+            )
+        trace(label, "sandbox.cold-pause-volume")
+        cold_mounted = await sandbox.commands.run("cat /mnt/data/shared/from-api.txt")
+        if cold_mounted.stdout != api_content or cold_mounted.stderr:
+            raise AssertionError("filesystem-only resume did not remount the Volume")
 
         trace(label, "sandbox.set-timeout")
         await sandbox.set_timeout(30)

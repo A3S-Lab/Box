@@ -2,21 +2,32 @@
 
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
+use std::io::Read;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 #[cfg(any(target_os = "linux", test))]
 use std::path::Component;
 use std::path::{Path, PathBuf};
 
 use a3s_box_core::error::{BoxError, Result};
-use a3s_box_core::rootfs_metadata::{
-    runtime_managed_rootfs_mode, RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH,
-    ROOTFS_METADATA_PATH,
-};
+#[cfg(target_os = "linux")]
+use a3s_box_core::rootfs_metadata::runtime_managed_rootfs_mode;
 #[cfg(any(target_os = "linux", test))]
 use a3s_box_core::rootfs_metadata::{RootfsEntryKind, RootfsMetadataEntry};
+use a3s_box_core::rootfs_metadata::{
+    RootfsMetadataManifest, IMAGE_ROOTFS_METADATA_PATH, PREVIOUS_ROOTFS_METADATA_PATH,
+    ROOTFS_METADATA_PATH,
+};
 #[cfg(any(target_os = "linux", test))]
 use base64::Engine;
 
 use super::capability::{IdMapping, SandboxIdMappingPlan};
+
+const MAX_ROOTFS_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const SNAPSHOT_ID_MAPPING_FILE: &str = "sandbox/rootfs-id-mappings.json";
+#[cfg(target_os = "linux")]
+const MAX_SNAPSHOT_ID_MAPPING_BYTES: u64 = 64 * 1024;
 
 /// Container IDs discovered in the authoritative rootfs metadata manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +35,76 @@ pub struct RootfsIdentityRequirements {
     pub maximum_uid: u32,
     pub maximum_gid: u32,
     pub manifest_path: PathBuf,
+}
+
+/// Persist the exact user-namespace mapping needed to translate a stopped
+/// Sandbox rootfs back to container ownership during filesystem snapshots.
+#[cfg(target_os = "linux")]
+pub(crate) fn persist_snapshot_id_mappings(
+    box_dir: &Path,
+    plan: &SandboxIdMappingPlan,
+) -> Result<()> {
+    let destination = box_dir.join(SNAPSHOT_ID_MAPPING_FILE);
+    let parent = destination.parent().ok_or_else(|| {
+        BoxError::ConfigError(format!(
+            "Sandbox snapshot mapping path has no parent: {}",
+            destination.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent).map_err(BoxError::IoError)?;
+    let mut encoded = serde_json::to_vec_pretty(plan).map_err(|error| {
+        BoxError::SerializationError(format!(
+            "Failed to encode Sandbox snapshot ID mappings: {error}"
+        ))
+    })?;
+    encoded.push(b'\n');
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(BoxError::IoError)?;
+    temporary.write_all(&encoded).map_err(BoxError::IoError)?;
+    temporary.as_file().sync_all().map_err(BoxError::IoError)?;
+    temporary
+        .persist(&destination)
+        .map_err(|error| BoxError::IoError(error.error))?;
+    if let Ok(directory) = std::fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+    Ok(())
+}
+
+/// Load a persisted snapshot mapping, rejecting links, oversized artifacts,
+/// and malformed JSON before it can influence host ownership translation.
+#[cfg(target_os = "linux")]
+pub(crate) fn load_snapshot_id_mappings(box_dir: &Path) -> Result<Option<SandboxIdMappingPlan>> {
+    let path = box_dir.join(SNAPSHOT_ID_MAPPING_FILE);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(BoxError::IoError(error)),
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_SNAPSHOT_ID_MAPPING_BYTES {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox snapshot ID mapping artifact is not a bounded regular file: {}",
+            path.display()
+        )));
+    }
+    let mut encoded = Vec::with_capacity(metadata.len() as usize);
+    std::fs::File::open(&path)
+        .map_err(BoxError::IoError)?
+        .take(MAX_SNAPSHOT_ID_MAPPING_BYTES + 1)
+        .read_to_end(&mut encoded)
+        .map_err(BoxError::IoError)?;
+    if encoded.len() as u64 > MAX_SNAPSHOT_ID_MAPPING_BYTES {
+        return Err(BoxError::ConfigError(format!(
+            "Sandbox snapshot ID mapping artifact exceeds {} bytes: {}",
+            MAX_SNAPSHOT_ID_MAPPING_BYTES,
+            path.display()
+        )));
+    }
+    serde_json::from_slice(&encoded).map(Some).map_err(|error| {
+        BoxError::SerializationError(format!(
+            "Failed to decode Sandbox snapshot ID mappings {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Host IDs representing container root for one mapping plan.
@@ -110,9 +191,17 @@ struct DecodedEntry {
 }
 
 /// Read the terminal persistent manifest when present, otherwise the immutable
-/// image manifest. The mapping plan must cover every ID before `crun` starts.
+/// image manifest. Fresh image generations select the immutable manifest through
+/// the preference-aware variant below.
 pub fn inspect_rootfs_identity_requirements(root: &Path) -> Result<RootfsIdentityRequirements> {
-    let (manifest_path, manifest) = load_authoritative_manifest(root)?;
+    inspect_rootfs_identity_requirements_with_preference(root, false)
+}
+
+pub(crate) fn inspect_rootfs_identity_requirements_with_preference(
+    root: &Path,
+    prefer_image_manifest: bool,
+) -> Result<RootfsIdentityRequirements> {
+    let (manifest_path, manifest) = load_authoritative_manifest(root, prefer_image_manifest)?;
     let mut maximum_uid = 0u32;
     let mut maximum_gid = 0u32;
     for entry in manifest.entries {
@@ -145,6 +234,17 @@ pub fn prepare_rootfs_ownership(
     effective_uid: u32,
     read_only: bool,
 ) -> Result<()> {
+    prepare_rootfs_ownership_with_preference(root, plan, effective_uid, read_only, false)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn prepare_rootfs_ownership_with_preference(
+    root: &Path,
+    plan: &SandboxIdMappingPlan,
+    effective_uid: u32,
+    read_only: bool,
+    prefer_image_manifest: bool,
+) -> Result<()> {
     if effective_uid != 0 {
         if read_only {
             return Err(BoxError::ConfigError(
@@ -156,7 +256,7 @@ pub fn prepare_rootfs_ownership(
     }
 
     ensure_no_nested_mounts(root)?;
-    let (_, manifest) = load_authoritative_manifest(root)?;
+    let (_, manifest) = load_authoritative_manifest(root, prefer_image_manifest)?;
     let entries = decode_and_validate_entries(root, manifest)?;
     let authoritative_paths: HashSet<PathBuf> =
         entries.iter().map(|entry| entry.relative.clone()).collect();
@@ -242,15 +342,7 @@ fn collect_snapshot_rootfs_metadata(
     let relative = source
         .strip_prefix(root)
         .map_err(|_| BoxError::OciImageError("Sandbox Snapshot walk escaped its root".into()))?;
-    if matches!(
-        relative.to_str(),
-        Some(".a3s_rootfs_metadata_v1.json")
-            | Some(".a3s_rootfs_metadata_v1.json.tmp")
-            | Some(".a3s_image_metadata_v1.json")
-            | Some(".a3s_image_metadata_v1.json.tmp")
-            | Some(".a3s_exit_code")
-            | Some("init.trace.log")
-    ) {
+    if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(relative) {
         return Ok(());
     }
 
@@ -348,17 +440,94 @@ pub fn prepare_rootfs_ownership(
     ))
 }
 
-fn load_authoritative_manifest(root: &Path) -> Result<(PathBuf, RootfsMetadataManifest)> {
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn prepare_rootfs_ownership_with_preference(
+    root: &Path,
+    plan: &SandboxIdMappingPlan,
+    effective_uid: u32,
+    read_only: bool,
+    _prefer_image_manifest: bool,
+) -> Result<()> {
+    prepare_rootfs_ownership(root, plan, effective_uid, read_only)
+}
+
+fn load_authoritative_manifest(
+    root: &Path,
+    prefer_image_manifest: bool,
+) -> Result<(PathBuf, RootfsMetadataManifest)> {
     let terminal = root.join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
+    let previous = root.join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'));
     let image = root.join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'));
-    let path = if terminal.exists() { terminal } else { image };
-    let bytes = std::fs::read(&path).map_err(|error| BoxError::BoxBootError {
+    let candidates = if prefer_image_manifest {
+        // A freshly composed rootfs must not trust lifecycle markers that an
+        // image layer may have baked into the filesystem.
+        [image, terminal, previous]
+    } else {
+        // The CLI moves the clean-shutdown marker to `previous` before boot.
+        // Retain support for direct runtime callers that have not staged the
+        // legacy terminal marker yet; guest-init performs the one-shot cleanup
+        // only after replay succeeds.
+        [terminal, previous, image]
+    };
+
+    for candidate in &candidates {
+        if let Some(manifest) = load_manifest_if_present(candidate)? {
+            return Ok((candidate.clone(), manifest));
+        }
+    }
+
+    Err(BoxError::BoxBootError {
         message: format!(
-            "Sandbox rootfs metadata is unavailable at {}: {error}",
-            path.display()
+            "Sandbox rootfs metadata is unavailable at {}, {}, or {}",
+            candidates[0].display(),
+            candidates[1].display(),
+            candidates[2].display()
         ),
         hint: Some("Rebuild the per-box rootfs from its OCI image".to_string()),
-    })?;
+    })
+}
+
+fn load_manifest_if_present(path: &Path) -> Result<Option<RootfsMetadataManifest>> {
+    let mut file = match open_regular_file_no_follow(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(BoxError::BoxBootError {
+                message: format!(
+                    "Sandbox rootfs metadata is not a safe regular file at {}: {error}",
+                    path.display()
+                ),
+                hint: Some("Rebuild the per-box rootfs from its OCI image".to_string()),
+            });
+        }
+    };
+    let length = file.metadata().map_err(BoxError::IoError)?.len();
+    if length > MAX_ROOTFS_METADATA_BYTES {
+        return Err(BoxError::OciImageError(format!(
+            "Sandbox rootfs metadata {} exceeds the {} byte limit",
+            path.display(),
+            MAX_ROOTFS_METADATA_BYTES
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(length as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_ROOTFS_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| BoxError::BoxBootError {
+            message: format!(
+                "Failed to read Sandbox rootfs metadata {}: {error}",
+                path.display()
+            ),
+            hint: Some("Rebuild the per-box rootfs from its OCI image".to_string()),
+        })?;
+    if bytes.len() as u64 > MAX_ROOTFS_METADATA_BYTES {
+        return Err(BoxError::OciImageError(format!(
+            "Sandbox rootfs metadata {} exceeds the {} byte limit",
+            path.display(),
+            MAX_ROOTFS_METADATA_BYTES
+        )));
+    }
     let manifest: RootfsMetadataManifest = serde_json::from_slice(&bytes).map_err(|error| {
         BoxError::OciImageError(format!(
             "Invalid Sandbox rootfs metadata {}: {error}",
@@ -366,7 +535,41 @@ fn load_authoritative_manifest(root: &Path) -> Result<(PathBuf, RootfsMetadataMa
         ))
     })?;
     manifest.validate().map_err(BoxError::OciImageError)?;
-    Ok((path, manifest))
+    Ok(Some(manifest))
+}
+
+#[cfg(unix)]
+fn open_regular_file_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "rootfs metadata path is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_regular_file_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    a3s_box_core::windows_file::open_regular_file(path, None).map(|(file, _)| file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_regular_file_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "rootfs metadata path is not a regular file",
+        ));
+    }
+    std::fs::File::open(path)
 }
 
 #[cfg(target_os = "linux")]
@@ -386,8 +589,7 @@ fn decode_and_validate_entries(
         // platform path bytes can be reconstructed losslessly.
         let encoded = unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(raw) };
         let relative = safe_relative_path(Path::new(&encoded))?;
-        if relative == Path::new(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/'))
-            || relative == Path::new(ROOTFS_METADATA_PATH.trim_start_matches('/'))
+        if a3s_box_core::rootfs_metadata::is_runtime_internal_rootfs_path(&relative)
             || !unique.insert(relative.clone())
         {
             return Err(BoxError::OciImageError(
@@ -670,6 +872,22 @@ mod tests {
     use super::*;
     use a3s_box_core::rootfs_metadata::ROOTFS_METADATA_SCHEMA;
 
+    fn test_manifest(uid: u64, gid: u64) -> RootfsMetadataManifest {
+        RootfsMetadataManifest {
+            schema: ROOTFS_METADATA_SCHEMA.to_string(),
+            entries: vec![RootfsMetadataEntry {
+                path_base64: base64::engine::general_purpose::STANDARD.encode("."),
+                kind: RootfsEntryKind::Directory,
+                mode: 0o755,
+                uid,
+                gid,
+                mtime: 0,
+                size: 0,
+                link_target_base64: None,
+            }],
+        }
+    }
+
     #[test]
     fn mapping_translation_is_complete_and_exact() {
         let mappings = vec![
@@ -692,31 +910,18 @@ mod tests {
     #[test]
     fn terminal_manifest_takes_precedence_for_identity_planning() {
         let directory = tempfile::tempdir().unwrap();
-        let manifest = |uid, gid| RootfsMetadataManifest {
-            schema: ROOTFS_METADATA_SCHEMA.to_string(),
-            entries: vec![RootfsMetadataEntry {
-                path_base64: base64::engine::general_purpose::STANDARD.encode("."),
-                kind: RootfsEntryKind::Directory,
-                mode: 0o755,
-                uid,
-                gid,
-                mtime: 0,
-                size: 0,
-                link_target_base64: None,
-            }],
-        };
         std::fs::write(
             directory
                 .path()
                 .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
-            serde_json::to_vec(&manifest(1, 2)).unwrap(),
+            serde_json::to_vec(&test_manifest(1, 2)).unwrap(),
         )
         .unwrap();
         std::fs::write(
             directory
                 .path()
                 .join(ROOTFS_METADATA_PATH.trim_start_matches('/')),
-            serde_json::to_vec(&manifest(42, 43)).unwrap(),
+            serde_json::to_vec(&test_manifest(42, 43)).unwrap(),
         )
         .unwrap();
 
@@ -726,6 +931,139 @@ mod tests {
         assert!(requirements
             .manifest_path
             .ends_with(".a3s_rootfs_metadata_v1.json"));
+    }
+
+    #[test]
+    fn staged_previous_manifest_takes_precedence_over_image() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&test_manifest(1, 2)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&test_manifest(42, 43)).unwrap(),
+        )
+        .unwrap();
+
+        let requirements = inspect_rootfs_identity_requirements(directory.path()).unwrap();
+        assert_eq!(requirements.maximum_uid, 42);
+        assert_eq!(requirements.maximum_gid, 43);
+        assert!(requirements
+            .manifest_path
+            .ends_with(".a3s_rootfs_metadata_v1.previous.json"));
+    }
+
+    #[test]
+    fn fresh_rootfs_prefers_image_manifest_for_identity_planning() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&test_manifest(7, 8)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&test_manifest(42, 43)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&test_manifest(99, 100)).unwrap(),
+        )
+        .unwrap();
+
+        let requirements =
+            inspect_rootfs_identity_requirements_with_preference(directory.path(), true).unwrap();
+        assert_eq!(requirements.maximum_uid, 7);
+        assert_eq!(requirements.maximum_gid, 8);
+        assert!(requirements
+            .manifest_path
+            .ends_with(".a3s_image_metadata_v1.json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_manifest_symlink_is_rejected_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside.json");
+        let outside_bytes = serde_json::to_vec(&test_manifest(99, 100)).unwrap();
+        std::fs::write(&outside, &outside_bytes).unwrap();
+        symlink(
+            &outside,
+            directory
+                .path()
+                .join(ROOTFS_METADATA_PATH.trim_start_matches('/')),
+        )
+        .unwrap();
+
+        let error = inspect_rootfs_identity_requirements(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("not a safe regular file"));
+        assert_eq!(std::fs::read(outside).unwrap(), outside_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_rootfs_ignores_baked_terminal_manifest_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(IMAGE_ROOTFS_METADATA_PATH.trim_start_matches('/')),
+            serde_json::to_vec(&test_manifest(7, 8)).unwrap(),
+        )
+        .unwrap();
+        let outside = directory.path().join("outside.json");
+        std::fs::write(
+            &outside,
+            serde_json::to_vec(&test_manifest(99, 100)).unwrap(),
+        )
+        .unwrap();
+        symlink(
+            &outside,
+            directory
+                .path()
+                .join(ROOTFS_METADATA_PATH.trim_start_matches('/')),
+        )
+        .unwrap();
+
+        let requirements =
+            inspect_rootfs_identity_requirements_with_preference(directory.path(), true).unwrap();
+        assert_eq!(requirements.maximum_uid, 7);
+        assert_eq!(requirements.maximum_gid, 8);
+        assert!(requirements
+            .manifest_path
+            .ends_with(".a3s_image_metadata_v1.json"));
+    }
+
+    #[test]
+    fn oversized_rootfs_manifest_is_rejected_before_reading() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
+        let file = std::fs::File::create(path).unwrap();
+        file.set_len(MAX_ROOTFS_METADATA_BYTES + 1).unwrap();
+
+        let error = inspect_rootfs_identity_requirements(directory.path()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("exceeds the 67108864 byte limit"));
     }
 
     #[test]

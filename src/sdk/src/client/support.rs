@@ -775,11 +775,25 @@ fn read_log_source(source: LogSource, tail: usize) -> Result<Vec<BoxLogLine>> {
     }
 
     let file = std::fs::File::open(source.path)?;
-    let reader = std::io::BufReader::new(file);
+    let mut reader = std::io::BufReader::new(file);
+    let runtime_filter = (!source.structured).then(RuntimeConsoleFilter::new);
     let mut lines = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        let Some(decoded) = decode_log_line(&line, source.structured) else {
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        if reader.read_until(b'\n', &mut buffer)? == 0 {
+            break;
+        }
+        let complete = buffer.ends_with(b"\n");
+        let line = std::str::from_utf8(&buffer)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+            .trim_end_matches(['\n', '\r']);
+        let Some(decoded) = decode_log_line(
+            line,
+            source.structured,
+            runtime_filter.as_ref(),
+            complete,
+        ) else {
             continue;
         };
         lines.push(decoded);
@@ -789,7 +803,12 @@ fn read_log_source(source: LogSource, tail: usize) -> Result<Vec<BoxLogLine>> {
     Ok(lines[start..].to_vec())
 }
 
-fn decode_log_line(line: &str, structured: bool) -> Option<BoxLogLine> {
+fn decode_log_line(
+    line: &str,
+    structured: bool,
+    runtime_filter: Option<&RuntimeConsoleFilter>,
+    complete: bool,
+) -> Option<BoxLogLine> {
     if structured {
         return match serde_json::from_str::<LogEntry>(line) {
             Ok(entry) => Some(BoxLogLine {
@@ -805,7 +824,7 @@ fn decode_log_line(line: &str, structured: bool) -> Option<BoxLogLine> {
         };
     }
 
-    if is_runtime_console_noise(line) {
+    if complete && runtime_filter.is_some_and(|filter| !filter.keep_line(line)) {
         return None;
     }
 
