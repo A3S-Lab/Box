@@ -738,10 +738,14 @@ jobs:
             for attempt in $(seq 1 18); do
               status="$(crate_status "$crate")"
               if [ "$status" = "200" ]; then
-                echo "Verified $crate@$VERSION on crates.io"
-                return 0
+                if cargo info "$crate@$VERSION" \
+                     --registry crates-io >/dev/null 2>&1; then
+                  echo "Verified $crate@$VERSION in the crates.io index"
+                  return 0
+                fi
+                echo "$crate@$VERSION is visible through the API; waiting for the index"
               fi
-              if [ "$status" != "404" ]; then
+              if [ "$status" != "200" ] && [ "$status" != "404" ]; then
                 echo "::error::crates.io returned HTTP $status while verifying $crate@$VERSION"
                 return 1
               fi
