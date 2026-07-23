@@ -13,6 +13,10 @@ gap: it links **real** libkrun and runs the `#[ignore]` integration suite plus
 the `crictl` CRI smoke test against an actual microVM. It is **inert until you
 arm it**, so it never blocks a PR on a repo without a KVM runner.
 
+This short CI gate is a prerequisite, not a substitute, for the `G2`, `R24`,
+and `E72` profiles in the
+[Cross-Capability Soak Test Plan](soak-test-plan.md).
+
 ## Arming the gate (one-time)
 
 ### 1. Register a self-hosted runner that has `/dev/kvm`

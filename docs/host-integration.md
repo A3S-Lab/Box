@@ -4,6 +4,11 @@ This guide defines the macOS and Linux validation path for a3s-box. Run these
 commands from the crate repository root (`crates/box`), not from the monorepo
 root.
 
+Use the [Cross-Capability Soak Test Plan](soak-test-plan.md) to decide which
+capability scenarios and `R0`, `G2`, `R24`, or `E72` profile a change requires.
+This guide supplies host commands; it does not by itself prove that every
+capability scenario has soak coverage.
+
 ## Validation ladder
 
 | Level | Host requirements | Command |
@@ -16,6 +21,7 @@ root.
 | CRI smoke | macOS or Linux MicroVM host, `crictl`, CRI images | `scripts/host-integration-smoke.sh --cri` |
 | Host soak | Same as the selected host-backed suites; enough time to expose leaks and lost updates | `scripts/host-integration-smoke.sh --no-pure --core --host --soak` |
 | Production cluster validation | Explicitly enrolled production Linux nodes with `/dev/kvm`, containerd RuntimeClass wiring, labels, taints, and rollback prepared | See [`production-cluster-tests.md`](./production-cluster-tests.md) |
+| Cross-capability promotion | The host and isolation lanes required by the affected public capabilities | See [`soak-test-plan.md`](./soak-test-plan.md) |
 
 The default command runs formatting, clippy, unit tests, and integration test
 compilation with `A3S_DEPS_STUB=1`. It does not require a hypervisor and should

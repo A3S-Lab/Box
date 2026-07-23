@@ -6,6 +6,12 @@ portable networking, and verifiable confidential-computing workflows.
 
 ## Release Gates
 
+Long-running release evidence across runtime, image, build, storage, network,
+SDK, provider, TEE, Kubernetes, Windows, and upgrade behavior is defined in the
+[Cross-Capability Soak Test Plan](soak-test-plan.md). The gates below establish
+feature readiness; promotion also requires the soak profiles selected by that
+plan.
+
 ### Gate 1: Honest MVP
 
 Goal: make the documented surface match working behavior and protect users from
