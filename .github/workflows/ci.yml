@@ -198,7 +198,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential musl-tools protobuf-compiler
           rustup target add x86_64-unknown-linux-musl
-          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          sed -nE \
+            's/^[[:space:]]*pub fn (krun_[A-Za-z0-9_]+).*/long \1(void) { return -1; }/p' \
+            src/deps/libkrun-sys/src/lib.rs \
+            | sort -u > /tmp/krun_stub.c
+          test -s /tmp/krun_stub.c
           gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
           sudo cp /tmp/libkrun.so /usr/lib/
           sudo ldconfig
