@@ -152,6 +152,154 @@ fn builder_bridge_shapes_deserialize_as_typed_requests() {
     assert!(!request.auto_remove);
 }
 
+#[test]
+fn image_registry_options_deserialize_as_typed_requests() {
+    let pull: BridgeRequest = serde_json::from_str(
+        r#"{
+            "operation":"image_pull",
+            "reference":"registry.example/ci/base:latest",
+            "credentials":{"username":"builder","password":"secret"},
+            "signature_policy":{"mode":"cosign_key","public_key":"/keys/cosign.pub"}
+        }"#,
+    )
+    .unwrap();
+    let BridgeRequest::ImagePull {
+        credentials,
+        signature_policy,
+        ..
+    } = pull
+    else {
+        panic!("expected image pull request");
+    };
+    assert_eq!(
+        credentials,
+        Some(BridgeRegistryCredentials {
+            username: "builder".to_string(),
+            password: "secret".to_string(),
+        })
+    );
+    assert_eq!(
+        signature_policy,
+        BridgeSignaturePolicy::CosignKey {
+            public_key: "/keys/cosign.pub".to_string(),
+        }
+    );
+
+    let push: BridgeRequest = serde_json::from_str(
+        r#"{
+            "operation":"image_push",
+            "source":"local/ci:latest",
+            "target":"registry.example/ci/app:latest",
+            "registry_protocol":"http"
+        }"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        push,
+        BridgeRequest::ImagePush {
+            registry_protocol: Some(BridgeRegistryProtocol::Http),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn capabilities_publish_a_unique_exhaustive_operation_inventory() {
+    let mut sorted = BRIDGE_OPERATIONS.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), BRIDGE_OPERATIONS.len());
+
+    let response = handle_request(&A3sBoxClient::new(), BridgeRequest::SdkCapabilities).await;
+    assert!(response.ok);
+    let result = response.result.unwrap();
+    assert_eq!(result["protocol_version"], BRIDGE_PROTOCOL_VERSION);
+    assert_eq!(
+        result["operations"],
+        serde_json::to_value(BRIDGE_OPERATIONS).unwrap()
+    );
+    let checked_inventory: Vec<String> =
+        serde_json::from_str(include_str!("../../../../sdk/bridge-operations.json")).unwrap();
+    assert_eq!(checked_inventory, BRIDGE_OPERATIONS);
+}
+
+#[tokio::test]
+async fn image_management_bridge_validates_before_registry_or_store_mutation() {
+    let home = tempfile::tempdir().unwrap();
+    let client = A3sBoxClient::from_home(home.path());
+
+    let get = handle_request(
+        &client,
+        BridgeRequest::ImageGet {
+            reference: "alpine:latest".to_string(),
+        },
+    )
+    .await;
+    assert!(get.ok);
+    assert!(get.result.unwrap()["image"].is_null());
+
+    let inspect = handle_request(
+        &client,
+        BridgeRequest::ImageInspect {
+            reference: "alpine:latest".to_string(),
+        },
+    )
+    .await;
+    assert!(inspect.ok);
+    assert!(inspect.result.unwrap()["image"].is_null());
+
+    let history = handle_request(
+        &client,
+        BridgeRequest::ImageHistory {
+            reference: "alpine:latest".to_string(),
+        },
+    )
+    .await;
+    assert!(history.ok);
+    assert!(history.result.unwrap()["history"].is_null());
+
+    let pull = handle_request(
+        &client,
+        BridgeRequest::ImagePull {
+            reference: "alpine:latest".to_string(),
+            force: false,
+            platform: None,
+            credentials: Some(BridgeRegistryCredentials {
+                username: String::new(),
+                password: "secret".to_string(),
+            }),
+            signature_policy: BridgeSignaturePolicy::Skip,
+        },
+    )
+    .await;
+    assert!(!pull.ok);
+    assert_eq!(pull.error.unwrap().code, "invalid_request");
+
+    let push = handle_request(
+        &client,
+        BridgeRequest::ImagePush {
+            source: String::new(),
+            target: "registry.example/ci/app:latest".to_string(),
+            credentials: None,
+            registry_protocol: Some(BridgeRegistryProtocol::Https),
+        },
+    )
+    .await;
+    assert!(!push.ok);
+    assert_eq!(push.error.unwrap().code, "invalid_request");
+
+    let tag = handle_request(
+        &client,
+        BridgeRequest::ImageTag {
+            source: "missing:latest".to_string(),
+            target: "local/test:latest".to_string(),
+        },
+    )
+    .await;
+    assert!(!tag.ok);
+    assert_eq!(tag.error.unwrap().code, "invalid_request");
+}
+
 #[tokio::test]
 async fn resource_bridge_operations_use_typed_runtime_stores() {
     let home = tempfile::tempdir().unwrap();
@@ -191,6 +339,11 @@ async fn resource_bridge_operations_use_typed_runtime_stores() {
     assert_eq!(volumes.result.unwrap()["volumes"][0]["name"], "ci-cache");
     let networks = handle_request(&client, BridgeRequest::NetworkList).await;
     assert_eq!(networks.result.unwrap()["networks"][0]["name"], "ci-net");
+
+    let pruned_volumes = handle_request(&client, BridgeRequest::VolumePrune).await;
+    assert_eq!(pruned_volumes.result.unwrap()["names"][0], "ci-cache");
+    let pruned_networks = handle_request(&client, BridgeRequest::NetworkPrune).await;
+    assert_eq!(pruned_networks.result.unwrap()["names"][0], "ci-net");
 }
 
 #[tokio::test]

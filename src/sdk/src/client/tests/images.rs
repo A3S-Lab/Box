@@ -268,6 +268,24 @@
         assert_eq!(build.dockerfile_path, dockerfile);
         assert_eq!(build.platforms, vec![Platform::linux_amd64()]);
         assert_eq!(push.registry_protocol, RegistryProtocol::Http);
+
+        let empty_credentials = PullImage::new("alpine:latest")
+            .credentials(RegistryCredentials::basic("", "secret"));
+        assert!(matches!(
+            empty_credentials.validate(),
+            Err(ClientError::Validation(message))
+                if message.contains("username cannot be empty")
+        ));
+        let empty_signature = PullImage::new("alpine:latest").signature_policy(
+            SignaturePolicy::CosignKey {
+                public_key: " ".to_string(),
+            },
+        );
+        assert!(matches!(
+            empty_signature.validate(),
+            Err(ClientError::Validation(message))
+                if message.contains("public key path cannot be empty")
+        ));
     }
 
     #[cfg(unix)]

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use a3s_box_sdk::{
     A3sBoxClient, ClientError, ExecutionIsolation, ExecutionSnapshotId, Sandbox,
-    SandboxCreateOptions, SandboxNetwork,
+    SandboxCreateOptions, SandboxNetwork, TagImage,
 };
 
 type AnyError = Box<dyn Error + Send + Sync>;
@@ -48,6 +48,20 @@ async fn e2b_style_local_sandbox_runs_without_remote_credentials() -> Result<(),
         .tag("local/a3s-sdk-smoke-rust:latest")
         .build()
         .await?;
+    exercise_image_management(&client, &image.reference).await?;
+    let prune_volume = client.volume("rust-sdk-prune-cache").create()?;
+    require(
+        client.prune_volumes()?.contains(&prune_volume.name),
+        "volume prune did not remove an unused volume",
+    )?;
+    let prune_network = client
+        .network("rust-sdk-prune-network")
+        .subnet("10.89.94.0/24")
+        .create()?;
+    require(
+        client.prune_networks()?.contains(&prune_network.name),
+        "network prune did not remove an unused network",
+    )?;
     let volume = client
         .volume("rust-sdk-cache")
         .label("purpose", "local-sdk-smoke")
@@ -205,6 +219,31 @@ async fn cleanup_programmable_resources(
         client.remove_network(&network.name)?;
     }
     client.remove_image(image).await?;
+    client.evict_images().await?;
+    Ok(())
+}
+
+async fn exercise_image_management(client: &A3sBoxClient, reference: &str) -> Result<(), AnyError> {
+    require(
+        client.get_image(reference).await?.is_some(),
+        "built image was not gettable through the SDK",
+    )?;
+    require(
+        client.inspect_image(reference).await?.is_some(),
+        "built image was not inspectable through the SDK",
+    )?;
+    require(
+        client.image_history(reference).await?.is_some(),
+        "built image history was not available through the SDK",
+    )?;
+    let tagged = client
+        .tag_image(TagImage::new(reference, "local/a3s-sdk-smoke-rust:tested"))
+        .await?;
+    require(
+        tagged.reference == "local/a3s-sdk-smoke-rust:tested",
+        "image tag returned the wrong reference",
+    )?;
+    client.remove_image(&tagged.reference).await?;
     Ok(())
 }
 

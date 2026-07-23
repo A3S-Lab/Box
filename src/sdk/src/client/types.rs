@@ -114,6 +114,20 @@ impl RegistryCredentials {
     fn into_auth(self) -> RegistryAuth {
         RegistryAuth::basic(self.username, self.password)
     }
+
+    fn validate(&self) -> Result<()> {
+        if self.username.trim().is_empty() {
+            return Err(ClientError::Validation(
+                "registry username cannot be empty".to_string(),
+            ));
+        }
+        if self.password.is_empty() {
+            return Err(ClientError::Validation(
+                "registry password cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Request to pull an OCI image through the runtime image puller.
@@ -159,6 +173,10 @@ impl PullImage {
 
     fn validate(&self) -> Result<()> {
         ImageReference::parse(&self.reference).map_err(ClientError::Runtime)?;
+        if let Some(credentials) = &self.credentials {
+            credentials.validate()?;
+        }
+        validate_signature_policy(&self.signature_policy)?;
         Ok(())
     }
 
@@ -317,6 +335,9 @@ impl PushImage {
             ));
         }
         ImageReference::parse(&self.target).map_err(ClientError::Runtime)?;
+        if let Some(credentials) = &self.credentials {
+            credentials.validate()?;
+        }
         Ok(())
     }
 
@@ -325,6 +346,25 @@ impl PushImage {
             Some(credentials) => credentials.into_auth(),
             None => RegistryAuth::from_credential_store(&target.registry),
         }
+    }
+}
+
+fn validate_signature_policy(policy: &SignaturePolicy) -> Result<()> {
+    match policy {
+        SignaturePolicy::Skip => Ok(()),
+        SignaturePolicy::CosignKey { public_key } if public_key.trim().is_empty() => {
+            Err(ClientError::Validation(
+                "cosign public key path cannot be empty".to_string(),
+            ))
+        }
+        SignaturePolicy::CosignKeyless { issuer, identity }
+            if issuer.trim().is_empty() || identity.trim().is_empty() =>
+        {
+            Err(ClientError::Validation(
+                "cosign keyless issuer and identity cannot be empty".to_string(),
+            ))
+        }
+        _ => Ok(()),
     }
 }
 

@@ -6,7 +6,10 @@ import SandboxDefault, {
   A3SLocalRuntime,
   A3SRemoteConnection,
   DEFAULT_IMAGE,
+  RegistryCredentials,
   Sandbox,
+  SignaturePolicy,
+  SUPPORTED_BRIDGE_OPERATIONS,
 } from '../dist/index.js'
 import { Sandbox as CodeInterpreter } from '../dist/code-interpreter.js'
 
@@ -25,8 +28,35 @@ class FakeRuntime {
         }
       case 'image_pull':
         return imageResponse(request.reference)
+      case 'image_get':
+        return { image: imageResponse(request.reference) }
       case 'image_list':
         return { images: [imageResponse('alpine:3.20')] }
+      case 'image_inspect':
+        return { image: imageInspectResponse(request.reference) }
+      case 'image_history':
+        return {
+          history: [
+            {
+              created: '2026-07-23T00:00:00Z',
+              created_by: 'RUN npm test',
+              size_bytes: 2048,
+              comment: 'ci',
+              empty_layer: false,
+            },
+          ],
+        }
+      case 'image_tag':
+        return imageResponse(request.target)
+      case 'image_push':
+        return {
+          reference: request.target,
+          manifest_digest: 'sha256:manifest',
+          config_url: 'https://registry.example/config',
+          manifest_url: 'https://registry.example/manifest',
+        }
+      case 'image_evict':
+        return { references: ['local/old:latest'] }
       case 'image_remove':
         return { reference: request.reference, removed: true }
       case 'volume_create':
@@ -37,6 +67,8 @@ class FakeRuntime {
         return { volumes: [volumeResponse('ci-cache')] }
       case 'volume_remove':
         return volumeResponse(request.name)
+      case 'volume_prune':
+        return { names: ['old-cache'] }
       case 'network_create':
         return networkResponse(request.name, request.subnet)
       case 'network_get':
@@ -45,6 +77,23 @@ class FakeRuntime {
         return { networks: [networkResponse('ci-net', '10.89.0.0/24')] }
       case 'network_remove':
         return networkResponse(request.name, '10.89.0.0/24')
+      case 'network_prune':
+        return { names: ['old-network'] }
+      case 'sdk_capabilities':
+        return {
+          protocol_version: 1,
+          operations: [
+            'sdk_capabilities',
+            'image_get',
+            'image_inspect',
+            'image_history',
+            'image_tag',
+            'image_push',
+            'image_evict',
+            'volume_prune',
+            'network_prune',
+          ],
+        }
       case 'sandbox_create':
         return {
           sandbox_id: 'sandbox-local-1',
@@ -128,6 +177,31 @@ function imageResponse(reference) {
     pulled_at: '2026-07-23T00:00:00Z',
     last_used: '2026-07-23T00:00:00Z',
     path: '/tmp/image',
+  }
+}
+
+function imageInspectResponse(reference) {
+  return {
+    ...imageResponse(reference),
+    manifest_digest: 'sha256:manifest',
+    layer_count: 2,
+    entrypoint: ['/bin/sh'],
+    command: ['-c', 'npm test'],
+    env: { CI: 'true' },
+    working_dir: '/workspace',
+    user: '1000:1000',
+    exposed_ports: ['8080/tcp'],
+    volumes: ['/cache'],
+    stop_signal: 'SIGTERM',
+    health_check: {
+      test: ['CMD', 'true'],
+      interval: 1_000_000_000,
+      timeout: 500_000_000,
+      retries: 3,
+      start_period: 0,
+    },
+    onbuild: [],
+    labels: { purpose: 'ci' },
   }
 }
 
@@ -269,6 +343,43 @@ await client.removeNetwork(ciNetwork.name)
 await client.removeVolume(cacheVolume.name)
 await client.removeImage(builtImage.reference)
 
+const managementRuntime = new FakeRuntime()
+const management = new A3SBoxClient(managementRuntime)
+const credentials = new RegistryCredentials('builder', 'secret')
+const signaturePolicy = SignaturePolicy.cosignKey('/keys/cosign.pub')
+const pulled = await management.pullImage('registry.example/ci/base:latest', {
+  credentials,
+  signaturePolicy,
+})
+const cached = await management.getImage(pulled.reference)
+const inspected = await management.inspectImage(pulled.reference)
+const history = await management.imageHistory(pulled.reference)
+const tagged = await management.tagImage(pulled.reference, 'local/ci:tested')
+const pushed = await management.pushImage(
+  tagged.reference,
+  'registry.example/ci/app:tested',
+  { credentials, registryProtocol: 'http' }
+)
+assert.deepEqual(await management.evictImages(), ['local/old:latest'])
+assert.deepEqual(await management.pruneVolumes(), ['old-cache'])
+assert.deepEqual(await management.pruneNetworks(), ['old-network'])
+const capabilities = await management.capabilities()
+assert.deepEqual(cached, pulled)
+assert.equal(inspected.manifestDigest, 'sha256:manifest')
+assert.equal(inspected.healthCheck.retries, 3)
+assert.equal(history[0].createdBy, 'RUN npm test')
+assert.equal(pushed.manifestDigest, 'sha256:manifest')
+assert.ok(capabilities.operations.includes('image_push'))
+assert.deepEqual(managementRuntime.requests[0].credentials, {
+  username: 'builder',
+  password: 'secret',
+})
+assert.deepEqual(managementRuntime.requests[0].signature_policy, {
+  mode: 'cosign_key',
+  public_key: '/keys/cosign.pub',
+})
+assert.equal(managementRuntime.requests[5].registry_protocol, 'http')
+
 const sandboxIsolationRuntime = new FakeRuntime()
 const sharedKernelSandbox = await Sandbox.create(undefined, {
   isolation: 'sandbox',
@@ -368,3 +479,10 @@ const packageJson = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')
 )
 assert.deepEqual(packageJson.dependencies ?? {}, {})
+const operationInventory = JSON.parse(
+  await readFile(
+    new URL('../../bridge-operations.json', import.meta.url),
+    'utf8'
+  )
+)
+assert.deepEqual(SUPPORTED_BRIDGE_OPERATIONS, operationInventory)

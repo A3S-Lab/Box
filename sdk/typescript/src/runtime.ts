@@ -3,6 +3,45 @@ import { spawn } from 'node:child_process'
 import { A3SBoxError, A3SBoxNotInstalledError } from './errors.js'
 
 export const BRIDGE_PROTOCOL_VERSION = 1
+export const SUPPORTED_BRIDGE_OPERATIONS = [
+  'sdk_capabilities',
+  'image_build',
+  'image_pull',
+  'image_get',
+  'image_list',
+  'image_inspect',
+  'image_history',
+  'image_tag',
+  'image_push',
+  'image_remove',
+  'image_evict',
+  'volume_create',
+  'volume_get',
+  'volume_list',
+  'volume_remove',
+  'volume_prune',
+  'network_create',
+  'network_get',
+  'network_list',
+  'network_remove',
+  'network_prune',
+  'sandbox_create',
+  'sandbox_inspect',
+  'sandbox_kill',
+  'sandbox_pause',
+  'sandbox_resume',
+  'sandbox_snapshot_create',
+  'filesystem_snapshot_size',
+  'filesystem_snapshot_delete',
+  'command_run',
+  'file_write',
+  'file_read',
+  'filesystem_stat',
+  'filesystem_list',
+  'filesystem_make_dir',
+  'filesystem_move',
+  'filesystem_remove',
+] as const
 
 export type BridgeRequest = Readonly<Record<string, unknown>>
 export type BridgeResult = Record<string, unknown>

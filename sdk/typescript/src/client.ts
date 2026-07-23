@@ -27,6 +27,98 @@ export interface ImageInfo {
   path: string
 }
 
+export type RegistryProtocol = 'https' | 'http'
+
+export class RegistryCredentials {
+  constructor(
+    readonly username: string,
+    readonly password: string
+  ) {}
+
+  bridgeValue(): Readonly<Record<string, string>> {
+    return {
+      username: this.username,
+      password: this.password,
+    }
+  }
+}
+
+type SignaturePolicyValue =
+  | { mode: 'skip' }
+  | { mode: 'cosign_key'; public_key: string }
+  | { mode: 'cosign_keyless'; issuer: string; identity: string }
+
+export class SignaturePolicy {
+  private constructor(private readonly value: SignaturePolicyValue) {}
+
+  static skip(): SignaturePolicy {
+    return new SignaturePolicy({ mode: 'skip' })
+  }
+
+  static cosignKey(publicKey: string): SignaturePolicy {
+    return new SignaturePolicy({
+      mode: 'cosign_key',
+      public_key: publicKey,
+    })
+  }
+
+  static cosignKeyless(issuer: string, identity: string): SignaturePolicy {
+    return new SignaturePolicy({
+      mode: 'cosign_keyless',
+      issuer,
+      identity,
+    })
+  }
+
+  bridgeValue(): SignaturePolicyValue {
+    return this.value
+  }
+}
+
+export interface ImageHealthCheckInfo {
+  test: readonly string[]
+  interval?: number
+  timeout?: number
+  retries?: number
+  startPeriod?: number
+}
+
+export interface ImageInspectInfo extends ImageInfo {
+  manifestDigest: string
+  layerCount: number
+  entrypoint?: readonly string[]
+  command?: readonly string[]
+  env: Readonly<Record<string, string>>
+  workingDir?: string
+  user?: string
+  exposedPorts: readonly string[]
+  volumes: readonly string[]
+  stopSignal?: string
+  healthCheck?: ImageHealthCheckInfo
+  onbuild: readonly string[]
+  labels: Readonly<Record<string, string>>
+}
+
+export interface ImageHistoryInfo {
+  created?: string
+  createdBy: string
+  sizeBytes: number
+  comment: string
+  emptyLayer: boolean
+}
+
+export interface PushImageInfo {
+  reference: string
+  manifestDigest: string
+  configUrl: string
+  manifestUrl: string
+}
+
+export interface SdkCapabilities {
+  protocolVersion: number
+  operations: readonly string[]
+}
+
 export interface VolumeInfo {
   name: string
   driver: string
@@ -80,7 +172,12 @@ export class A3SBoxClient {
 
   async pullImage(
     reference: string,
-    options: { force?: boolean; platform?: string } = {}
+    options: {
+      force?: boolean
+      platform?: string
+      credentials?: RegistryCredentials
+      signaturePolicy?: SignaturePolicy
+    } = {}
   ): Promise<ImageInfo> {
     return imageInfo(
       await this.runtime.request({
@@ -90,8 +187,24 @@ export class A3SBoxClient {
         ...(options.platform === undefined
           ? {}
           : { platform: options.platform }),
+        ...(options.credentials === undefined
+          ? {}
+          : { credentials: options.credentials.bridgeValue() }),
+        ...(options.signaturePolicy === undefined
+          ? {}
+          : { signature_policy: options.signaturePolicy.bridgeValue() }),
       })
     )
+  }
+
+  async getImage(reference: string): Promise<ImageInfo | undefined> {
+    const result = await this.runtime.request({
+      operation: 'image_get',
+      reference,
+    })
+    return result.image === null || result.image === undefined
+      ? undefined
+      : imageInfo(asRecord(result.image))
   }
 
   async listImages(): Promise<ImageInfo[]> {
@@ -99,8 +212,68 @@ export class A3SBoxClient {
     return recordArray(result, 'images').map(imageInfo)
   }
 
+  async inspectImage(reference: string): Promise<ImageInspectInfo | undefined> {
+    const result = await this.runtime.request({
+      operation: 'image_inspect',
+      reference,
+    })
+    return result.image === null || result.image === undefined
+      ? undefined
+      : imageInspectInfo(asRecord(result.image))
+  }
+
+  async imageHistory(
+    reference: string
+  ): Promise<ImageHistoryInfo[] | undefined> {
+    const result = await this.runtime.request({
+      operation: 'image_history',
+      reference,
+    })
+    return result.history === null || result.history === undefined
+      ? undefined
+      : unknownRecordArray(result.history).map(imageHistoryInfo)
+  }
+
+  async tagImage(source: string, target: string): Promise<ImageInfo> {
+    return imageInfo(
+      await this.runtime.request({
+        operation: 'image_tag',
+        source,
+        target,
+      })
+    )
+  }
+
+  async pushImage(
+    source: string,
+    target: string,
+    options: {
+      credentials?: RegistryCredentials
+      registryProtocol?: RegistryProtocol
+    } = {}
+  ): Promise<PushImageInfo> {
+    return pushImageInfo(
+      await this.runtime.request({
+        operation: 'image_push',
+        source,
+        target,
+        ...(options.credentials === undefined
+          ? {}
+          : { credentials: options.credentials.bridgeValue() }),
+        ...(options.registryProtocol === undefined
+          ? {}
+          : { registry_protocol: options.registryProtocol }),
+      })
+    )
+  }
+
   async removeImage(reference: string): Promise<void> {
     await this.runtime.request({ operation: 'image_remove', reference })
+  }
+
+  async evictImages(): Promise<string[]> {
+    const result = await this.runtime.request({ operation: 'image_evict' })
+    return stringArray(result.references)
   }
 
   async getVolume(name: string): Promise<VolumeInfo | undefined> {
@@ -128,6 +301,11 @@ export class A3SBoxClient {
     )
   }
 
+  async pruneVolumes(): Promise<string[]> {
+    const result = await this.runtime.request({ operation: 'volume_prune' })
+    return stringArray(result.names)
+  }
+
   async getNetwork(name: string): Promise<NetworkInfo | undefined> {
     const result = await this.runtime.request({ operation: 'network_get', name })
     return result.network === null || result.network === undefined
@@ -143,6 +321,17 @@ export class A3SBoxClient {
   async removeNetwork(name: string): Promise<NetworkInfo> {
     return networkInfo(
       await this.runtime.request({ operation: 'network_remove', name })
+    )
+  }
+
+  async pruneNetworks(): Promise<string[]> {
+    const result = await this.runtime.request({ operation: 'network_prune' })
+    return stringArray(result.names)
+  }
+
+  async capabilities(): Promise<SdkCapabilities> {
+    return sdkCapabilities(
+      await this.runtime.request({ operation: 'sdk_capabilities' })
     )
   }
 }
@@ -465,6 +654,65 @@ function imageInfo(result: BridgeResult): ImageInfo {
   }
 }
 
+function imageInspectInfo(result: BridgeResult): ImageInspectInfo {
+  const healthCheck =
+    result.health_check === null || result.health_check === undefined
+      ? undefined
+      : imageHealthCheckInfo(asRecord(result.health_check))
+  return {
+    ...imageInfo(result),
+    manifestDigest: requiredString(result, 'manifest_digest'),
+    layerCount: requiredNumber(result, 'layer_count'),
+    entrypoint: optionalStringArray(result.entrypoint),
+    command: optionalStringArray(result.command),
+    env: stringRecord(result.env),
+    workingDir: optionalString(result, 'working_dir'),
+    user: optionalString(result, 'user'),
+    exposedPorts: stringArray(result.exposed_ports),
+    volumes: stringArray(result.volumes),
+    stopSignal: optionalString(result, 'stop_signal'),
+    healthCheck,
+    onbuild: stringArray(result.onbuild),
+    labels: stringRecord(result.labels),
+  }
+}
+
+function imageHealthCheckInfo(result: BridgeResult): ImageHealthCheckInfo {
+  return {
+    test: stringArray(result.test),
+    interval: optionalNumber(result, 'interval'),
+    timeout: optionalNumber(result, 'timeout'),
+    retries: optionalNumber(result, 'retries'),
+    startPeriod: optionalNumber(result, 'start_period'),
+  }
+}
+
+function imageHistoryInfo(result: BridgeResult): ImageHistoryInfo {
+  return {
+    created: optionalString(result, 'created'),
+    createdBy: requiredString(result, 'created_by'),
+    sizeBytes: requiredNumber(result, 'size_bytes'),
+    comment: requiredString(result, 'comment'),
+    emptyLayer: requiredBoolean(result, 'empty_layer'),
+  }
+}
+
+function pushImageInfo(result: BridgeResult): PushImageInfo {
+  return {
+    reference: requiredString(result, 'reference'),
+    manifestDigest: requiredString(result, 'manifest_digest'),
+    configUrl: requiredString(result, 'config_url'),
+    manifestUrl: requiredString(result, 'manifest_url'),
+  }
+}
+
+function sdkCapabilities(result: BridgeResult): SdkCapabilities {
+  return {
+    protocolVersion: requiredNumber(result, 'protocol_version'),
+    operations: stringArray(result.operations),
+  }
+}
+
 function volumeInfo(result: BridgeResult): VolumeInfo {
   return {
     name: requiredString(result, 'name'),
@@ -520,9 +768,34 @@ function requiredBoolean(result: BridgeResult, key: string): boolean {
   return value
 }
 
+function optionalString(
+  result: BridgeResult,
+  key: string
+): string | undefined {
+  const value = result[key]
+  if (value === null || value === undefined) return undefined
+  if (typeof value !== 'string') bridgeTypeError(key)
+  return value
+}
+
+function optionalNumber(
+  result: BridgeResult,
+  key: string
+): number | undefined {
+  const value = result[key]
+  if (value === null || value === undefined) return undefined
+  if (typeof value !== 'number') bridgeTypeError(key)
+  return value
+}
+
 function recordArray(result: BridgeResult, key: string): BridgeResult[] {
   const value = result[key]
   if (!Array.isArray(value)) bridgeTypeError(key)
+  return value.map(asRecord)
+}
+
+function unknownRecordArray(value: unknown): BridgeResult[] {
+  if (!Array.isArray(value)) bridgeTypeError('array')
   return value.map(asRecord)
 }
 
@@ -531,6 +804,10 @@ function stringArray(value: unknown): string[] {
     bridgeTypeError('array')
   }
   return value
+}
+
+function optionalStringArray(value: unknown): string[] | undefined {
+  return value === null || value === undefined ? undefined : stringArray(value)
 }
 
 function stringRecord(value: unknown): Readonly<Record<string, string>> {

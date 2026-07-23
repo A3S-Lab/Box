@@ -159,6 +159,23 @@ try:
         .tag("local/a3s-sdk-smoke-python:latest")
         .build()
     )
+    assert "image_push" in client.capabilities().operations
+    assert client.get_image(image.reference) is not None
+    assert client.inspect_image(image.reference) is not None
+    assert client.image_history(image.reference) is not None
+    tagged = client.tag_image(
+        image.reference,
+        "local/a3s-sdk-smoke-python:tested",
+    )
+    client.remove_image(tagged.reference)
+    prune_volume = client.volume("python-sdk-prune-cache").create()
+    assert prune_volume.name in client.prune_volumes()
+    prune_network = (
+        client.network("python-sdk-prune-network")
+        .subnet("10.89.95.0/24")
+        .create()
+    )
+    assert prune_network.name in client.prune_networks()
     volume = client.volume("python-sdk-cache").label("purpose", "sdk-smoke").create()
     builder = (
         client.sandbox(image.reference)
@@ -217,6 +234,7 @@ finally:
         client.remove_volume(volume.name)
     if image is not None:
         client.remove_image(image.reference)
+    client.evict_images()
     shutil.rmtree(context, ignore_errors=True)
 PY
 
@@ -260,6 +278,34 @@ try {
     .image(context)
     .tag('local/a3s-sdk-smoke-typescript:latest')
     .build()
+  if (!(await client.capabilities()).operations.includes('image_push')) {
+    throw new Error('SDK capability inventory did not include image_push')
+  }
+  if ((await client.getImage(image.reference)) === undefined) {
+    throw new Error('built image was not gettable through the TypeScript SDK')
+  }
+  if ((await client.inspectImage(image.reference)) === undefined) {
+    throw new Error('built image was not inspectable through the TypeScript SDK')
+  }
+  if ((await client.imageHistory(image.reference)) === undefined) {
+    throw new Error('built image history was not available through the TypeScript SDK')
+  }
+  const tagged = await client.tagImage(
+    image.reference,
+    'local/a3s-sdk-smoke-typescript:tested'
+  )
+  await client.removeImage(tagged.reference)
+  const pruneVolume = await client.volume('typescript-sdk-prune-cache').create()
+  if (!(await client.pruneVolumes()).includes(pruneVolume.name)) {
+    throw new Error('volume prune did not remove an unused TypeScript SDK volume')
+  }
+  const pruneNetwork = await client
+    .network('typescript-sdk-prune-network')
+    .subnet('10.89.96.0/24')
+    .create()
+  if (!(await client.pruneNetworks()).includes(pruneNetwork.name)) {
+    throw new Error('network prune did not remove an unused TypeScript SDK network')
+  }
   volume = await client
     .volume('typescript-sdk-cache')
     .label('purpose', 'sdk-smoke')
@@ -342,6 +388,7 @@ try {
   if (network !== undefined) await client.removeNetwork(network.name)
   if (volume !== undefined) await client.removeVolume(volume.name)
   if (image !== undefined) await client.removeImage(image.reference)
+  await client.evictImages()
   await rm(context, { recursive: true, force: true })
 }
 JS

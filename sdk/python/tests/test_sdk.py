@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import unittest
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -14,7 +16,10 @@ from a3s_box import (
     A3SBoxClient,
     A3SRemoteConnection,
     AsyncSandbox,
+    RegistryCredentials,
     Sandbox,
+    SignaturePolicy,
+    SUPPORTED_BRIDGE_OPERATIONS,
 )
 from a3s_box.code_interpreter import Sandbox as CodeInterpreter
 from a3s_box.runtime import _resolve_binary
@@ -52,8 +57,35 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         }
     if operation == "image_pull":
         return image_response(str(request["reference"]))
+    if operation == "image_get":
+        return {"image": image_response(str(request["reference"]))}
     if operation == "image_list":
         return {"images": [image_response("alpine:3.20")]}
+    if operation == "image_inspect":
+        return {"image": image_inspect_response(str(request["reference"]))}
+    if operation == "image_history":
+        return {
+            "history": [
+                {
+                    "created": "2026-07-23T00:00:00Z",
+                    "created_by": "RUN npm test",
+                    "size_bytes": 2048,
+                    "comment": "ci",
+                    "empty_layer": False,
+                }
+            ]
+        }
+    if operation == "image_tag":
+        return image_response(str(request["target"]))
+    if operation == "image_push":
+        return {
+            "reference": request["target"],
+            "manifest_digest": "sha256:manifest",
+            "config_url": "https://registry.example/config",
+            "manifest_url": "https://registry.example/manifest",
+        }
+    if operation == "image_evict":
+        return {"references": ["local/old:latest"]}
     if operation == "image_remove":
         return {"reference": request["reference"], "removed": True}
     if operation == "volume_create":
@@ -64,6 +96,8 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         return {"volumes": [volume_response("ci-cache")]}
     if operation == "volume_remove":
         return volume_response(str(request["name"]))
+    if operation == "volume_prune":
+        return {"names": ["old-cache"]}
     if operation == "network_create":
         return network_response(str(request["name"]), str(request["subnet"]))
     if operation == "network_get":
@@ -74,6 +108,23 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         return {"networks": [network_response("ci-net", "10.89.0.0/24")]}
     if operation == "network_remove":
         return network_response(str(request["name"]), "10.89.0.0/24")
+    if operation == "network_prune":
+        return {"names": ["old-network"]}
+    if operation == "sdk_capabilities":
+        return {
+            "protocol_version": 1,
+            "operations": [
+                "sdk_capabilities",
+                "image_get",
+                "image_inspect",
+                "image_history",
+                "image_tag",
+                "image_push",
+                "image_evict",
+                "volume_prune",
+                "network_prune",
+            ],
+        }
     if operation == "sandbox_create":
         return {
             "sandbox_id": "sandbox-local-1",
@@ -159,6 +210,31 @@ def image_response(reference: str) -> dict[str, Any]:
     }
 
 
+def image_inspect_response(reference: str) -> dict[str, Any]:
+    return {
+        **image_response(reference),
+        "manifest_digest": "sha256:manifest",
+        "layer_count": 2,
+        "entrypoint": ["/bin/sh"],
+        "command": ["-c", "npm test"],
+        "env": {"CI": "true"},
+        "working_dir": "/workspace",
+        "user": "1000:1000",
+        "exposed_ports": ["8080/tcp"],
+        "volumes": ["/cache"],
+        "stop_signal": "SIGTERM",
+        "health_check": {
+            "test": ["CMD", "true"],
+            "interval": 1_000_000_000,
+            "timeout": 500_000_000,
+            "retries": 3,
+            "start_period": 0,
+        },
+        "onbuild": [],
+        "labels": {"purpose": "ci"},
+    }
+
+
 def volume_response(name: str) -> dict[str, Any]:
     return {
         "name": name,
@@ -191,6 +267,13 @@ class SdkTests(unittest.TestCase):
         self.assertIs(a3s_box.Sandbox, Sandbox)
         self.assertIs(a3s_box.AsyncSandbox, AsyncSandbox)
         self.assertEqual(a3s_box.DEFAULT_IMAGE, "alpine:3.20")
+        inventory = json.loads(
+            (
+                Path(__file__).resolve().parents[2]
+                / "bridge-operations.json"
+            ).read_text()
+        )
+        self.assertEqual(list(SUPPORTED_BRIDGE_OPERATIONS), inventory)
 
     def test_sync_sandbox_uses_local_runtime_with_e2b_like_surface(self) -> None:
         runtime = FakeRuntime()
@@ -308,6 +391,55 @@ class SdkTests(unittest.TestCase):
             base64.b64decode(str(command["stdin_base64"])),
             b"print(6 * 7)\n",
         )
+
+    def test_complete_image_and_resource_management_surface(self) -> None:
+        runtime = FakeRuntime()
+        client = A3SBoxClient(runtime)
+        credentials = RegistryCredentials("builder", "secret")
+        signature = SignaturePolicy.cosign_key("/keys/cosign.pub")
+
+        pulled = client.pull_image(
+            "registry.example/ci/base:latest",
+            credentials=credentials,
+            signature_policy=signature,
+        )
+        cached = client.get_image(pulled.reference)
+        inspected = client.inspect_image(pulled.reference)
+        history = client.image_history(pulled.reference)
+        tagged = client.tag_image(pulled.reference, "local/ci:tested")
+        pushed = client.push_image(
+            tagged.reference,
+            "registry.example/ci/app:tested",
+            credentials=credentials,
+            protocol="http",
+        )
+        evicted = client.evict_images()
+        pruned_volumes = client.prune_volumes()
+        pruned_networks = client.prune_networks()
+        capabilities = client.capabilities()
+
+        self.assertEqual(cached, pulled)
+        self.assertEqual(inspected.manifest_digest, "sha256:manifest")
+        self.assertEqual(inspected.health_check.retries, 3)
+        self.assertEqual(history[0].created_by, "RUN npm test")
+        self.assertEqual(pushed.manifest_digest, "sha256:manifest")
+        self.assertEqual(evicted, ["local/old:latest"])
+        self.assertEqual(pruned_volumes, ["old-cache"])
+        self.assertEqual(pruned_networks, ["old-network"])
+        self.assertIn("image_push", capabilities.operations)
+
+        pull_request = runtime.requests[0]
+        self.assertEqual(
+            pull_request["credentials"],
+            {"username": "builder", "password": "secret"},
+        )
+        self.assertEqual(
+            pull_request["signature_policy"],
+            {"mode": "cosign_key", "public_key": "/keys/cosign.pub"},
+        )
+        push_request = runtime.requests[5]
+        self.assertEqual(push_request["registry_protocol"], "http")
+        self.assertEqual(push_request["credentials"]["username"], "builder")
 
     def test_create_explicitly_selects_shared_kernel_sandbox_isolation(self) -> None:
         runtime = FakeRuntime()
@@ -443,6 +575,32 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.requests[2]["network"], {"mode": "none"})
         self.assertTrue(runtime.requests[2]["mounts"][0]["read_only"])
         self.assertEqual(runtime.requests[3]["argv"], ["/bin/sh", "-se"])
+
+    async def test_async_resource_management_matches_sync_surface(self) -> None:
+        runtime = AsyncFakeRuntime()
+        client = A3SAsyncBoxClient(runtime)
+
+        image = await client.get_image("alpine:3.20")
+        inspect = await client.inspect_image("alpine:3.20")
+        history = await client.image_history("alpine:3.20")
+        tagged = await client.tag_image("alpine:3.20", "local/async:latest")
+        pushed = await client.push_image(
+            tagged.reference,
+            "registry.example/async:latest",
+        )
+        evicted = await client.evict_images()
+        volumes = await client.prune_volumes()
+        networks = await client.prune_networks()
+        capabilities = await client.capabilities()
+
+        self.assertEqual(image.reference, "alpine:3.20")
+        self.assertEqual(inspect.layer_count, 2)
+        self.assertEqual(history[0].size_bytes, 2048)
+        self.assertEqual(pushed.reference, "registry.example/async:latest")
+        self.assertEqual(evicted, ["local/old:latest"])
+        self.assertEqual(volumes, ["old-cache"])
+        self.assertEqual(networks, ["old-network"])
+        self.assertEqual(capabilities.protocol_version, 1)
 
     async def test_async_filesystem_snapshot_lifecycle(self) -> None:
         runtime = AsyncFakeRuntime()
