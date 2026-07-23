@@ -159,10 +159,20 @@ jobs:
             exit 1
           fi
 
+          registry_status() {
+            local url="$1"
+            local name="$2"
+            local headers="$RUNNER_TEMP/$name-headers"
+            local body="$RUNNER_TEMP/$name-body"
+
+            curl --retry 3 --retry-all-errors --silent --show-error --location \
+              --output "$body" --dump-header "$headers" "$url"
+            awk '/^HTTP\// { status=$2 } END { if (status == "") exit 1; print status }' "$headers"
+          }
+
           NPM_ESCAPED=$(node -e "process.stdout.write(encodeURIComponent(process.argv[1]))" "$NPM_NAME")
-          NPM_STATUS=$(curl --retry 3 --retry-all-errors --silent --show-error \
-            --output /dev/null --write-out '%{http_code}' \
-            "https://registry.npmjs.org/$NPM_ESCAPED/$NPM_VERSION")
+          NPM_STATUS=$(registry_status \
+            "https://registry.npmjs.org/$NPM_ESCAPED/$NPM_VERSION" npm)
           case "$NPM_STATUS" in
             200) NPM_EXISTS=true ;;
             404) NPM_EXISTS=false ;;
@@ -172,9 +182,8 @@ jobs:
               ;;
           esac
 
-          PYPI_STATUS=$(curl --retry 3 --retry-all-errors --silent --show-error \
-            --output /dev/null --write-out '%{http_code}' \
-            "https://pypi.org/pypi/$PYPI_NAME/$PYPI_VERSION/json")
+          PYPI_STATUS=$(registry_status \
+            "https://pypi.org/pypi/$PYPI_NAME/$PYPI_VERSION/json" pypi)
           case "$PYPI_STATUS" in
             200) PYPI_EXISTS=true ;;
             404) PYPI_EXISTS=false ;;
