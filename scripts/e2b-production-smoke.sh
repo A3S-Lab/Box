@@ -889,9 +889,6 @@ if [[ "${A3S_BOX_E2B_OFFICIAL_CLIENTS:-}" == "1" ]]; then
   if [[ -n "${A3S_BOX_E2B_ARTIFACT_CACHE:-}" ]]; then
     OFFICIAL_CLIENT_ARGS+=(--artifact-cache "$A3S_BOX_E2B_ARTIFACT_CACHE")
   fi
-  if [[ "${A3S_BOX_E2B_NATIVE_SDKS:-}" == "1" ]]; then
-    OFFICIAL_CLIENT_ARGS+=(--native-sdks)
-  fi
   SMOKE_NO_PROXY="${NO_PROXY:+$NO_PROXY,}$SANDBOX_DOMAIN,.$SANDBOX_DOMAIN,127.0.0.1,localhost"
   E2B_API_KEY="$API_KEY" \
     SSL_CERT_FILE="$TLS_CERT" \

@@ -13,6 +13,7 @@ version = "3.0.11"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
+ "a3s-box-sdk",
  "a3s-common",
  "base64 0.22.1",
  "chrono",
@@ -248,6 +249,7 @@ dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "libc",
  "serde",

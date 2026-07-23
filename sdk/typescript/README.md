@@ -1,69 +1,79 @@
 # A3S Box TypeScript SDK
 
-`@a3s-lab/box` re-exports the official `e2b` 2.33.0 TypeScript API and the
-pinned `@e2b/code-interpreter` 2.6.1 package. It does not fork or translate the
-public protocol. A3S Box provides the runtime; this native package does not
-read `E2B_API_URL` or contact E2B Cloud.
+`@a3s-lab/box` is a local-first TypeScript SDK with familiar E2B-style
+`Sandbox`, `commands`, and `files` APIs. It controls the A3S Box runtime
+installed on the same machine. It does not depend on, wrap, import, or contact
+the official E2B SDK.
+
+## Local use
+
+Install the A3S Box runtime and the TypeScript package:
 
 ```bash
-export A3S_BOX_ENDPOINT=https://api.box.example.com
-export A3S_BOX_API_KEY=a3s_your_key
+brew install a3s-lab/tap/a3s-box
+npm install @a3s-lab/box
 ```
 
-```typescript
-import { A3SConnectionConfig, Sandbox } from '@a3s-lab/box'
+No endpoint or API key is required:
 
-const connection = A3SConnectionConfig.fromEnvironment(process.env)
-const sandbox = await Sandbox.create('code-interpreter-v1', {
-  ...connection.typescriptOptions(),
-  timeoutMs: 60_000,
-})
+```typescript
+import { Sandbox } from '@a3s-lab/box'
+
+const sandbox = await Sandbox.create('python:3.12-alpine')
 
 try {
-  const result = await sandbox.commands.run('node -e "console.log(6 * 7)"')
+  const result = await sandbox.commands.run(
+    'python -c "print(6 * 7)"'
+  )
   console.log(result.stdout)
+
+  await sandbox.files.write('/workspace/note.txt', 'hello')
+  console.log(await sandbox.files.read('/workspace/note.txt'))
 } finally {
   await sandbox.kill()
 }
 ```
 
-Code Interpreter exports are available from `@a3s-lab/box/code-interpreter`.
-The production-tested Sandbox backend supports memory-preserving pause through
-the unchanged SDK methods: `await sandbox.pause({ keepMemory: true })` followed
-by `await sandbox.connect({ timeoutMs: 60_000 })`. The A3S OS matrix proves
-that a process started before pause continues after resume. `keepMemory: false`
-performs a durable filesystem-only pause: it retains the rootfs and replaces
-the runtime generation on connect. Those cold-pause assertions are in the
-production gate and await the next certified A3S OS run.
-
-`A3SConnectionConfig` derives the Sandbox domain from conventional
-`https://api.<domain>` endpoints. Set `A3S_BOX_DOMAIN` only when that convention
-does not apply. The service returns the public direct Sandbox authority,
-including a configured non-standard TLS port. `A3S_BOX_SANDBOX_URL` is retained
-only for single-Sandbox fixtures. The A3S service owns template and isolation
-selection; this package never starts a local container or runtime.
-`E2B_API_URL` is not read by this package; that name is used only when an
-unchanged official SDK is connected directly to the same A3S Box endpoint.
-
-Volume control requests use `connection.typescriptOptions()`. Volume content
-requests use `connection.volumeOptions()` so they reach that same A3S Box
-endpoint without `E2B_VOLUME_API_URL`:
+`Sandbox.create()` defaults to `alpine:3.20` and MicroVM isolation. The first
+argument is an OCI image reference in local mode. Select the shared-kernel
+Sandbox backend explicitly on a certified Linux host:
 
 ```typescript
-import { A3SConnectionConfig, Volume } from '@a3s-lab/box'
-
-const connection = A3SConnectionConfig.fromEnvironment(process.env)
-const volume = await Volume.create('data', connection.typescriptOptions())
-await volume.writeFile('/input.txt', 'hello', connection.volumeOptions())
-```
-
-Filesystem Snapshots use the same Sandbox connection. They capture rootfs
-state, preserve the source Sandbox state, and restore into a writable private
-copy-on-write layer:
-
-```typescript
-const snapshot = await sandbox.createSnapshot({ name: 'checkpoint' })
-const restored = await Sandbox.create(snapshot.snapshotId, {
-  ...connection.typescriptOptions(),
+const sandbox = await Sandbox.create('python:3.12-alpine', {
+  isolation: 'sandbox',
+  cpus: 2,
+  memoryMb: 1024,
 })
 ```
+
+The package invokes the versioned machine bridge built into the installed
+`a3s-box` executable. It does not parse human CLI output. Set `A3S_BOX_BINARY`
+only when the executable is not on `PATH`, or inject a typed
+`A3SLocalRuntime` object in application tests.
+
+## Remote and self-hosted deployments
+
+`A3S_BOX_ENDPOINT`, `A3S_BOX_API_KEY`, `A3S_BOX_DOMAIN`, and
+`A3S_BOX_SANDBOX_URL` are remote-only settings. Local `Sandbox.create()` never
+reads them.
+
+The native package exposes `A3SRemoteConnection` as a typed configuration
+helper for applications that deliberately install an unchanged official E2B
+client and point it at a remote A3S Box compatibility service:
+
+```typescript
+import { A3SRemoteConnection } from '@a3s-lab/box'
+import { Sandbox as RemoteSandbox } from 'e2b'
+
+const connection = A3SRemoteConnection.fromEnvironment(process.env)
+const remote = await RemoteSandbox.create('code-interpreter-v1', {
+  ...connection.officialSdkOptions(),
+})
+await remote.kill()
+```
+
+This explicit migration path is separate from the native local SDK. The
+official client is not a dependency of `@a3s-lab/box`.
+
+See the repository README for complete self-hosted endpoint, wildcard DNS,
+TLS, and API-key setup.

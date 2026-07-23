@@ -1,37 +1,32 @@
-export interface A3SConnectionEnvironment {
+export interface A3SRemoteEnvironment {
   A3S_BOX_ENDPOINT?: string
   A3S_BOX_DOMAIN?: string
   A3S_BOX_API_KEY?: string
   A3S_BOX_SANDBOX_URL?: string
 }
 
-export interface A3SConnectionOptions {
+export interface A3SRemoteConnectionOptions {
   apiUrl: string
   domain?: string
   apiKey?: string
   sandboxUrl?: string
 }
 
-export interface A3SSandboxConnectionOptions {
+export interface OfficialSdkConnectionOptions {
   apiUrl: string
   domain: string
-  validateApiKey: false
   apiKey?: string
   sandboxUrl?: string
 }
 
-export interface A3SVolumeConnectionOptions {
-  apiUrl: string
-}
-
-/** Typed connection values accepted by the pinned official E2B SDK. */
-export class A3SConnectionConfig {
+/** Explicit configuration for a remote, self-hosted A3S Box service. */
+export class A3SRemoteConnection {
   readonly apiUrl: string
   readonly domain: string
   readonly apiKey?: string
   readonly sandboxUrl?: string
 
-  constructor(options: A3SConnectionOptions) {
+  constructor(options: A3SRemoteConnectionOptions) {
     if (!options.apiUrl.trim()) throw new Error('apiUrl cannot be empty')
     const derivedDomain = domainFromEndpoint(options.apiUrl)
     const domain = options.domain ?? derivedDomain
@@ -49,12 +44,12 @@ export class A3SConnectionConfig {
   }
 
   static fromEnvironment(
-    environment: Readonly<A3SConnectionEnvironment>
-  ): A3SConnectionConfig {
+    environment: Readonly<A3SRemoteEnvironment>
+  ): A3SRemoteConnection {
     if (!environment.A3S_BOX_ENDPOINT) {
-      throw new Error('A3S_BOX_ENDPOINT is required')
+      throw new Error('A3S_BOX_ENDPOINT is required for remote mode')
     }
-    return new A3SConnectionConfig({
+    return new A3SRemoteConnection({
       apiUrl: environment.A3S_BOX_ENDPOINT,
       domain: environment.A3S_BOX_DOMAIN,
       apiKey: environment.A3S_BOX_API_KEY,
@@ -62,11 +57,11 @@ export class A3SConnectionConfig {
     })
   }
 
-  typescriptOptions(): A3SSandboxConnectionOptions {
+  /** Options for an official E2B client used explicitly in remote mode. */
+  officialSdkOptions(): OfficialSdkConnectionOptions {
     return {
       apiUrl: this.apiUrl,
       domain: this.domain,
-      validateApiKey: false,
       ...(this.apiKey === undefined ? {} : { apiKey: this.apiKey }),
       ...(this.sandboxUrl === undefined
         ? {}
@@ -74,10 +69,18 @@ export class A3SConnectionConfig {
     }
   }
 
-  volumeOptions(): A3SVolumeConnectionOptions {
+  /** Deprecated alias for officialSdkOptions. */
+  typescriptOptions(): OfficialSdkConnectionOptions {
+    return this.officialSdkOptions()
+  }
+
+  volumeOptions(): { apiUrl: string } {
     return { apiUrl: this.apiUrl }
   }
 }
+
+/** Backwards-compatible remote-only class name. */
+export { A3SRemoteConnection as A3SConnectionConfig }
 
 function domainFromEndpoint(endpoint: string): string {
   let url: URL

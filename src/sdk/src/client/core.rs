@@ -4,6 +4,8 @@ pub struct A3sBoxClient {
     paths: A3sBoxPaths,
     image_cache_size: u64,
     execution_manager: Arc<dyn ExecutionManager>,
+    execution_session_manager: Option<Arc<dyn ExecutionSessionManager>>,
+    local_execution_manager: Option<Arc<a3s_box_runtime::LocalExecutionManager>>,
 }
 
 impl std::fmt::Debug for A3sBoxClient {
@@ -29,11 +31,19 @@ impl A3sBoxClient {
 
     /// Create a client using explicit state paths.
     pub fn with_paths(paths: A3sBoxPaths) -> Self {
-        let execution_manager = Arc::new(a3s_box_runtime::LocalExecutionManager::with_vm_backend(
-            paths.boxes_file.clone(),
-            paths.home.clone(),
-        ));
-        Self::with_execution_manager(paths, execution_manager)
+        let local_execution_manager = Arc::new(
+            a3s_box_runtime::LocalExecutionManager::with_vm_backend(
+                paths.boxes_file.clone(),
+                paths.home.clone(),
+            ),
+        );
+        Self {
+            paths,
+            image_cache_size: a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
+            execution_manager: local_execution_manager.clone(),
+            execution_session_manager: Some(local_execution_manager.clone()),
+            local_execution_manager: Some(local_execution_manager),
+        }
     }
 
     /// Create a client with an explicit backend-neutral execution manager.
@@ -49,6 +59,8 @@ impl A3sBoxClient {
             paths,
             image_cache_size: a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
             execution_manager,
+            execution_session_manager: None,
+            local_execution_manager: None,
         }
     }
 
@@ -854,6 +866,22 @@ impl A3sBoxClient {
         Ok(self.exec_client(query).await?.exec_command(request).await?)
     }
 
+    /// Execute a command through the generation-fenced managed session facade.
+    #[cfg(unix)]
+    pub async fn execute_execution(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: ExecRequest,
+    ) -> Result<ExecOutput> {
+        let manager = self.execution_session_manager.as_ref().ok_or_else(|| {
+            ClientError::Validation(
+                "this client was constructed without an execution session manager".to_string(),
+            )
+        })?;
+        Ok(manager.execute(execution_id, generation, request).await?)
+    }
+
     /// Transfer a file to or from a running box through the runtime exec client.
     #[cfg(unix)]
     pub async fn transfer_box_file(
@@ -865,6 +893,42 @@ impl A3sBoxClient {
             .exec_client(query)
             .await?
             .file_transfer(request)
+            .await?)
+    }
+
+    /// Transfer a file through the generation-fenced managed session facade.
+    #[cfg(unix)]
+    pub async fn transfer_execution_file(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: FileRequest,
+    ) -> Result<FileResponse> {
+        let manager = self.execution_session_manager.as_ref().ok_or_else(|| {
+            ClientError::Validation(
+                "this client was constructed without an execution session manager".to_string(),
+            )
+        })?;
+        Ok(manager
+            .transfer_file(execution_id, generation, request)
+            .await?)
+    }
+
+    /// Access filesystem metadata through the generation-fenced session facade.
+    #[cfg(unix)]
+    pub async fn filesystem_execution(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        request: FilesystemRequest,
+    ) -> Result<FilesystemResponse> {
+        let manager = self.execution_session_manager.as_ref().ok_or_else(|| {
+            ClientError::Validation(
+                "this client was constructed without an execution session manager".to_string(),
+            )
+        })?;
+        Ok(manager
+            .filesystem(execution_id, generation, request)
             .await?)
     }
 

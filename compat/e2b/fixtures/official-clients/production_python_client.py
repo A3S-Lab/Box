@@ -9,48 +9,23 @@ import datetime
 import os
 from typing import Any
 
+from e2b import (
+    AsyncSandbox,
+    AsyncVolume,
+    Sandbox,
+    SandboxException,
+    SandboxNotFoundException,
+    SandboxQuery,
+    SandboxState,
+    Volume,
+    VolumeException,
+)
 from e2b.sandbox.commands.command_handle import PtySize
-
-NATIVE_SDK = os.environ.get("A3S_BOX_NATIVE_SDK") == "1"
-
-if NATIVE_SDK:
-    from a3s_box import (  # type: ignore[import-not-found]
-        A3SConnectionConfig,
-        AsyncSandbox,
-        AsyncVolume,
-        Sandbox,
-        SandboxException,
-        SandboxNotFoundException,
-        SandboxQuery,
-        SandboxState,
-        Volume,
-        VolumeException,
-    )
-    from a3s_box.code_interpreter import (  # type: ignore[import-not-found]
-        AsyncSandbox as AsyncCodeInterpreter,
-    )
-    from a3s_box.code_interpreter import (  # type: ignore[import-not-found]
-        Sandbox as CodeInterpreter,
-    )
-else:
-    from e2b import (
-        AsyncSandbox,
-        AsyncVolume,
-        Sandbox,
-        SandboxException,
-        SandboxNotFoundException,
-        SandboxQuery,
-        SandboxState,
-        Volume,
-        VolumeException,
-    )
-    from e2b_code_interpreter import AsyncSandbox as AsyncCodeInterpreter
-    from e2b_code_interpreter import Sandbox as CodeInterpreter
+from e2b_code_interpreter import AsyncSandbox as AsyncCodeInterpreter
+from e2b_code_interpreter import Sandbox as CodeInterpreter
 
 
 def connection(api_url: str, domain: str) -> dict[str, Any]:
-    if NATIVE_SDK:
-        return A3SConnectionConfig.from_environment().python_options()  # type: ignore[name-defined]
     api_key = os.environ.get("E2B_API_KEY")
     if not api_key:
         raise RuntimeError("E2B_API_KEY is required")
@@ -58,8 +33,6 @@ def connection(api_url: str, domain: str) -> dict[str, Any]:
 
 
 def volume_connection(api_url: str) -> dict[str, Any]:
-    if NATIVE_SDK:
-        return A3SConnectionConfig.from_environment().volume_options()  # type: ignore[name-defined]
     return {"api_url": api_url}
 
 
@@ -325,7 +298,7 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
     label = "python-sync"
     options = connection(api_url, domain)
     volume_options = volume_connection(api_url)
-    volume_name = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-volume"
+    volume_name = f"official-{label}-volume"
     metadata = {"client": "python-sync", "suite": "production-official"}
     sandbox: Sandbox | None = None
     restored: Sandbox | None = None
@@ -475,7 +448,7 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         listed = assert_listed(paginator.next_items(), sandbox.sandbox_id)
         assert_volume_mount(listed, volume_name, "/mnt/data")
 
-        snapshot_content = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-snapshot"
+        snapshot_content = f"official-{label}-snapshot"
         trace(label, "snapshot.write-state")
         sandbox.files.write("a3s-snapshot-state.txt", snapshot_content)
         snapshot_metadata = sandbox.commands.run(
@@ -483,7 +456,7 @@ def run_sync(api_url: str, domain: str, template: str) -> None:
         ).stdout.strip()
         trace(label, "snapshot.create")
         snapshot = sandbox.create_snapshot(
-            name=f"{'a3s' if NATIVE_SDK else 'official'}-{label}-state"
+            name=f"official-{label}-state"
         )
         snapshot_id = snapshot.snapshot_id
         if not snapshot_id or snapshot.names != [snapshot_id]:
@@ -627,7 +600,7 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
     label = "python-async"
     options = connection(api_url, domain)
     volume_options = volume_connection(api_url)
-    volume_name = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-volume"
+    volume_name = f"official-{label}-volume"
     metadata = {"client": "python-async", "suite": "production-official"}
     sandbox: AsyncSandbox | None = None
     restored: AsyncSandbox | None = None
@@ -786,7 +759,7 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         listed = assert_listed(await paginator.next_items(), sandbox.sandbox_id)
         assert_volume_mount(listed, volume_name, "/mnt/data")
 
-        snapshot_content = f"{'a3s' if NATIVE_SDK else 'official'}-{label}-snapshot"
+        snapshot_content = f"official-{label}-snapshot"
         trace(label, "snapshot.write-state")
         await sandbox.files.write("a3s-snapshot-state.txt", snapshot_content)
         snapshot_metadata = (
@@ -796,7 +769,7 @@ async def run_async(api_url: str, domain: str, template: str) -> None:
         ).stdout.strip()
         trace(label, "snapshot.create")
         snapshot = await sandbox.create_snapshot(
-            name=f"{'a3s' if NATIVE_SDK else 'official'}-{label}-state"
+            name=f"official-{label}-state"
         )
         snapshot_id = snapshot.snapshot_id
         if not snapshot_id or snapshot.names != [snapshot_id]:

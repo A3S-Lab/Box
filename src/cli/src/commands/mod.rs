@@ -46,6 +46,7 @@ mod rm;
 mod rmi;
 mod run;
 mod save;
+mod sdk_bridge;
 mod seal;
 mod shell;
 mod snapshot;
@@ -193,6 +194,9 @@ pub enum Command {
     Pool(pool::PoolArgs),
     /// Open an interactive shell in a running box
     Shell(shell::ShellArgs),
+    /// Structured bridge used by the native language SDKs
+    #[command(name = "sdk-bridge", hide = true)]
+    SdkBridge(sdk_bridge::SdkBridgeArgs),
 }
 
 /// Return the path to the image store directory (~/.a3s/images).
@@ -670,6 +674,7 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Monitor(args) => monitor::execute(args).await,
         Command::Pool(args) => pool::execute(args).await,
         Command::Shell(args) => shell::execute(args).await,
+        Command::SdkBridge(args) => sdk_bridge::execute(args).await,
     }
 }
 

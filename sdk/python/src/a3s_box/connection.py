@@ -1,4 +1,4 @@
-"""Typed A3S endpoint configuration helpers."""
+"""Explicit configuration for a remote, self-hosted A3S Box service."""
 
 from __future__ import annotations
 
@@ -9,8 +9,12 @@ from urllib.parse import urlparse
 
 
 @dataclass(frozen=True, slots=True)
-class A3SConnectionConfig:
-    """Connection values accepted by the pinned official E2B Python SDK."""
+class A3SRemoteConnection:
+    """Connection values for an explicitly remote A3S Box deployment.
+
+    Local :class:`a3s_box.Sandbox` use does not instantiate this class and does
+    not read endpoint or API-key environment variables.
+    """
 
     api_url: str
     domain: str | None = None
@@ -34,13 +38,13 @@ class A3SConnectionConfig:
     def from_environment(
         cls,
         environment: Mapping[str, str] | None = None,
-    ) -> A3SConnectionConfig:
-        """Read A3S Box endpoint variables without mutating the process."""
+    ) -> A3SRemoteConnection:
+        """Read remote-only settings without mutating process state."""
 
         values = os.environ if environment is None else environment
         api_url = values.get("A3S_BOX_ENDPOINT")
         if not api_url:
-            raise ValueError("A3S_BOX_ENDPOINT is required")
+            raise ValueError("A3S_BOX_ENDPOINT is required for remote mode")
         return cls(
             api_url=api_url,
             domain=values.get("A3S_BOX_DOMAIN"),
@@ -48,14 +52,13 @@ class A3SConnectionConfig:
             sandbox_url=values.get("A3S_BOX_SANDBOX_URL"),
         )
 
-    def python_options(self) -> dict[str, str | bool]:
-        """Return keyword arguments for Python Sandbox create/connect calls."""
+    def official_python_options(self) -> dict[str, str]:
+        """Return options for an official E2B client used in remote mode."""
 
         assert self.domain is not None
-        options: dict[str, str | bool] = {
+        options = {
             "api_url": self.api_url,
             "domain": self.domain,
-            "validate_api_key": False,
         }
         if self.api_key is not None:
             options["api_key"] = self.api_key
@@ -63,15 +66,24 @@ class A3SConnectionConfig:
             options["sandbox_url"] = self.sandbox_url
         return options
 
+    def python_options(self) -> dict[str, str]:
+        """Deprecated alias for :meth:`official_python_options`."""
+
+        return self.official_python_options()
+
     def volume_options(self) -> dict[str, str]:
-        """Return A3S Box endpoint options for Volume content calls."""
+        """Return the remote endpoint option for official Volume calls."""
 
         return {"api_url": self.api_url}
+
+
+# Backwards-compatible name. It remains remote-only; local Sandbox creation
+# never constructs it.
+A3SConnectionConfig = A3SRemoteConnection
 
 
 def _domain_from_endpoint(endpoint: str) -> str:
     parsed = urlparse(endpoint)
     if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
         raise ValueError("api_url must be an absolute HTTP or HTTPS URL")
-    hostname = parsed.hostname
-    return hostname.removeprefix("api.")
+    return parsed.hostname.removeprefix("api.")

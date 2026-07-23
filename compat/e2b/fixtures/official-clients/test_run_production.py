@@ -1,94 +1,35 @@
-import subprocess
-import tempfile
+from __future__ import annotations
+
 import unittest
 from pathlib import Path
-from unittest import mock
-
-import run_production
 
 
-class NativeEnvironmentTests(unittest.TestCase):
-    def test_removes_every_official_connection_override(self) -> None:
-        self.assertEqual(
-            set(run_production.E2B_CONNECTION_ENVIRONMENT),
-            {
-                "E2B_API_KEY",
-                "E2B_API_URL",
-                "E2B_DEBUG",
-                "E2B_DOMAIN",
-                "E2B_SANDBOX_URL",
-                "E2B_VALIDATE_API_KEY",
-                "E2B_VOLUME_API_URL",
-            },
+FIXTURE_DIR = Path(__file__).resolve().parent
+
+
+class ProductionClientBoundaryTests(unittest.TestCase):
+    def test_remote_conformance_clients_remain_official_and_unchanged(self) -> None:
+        python_client = (FIXTURE_DIR / "production_python_client.py").read_text(
+            encoding="utf-8"
         )
+        typescript_client = (
+            FIXTURE_DIR / "production_typescript_client.mjs"
+        ).read_text(encoding="utf-8")
 
+        self.assertIn("from e2b import", python_client)
+        self.assertIn("from e2b_code_interpreter import", python_client)
+        self.assertIn("await import('e2b')", typescript_client)
+        self.assertIn("await import('@e2b/code-interpreter')", typescript_client)
+        self.assertNotIn("A3S_BOX_NATIVE_SDK", python_client)
+        self.assertNotIn("A3S_BOX_NATIVE_SDK", typescript_client)
+        self.assertNotIn("@a3s-lab/box", typescript_client)
 
-class PrepareNativeTypescriptTests(unittest.TestCase):
-    def test_compiler_resolves_dependencies_without_symlink_privilege(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            sdk_root = temp / "sdk"
-            source = sdk_root / "typescript"
-            (source / "src").mkdir(parents=True)
-            (source / "src" / "index.ts").write_text(
-                "export { Sandbox } from 'e2b'\n",
-                encoding="utf-8",
-            )
-            (source / "package.json").write_text(
-                '{"name":"@a3s-lab/box","version":"0.1.0"}\n',
-                encoding="utf-8",
-            )
-            (source / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    def test_runner_has_no_native_remote_wrapper_mode(self) -> None:
+        runner = (FIXTURE_DIR / "run_production.py").read_text(encoding="utf-8")
 
-            environment = temp / "typescript"
-            environment.mkdir()
-            client = environment / "production_typescript_client.mjs"
-            client.touch()
-            modules = environment / "node_modules"
-            (modules / ".bin").mkdir(parents=True)
-            compiler = modules / ".bin" / "tsc"
-            compiler.touch()
-
-            calls = 0
-
-            def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                nonlocal calls
-                calls += 1
-                if calls == 2:
-                    build_source = Path(str(kwargs["cwd"]))
-                    dependencies = build_source / "node_modules"
-                    self.assertTrue(dependencies.is_dir())
-                    self.assertTrue((dependencies / ".bin" / "tsc").is_file())
-                if calls == 3:
-                    tarball = temp / "a3s-lab-box-0.1.0.tgz"
-                    tarball.touch()
-                    return subprocess.CompletedProcess(
-                        command,
-                        0,
-                        stdout=f"{tarball.name}\n",
-                    )
-                return subprocess.CompletedProcess(command, 0)
-
-            with (
-                mock.patch.object(run_production, "SDK_ROOT", sdk_root),
-                mock.patch.object(
-                    run_production,
-                    "require_executable",
-                    side_effect=lambda name, _path=None: (
-                        str(compiler) if name == "tsc" else "npm"
-                    ),
-                ),
-                mock.patch.object(run_production.subprocess, "run", side_effect=run),
-                mock.patch.object(
-                    Path,
-                    "symlink_to",
-                    side_effect=OSError("symbolic links are unavailable"),
-                ),
-            ):
-                run_production.prepare_native_typescript(temp, client)
-
-            self.assertEqual(calls, 4)
-            self.assertFalse((temp / "a3s-typescript-sdk" / "node_modules").exists())
+        self.assertNotIn("--native-sdks", runner)
+        self.assertNotIn("A3S_BOX_ENDPOINT", runner)
+        self.assertNotIn("A3S_BOX_API_KEY", runner)
 
 
 if __name__ == "__main__":

@@ -1,78 +1,90 @@
 # A3S Box Python SDK
 
-`a3s-box` is a typed convenience package around the checksum-pinned official
-E2B Python clients used by A3S Box compatibility tests. It re-exports the
-official `e2b` 2.32.0 API instead of maintaining a fork, so existing E2B code
-can keep the same classes and method signatures. A3S Box provides the runtime;
-this native package does not read `E2B_API_URL` or contact E2B Cloud.
+`a3s-box` is a local-first Python SDK with familiar E2B-style `Sandbox`,
+`commands`, and `files` APIs. It controls the A3S Box runtime installed on the
+same machine. It does not depend on, wrap, import, or contact the official E2B
+SDK.
+
+## Local use
+
+Install the A3S Box runtime and the Python package:
 
 ```bash
-export A3S_BOX_ENDPOINT=https://api.box.example.com
-export A3S_BOX_API_KEY=a3s_your_key
+brew install a3s-lab/tap/a3s-box
+python -m pip install a3s-box
 ```
+
+No endpoint or API key is required:
+
+```python
+from a3s_box import Sandbox
+
+with Sandbox.create("python:3.12-alpine") as sandbox:
+    result = sandbox.commands.run("python -c 'print(6 * 7)'")
+    print(result.stdout)
+
+    sandbox.files.write("/workspace/note.txt", "hello")
+    print(sandbox.files.read("/workspace/note.txt"))
+```
+
+`Sandbox.create()` defaults to `alpine:3.20` and MicroVM isolation. The first
+argument is an OCI image reference in local mode. Select the shared-kernel
+Sandbox backend explicitly on a certified Linux host:
+
+```python
+sandbox = Sandbox.create(
+    "python:3.12-alpine",
+    isolation="sandbox",
+    cpus=2,
+    memory_mb=1024,
+)
+```
+
+Async applications use the same local runtime:
 
 ```python
 import asyncio
 
-from a3s_box import A3SConnectionConfig, AsyncSandbox
+from a3s_box import AsyncSandbox
 
 
 async def main() -> None:
-    connection = A3SConnectionConfig.from_environment()
-    sandbox = await AsyncSandbox.create(
-        "code-interpreter-v1",
-        **connection.python_options(),
-    )
-    async with sandbox:
-        result = await sandbox.commands.run("python -c 'print(6 * 7)'")
+    async with await AsyncSandbox.create("python:3.12-alpine") as sandbox:
+        result = await sandbox.commands.run(["python", "-c", "print(6 * 7)"])
         print(result.stdout)
 
 
 asyncio.run(main())
 ```
 
-The synchronous and asynchronous Code Interpreter exports are available from
-`a3s_box.code_interpreter`.
+The package invokes the versioned machine bridge built into the installed
+`a3s-box` executable. It does not parse human CLI output. Set `A3S_BOX_BINARY`
+only when the executable is not on `PATH`.
 
-The production-tested Sandbox backend supports memory-preserving pause through
-the unchanged SDK methods: `await sandbox.pause(keep_memory=True)` followed by
-`await sandbox.connect(timeout=60)`. The A3S OS matrix proves that a process
-started before pause continues after resume. `keep_memory=False` performs a
-durable filesystem-only pause: it retains the rootfs and replaces the runtime
-generation on connect. Those cold-pause assertions are in the production gate
-and await the next certified A3S OS run.
+## Remote and self-hosted deployments
 
-`A3SConnectionConfig` reads `A3S_BOX_ENDPOINT` and `A3S_BOX_API_KEY` without
-changing process-global environment variables. It derives the Sandbox domain
-from conventional `https://api.<domain>` endpoints. Set `A3S_BOX_DOMAIN` only
-when that convention does not apply. The A3S service returns the public direct
-Sandbox authority, including a non-standard TLS port when configured.
-`A3S_BOX_SANDBOX_URL` is retained only for single-Sandbox fixtures. The A3S
-endpoint decides the execution template and isolation policy; the SDK never
-invokes a local runtime. `E2B_API_URL` is not read by this package. It is used
-only when the unchanged official SDK is intentionally connected to the same
-A3S Box endpoint.
+`A3S_BOX_ENDPOINT`, `A3S_BOX_API_KEY`, `A3S_BOX_DOMAIN`, and
+`A3S_BOX_SANDBOX_URL` are remote-only settings. Local `Sandbox.create()` never
+reads them.
 
-Volume control requests use `connection.python_options()`. Volume content
-requests use `connection.volume_options()` so they reach that same A3S Box
-endpoint without `E2B_VOLUME_API_URL`:
+The native package exposes `A3SRemoteConnection` as a typed configuration
+helper for applications that deliberately install an unchanged official E2B
+client and point it at a remote A3S Box compatibility service:
 
 ```python
-from a3s_box import A3SConnectionConfig, Volume
+from a3s_box import A3SRemoteConnection
+from e2b import Sandbox as RemoteSandbox
 
-connection = A3SConnectionConfig.from_environment()
-volume = Volume.create("data", **connection.python_options())
-volume.write_file("/input.txt", "hello", **connection.volume_options())
-```
-
-Filesystem Snapshots use the same Sandbox connection. They capture rootfs
-state, preserve the source Sandbox state, and restore into a writable private
-copy-on-write layer:
-
-```python
-snapshot = await sandbox.create_snapshot(name="checkpoint")
-restored = await AsyncSandbox.create(
-    snapshot.snapshot_id,
-    **connection.python_options(),
+connection = A3SRemoteConnection.from_environment()
+remote = RemoteSandbox.create(
+    "code-interpreter-v1",
+    **connection.official_python_options(),
 )
+remote.kill()
 ```
+
+This explicit migration path is separate from the native local SDK. The
+official client is not a dependency of `a3s-box`.
+
+See the repository README for complete self-hosted endpoint, wildcard DNS,
+TLS, and API-key setup.
