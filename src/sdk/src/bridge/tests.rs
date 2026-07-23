@@ -502,7 +502,8 @@ async fn resource_bridge_operations_use_typed_runtime_stores() {
     assert_eq!(
         volume.result.unwrap()["mount_point"],
         home.path()
-            .join("volumes/ci-cache")
+            .join("volumes")
+            .join("ci-cache")
             .to_string_lossy()
             .as_ref()
     );
