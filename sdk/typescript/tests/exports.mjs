@@ -81,9 +81,9 @@ class FakeRuntime {
         return { names: ['old-network'] }
       case 'runtime_diagnostics':
         return {
-          core_version: '3.0.12',
-          runtime_version: '3.0.12',
-          sdk_version: '3.0.12',
+          core_version: '3.1.0',
+          runtime_version: '3.1.0',
+          sdk_version: '3.1.0',
           home: '/tmp/a3s',
           virtualization: {
             available: true,
