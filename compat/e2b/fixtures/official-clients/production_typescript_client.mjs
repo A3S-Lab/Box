@@ -3,33 +3,22 @@
 
 import assert from 'node:assert/strict'
 
-const nativeSdk = process.env.A3S_BOX_NATIVE_SDK === '1'
-const baseSdk = await import(nativeSdk ? '@a3s-lab/box' : 'e2b')
-const codeInterpreterSdk = await import(
-  nativeSdk ? '@a3s-lab/box/code-interpreter' : '@e2b/code-interpreter'
-)
+const baseSdk = await import('e2b')
+const codeInterpreterSdk = await import('@e2b/code-interpreter')
 const { Sandbox, SandboxError, SandboxNotFoundError, Volume, VolumeError } =
   baseSdk
 const { Sandbox: CodeInterpreter } = codeInterpreterSdk
 
 const [apiUrl, domain, template] = process.argv.slice(2)
-const apiKey = nativeSdk
-  ? process.env.A3S_BOX_API_KEY
-  : process.env.E2B_API_KEY
+const apiKey = process.env.E2B_API_KEY
 if (!apiUrl || !domain || !template || !apiKey) {
   throw new Error('API URL, domain, template, and API key are required')
 }
 
-const connection = nativeSdk
-  ? baseSdk.A3SConnectionConfig.fromEnvironment(
-      process.env
-    ).typescriptOptions()
-  : { apiKey, apiUrl, domain }
-const volumeConnection = nativeSdk
-  ? baseSdk.A3SConnectionConfig.fromEnvironment(process.env).volumeOptions()
-  : { apiUrl }
+const connection = { apiKey, apiUrl, domain }
+const volumeConnection = { apiUrl }
 const metadata = { client: 'typescript', suite: 'production-official' }
-const clientLabel = `${nativeSdk ? 'a3s' : 'official'}-typescript`
+const clientLabel = 'official-typescript'
 const volumeName = `${clientLabel}-volume`
 const trace = (stage) => console.log(`${clientLabel}:${stage}`)
 let sandbox

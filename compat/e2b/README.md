@@ -1,8 +1,10 @@
 # E2B Compatibility Contract Fixture
 
-This directory pins the public E2B contracts that A3S Box implements. It is
-the source of truth for protocol generation, official-client conformance, and
-the Python and TypeScript public API alignment checks.
+This directory pins the public E2B contracts that the remote A3S Box
+compatibility service implements. It is the source of truth for protocol
+generation and unchanged official-client conformance. The native local Python
+and TypeScript SDKs use an E2B-like object model but do not re-export these
+packages.
 
 The fixture does not claim full compatibility. The generated manifest keeps
 `full_compatibility` set to `false` until the complete black-box release gate
@@ -134,17 +136,17 @@ returns a running or paused source to its original state. Snapshot records from
 older builds that lack those OCI defaults remain inspectable and deletable but
 fail closed on restore.
 
-With `A3S_BOX_E2B_NATIVE_SDKS=1`, the harness repeats that matrix through the
-A3S Python sync/async and TypeScript packages after removing every `E2B_*`
-connection variable and configuring only `A3S_BOX_*`. The previously certified
-subset passes on A3S OS with `crun`; the newly added filesystem-only pause
-assertions require the next certified-host run. This does not establish full protocol
-compatibility. The shared Exec/PTY transport now implements the pinned SIGTERM
-and SIGKILL semantics with wire and guest process-group tests. Templates/builds,
-signed files, historical metrics, MCP, signals outside the pinned contract, reconnect, cancellation,
-backpressure, multi-file and large-file behavior, deeper Snapshot and Volume
-failure/recovery cases, and other pinned edge cases remain outside the matrix,
-so `full_compatibility=false` remains mandatory.
+This remote matrix deliberately does not install or route through the native
+local A3S packages. Those packages invoke the local `a3s-box sdk-bridge` and
+have their own package and bridge tests. The remote matrix remains the proof
+for protocol compatibility because it uses the published official clients
+unchanged. This does not establish full protocol compatibility. The shared
+Exec/PTY transport now implements the pinned SIGTERM and SIGKILL semantics
+with wire and guest process-group tests. Templates/builds, signed files,
+historical metrics, MCP, signals outside the pinned contract, reconnect,
+cancellation, backpressure, multi-file and large-file behavior, deeper
+Snapshot and Volume failure/recovery cases, and other pinned edge cases remain
+outside the matrix, so `full_compatibility=false` remains mandatory.
 
 Broker-mode MicroVMs additionally support generation-fenced binary
 `GET /files`, raw octet-stream upload, and multi-file multipart upload through

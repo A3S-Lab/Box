@@ -19,8 +19,9 @@ use a3s_box_core::vmm::parse_signal_name;
 use a3s_box_core::volume::VolumeConfig;
 use a3s_box_core::{
     CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
-    ExecutionLease, ExecutionManager, ExecutionReservation, ExecutionStatus, FileRequest,
-    FileResponse, KillOutcome, OperationId, ReconcileOutcome, RestartExecutionOptions, StoredImage,
+    ExecutionLease, ExecutionManager, ExecutionReservation, ExecutionSessionManager,
+    ExecutionStatus, FileRequest, FileResponse, FilesystemRequest, FilesystemResponse, KillOutcome,
+    OperationId, ReconcileOutcome, RestartExecutionOptions, StoredImage,
 };
 use a3s_box_runtime::oci::BuildResult as RuntimeBuildResult;
 use a3s_box_runtime::{

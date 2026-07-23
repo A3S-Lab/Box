@@ -1,7 +1,7 @@
 {
   "name": "@a3s-lab/box",
   "version": "3.0.11",
-  "description": "Typed TypeScript convenience package for the A3S Box E2B-compatible endpoint",
+  "description": "Local-first TypeScript SDK for A3S Box with E2B-like APIs",
   "type": "module",
   "sideEffects": false,
   "license": "Apache-2.0",
@@ -30,11 +30,9 @@
     "build": "tsc -p tsconfig.json",
     "test": "node tests/exports.mjs"
   },
-  "dependencies": {
-    "@e2b/code-interpreter": "2.6.1",
-    "e2b": "2.33.0"
-  },
+  "dependencies": {},
   "devDependencies": {
+    "@types/node": "20.19.9",
     "typescript": "5.9.3"
   },
   "engines": {

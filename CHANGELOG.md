@@ -6,6 +6,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Zero-configuration local Python and TypeScript SDKs.** Native `Sandbox`,
+  commands, files, lifecycle, and a small Python Code Interpreter facade now
+  call the installed `a3s-box` runtime through a versioned structured bridge.
+  Local use has no endpoint or API key, and the packages no longer depend on,
+  wrap, or re-export official E2B SDKs.
 - **Runnable native Windows WHPX path.** Windows packages now include the
   `libkrunfw.dll` companion kernel alongside `krun.dll`, and the native path is
   documented and validated with Alpine foreground/detached workloads, separated
@@ -17,6 +22,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Changed
 
+- **Explicit remote E2B compatibility boundary.** Network endpoint, domain, and
+  API-key configuration is now limited to the self-hosted compatibility
+  service and an opt-in remote configuration helper. Remote conformance uses
+  unchanged official E2B clients; native local SDK tests are independent.
 - **Explicit Windows CPU boundary.** Windows defaults to one vCPU and rejects
   unsupported SMP requests before image pull; Linux and macOS keep their
   existing two-vCPU default.

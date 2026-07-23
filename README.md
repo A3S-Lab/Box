@@ -53,80 +53,54 @@ a3s-box run --rm alpine:latest -- uname -a
 a3s-box run --rm --isolation sandbox alpine:latest -- id
 ```
 
-### A3S SDKs with E2B-compatible APIs
+### Local SDKs with E2B-like APIs
 
-A3S Box implements the remote runtime and protocol service. The A3S Python and
-TypeScript packages re-export the pinned official E2B objects and add typed A3S
-endpoint configuration, so applications keep the familiar `Sandbox`,
-`AsyncSandbox`, Commands, Filesystem, PTY, Volume, filesystem Snapshot, and
-Code Interpreter surfaces. No E2B-hosted service is involved, and native A3S
-SDK applications do not set `E2B_API_URL`.
+The A3S Python and TypeScript packages expose familiar `Sandbox`, `commands`,
+and `files` namespaces while executing through the A3S Box runtime installed
+on the same machine. They do not wrap, import, depend on, or contact the
+official E2B SDK.
 
-Point the native SDK at the deployed A3S Box service. A conventional
-`https://api.<domain>` endpoint automatically derives `<domain>` for Sandbox
-routing:
+Local SDK use is zero-configuration: do not set an endpoint, domain, or API
+key. The package finds `a3s-box` on `PATH` and talks to its versioned,
+machine-only bridge instead of parsing human CLI output.
 
-```bash
-export A3S_BOX_ENDPOINT=https://api.box.example.com
-export A3S_BOX_API_KEY="e2b_<generated-lowercase-hex>"
-```
-
-Set `A3S_BOX_DOMAIN` only when the control endpoint does not follow the
-conventional `api.<domain>` form. The service advertises the direct Sandbox
-authority, including a non-standard public TLS port, so normal deployments do
-not need a client-side Sandbox URL override. `A3S_BOX_SANDBOX_URL` remains a
-single-Sandbox fixture escape hatch. Normal A3S SDK applications use only the
-`A3S_BOX_*` connection settings; the endpoint is always an A3S Box deployment.
-`E2B_API_URL` appears only in the optional unchanged-official-SDK migration
-path documented below.
-
-Python uses async lifecycle management so the remote Sandbox is always cleaned
-up:
+Python:
 
 ```python
-import asyncio
+from a3s_box import Sandbox
 
-from a3s_box import A3SConnectionConfig, AsyncSandbox
-
-
-async def main() -> None:
-    connection = A3SConnectionConfig.from_environment()
-    sandbox = await AsyncSandbox.create(
-        "code-interpreter-v1",
-        timeout=60,
-        **connection.python_options(),
-    )
-    async with sandbox:
-        result = await sandbox.commands.run("python -c 'print(6 * 7)'")
-        print(result.stdout)
-
-
-asyncio.run(main())
+with Sandbox.create("python:3.12-alpine") as sandbox:
+    result = sandbox.commands.run("python -c 'print(6 * 7)'")
+    print(result.stdout)
+    sandbox.files.write("/workspace/note.txt", "hello")
 ```
 
-TypeScript uses the same endpoint and E2B object model:
+TypeScript:
 
 ```typescript
-import { A3SConnectionConfig, Sandbox } from '@a3s-lab/box'
+import { Sandbox } from '@a3s-lab/box'
 
-const connection = A3SConnectionConfig.fromEnvironment(process.env)
-const sandbox = await Sandbox.create('code-interpreter-v1', {
-  ...connection.typescriptOptions(),
-  timeoutMs: 60_000,
-})
+const sandbox = await Sandbox.create('python:3.12-alpine')
 
 try {
-  const result = await sandbox.commands.run('node -e "console.log(6 * 7)"')
+  const result = await sandbox.commands.run(
+    'python -c "print(6 * 7)"'
+  )
   console.log(result.stdout)
 } finally {
   await sandbox.kill()
 }
 ```
 
-Both packages pass the production matrix described below. The release workflow
-builds wheel and npm tarball artifacts, but the packages are not yet published
-to PyPI or npm. The verified subset and remaining full-compatibility gates are
-stated under [SDKs and Compatibility](#sdks-and-compatibility).
+`Sandbox.create()` defaults to `alpine:3.20` and MicroVM isolation. Its first
+argument is a local OCI image reference. Set `A3S_BOX_BINARY` only when the
+installed executable is not on `PATH`.
+
+`A3S_BOX_ENDPOINT`, `A3S_BOX_API_KEY`, `A3S_BOX_DOMAIN`, and
+`A3S_BOX_SANDBOX_URL` are exclusively for an explicitly remote, self-hosted
+compatibility service. They are not read during local SDK use. The remote
+chapter below documents that separate deployment and the unchanged official
+E2B client used to validate it.
 
 ## Features
 
@@ -171,7 +145,8 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
 | Rust SDK | Typed, direct runtime-backed management and guest-control APIs | Implemented in `a3s-box-sdk`. The optional `pipeline-cli` feature retains the CLI-driven programmable pipeline. |
-| E2B protocol and language SDKs | Pinned contracts, durable lifecycle, memory-preserving and filesystem-only pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | The last certified A3S OS run proves the pinned official Python sync/async and TypeScript clients, plus the A3S Python sync/async and TypeScript packages, against the existing matrix, including Snapshot capture/list/restore/delete, filesystem and OCI-default fidelity, bidirectional Volume mounts, warm-pause process survival, and generation-fenced logs. The production gate is now extended to check cold-pause rootfs persistence, process replacement, environment reinitialization, and Volume remounting; that extension still requires its certified-host run. Templates/builds, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. PyPI/npm publication is also pending. |
+| Local Python and TypeScript SDKs | E2B-like `Sandbox`, commands, files, lifecycle, and a small Python Code Interpreter facade over the installed local runtime | The packages have no official E2B runtime dependency and require no endpoint or API key. Their versioned bridge, request mapping, package builds, language-level API tests, and real macOS MicroVM create/command/file/cleanup smokes pass; a broader release-host MicroVM/Sandbox matrix remains a publication gate. |
+| Remote E2B protocol service | Pinned contracts, durable lifecycle, memory-preserving and filesystem-only pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | The certified A3S OS evidence uses unchanged official Python sync/async and TypeScript clients. Templates/builds, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
 | Windows | Native x86_64 WHPX/libkrun MicroVM execution | Host-specific. Foreground and detached workloads, long arguments staged outside the guest kernel command line, live split logs, exit codes, TCP publishing, bind mounts, named-volume persistence, stats, stopped-box commit, and stopped-box filesystem snapshot flows have passed real-host validation. Running-box commit has no guest archive channel. The reliable path is currently limited to one vCPU; container health checks, bridge networking, interactive execution, TEE, snapshot-fork, and CRI remain unsupported. |
@@ -648,13 +623,12 @@ compatibility:
 | --- | --- | --- |
 | Control plane | Owner-scoped create, connect, get, memory-preserving and filesystem-only pause, connect/resume, v1 running list, v2 filtered running/paused list, timeout replacement, monotonic refresh, kill, current single/batch metrics, and structured v1/v2 logs for runtime-envd Sandboxes, with SQLite WAL persistence, restart reconciliation, cleanup, and a complete requested timeout measured from runtime and envd readiness | Templates/builds, network updates, historical metric retention, cache attribution, full pagination edge cases, and host-reboot recovery semantics |
 | Credentials and routing | PBKDF2 account-key hashes, encrypted scope-bound Sandbox tokens, generation-fenced leases, wildcard TLS, direct/shared routes, CORS, HTTP/2, and PID-fenced Sandbox access | Certificate rotation and the complete streaming, upgrade, signed-file, and public-port route matrix |
-| Volumes | Owner-scoped create, connect/get, list, and delete with durable records, encrypted tokens, startup reconciliation, authenticated content operations, and named Sandbox mounts; all six production clients pass bidirectional I/O, UID/GID mapping, public mount metadata, in-use deletion conflicts, and cleanup | Complete large-file, concurrent-mutation, service-crash, host-reboot, and negative-path breadth before treating Volume coverage as a standalone compatibility claim |
-| Filesystem Snapshots | Owner-scoped capture, source-filtered list, restore, and delete with durable records, startup reconciliation, quiesced rootfs capture, copy-on-write restore, OCI image-default and Unix metadata fidelity, and active-use deletion conflicts; all six production clients restore captured state after deleting the source Sandbox | Filesystem only: no process memory or device state. Named-reference, pagination, large-rootfs, concurrent mutation, service-crash, host-reboot, and broader negative-path coverage remain release gates |
+| Volumes | Owner-scoped create, connect/get, list, and delete with durable records, encrypted tokens, startup reconciliation, authenticated content operations, and named Sandbox mounts; unchanged official clients pass bidirectional I/O, UID/GID mapping, public mount metadata, in-use deletion conflicts, and cleanup | Complete large-file, concurrent-mutation, service-crash, host-reboot, and negative-path breadth before treating Volume coverage as a standalone compatibility claim |
+| Filesystem Snapshots | Owner-scoped capture, source-filtered list, restore, and delete with durable records, startup reconciliation, quiesced rootfs capture, copy-on-write restore, OCI image-default and Unix metadata fidelity, and active-use deletion conflicts; unchanged official clients restore captured state after deleting the source Sandbox | Filesystem only: no process memory or device state. Named-reference, pagination, large-rootfs, concurrent mutation, service-crash, host-reboot, and broader negative-path coverage remain release gates |
 | envd | Authenticated health and production runtime-envd coverage; Broker-mode MicroVMs expose generation-fenced, binary-safe `GET /files`, raw or multipart `POST /files`, and the pinned unary Filesystem Stat/MakeDir/Move/ListDir/Remove procedures over Connect JSON and Protobuf through the guest session transport | Broker transfers are capped at 11 MiB per file; compression, ranges, xattr metadata, signed URLs, Filesystem watches, and production edge-case validation remain gates |
-| Process and PTY | Official and A3S Python sync/async and TypeScript clients pass foreground and background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output on real Sandboxes; the host broker also has bounded, fragmented, ordered JSON and Protobuf Connect framing coverage across every pinned Process procedure, including raw binary stdio, while the shared Exec/PTY transport implements the pinned SIGTERM and SIGKILL semantics with wire and guest process-group tests | Signals outside the pinned contract, reconnect, cancellation/backpressure stress, and adversarial concurrent-stream coverage |
-| Filesystem | The same six clients pass the production runtime-envd subset; the host broker has bounded binary download, octet-stream upload, multi-file multipart, and JSON/Protobuf Stat, MakeDir, Move, ListDir, and Remove coverage with user-relative POSIX paths and generation fencing | Watches, xattr metadata, streaming large files, ownership edge cases, and negative-path breadth |
-| Code Interpreter and MCP | Official and A3S Python sync/async and TypeScript clients execute Python, validate stdout/results, and pass context create/list/run/restart/remove | Other languages, rich MIME/error/cancellation breadth, MCP execution, and the rest of the pinned interpreter contract |
-| Python and TypeScript packages | Typed packages re-export the pinned official surfaces, use `A3S_BOX_*` connection configuration, and pass the production matrix with all `E2B_*` connection variables removed | PyPI/npm publication and conformance for the unimplemented protocol surfaces above |
+| Process and PTY | Unchanged official Python sync/async and TypeScript clients pass foreground and background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output on real Sandboxes; the host broker also has bounded, fragmented, ordered JSON and Protobuf Connect framing coverage across every pinned Process procedure, including raw binary stdio, while the shared Exec/PTY transport implements the pinned SIGTERM and SIGKILL semantics with wire and guest process-group tests | Signals outside the pinned contract, reconnect, cancellation/backpressure stress, and adversarial concurrent-stream coverage |
+| Filesystem | The unchanged official clients pass the production runtime-envd subset; the host broker has bounded binary download, octet-stream upload, multi-file multipart, and JSON/Protobuf Stat, MakeDir, Move, ListDir, and Remove coverage with user-relative POSIX paths and generation fencing | Watches, xattr metadata, streaming large files, ownership edge cases, and negative-path breadth |
+| Code Interpreter and MCP | Unchanged official Python sync/async and TypeScript clients execute Python, validate stdout/results, and pass context create/list/run/restart/remove | Other languages, rich MIME/error/cancellation breadth, MCP execution, and the rest of the pinned interpreter contract |
 
 The production `a3s-box-e2b` process accepts only `.acl` configuration parsed
 by `a3s-acl`. For runtime-envd templates, create does not become visible until
@@ -673,10 +647,11 @@ generation-fenced, and recover interrupted transitions after service restart.
 
 #### Self-hosted deployment and client configuration
 
-`a3s-box-e2b` is a network service. The Python and TypeScript packages connect
-to that service; they do not start a local Box runtime. The production-tested
-preview requires a Linux Sandbox host with the certified `crun` runtime, a
-public control-plane address, and a TLS Sandbox gateway with wildcard DNS.
+`a3s-box-e2b` is a separate network service for remote compatibility. It is
+not involved in normal local Python or TypeScript SDK use. The
+production-tested preview uses unchanged official E2B clients and requires a
+Linux Sandbox host with the certified `crun` runtime, a public control-plane
+address, and a TLS Sandbox gateway with wildcard DNS.
 See [Host Sandbox Backend Design](docs/host-sandbox-backend-design.md) for the
 host boundary and
 [E2B Protocol Compatibility and SDK Design](docs/e2b-compatible-sdk-design.md)
@@ -688,7 +663,7 @@ The simplest single-host production topology uses two public listeners:
 
 | Public address | Purpose | Service destination |
 | --- | --- | --- |
-| `https://api.box.example.com` | Control API used by `A3S_BOX_ENDPOINT` | TLS reverse proxy to `api_listen`, for example `127.0.0.1:3000` |
+| `https://api.box.example.com` | Remote control API (`E2B_API_URL`, or `A3S_BOX_ENDPOINT` when using the optional configuration helper) | TLS reverse proxy to `api_listen`, for example `127.0.0.1:3000` |
 | `https://<port>-<sandbox-id>.box.example.com:8443` | Direct Sandbox data plane | `gateway.listen`, for example `0.0.0.0:8443` |
 | `https://sandbox.box.example.com:8443` | Shared Sandbox route form | The same `gateway.listen` |
 
@@ -700,23 +675,23 @@ addresses or an SNI-aware load balancer can use port `443` for both.
 
 The client and server settings map as follows:
 
-| Client setting | What to enter | Matching server setting |
+| Remote client setting | What to enter | Matching server setting |
 | --- | --- | --- |
-| `A3S_BOX_ENDPOINT` | Externally reachable control API origin, including `http://` or `https://` and any non-default port | `e2b_compat.api_public_url` |
-| `A3S_BOX_API_KEY` | The **raw** API key issued to the client | The raw key whose PBKDF2-SHA256 encoding is stored in `account.hash` |
-| `A3S_BOX_DOMAIN` | Optional Sandbox wildcard suffix, with no scheme or port | `e2b_compat.sandbox_domain` |
-| `A3S_BOX_SANDBOX_URL` | Single-Sandbox fixture override only; normally unset | Not a production multi-Sandbox setting |
+| `E2B_API_URL` / helper `A3S_BOX_ENDPOINT` | Externally reachable control API origin, including `http://` or `https://` and any non-default port | `e2b_compat.api_public_url` |
+| `E2B_API_KEY` / helper `A3S_BOX_API_KEY` | The **raw** API key issued to the remote client | The raw key whose PBKDF2-SHA256 encoding is stored in `account.hash` |
+| `E2B_DOMAIN` / helper `A3S_BOX_DOMAIN` | Sandbox wildcard suffix, with no scheme or port | `e2b_compat.sandbox_domain` |
+| `E2B_SANDBOX_URL` / helper `A3S_BOX_SANDBOX_URL` | Single-Sandbox fixture override only; normally unset | Not a production multi-Sandbox setting |
 
-Use the bare control origin for `A3S_BOX_ENDPOINT`. Do not append `/api`,
+Use the bare control origin for the remote API URL. Do not append `/api`,
 `/v1`, `/sandboxes`, a query string, or a fragment, and omit the trailing
 slash:
 
-| Deployment | `A3S_BOX_ENDPOINT` | Additional setting |
+| Deployment | Remote API URL | Additional setting |
 | --- | --- | --- |
-| Standard HTTPS | `https://api.box.example.com` | None; the SDK derives `box.example.com` |
-| Non-default control port | `https://api.box.example.com:8444` | None; the SDK still derives `box.example.com` |
-| Custom/LAN hostname | `https://box-api.lab.example:8444` | `A3S_BOX_DOMAIN=sandboxes.lab.example` |
-| Loopback development | `http://127.0.0.1:3000` | Set `A3S_BOX_DOMAIN` to the configured local Sandbox DNS suffix |
+| Standard HTTPS | `https://api.box.example.com` | `E2B_DOMAIN=box.example.com` |
+| Non-default control port | `https://api.box.example.com:8444` | `E2B_DOMAIN=box.example.com` |
+| Custom/LAN hostname | `https://box-api.lab.example:8444` | `E2B_DOMAIN=sandboxes.lab.example` |
+| Loopback development | `http://127.0.0.1:3000` | Set `E2B_DOMAIN` to the configured local Sandbox DNS suffix |
 
 Plain HTTP is appropriate only on loopback. A loopback control endpoint does
 not remove the data-plane requirements: Filesystem, Process, PTY, health, and
@@ -725,11 +700,11 @@ reachability to the configured Sandbox gateway.
 
 ##### Generate the client API key and server hash
 
-The current compatibility service requires API keys in the form
-`e2b_[0-9a-f]+`. The native A3S packages disable the upstream client-side
-validator, but the self-hosted server still enforces this compatibility form.
-Generate a high-entropy key and its server-side hash on a trusted
-administrative machine:
+The remote compatibility service requires API keys in the form
+`e2b_[0-9a-f]+`, matching the unchanged official clients' validator. This
+credential belongs only to a deployed network service; local SDK use does not
+create or read it. Generate a high-entropy key and its server-side hash on a
+trusted administrative machine:
 
 ```bash
 python3 - <<'PY'
@@ -750,18 +725,18 @@ encoded = (
     f"pbkdf2-sha256${iterations}${salt.hex()}${digest.hex()}"
 )
 
-print("Store this raw value in the client secret manager:")
-print(f"A3S_BOX_API_KEY={api_key}")
+print("Store this raw value in the remote client secret manager:")
+print(f"E2B_API_KEY={api_key}")
 print()
 print("Paste only this encoded value into the server account.hash:")
 print(encoded)
 PY
 ```
 
-The command prints the raw key once. Store the `A3S_BOX_API_KEY=...` value in
-the client secret manager. Paste only the `pbkdf2-sha256$...` value into the
-server ACL. Do not put the raw key in the ACL, and do not put the encoded hash
-in `A3S_BOX_API_KEY`.
+The command prints the raw key once. Store the `E2B_API_KEY=...` value in the
+remote client secret manager. Paste only the `pbkdf2-sha256$...` value into the
+server ACL. Do not put the raw key in the ACL, and do not give the encoded hash
+to a client.
 
 Sandbox tokens use two different 32-byte service keys. Generate and persist
 them separately; they are not account API keys:
@@ -844,7 +819,8 @@ e2b_compat {
 }
 ```
 
-`api_public_url` is the value clients use as `A3S_BOX_ENDPOINT`;
+`api_public_url` is the value official clients use as `E2B_API_URL` (and the
+optional `A3SRemoteConnection` helper accepts it as `A3S_BOX_ENDPOINT`).
 `api_listen` is an internal bind address and normally must not be given to
 remote clients. The TLS reverse proxy in front of `api_listen` must forward
 paths unchanged and preserve `X-API-Key`. The separate Sandbox gateway must be
@@ -871,66 +847,79 @@ in the service process. Run the service under a supervisor and ensure its user
 can read the TLS private key and write the database, runtime home, and runtime
 state paths.
 
-Configure a client with the **raw** API key printed by the generator:
+Configure an unchanged official client with the **raw** API key printed by the
+generator. These variables are remote-only:
 
 ```bash
-export A3S_BOX_ENDPOINT="https://api.box.example.com"
-export A3S_BOX_API_KEY="<raw e2b_... value>"
-
-# Only for a non-conventional control hostname:
-# export A3S_BOX_DOMAIN="sandboxes.lab.example"
-
-unset A3S_BOX_SANDBOX_URL
+export E2B_API_URL="https://api.box.example.com"
+export E2B_API_KEY="<raw e2b_... value>"
+export E2B_DOMAIN="box.example.com"
+unset E2B_SANDBOX_URL
 ```
 
 Verify the control API independently of Sandbox routing:
 
 ```bash
 curl --fail --show-error --silent \
-  --header "X-API-Key: ${A3S_BOX_API_KEY}" \
-  "${A3S_BOX_ENDPOINT}/v2/sandboxes"
+  --header "X-API-Key: ${E2B_API_KEY}" \
+  "${E2B_API_URL}/v2/sandboxes"
 ```
 
 A successful request returns HTTP `200`. This proves the control endpoint,
 TLS trust, reverse-proxy path, and account key. It does not prove wildcard
-Sandbox DNS or the data-plane gateway; create a Sandbox and run a command with
-the Python or TypeScript example near the beginning of this README for that
-end-to-end check.
+Sandbox DNS or the data-plane gateway. Use an unchanged official E2B client
+against this remote service for that end-to-end check:
 
-The native packages read only `A3S_BOX_*` connection settings. They pass the
-API key to the pinned E2B client, which sends it as `X-API-Key`.
-`A3S_BOX_DOMAIN` is derived only from a conventional `api.<domain>` control
-hostname; set it explicitly for any other hostname.
+```python
+from e2b import Sandbox
+
+sandbox = Sandbox.create("a3s-base")
+try:
+    print(sandbox.commands.run("printf remote-ok").stdout)
+finally:
+    sandbox.kill()
+```
+
+This remote example is intentionally separate from the zero-configuration
+local `a3s_box.Sandbox` examples near the beginning of the README.
 
 ##### Use an unchanged official E2B SDK
 
-The unchanged official SDKs use their own environment names. Point them at the
-same A3S Box service without setting a process-global Sandbox URL:
+The unchanged official SDKs use the `E2B_*` variables shown above. If an
+application already uses the optional `A3SRemoteConnection` helper, it may keep
+remote deployment values under `A3S_BOX_*` and pass the returned options
+explicitly to an independently installed official SDK. The native local
+`Sandbox` never performs this translation and never reads these variables:
 
-```bash
-export E2B_API_URL="${A3S_BOX_ENDPOINT}"
-export E2B_API_KEY="${A3S_BOX_API_KEY}"
-export E2B_DOMAIN="box.example.com"
-unset E2B_SANDBOX_URL
+```python
+from a3s_box import A3SRemoteConnection
+from e2b import Sandbox as RemoteSandbox
+
+connection = A3SRemoteConnection.from_environment()
+remote = RemoteSandbox.create(
+    "a3s-base",
+    **connection.official_python_options(),
+)
+remote.kill()
 ```
 
 The generated `e2b_` key passes the official clients' default API-key
 validation. Do not set `E2B_SANDBOX_URL` to the shared
 `sandbox.<domain>` endpoint in a multi-Sandbox deployment: it is a fixed URL,
-and file-transfer URLs would lose the Sandbox identity. Native A3S packages
-intentionally ignore these `E2B_*` connection variables.
+and file-transfer URLs would lose the Sandbox identity.
 
 ##### Troubleshooting and security
 
 | Symptom | Check |
 | --- | --- |
-| `A3S_BOX_ENDPOINT is required` | Export it in the process that starts the application; the native package does not read `E2B_API_URL`. |
-| HTTP `401` | `A3S_BOX_API_KEY` must be the raw `e2b_...` value, not `account.hash`; confirm the reverse proxy preserves `X-API-Key`. |
+| Local `a3s_box.Sandbox.create()` reports that `a3s-box` is not installed | Install the A3S Box runtime or set only `A3S_BOX_BINARY` to its executable path. Do not configure an endpoint or API key. |
+| Remote helper reports `A3S_BOX_ENDPOINT is required for remote mode` | This helper is only for a deliberately remote self-hosted service. Set its remote variables, or use local `Sandbox.create()` with no credentials. |
+| Remote HTTP `401` | `E2B_API_KEY` (or helper `A3S_BOX_API_KEY`) must be the raw `e2b_...` value, not `account.hash`; confirm the reverse proxy preserves `X-API-Key`. |
 | Official SDK rejects the key before sending a request | Regenerate it in the required `e2b_[0-9a-f]+` form. Uppercase hex and `a3s_` prefixes are rejected by the current compatibility service. |
-| HTTP `404` from every SDK operation | Remove `/api`, `/v1`, `/sandboxes`, and the trailing slash from `A3S_BOX_ENDPOINT`; ensure the proxy does not rewrite a path prefix. |
+| Remote HTTP `404` from every operation | Remove `/api`, `/v1`, `/sandboxes`, and the trailing slash from the remote API URL; ensure the proxy does not rewrite a path prefix. |
 | Control listing works but commands, files, PTY, or health fail | Check wildcard DNS, gateway firewall/port, wildcard certificate trust, and `sandbox_public_domain`. |
-| TLS hostname mismatch on a Sandbox URL | The certificate must cover `*.sandbox_domain`; `A3S_BOX_DOMAIN` contains only the DNS suffix, without a scheme or port. |
-| A custom control hostname routes Sandbox calls to the wrong domain | Set `A3S_BOX_DOMAIN` exactly to `e2b_compat.sandbox_domain`. |
+| TLS hostname mismatch on a Sandbox URL | The certificate must cover `*.sandbox_domain`; `E2B_DOMAIN` contains only the DNS suffix, without a scheme or port. |
+| A custom control hostname routes Sandbox calls to the wrong domain | Set `E2B_DOMAIN` exactly to `e2b_compat.sandbox_domain`. |
 | Sandbox creation reports an unknown template | Pass a template ID declared by `template_policy`, such as `a3s-base`. |
 | Existing Sandbox tokens fail after a restart | Restore the token encryption/digest key version used to issue them; rotate with a new retained version instead of replacing key material in place. |
 
@@ -940,10 +929,12 @@ add a second `account` block with the same `owner_id`, a new label and
 `client_id`, and the new hash; restart the service, update clients, then remove
 the old account in a later restart.
 
-The Python package under [`sdk/python`](sdk/python/README.md) and the TypeScript
-package under [`sdk/typescript`](sdk/typescript/README.md) pass the production
-matrix and are built as GitHub Release assets. They are not yet published to
-PyPI or npm. Passing this subset is not evidence for unimplemented protocol
+The local Python package under [`sdk/python`](sdk/python/README.md) and the
+local TypeScript package under [`sdk/typescript`](sdk/typescript/README.md)
+have no official E2B runtime dependency. Their bridge mapping and package tests
+plus real macOS MicroVM create/command/file/cleanup smokes are separate from
+the remote production compatibility matrix, which uses only unchanged official
+clients. Passing either subset is not evidence for unimplemented protocol
 surfaces, so the generated manifest continues to report
 `full_compatibility=false`.
 

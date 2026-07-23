@@ -16,6 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 a3s-box-core = { path = "../core" }
 a3s-box-runtime = { path = "../runtime" }
+a3s-box-sdk = { path = "../sdk" }
 a3s-transport = { workspace = true }
 
 # Async runtime
