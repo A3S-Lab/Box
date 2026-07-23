@@ -4,6 +4,43 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-07-23
+
+### Added
+
+- **Fluent programmable CI/CD builders.** Rust, synchronous/asynchronous
+  Python, and TypeScript can build OCI images, create named volumes and bridge
+  networks, configure typed Sandboxes, and run stdin-backed scripts through the
+  same local A3S Box runtime.
+- **Complete local SDK resource management.** The native SDKs now cover image
+  pull, inspect, tag, save, load, push, remove, and prune; volume and network
+  lifecycle; Sandbox list/get; runtime diagnostics and disk usage; filesystem
+  snapshot list/get; and deterministic cleanup.
+- **Cross-capability soak validation plan.** Runtime, image, build, storage,
+  networking, SDK, provider, TEE, Kubernetes, Windows, and upgrade behavior now
+  share named rehearsal, guardrail, release, and endurance profiles with a
+  common evidence contract and promotion gates.
+
+### Changed
+
+- **Local Sandbox lifecycle parity.** Rust, Python, and TypeScript handles now
+  expose generation-fenced stop, restart, remove, logs, stats, and execution
+  results while preserving zero-configuration local operation.
+- **Versioned machine bridge contract.** Python and TypeScript validate a
+  checked operation inventory and typed request/response values instead of
+  parsing human CLI output.
+- **Verified SDK publication.** Stable Python and TypeScript packages are
+  published only from artifacts produced and tested by the matching successful
+  GitHub Release workflow.
+
+### Fixed
+
+- **Windows release toolchain target.** Windows Actions install the Linux musl
+  target required to build the bundled guest init alongside native WHPX
+  binaries.
+- **Persistent snapshot SDK coverage.** Cross-language tests verify persistent
+  rootfs paths and lifecycle results across snapshot-backed local workflows.
+
 ## [3.0.12] — 2026-07-23
 
 ### Added

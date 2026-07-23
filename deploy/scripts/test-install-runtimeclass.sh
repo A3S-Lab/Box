@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER="$SCRIPT_DIR/install-runtimeclass.sh"
-VERSION="v3.0.12"
+VERSION="v3.1.0"
 ARCH="x86_64"
 PACKAGE_DIR="a3s-box-${VERSION}-linux-${ARCH}"
 TARBALL="${PACKAGE_DIR}.tar.gz"
@@ -35,7 +35,7 @@ make_assets() {
 
   cat > "$fixture/a3s-box" <<'SCRIPT'
 #!/usr/bin/env bash
-echo "a3s-box 3.0.12"
+echo "a3s-box 3.1.0"
 SCRIPT
   cat > "$fixture/a3s-box-cri" <<'SCRIPT'
 #!/usr/bin/env bash

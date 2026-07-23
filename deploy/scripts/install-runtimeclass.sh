@@ -16,7 +16,7 @@
 # Usage:
 #   install-runtimeclass.sh [--version vX.Y.Z] [--repo OWNER/REPO] [--from-dir DIR]
 #
-#   --version   release tag to install                 (default: v3.0.12)
+#   --version   release tag to install                 (default: v3.1.0)
 #   --repo      GitHub repo to download artifacts from (default: A3S-Lab/Box)
 #   --from-dir  install from a local directory instead of downloading; the dir must
 #               contain a3s-box-<version>-linux-<arch>.tar.gz, its .sha256 file,
@@ -28,7 +28,7 @@
 # Idempotent: safe to re-run (re-installs binaries, rewrites the containerd drop-in).
 set -euo pipefail
 
-VERSION="v3.0.12"
+VERSION="v3.1.0"
 REPO="A3S-Lab/Box"
 FROM_DIR=""
 WARMUP_IMAGE="busybox:latest"   # first box on a fresh node builds a one-time cache
