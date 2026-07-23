@@ -19,171 +19,19 @@ use serde_json::{json, Value};
 
 use crate::{
     A3sBoxClient, BuildImage, ClientError, CommandRunOptions, CreateNetwork, CreateVolume,
-    FilesystemOptions, PullImage, Sandbox, SandboxCommand, SandboxCreateOptions, SandboxNetwork,
-    TmpfsMount, VolumeMount, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    FilesystemOptions, PullImage, PushImage, Sandbox, SandboxCommand, SandboxCreateOptions,
+    SandboxNetwork, TagImage, TmpfsMount, VolumeMount, DEFAULT_SANDBOX_IMAGE,
+    DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+};
+
+mod request;
+
+pub use request::{
+    BridgeRegistryCredentials, BridgeRegistryProtocol, BridgeRequest, BridgeSignaturePolicy,
+    BRIDGE_OPERATIONS,
 };
 
 pub const BRIDGE_PROTOCOL_VERSION: u8 = 1;
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(tag = "operation", rename_all = "snake_case")]
-pub enum BridgeRequest {
-    ImageBuild {
-        context_dir: String,
-        #[serde(default)]
-        dockerfile: Option<String>,
-        #[serde(default)]
-        tag: Option<String>,
-        #[serde(default)]
-        build_args: BTreeMap<String, String>,
-        #[serde(default = "default_true")]
-        quiet: bool,
-        #[serde(default)]
-        platforms: Vec<String>,
-        #[serde(default)]
-        target: Option<String>,
-        #[serde(default)]
-        no_cache: bool,
-    },
-    ImagePull {
-        reference: String,
-        #[serde(default)]
-        force: bool,
-        #[serde(default)]
-        platform: Option<String>,
-    },
-    ImageList,
-    ImageRemove {
-        reference: String,
-    },
-    VolumeCreate {
-        name: String,
-        #[serde(default)]
-        labels: BTreeMap<String, String>,
-        #[serde(default)]
-        size_limit: u64,
-    },
-    VolumeGet {
-        name: String,
-    },
-    VolumeList,
-    VolumeRemove {
-        name: String,
-        #[serde(default)]
-        force: bool,
-    },
-    NetworkCreate {
-        name: String,
-        #[serde(default = "default_network_subnet")]
-        subnet: String,
-        #[serde(default)]
-        labels: BTreeMap<String, String>,
-    },
-    NetworkGet {
-        name: String,
-    },
-    NetworkList,
-    NetworkRemove {
-        name: String,
-    },
-    SandboxCreate(Box<BridgeSandboxCreateRequest>),
-    SandboxInspect {
-        sandbox_id: String,
-    },
-    SandboxKill {
-        sandbox_id: String,
-        generation: u64,
-    },
-    SandboxPause {
-        sandbox_id: String,
-        generation: u64,
-        #[serde(default = "default_true")]
-        keep_memory: bool,
-    },
-    SandboxResume {
-        sandbox_id: String,
-        generation: u64,
-    },
-    SandboxSnapshotCreate {
-        sandbox_id: String,
-        generation: u64,
-        snapshot_id: String,
-    },
-    FilesystemSnapshotSize {
-        snapshot_id: String,
-    },
-    FilesystemSnapshotDelete {
-        snapshot_id: String,
-    },
-    CommandRun {
-        sandbox_id: String,
-        generation: u64,
-        argv: Vec<String>,
-        #[serde(default)]
-        timeout_ms: Option<u64>,
-        #[serde(default)]
-        env: BTreeMap<String, String>,
-        #[serde(default)]
-        cwd: Option<String>,
-        #[serde(default)]
-        user: Option<String>,
-        #[serde(default)]
-        stdin_base64: Option<String>,
-    },
-    FileWrite {
-        sandbox_id: String,
-        generation: u64,
-        path: String,
-        data_base64: String,
-        #[serde(default)]
-        user: Option<String>,
-    },
-    FileRead {
-        sandbox_id: String,
-        generation: u64,
-        path: String,
-        #[serde(default)]
-        user: Option<String>,
-    },
-    FilesystemStat {
-        sandbox_id: String,
-        generation: u64,
-        path: String,
-        #[serde(default)]
-        user: Option<String>,
-    },
-    FilesystemList {
-        sandbox_id: String,
-        generation: u64,
-        path: String,
-        #[serde(default = "default_depth")]
-        depth: u32,
-        #[serde(default)]
-        user: Option<String>,
-    },
-    FilesystemMakeDir {
-        sandbox_id: String,
-        generation: u64,
-        path: String,
-        #[serde(default)]
-        user: Option<String>,
-    },
-    FilesystemMove {
-        sandbox_id: String,
-        generation: u64,
-        path: String,
-        destination: String,
-        #[serde(default)]
-        user: Option<String>,
-    },
-    FilesystemRemove {
-        sandbox_id: String,
-        generation: u64,
-        path: String,
-        #[serde(default)]
-        user: Option<String>,
-    },
-}
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct BridgeSandboxCreateRequest {
@@ -375,6 +223,10 @@ async fn execute_request(
     request: BridgeRequest,
 ) -> Result<Value, BridgeFailure> {
     match request {
+        BridgeRequest::SdkCapabilities => Ok(json!({
+            "protocol_version": BRIDGE_PROTOCOL_VERSION,
+            "operations": BRIDGE_OPERATIONS,
+        })),
         BridgeRequest::ImageBuild {
             context_dir,
             dockerfile,
@@ -423,15 +275,49 @@ async fn execute_request(
             reference,
             force,
             platform,
+            credentials,
+            signature_policy,
         } => {
-            let mut request = PullImage::new(reference).force(force);
+            let mut request = PullImage::new(reference)
+                .force(force)
+                .signature_policy(signature_policy.into());
             if let Some(platform) = platform {
                 Platform::parse(&platform).map_err(ClientError::Validation)?;
                 request = request.platform(platform);
             }
+            if let Some(credentials) = credentials {
+                request = request.credentials(credentials.into());
+            }
             serialize_value(client.pull_image(request).await?)
         }
+        BridgeRequest::ImageGet { reference } => {
+            serialize_field("image", client.get_image(&reference).await?)
+        }
         BridgeRequest::ImageList => serialize_field("images", client.list_images().await?),
+        BridgeRequest::ImageInspect { reference } => {
+            serialize_field("image", client.inspect_image(&reference).await?)
+        }
+        BridgeRequest::ImageHistory { reference } => {
+            serialize_field("history", client.image_history(&reference).await?)
+        }
+        BridgeRequest::ImageTag { source, target } => {
+            serialize_value(client.tag_image(TagImage::new(source, target)).await?)
+        }
+        BridgeRequest::ImagePush {
+            source,
+            target,
+            credentials,
+            registry_protocol,
+        } => {
+            let mut request = PushImage::new(source, target);
+            if let Some(credentials) = credentials {
+                request = request.credentials(credentials.into());
+            }
+            if let Some(registry_protocol) = registry_protocol {
+                request = request.registry_protocol(registry_protocol.into());
+            }
+            serialize_value(client.push_image(request).await?)
+        }
         BridgeRequest::ImageRemove { reference } => {
             client.remove_image(&reference).await?;
             Ok(json!({
@@ -439,6 +325,7 @@ async fn execute_request(
                 "removed": true,
             }))
         }
+        BridgeRequest::ImageEvict => serialize_field("references", client.evict_images().await?),
         BridgeRequest::VolumeCreate {
             name,
             labels,
@@ -455,6 +342,7 @@ async fn execute_request(
         BridgeRequest::VolumeRemove { name, force } => {
             serialize_value(client.remove_volume(&name, force)?)
         }
+        BridgeRequest::VolumePrune => serialize_field("names", client.prune_volumes()?),
         BridgeRequest::NetworkCreate {
             name,
             subnet,
@@ -471,6 +359,7 @@ async fn execute_request(
         }
         BridgeRequest::NetworkList => serialize_field("networks", client.list_networks()?),
         BridgeRequest::NetworkRemove { name } => serialize_value(client.remove_network(&name)?),
+        BridgeRequest::NetworkPrune => serialize_field("names", client.prune_networks()?),
         BridgeRequest::SandboxCreate(request) => {
             let BridgeSandboxCreateRequest {
                 image,

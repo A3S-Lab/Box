@@ -91,8 +91,10 @@ sudo usermod -aG kvm "$USER"
 
 The native Rust, Python, and TypeScript SDK smoke exercises the same E2B-style
 `Sandbox`, commands, files, pause/resume, kill, and cleanup behavior against a
-real local backend. It fails if any remote endpoint, domain, or API-key
-variable is present.
+real local backend. Before starting the box it also verifies the bridge
+capability inventory, built-image get/inspect/history/tag/remove calls, and
+unused volume/network pruning; cache eviction is exercised after cleanup. It
+fails if any remote endpoint, domain, or API-key variable is present.
 
 Build the host binary, shim, and matching Linux guest init first. Then use a
 dedicated state directory:

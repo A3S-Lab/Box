@@ -109,6 +109,39 @@ The package invokes the versioned machine bridge built into the installed
 only when the executable is not on `PATH`, or inject a typed
 `A3SLocalRuntime` object in application tests.
 
+Host resources use the same typed client:
+
+```typescript
+import {
+  A3SBoxClient,
+  RegistryCredentials,
+  SignaturePolicy,
+} from '@a3s-lab/box'
+
+const client = new A3SBoxClient()
+const password = process.env.REGISTRY_PASSWORD
+if (!password) throw new Error('REGISTRY_PASSWORD is required')
+const credentials = new RegistryCredentials('builder', password)
+const image = await client.pullImage('registry.example/ci/base:latest', {
+  credentials,
+  signaturePolicy: SignaturePolicy.cosignKey('/keys/cosign.pub'),
+})
+const metadata = await client.inspectImage(image.reference)
+const history = await client.imageHistory(image.reference)
+const tagged = await client.tagImage(image.reference, 'local/ci-base:tested')
+await client.pushImage(
+  tagged.reference,
+  'registry.example/ci/base:tested',
+  { credentials }
+)
+await client.pruneVolumes()
+await client.pruneNetworks()
+```
+
+`client.capabilities()` returns the bridge protocol version and exact supported
+operation names. Passwords are passed only to the local runtime process and are
+not read from the remote-only endpoint/API-key environment variables.
+
 ## Remote and self-hosted deployments
 
 `A3S_BOX_ENDPOINT`, `A3S_BOX_API_KEY`, `A3S_BOX_DOMAIN`, and

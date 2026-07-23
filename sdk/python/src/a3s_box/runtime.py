@@ -14,6 +14,45 @@ from typing import Any, Protocol
 from .exceptions import A3SBoxError, A3SBoxNotInstalledError
 
 BRIDGE_PROTOCOL_VERSION = 1
+SUPPORTED_BRIDGE_OPERATIONS = (
+    "sdk_capabilities",
+    "image_build",
+    "image_pull",
+    "image_get",
+    "image_list",
+    "image_inspect",
+    "image_history",
+    "image_tag",
+    "image_push",
+    "image_remove",
+    "image_evict",
+    "volume_create",
+    "volume_get",
+    "volume_list",
+    "volume_remove",
+    "volume_prune",
+    "network_create",
+    "network_get",
+    "network_list",
+    "network_remove",
+    "network_prune",
+    "sandbox_create",
+    "sandbox_inspect",
+    "sandbox_kill",
+    "sandbox_pause",
+    "sandbox_resume",
+    "sandbox_snapshot_create",
+    "filesystem_snapshot_size",
+    "filesystem_snapshot_delete",
+    "command_run",
+    "file_write",
+    "file_read",
+    "filesystem_stat",
+    "filesystem_list",
+    "filesystem_make_dir",
+    "filesystem_move",
+    "filesystem_remove",
+)
 
 
 class LocalRuntime(Protocol):

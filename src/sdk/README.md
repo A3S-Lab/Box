@@ -115,6 +115,14 @@ automatic cleanup, and filesystem-snapshot restore are available on
 Named bridge networks and published ports are currently MicroVM-only. The
 shared-kernel Sandbox resolver rejects either before runtime mutation.
 
+The same native Python and TypeScript packages now expose the Rust client's
+local image lifecycle: get, inspect, history, pull, tag, push, remove, and
+cache eviction. Pull accepts typed registry credentials and cosign verification
+policies; push accepts typed credentials and an explicit HTTPS or trusted
+plain-HTTP registry protocol. Named volumes and networks also expose prune.
+`sdk_capabilities` reports the exact operation inventory supported by the
+installed runtime so applications can fail closed before using a newer API.
+
 ## Runtime-Backed Client
 
 ```rust
@@ -240,6 +248,10 @@ embedding or tests without changing request semantics.
 - E2B-style local use: zero-configuration `Sandbox`, `commands`, `files`,
   lifecycle, explicit MicroVM/shared-kernel isolation, and typed client
   injection for embedding and tests.
+- Language bridge: versioned capability inventory plus image
+  get/inspect/history/pull/build/tag/push/remove/evict and
+  volume/network create/get/list/remove/prune parity in Python sync/async and
+  TypeScript.
 
 The client reads the shared `boxes.json` state format through an SDK-local model
 so it does not depend on the CLI crate. Image, volume, network, snapshot, build,

@@ -7,11 +7,18 @@ from typing import Literal, TypeVar, cast
 
 from .models import (
     BuildImageInfo,
+    ImageHealthCheckInfo,
+    ImageHistoryInfo,
     ImageInfo,
+    ImageInspectInfo,
     NetworkEndpointInfo,
     NetworkInfo,
     PortMapping,
+    PushImageInfo,
+    RegistryCredentials,
     SandboxNetwork,
+    SdkCapabilities,
+    SignaturePolicy,
     TmpfsMount,
     VolumeInfo,
     VolumeMount,
@@ -25,6 +32,7 @@ from .runtime import (
 from .sandbox import DEFAULT_IMAGE, AsyncSandbox, Sandbox
 
 LiteralIsolation = Literal["microvm", "sandbox"]
+RegistryProtocol = Literal["https", "http"]
 
 
 class A3SBoxClient:
@@ -51,6 +59,8 @@ class A3SBoxClient:
         *,
         force: bool = False,
         platform: str | None = None,
+        credentials: RegistryCredentials | None = None,
+        signature_policy: SignaturePolicy | None = None,
     ) -> ImageInfo:
         result = self._runtime.request(
             {
@@ -58,18 +68,99 @@ class A3SBoxClient:
                 "reference": reference,
                 "force": force,
                 **({} if platform is None else {"platform": platform}),
+                **(
+                    {}
+                    if credentials is None
+                    else {"credentials": credentials.bridge_value()}
+                ),
+                **(
+                    {}
+                    if signature_policy is None
+                    else {"signature_policy": signature_policy.bridge_value()}
+                ),
             }
         )
         return _image_info(result)
+
+    def get_image(self, reference: str) -> ImageInfo | None:
+        result = self._runtime.request(
+            {"operation": "image_get", "reference": reference}
+        )
+        value = result.get("image")
+        return None if value is None else _image_info(_mapping(value))
 
     def list_images(self) -> list[ImageInfo]:
         result = self._runtime.request({"operation": "image_list"})
         return [_image_info(item) for item in _mapping_list(result, "images")]
 
+    def inspect_image(self, reference: str) -> ImageInspectInfo | None:
+        result = self._runtime.request(
+            {"operation": "image_inspect", "reference": reference}
+        )
+        value = result.get("image")
+        return None if value is None else _image_inspect_info(_mapping(value))
+
+    def image_history(self, reference: str) -> list[ImageHistoryInfo] | None:
+        result = self._runtime.request(
+            {"operation": "image_history", "reference": reference}
+        )
+        value = result.get("history")
+        return (
+            None
+            if value is None
+            else [
+                _image_history_info(item)
+                for item in _mapping_sequence(value)
+            ]
+        )
+
+    def tag_image(self, source: str, target: str) -> ImageInfo:
+        return _image_info(
+            self._runtime.request(
+                {
+                    "operation": "image_tag",
+                    "source": source,
+                    "target": target,
+                }
+            )
+        )
+
+    def push_image(
+        self,
+        source: str,
+        target: str,
+        *,
+        credentials: RegistryCredentials | None = None,
+        protocol: RegistryProtocol | None = None,
+    ) -> PushImageInfo:
+        return _push_image_info(
+            self._runtime.request(
+                {
+                    "operation": "image_push",
+                    "source": source,
+                    "target": target,
+                    **(
+                        {}
+                        if credentials is None
+                        else {"credentials": credentials.bridge_value()}
+                    ),
+                    **(
+                        {}
+                        if protocol is None
+                        else {"registry_protocol": protocol}
+                    ),
+                }
+            )
+        )
+
     def remove_image(self, reference: str) -> None:
         self._runtime.request(
             {"operation": "image_remove", "reference": reference}
         )
+
+    def evict_images(self) -> list[str]:
+        result = self._runtime.request({"operation": "image_evict"})
+        return [str(value) for value in _sequence(result["references"])]
 
     def get_volume(self, name: str) -> VolumeInfo | None:
         result = self._runtime.request({"operation": "volume_get", "name": name})
@@ -91,6 +182,10 @@ class A3SBoxClient:
             )
         )
 
+    def prune_volumes(self) -> list[str]:
+        result = self._runtime.request({"operation": "volume_prune"})
+        return [str(value) for value in _sequence(result["names"])]
+
     def get_network(self, name: str) -> NetworkInfo | None:
         result = self._runtime.request({"operation": "network_get", "name": name})
         value = result.get("network")
@@ -103,6 +198,15 @@ class A3SBoxClient:
     def remove_network(self, name: str) -> NetworkInfo:
         return _network_info(
             self._runtime.request({"operation": "network_remove", "name": name})
+        )
+
+    def prune_networks(self) -> list[str]:
+        result = self._runtime.request({"operation": "network_prune"})
+        return [str(value) for value in _sequence(result["names"])]
+
+    def capabilities(self) -> SdkCapabilities:
+        return _sdk_capabilities(
+            self._runtime.request({"operation": "sdk_capabilities"})
         )
 
 
@@ -130,6 +234,8 @@ class A3SAsyncBoxClient:
         *,
         force: bool = False,
         platform: str | None = None,
+        credentials: RegistryCredentials | None = None,
+        signature_policy: SignaturePolicy | None = None,
     ) -> ImageInfo:
         result = await self._runtime.request(
             {
@@ -137,18 +243,102 @@ class A3SAsyncBoxClient:
                 "reference": reference,
                 "force": force,
                 **({} if platform is None else {"platform": platform}),
+                **(
+                    {}
+                    if credentials is None
+                    else {"credentials": credentials.bridge_value()}
+                ),
+                **(
+                    {}
+                    if signature_policy is None
+                    else {"signature_policy": signature_policy.bridge_value()}
+                ),
             }
         )
         return _image_info(result)
+
+    async def get_image(self, reference: str) -> ImageInfo | None:
+        result = await self._runtime.request(
+            {"operation": "image_get", "reference": reference}
+        )
+        value = result.get("image")
+        return None if value is None else _image_info(_mapping(value))
 
     async def list_images(self) -> list[ImageInfo]:
         result = await self._runtime.request({"operation": "image_list"})
         return [_image_info(item) for item in _mapping_list(result, "images")]
 
+    async def inspect_image(self, reference: str) -> ImageInspectInfo | None:
+        result = await self._runtime.request(
+            {"operation": "image_inspect", "reference": reference}
+        )
+        value = result.get("image")
+        return None if value is None else _image_inspect_info(_mapping(value))
+
+    async def image_history(
+        self,
+        reference: str,
+    ) -> list[ImageHistoryInfo] | None:
+        result = await self._runtime.request(
+            {"operation": "image_history", "reference": reference}
+        )
+        value = result.get("history")
+        return (
+            None
+            if value is None
+            else [
+                _image_history_info(item)
+                for item in _mapping_sequence(value)
+            ]
+        )
+
+    async def tag_image(self, source: str, target: str) -> ImageInfo:
+        return _image_info(
+            await self._runtime.request(
+                {
+                    "operation": "image_tag",
+                    "source": source,
+                    "target": target,
+                }
+            )
+        )
+
+    async def push_image(
+        self,
+        source: str,
+        target: str,
+        *,
+        credentials: RegistryCredentials | None = None,
+        protocol: RegistryProtocol | None = None,
+    ) -> PushImageInfo:
+        return _push_image_info(
+            await self._runtime.request(
+                {
+                    "operation": "image_push",
+                    "source": source,
+                    "target": target,
+                    **(
+                        {}
+                        if credentials is None
+                        else {"credentials": credentials.bridge_value()}
+                    ),
+                    **(
+                        {}
+                        if protocol is None
+                        else {"registry_protocol": protocol}
+                    ),
+                }
+            )
+        )
+
     async def remove_image(self, reference: str) -> None:
         await self._runtime.request(
             {"operation": "image_remove", "reference": reference}
         )
+
+    async def evict_images(self) -> list[str]:
+        result = await self._runtime.request({"operation": "image_evict"})
+        return [str(value) for value in _sequence(result["references"])]
 
     async def get_volume(self, name: str) -> VolumeInfo | None:
         result = await self._runtime.request({"operation": "volume_get", "name": name})
@@ -170,6 +360,10 @@ class A3SAsyncBoxClient:
             )
         )
 
+    async def prune_volumes(self) -> list[str]:
+        result = await self._runtime.request({"operation": "volume_prune"})
+        return [str(value) for value in _sequence(result["names"])]
+
     async def get_network(self, name: str) -> NetworkInfo | None:
         result = await self._runtime.request({"operation": "network_get", "name": name})
         value = result.get("network")
@@ -182,6 +376,15 @@ class A3SAsyncBoxClient:
     async def remove_network(self, name: str) -> NetworkInfo:
         return _network_info(
             await self._runtime.request({"operation": "network_remove", "name": name})
+        )
+
+    async def prune_networks(self) -> list[str]:
+        result = await self._runtime.request({"operation": "network_prune"})
+        return [str(value) for value in _sequence(result["names"])]
+
+    async def capabilities(self) -> SdkCapabilities:
+        return _sdk_capabilities(
+            await self._runtime.request({"operation": "sdk_capabilities"})
         )
 
 
@@ -627,6 +830,75 @@ def _image_info(result: Mapping[str, object]) -> ImageInfo:
     )
 
 
+def _image_inspect_info(result: Mapping[str, object]) -> ImageInspectInfo:
+    health_value = result.get("health_check")
+    return ImageInspectInfo(
+        reference=str(result["reference"]),
+        digest=str(result["digest"]),
+        size_bytes=int(cast(int, result["size_bytes"])),
+        pulled_at=str(result["pulled_at"]),
+        last_used=str(result["last_used"]),
+        path=str(result["path"]),
+        manifest_digest=str(result["manifest_digest"]),
+        layer_count=int(cast(int, result["layer_count"])),
+        entrypoint=_optional_string_tuple(result.get("entrypoint")),
+        command=_optional_string_tuple(result.get("command")),
+        env=_string_mapping(result["env"]),
+        working_dir=_optional_string(result.get("working_dir")),
+        user=_optional_string(result.get("user")),
+        exposed_ports=tuple(
+            str(value) for value in _sequence(result["exposed_ports"])
+        ),
+        volumes=tuple(str(value) for value in _sequence(result["volumes"])),
+        stop_signal=_optional_string(result.get("stop_signal")),
+        health_check=(
+            None
+            if health_value is None
+            else _image_health_check_info(_mapping(health_value))
+        ),
+        onbuild=tuple(str(value) for value in _sequence(result["onbuild"])),
+        labels=_string_mapping(result["labels"]),
+    )
+
+
+def _image_health_check_info(
+    result: Mapping[str, object],
+) -> ImageHealthCheckInfo:
+    return ImageHealthCheckInfo(
+        test=tuple(str(value) for value in _sequence(result["test"])),
+        interval=_optional_int(result.get("interval")),
+        timeout=_optional_int(result.get("timeout")),
+        retries=_optional_int(result.get("retries")),
+        start_period=_optional_int(result.get("start_period")),
+    )
+
+
+def _image_history_info(result: Mapping[str, object]) -> ImageHistoryInfo:
+    return ImageHistoryInfo(
+        created=_optional_string(result.get("created")),
+        created_by=str(result["created_by"]),
+        size_bytes=int(cast(int, result["size_bytes"])),
+        comment=str(result["comment"]),
+        empty_layer=bool(result["empty_layer"]),
+    )
+
+
+def _push_image_info(result: Mapping[str, object]) -> PushImageInfo:
+    return PushImageInfo(
+        reference=str(result["reference"]),
+        manifest_digest=str(result["manifest_digest"]),
+        config_url=str(result["config_url"]),
+        manifest_url=str(result["manifest_url"]),
+    )
+
+
+def _sdk_capabilities(result: Mapping[str, object]) -> SdkCapabilities:
+    return SdkCapabilities(
+        protocol_version=int(cast(int, result["protocol_version"])),
+        operations=tuple(str(value) for value in _sequence(result["operations"])),
+    )
+
+
 def _volume_info(result: Mapping[str, object]) -> VolumeInfo:
     return VolumeInfo(
         name=str(result["name"]),
@@ -692,3 +964,19 @@ def _mapping_list(
 
 def _string_mapping(value: object) -> dict[str, str]:
     return {str(key): str(item) for key, item in _mapping(value).items()}
+
+
+def _optional_string(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _optional_string_tuple(value: object) -> tuple[str, ...] | None:
+    return (
+        None
+        if value is None
+        else tuple(str(item) for item in _sequence(value))
+    )
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(cast(int, value))

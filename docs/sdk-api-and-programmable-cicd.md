@@ -173,10 +173,10 @@ If retained, the composition layer must:
 
 | Area | Required operations | Current state |
 | --- | --- | --- |
-| Images and builds | list, inspect, history, pull, build, tag, push, remove, cache eviction, platform selection, credentials, and progress | Fluent build plus pull/list have Rust/Python/TypeScript parity. Inspect, history, tag, push, remove, eviction, credentials, and progress remain bridge gaps. |
+| Images and builds | list, inspect, history, pull, build, tag, push, remove, cache eviction, platform selection, credentials, and progress | List/get/inspect/history/pull/build/tag/push/remove/evict, platform selection, registry credentials, pull signature policy, and push protocol have Rust/Python/TypeScript parity. The blocking real-Sandbox gate covers all local-store operations; authenticated registry push is covered by the opt-in host integration suite. Structured build and live pull/push progress remain pending. |
 | Typed box configuration | image, isolation, CPU/memory/lifetime, environment, workdir/user, mounts, tmpfs, network, ports, DNS/hosts, read-only root, persistence, cleanup, and snapshot restore | Implemented in Rust/Python/TypeScript options and fluent builders. The real macOS/HVF MicroVM builder gate passes; the Ubuntu/crun gate is wired into blocking CI, while Linux/KVM remains host-gated. |
-| Volumes | list, get, create, typed mount, content operations, remove, and prune | Create/get/list/remove and typed bind/named mounts have three-language parity. Prune and direct content helpers remain pending. |
-| Networking | list/create/get/remove/prune, typed attachment, published ports, and resolved endpoint inspection | Create/get/list/remove, typed TSI/disabled/bridge selection, endpoint responses, and TCP publication have three-language parity. Prune remains pending; live hot-plug is intentionally unsupported. |
+| Volumes | list, get, create, typed mount, content operations, remove, and prune | Create/get/list/remove/prune and typed bind/named mounts have three-language parity. Direct content helpers remain pending. |
+| Networking | list/create/get/remove/prune, typed attachment, published ports, and resolved endpoint inspection | Create/get/list/remove/prune, typed TSI/disabled/bridge selection, endpoint responses, and TCP publication have three-language parity. Live hot-plug is intentionally unsupported. |
 | Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have three-language parity and pass the real macOS/HVF builder-to-E2B smoke. Process handles, signals, wait, and streaming remain pending. |
 | Files and artifacts | binary/text read/write, stat, exists, list, mkdir, move, remove, streaming, confined export, size limits, and hashes | Core mutations implemented; artifact/export layer and large-file streaming pending. |
 | Filesystem snapshots | capture, size, restore, delete, in-use fencing, and cleanup | Rust and bridge foundations implemented; real-backend release gate pending. |
@@ -196,6 +196,12 @@ If retained, the composition layer must:
   persistence controls to box creation.
 - Add explicit script execution and executable examples in all three languages.
 - Retain and validate runtime-managed filesystem snapshot operations.
+
+Implemented evidence now includes a versioned `sdk_capabilities` inventory and
+three-language parity for local image inspection/history/tagging/removal/cache
+eviction, authenticated pull/push request shapes, and volume/network pruning.
+Structured registry/build progress remains in this phase because the current
+one-request/one-response bridge cannot represent live progress safely.
 
 ### Phase 2: Results, caches, and artifacts
 

@@ -118,6 +118,36 @@ The package invokes the versioned machine bridge built into the installed
 `a3s-box` executable. It does not parse human CLI output. Set `A3S_BOX_BINARY`
 only when the executable is not on `PATH`.
 
+Host resources use the same typed client:
+
+```python
+import os
+
+from a3s_box import A3SBoxClient, RegistryCredentials, SignaturePolicy
+
+client = A3SBoxClient()
+credentials = RegistryCredentials("builder", os.environ["REGISTRY_PASSWORD"])
+image = client.pull_image(
+    "registry.example/ci/base:latest",
+    credentials=credentials,
+    signature_policy=SignaturePolicy.cosign_key("/keys/cosign.pub"),
+)
+metadata = client.inspect_image(image.reference)
+history = client.image_history(image.reference)
+tagged = client.tag_image(image.reference, "local/ci-base:tested")
+client.push_image(
+    tagged.reference,
+    "registry.example/ci/base:tested",
+    credentials=credentials,
+)
+client.prune_volumes()
+client.prune_networks()
+```
+
+`client.capabilities()` returns the bridge protocol version and exact supported
+operation names. Passwords are passed only to the local runtime process and are
+not read from the remote-only endpoint/API-key environment variables.
+
 ## Remote and self-hosted deployments
 
 `A3S_BOX_ENDPOINT`, `A3S_BOX_API_KEY`, `A3S_BOX_DOMAIN`, and
