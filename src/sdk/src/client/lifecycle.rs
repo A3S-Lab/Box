@@ -89,17 +89,15 @@ impl A3sBoxClient {
     }
 
     /// Remove one terminal local execution and all runtime-owned paths.
-    pub(crate) async fn remove_execution(
+    pub(crate) async fn remove_local_execution_if_present(
         &self,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
     ) -> Result<bool> {
-        let manager = self.local_execution_manager.as_ref().ok_or_else(|| {
-            ClientError::Validation(
-                "this client was constructed without a local execution manager".to_string(),
-            )
-        })?;
-        Ok(manager.remove_execution(execution_id, generation).await?)
+        match self.local_execution_manager.as_ref() {
+            Some(manager) => Ok(manager.remove_execution(execution_id, generation).await?),
+            None => Ok(false),
+        }
     }
 
     /// Reconcile one idempotent create operation after caller or service restart.

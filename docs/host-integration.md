@@ -10,6 +10,7 @@ root.
 | --- | --- | --- |
 | Stub baseline | macOS or Linux with Rust, C compiler, and protoc | `scripts/host-integration-smoke.sh` |
 | Core MicroVM smoke | macOS Apple Silicon/HVF or Linux KVM, libkrun, Linux guest init, runnable image | `scripts/host-integration-smoke.sh --core` |
+| Native local SDK smoke | Same as the selected MicroVM or certified Linux Sandbox backend, plus Python 3.10+ and Node.js 20+ | `scripts/local-sdk-smoke.sh microvm` or `scripts/local-sdk-smoke.sh sandbox` |
 | Host command and warm-pool smoke | Same as core smoke; optional registry credentials for push coverage | `scripts/host-integration-smoke.sh --host` |
 | Linux Dockerfile `RUN` | Linux, root, chroot-capable filesystem, local Alpine OCI archive | `sudo -E scripts/host-integration-smoke.sh --linux-run --no-pure` |
 | CRI smoke | macOS or Linux MicroVM host, `crictl`, CRI images | `scripts/host-integration-smoke.sh --cri` |
@@ -85,6 +86,40 @@ new login session:
 ```bash
 sudo usermod -aG kvm "$USER"
 ```
+
+## Native local SDK matrix
+
+The native Rust, Python, and TypeScript SDK smoke exercises the same E2B-style
+`Sandbox`, commands, files, pause/resume, kill, and cleanup behavior against a
+real local backend. It fails if any remote endpoint, domain, or API-key
+variable is present.
+
+Build the host binary, shim, and matching Linux guest init first. Then use a
+dedicated state directory:
+
+```bash
+export A3S_HOME=/var/tmp/a3s-local-sdk-smoke
+unset E2B_API_KEY E2B_API_URL E2B_DOMAIN
+unset A3S_BOX_API_KEY A3S_BOX_ENDPOINT A3S_BOX_DOMAIN A3S_BOX_SANDBOX_URL
+
+# Development-tree override only; installed packages normally find a3s-box on PATH.
+export A3S_BOX_BINARY="$PWD/src/target/debug/a3s-box"
+
+scripts/local-sdk-smoke.sh microvm
+```
+
+On a certified Linux shared-kernel host, install `crun 1.28` at the normal A3S
+Box runtime location or select the verified artifact, then run the second
+isolation row:
+
+```bash
+export A3S_BOX_CRUN_PATH="$A3S_HOME/bin/crun"
+scripts/local-sdk-smoke.sh sandbox
+```
+
+`A3S_BOX_BINARY` is only an optional executable-path override for development;
+it is not a service endpoint or credential. Normal local SDK consumers set
+none of these variables.
 
 ## Resilient registry pull validation
 

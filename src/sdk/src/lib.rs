@@ -9,6 +9,7 @@ mod box_state;
 
 pub mod bridge;
 pub mod client;
+pub mod sandbox;
 
 #[cfg(feature = "pipeline-cli")]
 pub mod pipeline;
@@ -21,6 +22,11 @@ pub use client::{
     PushImageSummary, ReadBoxLogsOptions, RegistryCredentials, RemoveBox, RemoveBoxSummary,
     RestoreSnapshot, Result, RuntimeDiagnostics, RuntimeDiskUsage, RuntimeVirtualizationSummary,
     SnapshotSummary, StopBox, StopBoxSummary, StopOutcome, TagImage, VolumeSummary,
+};
+pub use sandbox::{
+    CommandResult, CommandRunOptions, Commands, Filesystem, FilesystemOptions, Sandbox,
+    SandboxCommand, SandboxCreateOptions, SandboxInfo, WriteInfo, DEFAULT_SANDBOX_IMAGE,
+    DEFAULT_SANDBOX_TIMEOUT_SECONDS,
 };
 
 pub use a3s_box_core::{

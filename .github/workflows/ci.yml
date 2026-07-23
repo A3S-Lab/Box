@@ -73,6 +73,8 @@ jobs:
         with:
           workspaces: src
       - run: cd src && cargo test --locked --workspace --lib
+      - name: Compile local SDK real-runtime smoke
+        run: cd src && cargo test --locked -p a3s-box-sdk --test local_sandbox --no-run
 
   # The RuntimeClass shim is an intentionally standalone Cargo workspace, so
   # none of the src workspace gates above compile or test it.
@@ -170,10 +172,80 @@ jobs:
           npm test
           npm pack --dry-run
 
+  # ── Real shared-kernel local SDK gate ──────────────────────────
+  sdk-local-sandbox:
+    name: SDK Local Sandbox (real crun)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      A3S_HOME: /tmp/a3s-local-sdk-smoke-sandbox
+      A3S_BOX_CRUN_PATH: /tmp/a3s-local-sdk-smoke-sandbox/bin/crun
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Init submodules
+        run: git -c http.extraheader= submodule update --init --recursive
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential musl-tools protobuf-compiler
+          rustup target add x86_64-unknown-linux-musl
+      - name: Build local SDK runtime artifacts
+        run: |
+          cd src
+          cargo build --locked -p a3s-box-cli -p a3s-box-shim
+          cargo build --locked --release -p a3s-box-guest-init \
+            --target x86_64-unknown-linux-musl
+      - name: Install certified crun and host identity ranges
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/containers/crun/releases/download/1.28/crun-1.28-linux-amd64 \
+            --output /tmp/crun-1.28-linux-amd64
+          echo '2aa6b7024a9c9f153895c0d11ae233d3758f54844011c3a039e3e89048d01d42  /tmp/crun-1.28-linux-amd64' \
+            | sha256sum --check
+          sudo install -d -m 755 "$A3S_HOME/bin"
+          sudo install -m 755 /tmp/crun-1.28-linux-amd64 "$A3S_BOX_CRUN_PATH"
+          grep -q '^root:' /etc/subuid ||
+            echo 'root:100000:65536' | sudo tee -a /etc/subuid
+          grep -q '^root:' /etc/subgid ||
+            echo 'root:100000:65536' | sudo tee -a /etc/subgid
+      - name: Test Rust, Python, and TypeScript SDKs without credentials
+        run: |
+          sudo env \
+              PATH="$PATH" \
+              HOME="$HOME" \
+              RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+              CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+              A3S_DEPS_STUB=1 \
+              A3S_HOME="$A3S_HOME" \
+              A3S_BOX_CRUN_PATH="$A3S_BOX_CRUN_PATH" \
+              A3S_BOX_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box" \
+              A3S_BOX_SHIM_BINARY="$GITHUB_WORKSPACE/src/target/debug/a3s-box-shim" \
+              A3S_BOX_GUEST_INIT_BINARY="$GITHUB_WORKSPACE/src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init" \
+              RUST_MIN_STACK=16777216 \
+              PYTHON=python3 \
+              scripts/local-sdk-smoke.sh sandbox
+      - name: Verify cleanup
+        if: always()
+        run: |
+          if pgrep -f 'a3s-box-shim|crun.*a3s-local-sdk' >/dev/null; then
+            ps aux | grep -E 'a3s-box-shim|crun.*a3s-local-sdk' | grep -v grep
+            exit 1
+          fi
+          sudo rm -rf "$A3S_HOME"
+
   # ── Build check (compile only, no artifacts) ────────────────────
   build-check:
     name: Build Check (${{ matrix.target }})
-    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages]
+    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages, sdk-local-sandbox]
     strategy:
       matrix:
         include:
@@ -302,7 +374,7 @@ jobs:
   # Until both are done this job is SKIPPED (inert) and never blocks a PR.
   integration-kvm:
     name: Integration (real microVM, KVM)
-    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages]
+    needs: [fmt, clippy, test, e2b-contract, e2b-official-clients, sdk-packages, sdk-local-sandbox]
     # Never execute arbitrary pull-request code on a persistent self-hosted
     # runner. After review, maintainers can dispatch this workflow against the
     # PR branch explicitly.
@@ -353,6 +425,26 @@ jobs:
           unset A3S_DEPS_STUB
           cd src
           cargo test --locked --release -p a3s-box-cli --test core_smoke -- --ignored --nocapture --test-threads=1
+      - name: Rust local SDK — zero credentials + real MicroVM
+        run: |
+          unset A3S_DEPS_STUB
+          unset E2B_API_KEY E2B_API_URL E2B_DOMAIN
+          unset A3S_BOX_API_KEY A3S_BOX_ENDPOINT A3S_BOX_DOMAIN A3S_BOX_SANDBOX_URL
+          export A3S_HOME
+          A3S_HOME="$(mktemp -d /tmp/a3s-local-sdk-smoke.XXXXXX)"
+          trap 'rm -rf "$A3S_HOME"' EXIT
+          mkdir -p "$A3S_HOME/bin"
+          install -m 755 src/target/release/a3s-box-shim \
+            "$A3S_HOME/bin/a3s-box-shim"
+          install -m 755 \
+            src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init \
+            "$A3S_HOME/bin/a3s-box-guest-init"
+          cd src
+          A3S_BOX_SDK_LOCAL_SMOKE=1 \
+            A3S_BOX_SDK_SMOKE_ISOLATION=microvm \
+            cargo test --locked --release -p a3s-box-sdk --test local_sandbox \
+              e2b_style_local_sandbox_runs_without_remote_credentials \
+              -- --ignored --nocapture --test-threads=1
       # Keep the cached foreground no-op inside a bounded production envelope.
       # Docker is intentionally unavailable on this runner; the original
       # macOS/HVF Docker ratio remains a separate hardware-specific comparison.

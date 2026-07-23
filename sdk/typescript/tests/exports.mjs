@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 import SandboxDefault, {
+  A3SLocalRuntime,
   A3SRemoteConnection,
   DEFAULT_IMAGE,
   Sandbox,
@@ -106,6 +107,7 @@ assert.equal(create.image, 'python:3.12-alpine')
 assert.equal(create.timeout_seconds, 120)
 assert.deepEqual(create.env, { MODE: 'test' })
 assert.deepEqual(create.labels, { suite: 'sdk' })
+assert.equal(create.isolation, 'microvm')
 assert.deepEqual(command.argv, [
   '/bin/sh',
   '-lc',
@@ -116,6 +118,30 @@ assert.equal(writeRequest.data_base64, Buffer.from('hello').toString('base64'))
 assert.equal(read.path, '/workspace/notes.txt')
 assert.equal(stat.operation, 'filesystem_stat')
 assert.equal(kill.operation, 'sandbox_kill')
+
+const sandboxIsolationRuntime = new FakeRuntime()
+const sharedKernelSandbox = await Sandbox.create(undefined, {
+  isolation: 'sandbox',
+  runtime: sandboxIsolationRuntime,
+})
+await sharedKernelSandbox.kill()
+assert.equal(sandboxIsolationRuntime.requests[0].isolation, 'sandbox')
+
+const savedEnvironment = {
+  E2B_API_KEY: process.env.E2B_API_KEY,
+  A3S_BOX_API_KEY: process.env.A3S_BOX_API_KEY,
+  A3S_BOX_ENDPOINT: process.env.A3S_BOX_ENDPOINT,
+  A3S_BOX_BINARY: process.env.A3S_BOX_BINARY,
+}
+process.env.E2B_API_KEY = 'must-not-be-read'
+process.env.A3S_BOX_API_KEY = 'must-not-be-read'
+process.env.A3S_BOX_ENDPOINT = 'https://must-not-be-read.invalid'
+delete process.env.A3S_BOX_BINARY
+assert.equal(new A3SLocalRuntime().binaryPath, 'a3s-box')
+for (const [key, value] of Object.entries(savedEnvironment)) {
+  if (value === undefined) delete process.env[key]
+  else process.env[key] = value
+}
 
 const connected = await Sandbox.connect('existing-local', { runtime })
 assert.equal(connected.sandboxId, 'existing-local')

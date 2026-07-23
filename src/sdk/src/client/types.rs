@@ -12,6 +12,8 @@ pub enum ClientError {
     Execution(#[from] a3s_box_core::ExecutionManagerError),
     #[error("validation error: {0}")]
     Validation(String),
+    #[error("guest operation failed: {0}")]
+    Guest(String),
     #[error("box not found: {0}")]
     BoxNotFound(String),
     #[error("box query {query:?} matched multiple boxes: {matches:?}")]

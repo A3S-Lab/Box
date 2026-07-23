@@ -55,14 +55,32 @@ a3s-box run --rm --isolation sandbox alpine:latest -- id
 
 ### Local SDKs with E2B-like APIs
 
-The A3S Python and TypeScript packages expose familiar `Sandbox`, `commands`,
-and `files` namespaces while executing through the A3S Box runtime installed
-on the same machine. They do not wrap, import, depend on, or contact the
-official E2B SDK.
+The A3S Rust, Python, and TypeScript packages expose familiar `Sandbox`,
+`commands`, and `files` namespaces while executing through the A3S Box runtime
+installed on the same machine. They do not wrap, import, depend on, or contact
+the official E2B SDK.
 
 Local SDK use is zero-configuration: do not set an endpoint, domain, or API
-key. The package finds `a3s-box` on `PATH` and talks to its versioned,
-machine-only bridge instead of parsing human CLI output.
+key. The Rust SDK calls the runtime directly. Python and TypeScript find
+`a3s-box` on `PATH` and talk to its versioned, machine-only bridge instead of
+parsing human CLI output.
+
+Rust:
+
+```rust
+use a3s_box_sdk::Sandbox;
+
+# async fn example() -> Result<(), a3s_box_sdk::ClientError> {
+let sandbox = Sandbox::create("python:3.12-alpine").await?;
+let result = sandbox
+    .commands
+    .run("python -c 'print(6 * 7)'")
+    .await?;
+println!("{}", result.stdout);
+sandbox.files.write("/workspace/note.txt", "hello").await?;
+sandbox.kill().await?;
+# Ok(()) }
+```
 
 Python:
 
@@ -92,9 +110,12 @@ try {
 }
 ```
 
-`Sandbox.create()` defaults to `alpine:3.20` and MicroVM isolation. Its first
-argument is a local OCI image reference. Set `A3S_BOX_BINARY` only when the
-installed executable is not on `PATH`.
+All three constructors default to `alpine:3.20` and MicroVM isolation. Their
+image argument is a local OCI image reference. Set `A3S_BOX_BINARY` only for
+Python or TypeScript when the installed executable is not on `PATH`. Select
+`ExecutionIsolation::Sandbox`, `isolation="sandbox"`, or
+`isolation: 'sandbox'` respectively to opt into the shared-kernel backend on a
+certified Linux host.
 
 `A3S_BOX_ENDPOINT`, `A3S_BOX_API_KEY`, `A3S_BOX_DOMAIN`, and
 `A3S_BOX_SANDBOX_URL` are exclusively for an explicitly remote, self-hosted
@@ -144,8 +165,8 @@ E2B client used to validate it.
 | Storage | Bind mounts, named volumes, tmpfs, `cp`, `diff`, `export`, `commit`, filesystem snapshots, and CoW restore | Implemented. Filesystem snapshots do not contain live VM RAM or device state. |
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
-| Rust SDK | Typed, direct runtime-backed management and guest-control APIs | Implemented in `a3s-box-sdk`. The optional `pipeline-cli` feature retains the CLI-driven programmable pipeline. |
-| Local Python and TypeScript SDKs | E2B-like `Sandbox`, commands, files, lifecycle, and a small Python Code Interpreter facade over the installed local runtime | The packages have no official E2B runtime dependency and require no endpoint or API key. Their versioned bridge, request mapping, package builds, language-level API tests, and real macOS MicroVM create/command/file/cleanup smokes pass; a broader release-host MicroVM/Sandbox matrix remains a publication gate. |
+| Rust SDK | Typed, direct runtime-backed management and guest-control APIs plus an E2B-like local `Sandbox`, commands, files, and lifecycle facade | Implemented in `a3s-box-sdk`. Local use requires no endpoint or API key, defaults to MicroVM, and explicitly accepts the shared-kernel Sandbox isolation level. The optional `pipeline-cli` feature retains the CLI-driven programmable pipeline. |
+| Local Python and TypeScript SDKs | E2B-like `Sandbox`, commands, files, lifecycle, and a small Python Code Interpreter facade over the installed local runtime | The packages share the Rust Sandbox implementation through the versioned bridge, have no official E2B runtime dependency, and require no endpoint or API key. Package builds, language-level API tests for both isolation selectors, and real macOS MicroVM create/command/file/cleanup smokes pass; a broader release-host MicroVM/Sandbox matrix remains a publication gate. |
 | Remote E2B protocol service | Pinned contracts, durable lifecycle, memory-preserving and filesystem-only pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | The certified A3S OS evidence uses unchanged official Python sync/async and TypeScript clients. Templates/builds, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
@@ -1051,7 +1072,7 @@ Main components:
 | `src/netproxy` | macOS user-space bridge, DNS, inbound TCP, and outbound TCP |
 | `src/cri` | Kubernetes CRI server |
 | `containerd-shim` | containerd runtime-v2 adapter for RuntimeClass |
-| `src/sdk` | Direct runtime-backed Rust SDK and optional pipeline runner |
+| `src/sdk` | Direct runtime-backed Rust SDK, E2B-style local Sandbox facade, and optional pipeline runner |
 | `src/lambda` | Workload-execution integration retained for higher-level runtimes |
 | `sdk/python`, `sdk/typescript` | Production-tested A3S language SDK packages; public registry publication pending |
 
@@ -1093,6 +1114,8 @@ entry points are:
 
 - [`scripts/host-integration-smoke.sh`](scripts/host-integration-smoke.sh) for
   macOS/HVF and Linux/KVM;
+- [`scripts/local-sdk-smoke.sh`](scripts/local-sdk-smoke.sh) for the
+  zero-credential Rust/Python/TypeScript MicroVM and Sandbox API matrix;
 - [`scripts/e2b-production-smoke.sh`](scripts/e2b-production-smoke.sh) for the
   destructive A3S OS Sandbox compatibility gate;
 - [Production Cluster Tests](docs/production-cluster-tests.md) for enrolled

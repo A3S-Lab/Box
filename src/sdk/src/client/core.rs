@@ -64,6 +64,24 @@ impl A3sBoxClient {
         }
     }
 
+    /// Create a client with explicit typed lifecycle and session managers.
+    ///
+    /// This is useful for embedding the E2B-style [`crate::Sandbox`] facade in
+    /// another local process without selecting backends by string.
+    pub fn with_execution_services(
+        paths: A3sBoxPaths,
+        execution_manager: Arc<dyn ExecutionManager>,
+        execution_session_manager: Arc<dyn ExecutionSessionManager>,
+    ) -> Self {
+        Self {
+            paths,
+            image_cache_size: a3s_box_runtime::DEFAULT_IMAGE_CACHE_SIZE,
+            execution_manager,
+            execution_session_manager: Some(execution_session_manager),
+            local_execution_manager: None,
+        }
+    }
+
     /// Override the image cache size used when opening the runtime image store.
     pub fn with_image_cache_size(mut self, image_cache_size: u64) -> Self {
         self.image_cache_size = image_cache_size;
