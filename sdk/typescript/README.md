@@ -46,6 +46,64 @@ const sandbox = await Sandbox.create('python:3.12-alpine', {
 })
 ```
 
+## Builder-style programmable CI/CD
+
+The E2B-style API remains available for direct execution. For build and CI
+tooling, `A3SBoxClient` adds fluent builders over the same local runtime and
+bridge:
+
+```typescript
+import { A3SBoxClient } from '@a3s-lab/box'
+
+const client = new A3SBoxClient()
+
+const image = await client
+  .image('./ci')
+  .dockerfile('Dockerfile')
+  .tag('local/ci-base:latest')
+  .buildArg('NODE_VERSION', '24')
+  .build()
+const cache = await client
+  .volume('npm-cache')
+  .label('purpose', 'ci-cache')
+  .sizeLimit(10 * 1024 * 1024 * 1024)
+  .create()
+const network = await client
+  .network('ci-net')
+  .subnet('10.89.40.0/24')
+  .create()
+
+const box = await client
+  .sandbox(image.reference)
+  .cpus(4)
+  .memoryMb(4096)
+  .mountNamed(cache.name, '/root/.npm')
+  .network(network.name)
+  .publishTcp(8080, 8080)
+  .workdir('/workspace')
+  .start()
+
+try {
+  const result = await box
+    .script('npm ci\nnpm test\n')
+    .interpreter('/bin/sh', '-se')
+    .env('CI', 'true')
+    .run()
+  if (result.exitCode !== 0) throw new Error(result.stderr)
+} finally {
+  await box.kill()
+}
+```
+
+Named volumes and networks must be created explicitly before they are mounted
+or selected. Builder scripts are sent through standard input to the selected
+interpreter, so their contents are not interpolated into a host shell command.
+
+Named bridge networks and published ports are currently MicroVM-only. A
+shared-kernel Sandbox request that selects either fails before runtime
+mutation; use `.disableNetwork()` or the default TSI-compatible configuration
+for supported Sandbox workloads.
+
 The package invokes the versioned machine bridge built into the installed
 `a3s-box` executable. It does not parse human CLI output. Set `A3S_BOX_BINARY`
 only when the executable is not on `PATH`, or inject a typed

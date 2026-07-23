@@ -128,6 +128,48 @@ try {
 }
 ```
 
+The same packages also expose builder-style programmable CI/CD without
+introducing a separate workflow engine. Builders manage host-level images,
+named volumes, and bridge networks, then create the same E2B-style `Sandbox`
+handle:
+
+```typescript
+import { A3SBoxClient } from '@a3s-lab/box'
+
+const client = new A3SBoxClient()
+const image = await client
+  .image('./ci')
+  .dockerfile('Dockerfile')
+  .tag('local/ci-base:latest')
+  .build()
+const cache = await client.volume('build-cache').create()
+const network = await client.network('ci-net').subnet('10.89.40.0/24').create()
+const sandbox = await client
+  .sandbox(image.reference)
+  .mountNamed(cache.name, '/cache')
+  .network(network.name)
+  .publishTcp(8080, 8080)
+  .start()
+
+try {
+  const result = await sandbox
+    .script('npm ci\nnpm test\n')
+    .interpreter('/bin/sh', '-se')
+    .run()
+  if (result.exitCode !== 0) throw new Error(result.stderr)
+} finally {
+  await sandbox.kill()
+}
+```
+
+Rust, synchronous/asynchronous Python, and TypeScript expose the same builder
+concepts. Script source travels over stdin to an explicit interpreter. Mounts,
+network selection, ports, tmpfs, workdir, persistence, cleanup, and snapshot
+restore remain typed values and are validated before runtime mutation. Named
+bridge networking and port publication are MicroVM-only in the current
+runtime; the Sandbox backend rejects them rather than silently weakening the
+request.
+
 These native local APIs are currently an unreleased `main` feature; the
 distribution table above identifies which published artifacts predate them.
 
@@ -188,8 +230,8 @@ E2B client used to validate it.
 | Storage | Bind mounts, named volumes, tmpfs, `cp`, `diff`, `export`, `commit`, filesystem snapshots, and CoW restore | Implemented. Filesystem snapshots do not contain live VM RAM or device state. |
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
-| Rust SDK | Typed, direct runtime-backed management and guest-control APIs plus an E2B-like local `Sandbox`, commands, files, and lifecycle facade | The direct client is published as `a3s-box-sdk` `3.0.11`. The zero-credential local facade is implemented and tested on `main`, defaults to MicroVM, and explicitly accepts shared-kernel Sandbox isolation, but awaits the next crate release. The optional `pipeline-cli` feature retains the CLI-driven programmable pipeline. |
-| Local Python and TypeScript SDKs | E2B-like `Sandbox`, commands, files, lifecycle, and a small Python Code Interpreter facade over the installed local runtime | Implemented on `main`. The packages share the Rust Sandbox implementation through the versioned bridge, have no official E2B runtime dependency, and require no endpoint or API key. Package tests plus real macOS MicroVM and Ubuntu/crun 1.28 Sandbox three-language smokes pass. Linux/KVM MicroVM validation remains host-specific, and the native packages are not yet published to PyPI or npm. |
+| Rust SDK | Typed, direct runtime-backed management and guest-control APIs; E2B-like local `Sandbox`, commands, files, and lifecycle; fluent image, volume, network, Sandbox, and script builders | The direct client is published as `a3s-box-sdk` `3.0.11`. The zero-credential local facade and builder-style programmable CI/CD API are implemented and package-tested on `main`, default to MicroVM, and explicitly accept supported shared-kernel Sandbox configurations, but await the next crate release. The optional historical `pipeline-cli` feature remains separate. |
+| Local Python and TypeScript SDKs | E2B-like `Sandbox`, commands, files, lifecycle, plus fluent image-build, named-volume, bridge-network, typed Sandbox, and stdin-backed script builders over the installed local runtime | Implemented and package-tested on `main`. The packages share the Rust implementation through the versioned bridge, have no official E2B runtime dependency, and require no endpoint or API key. The real macOS/HVF MicroVM three-language builder-to-E2B smoke passes; the expanded Ubuntu/crun 1.28 Sandbox matrix is a blocking CI gate. Linux/KVM MicroVM validation remains host-specific, and the native packages are not yet published to PyPI or npm. |
 | Remote E2B protocol service | Pinned contracts, durable lifecycle, memory-preserving and filesystem-only pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | The certified A3S OS evidence uses unchanged official Python sync/async and TypeScript clients. Templates/builds, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |

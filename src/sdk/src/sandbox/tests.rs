@@ -6,16 +6,17 @@ use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecOutput, ExecRequest,
     ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionLease, ExecutionManager,
     ExecutionManagerError, ExecutionManagerResult, ExecutionProcess, ExecutionReservation,
-    ExecutionSessionManager, ExecutionState, ExecutionStatus, FileOp, FileRequest, FileResponse,
-    FilesystemEntry, FilesystemEntryKind, FilesystemOp, FilesystemRequest, FilesystemResponse,
-    KillOutcome, OperationId, ReconcileOutcome,
+    ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
+    ExecutionStatus, FileOp, FileRequest, FileResponse, FilesystemEntry, FilesystemEntryKind,
+    FilesystemOp, FilesystemRequest, FilesystemResponse, KillOutcome, OperationId,
+    ReconcileOutcome,
 };
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::Utc;
 
-use super::{CommandRunOptions, Sandbox, SandboxCreateOptions};
+use super::{CommandRunOptions, Sandbox, SandboxCreateOptions, SandboxNetwork};
 use crate::{A3sBoxClient, A3sBoxPaths};
 
 #[derive(Debug)]
@@ -26,6 +27,7 @@ struct RecordingRuntime {
     exec_requests: Mutex<Vec<ExecRequest>>,
     file_requests: Mutex<Vec<FileRequest>>,
     filesystem_requests: Mutex<Vec<FilesystemRequest>>,
+    snapshot_requests: Mutex<Vec<ExecutionSnapshotId>>,
 }
 
 impl RecordingRuntime {
@@ -37,6 +39,7 @@ impl RecordingRuntime {
             exec_requests: Mutex::new(Vec::new()),
             file_requests: Mutex::new(Vec::new()),
             filesystem_requests: Mutex::new(Vec::new()),
+            snapshot_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -97,6 +100,47 @@ impl ExecutionManager for RecordingRuntime {
             state: *self.state.lock().unwrap(),
             plan: lease.plan,
         })
+    }
+
+    async fn create_filesystem_snapshot(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<ExecutionSnapshot> {
+        self.snapshot_requests
+            .lock()
+            .unwrap()
+            .push(snapshot_id.clone());
+        Ok(ExecutionSnapshot {
+            snapshot_id: snapshot_id.clone(),
+            size_bytes: 5,
+            state: *self.state.lock().unwrap(),
+            lease: self.lease(),
+        })
+    }
+
+    async fn filesystem_snapshot_size(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<Option<u64>> {
+        Ok(self
+            .snapshot_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate == snapshot_id)
+            .then_some(5))
+    }
+
+    async fn delete_filesystem_snapshot(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> ExecutionManagerResult<bool> {
+        let mut snapshots = self.snapshot_requests.lock().unwrap();
+        let original_len = snapshots.len();
+        snapshots.retain(|candidate| candidate != snapshot_id);
+        Ok(snapshots.len() != original_len)
     }
 
     async fn pause(
@@ -309,6 +353,114 @@ async fn e2b_style_rust_surface_supports_both_local_isolation_levels() {
         let exec = runtime.exec_requests.lock().unwrap();
         assert_eq!(exec[0].cmd, ["/bin/sh", "-lc", "python -c 'print(6 * 7)'"]);
     }
+}
+
+#[tokio::test]
+async fn sandbox_snapshot_api_uses_typed_runtime_managed_snapshots() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let client = test_client(Arc::clone(&runtime), temp.path());
+    let source_snapshot = ExecutionSnapshotId::new("ci-base-source").unwrap();
+    let sandbox = Sandbox::create_with_client(
+        client.clone(),
+        SandboxCreateOptions::new("python:3.12-alpine")
+            .isolation(ExecutionIsolation::Sandbox)
+            .filesystem_snapshot(source_snapshot.clone()),
+    )
+    .await
+    .unwrap();
+
+    {
+        let requests = runtime.create_requests.lock().unwrap();
+        assert_eq!(
+            requests[0].rootfs_snapshot_id.as_ref(),
+            Some(&source_snapshot)
+        );
+    }
+
+    let captured_id = ExecutionSnapshotId::new("ci-captured").unwrap();
+    let captured = sandbox
+        .create_filesystem_snapshot(captured_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(captured.snapshot_id, captured_id);
+    assert_eq!(captured.size_bytes, 5);
+    assert_eq!(
+        client
+            .execution_snapshot_size(&captured.snapshot_id)
+            .await
+            .unwrap(),
+        Some(5)
+    );
+
+    sandbox.kill().await.unwrap();
+    assert!(client
+        .delete_execution_snapshot(&captured.snapshot_id)
+        .await
+        .unwrap());
+    assert_eq!(
+        client
+            .execution_snapshot_size(&captured.snapshot_id)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn fluent_builders_configure_resources_and_stream_script_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let client = test_client(Arc::clone(&runtime), temp.path());
+    client
+        .volume("build-cache")
+        .label("purpose", "ci")
+        .create()
+        .unwrap();
+    client
+        .network("ci-net")
+        .subnet("10.89.66.0/24")
+        .create()
+        .unwrap();
+
+    let sandbox = client
+        .sandbox("local/ci-base:latest")
+        .cpus(4)
+        .memory_mb(4096)
+        .mount_named("build-cache", "/cache")
+        .network(SandboxNetwork::bridge("ci-net"))
+        .publish_tcp(8080, 80)
+        .workdir("/workspace")
+        .auto_remove(false)
+        .start()
+        .await
+        .unwrap();
+
+    let result = sandbox
+        .script("print(6 * 7)\n")
+        .interpreter(["python", "-"])
+        .env("CI", "true")
+        .cwd("/workspace")
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(result.stdout, "42\n");
+
+    let creates = runtime.create_requests.lock().unwrap();
+    let request = &creates[0];
+    assert_eq!(request.config.resources.vcpus, 4);
+    assert_eq!(request.config.resources.memory_mb, 4096);
+    assert_eq!(request.config.network.to_string(), "bridge:ci-net");
+    assert_eq!(request.config.port_map, ["8080:80"]);
+    assert_eq!(request.policy.volume_names, ["build-cache"]);
+    assert!(!request.policy.auto_remove);
+    drop(creates);
+
+    let exec = runtime.exec_requests.lock().unwrap();
+    assert_eq!(exec[0].cmd, ["python", "-"]);
+    assert_eq!(exec[0].stdin.as_deref(), Some(b"print(6 * 7)\n".as_slice()));
+    assert_eq!(exec[0].env, ["CI=true"]);
+    assert_eq!(exec[0].working_dir.as_deref(), Some("/workspace"));
 }
 
 #[test]

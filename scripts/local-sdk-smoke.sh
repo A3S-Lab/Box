@@ -127,8 +127,10 @@ echo "==> Python SDK ($ISOLATION)"
     PYTHONPATH="$REPO_ROOT/sdk/python/src" \
     "$PYTHON" - <<'PY'
 import os
+import shutil
+from pathlib import Path
 
-from a3s_box import Sandbox
+from a3s_box import A3SBoxClient, Sandbox
 
 for name in (
     "E2B_API_KEY",
@@ -141,16 +143,79 @@ for name in (
 ):
     assert name not in os.environ
 
-with Sandbox.create(
-    "alpine:3.20",
-    isolation=os.environ["A3S_BOX_SDK_SMOKE_ISOLATION"],
-) as sandbox:
-    result = sandbox.commands.run("printf 'python-sdk-ok'")
-    assert result.exit_code == 0
-    assert result.stdout == "python-sdk-ok"
-    sandbox.files.write("/tmp/a3s-python-sdk-smoke.txt", "hello")
-    assert sandbox.files.read("/tmp/a3s-python-sdk-smoke.txt") == "hello"
-    sandbox.files.remove("/tmp/a3s-python-sdk-smoke.txt")
+client = A3SBoxClient()
+isolation = os.environ["A3S_BOX_SDK_SMOKE_ISOLATION"]
+context = Path(os.environ["A3S_HOME"]) / "python-sdk-build-context"
+context.mkdir(parents=True, exist_ok=True)
+(context / "Dockerfile").write_text(
+    "FROM alpine:3.20\nENV A3S_SDK_BASE=ready\nWORKDIR /workspace\n"
+)
+image = None
+volume = None
+network = None
+try:
+    image = (
+        client.image(str(context))
+        .tag("local/a3s-sdk-smoke-python:latest")
+        .build()
+    )
+    volume = client.volume("python-sdk-cache").label("purpose", "sdk-smoke").create()
+    builder = (
+        client.sandbox(image.reference)
+        .isolation(isolation)
+        .mount_named(volume.name, "/cache")
+        .workdir("/workspace")
+    )
+    if isolation == "microvm":
+        network = (
+            client.network("python-sdk-network")
+            .subnet("10.89.92.0/24")
+            .create()
+        )
+        builder = builder.network(network.name).publish_tcp(0, 8080)
+    else:
+        builder = builder.disable_network()
+
+    with builder.start() as sandbox:
+        result = sandbox.commands.run("printf 'python-sdk-ok'")
+        assert result.exit_code == 0
+        assert result.stdout == "python-sdk-ok"
+        script = sandbox.script("printf 'python-script-ok'\n").env("CI", "true").run()
+        assert script.exit_code == 0
+        assert script.stdout == "python-script-ok"
+        sandbox.files.write("/cache/marker.txt", "cache-ok")
+        assert sandbox.files.read("/cache/marker.txt") == "cache-ok"
+        sandbox.files.write("/tmp/a3s-python-sdk-smoke.txt", "hello")
+        assert sandbox.files.read("/tmp/a3s-python-sdk-smoke.txt") == "hello"
+        sandbox.files.remove("/tmp/a3s-python-sdk-smoke.txt")
+        if isolation == "sandbox":
+            marker = "/tmp/a3s-python-sdk-snapshot.txt"
+            snapshot_id = f"python_sdk_{sandbox.id.replace('-', '_')}"
+            sandbox.files.write(marker, "snapshot-ok")
+            snapshot = sandbox.create_filesystem_snapshot(snapshot_id)
+            assert Sandbox.filesystem_snapshot_size(snapshot.snapshot_id) == snapshot.size_bytes
+            with Sandbox.create(
+                image.reference,
+                isolation="sandbox",
+                filesystem_snapshot_id=snapshot.snapshot_id,
+            ) as restored:
+                assert restored.files.read(marker) == "snapshot-ok"
+                try:
+                    Sandbox.delete_filesystem_snapshot(snapshot.snapshot_id)
+                except Exception:
+                    pass
+                else:
+                    raise AssertionError("active restored Sandbox did not fence snapshot deletion")
+            assert Sandbox.delete_filesystem_snapshot(snapshot.snapshot_id)
+            assert Sandbox.filesystem_snapshot_size(snapshot.snapshot_id) is None
+finally:
+    if network is not None:
+        client.remove_network(network.name)
+    if volume is not None:
+        client.remove_volume(volume.name)
+    if image is not None:
+        client.remove_image(image.reference)
+    shutil.rmtree(context, ignore_errors=True)
 PY
 
 echo "==> TypeScript SDK ($ISOLATION)"
@@ -159,8 +224,11 @@ npm --prefix "$REPO_ROOT/sdk/typescript" run build
 "${clean_env[@]}" \
     A3S_BOX_BINARY="$A3S_BOX_BINARY" \
     A3S_BOX_SDK_SMOKE_ISOLATION="$ISOLATION" \
-    node --input-type=module <<'JS'
-import { Sandbox } from './sdk/typescript/dist/index.js'
+node --input-type=module <<'JS'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+import { A3SBoxClient, Sandbox } from './sdk/typescript/dist/index.js'
 
 for (const name of [
   'E2B_API_KEY',
@@ -174,21 +242,103 @@ for (const name of [
   if (name in process.env) throw new Error(`${name} must be unset`)
 }
 
-const sandbox = await Sandbox.create('alpine:3.20', {
-  isolation: process.env.A3S_BOX_SDK_SMOKE_ISOLATION,
-})
+const client = new A3SBoxClient()
+const isolation = process.env.A3S_BOX_SDK_SMOKE_ISOLATION
+const context = join(process.env.A3S_HOME, 'typescript-sdk-build-context')
+await mkdir(context, { recursive: true })
+await writeFile(
+  join(context, 'Dockerfile'),
+  'FROM alpine:3.20\nENV A3S_SDK_BASE=ready\nWORKDIR /workspace\n'
+)
+let image
+let volume
+let network
 try {
-  const result = await sandbox.commands.run("printf 'typescript-sdk-ok'")
-  if (result.exitCode !== 0 || result.stdout !== 'typescript-sdk-ok') {
-    throw new Error('TypeScript SDK command returned an unexpected result')
+  image = await client
+    .image(context)
+    .tag('local/a3s-sdk-smoke-typescript:latest')
+    .build()
+  volume = await client
+    .volume('typescript-sdk-cache')
+    .label('purpose', 'sdk-smoke')
+    .create()
+  let builder = client
+    .sandbox(image.reference)
+    .isolation(isolation)
+    .mountNamed(volume.name, '/cache')
+    .workdir('/workspace')
+  if (isolation === 'microvm') {
+    network = await client
+      .network('typescript-sdk-network')
+      .subnet('10.89.93.0/24')
+      .create()
+    builder = builder.network(network.name).publishTcp(0, 8080)
+  } else {
+    builder = builder.disableNetwork()
   }
-  await sandbox.files.write('/tmp/a3s-typescript-sdk-smoke.txt', 'hello')
-  if (await sandbox.files.read('/tmp/a3s-typescript-sdk-smoke.txt') !== 'hello') {
-    throw new Error('TypeScript SDK file read returned unexpected data')
+  const sandbox = await builder.start()
+  try {
+    const result = await sandbox.commands.run("printf 'typescript-sdk-ok'")
+    if (result.exitCode !== 0 || result.stdout !== 'typescript-sdk-ok') {
+      throw new Error('TypeScript SDK command returned an unexpected result')
+    }
+    const script = await sandbox
+      .script("printf 'typescript-script-ok'\n")
+      .env('CI', 'true')
+      .run()
+    if (script.exitCode !== 0 || script.stdout !== 'typescript-script-ok') {
+      throw new Error('TypeScript SDK script returned an unexpected result')
+    }
+    await sandbox.files.write('/cache/marker.txt', 'cache-ok')
+    if (await sandbox.files.read('/cache/marker.txt') !== 'cache-ok') {
+      throw new Error('TypeScript SDK named volume returned unexpected data')
+    }
+    await sandbox.files.write('/tmp/a3s-typescript-sdk-smoke.txt', 'hello')
+    if (await sandbox.files.read('/tmp/a3s-typescript-sdk-smoke.txt') !== 'hello') {
+      throw new Error('TypeScript SDK file read returned unexpected data')
+    }
+    await sandbox.files.remove('/tmp/a3s-typescript-sdk-smoke.txt')
+    if (isolation === 'sandbox') {
+      const marker = '/tmp/a3s-typescript-sdk-snapshot.txt'
+      const snapshotId = `typescript_sdk_${sandbox.id.replaceAll('-', '_')}`
+      await sandbox.files.write(marker, 'snapshot-ok')
+      const snapshot = await sandbox.createFilesystemSnapshot(snapshotId)
+      if (await Sandbox.filesystemSnapshotSize(snapshot.snapshotId) !== snapshot.sizeBytes) {
+        throw new Error('snapshot size lookup returned an unexpected value')
+      }
+      const restored = await Sandbox.create(image.reference, {
+        isolation: 'sandbox',
+        filesystemSnapshotId: snapshot.snapshotId,
+      })
+      try {
+        if (await restored.files.read(marker) !== 'snapshot-ok') {
+          throw new Error('restored Sandbox did not contain the captured file')
+        }
+        let fenced = false
+        try {
+          await Sandbox.deleteFilesystemSnapshot(snapshot.snapshotId)
+        } catch {
+          fenced = true
+        }
+        if (!fenced) throw new Error('active restored Sandbox did not fence snapshot deletion')
+      } finally {
+        await restored.kill()
+      }
+      if (!(await Sandbox.deleteFilesystemSnapshot(snapshot.snapshotId))) {
+        throw new Error('snapshot was not deleted after restored Sandbox cleanup')
+      }
+      if (await Sandbox.filesystemSnapshotSize(snapshot.snapshotId) !== undefined) {
+        throw new Error('deleted snapshot still reported a size')
+      }
+    }
+  } finally {
+    await sandbox.kill()
   }
-  await sandbox.files.remove('/tmp/a3s-typescript-sdk-smoke.txt')
 } finally {
-  await sandbox.kill()
+  if (network !== undefined) await client.removeNetwork(network.name)
+  if (volume !== undefined) await client.removeVolume(volume.name)
+  if (image !== undefined) await client.removeImage(image.reference)
+  await rm(context, { recursive: true, force: true })
 }
 JS
 

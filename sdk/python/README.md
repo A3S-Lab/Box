@@ -57,6 +57,63 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Builder-style programmable CI/CD
+
+The E2B-style API remains available for direct execution. For build and CI
+tooling, `A3SBoxClient` adds fluent builders over the same local runtime and
+bridge:
+
+```python
+from a3s_box import A3SBoxClient
+
+client = A3SBoxClient()
+
+image = (
+    client.image("./ci")
+    .dockerfile("Dockerfile")
+    .tag("local/ci-base:latest")
+    .build_arg("NODE_VERSION", "24")
+    .build()
+)
+cache = (
+    client.volume("npm-cache")
+    .label("purpose", "ci-cache")
+    .size_limit(10 * 1024 * 1024 * 1024)
+    .create()
+)
+network = client.network("ci-net").subnet("10.89.40.0/24").create()
+
+with (
+    client.sandbox(image.reference)
+    .cpus(4)
+    .memory_mb(4096)
+    .mount_named(cache.name, "/root/.npm")
+    .network(network.name)
+    .publish_tcp(8080, 8080)
+    .workdir("/workspace")
+    .start()
+) as box:
+    result = (
+        box.script("npm ci\nnpm test\n")
+        .interpreter("/bin/sh", "-se")
+        .env("CI", "true")
+        .run()
+    )
+    if result.exit_code != 0:
+        raise RuntimeError(result.stderr)
+```
+
+`A3SAsyncBoxClient` provides the same builders with asynchronous terminal
+operations. Named volumes and networks must be created explicitly before they
+are mounted or selected. Builder scripts are sent through standard input to
+the selected interpreter, so their contents are not interpolated into a host
+shell command.
+
+Named bridge networks and published ports are currently MicroVM-only. A
+shared-kernel Sandbox request that selects either fails before runtime
+mutation; use `.disable_network()` or the default TSI-compatible configuration
+for supported Sandbox workloads.
+
 The package invokes the versioned machine bridge built into the installed
 `a3s-box` executable. It does not parse human CLI output. Set `A3S_BOX_BINARY`
 only when the executable is not on `PATH`.

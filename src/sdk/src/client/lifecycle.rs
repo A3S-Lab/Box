@@ -37,6 +37,48 @@ impl A3sBoxClient {
         Ok(self.execution_manager.inspect(execution_id).await?)
     }
 
+    /// Atomically capture one running or paused execution filesystem.
+    ///
+    /// The runtime temporarily quiesces a running execution, publishes the
+    /// snapshot under the validated identifier, and restores the prior stable
+    /// state before returning.
+    pub async fn create_execution_snapshot(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> Result<ExecutionSnapshot> {
+        Ok(self
+            .execution_manager
+            .create_filesystem_snapshot(execution_id, generation, snapshot_id)
+            .await?)
+    }
+
+    /// Return the published size of a runtime-managed filesystem snapshot.
+    pub async fn execution_snapshot_size(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> Result<Option<u64>> {
+        Ok(self
+            .execution_manager
+            .filesystem_snapshot_size(snapshot_id)
+            .await?)
+    }
+
+    /// Delete a runtime-managed filesystem snapshot.
+    ///
+    /// The runtime refuses deletion while a live execution still uses the
+    /// snapshot as its immutable copy-on-write lower.
+    pub async fn delete_execution_snapshot(
+        &self,
+        snapshot_id: &ExecutionSnapshotId,
+    ) -> Result<bool> {
+        Ok(self
+            .execution_manager
+            .delete_filesystem_snapshot(snapshot_id)
+            .await?)
+    }
+
     /// Pause a managed execution through its resolved backend.
     pub async fn pause_execution(
         &self,
