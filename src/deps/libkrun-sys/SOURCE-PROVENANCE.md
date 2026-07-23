@@ -7,23 +7,23 @@ are lowercase SHA-256 unless noted otherwise.
 ## Packaged Windows runtime
 
 The deterministic `vendor/krun-windows-x64.tar.xz` archive has SHA-256
-`f528d69284dc4b182851c2bc10ef060512306848f11a4e358a461556d81a7268`
+`c8d14bd0ceb86190effac9c9af12892f1dbb5b82f22123e8524dd375014d5493`
 and contains exactly:
 
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `krun.dll` | 7,428,608 | `3af54645aa675356d631839ec64b863b1ef45ff1d83fb7530ffd39a83b1ea17a` |
+| `krun.dll` | 7,428,608 | `e5debc685ae171e3f60a6e3b9c1c4e12a7c3eb943a68ceb1169e153f0cc6c255` |
 | `krun.lib` | 11,870 | `3ac760758158bd4d2d6570db58037d47cd370a8e6ea04ccf54a8b24fd1fdec3d` |
 | `libkrunfw.dll` | 21,473,280 | `44f25540f58155c01258fe123617636fdc6cff27873e38e71dbc75f139602077` |
 
 `krun.dll` and its import library correspond to A3S-Lab/libkrun commit
-`e50683984386611f9a06d7a66d87976d8aa4bbcb`. The packaged
+`513268f40c83979b45f39410c3fe96888ddd60ea`. The packaged
 `libkrunfw.dll` wrapper remains from commit
 `2692169b7567363244fdd21cb83de3220ebf3021`. The required source is included
 in `vendor/libkrun-source.tar` (SHA-256
-`05f6d3137d424e131aafc9cd0fdef6cde019b4ede15b19cacf6435280748588e`).
+`8bb6ef324936c12bdb567b86072024f68dcd137d731bf2f6ef23ec90d9d90a1b`).
 The deterministic archive was generated from local tooling commit
-`e50683984386611f9a06d7a66d87976d8aa4bbcb`; its
+`513268f40c83979b45f39410c3fe96888ddd60ea`; its
 `corresponding-source/2692169` directory preserves the exact wrapper source
 for the packaged firmware DLL. The archive also contains the Apache-2.0
 license and the EDK2 source notices.

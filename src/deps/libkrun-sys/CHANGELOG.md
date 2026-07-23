@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Enable the boot-safe Hyper-V enlightenment surface by default on WHPX so
+  current libkrunfw kernels reach Linux userspace.
+- Return fatal WHPX vCPU exits as failures instead of successful guest
+  shutdowns.
+- Restore Linux `/` separators in Windows virtiofs `READLINK` replies so OCI
+  rootfs links such as `/bin/sh -> /bin/busybox` remain executable.
 - Preserve guest-visible POSIX mode, UID, and GID values in the Windows
   virtiofs inode table so callers can capture and replay them across VM
   generations.
