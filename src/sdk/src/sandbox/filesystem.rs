@@ -238,42 +238,18 @@ impl Filesystem {
 
     async fn transfer(&self, request: FileRequest) -> Result<FileResponse> {
         let (_, generation) = self.inner.active_execution()?;
-        #[cfg(unix)]
-        {
-            self.inner
-                .client
-                .transfer_execution_file(&self.inner.execution_id, generation, request)
-                .await
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (generation, request);
-            Err(ClientError::Execution(
-                a3s_box_core::ExecutionManagerError::Unavailable(
-                    "local file sessions are not available on this host".to_string(),
-                ),
-            ))
-        }
+        self.inner
+            .client
+            .transfer_execution_file(&self.inner.execution_id, generation, request)
+            .await
     }
 
     async fn filesystem(&self, request: FilesystemRequest) -> Result<FilesystemResponse> {
         let (_, generation) = self.inner.active_execution()?;
-        #[cfg(unix)]
-        {
-            self.inner
-                .client
-                .filesystem_execution(&self.inner.execution_id, generation, request)
-                .await
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (generation, request);
-            Err(ClientError::Execution(
-                a3s_box_core::ExecutionManagerError::Unavailable(
-                    "local filesystem sessions are not available on this host".to_string(),
-                ),
-            ))
-        }
+        self.inner
+            .client
+            .filesystem_execution(&self.inner.execution_id, generation, request)
+            .await
     }
 }
 

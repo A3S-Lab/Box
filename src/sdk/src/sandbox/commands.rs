@@ -163,32 +163,19 @@ impl Commands {
             streaming: false,
         };
 
-        #[cfg(not(unix))]
-        {
-            let _ = (generation, request);
-            return Err(ClientError::Execution(
-                a3s_box_core::ExecutionManagerError::Unavailable(
-                    "local command sessions are not available on this host".to_string(),
-                ),
-            ));
-        }
+        let output = self
+            .inner
+            .client
+            .execute_execution(&self.inner.execution_id, generation, request)
+            .await?;
 
-        #[cfg(unix)]
-        {
-            let output = self
-                .inner
-                .client
-                .execute_execution(&self.inner.execution_id, generation, request)
-                .await?;
-
-            Ok(CommandResult {
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-                exit_code: output.exit_code,
-                truncated: output.truncated,
-                stdout_bytes: output.stdout,
-                stderr_bytes: output.stderr,
-            })
-        }
+        Ok(CommandResult {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: output.exit_code,
+            truncated: output.truncated,
+            stdout_bytes: output.stdout,
+            stderr_bytes: output.stderr,
+        })
     }
 }

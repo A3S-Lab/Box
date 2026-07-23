@@ -781,7 +781,6 @@ impl A3sBoxClient {
     }
 
     /// Execute a command through the generation-fenced managed session facade.
-    #[cfg(unix)]
     pub async fn execute_execution(
         &self,
         execution_id: &ExecutionId,
@@ -811,7 +810,6 @@ impl A3sBoxClient {
     }
 
     /// Transfer a file through the generation-fenced managed session facade.
-    #[cfg(unix)]
     pub async fn transfer_execution_file(
         &self,
         execution_id: &ExecutionId,
@@ -829,7 +827,6 @@ impl A3sBoxClient {
     }
 
     /// Access filesystem metadata through the generation-fenced session facade.
-    #[cfg(unix)]
     pub async fn filesystem_execution(
         &self,
         execution_id: &ExecutionId,
