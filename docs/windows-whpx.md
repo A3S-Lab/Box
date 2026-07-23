@@ -143,6 +143,11 @@ then repeatedly exercises the supported lifecycle, logs, exit-code, long-argv,
 stats, published-port, bind-mount, named-volume, commit, snapshot, and virtio-fs
 paths.
 
+This runner supplies the `WIN-01` lane in the
+[Cross-Capability Soak Test Plan](soak-test-plan.md). Its evidence proves only
+the documented Windows subset; unsupported Windows features require fail-closed
+functional tests rather than being inferred from another host.
+
 ```powershell
 .\scripts\windows-whpx-soak.ps1 `
   -ImageTar C:\images\alpine-3.20.tar `

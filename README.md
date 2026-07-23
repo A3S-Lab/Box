@@ -224,7 +224,10 @@ An implemented API is not automatically a production guarantee for every host
 or threat model. Real-runtime validation evidence and remaining platform gaps
 are maintained in [Host Integration](docs/host-integration.md),
 [Production Cluster Tests](docs/production-cluster-tests.md), and
-[CRI Conformance](docs/cri-conformance.md).
+[CRI Conformance](docs/cri-conformance.md). The
+[Cross-Capability Soak Test Plan](docs/soak-test-plan.md) maps every capability
+above to its long-running workload, host matrix, evidence contract, and release
+gate.
 
 ## Quick Start
 
@@ -962,6 +965,8 @@ entry points are:
   macOS/HVF and Linux/KVM;
 - [`scripts/local-sdk-smoke.sh`](scripts/local-sdk-smoke.sh) for the
   zero-credential Rust/Python/TypeScript MicroVM and Sandbox API matrix;
+- [Cross-Capability Soak Test Plan](docs/soak-test-plan.md) for the capability,
+  platform, duration, fault, evidence, and promotion matrix;
 - [Production Cluster Tests](docs/production-cluster-tests.md) for enrolled
   RuntimeClass nodes and soak evidence.
 

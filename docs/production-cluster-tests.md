@@ -9,6 +9,11 @@ The goal is not to prove every CRI edge case. The goal is to answer the
 production question: can a3s-box boot, run, observe, restart, and clean up real
 MicroVM workloads repeatedly on the host class that will run them?
 
+This is the Kubernetes/RuntimeClass lane of the
+[Cross-Capability Soak Test Plan](soak-test-plan.md). Image, build, storage,
+network, warm-pool, native SDK, Sandbox, provider, TEE, desktop-platform, and
+upgrade lanes retain separate host requirements and evidence.
+
 ## Scope
 
 In scope:
