@@ -558,8 +558,12 @@ jobs:
           cp src/target/x86_64-pc-windows-msvc/release/a3s-box.exe "$DIR/"
           cp src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe "$DIR/"
 
-          tar -xzf "linux-x86_64/a3s-box-${TAG}-linux-x86_64.tar.gz" -C linux-x86_64
-          cp "linux-x86_64/a3s-box-${TAG}-linux-x86_64/a3s-box-guest-init" "$DIR/"
+          LINUX_ARCHIVE="linux-x86_64/a3s-box-${TAG}-linux-x86_64.tar.gz"
+          GUEST_MEMBER="a3s-box-${TAG}-linux-x86_64/a3s-box-guest-init"
+          # Windows only needs the guest executable. Extracting the complete
+          # Linux archive would also ask Windows tar to create Unix symlinks.
+          tar -xzf "$LINUX_ARCHIVE" -C linux-x86_64 "$GUEST_MEMBER"
+          cp "linux-x86_64/$GUEST_MEMBER" "$DIR/"
 
           if [ -f "src/target/x86_64-pc-windows-msvc/release/krun.dll" ]; then
             cp src/target/x86_64-pc-windows-msvc/release/krun.dll "$DIR/"
