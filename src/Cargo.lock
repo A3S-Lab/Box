@@ -303,6 +303,7 @@ dependencies = [
  "libc",
  "num_cpus",
  "pkg-config",
+ "sha2",
  "tempfile",
  "windows-sys 0.59.0",
 ]
