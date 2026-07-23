@@ -314,7 +314,7 @@ jobs:
         run: git -c http.extraheader= submodule update --init --recursive
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc,x86_64-unknown-linux-musl
       - name: Verify bundled libkrun source archive
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/package-libkrun-source.ps1 -Check
