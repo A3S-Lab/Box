@@ -165,12 +165,12 @@ jobs:
           workspaces: src
           key: libkrun-windows
 
-      - name: Build reproducible krun.dll
+      - name: Rebuild krun.dll from the bundled source
         working-directory: src/deps/libkrun-sys/vendor/libkrun
         shell: pwsh
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Packages libkrun
 
-      - name: Stage and test the Windows runtime bundle
+      - name: Test the rebuilt and packaged Windows runtimes
         working-directory: src/deps/libkrun-sys
         shell: pwsh
         run: |
@@ -179,9 +179,12 @@ jobs:
 
           $built = Join-Path $PWD 'vendor/libkrun/target/x86_64-pc-windows-msvc/release'
           $prebuilt = Join-Path $PWD 'prebuilt/x86_64-pc-windows-msvc'
+          $rebuilt = Join-Path $env:RUNNER_TEMP 'a3s-libkrun-rebuilt'
           $required = @(
               (Join-Path $built 'krun.dll'),
               (Join-Path $built 'krun.dll.lib'),
+              (Join-Path $prebuilt 'krun.dll'),
+              (Join-Path $prebuilt 'krun.lib'),
               (Join-Path $prebuilt 'libkrunfw.dll')
           )
           foreach ($path in $required) {
@@ -190,14 +193,44 @@ jobs:
               }
           }
 
-          Copy-Item -LiteralPath (Join-Path $built 'krun.dll') -Destination (Join-Path $prebuilt 'krun.dll') -Force
-          Copy-Item -LiteralPath (Join-Path $built 'krun.dll.lib') -Destination (Join-Path $prebuilt 'krun.lib') -Force
+          if (Test-Path -LiteralPath $rebuilt) {
+              Remove-Item -LiteralPath $rebuilt -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $rebuilt | Out-Null
+          Copy-Item -LiteralPath (Join-Path $built 'krun.dll') -Destination $rebuilt
+          Copy-Item -LiteralPath (Join-Path $built 'krun.dll.lib') -Destination (Join-Path $rebuilt 'krun.lib')
+          Copy-Item -LiteralPath (Join-Path $prebuilt 'libkrunfw.dll') -Destination $rebuilt
 
-          cargo test --locked --target x86_64-pc-windows-msvc --lib -- --test-threads=1
-          if ($LASTEXITCODE -ne 0) {
-              throw "Windows API tests failed with exit code $LASTEXITCODE."
+          function Test-Runtime {
+              param(
+                  [Parameter(Mandatory)]
+                  [string]$Label,
+                  [Parameter(Mandatory)]
+                  [string]$RuntimeDirectory
+              )
+
+              Write-Output "Testing $Label runtime from $RuntimeDirectory"
+              $env:LIBKRUN_DIR = $RuntimeDirectory
+              $env:PATH = "$RuntimeDirectory;$script:OriginalPath"
+              $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "a3s-libkrun-test-$Label"
+
+              cargo test --locked --target x86_64-pc-windows-msvc --lib -- --test-threads=1
+              if ($LASTEXITCODE -ne 0) {
+                  throw "$Label Windows unit tests failed with exit code $LASTEXITCODE."
+              }
+              cargo run --locked --target x86_64-pc-windows-msvc --example windows_api_test
+              if ($LASTEXITCODE -ne 0) {
+                  throw "$Label Windows API smoke test failed with exit code $LASTEXITCODE."
+              }
           }
 
+          $script:OriginalPath = $env:PATH
+          Test-Runtime -Label 'rebuilt' -RuntimeDirectory $rebuilt
+          Test-Runtime -Label 'packaged' -RuntimeDirectory $prebuilt
+
+          # The release and crate must contain the checksum-pinned, documented
+          # bundle. Rebuilding from source is an independent validation and
+          # must not mutate these packaged inputs.
           & (Join-Path $PWD '../../../scripts/package-libkrun-windows.ps1') -Check
 
       - name: Package Windows runtime bundle
@@ -457,8 +490,9 @@ jobs:
           body: |
             Windows x86_64 WHPX runtime bundle for a3s-libkrun-sys.
 
-            The archive contains the reproducibly built `krun.dll`, its
-            `krun.lib` import library, `libkrunfw.dll`, and SHA256 checksums.
+            The archive contains the checksum-pinned and tested `krun.dll`,
+            its `krun.lib` import library, `libkrunfw.dll`, and SHA256
+            checksums.
 
             The matching libkrun/libkrunfw and Linux kernel corresponding
             source, licenses, provenance, and checksums are attached to this
