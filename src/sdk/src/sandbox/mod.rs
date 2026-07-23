@@ -6,6 +6,7 @@
 mod builder;
 mod commands;
 mod filesystem;
+mod lifecycle;
 mod options;
 mod script;
 
@@ -19,6 +20,7 @@ use a3s_box_core::{
 pub use builder::SandboxBuilder;
 pub use commands::{CommandResult, CommandRunOptions, Commands, SandboxCommand};
 pub use filesystem::{Filesystem, FilesystemOptions, WriteInfo};
+pub use lifecycle::{SandboxLogOptions, SandboxRestartOptions};
 pub use options::{
     SandboxCreateOptions, SandboxNetwork, TmpfsMount, VolumeMount, VolumeSource,
     DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
@@ -293,20 +295,8 @@ impl Sandbox {
 
     /// Kill the local execution and remove its runtime-owned record/resources.
     pub async fn kill(&self) -> Result<()> {
-        let state = self.inner.state();
-        if state.closed {
-            return Ok(());
-        }
-        self.inner
-            .client
-            .kill_execution(&self.inner.execution_id, state.generation)
-            .await?;
-        self.inner
-            .client
-            .remove_local_execution_if_present(&self.inner.execution_id, state.generation)
-            .await?;
-        self.inner.close(state.generation);
-        Ok(())
+        self.stop().await?;
+        self.remove().await
     }
 }
 

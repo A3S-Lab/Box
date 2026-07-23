@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use a3s_box_core::log::LogEntry;
 use a3s_box_core::pty::PtyRequest;
 use a3s_box_core::{
     resolve_execution, BoxConfig, CreateExecutionRequest, ExecOutput, ExecRequest,
@@ -9,37 +10,65 @@ use a3s_box_core::{
     ExecutionSessionManager, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
     ExecutionStatus, FileOp, FileRequest, FileResponse, FilesystemEntry, FilesystemEntryKind,
     FilesystemOp, FilesystemRequest, FilesystemResponse, KillOutcome, OperationId,
-    ReconcileOutcome,
+    ReconcileOutcome, RestartExecutionOptions,
 };
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use chrono::Utc;
 
-use super::{CommandRunOptions, Sandbox, SandboxCreateOptions, SandboxNetwork};
-use crate::{A3sBoxClient, A3sBoxPaths};
+use super::{
+    CommandRunOptions, Sandbox, SandboxCreateOptions, SandboxLogOptions, SandboxNetwork,
+    SandboxRestartOptions,
+};
+use crate::{A3sBoxClient, A3sBoxPaths, ClientError};
 
 #[derive(Debug)]
 struct RecordingRuntime {
     config: Mutex<Option<BoxConfig>>,
+    generation: Mutex<ExecutionGeneration>,
     state: Mutex<ExecutionState>,
+    removed: Mutex<bool>,
     create_requests: Mutex<Vec<CreateExecutionRequest>>,
     exec_requests: Mutex<Vec<ExecRequest>>,
     file_requests: Mutex<Vec<FileRequest>>,
     filesystem_requests: Mutex<Vec<FilesystemRequest>>,
     snapshot_requests: Mutex<Vec<ExecutionSnapshotId>>,
+    log_requests: Mutex<Vec<ExecutionGeneration>>,
+    restart_requests: Mutex<Vec<(ExecutionGeneration, OperationId, RestartExecutionOptions)>>,
+    kill_requests: Mutex<Vec<ExecutionGeneration>>,
+    remove_requests: Mutex<Vec<ExecutionGeneration>>,
+    logs: Mutex<Vec<LogEntry>>,
 }
 
 impl RecordingRuntime {
     fn new() -> Self {
         Self {
             config: Mutex::new(None),
+            generation: Mutex::new(ExecutionGeneration::INITIAL),
             state: Mutex::new(ExecutionState::Created),
+            removed: Mutex::new(false),
             create_requests: Mutex::new(Vec::new()),
             exec_requests: Mutex::new(Vec::new()),
             file_requests: Mutex::new(Vec::new()),
             filesystem_requests: Mutex::new(Vec::new()),
             snapshot_requests: Mutex::new(Vec::new()),
+            log_requests: Mutex::new(Vec::new()),
+            restart_requests: Mutex::new(Vec::new()),
+            kill_requests: Mutex::new(Vec::new()),
+            remove_requests: Mutex::new(Vec::new()),
+            logs: Mutex::new(vec![
+                LogEntry {
+                    log: "first\n".to_string(),
+                    stream: "stdout".to_string(),
+                    time: "2026-07-23T00:00:00Z".to_string(),
+                },
+                LogEntry {
+                    log: "second\n".to_string(),
+                    stream: "stderr".to_string(),
+                    time: "2026-07-23T00:00:01Z".to_string(),
+                },
+            ]),
         }
     }
 
@@ -51,11 +80,33 @@ impl RecordingRuntime {
         let config = self.config.lock().unwrap().clone().unwrap();
         ExecutionLease {
             execution_id: Self::execution_id(),
-            generation: ExecutionGeneration::INITIAL,
+            generation: *self.generation.lock().unwrap(),
             plan: resolve_execution(&config).unwrap(),
             resources: config.resources,
             started_at: Utc::now(),
         }
+    }
+
+    fn require_current_generation(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<()> {
+        if execution_id != &Self::execution_id() || *self.removed.lock().unwrap() {
+            return Err(ExecutionManagerError::NotFound(execution_id.clone()));
+        }
+        let current = *self.generation.lock().unwrap();
+        if current != generation {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: format!(
+                    "expected generation {}, received {}",
+                    current.get(),
+                    generation.get()
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -68,6 +119,8 @@ impl ExecutionManager for RecordingRuntime {
     ) -> ExecutionManagerResult<ExecutionReservation> {
         let config = request.config.clone();
         *self.config.lock().unwrap() = Some(config.clone());
+        *self.generation.lock().unwrap() = ExecutionGeneration::INITIAL;
+        *self.removed.lock().unwrap() = false;
         self.create_requests.lock().unwrap().push(request);
         Ok(ExecutionReservation {
             execution_id: Self::execution_id(),
@@ -84,13 +137,15 @@ impl ExecutionManager for RecordingRuntime {
         _operation_id: &OperationId,
     ) -> ExecutionManagerResult<ExecutionLease> {
         *self.config.lock().unwrap() = Some(request.config.clone());
+        *self.generation.lock().unwrap() = ExecutionGeneration::INITIAL;
+        *self.removed.lock().unwrap() = false;
         self.create_requests.lock().unwrap().push(request);
         *self.state.lock().unwrap() = ExecutionState::Running;
         Ok(self.lease())
     }
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus> {
-        if execution_id != &Self::execution_id() {
+        if execution_id != &Self::execution_id() || *self.removed.lock().unwrap() {
             return Err(ExecutionManagerError::NotFound(execution_id.clone()));
         }
         let lease = self.lease();
@@ -102,12 +157,23 @@ impl ExecutionManager for RecordingRuntime {
         })
     }
 
+    async fn read_logs(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<Vec<LogEntry>> {
+        self.require_current_generation(execution_id, generation)?;
+        self.log_requests.lock().unwrap().push(generation);
+        Ok(self.logs.lock().unwrap().clone())
+    }
+
     async fn create_filesystem_snapshot(
         &self,
-        _execution_id: &ExecutionId,
-        _generation: ExecutionGeneration,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
         snapshot_id: &ExecutionSnapshotId,
     ) -> ExecutionManagerResult<ExecutionSnapshot> {
+        self.require_current_generation(execution_id, generation)?;
         self.snapshot_requests
             .lock()
             .unwrap()
@@ -145,30 +211,87 @@ impl ExecutionManager for RecordingRuntime {
 
     async fn pause(
         &self,
-        _execution_id: &ExecutionId,
-        _generation: ExecutionGeneration,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
         _keep_memory: bool,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        self.require_current_generation(execution_id, generation)?;
         *self.state.lock().unwrap() = ExecutionState::Paused;
         Ok(self.lease())
     }
 
     async fn resume(
         &self,
-        _execution_id: &ExecutionId,
-        _generation: ExecutionGeneration,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<ExecutionLease> {
+        self.require_current_generation(execution_id, generation)?;
+        *self.state.lock().unwrap() = ExecutionState::Running;
+        Ok(self.lease())
+    }
+
+    async fn restart_with_options(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+        operation_id: &OperationId,
+        options: RestartExecutionOptions,
+    ) -> ExecutionManagerResult<ExecutionLease> {
+        if self
+            .restart_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, existing, _)| existing == operation_id)
+        {
+            return Ok(self.lease());
+        }
+        self.require_current_generation(execution_id, generation)?;
+        self.restart_requests
+            .lock()
+            .unwrap()
+            .push((generation, operation_id.clone(), options));
+        let next = ExecutionGeneration::new(generation.get() + 1)?;
+        *self.generation.lock().unwrap() = next;
         *self.state.lock().unwrap() = ExecutionState::Running;
         Ok(self.lease())
     }
 
     async fn kill(
         &self,
-        _execution_id: &ExecutionId,
-        _generation: ExecutionGeneration,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
     ) -> ExecutionManagerResult<KillOutcome> {
+        self.require_current_generation(execution_id, generation)?;
+        self.kill_requests.lock().unwrap().push(generation);
+        if *self.state.lock().unwrap() == ExecutionState::Stopped {
+            return Ok(KillOutcome::AlreadyStopped);
+        }
         *self.state.lock().unwrap() = ExecutionState::Stopped;
         Ok(KillOutcome::Killed)
+    }
+
+    async fn remove(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<bool> {
+        if *self.removed.lock().unwrap() {
+            return Ok(false);
+        }
+        self.require_current_generation(execution_id, generation)?;
+        if !matches!(
+            *self.state.lock().unwrap(),
+            ExecutionState::Created | ExecutionState::Stopped | ExecutionState::Failed
+        ) {
+            return Err(ExecutionManagerError::Conflict {
+                execution_id: execution_id.clone(),
+                message: "execution must be terminal before removal".to_string(),
+            });
+        }
+        self.remove_requests.lock().unwrap().push(generation);
+        *self.removed.lock().unwrap() = true;
+        Ok(true)
     }
 
     async fn reconcile(
@@ -461,6 +584,109 @@ async fn fluent_builders_configure_resources_and_stream_script_source() {
     assert_eq!(exec[0].stdin.as_deref(), Some(b"print(6 * 7)\n".as_slice()));
     assert_eq!(exec[0].env, ["CI=true"]);
     assert_eq!(exec[0].working_dir.as_deref(), Some("/workspace"));
+}
+
+#[tokio::test]
+async fn sandbox_lifecycle_logs_and_removal_share_generation_fencing() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let sandbox = Sandbox::create_with_client(
+        test_client(Arc::clone(&runtime), temp.path()),
+        SandboxCreateOptions::new("alpine:3.20")
+            .isolation(ExecutionIsolation::Sandbox)
+            .auto_remove(false),
+    )
+    .await
+    .unwrap();
+
+    sandbox.stop().await.unwrap();
+    assert_eq!(sandbox.info().state, ExecutionState::Stopped);
+    sandbox.stop().await.unwrap();
+
+    let operation_id = OperationId::new("sdk-test-restart").unwrap();
+    sandbox
+        .restart(
+            SandboxRestartOptions::default()
+                .operation_id(operation_id.clone())
+                .stop_timeout_seconds(7),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sandbox.info().generation, 2);
+    assert_eq!(sandbox.info().state, ExecutionState::Running);
+
+    let logs = sandbox.logs(SandboxLogOptions::tail(1)).await.unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].stream, "stderr");
+    assert_eq!(logs[0].log, "second\n");
+
+    sandbox.stop().await.unwrap();
+    sandbox.remove().await.unwrap();
+    sandbox.remove().await.unwrap();
+    assert!(!sandbox.is_running().await.unwrap());
+
+    assert_eq!(
+        *runtime.kill_requests.lock().unwrap(),
+        [
+            ExecutionGeneration::INITIAL,
+            ExecutionGeneration::new(2).unwrap()
+        ]
+    );
+    assert_eq!(
+        *runtime.remove_requests.lock().unwrap(),
+        [ExecutionGeneration::new(2).unwrap()]
+    );
+    let restarts = runtime.restart_requests.lock().unwrap();
+    assert_eq!(restarts.len(), 1);
+    assert_eq!(restarts[0].0, ExecutionGeneration::INITIAL);
+    assert_eq!(restarts[0].1, operation_id);
+    assert_eq!(restarts[0].2.stop_timeout_secs, Some(7));
+}
+
+#[tokio::test]
+async fn sandbox_logs_reject_invalid_bounds_and_stale_generations() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(RecordingRuntime::new());
+    let client = test_client(Arc::clone(&runtime), temp.path());
+    let sandbox = Sandbox::create_with_client(
+        client.clone(),
+        SandboxCreateOptions::new("alpine:3.20")
+            .isolation(ExecutionIsolation::Sandbox)
+            .auto_remove(false),
+    )
+    .await
+    .unwrap();
+
+    for tail in [0, 10_001] {
+        let error = sandbox
+            .logs(SandboxLogOptions::tail(tail))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ClientError::Validation(_)));
+    }
+    assert!(runtime.log_requests.lock().unwrap().is_empty());
+
+    sandbox
+        .restart(
+            SandboxRestartOptions::default()
+                .operation_id(OperationId::new("sdk-stale-generation").unwrap()),
+        )
+        .await
+        .unwrap();
+    let error = client
+        .read_execution_logs(
+            &RecordingRuntime::execution_id(),
+            ExecutionGeneration::INITIAL,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ClientError::Execution(ExecutionManagerError::Conflict { .. })
+    ));
+    assert!(runtime.log_requests.lock().unwrap().is_empty());
+
+    sandbox.kill().await.unwrap();
 }
 
 #[test]

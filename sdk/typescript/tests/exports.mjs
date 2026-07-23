@@ -79,6 +79,29 @@ class FakeRuntime {
         return networkResponse(request.name, '10.89.0.0/24')
       case 'network_prune':
         return { names: ['old-network'] }
+      case 'runtime_diagnostics':
+        return {
+          core_version: '3.0.12',
+          runtime_version: '3.0.12',
+          sdk_version: '3.0.12',
+          home: '/tmp/a3s',
+          virtualization: {
+            available: true,
+            backend: 'hvf',
+            details: 'Apple Hypervisor.framework',
+          },
+        }
+      case 'runtime_disk_usage':
+        return {
+          home: '/tmp/a3s',
+          total_bytes: 28,
+          boxes_bytes: 1,
+          images_bytes: 2,
+          volumes_bytes: 3,
+          snapshots_bytes: 4,
+          state_bytes: 8,
+          other_bytes: 10,
+        }
       case 'sdk_capabilities':
         return {
           protocol_version: 1,
@@ -94,6 +117,10 @@ class FakeRuntime {
             'network_prune',
           ],
         }
+      case 'sandbox_list':
+        return { sandboxes: [sandboxSummaryResponse('sandbox-local-1')] }
+      case 'sandbox_get':
+        return { sandbox: sandboxSummaryResponse(request.query) }
       case 'sandbox_create':
         return {
           sandbox_id: 'sandbox-local-1',
@@ -106,12 +133,48 @@ class FakeRuntime {
           generation: 2,
           state: 'paused',
         }
+      case 'sandbox_stop':
+        return {
+          sandbox_id: request.sandbox_id,
+          generation: request.generation,
+          state: 'stopped',
+        }
+      case 'sandbox_restart':
+        return {
+          sandbox_id: request.sandbox_id,
+          generation: request.generation + 1,
+          state: 'running',
+        }
+      case 'sandbox_remove':
+        return {
+          sandbox_id: request.sandbox_id,
+          generation: request.generation,
+          state: 'removed',
+        }
+      case 'sandbox_logs':
+        return {
+          logs: [
+            {
+              stream: 'stdout',
+              log: 'sdk-log\n',
+              time: '2026-07-23T00:00:00Z',
+            },
+          ],
+        }
+      case 'sandbox_stats':
+        return { stats: sandboxStatsResponse(request.sandbox_id) }
       case 'sandbox_snapshot_create':
         return {
           snapshot_id: request.snapshot_id,
           size_bytes: 4096,
           state: 'running',
           generation: request.generation,
+        }
+      case 'filesystem_snapshot_list':
+        return { snapshots: [filesystemSnapshotResponse('ci-base')] }
+      case 'filesystem_snapshot_get':
+        return {
+          snapshot: filesystemSnapshotResponse(request.snapshot_id),
         }
       case 'filesystem_snapshot_size':
         return {
@@ -232,6 +295,69 @@ function networkResponse(name, subnet) {
   }
 }
 
+function sandboxSummaryResponse(sandboxId) {
+  return {
+    id: sandboxId,
+    short_id: 'sandboxlocal',
+    name: 'ci-box',
+    image: 'alpine:3.20',
+    isolation: 'microvm',
+    status: 'running',
+    status_summary: 'running',
+    active: true,
+    pid: 1234,
+    cpus: 2,
+    memory_mb: 512,
+    ports: ['8080:80'],
+    command: ['sh'],
+    health: 'none',
+    labels: { purpose: 'ci' },
+    created_at: '2026-07-23T00:00:00Z',
+    started_at: '2026-07-23T00:00:01Z',
+    network_name: 'ci-net',
+    volume_names: ['ci-cache'],
+  }
+}
+
+function sandboxStatsResponse(sandboxId) {
+  return {
+    id: sandboxId,
+    short_id: 'sandboxlocal',
+    name: 'ci-box',
+    status: 'running',
+    pid: 1234,
+    cpus: 2,
+    cpu_percent: 1.5,
+    cpu_percent_scaled: 3,
+    memory_bytes: 1024,
+    memory_limit_bytes: 2048,
+    memory_percent: 50,
+    network_rx_bytes: 10,
+    network_tx_bytes: 20,
+    block_read_bytes: 30,
+    block_write_bytes: 40,
+  }
+}
+
+function filesystemSnapshotResponse(snapshotId) {
+  return {
+    id: snapshotId,
+    name: 'CI base',
+    source_box_id: 'sandbox-local-1',
+    image: 'alpine:3.20',
+    vcpus: 2,
+    memory_mb: 512,
+    volumes: ['/cache'],
+    command: ['sh'],
+    port_map: ['8080:80'],
+    labels: { purpose: 'ci' },
+    network_mode: 'tsi',
+    size_bytes: 4096,
+    created_at: '2026-07-23T00:00:00Z',
+    description: 'Warm CI base',
+  }
+}
+
 assert.equal(SandboxDefault, Sandbox)
 assert.equal(DEFAULT_IMAGE, 'alpine:3.20')
 assert.notEqual(CodeInterpreter, Sandbox)
@@ -277,6 +403,54 @@ assert.equal(writeRequest.data_base64, Buffer.from('hello').toString('base64'))
 assert.equal(read.path, '/workspace/notes.txt')
 assert.equal(stat.operation, 'filesystem_stat')
 assert.equal(kill.operation, 'sandbox_kill')
+
+const lifecycleRuntime = new FakeRuntime()
+const lifecycleSandbox = await Sandbox.create(undefined, {
+  runtime: lifecycleRuntime,
+})
+await lifecycleSandbox.stop()
+assert.equal(lifecycleSandbox.state, 'stopped')
+await assert.rejects(
+  lifecycleSandbox.restart({ operationId: ' ' }),
+  /operationId cannot be empty/
+)
+await assert.rejects(lifecycleSandbox.logs({ tail: 0 }), /between 1 and 10000/)
+await lifecycleSandbox.restart({
+  operationId: 'typescript-restart-1',
+  stopTimeoutSeconds: 7,
+})
+assert.equal(lifecycleSandbox.generation, 2)
+assert.equal(lifecycleSandbox.state, 'running')
+const lifecycleLogs = await lifecycleSandbox.logs({ tail: 1 })
+const lifecycleStats = await lifecycleSandbox.stats()
+await lifecycleSandbox.stop()
+await lifecycleSandbox.remove()
+await lifecycleSandbox.kill()
+assert.equal(lifecycleSandbox.state, 'removed')
+assert.equal(lifecycleLogs[0].message, 'sdk-log\n')
+assert.equal(lifecycleStats.memoryPercent, 50)
+assert.deepEqual(
+  lifecycleRuntime.requests.map((request) => request.operation),
+  [
+    'sandbox_create',
+    'sandbox_stop',
+    'sandbox_restart',
+    'sandbox_logs',
+    'sandbox_stats',
+    'sandbox_stop',
+    'sandbox_remove',
+  ]
+)
+assert.deepEqual(lifecycleRuntime.requests[2], {
+  operation: 'sandbox_restart',
+  sandbox_id: 'sandbox-local-1',
+  generation: 1,
+  operation_id: 'typescript-restart-1',
+  stop_timeout_seconds: 7,
+})
+assert.equal(lifecycleRuntime.requests[3].generation, 2)
+assert.equal(lifecycleRuntime.requests[3].tail, 1)
+assert.equal(lifecycleRuntime.requests.at(-1).generation, 2)
 
 const builderRuntime = new FakeRuntime()
 const client = new A3SBoxClient(builderRuntime)
@@ -379,6 +553,33 @@ assert.deepEqual(managementRuntime.requests[0].signature_policy, {
   public_key: '/keys/cosign.pub',
 })
 assert.equal(managementRuntime.requests[5].registry_protocol, 'http')
+const managedSandboxes = await management.listSandboxes({ all: false })
+const managedSandbox = await management.getSandbox('sandbox-local-1')
+const diagnostics = await management.runtimeDiagnostics()
+const diskUsage = await management.runtimeDiskUsage()
+const filesystemSnapshots = await management.listFilesystemSnapshots()
+const filesystemSnapshot = await management.getFilesystemSnapshot('ci-base')
+assert.equal(managedSandboxes[0].name, 'ci-box')
+assert.equal(managedSandbox.id, 'sandbox-local-1')
+assert.equal(diagnostics.virtualization.backend, 'hvf')
+assert.equal(diskUsage.totalBytes, 28)
+assert.equal(filesystemSnapshots[0].sourceSandboxId, 'sandbox-local-1')
+assert.equal(filesystemSnapshot.description, 'Warm CI base')
+assert.deepEqual(managementRuntime.requests.at(-6), {
+  operation: 'sandbox_list',
+  all: false,
+})
+assert.deepEqual(
+  managementRuntime.requests.slice(-6).map((request) => request.operation),
+  [
+    'sandbox_list',
+    'sandbox_get',
+    'runtime_diagnostics',
+    'runtime_disk_usage',
+    'filesystem_snapshot_list',
+    'filesystem_snapshot_get',
+  ]
+)
 
 const sandboxIsolationRuntime = new FakeRuntime()
 const sharedKernelSandbox = await Sandbox.create(undefined, {

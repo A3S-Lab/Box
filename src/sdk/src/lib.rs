@@ -25,9 +25,9 @@ pub use client::{
 };
 pub use sandbox::{
     CommandResult, CommandRunOptions, Commands, Filesystem, FilesystemOptions, Sandbox,
-    SandboxBuilder, SandboxCommand, SandboxCreateOptions, SandboxInfo, SandboxNetwork,
-    ScriptBuilder, TmpfsMount, VolumeMount, VolumeSource, WriteInfo, DEFAULT_SANDBOX_IMAGE,
-    DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    SandboxBuilder, SandboxCommand, SandboxCreateOptions, SandboxInfo, SandboxLogOptions,
+    SandboxNetwork, SandboxRestartOptions, ScriptBuilder, TmpfsMount, VolumeMount, VolumeSource,
+    WriteInfo, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
 };
 
 pub use a3s_box_core::{

@@ -28,7 +28,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node tests/exports.mjs"
+    "test": "tsc -p tsconfig.tests.json && node tests/exports.mjs"
   },
   "dependencies": {},
   "devDependencies": {

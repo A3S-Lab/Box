@@ -43,6 +43,7 @@ use crate::box_state::{BoxRecord, StateFile};
 
 include!("types.rs");
 include!("summaries.rs");
+include!("config.rs");
 include!("core.rs");
 include!("builders.rs");
 include!("lifecycle.rs");

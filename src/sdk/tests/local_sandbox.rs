@@ -4,8 +4,9 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use a3s_box_sdk::{
-    A3sBoxClient, ClientError, ExecutionIsolation, ExecutionSnapshotId, Sandbox,
-    SandboxCreateOptions, SandboxNetwork, TagImage,
+    A3sBoxClient, ClientError, ExecutionIsolation, ExecutionSnapshotId, ListBoxesOptions,
+    OperationId, Sandbox, SandboxCreateOptions, SandboxLogOptions, SandboxNetwork,
+    SandboxRestartOptions, TagImage,
 };
 
 type AnyError = Box<dyn Error + Send + Sync>;
@@ -37,6 +38,16 @@ async fn e2b_style_local_sandbox_runs_without_remote_credentials() -> Result<(),
     let base_image =
         std::env::var("A3S_BOX_SDK_SMOKE_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_string());
     let client = A3sBoxClient::from_home(&home);
+    let diagnostics = client.runtime_diagnostics();
+    require(
+        diagnostics.home == home,
+        "runtime diagnostics returned the wrong home",
+    )?;
+    require(
+        !diagnostics.runtime_version.is_empty(),
+        "runtime diagnostics omitted the runtime version",
+    )?;
+    let _ = client.runtime_disk_usage()?;
     let context = home.join("rust-sdk-build-context");
     std::fs::create_dir_all(&context)?;
     std::fs::write(
@@ -91,6 +102,17 @@ async fn e2b_style_local_sandbox_runs_without_remote_credentials() -> Result<(),
     };
     let sandbox = builder.start().await?;
     let sandbox_id = sandbox.id().to_string();
+    require(
+        client
+            .list_boxes(ListBoxesOptions::all())?
+            .iter()
+            .any(|summary| summary.id == sandbox_id),
+        "created Sandbox was absent from the management inventory",
+    )?;
+    require(
+        client.get_box(&sandbox_id)?.is_some(),
+        "created Sandbox was not gettable through the management client",
+    )?;
 
     let exercise_result = exercise(&sandbox, &client, isolation, &image.reference).await;
     let cleanup_result = sandbox.kill().await;
@@ -190,6 +212,12 @@ async fn exercise(
         "Rust SDK move did not publish the destination",
     )?;
     sandbox.files.remove(directory).await?;
+    let logs = sandbox.logs(SandboxLogOptions::tail(20)).await?;
+    require(logs.len() <= 20, "Sandbox logs exceeded the requested tail")?;
+    require(
+        sandbox.stats().await?.is_some(),
+        "running Sandbox did not expose a stats snapshot",
+    )?;
 
     if expected_isolation == ExecutionIsolation::Sandbox {
         exercise_filesystem_snapshot(sandbox, client, image).await?;
@@ -204,6 +232,30 @@ async fn exercise(
     require(
         sandbox.is_running().await?,
         "resumed Sandbox is not running",
+    )?;
+    let previous_generation = sandbox.info().generation;
+    sandbox.stop().await?;
+    require(
+        !sandbox.is_running().await?,
+        "stopped Sandbox reports itself running",
+    )?;
+    sandbox
+        .restart(
+            SandboxRestartOptions::default()
+                .operation_id(OperationId::new(format!(
+                    "sdk-smoke-restart-{}",
+                    sandbox.id()
+                ))?)
+                .stop_timeout_seconds(5),
+        )
+        .await?;
+    require(
+        sandbox.info().generation == previous_generation + 1,
+        "restart did not advance the Sandbox generation",
+    )?;
+    require(
+        sandbox.is_running().await?,
+        "restarted Sandbox is not running",
     )?;
     Ok(())
 }
@@ -268,6 +320,19 @@ async fn exercise_filesystem_snapshot(
     require(
         client.execution_snapshot_size(&snapshot_id).await? == Some(snapshot.size_bytes),
         "snapshot size lookup did not return the published size",
+    )?;
+    require(
+        client
+            .list_snapshots()?
+            .iter()
+            .any(|summary| summary.id == snapshot_id.as_str()),
+        "captured snapshot was absent from the management inventory",
+    )?;
+    require(
+        client
+            .get_snapshot(snapshot_id.as_str())?
+            .is_some_and(|summary| summary.id == snapshot_id.as_str()),
+        "captured snapshot was not gettable through the management client",
     )?;
 
     let restored = Sandbox::create_with_client(

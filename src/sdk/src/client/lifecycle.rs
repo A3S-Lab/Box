@@ -79,6 +79,18 @@ impl A3sBoxClient {
             .await?)
     }
 
+    /// Read structured stdout/stderr entries for one generation.
+    pub async fn read_execution_logs(
+        &self,
+        execution_id: &ExecutionId,
+        generation: ExecutionGeneration,
+    ) -> Result<Vec<a3s_box_core::log::LogEntry>> {
+        Ok(self
+            .execution_manager
+            .read_logs(execution_id, generation)
+            .await?)
+    }
+
     /// Pause a managed execution through its resolved backend.
     pub async fn pause_execution(
         &self,
@@ -130,16 +142,16 @@ impl A3sBoxClient {
             .await?)
     }
 
-    /// Remove one terminal local execution and all runtime-owned paths.
-    pub(crate) async fn remove_local_execution_if_present(
+    /// Remove one terminal execution through the canonical lifecycle facade.
+    pub async fn remove_execution(
         &self,
         execution_id: &ExecutionId,
         generation: ExecutionGeneration,
     ) -> Result<bool> {
-        match self.local_execution_manager.as_ref() {
-            Some(manager) => Ok(manager.remove_execution(execution_id, generation).await?),
-            None => Ok(false),
-        }
+        Ok(self
+            .execution_manager
+            .remove(execution_id, generation)
+            .await?)
     }
 
     /// Reconcile one idempotent create operation after caller or service restart.

@@ -110,6 +110,29 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         return network_response(str(request["name"]), "10.89.0.0/24")
     if operation == "network_prune":
         return {"names": ["old-network"]}
+    if operation == "runtime_diagnostics":
+        return {
+            "core_version": "3.0.12",
+            "runtime_version": "3.0.12",
+            "sdk_version": "3.0.12",
+            "home": "/tmp/a3s",
+            "virtualization": {
+                "available": True,
+                "backend": "hvf",
+                "details": "Apple Hypervisor.framework",
+            },
+        }
+    if operation == "runtime_disk_usage":
+        return {
+            "home": "/tmp/a3s",
+            "total_bytes": 28,
+            "boxes_bytes": 1,
+            "images_bytes": 2,
+            "volumes_bytes": 3,
+            "snapshots_bytes": 4,
+            "state_bytes": 8,
+            "other_bytes": 10,
+        }
     if operation == "sdk_capabilities":
         return {
             "protocol_version": 1,
@@ -125,6 +148,10 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
                 "network_prune",
             ],
         }
+    if operation == "sandbox_list":
+        return {"sandboxes": [sandbox_summary_response("sandbox-local-1")]}
+    if operation == "sandbox_get":
+        return {"sandbox": sandbox_summary_response(str(request["query"]))}
     if operation == "sandbox_create":
         return {
             "sandbox_id": "sandbox-local-1",
@@ -137,12 +164,48 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
             "generation": 2,
             "state": "paused",
         }
+    if operation == "sandbox_stop":
+        return {
+            "sandbox_id": request["sandbox_id"],
+            "generation": request["generation"],
+            "state": "stopped",
+        }
+    if operation == "sandbox_restart":
+        return {
+            "sandbox_id": request["sandbox_id"],
+            "generation": int(request["generation"]) + 1,
+            "state": "running",
+        }
+    if operation == "sandbox_remove":
+        return {
+            "sandbox_id": request["sandbox_id"],
+            "generation": request["generation"],
+            "state": "removed",
+        }
+    if operation == "sandbox_logs":
+        return {
+            "logs": [
+                {
+                    "stream": "stdout",
+                    "log": "sdk-log\n",
+                    "time": "2026-07-23T00:00:00Z",
+                }
+            ]
+        }
+    if operation == "sandbox_stats":
+        return {"stats": sandbox_stats_response(str(request["sandbox_id"]))}
     if operation == "sandbox_snapshot_create":
         return {
             "snapshot_id": request["snapshot_id"],
             "size_bytes": 4096,
             "state": "running",
             "generation": request["generation"],
+        }
+    if operation == "filesystem_snapshot_list":
+        return {"snapshots": [filesystem_snapshot_response("ci-base")]}
+    if operation == "filesystem_snapshot_get":
+        return {
+            "snapshot": filesystem_snapshot_response(str(request["snapshot_id"]))
         }
     if operation == "filesystem_snapshot_size":
         return {
@@ -262,11 +325,84 @@ def network_response(name: str, subnet: str) -> dict[str, Any]:
     }
 
 
+def sandbox_summary_response(sandbox_id: str) -> dict[str, Any]:
+    return {
+        "id": sandbox_id,
+        "short_id": "sandboxlocal",
+        "name": "ci-box",
+        "image": "alpine:3.20",
+        "isolation": "microvm",
+        "status": "running",
+        "status_summary": "running",
+        "active": True,
+        "pid": 1234,
+        "cpus": 2,
+        "memory_mb": 512,
+        "ports": ["8080:80"],
+        "command": ["sh"],
+        "health": "none",
+        "labels": {"purpose": "ci"},
+        "created_at": "2026-07-23T00:00:00Z",
+        "started_at": "2026-07-23T00:00:01Z",
+        "network_name": "ci-net",
+        "volume_names": ["ci-cache"],
+    }
+
+
+def sandbox_stats_response(sandbox_id: str) -> dict[str, Any]:
+    return {
+        "id": sandbox_id,
+        "short_id": "sandboxlocal",
+        "name": "ci-box",
+        "status": "running",
+        "pid": 1234,
+        "cpus": 2,
+        "cpu_percent": 1.5,
+        "cpu_percent_scaled": 3.0,
+        "memory_bytes": 1024,
+        "memory_limit_bytes": 2048,
+        "memory_percent": 50.0,
+        "network_rx_bytes": 10,
+        "network_tx_bytes": 20,
+        "block_read_bytes": 30,
+        "block_write_bytes": 40,
+    }
+
+
+def filesystem_snapshot_response(snapshot_id: str) -> dict[str, Any]:
+    return {
+        "id": snapshot_id,
+        "name": "CI base",
+        "source_box_id": "sandbox-local-1",
+        "image": "alpine:3.20",
+        "vcpus": 2,
+        "memory_mb": 512,
+        "volumes": ["/cache"],
+        "command": ["sh"],
+        "port_map": ["8080:80"],
+        "labels": {"purpose": "ci"},
+        "network_mode": "tsi",
+        "size_bytes": 4096,
+        "created_at": "2026-07-23T00:00:00Z",
+        "description": "Warm CI base",
+    }
+
+
 class SdkTests(unittest.TestCase):
     def test_exports_native_local_clients_without_importing_e2b(self) -> None:
         self.assertIs(a3s_box.Sandbox, Sandbox)
         self.assertIs(a3s_box.AsyncSandbox, AsyncSandbox)
         self.assertEqual(a3s_box.DEFAULT_IMAGE, "alpine:3.20")
+        for exported_type in (
+            "FilesystemSnapshotSummary",
+            "RuntimeDiagnostics",
+            "RuntimeDiskUsage",
+            "RuntimeVirtualization",
+            "SandboxLogEntry",
+            "SandboxStats",
+            "SandboxSummary",
+        ):
+            self.assertTrue(hasattr(a3s_box, exported_type), exported_type)
         inventory = json.loads(
             (
                 Path(__file__).resolve().parents[2]
@@ -314,6 +450,82 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(read["path"], "/workspace/notes.txt")
         self.assertEqual(stat["operation"], "filesystem_stat")
         self.assertEqual(kill["operation"], "sandbox_kill")
+
+    def test_lifecycle_logs_and_stats_preserve_request_identity(self) -> None:
+        runtime = FakeRuntime()
+        sandbox = Sandbox.create(runtime=runtime)
+
+        sandbox.stop()
+        self.assertEqual(sandbox.state, "stopped")
+        with self.assertRaisesRegex(ValueError, "operation_id cannot be empty"):
+            sandbox.restart(operation_id="")
+        with self.assertRaisesRegex(ValueError, "tail must be between"):
+            sandbox.logs(tail=0)
+        sandbox.restart(operation_id="python-restart-1", stop_timeout=7)
+        self.assertEqual(sandbox.generation, 2)
+        self.assertEqual(sandbox.state, "running")
+        logs = sandbox.logs(tail=1)
+        stats = sandbox.stats()
+        sandbox.stop()
+        sandbox.remove()
+        sandbox.kill()
+
+        self.assertEqual(logs[0].message, "sdk-log\n")
+        self.assertEqual(logs[0].stream, "stdout")
+        self.assertEqual(stats.memory_percent, 50.0)
+        self.assertEqual(sandbox.state, "removed")
+        self.assertEqual(
+            [request["operation"] for request in runtime.requests],
+            [
+                "sandbox_create",
+                "sandbox_stop",
+                "sandbox_restart",
+                "sandbox_logs",
+                "sandbox_stats",
+                "sandbox_stop",
+                "sandbox_remove",
+            ],
+        )
+        restart = runtime.requests[2]
+        self.assertEqual(restart["generation"], 1)
+        self.assertEqual(restart["operation_id"], "python-restart-1")
+        self.assertEqual(restart["stop_timeout_seconds"], 7)
+        self.assertEqual(runtime.requests[3]["generation"], 2)
+        self.assertEqual(runtime.requests[3]["tail"], 1)
+        self.assertEqual(runtime.requests[-1]["generation"], 2)
+
+    def test_management_inspection_and_snapshot_queries_are_typed(self) -> None:
+        runtime = FakeRuntime()
+        client = A3SBoxClient(runtime)
+
+        sandboxes = client.list_sandboxes(all=False)
+        sandbox = client.get_sandbox("sandbox-local-1")
+        diagnostics = client.runtime_diagnostics()
+        disk = client.runtime_disk_usage()
+        snapshots = client.list_filesystem_snapshots()
+        snapshot = client.get_filesystem_snapshot("ci-base")
+
+        self.assertEqual(sandboxes[0].name, "ci-box")
+        self.assertEqual(sandbox.id, "sandbox-local-1")
+        self.assertEqual(diagnostics.virtualization.backend, "hvf")
+        self.assertEqual(disk.total_bytes, 28)
+        self.assertEqual(snapshots[0].source_sandbox_id, "sandbox-local-1")
+        self.assertEqual(snapshot.description, "Warm CI base")
+        self.assertEqual(runtime.requests[0], {
+            "operation": "sandbox_list",
+            "all": False,
+        })
+        self.assertEqual(
+            [request["operation"] for request in runtime.requests],
+            [
+                "sandbox_list",
+                "sandbox_get",
+                "runtime_diagnostics",
+                "runtime_disk_usage",
+                "filesystem_snapshot_list",
+                "filesystem_snapshot_get",
+            ],
+        )
 
     def test_fluent_programmable_cicd_builders_share_the_e2b_sandbox(self) -> None:
         runtime = FakeRuntime()
@@ -575,6 +787,39 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.requests[2]["network"], {"mode": "none"})
         self.assertTrue(runtime.requests[2]["mounts"][0]["read_only"])
         self.assertEqual(runtime.requests[3]["argv"], ["/bin/sh", "-se"])
+
+    async def test_async_lifecycle_and_management_match_sync_surface(self) -> None:
+        runtime = AsyncFakeRuntime()
+        client = A3SAsyncBoxClient(runtime)
+        sandbox = await AsyncSandbox.create(runtime=runtime)
+
+        await sandbox.stop()
+        await sandbox.restart(
+            operation_id="python-async-restart-1",
+            stop_timeout=9,
+        )
+        logs = await sandbox.logs(tail=1)
+        stats = await sandbox.stats()
+        sandboxes = await client.list_sandboxes(all=False)
+        snapshot = await client.get_filesystem_snapshot("ci-async")
+        diagnostics = await client.runtime_diagnostics()
+        disk = await client.runtime_disk_usage()
+        await sandbox.stop()
+        await sandbox.remove()
+
+        self.assertEqual(logs[0].message, "sdk-log\n")
+        self.assertEqual(stats.block_write_bytes, 40)
+        self.assertEqual(sandboxes[0].id, "sandbox-local-1")
+        self.assertEqual(snapshot.id, "ci-async")
+        self.assertEqual(diagnostics.sdk_version, "3.0.12")
+        self.assertEqual(disk.snapshots_bytes, 4)
+        restart = next(
+            request
+            for request in runtime.requests
+            if request["operation"] == "sandbox_restart"
+        )
+        self.assertEqual(restart["operation_id"], "python-async-restart-1")
+        self.assertEqual(restart["stop_timeout_seconds"], 9)
 
     async def test_async_resource_management_matches_sync_surface(self) -> None:
         runtime = AsyncFakeRuntime()

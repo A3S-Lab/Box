@@ -49,9 +49,40 @@ sandbox.kill().await?;
 # Ok(()) }
 ```
 
-The facade also provides `connect`, `pause`, `resume`, `is_running`, command
-environment/working-directory/stdin options, and file metadata and mutation
-operations. `A3sBoxClient` remains available for lower-level management APIs.
+The facade also provides `connect`, `pause`, `resume`, generation-fenced
+`stop`, idempotent `restart`, explicit terminal `remove`, `is_running`, bounded
+structured logs, current stats, command environment/working-directory/stdin
+options, and file metadata and mutation operations. `kill` is the convenient
+stop-and-remove composition. `A3sBoxClient` remains available for lower-level
+management APIs.
+
+```rust
+use a3s_box_sdk::{
+    OperationId, SandboxLogOptions, SandboxRestartOptions,
+};
+
+# async fn lifecycle(sandbox: &a3s_box_sdk::Sandbox) -> Result<(), a3s_box_sdk::ClientError> {
+let logs = sandbox.logs(SandboxLogOptions::tail(100)).await?;
+let stats = sandbox.stats().await?;
+println!("{} log entries; active stats: {}", logs.len(), stats.is_some());
+
+sandbox.stop().await?;
+sandbox
+    .restart(
+        SandboxRestartOptions::default()
+            .operation_id(OperationId::new("ci-restart-1")?)
+            .stop_timeout_seconds(10),
+    )
+    .await?;
+sandbox.stop().await?;
+sandbox.remove().await?;
+# Ok(()) }
+```
+
+Callers should persist an operation ID until a restart outcome is known; a
+retry with that identity resolves the same durable restart instead of
+allocating a second lifecycle transition. Log tails must contain 1 through
+10,000 entries.
 
 ## Builder-Style Programmable CI/CD
 
@@ -115,13 +146,14 @@ automatic cleanup, and filesystem-snapshot restore are available on
 Named bridge networks and published ports are currently MicroVM-only. The
 shared-kernel Sandbox resolver rejects either before runtime mutation.
 
-The same native Python and TypeScript packages now expose the Rust client's
-local image lifecycle: get, inspect, history, pull, tag, push, remove, and
-cache eviction. Pull accepts typed registry credentials and cosign verification
-policies; push accepts typed credentials and an explicit HTTPS or trusted
-plain-HTTP registry protocol. Named volumes and networks also expose prune.
-`sdk_capabilities` reports the exact operation inventory supported by the
-installed runtime so applications can fail closed before using a newer API.
+The same native Python and TypeScript packages expose the Rust client's local
+image lifecycle; Sandbox list/get/stop/restart/remove/logs/stats; runtime
+diagnostics and disk usage; and filesystem snapshot list/get. Pull accepts
+typed registry credentials and cosign verification policies; push accepts
+typed credentials and an explicit HTTPS or trusted plain-HTTP registry
+protocol. Named volumes and networks also expose prune. `sdk_capabilities`
+reports the exact operation inventory supported by the installed runtime so
+applications can fail closed before using a newer API.
 
 ## Runtime-Backed Client
 
@@ -224,15 +256,17 @@ client
 ```
 
 `run_box` provides the idempotent create-and-start composition. Typed methods
-also expose inspect, pause, resume, restart, kill, and operation reconciliation.
-`A3sBoxClient::with_execution_manager` accepts an explicit typed manager for
-embedding or tests without changing request semantics.
+also expose inspect, structured logs, pause, resume, restart, kill, terminal
+removal, and operation reconciliation. `A3sBoxClient::with_execution_manager`
+accepts an explicit typed manager for embedding or tests without changing
+request semantics.
 
 ## API Coverage
 
-- Boxes: generation-fenced create, start, run, inspect, pause, resume, restart,
-  kill, and reconciliation; plus list, get, legacy pause/unpause, Unix stop,
-  remove, prune inactive boxes, log snapshots, and host-side stats snapshots.
+- Boxes: generation-fenced create, start, run, inspect, structured logs, pause,
+  resume, restart, stop, kill, terminal remove, and reconciliation; plus list,
+  get, legacy pause/unpause, Unix stop, prune inactive boxes, log snapshots,
+  and host-side stats snapshots.
 - Images: list, get, inspect local OCI metadata, read OCI history, pull, build,
   tag, push, remove, and evict.
 - Volumes: list, get, create, remove, and prune.
@@ -249,9 +283,10 @@ embedding or tests without changing request semantics.
   lifecycle, explicit MicroVM/shared-kernel isolation, and typed client
   injection for embedding and tests.
 - Language bridge: versioned capability inventory plus image
-  get/inspect/history/pull/build/tag/push/remove/evict and
-  volume/network create/get/list/remove/prune parity in Python sync/async and
-  TypeScript.
+  get/inspect/history/pull/build/tag/push/remove/evict; volume/network
+  create/get/list/remove/prune; Sandbox list/get/stop/restart/remove/logs/stats;
+  runtime diagnostics/disk usage; and filesystem snapshot list/get parity in
+  Python sync/async and TypeScript.
 
 The client reads the shared `boxes.json` state format through an SDK-local model
 so it does not depend on the CLI crate. Image, volume, network, snapshot, build,

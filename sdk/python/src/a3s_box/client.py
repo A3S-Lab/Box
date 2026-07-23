@@ -2,21 +2,41 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Literal, TypeVar, cast
+from typing import Literal, TypeVar
+
+from ._bridge_values import (
+    build_image_info as _build_image_info,
+    filesystem_snapshot_summary as _filesystem_snapshot_summary,
+    image_history_info as _image_history_info,
+    image_info as _image_info,
+    image_inspect_info as _image_inspect_info,
+    mapping as _mapping,
+    mapping_list as _mapping_list,
+    mapping_sequence as _mapping_sequence,
+    network_info as _network_info,
+    push_image_info as _push_image_info,
+    runtime_diagnostics as _runtime_diagnostics,
+    runtime_disk_usage as _runtime_disk_usage,
+    sandbox_summary as _sandbox_summary,
+    sdk_capabilities as _sdk_capabilities,
+    sequence as _sequence,
+    volume_info as _volume_info,
+)
 
 from .models import (
     BuildImageInfo,
-    ImageHealthCheckInfo,
+    FilesystemSnapshotSummary,
     ImageHistoryInfo,
     ImageInfo,
     ImageInspectInfo,
-    NetworkEndpointInfo,
     NetworkInfo,
     PortMapping,
     PushImageInfo,
     RegistryCredentials,
+    RuntimeDiagnostics,
+    RuntimeDiskUsage,
     SandboxNetwork,
+    SandboxSummary,
     SdkCapabilities,
     SignaturePolicy,
     TmpfsMount,
@@ -209,6 +229,58 @@ class A3SBoxClient:
             self._runtime.request({"operation": "sdk_capabilities"})
         )
 
+    def list_sandboxes(self, *, all: bool = True) -> list[SandboxSummary]:
+        result = self._runtime.request(
+            {"operation": "sandbox_list", "all": all}
+        )
+        return [
+            _sandbox_summary(item)
+            for item in _mapping_list(result, "sandboxes")
+        ]
+
+    def get_sandbox(self, query: str) -> SandboxSummary | None:
+        result = self._runtime.request(
+            {"operation": "sandbox_get", "query": query}
+        )
+        value = result.get("sandbox")
+        return None if value is None else _sandbox_summary(_mapping(value))
+
+    def runtime_diagnostics(self) -> RuntimeDiagnostics:
+        return _runtime_diagnostics(
+            self._runtime.request({"operation": "runtime_diagnostics"})
+        )
+
+    def runtime_disk_usage(self) -> RuntimeDiskUsage:
+        return _runtime_disk_usage(
+            self._runtime.request({"operation": "runtime_disk_usage"})
+        )
+
+    def list_filesystem_snapshots(self) -> list[FilesystemSnapshotSummary]:
+        result = self._runtime.request(
+            {"operation": "filesystem_snapshot_list"}
+        )
+        return [
+            _filesystem_snapshot_summary(item)
+            for item in _mapping_list(result, "snapshots")
+        ]
+
+    def get_filesystem_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> FilesystemSnapshotSummary | None:
+        result = self._runtime.request(
+            {
+                "operation": "filesystem_snapshot_get",
+                "snapshot_id": snapshot_id,
+            }
+        )
+        value = result.get("snapshot")
+        return (
+            None
+            if value is None
+            else _filesystem_snapshot_summary(_mapping(value))
+        )
+
 
 class A3SAsyncBoxClient:
     """Asynchronous counterpart of :class:`A3SBoxClient`."""
@@ -385,6 +457,64 @@ class A3SAsyncBoxClient:
     async def capabilities(self) -> SdkCapabilities:
         return _sdk_capabilities(
             await self._runtime.request({"operation": "sdk_capabilities"})
+        )
+
+    async def list_sandboxes(
+        self,
+        *,
+        all: bool = True,
+    ) -> list[SandboxSummary]:
+        result = await self._runtime.request(
+            {"operation": "sandbox_list", "all": all}
+        )
+        return [
+            _sandbox_summary(item)
+            for item in _mapping_list(result, "sandboxes")
+        ]
+
+    async def get_sandbox(self, query: str) -> SandboxSummary | None:
+        result = await self._runtime.request(
+            {"operation": "sandbox_get", "query": query}
+        )
+        value = result.get("sandbox")
+        return None if value is None else _sandbox_summary(_mapping(value))
+
+    async def runtime_diagnostics(self) -> RuntimeDiagnostics:
+        return _runtime_diagnostics(
+            await self._runtime.request({"operation": "runtime_diagnostics"})
+        )
+
+    async def runtime_disk_usage(self) -> RuntimeDiskUsage:
+        return _runtime_disk_usage(
+            await self._runtime.request({"operation": "runtime_disk_usage"})
+        )
+
+    async def list_filesystem_snapshots(
+        self,
+    ) -> list[FilesystemSnapshotSummary]:
+        result = await self._runtime.request(
+            {"operation": "filesystem_snapshot_list"}
+        )
+        return [
+            _filesystem_snapshot_summary(item)
+            for item in _mapping_list(result, "snapshots")
+        ]
+
+    async def get_filesystem_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> FilesystemSnapshotSummary | None:
+        result = await self._runtime.request(
+            {
+                "operation": "filesystem_snapshot_get",
+                "snapshot_id": snapshot_id,
+            }
+        )
+        value = result.get("snapshot")
+        return (
+            None
+            if value is None
+            else _filesystem_snapshot_summary(_mapping(value))
         )
 
 
@@ -808,175 +938,3 @@ class AsyncSandboxBuilder(_SandboxBuilderBase):
             auto_remove=self._auto_remove,
             runtime=self._runtime,
         )
-
-
-def _build_image_info(result: Mapping[str, object]) -> BuildImageInfo:
-    return BuildImageInfo(
-        reference=str(result["reference"]),
-        digest=str(result["digest"]),
-        size_bytes=int(cast(int, result["size_bytes"])),
-        layer_count=int(cast(int, result["layer_count"])),
-    )
-
-
-def _image_info(result: Mapping[str, object]) -> ImageInfo:
-    return ImageInfo(
-        reference=str(result["reference"]),
-        digest=str(result["digest"]),
-        size_bytes=int(cast(int, result["size_bytes"])),
-        pulled_at=str(result["pulled_at"]),
-        last_used=str(result["last_used"]),
-        path=str(result["path"]),
-    )
-
-
-def _image_inspect_info(result: Mapping[str, object]) -> ImageInspectInfo:
-    health_value = result.get("health_check")
-    return ImageInspectInfo(
-        reference=str(result["reference"]),
-        digest=str(result["digest"]),
-        size_bytes=int(cast(int, result["size_bytes"])),
-        pulled_at=str(result["pulled_at"]),
-        last_used=str(result["last_used"]),
-        path=str(result["path"]),
-        manifest_digest=str(result["manifest_digest"]),
-        layer_count=int(cast(int, result["layer_count"])),
-        entrypoint=_optional_string_tuple(result.get("entrypoint")),
-        command=_optional_string_tuple(result.get("command")),
-        env=_string_mapping(result["env"]),
-        working_dir=_optional_string(result.get("working_dir")),
-        user=_optional_string(result.get("user")),
-        exposed_ports=tuple(
-            str(value) for value in _sequence(result["exposed_ports"])
-        ),
-        volumes=tuple(str(value) for value in _sequence(result["volumes"])),
-        stop_signal=_optional_string(result.get("stop_signal")),
-        health_check=(
-            None
-            if health_value is None
-            else _image_health_check_info(_mapping(health_value))
-        ),
-        onbuild=tuple(str(value) for value in _sequence(result["onbuild"])),
-        labels=_string_mapping(result["labels"]),
-    )
-
-
-def _image_health_check_info(
-    result: Mapping[str, object],
-) -> ImageHealthCheckInfo:
-    return ImageHealthCheckInfo(
-        test=tuple(str(value) for value in _sequence(result["test"])),
-        interval=_optional_int(result.get("interval")),
-        timeout=_optional_int(result.get("timeout")),
-        retries=_optional_int(result.get("retries")),
-        start_period=_optional_int(result.get("start_period")),
-    )
-
-
-def _image_history_info(result: Mapping[str, object]) -> ImageHistoryInfo:
-    return ImageHistoryInfo(
-        created=_optional_string(result.get("created")),
-        created_by=str(result["created_by"]),
-        size_bytes=int(cast(int, result["size_bytes"])),
-        comment=str(result["comment"]),
-        empty_layer=bool(result["empty_layer"]),
-    )
-
-
-def _push_image_info(result: Mapping[str, object]) -> PushImageInfo:
-    return PushImageInfo(
-        reference=str(result["reference"]),
-        manifest_digest=str(result["manifest_digest"]),
-        config_url=str(result["config_url"]),
-        manifest_url=str(result["manifest_url"]),
-    )
-
-
-def _sdk_capabilities(result: Mapping[str, object]) -> SdkCapabilities:
-    return SdkCapabilities(
-        protocol_version=int(cast(int, result["protocol_version"])),
-        operations=tuple(str(value) for value in _sequence(result["operations"])),
-    )
-
-
-def _volume_info(result: Mapping[str, object]) -> VolumeInfo:
-    return VolumeInfo(
-        name=str(result["name"]),
-        driver=str(result["driver"]),
-        mount_point=str(result["mount_point"]),
-        labels=_string_mapping(result["labels"]),
-        in_use_by=tuple(str(value) for value in _sequence(result["in_use_by"])),
-        in_use=bool(result["in_use"]),
-        size_limit=int(cast(int, result["size_limit"])),
-        created_at=str(result["created_at"]),
-    )
-
-
-def _network_info(result: Mapping[str, object]) -> NetworkInfo:
-    return NetworkInfo(
-        name=str(result["name"]),
-        driver=str(result["driver"]),
-        subnet=str(result["subnet"]),
-        gateway=str(result["gateway"]),
-        labels=_string_mapping(result["labels"]),
-        endpoints=tuple(
-            _network_endpoint(item)
-            for item in _mapping_sequence(result["endpoints"])
-        ),
-        endpoint_count=int(cast(int, result["endpoint_count"])),
-        isolation=str(result["isolation"]),
-        created_at=str(result["created_at"]),
-    )
-
-
-def _network_endpoint(result: Mapping[str, object]) -> NetworkEndpointInfo:
-    return NetworkEndpointInfo(
-        box_id=str(result["box_id"]),
-        box_name=str(result["box_name"]),
-        aliases=tuple(str(value) for value in _sequence(result["aliases"])),
-        ip_address=str(result["ip_address"]),
-        mac_address=str(result["mac_address"]),
-    )
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise TypeError("A3S Box bridge returned a non-object value")
-    return cast(Mapping[str, object], value)
-
-
-def _sequence(value: object) -> Sequence[object]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise TypeError("A3S Box bridge returned a non-array value")
-    return cast(Sequence[object], value)
-
-
-def _mapping_sequence(value: object) -> list[Mapping[str, object]]:
-    return [_mapping(item) for item in _sequence(value)]
-
-
-def _mapping_list(
-    result: Mapping[str, object],
-    key: str,
-) -> list[Mapping[str, object]]:
-    return _mapping_sequence(result[key])
-
-
-def _string_mapping(value: object) -> dict[str, str]:
-    return {str(key): str(item) for key, item in _mapping(value).items()}
-
-
-def _optional_string(value: object) -> str | None:
-    return None if value is None else str(value)
-
-
-def _optional_string_tuple(value: object) -> tuple[str, ...] | None:
-    return (
-        None
-        if value is None
-        else tuple(str(item) for item in _sequence(value))
-    )
-
-
-def _optional_int(value: object) -> int | None:
-    return None if value is None else int(cast(int, value))

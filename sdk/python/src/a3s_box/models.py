@@ -149,6 +149,101 @@ class SdkCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class SandboxSummary:
+    id: str
+    short_id: str
+    name: str
+    image: str
+    isolation: str
+    status: str
+    status_summary: str
+    active: bool
+    pid: int | None
+    cpus: int
+    memory_mb: int
+    ports: tuple[str, ...]
+    command: tuple[str, ...]
+    health: str
+    labels: dict[str, str]
+    created_at: str
+    started_at: str | None
+    network_name: str | None
+    volume_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxLogEntry:
+    stream: str
+    message: str
+    timestamp: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxStats:
+    id: str
+    short_id: str
+    name: str
+    status: str
+    pid: int
+    cpus: int
+    cpu_percent: float
+    cpu_percent_scaled: float
+    memory_bytes: int
+    memory_limit_bytes: int
+    memory_percent: float
+    network_rx_bytes: int
+    network_tx_bytes: int
+    block_read_bytes: int
+    block_write_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeVirtualization:
+    available: bool
+    backend: str | None
+    details: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDiagnostics:
+    core_version: str
+    runtime_version: str
+    sdk_version: str
+    home: str
+    virtualization: RuntimeVirtualization
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeDiskUsage:
+    home: str
+    total_bytes: int
+    boxes_bytes: int
+    images_bytes: int
+    volumes_bytes: int
+    snapshots_bytes: int
+    state_bytes: int
+    other_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class FilesystemSnapshotSummary:
+    id: str
+    name: str
+    source_sandbox_id: str
+    image: str
+    vcpus: int
+    memory_mb: int
+    volumes: tuple[str, ...]
+    command: tuple[str, ...]
+    ports: tuple[str, ...]
+    labels: dict[str, str]
+    network_mode: str | None
+    size_bytes: int
+    created_at: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
 class VolumeInfo:
     name: str
     driver: str
