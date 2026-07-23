@@ -9,6 +9,41 @@ export const DEFAULT_IMAGE = 'alpine:3.20'
 
 export type Isolation = 'microvm' | 'sandbox'
 
+export type SandboxNetwork =
+  | { readonly mode: 'tsi' }
+  | { readonly mode: 'none' }
+  | { readonly mode: 'bridge'; readonly name: string }
+
+export type VolumeMount =
+  | {
+      readonly kind: 'bind'
+      readonly source: string
+      readonly target: string
+      readonly readOnly?: boolean
+    }
+  | {
+      readonly kind: 'named'
+      readonly name: string
+      readonly target: string
+      readonly readOnly?: boolean
+    }
+
+export interface TmpfsMount {
+  target: string
+  sizeBytes?: number
+  readOnly?: boolean
+}
+
+export interface PortMapping {
+  hostPort: number
+  guestPort: number
+}
+
+export interface Script {
+  source: string | Uint8Array
+  interpreter?: readonly string[]
+}
+
 export interface SandboxCreateOptions {
   timeoutMs?: number
   envs?: Readonly<Record<string, string>>
@@ -17,6 +52,20 @@ export interface SandboxCreateOptions {
   cpus?: number
   memoryMb?: number
   isolation?: Isolation
+  filesystemSnapshotId?: string
+  workspace?: string
+  workdir?: string
+  user?: string
+  hostname?: string
+  mounts?: readonly VolumeMount[]
+  tmpfs?: readonly TmpfsMount[]
+  network?: SandboxNetwork
+  ports?: readonly PortMapping[]
+  dns?: readonly string[]
+  hostAliases?: Readonly<Record<string, string>>
+  readOnly?: boolean
+  persistent?: boolean
+  autoRemove?: boolean
   runtime?: LocalRuntime
 }
 
@@ -42,6 +91,13 @@ export interface CommandResult {
 export interface WriteInfo {
   path: string
   size: number
+}
+
+export interface FilesystemSnapshotInfo {
+  snapshotId: string
+  sizeBytes: number
+  state: string
+  generation: number
 }
 
 export interface EntryInfo {
@@ -106,6 +162,33 @@ export class Sandbox {
       ...(options.memoryMb === undefined
         ? {}
         : { memory_mb: options.memoryMb }),
+      ...(options.filesystemSnapshotId === undefined
+        ? {}
+        : { filesystem_snapshot_id: options.filesystemSnapshotId }),
+      ...(options.workspace === undefined
+        ? {}
+        : { workspace: options.workspace }),
+      ...(options.workdir === undefined ? {} : { workdir: options.workdir }),
+      ...(options.user === undefined ? {} : { user: options.user }),
+      ...(options.hostname === undefined ? {} : { hostname: options.hostname }),
+      mounts: (options.mounts ?? []).map(bridgeVolumeMount),
+      tmpfs: (options.tmpfs ?? []).map((mount) => ({
+        target: mount.target,
+        ...(mount.sizeBytes === undefined
+          ? {}
+          : { size_bytes: mount.sizeBytes }),
+        read_only: mount.readOnly ?? false,
+      })),
+      network: options.network ?? { mode: 'tsi' },
+      ports: (options.ports ?? []).map((port) => ({
+        host_port: port.hostPort,
+        guest_port: port.guestPort,
+      })),
+      dns: [...(options.dns ?? [])],
+      host_aliases: { ...(options.hostAliases ?? {}) },
+      read_only: options.readOnly ?? false,
+      persistent: options.persistent ?? false,
+      auto_remove: options.autoRemove ?? true,
     })
     return Sandbox.fromResult(result, runtime)
   }
@@ -171,6 +254,59 @@ export class Sandbox {
     }
   }
 
+  async createFilesystemSnapshot(
+    snapshotId: string
+  ): Promise<FilesystemSnapshotInfo> {
+    const result = await this.runtime.request({
+      ...this.lifecycleRequest('sandbox_snapshot_create'),
+      snapshot_id: snapshotId,
+    })
+    this.updateLifecycle(result, this.state)
+    return filesystemSnapshotInfo(result)
+  }
+
+  script(source: string | Uint8Array | Script): ScriptBuilder {
+    return this.commands.script(source)
+  }
+
+  static async filesystemSnapshotSize(
+    snapshotId: string,
+    options: SandboxConnectOptions = {}
+  ): Promise<number | undefined> {
+    const runtime = options.runtime ?? new A3SLocalRuntime()
+    const result = await runtime.request({
+      operation: 'filesystem_snapshot_size',
+      snapshot_id: snapshotId,
+    })
+    const size = result.size_bytes
+    if (size === null || size === undefined) return undefined
+    if (typeof size !== 'number') {
+      throw new A3SBoxError(
+        'Bridge result has an invalid size_bytes',
+        'bridge_protocol_error'
+      )
+    }
+    return size
+  }
+
+  static async deleteFilesystemSnapshot(
+    snapshotId: string,
+    options: SandboxConnectOptions = {}
+  ): Promise<boolean> {
+    const runtime = options.runtime ?? new A3SLocalRuntime()
+    const result = await runtime.request({
+      operation: 'filesystem_snapshot_delete',
+      snapshot_id: snapshotId,
+    })
+    if (typeof result.deleted !== 'boolean') {
+      throw new A3SBoxError(
+        'Bridge result is missing deleted',
+        'bridge_protocol_error'
+      )
+    }
+    return result.deleted
+  }
+
   bridgeRequest(request: Readonly<Record<string, unknown>>): Promise<BridgeResult> {
     return this.runtime.request(request)
   }
@@ -232,6 +368,85 @@ export class Commands {
       exitCode: requiredNumber(result, 'exit_code'),
       truncated: result.truncated === true,
     }
+  }
+
+  script(source: string | Uint8Array | Script): ScriptBuilder {
+    return new ScriptBuilder(this, source)
+  }
+
+  async runScript(
+    source: string | Uint8Array | Script,
+    options: CommandRunOptions = {}
+  ): Promise<CommandResult> {
+    let builder = this.script(source)
+    if (options.timeoutMs !== undefined) {
+      builder = builder.timeout(options.timeoutMs)
+    }
+    for (const [key, value] of Object.entries(options.envs ?? {})) {
+      builder = builder.env(key, value)
+    }
+    if (options.cwd !== undefined) builder = builder.cwd(options.cwd)
+    if (options.user !== undefined) builder = builder.user(options.user)
+    return builder.run()
+  }
+}
+
+/** Fluent script builder that sends source through stdin to an interpreter. */
+export class ScriptBuilder {
+  private readonly source: string | Uint8Array
+  private interpreterArgv: string[]
+  private options: CommandRunOptions = {}
+
+  constructor(
+    private readonly commands: Commands,
+    script: string | Uint8Array | Script
+  ) {
+    if (isScript(script)) {
+      this.source = script.source
+      this.interpreterArgv = [...(script.interpreter ?? ['/bin/sh', '-se'])]
+    } else {
+      this.source = script
+      this.interpreterArgv = ['/bin/sh', '-se']
+    }
+  }
+
+  interpreter(executable: string, ...args: string[]): ScriptBuilder {
+    this.interpreterArgv = [executable, ...args]
+    return this
+  }
+
+  timeout(timeoutMs: number): ScriptBuilder {
+    this.options = { ...this.options, timeoutMs }
+    return this
+  }
+
+  env(key: string, value: string): ScriptBuilder {
+    this.options = {
+      ...this.options,
+      envs: { ...(this.options.envs ?? {}), [key]: value },
+    }
+    return this
+  }
+
+  cwd(path: string): ScriptBuilder {
+    this.options = { ...this.options, cwd: path }
+    return this
+  }
+
+  user(user: string): ScriptBuilder {
+    this.options = { ...this.options, user }
+    return this
+  }
+
+  async run(): Promise<CommandResult> {
+    if (this.source.length === 0) throw new Error('script source cannot be empty')
+    if (this.interpreterArgv.length === 0) {
+      throw new Error('script interpreter cannot be empty')
+    }
+    return this.commands.run(this.interpreterArgv, {
+      ...this.options,
+      stdin: this.source,
+    })
   }
 }
 
@@ -348,6 +563,32 @@ export class Filesystem {
   }
 }
 
+function bridgeVolumeMount(
+  mount: VolumeMount
+): Readonly<Record<string, unknown>> {
+  return mount.kind === 'bind'
+    ? {
+        kind: 'bind',
+        source: mount.source,
+        target: mount.target,
+        read_only: mount.readOnly ?? false,
+      }
+    : {
+        kind: 'named',
+        name: mount.name,
+        target: mount.target,
+        read_only: mount.readOnly ?? false,
+      }
+}
+
+function isScript(value: string | Uint8Array | Script): value is Script {
+  return (
+    typeof value === 'object' &&
+    !(value instanceof Uint8Array) &&
+    'source' in value
+  )
+}
+
 function entryInfo(entry: Record<string, unknown>): EntryInfo {
   return {
     name: requiredString(entry, 'name'),
@@ -363,6 +604,15 @@ function entryInfo(entry: Record<string, unknown>): EntryInfo {
     ...(typeof entry.symlink_target === 'string'
       ? { symlinkTarget: entry.symlink_target }
       : {}),
+  }
+}
+
+function filesystemSnapshotInfo(result: BridgeResult): FilesystemSnapshotInfo {
+  return {
+    snapshotId: requiredString(result, 'snapshot_id'),
+    sizeBytes: requiredNumber(result, 'size_bytes'),
+    state: requiredString(result, 'state'),
+    generation: requiredNumber(result, 'generation'),
   }
 }
 

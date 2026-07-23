@@ -21,6 +21,165 @@ class WriteInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class FilesystemSnapshotInfo:
+    snapshot_id: str
+    size_bytes: int
+    state: str
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class BuildImageInfo:
+    reference: str
+    digest: str
+    size_bytes: int
+    layer_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ImageInfo:
+    reference: str
+    digest: str
+    size_bytes: int
+    pulled_at: str
+    last_used: str
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeInfo:
+    name: str
+    driver: str
+    mount_point: str
+    labels: dict[str, str]
+    in_use_by: tuple[str, ...]
+    in_use: bool
+    size_limit: int
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkEndpointInfo:
+    box_id: str
+    box_name: str
+    aliases: tuple[str, ...]
+    ip_address: str
+    mac_address: str
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkInfo:
+    name: str
+    driver: str
+    subnet: str
+    gateway: str
+    labels: dict[str, str]
+    endpoints: tuple[NetworkEndpointInfo, ...]
+    endpoint_count: int
+    isolation: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeMount:
+    kind: Literal["bind", "named"]
+    source: str
+    target: str
+    read_only: bool = False
+
+    @classmethod
+    def bind(
+        cls,
+        source: str,
+        target: str,
+        *,
+        read_only: bool = False,
+    ) -> VolumeMount:
+        return cls("bind", source, target, read_only)
+
+    @classmethod
+    def named(
+        cls,
+        name: str,
+        target: str,
+        *,
+        read_only: bool = False,
+    ) -> VolumeMount:
+        return cls("named", name, target, read_only)
+
+    def bridge_value(self) -> dict[str, object]:
+        source_key = "source" if self.kind == "bind" else "name"
+        return {
+            "kind": self.kind,
+            source_key: self.source,
+            "target": self.target,
+            "read_only": self.read_only,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TmpfsMount:
+    target: str
+    size_bytes: int | None = None
+    read_only: bool = False
+
+    def bridge_value(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "target": self.target,
+            "read_only": self.read_only,
+        }
+        if self.size_bytes is not None:
+            result["size_bytes"] = self.size_bytes
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxNetwork:
+    mode: Literal["tsi", "none", "bridge"]
+    name: str | None = None
+
+    @classmethod
+    def tsi(cls) -> SandboxNetwork:
+        return cls("tsi")
+
+    @classmethod
+    def disabled(cls) -> SandboxNetwork:
+        return cls("none")
+
+    @classmethod
+    def bridge(cls, name: str) -> SandboxNetwork:
+        return cls("bridge", name)
+
+    def bridge_value(self) -> dict[str, str]:
+        result = {"mode": self.mode}
+        if self.name is not None:
+            result["name"] = self.name
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class PortMapping:
+    host_port: int
+    guest_port: int
+
+    @classmethod
+    def tcp(cls, host_port: int, guest_port: int) -> PortMapping:
+        return cls(host_port, guest_port)
+
+    def bridge_value(self) -> dict[str, int]:
+        return {
+            "host_port": self.host_port,
+            "guest_port": self.guest_port,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Script:
+    source: str | bytes
+    interpreter: tuple[str, ...] = ("/bin/sh", "-se")
+
+
+@dataclass(frozen=True, slots=True)
 class EntryInfo:
     name: str
     type: Literal["file", "directory", "unspecified"]

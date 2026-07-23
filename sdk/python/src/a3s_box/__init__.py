@@ -1,22 +1,77 @@
 """Native local-first SDK for A3S Box."""
 
+from .client import (
+    A3SAsyncBoxClient,
+    A3SBoxClient,
+    AsyncImageBuilder,
+    AsyncNetworkBuilder,
+    AsyncSandboxBuilder,
+    AsyncVolumeBuilder,
+    ImageBuilder,
+    NetworkBuilder,
+    SandboxBuilder,
+    VolumeBuilder,
+)
 from .connection import A3SConnectionConfig, A3SRemoteConnection
 from .exceptions import A3SBoxError, A3SBoxNotInstalledError
-from .models import CommandResult, EntryInfo, WriteInfo
+from .models import (
+    BuildImageInfo,
+    CommandResult,
+    EntryInfo,
+    FilesystemSnapshotInfo,
+    ImageInfo,
+    NetworkEndpointInfo,
+    NetworkInfo,
+    PortMapping,
+    SandboxNetwork,
+    Script,
+    TmpfsMount,
+    VolumeInfo,
+    VolumeMount,
+    WriteInfo,
+)
 from .runtime import A3SAsyncLocalRuntime, A3SLocalRuntime
-from .sandbox import DEFAULT_IMAGE, AsyncSandbox, Sandbox
+from .script import AsyncScriptBuilder, ScriptBuilder
+from .sandbox import (
+    DEFAULT_IMAGE,
+    AsyncSandbox,
+    Sandbox,
+)
 
 __all__ = [
+    "A3SAsyncBoxClient",
     "A3SAsyncLocalRuntime",
+    "A3SBoxClient",
     "A3SBoxError",
     "A3SBoxNotInstalledError",
     "A3SConnectionConfig",
     "A3SLocalRuntime",
     "A3SRemoteConnection",
     "AsyncSandbox",
+    "AsyncImageBuilder",
+    "AsyncNetworkBuilder",
+    "AsyncSandboxBuilder",
+    "AsyncScriptBuilder",
+    "AsyncVolumeBuilder",
+    "BuildImageInfo",
     "CommandResult",
     "DEFAULT_IMAGE",
     "EntryInfo",
+    "FilesystemSnapshotInfo",
+    "ImageBuilder",
+    "ImageInfo",
+    "NetworkBuilder",
+    "NetworkEndpointInfo",
+    "NetworkInfo",
+    "PortMapping",
     "Sandbox",
+    "SandboxBuilder",
+    "SandboxNetwork",
+    "Script",
+    "ScriptBuilder",
+    "TmpfsMount",
+    "VolumeBuilder",
+    "VolumeInfo",
+    "VolumeMount",
     "WriteInfo",
 ]

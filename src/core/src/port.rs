@@ -32,6 +32,11 @@ pub struct PortMapping {
 }
 
 impl PortMapping {
+    /// Create and validate one TCP port publication.
+    pub fn tcp(host_port: u16, guest_port: u16) -> Result<Self, String> {
+        parse_port_mapping(&format!("{host_port}:{guest_port}"))
+    }
+
     /// Convert to the normalized runtime `host:guest` format.
     pub fn runtime_entry(&self) -> String {
         format!("{}:{}", self.host_port, self.guest_port)
@@ -128,6 +133,12 @@ mod tests {
         assert_eq!(mapping.protocol, PortProtocol::Tcp);
         assert_eq!(mapping.protocol.as_str(), "tcp");
         assert_eq!(mapping.runtime_entry(), "8080:80");
+    }
+
+    #[test]
+    fn test_typed_tcp_mapping_validates_guest_port() {
+        assert_eq!(PortMapping::tcp(0, 8080).unwrap().runtime_entry(), "0:8080");
+        assert!(PortMapping::tcp(8080, 0).is_err());
     }
 
     #[test]

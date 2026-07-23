@@ -53,6 +53,68 @@ The facade also provides `connect`, `pause`, `resume`, `is_running`, command
 environment/working-directory/stdin options, and file metadata and mutation
 operations. `A3sBoxClient` remains available for lower-level management APIs.
 
+## Builder-Style Programmable CI/CD
+
+The E2B-style facade and the fluent builders are two entry styles over the
+same typed client and lifecycle implementation:
+
+```rust
+use a3s_box_sdk::{A3sBoxClient, SandboxNetwork};
+
+# async fn example() -> Result<(), a3s_box_sdk::ClientError> {
+let client = A3sBoxClient::new();
+let image = client
+    .image("./ci")
+    .dockerfile("Dockerfile")
+    .tag("local/ci-base:latest")
+    .build_arg("NODE_VERSION", "24")
+    .build()
+    .await?;
+let cache = client
+    .volume("npm-cache")
+    .label("purpose", "ci-cache")
+    .size_limit(10 * 1024 * 1024 * 1024)
+    .create()?;
+let network = client
+    .network("ci-net")
+    .subnet("10.89.40.0/24")
+    .create()?;
+
+let sandbox = client
+    .sandbox(image.reference)
+    .cpus(4)
+    .memory_mb(4096)
+    .mount_named(cache.name, "/root/.npm")
+    .network(SandboxNetwork::bridge(network.name))
+    .publish_tcp(8080, 8080)
+    .workdir("/workspace")
+    .start()
+    .await?;
+
+let result = sandbox
+    .script("npm ci\nnpm test\n")
+    .interpreter(["/bin/sh", "-se"])
+    .env("CI", "true")
+    .run()
+    .await?;
+sandbox.kill().await?;
+if result.exit_code != 0 {
+    return Err(a3s_box_sdk::ClientError::Guest(result.stderr));
+}
+# Ok(()) }
+```
+
+Named volumes and networks must be created explicitly before selection.
+Scripts are sent through standard input to the selected interpreter and are
+not interpolated into a host shell command. Typed bind mounts, named-volume
+mounts, tmpfs, TSI/disabled/bridge networking, TCP publications, DNS, host
+aliases, workdir/user/hostname, read-only root filesystems, persistence,
+automatic cleanup, and filesystem-snapshot restore are available on
+`SandboxBuilder` and `SandboxCreateOptions`.
+
+Named bridge networks and published ports are currently MicroVM-only. The
+shared-kernel Sandbox resolver rejects either before runtime mutation.
+
 ## Runtime-Backed Client
 
 ```rust

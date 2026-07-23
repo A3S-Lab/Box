@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
 import SandboxDefault, {
+  A3SBoxClient,
   A3SLocalRuntime,
   A3SRemoteConnection,
   DEFAULT_IMAGE,
@@ -15,6 +16,35 @@ class FakeRuntime {
   async request(request) {
     this.requests.push(request)
     switch (request.operation) {
+      case 'image_build':
+        return {
+          reference: request.tag ?? 'local/build:latest',
+          digest: 'sha256:build',
+          size_bytes: 8192,
+          layer_count: 3,
+        }
+      case 'image_pull':
+        return imageResponse(request.reference)
+      case 'image_list':
+        return { images: [imageResponse('alpine:3.20')] }
+      case 'image_remove':
+        return { reference: request.reference, removed: true }
+      case 'volume_create':
+        return volumeResponse(request.name)
+      case 'volume_get':
+        return { volume: volumeResponse(request.name) }
+      case 'volume_list':
+        return { volumes: [volumeResponse('ci-cache')] }
+      case 'volume_remove':
+        return volumeResponse(request.name)
+      case 'network_create':
+        return networkResponse(request.name, request.subnet)
+      case 'network_get':
+        return { network: networkResponse(request.name, '10.89.0.0/24') }
+      case 'network_list':
+        return { networks: [networkResponse('ci-net', '10.89.0.0/24')] }
+      case 'network_remove':
+        return networkResponse(request.name, '10.89.0.0/24')
       case 'sandbox_create':
         return {
           sandbox_id: 'sandbox-local-1',
@@ -26,6 +56,23 @@ class FakeRuntime {
           sandbox_id: request.sandbox_id,
           generation: 2,
           state: 'paused',
+        }
+      case 'sandbox_snapshot_create':
+        return {
+          snapshot_id: request.snapshot_id,
+          size_bytes: 4096,
+          state: 'running',
+          generation: request.generation,
+        }
+      case 'filesystem_snapshot_size':
+        return {
+          snapshot_id: request.snapshot_id,
+          size_bytes: 4096,
+        }
+      case 'filesystem_snapshot_delete':
+        return {
+          snapshot_id: request.snapshot_id,
+          deleted: true,
         }
       case 'command_run':
         return {
@@ -70,6 +117,44 @@ class FakeRuntime {
       default:
         throw new Error(`unexpected operation: ${request.operation}`)
     }
+  }
+}
+
+function imageResponse(reference) {
+  return {
+    reference,
+    digest: 'sha256:image',
+    size_bytes: 4096,
+    pulled_at: '2026-07-23T00:00:00Z',
+    last_used: '2026-07-23T00:00:00Z',
+    path: '/tmp/image',
+  }
+}
+
+function volumeResponse(name) {
+  return {
+    name,
+    driver: 'local',
+    mount_point: `/tmp/volumes/${name}`,
+    labels: { purpose: 'ci' },
+    in_use_by: [],
+    in_use: false,
+    size_limit: 4096,
+    created_at: '2026-07-23T00:00:00Z',
+  }
+}
+
+function networkResponse(name, subnet) {
+  return {
+    name,
+    driver: 'bridge',
+    subnet,
+    gateway: '10.89.0.1',
+    labels: { purpose: 'ci' },
+    endpoints: [],
+    endpoint_count: 0,
+    isolation: 'none',
+    created_at: '2026-07-23T00:00:00Z',
   }
 }
 
@@ -119,6 +204,71 @@ assert.equal(read.path, '/workspace/notes.txt')
 assert.equal(stat.operation, 'filesystem_stat')
 assert.equal(kill.operation, 'sandbox_kill')
 
+const builderRuntime = new FakeRuntime()
+const client = new A3SBoxClient(builderRuntime)
+const builtImage = await client
+  .image('./ci')
+  .dockerfile('Dockerfile.ci')
+  .tag('local/ci-base:latest')
+  .buildArg('NODE_VERSION', '24')
+  .platform('linux/arm64')
+  .build()
+const cacheVolume = await client
+  .volume('ci-cache')
+  .label('purpose', 'ci')
+  .sizeLimit(4096)
+  .create()
+const ciNetwork = await client
+  .network('ci-net')
+  .subnet('10.89.55.0/24')
+  .label('purpose', 'ci')
+  .create()
+const builderSandbox = await client
+  .sandbox(builtImage.reference)
+  .cpus(4)
+  .memoryMb(4096)
+  .mountNamed(cacheVolume.name, '/cache')
+  .network(ciNetwork.name)
+  .publishTcp(8080, 80)
+  .workdir('/workspace')
+  .autoRemove(false)
+  .start()
+const scriptResult = await builderSandbox
+  .script('console.log(6 * 7)\n')
+  .interpreter('node', '-')
+  .env('CI', 'true')
+  .cwd('/workspace')
+  .run()
+await builderSandbox.kill()
+assert.equal(scriptResult.stdout, '42\n')
+assert.equal(builderRuntime.requests[0].operation, 'image_build')
+assert.equal(builderRuntime.requests[0].dockerfile, 'Dockerfile.ci')
+assert.deepEqual(builderRuntime.requests[0].platforms, ['linux/arm64'])
+assert.deepEqual(builderRuntime.requests[3].mounts, [
+  {
+    kind: 'named',
+    name: 'ci-cache',
+    target: '/cache',
+    read_only: false,
+  },
+])
+assert.deepEqual(builderRuntime.requests[3].network, {
+  mode: 'bridge',
+  name: 'ci-net',
+})
+assert.deepEqual(builderRuntime.requests[3].ports, [
+  { host_port: 8080, guest_port: 80 },
+])
+assert.equal(builderRuntime.requests[3].auto_remove, false)
+assert.deepEqual(builderRuntime.requests[4].argv, ['node', '-'])
+assert.equal(
+  Buffer.from(builderRuntime.requests[4].stdin_base64, 'base64').toString(),
+  'console.log(6 * 7)\n'
+)
+await client.removeNetwork(ciNetwork.name)
+await client.removeVolume(cacheVolume.name)
+await client.removeImage(builtImage.reference)
+
 const sandboxIsolationRuntime = new FakeRuntime()
 const sharedKernelSandbox = await Sandbox.create(undefined, {
   isolation: 'sandbox',
@@ -126,6 +276,43 @@ const sharedKernelSandbox = await Sandbox.create(undefined, {
 })
 await sharedKernelSandbox.kill()
 assert.equal(sandboxIsolationRuntime.requests[0].isolation, 'sandbox')
+
+const snapshotRuntime = new FakeRuntime()
+const snapshotSandbox = await Sandbox.create(undefined, {
+  isolation: 'sandbox',
+  filesystemSnapshotId: 'ci-base-source',
+  runtime: snapshotRuntime,
+})
+const snapshot = await snapshotSandbox.createFilesystemSnapshot('ci-base-captured')
+assert.equal(snapshot.snapshotId, 'ci-base-captured')
+assert.equal(snapshot.sizeBytes, 4096)
+assert.equal(
+  await Sandbox.filesystemSnapshotSize(snapshot.snapshotId, {
+    runtime: snapshotRuntime,
+  }),
+  4096
+)
+assert.equal(
+  await Sandbox.deleteFilesystemSnapshot(snapshot.snapshotId, {
+    runtime: snapshotRuntime,
+  }),
+  true
+)
+await snapshotSandbox.kill()
+assert.deepEqual(
+  snapshotRuntime.requests.map((request) => request.operation),
+  [
+    'sandbox_create',
+    'sandbox_snapshot_create',
+    'filesystem_snapshot_size',
+    'filesystem_snapshot_delete',
+    'sandbox_kill',
+  ]
+)
+assert.equal(
+  snapshotRuntime.requests[0].filesystem_snapshot_id,
+  'ci-base-source'
+)
 
 const savedEnvironment = {
   E2B_API_KEY: process.env.E2B_API_KEY,
