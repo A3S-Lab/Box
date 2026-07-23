@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import unittest
 from collections.abc import Mapping
 from typing import Any
+from unittest.mock import patch
 
 import a3s_box
 from a3s_box import (
@@ -13,6 +15,7 @@ from a3s_box import (
     Sandbox,
 )
 from a3s_box.code_interpreter import Sandbox as CodeInterpreter
+from a3s_box.runtime import _resolve_binary
 
 
 class FakeRuntime:
@@ -133,12 +136,34 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(create["timeout_seconds"], 120)
         self.assertEqual(create["env"], {"MODE": "test"})
         self.assertEqual(create["labels"], {"suite": "sdk"})
+        self.assertEqual(create["isolation"], "microvm")
         self.assertEqual(command["argv"], ["/bin/sh", "-lc", "python -c 'print(6 * 7)'"])
         self.assertEqual(command["generation"], 1)
         self.assertEqual(write["data_base64"], base64.b64encode(b"hello").decode())
         self.assertEqual(read["path"], "/workspace/notes.txt")
         self.assertEqual(stat["operation"], "filesystem_stat")
         self.assertEqual(kill["operation"], "sandbox_kill")
+
+    def test_create_explicitly_selects_shared_kernel_sandbox_isolation(self) -> None:
+        runtime = FakeRuntime()
+
+        sandbox = Sandbox.create(isolation="sandbox", runtime=runtime)
+        sandbox.kill()
+
+        self.assertEqual(runtime.requests[0]["isolation"], "sandbox")
+
+    def test_local_binary_resolution_ignores_remote_credentials(self) -> None:
+        environment = {
+            "E2B_API_KEY": "must-not-be-read",
+            "A3S_BOX_API_KEY": "must-not-be-read",
+            "A3S_BOX_ENDPOINT": "https://must-not-be-read.invalid",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch("a3s_box.runtime.shutil.which", return_value="/usr/local/bin/a3s-box") as which,
+        ):
+            self.assertEqual(_resolve_binary(None), "/usr/local/bin/a3s-box")
+            which.assert_called_once_with("a3s-box")
 
     def test_connect_recovers_a_local_handle_without_credentials(self) -> None:
         runtime = FakeRuntime()

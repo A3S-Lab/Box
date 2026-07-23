@@ -6,11 +6,12 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
-- **Zero-configuration local Python and TypeScript SDKs.** Native `Sandbox`,
-  commands, files, lifecycle, and a small Python Code Interpreter facade now
-  call the installed `a3s-box` runtime through a versioned structured bridge.
-  Local use has no endpoint or API key, and the packages no longer depend on,
-  wrap, or re-export official E2B SDKs.
+- **Zero-configuration local Rust, Python, and TypeScript SDKs.** Native
+  `Sandbox`, commands, files, lifecycle, and a small Python Code Interpreter
+  facade now share the direct Rust runtime implementation through a versioned
+  structured bridge. Local use has no endpoint or API key, supports the
+  default MicroVM and explicit shared-kernel Sandbox isolation levels, and the
+  packages do not depend on, wrap, or re-export official E2B SDKs.
 - **Runnable native Windows WHPX path.** Windows packages now include the
   `libkrunfw.dll` companion kernel alongside `krun.dll`, and the native path is
   documented and validated with Alpine foreground/detached workloads, separated

@@ -6,6 +6,53 @@ By default, the SDK does not spawn the `a3s-box` CLI. `A3sBoxClient` calls
 `a3s-box-runtime` stores and socket clients directly, returning typed Rust data
 for management apps, automation, and tests.
 
+## E2B-Style Local Sandbox
+
+The high-level `Sandbox` API is local and zero-configuration. It does not read
+`E2B_API_KEY`, `A3S_BOX_API_KEY`, an endpoint, or a domain:
+
+```rust
+use a3s_box_sdk::Sandbox;
+
+# async fn example() -> Result<(), a3s_box_sdk::ClientError> {
+let sandbox = Sandbox::create("python:3.12-alpine").await?;
+let result = sandbox
+    .commands
+    .run("python -c 'print(6 * 7)'")
+    .await?;
+println!("{}", result.stdout);
+
+sandbox.files.write("/workspace/note.txt", "hello").await?;
+assert_eq!(
+    sandbox.files.read_text("/workspace/note.txt").await?,
+    "hello"
+);
+sandbox.kill().await?;
+# Ok(()) }
+```
+
+MicroVM isolation is the default. Shared-kernel Sandbox isolation is an
+explicit opt-in and requires a certified Linux host:
+
+```rust
+use a3s_box_sdk::{ExecutionIsolation, Sandbox, SandboxCreateOptions};
+
+# async fn example() -> Result<(), a3s_box_sdk::ClientError> {
+let sandbox = Sandbox::create_with_options(
+    SandboxCreateOptions::new("python:3.12-alpine")
+        .isolation(ExecutionIsolation::Sandbox)
+        .cpus(2)
+        .memory_mb(1024),
+)
+.await?;
+sandbox.kill().await?;
+# Ok(()) }
+```
+
+The facade also provides `connect`, `pause`, `resume`, `is_running`, command
+environment/working-directory/stdin options, and file metadata and mutation
+operations. `A3sBoxClient` remains available for lower-level management APIs.
+
 ## Runtime-Backed Client
 
 ```rust
@@ -128,6 +175,9 @@ embedding or tests without changing request semantics.
   volumes, snapshots, state files, and other local data.
 - Running boxes on Unix: exec, file transfer, heartbeat, main-process signal,
   deferred-main spawn, PTY client, and attestation report through runtime sockets.
+- E2B-style local use: zero-configuration `Sandbox`, `commands`, `files`,
+  lifecycle, explicit MicroVM/shared-kernel isolation, and typed client
+  injection for embedding and tests.
 
 The client reads the shared `boxes.json` state format through an SDK-local model
 so it does not depend on the CLI crate. Image, volume, network, snapshot, build,

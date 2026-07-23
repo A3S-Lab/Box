@@ -5,24 +5,23 @@
 //! the direct Rust SDK and never parses human-facing CLI output.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
-use a3s_box_core::config::ResourceConfig;
 use a3s_box_core::{
-    BoxConfig, CreateExecutionRequest, ExecRequest, ExecutionGeneration, ExecutionId,
-    ExecutionIsolation, ExecutionRecordPolicy, ExecutionState, FileOp, FileRequest,
-    FilesystemEntry, FilesystemEntryKind, FilesystemOp, FilesystemRequest, OperationId,
+    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionState, FilesystemEntry,
+    FilesystemEntryKind,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{A3sBoxClient, ClientError};
+use crate::{
+    A3sBoxClient, ClientError, CommandRunOptions, FilesystemOptions, Sandbox, SandboxCommand,
+    SandboxCreateOptions, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+};
 
 pub const BRIDGE_PROTOCOL_VERSION: u8 = 1;
-const DEFAULT_IMAGE: &str = "alpine:3.20";
-const DEFAULT_TIMEOUT_SECONDS: u64 = 3600;
-const KEEPALIVE_COMMAND: &[&str] = &["/bin/sh", "-c", "while :; do sleep 3600; done"];
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -213,74 +212,50 @@ async fn execute_request(
             memory_mb,
             isolation,
         } => {
-            let (request, operation) = create_request(
-                image,
-                timeout_seconds,
-                env,
-                labels,
-                name,
-                cpus,
-                memory_mb,
-                isolation,
-            )?;
-            let lease = client.run_box(request, &operation).await?;
-            Ok(sandbox_value(
-                &lease.execution_id,
-                lease.generation,
-                ExecutionState::Running,
-            ))
+            let sandbox = Sandbox::create_with_client(
+                client.clone(),
+                SandboxCreateOptions {
+                    image,
+                    timeout_seconds,
+                    envs: env,
+                    metadata: labels,
+                    name,
+                    cpus,
+                    memory_mb,
+                    isolation,
+                },
+            )
+            .await?;
+            Ok(sandbox_info_value(&sandbox))
         }
         BridgeRequest::SandboxInspect { sandbox_id } => {
-            let execution_id = execution_id(sandbox_id)?;
-            let status = client.inspect_execution(&execution_id).await?;
-            Ok(sandbox_value(
-                &status.execution_id,
-                status.generation,
-                status.state,
-            ))
+            let sandbox = Sandbox::connect_with_client(client.clone(), sandbox_id).await?;
+            Ok(sandbox_info_value(&sandbox))
         }
         BridgeRequest::SandboxKill {
             sandbox_id,
             generation,
         } => {
-            let execution_id = execution_id(sandbox_id)?;
-            let generation = parse_generation(generation)?;
-            client.kill_execution(&execution_id, generation).await?;
-            client.remove_execution(&execution_id, generation).await?;
-            Ok(sandbox_value(
-                &execution_id,
-                generation,
-                ExecutionState::Stopped,
-            ))
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            sandbox.kill().await?;
+            Ok(sandbox_info_value(&sandbox))
         }
         BridgeRequest::SandboxPause {
             sandbox_id,
             generation,
             keep_memory,
         } => {
-            let execution_id = execution_id(sandbox_id)?;
-            let lease = client
-                .pause_execution(&execution_id, parse_generation(generation)?, keep_memory)
-                .await?;
-            Ok(sandbox_value(
-                &lease.execution_id,
-                lease.generation,
-                ExecutionState::Paused,
-            ))
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            sandbox.pause(keep_memory).await?;
+            Ok(sandbox_info_value(&sandbox))
         }
         BridgeRequest::SandboxResume {
             sandbox_id,
             generation,
         } => {
-            let execution_id = execution_id(sandbox_id)?;
-            let lease = client
-                .resume_execution(&execution_id, parse_generation(generation)?)
-                .await?;
-            Ok(sandbox_value(
-                &lease.execution_id,
-                lease.generation,
-                ExecutionState::Running,
-            ))
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Paused)?;
+            sandbox.resume().await?;
+            Ok(sandbox_info_value(&sandbox))
         }
         BridgeRequest::CommandRun {
             sandbox_id,
@@ -292,9 +267,6 @@ async fn execute_request(
             user,
             stdin_base64,
         } => {
-            if argv.is_empty() {
-                return Err(invalid("command argv cannot be empty"));
-            }
             let stdin = stdin_base64
                 .map(|encoded| {
                     STANDARD
@@ -302,44 +274,26 @@ async fn execute_request(
                         .map_err(|error| invalid(format!("stdin_base64 is invalid: {error}")))
                 })
                 .transpose()?;
-            let request = ExecRequest {
-                request_id: Some(format!("sdk-command-{}", uuid::Uuid::new_v4())),
-                cmd: argv,
-                timeout_ns: timeout_ms.unwrap_or_default().saturating_mul(1_000_000),
-                env: env
-                    .into_iter()
-                    .map(|(key, value)| format!("{key}={value}"))
-                    .collect(),
-                working_dir: cwd,
-                rootfs: None,
-                stdin,
-                stdin_streaming: false,
-                user,
-                streaming: false,
-            };
-            #[cfg(unix)]
-            {
-                let output = client
-                    .execute_execution(
-                        &execution_id(sandbox_id)?,
-                        parse_generation(generation)?,
-                        request,
-                    )
-                    .await?;
-                Ok(json!({
-                    "stdout_base64": STANDARD.encode(output.stdout),
-                    "stderr_base64": STANDARD.encode(output.stderr),
-                    "exit_code": output.exit_code,
-                    "truncated": output.truncated,
-                }))
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (client, sandbox_id, generation, request);
-                Err(unavailable(
-                    "local command sessions are not available on this host",
-                ))
-            }
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let output = sandbox
+                .commands
+                .run_with_options(
+                    SandboxCommand::Argv(argv),
+                    CommandRunOptions {
+                        timeout: timeout_ms.map(Duration::from_millis),
+                        envs: env,
+                        cwd,
+                        user,
+                        stdin,
+                    },
+                )
+                .await?;
+            Ok(json!({
+                "stdout_base64": STANDARD.encode(output.stdout_bytes),
+                "stderr_base64": STANDARD.encode(output.stderr_bytes),
+                "exit_code": output.exit_code,
+                "truncated": output.truncated,
+            }))
         }
         BridgeRequest::FileWrite {
             sandbox_id,
@@ -348,19 +302,18 @@ async fn execute_request(
             data_base64,
             user,
         } => {
-            STANDARD
+            let data = STANDARD
                 .decode(&data_base64)
                 .map_err(|error| invalid(format!("data_base64 is invalid: {error}")))?;
-            transfer_file(
-                client,
-                sandbox_id,
-                generation,
-                path,
-                FileOp::Upload,
-                Some(data_base64),
-                user,
-            )
-            .await
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let result = sandbox
+                .files
+                .write_with_options(&path, data, FilesystemOptions { user })
+                .await?;
+            Ok(json!({
+                "path": result.path,
+                "size": result.size,
+            }))
         }
         BridgeRequest::FileRead {
             sandbox_id,
@@ -368,16 +321,16 @@ async fn execute_request(
             path,
             user,
         } => {
-            transfer_file(
-                client,
-                sandbox_id,
-                generation,
-                path,
-                FileOp::Download,
-                None,
-                user,
-            )
-            .await
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let data = sandbox
+                .files
+                .read_with_options(&path, FilesystemOptions { user })
+                .await?;
+            Ok(json!({
+                "path": path,
+                "data_base64": STANDARD.encode(&data),
+                "size": data.len(),
+            }))
         }
         BridgeRequest::FilesystemStat {
             sandbox_id,
@@ -385,19 +338,12 @@ async fn execute_request(
             path,
             user,
         } => {
-            filesystem(
-                client,
-                sandbox_id,
-                generation,
-                FilesystemRequest {
-                    op: FilesystemOp::Stat,
-                    path,
-                    destination: None,
-                    depth: 0,
-                    user,
-                },
-            )
-            .await
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let entry = sandbox
+                .files
+                .stat_with_options(path, FilesystemOptions { user })
+                .await?;
+            Ok(json!({ "entry": entry_value(&entry) }))
         }
         BridgeRequest::FilesystemList {
             sandbox_id,
@@ -406,19 +352,14 @@ async fn execute_request(
             depth,
             user,
         } => {
-            filesystem(
-                client,
-                sandbox_id,
-                generation,
-                FilesystemRequest {
-                    op: FilesystemOp::ListDir,
-                    path,
-                    destination: None,
-                    depth,
-                    user,
-                },
-            )
-            .await
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let entries = sandbox
+                .files
+                .list_with_options(path, depth, FilesystemOptions { user })
+                .await?;
+            Ok(json!({
+                "entries": entries.iter().map(entry_value).collect::<Vec<_>>(),
+            }))
         }
         BridgeRequest::FilesystemMakeDir {
             sandbox_id,
@@ -426,19 +367,12 @@ async fn execute_request(
             path,
             user,
         } => {
-            filesystem(
-                client,
-                sandbox_id,
-                generation,
-                FilesystemRequest {
-                    op: FilesystemOp::MakeDir,
-                    path,
-                    destination: None,
-                    depth: 0,
-                    user,
-                },
-            )
-            .await
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            sandbox
+                .files
+                .make_dir_with_options(path, FilesystemOptions { user })
+                .await?;
+            Ok(json!({ "ok": true }))
         }
         BridgeRequest::FilesystemMove {
             sandbox_id,
@@ -447,19 +381,12 @@ async fn execute_request(
             destination,
             user,
         } => {
-            filesystem(
-                client,
-                sandbox_id,
-                generation,
-                FilesystemRequest {
-                    op: FilesystemOp::Move,
-                    path,
-                    destination: Some(destination),
-                    depth: 0,
-                    user,
-                },
-            )
-            .await
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            sandbox
+                .files
+                .move_path_with_options(path, destination, FilesystemOptions { user })
+                .await?;
+            Ok(json!({ "ok": true }))
         }
         BridgeRequest::FilesystemRemove {
             sandbox_id,
@@ -467,183 +394,37 @@ async fn execute_request(
             path,
             user,
         } => {
-            filesystem(
-                client,
-                sandbox_id,
-                generation,
-                FilesystemRequest {
-                    op: FilesystemOp::Remove,
-                    path,
-                    destination: None,
-                    depth: 0,
-                    user,
-                },
-            )
-            .await
+            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            sandbox
+                .files
+                .remove_with_options(path, FilesystemOptions { user })
+                .await?;
+            Ok(json!({ "ok": true }))
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn create_request(
-    image: String,
-    timeout_seconds: u64,
-    env: BTreeMap<String, String>,
-    labels: BTreeMap<String, String>,
-    name: Option<String>,
-    cpus: Option<u32>,
-    memory_mb: Option<u32>,
-    isolation: ExecutionIsolation,
-) -> Result<(CreateExecutionRequest, OperationId), BridgeFailure> {
-    if image.trim().is_empty() {
-        return Err(invalid("image cannot be empty"));
-    }
-    if timeout_seconds == 0 {
-        return Err(invalid("timeout_seconds must be greater than zero"));
-    }
-    if cpus == Some(0) {
-        return Err(invalid("cpus must be greater than zero"));
-    }
-    if memory_mb == Some(0) {
-        return Err(invalid("memory_mb must be greater than zero"));
-    }
-
-    let identity = uuid::Uuid::new_v4();
-    let mut resources = ResourceConfig {
-        timeout: timeout_seconds,
-        ..ResourceConfig::default()
-    };
-    if let Some(cpus) = cpus {
-        resources.vcpus = cpus;
-    }
-    if let Some(memory_mb) = memory_mb {
-        resources.memory_mb = memory_mb;
-    }
-    let config = BoxConfig {
-        isolation,
-        image,
-        resources,
-        cmd: KEEPALIVE_COMMAND
-            .iter()
-            .map(|part| (*part).to_string())
-            .collect(),
-        extra_env: env.into_iter().collect(),
-        ..BoxConfig::default()
-    };
-    let operation = OperationId::new(format!("sdk-create-{identity}"))
-        .map_err(|error| invalid(error.to_string()))?;
-    Ok((
-        CreateExecutionRequest {
-            external_sandbox_id: format!("local-{identity}"),
-            config,
-            labels,
-            policy: ExecutionRecordPolicy {
-                name,
-                auto_remove: true,
-                ..ExecutionRecordPolicy::default()
-            },
-            rootfs_snapshot_id: None,
-        },
-        operation,
+fn bridge_sandbox(
+    client: &A3sBoxClient,
+    sandbox_id: String,
+    generation: u64,
+    state: ExecutionState,
+) -> Result<Sandbox, BridgeFailure> {
+    Ok(Sandbox::from_known_state(
+        client.clone(),
+        execution_id(sandbox_id)?,
+        parse_generation(generation)?,
+        state,
+        ExecutionIsolation::Microvm,
     ))
 }
 
-async fn transfer_file(
-    client: &A3sBoxClient,
-    sandbox_id: String,
-    raw_generation: u64,
-    path: String,
-    op: FileOp,
-    data: Option<String>,
-    user: Option<String>,
-) -> Result<Value, BridgeFailure> {
-    #[cfg(unix)]
-    {
-        let response = client
-            .transfer_execution_file(
-                &execution_id(sandbox_id)?,
-                parse_generation(raw_generation)?,
-                FileRequest {
-                    op,
-                    guest_path: path.clone(),
-                    data,
-                    user,
-                },
-            )
-            .await?;
-        if !response.success {
-            return Err(guest_failure(
-                response
-                    .error
-                    .unwrap_or_else(|| "file operation failed".to_string()),
-            ));
-        }
-        match op {
-            FileOp::Upload => Ok(json!({
-                "path": path,
-                "size": response.size,
-            })),
-            FileOp::Download => Ok(json!({
-                "path": path,
-                "data_base64": response.data.unwrap_or_default(),
-                "size": response.size,
-            })),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (client, sandbox_id, raw_generation, path, op, data, user);
-        Err(unavailable(
-            "local file sessions are not available on this host",
-        ))
-    }
-}
-
-async fn filesystem(
-    client: &A3sBoxClient,
-    sandbox_id: String,
-    raw_generation: u64,
-    request: FilesystemRequest,
-) -> Result<Value, BridgeFailure> {
-    #[cfg(unix)]
-    {
-        let response = client
-            .filesystem_execution(
-                &execution_id(sandbox_id)?,
-                parse_generation(raw_generation)?,
-                request,
-            )
-            .await?;
-        if !response.success {
-            return Err(guest_failure(
-                response
-                    .error
-                    .unwrap_or_else(|| "filesystem operation failed".to_string()),
-            ));
-        }
-        Ok(json!({
-            "entry": response.entry.as_ref().map(entry_value),
-            "entries": response.entries.iter().map(entry_value).collect::<Vec<_>>(),
-        }))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (client, sandbox_id, raw_generation, request);
-        Err(unavailable(
-            "local filesystem sessions are not available on this host",
-        ))
-    }
-}
-
-fn sandbox_value(
-    execution_id: &ExecutionId,
-    generation: ExecutionGeneration,
-    state: ExecutionState,
-) -> Value {
+fn sandbox_info_value(sandbox: &Sandbox) -> Value {
+    let info = sandbox.info();
     json!({
-        "sandbox_id": execution_id.as_str(),
-        "generation": generation.get(),
-        "state": state_name(state),
+        "sandbox_id": info.sandbox_id,
+        "generation": info.generation,
+        "state": state_name(info.state),
     })
 }
 
@@ -687,11 +468,11 @@ fn parse_generation(value: u64) -> Result<ExecutionGeneration, BridgeFailure> {
 }
 
 fn default_image() -> String {
-    DEFAULT_IMAGE.to_string()
+    DEFAULT_SANDBOX_IMAGE.to_string()
 }
 
 const fn default_timeout_seconds() -> u64 {
-    DEFAULT_TIMEOUT_SECONDS
+    DEFAULT_SANDBOX_TIMEOUT_SECONDS
 }
 
 const fn default_depth() -> u32 {
@@ -709,23 +490,6 @@ fn invalid(message: impl Into<String>) -> BridgeFailure {
     }
 }
 
-#[cfg(not(unix))]
-fn unavailable(message: impl Into<String>) -> BridgeFailure {
-    BridgeFailure {
-        code: "unavailable",
-        message: message.into(),
-    }
-}
-
-fn guest_failure(message: String) -> BridgeFailure {
-    let code = if message.to_ascii_lowercase().contains("not found") {
-        "not_found"
-    } else {
-        "runtime_error"
-    };
-    BridgeFailure { code, message }
-}
-
 impl From<ClientError> for BridgeFailure {
     fn from(error: ClientError) -> Self {
         let code = match &error {
@@ -740,6 +504,13 @@ impl From<ClientError> for BridgeFailure {
             }
             ClientError::Execution(a3s_box_core::ExecutionManagerError::Unavailable(_)) => {
                 "unavailable"
+            }
+            ClientError::Guest(message) => {
+                if message.to_ascii_lowercase().contains("not found") {
+                    "not_found"
+                } else {
+                    "runtime_error"
+                }
             }
             ClientError::State(_)
             | ClientError::Runtime(_)
@@ -771,23 +542,24 @@ mod tests {
         else {
             panic!("expected create request");
         };
-        assert_eq!(image, DEFAULT_IMAGE);
-        assert_eq!(timeout_seconds, DEFAULT_TIMEOUT_SECONDS);
+        assert_eq!(image, DEFAULT_SANDBOX_IMAGE);
+        assert_eq!(timeout_seconds, DEFAULT_SANDBOX_TIMEOUT_SECONDS);
         assert_eq!(isolation, ExecutionIsolation::Microvm);
     }
 
     #[test]
     fn create_request_maps_language_options_to_the_runtime_facade() {
-        let (request, _) = create_request(
-            "python:3.12-alpine".to_string(),
-            120,
-            BTreeMap::from([("MODE".to_string(), "test".to_string())]),
-            BTreeMap::from([("suite".to_string(), "sdk".to_string())]),
-            Some("local-sdk".to_string()),
-            Some(4),
-            Some(2048),
-            ExecutionIsolation::Sandbox,
-        )
+        let (request, _) = SandboxCreateOptions {
+            image: "python:3.12-alpine".to_string(),
+            timeout_seconds: 120,
+            envs: BTreeMap::from([("MODE".to_string(), "test".to_string())]),
+            metadata: BTreeMap::from([("suite".to_string(), "sdk".to_string())]),
+            name: Some("local-sdk".to_string()),
+            cpus: Some(4),
+            memory_mb: Some(2048),
+            isolation: ExecutionIsolation::Sandbox,
+        }
+        .into_runtime_request()
         .unwrap();
 
         assert_eq!(request.config.image, "python:3.12-alpine");

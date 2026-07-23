@@ -18,6 +18,8 @@ coverage/
 htmlcov/
 *.egg-info/
 /dist/
+/sdk/python/dist/
+/sdk/typescript/dist/
 /build/
 
 # Node.js
