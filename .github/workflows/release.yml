@@ -348,6 +348,7 @@ jobs:
               "${PACKAGED_LIBKRUNFW_ELFS[@]}"
             )
             PACKAGE_LIB_DIR="$(realpath "$DIR/lib")"
+            LIBKRUNFW_LOAD_NAME=""
             for library in "${PACKAGED_RUNTIME_LIBS[@]}"; do
               patchelf --set-rpath '$ORIGIN' "$library"
               assert_runpath "$library" '$ORIGIN'
@@ -356,13 +357,52 @@ jobs:
                 echo "$library has missing or unpackaged SONAME '$SONAME'" >&2
                 exit 1
               fi
+              case "$(basename "$library")" in
+                libkrunfw.so*)
+                  if [ -n "$LIBKRUNFW_LOAD_NAME" ] &&
+                     [ "$LIBKRUNFW_LOAD_NAME" != "$SONAME" ]; then
+                    echo "packaged libkrunfw objects have conflicting SONAMEs" >&2
+                    exit 1
+                  fi
+                  LIBKRUNFW_LOAD_NAME="$SONAME"
+                  ;;
+              esac
             done
+
+            # libkrunfw is loaded by libkrun with libloading instead of a
+            # DT_NEEDED edge. Verify that libkrun names the packaged SONAME.
+            if [ -z "$LIBKRUNFW_LOAD_NAME" ]; then
+              echo "could not determine the packaged libkrunfw SONAME" >&2
+              exit 1
+            fi
+            SAW_LIBKRUNFW_LOAD_NAME=false
+            for library in "${PACKAGED_LIBKRUN_ELFS[@]}"; do
+              if grep -aF -- "$LIBKRUNFW_LOAD_NAME" "$library" >/dev/null; then
+                SAW_LIBKRUNFW_LOAD_NAME=true
+                break
+              fi
+            done
+            if [ "$SAW_LIBKRUNFW_LOAD_NAME" != true ]; then
+              echo "libkrun does not name packaged runtime $LIBKRUNFW_LOAD_NAME" >&2
+              exit 1
+            fi
+
+            SAW_HOST_LIBKRUN_NEEDED=false
+            for object in "${HOST_BINARIES[@]}"; do
+              while IFS= read -r needed; do
+                case "$needed" in
+                  libkrun.so*) SAW_HOST_LIBKRUN_NEEDED=true ;;
+                esac
+              done < <(patchelf --print-needed "$object")
+            done
+            if [ "$SAW_HOST_LIBKRUN_NEEDED" != true ]; then
+              echo "host ELF binaries do not contain a libkrun DT_NEEDED edge" >&2
+              exit 1
+            fi
 
             # Every packaged-library edge in the ELF dependency graph must
             # name an object shipped in DIR/lib. ldd must resolve those edges
             # back into that directory, never to an ambient runner library.
-            SAW_LIBKRUN_NEEDED=false
-            SAW_LIBKRUNFW_NEEDED=false
             ELF_OBJECTS=("${HOST_BINARIES[@]}" "${PACKAGED_RUNTIME_LIBS[@]}")
             for object in "${ELF_OBJECTS[@]}"; do
               LDD_OUTPUT="$(LD_LIBRARY_PATH= ldd "$object")"
@@ -374,8 +414,7 @@ jobs:
               NEEDED_OUTPUT="$(patchelf --print-needed "$object")"
               while IFS= read -r needed; do
                 case "$needed" in
-                  libkrun.so*) SAW_LIBKRUN_NEEDED=true ;;
-                  libkrunfw.so*) SAW_LIBKRUNFW_NEEDED=true ;;
+                  libkrun.so* | libkrunfw.so*) ;;
                   *) continue ;;
                 esac
                 if [ ! -e "$DIR/lib/$needed" ]; then
@@ -400,11 +439,6 @@ jobs:
                 esac
               done <<< "$NEEDED_OUTPUT"
             done
-            if [ "$SAW_LIBKRUN_NEEDED" != true ] ||
-               [ "$SAW_LIBKRUNFW_NEEDED" != true ]; then
-              echo "host ELF closure does not contain both libkrun and libkrunfw DT_NEEDED edges" >&2
-              exit 1
-            fi
             if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
               SHIM_PROGRAM_HEADERS="$(
                 readelf -l "$DIR/containerd-shim-a3s-box-v2"
