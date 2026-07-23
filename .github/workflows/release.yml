@@ -715,45 +715,85 @@ jobs:
       - name: Publish crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        # NOTE: crates.io is NOT the primary distribution channel — the GitHub
-        # Release tarballs + Homebrew are. This step is best-effort but
-        # MUST NOT silently report success on a real failure (it used to:
-        # `cargo publish || echo "Skipped"` masked 403s / version-requirement
-        # errors as "may already be published"). Now an already-published
-        # version is skipped truthfully and a genuine failure is a ::warning::.
+        # The GitHub Release tarballs + Homebrew are the primary distribution
+        # channel, but crates.io publication remains strict and idempotent.
         run: |
+          set -euo pipefail
           cd src
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Publishing version $VERSION (in dependency order)"
-          FAILED=""
-          libkrun_code=$(curl -s -o /dev/null -w '%{http_code}' \
-            "https://crates.io/api/v1/crates/a3s-libkrun-sys/$VERSION")
-          if [ "$libkrun_code" != "200" ]; then
-            echo "::error title=missing a3s-libkrun-sys release::Publish and verify a3s-libkrun-sys@$VERSION with publish-libkrun-sys.yml before running the general release."
-            exit 1
-          fi
+          CRATES_IO_USER_AGENT="A3S-Lab-Box-release-publisher/$VERSION (https://github.com/A3S-Lab/Box)"
+
+          crate_status() {
+            local crate="$1"
+            curl --retry 5 --retry-all-errors --silent --show-error \
+              --location --user-agent "$CRATES_IO_USER_AGENT" \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/$crate/$VERSION"
+          }
+
+          wait_for_crate() {
+            local crate="$1"
+            local attempt status
+            for attempt in $(seq 1 18); do
+              status="$(crate_status "$crate")"
+              if [ "$status" = "200" ]; then
+                echo "Verified $crate@$VERSION on crates.io"
+                return 0
+              fi
+              if [ "$status" != "404" ]; then
+                echo "::error::crates.io returned HTTP $status while verifying $crate@$VERSION"
+                return 1
+              fi
+              if [ "$attempt" -lt 18 ]; then
+                sleep 10
+              fi
+            done
+            echo "::error::$crate@$VERSION did not become visible on crates.io"
+            return 1
+          }
+
+          libkrun_code="$(crate_status a3s-libkrun-sys)"
+          case "$libkrun_code" in
+            200) ;;
+            404)
+              echo "::error title=missing a3s-libkrun-sys release::Publish and verify a3s-libkrun-sys@$VERSION with publish-libkrun-sys.yml before running the general release."
+              exit 1
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $libkrun_code while checking a3s-libkrun-sys@$VERSION"
+              exit 1
+              ;;
+          esac
+
           # Order matters: a dependent is published AFTER its internal deps so
           # the index has them. libkrun-sys is deliberately excluded: its
           # dedicated workflow performs native clean-package, size, and
           # corresponding-source gates that this stub-mode job cannot bypass.
           for crate in a3s-box-core a3s-box-netproxy a3s-box-runtime a3s-box-sdk; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' "https://crates.io/api/v1/crates/$crate/$VERSION")
-            if [ "$code" = "200" ]; then
-              echo "✓ $crate@$VERSION already on crates.io — skipping"
-              continue
-            fi
-            echo "Publishing $crate@$VERSION..."
-            if cargo publish --locked -p "$crate" --allow-dirty; then
-              echo "✓ published $crate@$VERSION"
-              sleep 30   # let the sparse index update before dependents publish
-            else
-              echo "::warning title=crates.io publish failed::$crate@$VERSION failed (token/auth or version requirement). GitHub Release + Homebrew are unaffected."
-              FAILED="$FAILED $crate"
-            fi
+            code="$(crate_status "$crate")"
+            case "$code" in
+              200)
+                echo "$crate@$VERSION already exists; skipping upload"
+                ;;
+              404)
+                echo "Publishing $crate@$VERSION..."
+                if ! cargo publish --locked -p "$crate" --allow-dirty; then
+                  code="$(crate_status "$crate")"
+                  if [ "$code" != "200" ]; then
+                    echo "::error::$crate@$VERSION publication failed"
+                    exit 1
+                  fi
+                  echo "$crate@$VERSION became visible after a concurrent publication"
+                fi
+                ;;
+              *)
+                echo "::error::crates.io returned HTTP $code while checking $crate@$VERSION"
+                exit 1
+                ;;
+            esac
+            wait_for_crate "$crate"
           done
-          if [ -n "$FAILED" ]; then
-            echo "::warning::crates.io publish incomplete for:$FAILED — does NOT block the release; rotate CARGO_REGISTRY_TOKEN / fix version requirements to resolve."
-          fi
 
   # ── Update Homebrew Formula ────────────────────────────────────
   publish-homebrew:

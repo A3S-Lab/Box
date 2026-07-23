@@ -1,0 +1,142 @@
+name: Publish runtime dependency
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact a3s-runtime version without a v prefix
+        required: true
+        type: string
+      release_ref:
+        description: Exact 40-character a3s-runtime commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-a3s-runtime-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_REF: ${{ inputs.release_ref }}
+  RELEASE_VERSION: ${{ inputs.version }}
+
+jobs:
+  publish:
+    name: Publish pinned a3s-runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a stable SemVer version, got '$RELEASE_VERSION'"
+            exit 1
+          fi
+          if [[ ! "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Expected an exact 40-character commit SHA"
+            exit 1
+          fi
+
+      - name: Check out A3S Box
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          path: box
+
+      - name: Check out exact a3s-runtime commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: A3S-Lab/Runtime
+          ref: ${{ env.RELEASE_REF }}
+          path: runtime
+
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: "1.85.0"
+          components: rustfmt
+
+      - name: Verify pinned release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t PINNED < <(
+            python3 - <<'PY'
+          import tomllib
+
+          with open("box/src/Cargo.toml", "rb") as manifest:
+              dependency = tomllib.load(manifest)["workspace"]["dependencies"]["a3s-runtime"]
+          print(dependency["version"])
+          print(dependency["rev"])
+          PY
+          )
+          if [ "${PINNED[0]:-}" != "$RELEASE_VERSION" ] ||
+             [ "${PINNED[1]:-}" != "$RELEASE_REF" ]; then
+            echo "::error::Requested release does not match the A3S Box dependency pin"
+            exit 1
+          fi
+          if [ "$(git -C runtime rev-parse HEAD)" != "$RELEASE_REF" ]; then
+            echo "::error::Runtime checkout does not match the requested release commit"
+            exit 1
+          fi
+          PACKAGE_VERSION="$(
+            cargo metadata --locked --no-deps --format-version 1 \
+              --manifest-path runtime/Cargo.toml |
+              jq -r '.packages[] | select(.name == "a3s-runtime") | .version'
+          )"
+          if [ "$PACKAGE_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "::error::Cargo version $PACKAGE_VERSION does not match $RELEASE_VERSION"
+            exit 1
+          fi
+          cargo fmt --all --check --manifest-path runtime/Cargo.toml
+          cargo test --locked --all-targets --manifest-path runtime/Cargo.toml
+          cargo publish --locked --dry-run --manifest-path runtime/Cargo.toml
+
+      - name: Publish and verify crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          CRATE_URL="https://crates.io/api/v1/crates/a3s-runtime/$RELEASE_VERSION"
+          USER_AGENT="A3S-Lab-Box-runtime-publisher/$RELEASE_VERSION (https://github.com/A3S-Lab/Box)"
+
+          crate_status() {
+            curl --retry 5 --retry-all-errors --silent --show-error \
+              --location --user-agent "$USER_AGENT" \
+              --output /dev/null --write-out '%{http_code}' "$CRATE_URL"
+          }
+
+          STATUS="$(crate_status)"
+          case "$STATUS" in
+            200)
+              echo "a3s-runtime@$RELEASE_VERSION already exists; skipping upload"
+              ;;
+            404)
+              cargo publish --locked --manifest-path runtime/Cargo.toml
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $STATUS before publication"
+              exit 1
+              ;;
+          esac
+
+          for attempt in $(seq 1 18); do
+            STATUS="$(crate_status)"
+            if [ "$STATUS" = "200" ]; then
+              echo "Verified a3s-runtime@$RELEASE_VERSION on crates.io"
+              exit 0
+            fi
+            if [ "$STATUS" != "404" ]; then
+              echo "::error::crates.io returned HTTP $STATUS during verification"
+              exit 1
+            fi
+            if [ "$attempt" -lt 18 ]; then
+              sleep 10
+            fi
+          done
+          echo "::error::a3s-runtime@$RELEASE_VERSION did not become visible on crates.io"
+          exit 1
