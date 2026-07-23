@@ -38,8 +38,10 @@ links = "a3s_krun"
 [build-dependencies]
 pkg-config = "0.3"
 num_cpus = "1.16"
+sha2.workspace = true
 
 [dev-dependencies]
+sha2.workspace = true
 tempfile = "3.10"
 
 [dependencies]

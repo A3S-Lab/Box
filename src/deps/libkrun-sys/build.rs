@@ -628,36 +628,7 @@ fn download_file(url: &str, dest: &Path) -> io::Result<()> {
 
 /// Verifies SHA256 checksum of a file.
 fn verify_sha256(file: &Path, expected: &str) -> io::Result<()> {
-    let actual = if cfg!(target_os = "windows") {
-        // PowerShell is available on all modern Windows
-        let literal_path = file.display().to_string().replace('\'', "''");
-        let script = format!(
-            "(Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash.ToLower()",
-            literal_path
-        );
-        let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", &script])
-            .output()?;
-        if !output.status.success() {
-            return Err(io::Error::other("PowerShell Get-FileHash failed"));
-        }
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    } else {
-        let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "linux") {
-            ("sha256sum", vec![file.to_str().unwrap()])
-        } else {
-            ("shasum", vec!["-a", "256", file.to_str().unwrap()])
-        };
-        let output = Command::new(cmd).args(&args).output()?;
-        if !output.status.success() {
-            return Err(io::Error::other(format!("{} failed", cmd)));
-        }
-        String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string()
-    };
+    let actual = build_support::sha256_file(file)?;
 
     if actual != expected {
         return Err(io::Error::new(
