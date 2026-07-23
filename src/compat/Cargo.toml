@@ -9,8 +9,8 @@ description = "Protocol compatibility service and contract fixtures for A3S Box"
 
 [dependencies]
 a3s-acl = { workspace = true }
-a3s-box-core = { version = "3.0", path = "../core" }
-a3s-box-runtime = { version = "3.0", path = "../runtime", default-features = false, features = ["vm"] }
+a3s-box-core = { version = "3.1", path = "../core" }
+a3s-box-runtime = { version = "3.1", path = "../runtime", default-features = false, features = ["vm"] }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

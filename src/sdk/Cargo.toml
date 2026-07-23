@@ -12,8 +12,8 @@ default = []
 pipeline-cli = []
 
 [dependencies]
-a3s-box-core = { version = "3.0", path = "../core" }
-a3s-box-runtime = { version = "3.0", path = "../runtime" }
+a3s-box-core = { version = "3.1", path = "../core" }
+a3s-box-runtime = { version = "3.1", path = "../runtime" }
 base64 = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
