@@ -198,6 +198,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential musl-tools protobuf-compiler
           rustup target add x86_64-unknown-linux-musl
+          echo "void krun_stub(void) {}" > /tmp/krun_stub.c
+          gcc -shared -o /tmp/libkrun.so /tmp/krun_stub.c
+          sudo cp /tmp/libkrun.so /usr/lib/
+          sudo ldconfig
       - name: Build local SDK runtime artifacts
         run: |
           cd src
