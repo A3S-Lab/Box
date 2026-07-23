@@ -20,8 +20,9 @@ use a3s_box_core::volume::VolumeConfig;
 use a3s_box_core::{
     CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionGeneration, ExecutionId,
     ExecutionLease, ExecutionManager, ExecutionReservation, ExecutionSessionManager,
-    ExecutionStatus, FileRequest, FileResponse, FilesystemRequest, FilesystemResponse, KillOutcome,
-    OperationId, ReconcileOutcome, RestartExecutionOptions, StoredImage,
+    ExecutionSnapshot, ExecutionSnapshotId, ExecutionStatus, FileRequest, FileResponse,
+    FilesystemRequest, FilesystemResponse, KillOutcome, OperationId, ReconcileOutcome,
+    RestartExecutionOptions, StoredImage,
 };
 use a3s_box_runtime::oci::BuildResult as RuntimeBuildResult;
 use a3s_box_runtime::{
@@ -43,6 +44,7 @@ use crate::box_state::{BoxRecord, StateFile};
 include!("types.rs");
 include!("summaries.rs");
 include!("core.rs");
+include!("builders.rs");
 include!("lifecycle.rs");
 include!("support.rs");
 

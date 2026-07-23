@@ -7,13 +7,24 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 from .exceptions import A3SBoxError
-from .models import CommandResult, EntryInfo, WriteInfo
+from .models import (
+    CommandResult,
+    EntryInfo,
+    FilesystemSnapshotInfo,
+    PortMapping,
+    SandboxNetwork,
+    Script,
+    TmpfsMount,
+    VolumeMount,
+    WriteInfo,
+)
 from .runtime import (
     A3SAsyncLocalRuntime,
     A3SLocalRuntime,
     AsyncLocalRuntime,
     LocalRuntime,
 )
+from .script import AsyncScriptBuilder, ScriptBuilder
 
 DEFAULT_IMAGE = "alpine:3.20"
 
@@ -51,6 +62,20 @@ class Sandbox:
         cpus: int | None = None,
         memory_mb: int | None = None,
         isolation: Literal["microvm", "sandbox"] = "microvm",
+        filesystem_snapshot_id: str | None = None,
+        workspace: str | None = None,
+        workdir: str | None = None,
+        user: str | None = None,
+        hostname: str | None = None,
+        mounts: Sequence[VolumeMount] | None = None,
+        tmpfs: Sequence[TmpfsMount] | None = None,
+        network: SandboxNetwork | None = None,
+        ports: Sequence[PortMapping] | None = None,
+        dns: Sequence[str] | None = None,
+        host_aliases: Mapping[str, str] | None = None,
+        read_only: bool = False,
+        persistent: bool = False,
+        auto_remove: bool = True,
         runtime: LocalRuntime | None = None,
     ) -> Sandbox:
         local_runtime = runtime or A3SLocalRuntime()
@@ -64,6 +89,20 @@ class Sandbox:
                 cpus,
                 memory_mb,
                 isolation,
+                filesystem_snapshot_id,
+                workspace,
+                workdir,
+                user,
+                hostname,
+                mounts,
+                tmpfs,
+                network,
+                ports,
+                dns,
+                host_aliases,
+                read_only,
+                persistent,
+                auto_remove,
             )
         )
         return cls._from_result(result, local_runtime)
@@ -128,6 +167,53 @@ class Sandbox:
         self._update_lifecycle(result, fallback_state=self.state)
         return self.state == "running"
 
+    def create_filesystem_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> FilesystemSnapshotInfo:
+        result = self._runtime.request(
+            {
+                **self._lifecycle_request("sandbox_snapshot_create"),
+                "snapshot_id": snapshot_id,
+            }
+        )
+        self._update_lifecycle(result, fallback_state=self.state)
+        return _snapshot_info(result)
+
+    def script(self, source: str | bytes | Script) -> ScriptBuilder:
+        return self.commands.script(source)
+
+    @classmethod
+    def filesystem_snapshot_size(
+        cls,
+        snapshot_id: str,
+        *,
+        runtime: LocalRuntime | None = None,
+    ) -> int | None:
+        result = (runtime or A3SLocalRuntime()).request(
+            {
+                "operation": "filesystem_snapshot_size",
+                "snapshot_id": snapshot_id,
+            }
+        )
+        size = result.get("size_bytes")
+        return None if size is None else int(size)
+
+    @classmethod
+    def delete_filesystem_snapshot(
+        cls,
+        snapshot_id: str,
+        *,
+        runtime: LocalRuntime | None = None,
+    ) -> bool:
+        result = (runtime or A3SLocalRuntime()).request(
+            {
+                "operation": "filesystem_snapshot_delete",
+                "snapshot_id": snapshot_id,
+            }
+        )
+        return bool(result["deleted"])
+
     def _lifecycle_request(self, operation: str) -> dict[str, object]:
         return {
             "operation": operation,
@@ -178,6 +264,29 @@ class Commands:
             )
         )
         return _command_result(result)
+
+    def script(self, source: str | bytes | Script) -> ScriptBuilder:
+        return ScriptBuilder(self, source)
+
+    def run_script(
+        self,
+        source: str | bytes | Script,
+        *,
+        timeout: float | None = None,
+        envs: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        user: str | None = None,
+    ) -> CommandResult:
+        script = self.script(source)
+        if timeout is not None:
+            script.timeout(timeout)
+        for key, value in (envs or {}).items():
+            script.env(key, value)
+        if cwd is not None:
+            script.cwd(cwd)
+        if user is not None:
+            script.user(user)
+        return script.run()
 
 
 class Filesystem:
@@ -325,6 +434,20 @@ class AsyncSandbox:
         cpus: int | None = None,
         memory_mb: int | None = None,
         isolation: Literal["microvm", "sandbox"] = "microvm",
+        filesystem_snapshot_id: str | None = None,
+        workspace: str | None = None,
+        workdir: str | None = None,
+        user: str | None = None,
+        hostname: str | None = None,
+        mounts: Sequence[VolumeMount] | None = None,
+        tmpfs: Sequence[TmpfsMount] | None = None,
+        network: SandboxNetwork | None = None,
+        ports: Sequence[PortMapping] | None = None,
+        dns: Sequence[str] | None = None,
+        host_aliases: Mapping[str, str] | None = None,
+        read_only: bool = False,
+        persistent: bool = False,
+        auto_remove: bool = True,
         runtime: AsyncLocalRuntime | None = None,
     ) -> AsyncSandbox:
         local_runtime = runtime or A3SAsyncLocalRuntime()
@@ -338,6 +461,20 @@ class AsyncSandbox:
                 cpus,
                 memory_mb,
                 isolation,
+                filesystem_snapshot_id,
+                workspace,
+                workdir,
+                user,
+                hostname,
+                mounts,
+                tmpfs,
+                network,
+                ports,
+                dns,
+                host_aliases,
+                read_only,
+                persistent,
+                auto_remove,
             )
         )
         return cls._from_result(result, local_runtime)
@@ -404,6 +541,53 @@ class AsyncSandbox:
         self._update_lifecycle(result, fallback_state=self.state)
         return self.state == "running"
 
+    async def create_filesystem_snapshot(
+        self,
+        snapshot_id: str,
+    ) -> FilesystemSnapshotInfo:
+        result = await self._runtime.request(
+            {
+                **self._lifecycle_request("sandbox_snapshot_create"),
+                "snapshot_id": snapshot_id,
+            }
+        )
+        self._update_lifecycle(result, fallback_state=self.state)
+        return _snapshot_info(result)
+
+    def script(self, source: str | bytes | Script) -> AsyncScriptBuilder:
+        return self.commands.script(source)
+
+    @classmethod
+    async def filesystem_snapshot_size(
+        cls,
+        snapshot_id: str,
+        *,
+        runtime: AsyncLocalRuntime | None = None,
+    ) -> int | None:
+        result = await (runtime or A3SAsyncLocalRuntime()).request(
+            {
+                "operation": "filesystem_snapshot_size",
+                "snapshot_id": snapshot_id,
+            }
+        )
+        size = result.get("size_bytes")
+        return None if size is None else int(size)
+
+    @classmethod
+    async def delete_filesystem_snapshot(
+        cls,
+        snapshot_id: str,
+        *,
+        runtime: AsyncLocalRuntime | None = None,
+    ) -> bool:
+        result = await (runtime or A3SAsyncLocalRuntime()).request(
+            {
+                "operation": "filesystem_snapshot_delete",
+                "snapshot_id": snapshot_id,
+            }
+        )
+        return bool(result["deleted"])
+
     def _lifecycle_request(self, operation: str) -> dict[str, object]:
         return {
             "operation": operation,
@@ -454,6 +638,29 @@ class AsyncCommands:
             )
         )
         return _command_result(result)
+
+    def script(self, source: str | bytes | Script) -> AsyncScriptBuilder:
+        return AsyncScriptBuilder(self, source)
+
+    async def run_script(
+        self,
+        source: str | bytes | Script,
+        *,
+        timeout: float | None = None,
+        envs: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+        user: str | None = None,
+    ) -> CommandResult:
+        script = self.script(source)
+        if timeout is not None:
+            script.timeout(timeout)
+        for key, value in (envs or {}).items():
+            script.env(key, value)
+        if cwd is not None:
+            script.cwd(cwd)
+        if user is not None:
+            script.user(user)
+        return await script.run()
 
 
 class AsyncFilesystem:
@@ -582,6 +789,20 @@ def _create_request(
     cpus: int | None,
     memory_mb: int | None,
     isolation: str,
+    filesystem_snapshot_id: str | None,
+    workspace: str | None,
+    workdir: str | None,
+    user: str | None,
+    hostname: str | None,
+    mounts: Sequence[VolumeMount] | None,
+    tmpfs: Sequence[TmpfsMount] | None,
+    network: SandboxNetwork | None,
+    ports: Sequence[PortMapping] | None,
+    dns: Sequence[str] | None,
+    host_aliases: Mapping[str, str] | None,
+    read_only: bool,
+    persistent: bool,
+    auto_remove: bool,
 ) -> dict[str, object]:
     if timeout <= 0:
         raise ValueError("timeout must be greater than zero")
@@ -592,6 +813,15 @@ def _create_request(
         "env": dict(envs or {}),
         "labels": dict(metadata or {}),
         "isolation": isolation,
+        "mounts": [mount.bridge_value() for mount in mounts or ()],
+        "tmpfs": [mount.bridge_value() for mount in tmpfs or ()],
+        "network": (network or SandboxNetwork.tsi()).bridge_value(),
+        "ports": [port.bridge_value() for port in ports or ()],
+        "dns": list(dns or ()),
+        "host_aliases": dict(host_aliases or {}),
+        "read_only": read_only,
+        "persistent": persistent,
+        "auto_remove": auto_remove,
     }
     if name is not None:
         request["name"] = name
@@ -599,7 +829,26 @@ def _create_request(
         request["cpus"] = cpus
     if memory_mb is not None:
         request["memory_mb"] = memory_mb
+    if filesystem_snapshot_id is not None:
+        request["filesystem_snapshot_id"] = filesystem_snapshot_id
+    if workspace is not None:
+        request["workspace"] = workspace
+    if workdir is not None:
+        request["workdir"] = workdir
+    if user is not None:
+        request["user"] = user
+    if hostname is not None:
+        request["hostname"] = hostname
     return request
+
+
+def _snapshot_info(result: Mapping[str, Any]) -> FilesystemSnapshotInfo:
+    return FilesystemSnapshotInfo(
+        snapshot_id=str(result["snapshot_id"]),
+        size_bytes=int(result["size_bytes"]),
+        state=str(result["state"]),
+        generation=int(result["generation"]),
+    )
 
 
 def _command_request(

@@ -16,16 +16,17 @@ pub mod pipeline;
 
 pub use client::{
     A3sBoxClient, A3sBoxPaths, BoxLogLine, BoxStatsSummary, BoxSummary, BuildImage,
-    BuildImageSummary, ClientError, CreateNetwork, CreateSnapshot, CreateVolume,
+    BuildImageSummary, ClientError, CreateNetwork, CreateSnapshot, CreateVolume, ImageBuilder,
     ImageHealthCheckSummary, ImageHistoryEntry, ImageInspectSummary, ImageSummary,
-    ListBoxesOptions, NetworkEndpointSummary, NetworkSummary, PullImage, PushImage,
+    ListBoxesOptions, NetworkBuilder, NetworkEndpointSummary, NetworkSummary, PullImage, PushImage,
     PushImageSummary, ReadBoxLogsOptions, RegistryCredentials, RemoveBox, RemoveBoxSummary,
     RestoreSnapshot, Result, RuntimeDiagnostics, RuntimeDiskUsage, RuntimeVirtualizationSummary,
-    SnapshotSummary, StopBox, StopBoxSummary, StopOutcome, TagImage, VolumeSummary,
+    SnapshotSummary, StopBox, StopBoxSummary, StopOutcome, TagImage, VolumeBuilder, VolumeSummary,
 };
 pub use sandbox::{
     CommandResult, CommandRunOptions, Commands, Filesystem, FilesystemOptions, Sandbox,
-    SandboxCommand, SandboxCreateOptions, SandboxInfo, WriteInfo, DEFAULT_SANDBOX_IMAGE,
+    SandboxBuilder, SandboxCommand, SandboxCreateOptions, SandboxInfo, SandboxNetwork,
+    ScriptBuilder, TmpfsMount, VolumeMount, VolumeSource, WriteInfo, DEFAULT_SANDBOX_IMAGE,
     DEFAULT_SANDBOX_TIMEOUT_SECONDS,
 };
 
@@ -33,9 +34,10 @@ pub use a3s_box_core::{
     BoxConfig, CreateExecutionRequest, ExecOutput, ExecRequest, ExecutionGeneration,
     ExecutionHealthCheck, ExecutionId, ExecutionIsolation, ExecutionLease, ExecutionManager,
     ExecutionManagerError, ExecutionRecordPolicy, ExecutionReservation, ExecutionRestartPolicy,
-    ExecutionState, ExecutionStatus, FileOp, FileRequest, FileResponse, FilesystemEntry,
-    FilesystemEntryKind, FilesystemOp, FilesystemRequest, FilesystemResponse, KillOutcome,
-    OperationId, Platform, ReconcileOutcome, RestartExecutionOptions,
+    ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, ExecutionStatus, FileOp, FileRequest,
+    FileResponse, FilesystemEntry, FilesystemEntryKind, FilesystemOp, FilesystemRequest,
+    FilesystemResponse, KillOutcome, OperationId, Platform, PortMapping, PortProtocol,
+    ReconcileOutcome, RestartExecutionOptions,
 };
 pub use a3s_box_runtime::{RegistryAuth, RegistryProtocol, SignaturePolicy};
 

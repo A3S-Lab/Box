@@ -3,19 +3,27 @@
 //! This module never reads endpoint or API-key environment variables. The
 //! default constructor opens the installed local runtime state directly.
 
+mod builder;
 mod commands;
 mod filesystem;
 mod options;
+mod script;
 
 use std::sync::{Arc, RwLock};
 
 use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionState, ExecutionStatus,
+    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionSnapshot, ExecutionSnapshotId,
+    ExecutionState, ExecutionStatus,
 };
 
+pub use builder::SandboxBuilder;
 pub use commands::{CommandResult, CommandRunOptions, Commands, SandboxCommand};
 pub use filesystem::{Filesystem, FilesystemOptions, WriteInfo};
-pub use options::{SandboxCreateOptions, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS};
+pub use options::{
+    SandboxCreateOptions, SandboxNetwork, TmpfsMount, VolumeMount, VolumeSource,
+    DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+};
+pub use script::ScriptBuilder;
 
 use crate::{A3sBoxClient, ClientError, Result};
 
@@ -119,7 +127,7 @@ impl Sandbox {
         options: SandboxCreateOptions,
     ) -> Result<Self> {
         let isolation = options.isolation;
-        let (request, operation) = options.into_runtime_request()?;
+        let (request, operation) = options.into_runtime_request(&client)?;
         let lease = client.run_box(request, &operation).await?;
         Ok(Self::from_known_state(
             client,
@@ -200,6 +208,39 @@ impl Sandbox {
 
     pub fn isolation(&self) -> ExecutionIsolation {
         self.inner.isolation
+    }
+
+    /// Build an explicitly interpreted script execution.
+    pub fn script(&self, source: impl AsRef<[u8]>) -> ScriptBuilder {
+        self.commands.script(source)
+    }
+
+    /// Capture this running or paused Sandbox filesystem without changing its
+    /// final lifecycle state.
+    pub async fn create_filesystem_snapshot(
+        &self,
+        snapshot_id: ExecutionSnapshotId,
+    ) -> Result<ExecutionSnapshot> {
+        let state = self.inner.state();
+        if state.closed
+            || !matches!(
+                state.state,
+                ExecutionState::Running | ExecutionState::Paused
+            )
+        {
+            return Err(ClientError::Validation(format!(
+                "sandbox {} cannot be snapshotted while it is {:?}",
+                self.id(),
+                state.state
+            )));
+        }
+        let snapshot = self
+            .inner
+            .client
+            .create_execution_snapshot(&self.inner.execution_id, state.generation, &snapshot_id)
+            .await?;
+        self.inner.update(snapshot.lease.generation, snapshot.state);
+        Ok(snapshot)
     }
 
     pub async fn pause(&self, keep_memory: bool) -> Result<()> {

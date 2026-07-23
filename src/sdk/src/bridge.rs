@@ -5,11 +5,12 @@
 //! the direct Rust SDK and never parses human-facing CLI output.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use a3s_box_core::{
-    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionState, FilesystemEntry,
-    FilesystemEntryKind,
+    ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionSnapshot, ExecutionSnapshotId,
+    ExecutionState, FilesystemEntry, FilesystemEntryKind, Platform, PortMapping,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -17,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
-    A3sBoxClient, ClientError, CommandRunOptions, FilesystemOptions, Sandbox, SandboxCommand,
-    SandboxCreateOptions, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    A3sBoxClient, BuildImage, ClientError, CommandRunOptions, CreateNetwork, CreateVolume,
+    FilesystemOptions, PullImage, Sandbox, SandboxCommand, SandboxCreateOptions, SandboxNetwork,
+    TmpfsMount, VolumeMount, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
 };
 
 pub const BRIDGE_PROTOCOL_VERSION: u8 = 1;
@@ -26,24 +28,65 @@ pub const BRIDGE_PROTOCOL_VERSION: u8 = 1;
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum BridgeRequest {
-    SandboxCreate {
-        #[serde(default = "default_image")]
-        image: String,
-        #[serde(default = "default_timeout_seconds")]
-        timeout_seconds: u64,
+    ImageBuild {
+        context_dir: String,
         #[serde(default)]
-        env: BTreeMap<String, String>,
+        dockerfile: Option<String>,
+        #[serde(default)]
+        tag: Option<String>,
+        #[serde(default)]
+        build_args: BTreeMap<String, String>,
+        #[serde(default = "default_true")]
+        quiet: bool,
+        #[serde(default)]
+        platforms: Vec<String>,
+        #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        no_cache: bool,
+    },
+    ImagePull {
+        reference: String,
+        #[serde(default)]
+        force: bool,
+        #[serde(default)]
+        platform: Option<String>,
+    },
+    ImageList,
+    ImageRemove {
+        reference: String,
+    },
+    VolumeCreate {
+        name: String,
         #[serde(default)]
         labels: BTreeMap<String, String>,
         #[serde(default)]
-        name: Option<String>,
-        #[serde(default)]
-        cpus: Option<u32>,
-        #[serde(default)]
-        memory_mb: Option<u32>,
-        #[serde(default)]
-        isolation: ExecutionIsolation,
+        size_limit: u64,
     },
+    VolumeGet {
+        name: String,
+    },
+    VolumeList,
+    VolumeRemove {
+        name: String,
+        #[serde(default)]
+        force: bool,
+    },
+    NetworkCreate {
+        name: String,
+        #[serde(default = "default_network_subnet")]
+        subnet: String,
+        #[serde(default)]
+        labels: BTreeMap<String, String>,
+    },
+    NetworkGet {
+        name: String,
+    },
+    NetworkList,
+    NetworkRemove {
+        name: String,
+    },
+    SandboxCreate(Box<BridgeSandboxCreateRequest>),
     SandboxInspect {
         sandbox_id: String,
     },
@@ -60,6 +103,17 @@ pub enum BridgeRequest {
     SandboxResume {
         sandbox_id: String,
         generation: u64,
+    },
+    SandboxSnapshotCreate {
+        sandbox_id: String,
+        generation: u64,
+        snapshot_id: String,
+    },
+    FilesystemSnapshotSize {
+        snapshot_id: String,
+    },
+    FilesystemSnapshotDelete {
+        snapshot_id: String,
     },
     CommandRun {
         sandbox_id: String,
@@ -129,6 +183,125 @@ pub enum BridgeRequest {
         #[serde(default)]
         user: Option<String>,
     },
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct BridgeSandboxCreateRequest {
+    #[serde(default = "default_image")]
+    image: String,
+    #[serde(default = "default_timeout_seconds")]
+    timeout_seconds: u64,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    cpus: Option<u32>,
+    #[serde(default)]
+    memory_mb: Option<u32>,
+    #[serde(default)]
+    isolation: ExecutionIsolation,
+    #[serde(default)]
+    filesystem_snapshot_id: Option<String>,
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    hostname: Option<String>,
+    #[serde(default)]
+    mounts: Vec<BridgeVolumeMount>,
+    #[serde(default)]
+    tmpfs: Vec<BridgeTmpfsMount>,
+    #[serde(default)]
+    network: BridgeSandboxNetwork,
+    #[serde(default)]
+    ports: Vec<BridgePortMapping>,
+    #[serde(default)]
+    dns: Vec<String>,
+    #[serde(default)]
+    host_aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    persistent: bool,
+    #[serde(default = "default_true")]
+    auto_remove: bool,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BridgeVolumeMount {
+    Bind {
+        source: String,
+        target: String,
+        #[serde(default)]
+        read_only: bool,
+    },
+    Named {
+        name: String,
+        target: String,
+        #[serde(default)]
+        read_only: bool,
+    },
+}
+
+impl BridgeVolumeMount {
+    fn into_mount(self) -> VolumeMount {
+        match self {
+            Self::Bind {
+                source,
+                target,
+                read_only,
+            } => VolumeMount::bind(source, target).read_only(read_only),
+            Self::Named {
+                name,
+                target,
+                read_only,
+            } => VolumeMount::named(name, target).read_only(read_only),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum BridgeSandboxNetwork {
+    #[default]
+    Tsi,
+    #[serde(rename = "none")]
+    Disabled,
+    Bridge {
+        name: String,
+    },
+}
+
+impl From<BridgeSandboxNetwork> for SandboxNetwork {
+    fn from(value: BridgeSandboxNetwork) -> Self {
+        match value {
+            BridgeSandboxNetwork::Tsi => Self::Tsi,
+            BridgeSandboxNetwork::Disabled => Self::Disabled,
+            BridgeSandboxNetwork::Bridge { name } => Self::bridge(name),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct BridgePortMapping {
+    pub host_port: u16,
+    pub guest_port: u16,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub struct BridgeTmpfsMount {
+    pub target: String,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -202,16 +375,148 @@ async fn execute_request(
     request: BridgeRequest,
 ) -> Result<Value, BridgeFailure> {
     match request {
-        BridgeRequest::SandboxCreate {
-            image,
-            timeout_seconds,
-            env,
-            labels,
-            name,
-            cpus,
-            memory_mb,
-            isolation,
+        BridgeRequest::ImageBuild {
+            context_dir,
+            dockerfile,
+            tag,
+            build_args,
+            quiet,
+            platforms,
+            target,
+            no_cache,
         } => {
+            let context_dir = PathBuf::from(context_dir);
+            // Bridge stdout is reserved for one JSON response envelope. The
+            // runtime builder's human progress renderer writes to stdout, so
+            // language SDK builds must stay quiet until progress is exposed as
+            // a separate structured event channel.
+            if !quiet {
+                return Err(invalid(
+                    "language SDK image builds must be quiet because bridge stdout is reserved for JSON; structured build progress is not implemented yet",
+                ));
+            }
+            let mut request = BuildImage::new(&context_dir).quiet(true).no_cache(no_cache);
+            if let Some(path) = dockerfile {
+                let path = PathBuf::from(path);
+                request = request.dockerfile_path(if path.is_relative() {
+                    context_dir.join(path)
+                } else {
+                    path
+                });
+            }
+            if let Some(tag) = tag {
+                request = request.tag(tag);
+            }
+            for (key, value) in build_args {
+                request = request.build_arg(key, value);
+            }
+            for platform in platforms {
+                request =
+                    request.platform(Platform::parse(&platform).map_err(ClientError::Validation)?);
+            }
+            if let Some(target) = target {
+                request = request.target(target);
+            }
+            serialize_value(client.build_image(request).await?)
+        }
+        BridgeRequest::ImagePull {
+            reference,
+            force,
+            platform,
+        } => {
+            let mut request = PullImage::new(reference).force(force);
+            if let Some(platform) = platform {
+                Platform::parse(&platform).map_err(ClientError::Validation)?;
+                request = request.platform(platform);
+            }
+            serialize_value(client.pull_image(request).await?)
+        }
+        BridgeRequest::ImageList => serialize_field("images", client.list_images().await?),
+        BridgeRequest::ImageRemove { reference } => {
+            client.remove_image(&reference).await?;
+            Ok(json!({
+                "reference": reference,
+                "removed": true,
+            }))
+        }
+        BridgeRequest::VolumeCreate {
+            name,
+            labels,
+            size_limit,
+        } => {
+            let mut request = CreateVolume::new(name).size_limit(size_limit);
+            for (key, value) in labels {
+                request = request.label(key, value);
+            }
+            serialize_value(client.create_volume(request)?)
+        }
+        BridgeRequest::VolumeGet { name } => serialize_field("volume", client.get_volume(&name)?),
+        BridgeRequest::VolumeList => serialize_field("volumes", client.list_volumes()?),
+        BridgeRequest::VolumeRemove { name, force } => {
+            serialize_value(client.remove_volume(&name, force)?)
+        }
+        BridgeRequest::NetworkCreate {
+            name,
+            subnet,
+            labels,
+        } => {
+            let mut request = CreateNetwork::new(name).subnet(subnet);
+            for (key, value) in labels {
+                request = request.label(key, value);
+            }
+            serialize_value(client.create_network(request)?)
+        }
+        BridgeRequest::NetworkGet { name } => {
+            serialize_field("network", client.get_network(&name)?)
+        }
+        BridgeRequest::NetworkList => serialize_field("networks", client.list_networks()?),
+        BridgeRequest::NetworkRemove { name } => serialize_value(client.remove_network(&name)?),
+        BridgeRequest::SandboxCreate(request) => {
+            let BridgeSandboxCreateRequest {
+                image,
+                timeout_seconds,
+                env,
+                labels,
+                name,
+                cpus,
+                memory_mb,
+                isolation,
+                filesystem_snapshot_id,
+                workspace,
+                workdir,
+                user,
+                hostname,
+                mounts,
+                tmpfs,
+                network,
+                ports,
+                dns,
+                host_aliases,
+                read_only,
+                persistent,
+                auto_remove,
+            } = *request;
+            let rootfs_snapshot_id = filesystem_snapshot_id
+                .map(ExecutionSnapshotId::new)
+                .transpose()
+                .map_err(|error| invalid(error.to_string()))?;
+            let ports = ports
+                .into_iter()
+                .map(|port| {
+                    PortMapping::tcp(port.host_port, port.guest_port)
+                        .map_err(ClientError::Validation)
+                })
+                .collect::<crate::Result<Vec<_>>>()?;
+            let tmpfs = tmpfs
+                .into_iter()
+                .map(|mount| {
+                    let mut value = TmpfsMount::new(mount.target).read_only(mount.read_only);
+                    if let Some(size_bytes) = mount.size_bytes {
+                        value = value.size_bytes(size_bytes);
+                    }
+                    value
+                })
+                .collect();
             let sandbox = Sandbox::create_with_client(
                 client.clone(),
                 SandboxCreateOptions {
@@ -223,6 +528,23 @@ async fn execute_request(
                     cpus,
                     memory_mb,
                     isolation,
+                    rootfs_snapshot_id,
+                    workspace: workspace.map(PathBuf::from),
+                    workdir,
+                    user,
+                    hostname,
+                    mounts: mounts
+                        .into_iter()
+                        .map(BridgeVolumeMount::into_mount)
+                        .collect(),
+                    tmpfs,
+                    network: network.into(),
+                    ports,
+                    dns_servers: dns,
+                    host_aliases,
+                    read_only,
+                    persistent,
+                    auto_remove,
                 },
             )
             .await?;
@@ -256,6 +578,35 @@ async fn execute_request(
             let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Paused)?;
             sandbox.resume().await?;
             Ok(sandbox_info_value(&sandbox))
+        }
+        BridgeRequest::SandboxSnapshotCreate {
+            sandbox_id,
+            generation,
+            snapshot_id,
+        } => {
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            let snapshot_id = ExecutionSnapshotId::new(snapshot_id)
+                .map_err(|error| invalid(error.to_string()))?;
+            let snapshot = sandbox.create_filesystem_snapshot(snapshot_id).await?;
+            Ok(execution_snapshot_value(&snapshot))
+        }
+        BridgeRequest::FilesystemSnapshotSize { snapshot_id } => {
+            let snapshot_id = ExecutionSnapshotId::new(snapshot_id)
+                .map_err(|error| invalid(error.to_string()))?;
+            let size_bytes = client.execution_snapshot_size(&snapshot_id).await?;
+            Ok(json!({
+                "snapshot_id": snapshot_id,
+                "size_bytes": size_bytes,
+            }))
+        }
+        BridgeRequest::FilesystemSnapshotDelete { snapshot_id } => {
+            let snapshot_id = ExecutionSnapshotId::new(snapshot_id)
+                .map_err(|error| invalid(error.to_string()))?;
+            let deleted = client.delete_execution_snapshot(&snapshot_id).await?;
+            Ok(json!({
+                "snapshot_id": snapshot_id,
+                "deleted": deleted,
+            }))
         }
         BridgeRequest::CommandRun {
             sandbox_id,
@@ -419,12 +770,46 @@ fn bridge_sandbox(
     ))
 }
 
+async fn connected_sandbox(
+    client: &A3sBoxClient,
+    sandbox_id: String,
+    generation: u64,
+) -> Result<Sandbox, BridgeFailure> {
+    let execution_id = execution_id(sandbox_id)?;
+    let expected_generation = parse_generation(generation)?;
+    let status = client.inspect_execution(&execution_id).await?;
+    if status.generation != expected_generation {
+        return Err(invalid(format!(
+            "sandbox {} generation changed from {} to {}",
+            execution_id,
+            expected_generation.get(),
+            status.generation.get()
+        )));
+    }
+    Ok(Sandbox::from_known_state(
+        client.clone(),
+        execution_id,
+        status.generation,
+        status.state,
+        status.plan.requested_isolation,
+    ))
+}
+
 fn sandbox_info_value(sandbox: &Sandbox) -> Value {
     let info = sandbox.info();
     json!({
         "sandbox_id": info.sandbox_id,
         "generation": info.generation,
         "state": state_name(info.state),
+    })
+}
+
+fn execution_snapshot_value(snapshot: &ExecutionSnapshot) -> Value {
+    json!({
+        "snapshot_id": snapshot.snapshot_id,
+        "size_bytes": snapshot.size_bytes,
+        "state": state_name(snapshot.state),
+        "generation": snapshot.lease.generation.get(),
     })
 }
 
@@ -448,6 +833,19 @@ fn entry_value(entry: &FilesystemEntry) -> Value {
     })
 }
 
+fn serialize_value(value: impl Serialize) -> Result<Value, BridgeFailure> {
+    serde_json::to_value(value).map_err(|error| BridgeFailure {
+        code: "runtime_error",
+        message: format!("failed to encode SDK bridge result: {error}"),
+    })
+}
+
+fn serialize_field(name: &str, value: impl Serialize) -> Result<Value, BridgeFailure> {
+    let mut result = serde_json::Map::new();
+    result.insert(name.to_string(), serialize_value(value)?);
+    Ok(Value::Object(result))
+}
+
 fn state_name(state: ExecutionState) -> &'static str {
     match state {
         ExecutionState::Created => "created",
@@ -469,6 +867,10 @@ fn parse_generation(value: u64) -> Result<ExecutionGeneration, BridgeFailure> {
 
 fn default_image() -> String {
     DEFAULT_SANDBOX_IMAGE.to_string()
+}
+
+fn default_network_subnet() -> String {
+    "10.89.0.0/24".to_string()
 }
 
 const fn default_timeout_seconds() -> u64 {
@@ -526,67 +928,5 @@ impl From<ClientError> for BridgeFailure {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn create_request_defaults_to_a_local_microvm() {
-        let request: BridgeRequest =
-            serde_json::from_str(r#"{"operation":"sandbox_create"}"#).unwrap();
-        let BridgeRequest::SandboxCreate {
-            image,
-            timeout_seconds,
-            isolation,
-            ..
-        } = request
-        else {
-            panic!("expected create request");
-        };
-        assert_eq!(image, DEFAULT_SANDBOX_IMAGE);
-        assert_eq!(timeout_seconds, DEFAULT_SANDBOX_TIMEOUT_SECONDS);
-        assert_eq!(isolation, ExecutionIsolation::Microvm);
-    }
-
-    #[test]
-    fn create_request_maps_language_options_to_the_runtime_facade() {
-        let (request, _) = SandboxCreateOptions {
-            image: "python:3.12-alpine".to_string(),
-            timeout_seconds: 120,
-            envs: BTreeMap::from([("MODE".to_string(), "test".to_string())]),
-            metadata: BTreeMap::from([("suite".to_string(), "sdk".to_string())]),
-            name: Some("local-sdk".to_string()),
-            cpus: Some(4),
-            memory_mb: Some(2048),
-            isolation: ExecutionIsolation::Sandbox,
-        }
-        .into_runtime_request()
-        .unwrap();
-
-        assert_eq!(request.config.image, "python:3.12-alpine");
-        assert_eq!(request.config.resources.timeout, 120);
-        assert_eq!(request.config.resources.vcpus, 4);
-        assert_eq!(request.config.resources.memory_mb, 2048);
-        assert_eq!(request.config.isolation, ExecutionIsolation::Sandbox);
-        assert_eq!(
-            request.config.cmd,
-            ["/bin/sh", "-c", "while :; do sleep 3600; done"]
-        );
-        assert_eq!(request.policy.name.as_deref(), Some("local-sdk"));
-        assert!(request.policy.auto_remove);
-        assert_eq!(request.labels.get("suite").map(String::as_str), Some("sdk"));
-    }
-
-    #[tokio::test]
-    async fn malformed_json_returns_a_versioned_error_envelope() {
-        let response = dispatch_json("{").await;
-        assert_eq!(response.protocol_version, BRIDGE_PROTOCOL_VERSION);
-        assert!(!response.ok);
-        assert_eq!(response.error.unwrap().code, "invalid_request");
-    }
-
-    #[test]
-    fn zero_generation_is_rejected_before_runtime_access() {
-        let error = parse_generation(0).unwrap_err();
-        assert_eq!(error.code, "invalid_request");
-    }
-}
+#[path = "bridge/tests.rs"]
+mod tests;
