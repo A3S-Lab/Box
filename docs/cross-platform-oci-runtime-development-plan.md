@@ -1,6 +1,6 @@
 # Cross-Platform OCI Runtime Development Plan
 
-Status: **Proposed**
+Status: **In development**
 
 Scope: repository extraction, runtime architecture, delivery order, migration
 from certified `crun`, and release gates
@@ -9,7 +9,7 @@ Target repository: `git@github.com:A3S-Lab/OCI-Runtime.git`
 
 Target monorepo path: `crates/oci-runtime`
 
-Primary Rust package: `a3s-oci-runtime`
+Primary Rust packages: `a3s-oci-sdk` and `a3s-oci-runtime`
 
 ## Executive decision
 
@@ -26,21 +26,23 @@ container executor:
 - a libkrun driver starts a Linux utility VM through KVM, HVF, or WHPX and asks
   a guest agent to execute the same container logic inside the guest.
 
-The first production objective is narrower than complete general-purpose
-`crun` compatibility:
+The release objective is complete OCI Runtime Specification 1.3.0 conformance
+for every normative requirement applicable to Linux containers and each
+advertised native or utility-VM driver. A restricted A3S bundle profile may be
+used as an early implementation fixture, but it is not an acceptable
+production compatibility boundary and cannot be used to remove `crun`.
 
-1. replace the `crun` process boundary used by A3S Box for the supported A3S
-   Sandbox profile;
-2. retain certified `crun` as a rollback backend while differential,
-   conformance, security-negative, and soak gates run;
-3. remove `crun` only after the native Linux driver satisfies every mandatory
-   A3S Sandbox control and lifecycle requirement;
-4. claim general OCI runtime compatibility only after the broader OCI
-   configuration and hook matrix passes.
+Development remains incremental:
 
-This order keeps the initial contract honest. A runtime that supports only the
-A3S-generated bundle profile must report that profile explicitly and reject
-unsupported OCI properties rather than silently ignore them.
+1. build and test the complete public Rust SDK and OCI model boundary;
+2. land lifecycle and driver operations behind truthful capability states;
+3. retain certified `crun` as a rollback and differential oracle;
+4. migrate A3S Box only after the complete applicable OCI configuration,
+   lifecycle, hook, security, recovery, and soak gates pass.
+
+Unsupported or inapplicable properties must fail before runtime state mutation.
+They must never be silently ignored or omitted while crossing the SDK, host,
+transport, durable-state, or guest-agent boundaries.
 
 KVM is an optional Linux VM backend, not an installation, startup, Sandbox, or
 SDK prerequisite. Native Linux support on a host where `/dev/kvm` is absent,
@@ -64,19 +66,17 @@ Keeping it separate provides:
 - a one-way dependency graph that prevents the runtime from importing product
   policy.
 
-The dependency direction must be:
+The Rust crate dependency direction must be:
 
 ```text
-a3s-box
-    |
-    v
-a3s-oci-runtime
-    |
-    v
-a3s-libkrun-sys
+a3s-box ---------> a3s-oci-sdk <--------- a3s-oci-runtime
+                                                |
+                                                v
+                               a3s-libkrun-sys + platform driver
 ```
 
 `a3s-oci-runtime` must not depend on `a3s-box-core` or `a3s-box-runtime`.
+`a3s-oci-sdk` must not depend on runtime drivers.
 
 ## Product and security terminology
 
@@ -126,6 +126,10 @@ option explicitly.
 
 - Implement the OCI create, start, state, kill, and delete lifecycle with
   durable, crash-reconcilable state.
+- Implement every normative OCI Runtime Specification 1.3.0 requirement
+  applicable to Linux containers and the drivers advertised by the runtime.
+- Provide a complete async, strongly typed, `Send + Sync` Rust SDK for A3S Box
+  without CLI construction or driver-specific imports.
 - Support run, exec, pause, resume, process I/O, terminal resize, resource
   updates, and events required by A3S Box.
 - Run Linux OCI bundles on:
@@ -145,8 +149,8 @@ option explicitly.
 - Fail closed when a requested security or resource control cannot be applied.
 - Ship version-matched host binaries, guest agent, kernel/firmware, libkrun
   library, protocol schema, and provenance records.
-- Produce enough standard compatibility that the runtime can later be used by
-  a containerd shim without redesigning the core lifecycle.
+- Preserve complete OCI models and semantics so a future containerd shim does
+  not require a second lifecycle implementation.
 
 ## Non-goals for the first production release
 
@@ -158,18 +162,23 @@ option explicitly.
 - Host PID namespace sharing in a utility-VM backend.
 - Cross-tenant sharing of a utility VM.
 - CRI or containerd shim v2 before the standalone OCI lifecycle is stable.
-- General OCI compatibility claims while hooks or configuration fields remain
-  rejected.
 - Removing `crun` before rollback and differential gates pass.
 
 ## Standards baseline
 
-The runtime must track the current OCI Runtime Specification and record the
+The runtime is pinned to OCI Runtime Specification 1.3.0 until an explicit
+standards-update commit advances the schemas, Rust models, property inventory,
+fixtures, validators, and conformance evidence together. It must record the
 exact supported version and feature set in `features` output.
 
 The initial implementation must:
 
-- accept the OCI versions required by existing A3S bundles;
+- represent the complete official OCI `Spec`, `Process`, `LinuxResources`,
+  `State`, and `Features` models in the Rust SDK;
+- classify every OCI 1.3.0 schema property as applicable, inapplicable to the
+  selected workload platform, or unsupported by the selected driver;
+- accept all applicable configuration after its semantic and enforcement
+  implementation passes;
 - implement the specified `creating`, `created`, `running`, and `stopped`
   states;
 - guarantee that `create` prepares the container but does not execute the
@@ -181,10 +190,10 @@ The initial implementation must:
 - reject unsupported configuration before mutating runtime state.
 
 OCI Runtime Specification 1.3 includes a VM-specific configuration section
-for hypervisor, kernel, VM image, vCPU, and memory intent. The runtime may
-consume safe hardware intent from that section, but it must select only
-certified A3S hypervisor and kernel artifacts. It must reject an untrusted
-request to execute an arbitrary hypervisor path.
+for hypervisor, kernel, initrd, image, and parameter intent. The runtime must
+preserve those fields but may select only certified A3S hypervisor, kernel,
+firmware, and system-image artifacts. It must reject an untrusted request to
+execute an arbitrary path.
 
 References:
 
@@ -199,7 +208,9 @@ References:
 ```text
 Box / OCI CLI / future containerd shim
                   |
-           OCI runtime service API
+             a3s-oci-sdk
+                  |
+           OCI runtime service
                   |
      durable state + operation journal
                   |
@@ -364,6 +375,7 @@ OCI-Runtime/
 |-- Cargo.toml
 |-- crates/
 |   |-- core/             # pure lifecycle, state, errors, protocol types
+|   |-- sdk/              # complete async Rust client and OCI model boundary
 |   |-- linux-executor/   # Linux-only isolation and process implementation
 |   |-- agent/            # static Linux guest binary
 |   |-- runtime/          # host orchestration and native/libkrun drivers
@@ -378,7 +390,7 @@ OCI-Runtime/
 |   |-- threat-model.md
 |   |-- protocol.md
 |   |-- state-and-recovery.md
-|   `-- supported-oci-profile.md
+|   `-- oci-conformance.md
 `-- scripts/
     |-- build-guest.ps1
     |-- package-runtime.ps1
@@ -530,7 +542,8 @@ Deliverables:
 
 - independent repository skeleton;
 - architecture and threat-model documents;
-- supported OCI profile document;
+- OCI 1.3.0 conformance contract and generated schema-property inventory;
+- complete async `a3s-oci-sdk` operation and model boundary;
 - lifecycle state machine and recovery journal schemas;
 - protocol schema with version negotiation;
 - platform support and packaging matrix;
@@ -539,7 +552,9 @@ Deliverables:
 Exit criteria:
 
 - no runtime code depends on Box;
-- unsupported OCI fields have an explicit reject/defer decision;
+- every OCI 1.3.0 property has an implementation owner and applicability
+  classification;
+- no complete OCI model field is lost at the SDK service boundary;
 - create/start ordering and rollback behavior are testable as pure state
   transitions;
 - security review accepts the trust boundary and state directory model.
@@ -634,12 +649,33 @@ Exit criteria:
   seccomp, capability, and cleanup tests;
 - rootless and rootful certification lanes pass on x86_64 and aarch64 Linux.
 
-### M5: Box experimental backend
+### M5: Complete OCI 1.3 conformance
 
 Deliverables:
 
-- released and digest-pinned runtime artifacts;
-- Box `A3sOci` backend adapter;
+- complete common, process, Linux, VM, state, feature, lifecycle, and hook
+  semantics applicable to the advertised Linux-container drivers;
+- generated property and normative-requirement coverage;
+- upstream OCI schema and lifecycle validation;
+- differential, security-negative, recovery, and soak evidence;
+- exact feature output generated from the tested implementation.
+
+Exit criteria:
+
+- every applicable OCI Runtime Specification 1.3.0 MUST and MUST NOT has
+  retained passing evidence;
+- no schema property is unclassified or silently ignored;
+- all unsupported workload-platform combinations fail before state mutation;
+- feature output contains no untested capability;
+- real WHPX and native Linux lanes pass the same lifecycle and configuration
+  suites.
+
+### M6: Box experimental backend
+
+Deliverables:
+
+- released and digest-pinned runtime and SDK artifacts;
+- Box `A3sOci` backend adapter using `a3s-oci-sdk` only;
 - explicit experimental capability reporting;
 - dual-runtime differential CI;
 - migration and rollback documentation.
@@ -653,7 +689,7 @@ Exit criteria:
 - no Box image, SDK, or product logic has moved into the runtime;
 - rollback to certified `crun` is possible before a new execution starts.
 
-### M6: Replace certified crun for the A3S profile
+### M7: Replace certified crun
 
 Deliverables:
 
@@ -673,19 +709,18 @@ Exit criteria:
   state schema;
 - `crun` remains available for one deprecation release, then is removed.
 
-### M7: Broader OCI and containerd compatibility
+### After M7: containerd integration
 
-This milestone begins only after M6 and is not required to replace `crun` for
-the restricted A3S bundle profile.
+Containerd integration begins only after the complete OCI release and Box
+migration gates pass.
 
 Deliverables may include:
 
-- the remaining OCI hook and configuration matrix;
-- standard bundle and runtime conformance submissions;
 - containerd shim v2 with separate sandbox and task lifecycles;
 - snapshotter and block-rootfs integration.
 
-Compatibility claims must name the exact completed profile and test suite.
+Containerd support must reuse the same lifecycle and SDK/service contracts
+rather than introduce a second runtime implementation.
 
 ## Validation gates
 
@@ -739,7 +774,9 @@ and the native `a3s-oci` driver. Compare:
 - exec behavior;
 - cleanup and residual host resources.
 
-A difference must be documented as an intentional profile restriction or fixed.
+A difference must be explained by an OCI-permitted implementation choice or
+the submitted workload platform being inapplicable; otherwise it must be
+fixed.
 
 ### Security-negative gates
 
@@ -801,11 +838,13 @@ Existing guest-init code proves the needed primitives but is a single-container
 implementation. It contains process-wide state and best-effort enforcement
 that must not define the new runtime contract.
 
-### OCI profile scope
+### OCI completeness tracking
 
-M0 must publish a machine-readable feature/profile description. A3S Box may
-depend only on features in that profile. Unsupported standard features are
-rejected until implemented and tested.
+M0 must publish a machine-readable feature description and a generated OCI
+1.3.0 property inventory. A3S Box may depend only on features advertised by
+the exact tested runtime build. During development, known but unenforced
+properties are rejected before create. Production promotion requires every
+applicable property and normative requirement to reach the conformant state.
 
 ## First implementation slices
 
@@ -840,7 +879,7 @@ executor is proven before it becomes guest infrastructure.
 
 Image pulls, arbitrary networking, Compose, CRI, TEE, snapshots, and Box SDK
 integration are excluded from these first two slices. Box and SDK integration
-is a blocking M5 gate, including the no-KVM Linux matrix.
+is a blocking M6 gate, including the no-KVM Linux matrix.
 
 ## Migration and rollback
 
@@ -856,7 +895,7 @@ is a blocking M5 gate, including the no-KVM Linux matrix.
   existing `a3s-oci` state is reconciled or explicitly quarantined.
 - Runtime state schemas support an explicit read/upgrade path and reject
   unsupported downgrade rather than corrupting state.
-- `crun` packaging is removed only after the M6 deprecation release.
+- `crun` packaging is removed only after the M7 deprecation release.
 
 ## Definition of done
 
@@ -869,6 +908,8 @@ The project replaces `crun` for A3S Box only when:
 - Linux native and shared-utility-VM paths use the same reviewed
   `LinuxExecutor`;
 - Windows provides real shared-guest-kernel OCI execution without WSL;
+- every applicable OCI Runtime Specification 1.3.0 property and normative
+  requirement has retained conformance evidence;
 - every requested namespace, mount, cgroup, seccomp, capability, user, and
   resource control has active evidence or fails closed;
 - create/start/state/kill/delete, exec, I/O, pause/resume, update, wait, and
