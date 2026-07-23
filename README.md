@@ -43,24 +43,6 @@ execution, the E2B protocol service, Kubernetes CRI/RuntimeClass integration,
 TEE workflows, and Windows support have different maturity and host
 requirements; the capability matrix below states those boundaries explicitly.
 
-### Distribution status
-
-This README describes the current `main` branch, including unreleased work.
-Distribution status was verified on 2026-07-23:
-
-| Surface | Current public distribution | Boundary |
-| --- | --- | --- |
-| CLI and runtime | GitHub Release and Homebrew `v3.0.11` | Stable. It predates the native local SDK bridge and the unreleased Windows packaging work on `main`. |
-| Rust SDK | crates.io `a3s-box-sdk` `3.0.11` | The direct runtime-backed client is published. The high-level local `Sandbox` facade described below was added after `v3.0.11` and is not in the published crate yet. |
-| Python SDK | PyPI `a3s-box` `2.0.0`; GitHub `v3.0.11` also contains a wheel and sdist | Those artifacts expose the earlier remote E2B-oriented wrapper, not the native zero-configuration local API on `main`. |
-| TypeScript SDK | npm `@a3s-lab/box` `2.0.0`; GitHub `v3.0.11` also contains a package tarball | Those artifacts expose the earlier remote E2B-oriented wrapper, not the native zero-configuration local API on `main`. |
-| Windows runtime | Source build from `main` | The WHPX path has real-host validation, but the current `v3.0.11` release has no Windows archive. |
-
-Use the stable release for the published CLI/runtime behavior. Evaluate the
-native local SDKs or Windows path from one consistent `main` source checkout
-until a newer version is tagged and published; do not mix `main` language
-packages with the `v3.0.11` runtime binary.
-
 ### Basic usage
 
 ```bash
@@ -170,8 +152,8 @@ bridge networking and port publication are MicroVM-only in the current
 runtime; the Sandbox backend rejects them rather than silently weakening the
 request.
 
-These native local APIs are currently an unreleased `main` feature; the
-distribution table above identifies which published artifacts predate them.
+Use a runtime and language SDK built from the same release or source revision;
+the machine bridge is versioned and rejects incompatible requests.
 
 Python and TypeScript default to `alpine:3.20`. Rust
 `Sandbox::create(...)` requires an image argument, while
@@ -230,12 +212,12 @@ E2B client used to validate it.
 | Storage | Bind mounts, named volumes, tmpfs, `cp`, `diff`, `export`, `commit`, filesystem snapshots, and CoW restore | Implemented. Filesystem snapshots do not contain live VM RAM or device state. |
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
-| Rust SDK | Typed, direct runtime-backed management and guest-control APIs; E2B-like local `Sandbox`, commands, files, and lifecycle; fluent image, volume, network, Sandbox, and script builders | The direct client is published as `a3s-box-sdk` `3.0.11`. The zero-credential local facade and builder-style programmable CI/CD API are implemented and package-tested on `main`, default to MicroVM, and explicitly accept supported shared-kernel Sandbox configurations, but await the next crate release. The optional historical `pipeline-cli` feature remains separate. |
+| Rust SDK | Typed, direct runtime-backed management and guest-control APIs; E2B-like local `Sandbox`, commands, files, and lifecycle; fluent image, volume, network, Sandbox, and script builders | The zero-credential local facade and builder-style programmable CI/CD API are implemented and package-tested, default to MicroVM, and explicitly accept supported shared-kernel Sandbox configurations. The optional historical `pipeline-cli` feature remains separate. |
 | Local Python and TypeScript SDKs | E2B-like `Sandbox`, commands, files, lifecycle, plus fluent image-build, named-volume, bridge-network, typed Sandbox, and stdin-backed script builders over the installed local runtime | Implemented and package-tested on `main`. The packages share the Rust implementation through the versioned bridge, have no official E2B runtime dependency, and require no endpoint or API key. The real macOS/HVF MicroVM three-language builder-to-E2B smoke passes; the expanded Ubuntu/crun 1.28 Sandbox matrix is a blocking CI gate. Linux/KVM MicroVM validation remains host-specific, and the native packages are not yet published to PyPI or npm. |
 | Remote E2B protocol service | Pinned contracts, durable lifecycle, memory-preserving and filesystem-only pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | The certified A3S OS evidence uses unchanged official Python sync/async and TypeScript clients. Templates/builds, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
-| Windows | Native x86_64 WHPX/libkrun MicroVM execution | Implemented and real-host validated on `main`, but not included in the current `v3.0.11` release. Foreground and detached workloads, long arguments staged outside the guest kernel command line, live split logs, exit codes, TCP publishing, bind mounts, named-volume persistence, stats, stopped-box commit, and stopped-box filesystem snapshot flows pass. Running-box commit has no guest archive channel. The reliable path is currently limited to one vCPU; container health checks, bridge networking, interactive execution, TEE, snapshot-fork, and CRI remain unsupported. |
+| Windows | Native x86_64 WHPX/libkrun MicroVM execution | Implemented and real-host validated from source; published Windows archives remain pending. Foreground and detached workloads, long arguments staged outside the guest kernel command line, live split logs, exit codes, TCP publishing, bind mounts, named-volume persistence, stats, stopped-box commit, and stopped-box filesystem snapshot flows pass. Running-box commit has no guest archive channel. The reliable path is currently limited to one vCPU; container health checks, bridge networking, interactive execution, TEE, snapshot-fork, and CRI remain unsupported. |
 
 An implemented API is not automatically a production guarantee for every host
 or threat model. Real-runtime validation evidence and remaining platform gaps
@@ -247,17 +229,15 @@ are maintained in [Host Integration](docs/host-integration.md),
 
 ### Installation
 
-Install the current stable macOS or Linux CLI/runtime (`v3.0.11`) from the
-Homebrew tap:
+Install the current stable macOS or Linux CLI/runtime from the Homebrew tap:
 
 ```bash
 brew install a3s-lab/tap/a3s-box
 a3s-box info
 ```
 
-That release predates the native local SDK bridge described above. To evaluate
-the current `main` implementation, build the runtime and language packages
-from the same source checkout:
+To evaluate the current source implementation, build the runtime and language
+packages from the same checkout:
 
 ```bash
 git clone https://github.com/A3S-Lab/Box.git
@@ -276,7 +256,7 @@ Host requirements:
 | Linux | KVM and libkrun | The current primary production-host path |
 | macOS | Apple Silicon and Hypervisor.framework | Intel macOS is unsupported |
 | Linux Sandbox | Certified `crun 1.28`, user namespaces, subordinate IDs, seccomp, and delegated cgroup v2 | Does not require KVM; explicitly select `--isolation sandbox` |
-| Windows | x86_64, Windows Hypervisor Platform, Developer Mode (or `SeCreateSymbolicLinkPrivilege`), and matching `krun.dll`/`libkrunfw.dll` assets | Source-build path on `main`; no Windows archive exists in `v3.0.11`. Currently one vCPU, with the command boundaries documented below |
+| Windows | x86_64, Windows Hypervisor Platform, Developer Mode (or `SeCreateSymbolicLinkPrivilege`), and matching `krun.dll`/`libkrunfw.dll` assets | Source-build path; published Windows archives remain pending. Currently one vCPU, with the command boundaries documented below |
 
 Linux release archives intentionally contain GNU/glibc host executables because
 the CLI, CRI service, and VM shim dynamically load the bundled `libkrun`. The
@@ -662,11 +642,8 @@ does not spawn the `a3s-box` CLI and uses the same stores, execution manager,
 registry, build, volume, network, snapshot, exec, PTY, and attestation
 implementations as the runtime.
 
-The crates.io dependency below is the published `3.0.x` direct client. It does
-not yet contain the high-level local `Sandbox` facade added after `v3.0.11`.
-Use the workspace crate from a consistent `main` checkout for development, or
-wait for the next published crate before depending on that facade in released
-applications.
+Use matching runtime and SDK minor versions. For source development, use the
+workspace crate and language packages from one checkout.
 
 ```toml
 [dependencies]
@@ -1030,10 +1007,10 @@ The native local Python package under
 runtime dependency. Their bridge mapping, package tests, real macOS MicroVM
 smoke, and real Ubuntu/crun 1.28 Sandbox smoke are separate from the remote
 production compatibility matrix, which uses only unchanged official clients.
-The current PyPI/npm releases and GitHub `v3.0.11` language artifacts still
-contain the earlier remote-oriented wrappers. Passing either tested subset is
-not evidence for unimplemented protocol surfaces, so the generated manifest
-continues to report `full_compatibility=false`.
+The native local packages and remote protocol compatibility surface have
+separate test matrices. Passing either tested subset is not evidence for
+unimplemented protocol surfaces, so the generated manifest continues to
+report `full_compatibility=false`.
 
 See [E2B Protocol Compatibility and SDK Design](docs/e2b-compatible-sdk-design.md)
 for the release definition, architecture, ACL schema, and remaining gates.
@@ -1150,7 +1127,7 @@ Main components:
 | `containerd-shim` | containerd runtime-v2 adapter for RuntimeClass |
 | `src/sdk` | Direct runtime-backed Rust SDK, E2B-style local Sandbox facade, and optional pipeline runner |
 | `src/lambda` | Workload-execution integration retained for higher-level runtimes |
-| `sdk/python`, `sdk/typescript` | Native local A3S language SDK source packages on `main`; their first public-registry release is pending, while existing registry and `v3.0.11` artifacts contain the earlier remote-oriented wrappers |
+| `sdk/python`, `sdk/typescript` | Native local A3S language SDKs using the versioned machine bridge |
 
 MicroVM guest control uses vsock-backed channels for control/health, exec, PTY,
 attestation, and optional sidecars. These are guest-to-host control channels,
