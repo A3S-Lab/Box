@@ -32,6 +32,9 @@ implementation:
 
 The E2B-style surface remains supported as the builder API grows. Neither entry
 style may maintain a separate lifecycle or transport implementation.
+`SandboxBuilder.start()` returns the same public `Sandbox` type used by
+`Sandbox.create()`, with the same `commands`, `files`, snapshot, and lifecycle
+namespaces.
 
 Every public operation must have:
 
