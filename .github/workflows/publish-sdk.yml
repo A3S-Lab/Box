@@ -238,6 +238,8 @@ jobs:
           path: publish/npm
 
       - name: Publish npm package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish publish/npm/*.tgz --access public
 
   publish-pypi:
@@ -258,4 +260,5 @@ jobs:
       - name: Publish PyPI package
         uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1
         with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: publish/pypi
