@@ -397,6 +397,343 @@ process-global Sandbox URL override. Native A3S SDK applications use only
 `A3S_BOX_*` connection settings and do not read `E2B_API_URL`; that variable is
 reserved for the optional unchanged-official-SDK migration path.
 
+#### Self-hosted usage
+
+`a3s-box-e2b` is a network service. The Python and TypeScript packages connect
+to that service; they do not start a local Box runtime. The production-tested
+preview requires a Linux Sandbox host with the certified `crun` runtime, a
+public control-plane address, and a TLS Sandbox gateway with wildcard DNS.
+See [Host Sandbox Backend Design](docs/host-sandbox-backend-design.md) for the
+host boundary and [E2B-Compatible SDK Design](docs/e2b-compatible-sdk-design.md)
+for the complete protocol and release gates.
+
+The simplest single-host production topology uses two public listeners:
+
+| Public address | Purpose | Service destination |
+| --- | --- | --- |
+| `https://api.box.example.com` | Control API used by `A3S_BOX_ENDPOINT` | TLS reverse proxy to `api_listen`, for example `127.0.0.1:3000` |
+| `https://<port>-<sandbox-id>.box.example.com:8443` | Direct Sandbox data plane | `gateway.listen`, for example `0.0.0.0:8443` |
+| `https://sandbox.box.example.com:8443` | Shared Sandbox route form | The same `gateway.listen` |
+
+Create explicit DNS for `api.box.example.com` and wildcard DNS for
+`*.box.example.com`. The Sandbox gateway terminates TLS itself and its
+certificate must cover `*.box.example.com`. Port `8443` avoids competing with
+the control-plane TLS proxy on a single IP. A deployment with separate IP
+addresses or an SNI-aware load balancer can use port `443` for both.
+
+The client and server settings map as follows:
+
+| Client setting | What to enter | Matching server setting |
+| --- | --- | --- |
+| `A3S_BOX_ENDPOINT` | The externally reachable control API origin, including `http://` or `https://` and any non-default port | `e2b_compat.api_public_url` |
+| `A3S_BOX_API_KEY` | The **raw** API key issued to this client | The raw key whose PBKDF2-SHA256 encoding is stored in `account.hash` |
+| `A3S_BOX_DOMAIN` | Optional Sandbox wildcard suffix, with no scheme or port | `e2b_compat.sandbox_domain` |
+| `A3S_BOX_SANDBOX_URL` | Single-Sandbox fixture override only; normally unset | Not a production multi-Sandbox setting |
+
+Use the bare control origin for `A3S_BOX_ENDPOINT`. Do not append `/api`,
+`/v1`, `/sandboxes`, a query string, or a fragment, and omit the trailing
+slash. For example:
+
+| Deployment | `A3S_BOX_ENDPOINT` | Additional setting |
+| --- | --- | --- |
+| Standard HTTPS | `https://api.box.example.com` | None; the SDK derives `box.example.com` |
+| Non-default control port | `https://api.box.example.com:8444` | None; the SDK still derives `box.example.com` |
+| Custom/LAN hostname | `https://box-api.lab.example:8444` | `A3S_BOX_DOMAIN=sandboxes.lab.example` |
+| Loopback development | `http://127.0.0.1:3000` | Set `A3S_BOX_DOMAIN` to the configured local Sandbox DNS suffix |
+
+Plain HTTP is appropriate only on loopback. A loopback control endpoint does
+not remove the data-plane requirements: Filesystem, Process, PTY, health, and
+Code Interpreter calls still need wildcard DNS, a trusted TLS certificate, and
+reachability to the configured Sandbox gateway.
+
+##### 1. Generate the client API key and server hash
+
+The current compatibility service requires API keys in the form
+`e2b_[0-9a-f]+`. The native A3S packages disable the upstream client-side
+validator, but the self-hosted server still enforces this compatibility form.
+Generate a high-entropy key and its server-side hash on a trusted
+administrative machine:
+
+```bash
+python3 - <<'PY'
+import hashlib
+import secrets
+
+iterations = 210_000
+salt = secrets.token_bytes(16)
+api_key = f"e2b_{secrets.token_hex(32)}"
+digest = hashlib.pbkdf2_hmac(
+    "sha256",
+    api_key.encode("utf-8"),
+    salt,
+    iterations,
+    dklen=32,
+)
+encoded = (
+    f"pbkdf2-sha256${iterations}${salt.hex()}${digest.hex()}"
+)
+
+print("Store this raw value in the client secret manager:")
+print(f"A3S_BOX_API_KEY={api_key}")
+print()
+print("Paste only this encoded value into the server account.hash:")
+print(encoded)
+PY
+```
+
+The command prints the raw key once. Store the `A3S_BOX_API_KEY=...` value in
+the client secret manager. Paste only the `pbkdf2-sha256$...` value into the
+server ACL. Do not put the raw key in the ACL, and do not put the encoded hash
+in `A3S_BOX_API_KEY`.
+
+Sandbox tokens use two different 32-byte service keys. Generate and persist
+them separately; they are not account API keys:
+
+```bash
+export A3S_BOX_E2B_TOKEN_ENCRYPTION_KEY_V1="$(openssl rand -hex 32)"
+export A3S_BOX_E2B_TOKEN_DIGEST_KEY_V1="$(openssl rand -hex 32)"
+```
+
+Keep these values stable across service restarts. Losing or changing them
+without a versioned rotation makes existing Sandbox tokens fail closed.
+
+##### 2. Configure the self-hosted service
+
+A3S Box accepts only ACL configuration parsed by `a3s-acl`. The following
+single-host example keeps the plaintext control listener on loopback, exposes
+the Sandbox TLS gateway on port `8443`, and defines a broker-mode base
+template. Replace the account hash, certificate paths, runtime paths, and image
+with values for the deployment. Pin the image by digest for production.
+
+```acl
+e2b_compat {
+  api_listen             = "127.0.0.1:3000"
+  api_public_url         = "https://api.box.example.com"
+  sandbox_domain        = "box.example.com"
+  sandbox_public_domain = "box.example.com:8443"
+  database_path         = "/var/lib/a3s-box/e2b/lifecycle.sqlite3"
+  runtime_home          = "/var/lib/a3s"
+  runtime_state_path    = "/var/lib/a3s-box/e2b/managed-executions.json"
+
+  gateway {
+    listen                = "0.0.0.0:8443"
+    tls_certificate_path  = "/etc/a3s-box/tls/sandbox-chain.pem"
+    tls_private_key_path  = "/etc/a3s-box/tls/sandbox-key.pem"
+    max_connections       = 4096
+    handshake_timeout_ms  = 5000
+    connect_timeout_ms    = 2000
+    drain_timeout_seconds = 30
+  }
+
+  supervisor {
+    interval_seconds          = 5
+    batch_size                = 100
+    reconciliation_page_size = 100
+  }
+
+  account "primary" {
+    scheme    = "api_key"
+    owner_id  = "production-team"
+    client_id = "production-client"
+    hash      = "pbkdf2-sha256$210000$<salt-hex>$<digest-hex>"
+  }
+
+  token_key "2026-07" {
+    version        = 1
+    active         = true
+    encryption_key = env("A3S_BOX_E2B_TOKEN_ENCRYPTION_KEY_V1")
+    digest_key     = env("A3S_BOX_E2B_TOKEN_DIGEST_KEY_V1")
+  }
+
+  template_policy "a3s-base" {
+    image        = "docker.io/library/alpine:3.20"
+    envd_version = "0.1.3"
+    envd_mode    = "broker"
+    isolation    = "sandbox"
+    network      = "none"
+    command      = ["/bin/sh", "-c", "while :; do sleep 3600; done"]
+
+    resources {
+      vcpus     = 2
+      memory_mb = 512
+      disk_mb   = 1024
+    }
+
+    route {
+      port        = 49983
+      token_scope = "envd"
+    }
+  }
+}
+```
+
+`api_public_url` is the value clients use as `A3S_BOX_ENDPOINT`;
+`api_listen` is an internal bind address and normally must not be given to
+remote clients. The TLS reverse proxy in front of `api_listen` must forward
+paths unchanged and preserve `X-API-Key`. The separate Sandbox gateway must be
+reachable on the port advertised by `sandbox_public_domain`.
+
+For the in-Sandbox envd and Code Interpreter template, use the immutable
+runtime image and template policy described in
+[`deploy/e2b/README.md`](deploy/e2b/README.md).
+
+##### 3. Start and verify the service
+
+Release archives install `a3s-box-e2b`. To build the same binary from this
+repository:
+
+```bash
+cd src
+cargo build --locked --release -p a3s-box-compat --bin a3s-box-e2b
+
+RUST_LOG=a3s_box_compat=info \
+  ./target/release/a3s-box-e2b --config /etc/a3s-box/e2b.acl
+```
+
+The two token-key environment variables referenced by the ACL must be present
+in the service process. Run the service under a supervisor and ensure its user
+can read the TLS private key and write the database, runtime home, and runtime
+state paths.
+
+Configure a client with the **raw** API key:
+
+```bash
+export A3S_BOX_ENDPOINT="https://api.box.example.com"
+export A3S_BOX_API_KEY="e2b_<raw-lowercase-hex-key>"
+
+# Only for a non-conventional control hostname:
+# export A3S_BOX_DOMAIN="sandboxes.lab.example"
+
+unset A3S_BOX_SANDBOX_URL
+```
+
+First verify the control API independently of Sandbox routing:
+
+```bash
+curl --fail --show-error --silent \
+  --header "X-API-Key: ${A3S_BOX_API_KEY}" \
+  "${A3S_BOX_ENDPOINT}/v2/sandboxes"
+```
+
+A successful request returns HTTP `200`. This proves the control endpoint,
+TLS trust, reverse-proxy path, and account key. It does not prove wildcard
+Sandbox DNS or the data-plane gateway; create a Sandbox and run a command for
+that end-to-end check.
+
+##### 4. Use the native A3S SDKs
+
+The native packages are currently source-tree previews. Build or install them
+as described in the
+[`a3s-box` Python package](sdk/python/README.md) and
+[`@a3s-lab/box` TypeScript package](sdk/typescript/README.md).
+
+Python synchronous client:
+
+```python
+from a3s_box import A3SConnectionConfig, Sandbox
+
+connection = A3SConnectionConfig.from_environment()
+sandbox = Sandbox.create(
+    "a3s-base",
+    **connection.python_options(),
+)
+
+try:
+    result = sandbox.commands.run("printf 'hello from A3S Box\\n'")
+    print(result.stdout)
+finally:
+    sandbox.kill()
+```
+
+Python asynchronous client:
+
+```python
+import asyncio
+
+from a3s_box import A3SConnectionConfig, AsyncSandbox
+
+
+async def main() -> None:
+    connection = A3SConnectionConfig.from_environment()
+    sandbox = await AsyncSandbox.create(
+        "a3s-base",
+        **connection.python_options(),
+    )
+    async with sandbox:
+        result = await sandbox.commands.run(
+            "printf 'hello from A3S Box\\n'"
+        )
+        print(result.stdout)
+
+
+asyncio.run(main())
+```
+
+TypeScript client:
+
+```typescript
+import { A3SConnectionConfig, Sandbox } from '@a3s-lab/box'
+
+const connection = A3SConnectionConfig.fromEnvironment(process.env)
+const sandbox = await Sandbox.create('a3s-base', {
+  ...connection.typescriptOptions(),
+  timeoutMs: 60_000,
+})
+
+try {
+  const result = await sandbox.commands.run(
+    "printf 'hello from A3S Box\\n'"
+  )
+  console.log(result.stdout)
+} finally {
+  await sandbox.kill()
+}
+```
+
+`A3SConnectionConfig` passes the API key to the pinned E2B client, which sends
+it as `X-API-Key`. It derives `A3S_BOX_DOMAIN` only when the endpoint hostname
+starts with `api.`; otherwise set the domain explicitly.
+
+##### 5. Use unchanged official E2B SDKs
+
+The unchanged official SDKs use their own environment names. Point them at the
+same A3S Box service without setting a process-global Sandbox URL:
+
+```bash
+export E2B_API_URL="${A3S_BOX_ENDPOINT}"
+export E2B_API_KEY="${A3S_BOX_API_KEY}"
+export E2B_DOMAIN="box.example.com"
+unset E2B_SANDBOX_URL
+```
+
+The generated `e2b_` key passes the official clients' default API-key
+validation. Do not set `E2B_SANDBOX_URL` to the shared
+`sandbox.<domain>` endpoint in a multi-Sandbox deployment: it is a fixed URL,
+and file-transfer URLs would lose the Sandbox identity. The native A3S
+packages intentionally ignore these `E2B_*` connection variables.
+
+##### Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| `A3S_BOX_ENDPOINT is required` | Export it in the same process that starts the application; the native package does not read `E2B_API_URL`. |
+| HTTP `401` | `A3S_BOX_API_KEY` must be the raw `e2b_...` value, not `account.hash`; also confirm the reverse proxy preserves `X-API-Key`. |
+| Official SDK rejects the key before sending a request | Regenerate it in the required `e2b_[0-9a-f]+` form. Uppercase hex and `a3s_` prefixes are rejected by the current compatibility service. |
+| HTTP `404` from every SDK operation | Remove `/api`, `/v1`, `/sandboxes`, and the trailing slash from `A3S_BOX_ENDPOINT`; ensure the reverse proxy does not add or strip a path prefix. |
+| Control listing works but commands, files, PTY, or health fail | Check wildcard DNS, gateway firewall/port, wildcard certificate trust, and `sandbox_public_domain`. |
+| TLS hostname mismatch on a Sandbox URL | The certificate must cover `*.sandbox_domain`; `A3S_BOX_DOMAIN` contains only the DNS suffix, without a scheme or port. |
+| A custom control hostname routes Sandbox calls to the wrong domain | Set `A3S_BOX_DOMAIN` exactly to `e2b_compat.sandbox_domain`. |
+| Sandbox creation reports an unknown template | Pass a template ID declared by `template_policy`, such as `a3s-base`. |
+| Existing Sandbox tokens fail after a restart | Restore the token encryption/digest key version used to issue them; rotate with a new retained version instead of replacing key material in place. |
+
+Use HTTPS everywhere outside loopback, never commit raw account or token keys,
+and keep credentials out of logs. To rotate an account key without an outage,
+add a second `account` block with the same `owner_id`, a new label and
+`client_id`, and the new hash; restart the service, update clients, then remove
+the old account in a later restart.
+
+#### Current implementation status
+
 The Phase 2 preview includes an owner-scoped Rust lifecycle router for create,
 connect, get, memory-preserving pause, connect/resume, v1/v2 running/paused
 list, timeout, monotonic refresh, current single/batch metrics,
@@ -1057,6 +1394,10 @@ matrix, warm-pool Dockerfile `RUN` smoke, CRI smoke, and host soak procedures.
 | Variable | Description |
 | --- | --- |
 | `A3S_HOME` | Data directory. Default: `~/.a3s`. |
+| `A3S_BOX_ENDPOINT` | Native Python/TypeScript SDK control-plane origin for the E2B-compatible service, for example `https://api.box.example.com`. Do not append an API path or trailing slash. |
+| `A3S_BOX_API_KEY` | Raw self-hosted compatibility API key sent as `X-API-Key`. It must match `e2b_[0-9a-f]+`; do not use the PBKDF2 hash stored in the server ACL. |
+| `A3S_BOX_DOMAIN` | Optional Sandbox wildcard DNS suffix when it cannot be derived from a conventional `https://api.<domain>` endpoint. Do not include a scheme or port. |
+| `A3S_BOX_SANDBOX_URL` | Fixed single-Sandbox fixture override. Leave unset for normal self-hosted multi-Sandbox deployments. |
 | `A3S_IMAGE_CACHE_SIZE` | Image cache size. Default: `10g`. |
 | `A3S_TEE_SIMULATE` | Enables simulated TEE report behavior. |
 | `A3S_REGISTRY_PROTOCOL` | Legacy registry protocol override for local/insecure registry tests. Prefer `a3s-box push --plain-http` for push. |
