@@ -213,7 +213,9 @@ async fn exercise_filesystem_snapshot(
     client: &A3sBoxClient,
     image: &str,
 ) -> Result<(), AnyError> {
-    let marker = "/tmp/a3s-sdk-snapshot-marker.txt";
+    // `/tmp` is an intentionally ephemeral tmpfs in Sandbox isolation and is
+    // therefore outside a filesystem snapshot. Keep the marker in the rootfs.
+    let marker = "/a3s-sdk-snapshot-marker.txt";
     sandbox.files.write(marker, "snapshot-ok").await?;
     let snapshot_id =
         ExecutionSnapshotId::new(format!("sdk-smoke-{}", sandbox.id().replace('-', "_")))?;

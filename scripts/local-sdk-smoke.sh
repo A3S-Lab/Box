@@ -189,7 +189,9 @@ try:
         assert sandbox.files.read("/tmp/a3s-python-sdk-smoke.txt") == "hello"
         sandbox.files.remove("/tmp/a3s-python-sdk-smoke.txt")
         if isolation == "sandbox":
-            marker = "/tmp/a3s-python-sdk-snapshot.txt"
+            # `/tmp` is an ephemeral tmpfs and is intentionally excluded from
+            # rootfs snapshots.
+            marker = "/a3s-python-sdk-snapshot.txt"
             snapshot_id = f"python_sdk_{sandbox.id.replace('-', '_')}"
             sandbox.files.write(marker, "snapshot-ok")
             snapshot = sandbox.create_filesystem_snapshot(snapshot_id)
@@ -299,7 +301,9 @@ try {
     }
     await sandbox.files.remove('/tmp/a3s-typescript-sdk-smoke.txt')
     if (isolation === 'sandbox') {
-      const marker = '/tmp/a3s-typescript-sdk-snapshot.txt'
+      // `/tmp` is an ephemeral tmpfs and is intentionally excluded from
+      // rootfs snapshots.
+      const marker = '/a3s-typescript-sdk-snapshot.txt'
       const snapshotId = `typescript_sdk_${sandbox.id.replaceAll('-', '_')}`
       await sandbox.files.write(marker, 'snapshot-ok')
       const snapshot = await sandbox.createFilesystemSnapshot(snapshotId)
