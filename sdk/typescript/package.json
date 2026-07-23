@@ -1,6 +1,6 @@
 {
   "name": "@a3s-lab/box",
-  "version": "3.0.11",
+  "version": "3.0.12",
   "description": "Local-first TypeScript SDK for A3S Box with E2B-like APIs",
   "type": "module",
   "sideEffects": false,

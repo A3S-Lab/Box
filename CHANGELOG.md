@@ -4,6 +4,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.0.12] — 2026-07-23
+
 ### Added
 
 - **Zero-configuration local Rust, Python, and TypeScript SDKs.** Native
