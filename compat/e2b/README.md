@@ -47,6 +47,9 @@ cargo run -p a3s-box-compat --bin a3s-box-e2b-contract -- verify
 `protoc` must be available because the Protobuf inventory is generated from a
 real descriptor set rather than a hand-written parser. CI verifies that the
 vendored sources, inventories, and manifest remain byte-for-byte consistent.
+Portable installations may set `PROTOC` to the compiler executable and
+`PROTOC_INCLUDE` to one or more platform-separated include directories. Each
+include directory must contain the imported `google/protobuf/*.proto` files.
 
 ## Updating the pin
 
@@ -81,6 +84,20 @@ Run it from the Rust workspace:
 cargo run --locked -p a3s-box-compat --bin a3s-box-e2b -- \
   --config /etc/a3s-box/e2b.acl
 ```
+
+On Windows, omitting `isolation` from the template policy selects the native
+WHPX MicroVM backend; WSL is not part of the runtime path. The template must
+request one vCPU, and the operator must enable the `HypervisorPlatform` Windows
+feature before starting A3S Box. The service never enables Windows features on
+the operator's behalf.
+
+Real WHPX validation on July 23, 2026 passed create, list, connect, timeout
+replacement, and kill with the official Python sync/async and TypeScript
+clients and the A3S Python sync/async and TypeScript packages. Authenticated
+direct wildcard broker health returned `204` while running and `502` after
+kill. Managed Process, PTY, and file sessions and Volume content operations
+remain fail-closed on non-Unix hosts, so this evidence does not extend the
+Windows claim to the complete data-plane or Code Interpreter matrix.
 
 The validated schema and an operator example are documented in
 [`docs/e2b-compatible-sdk-design.md`](../../docs/e2b-compatible-sdk-design.md#configuration).

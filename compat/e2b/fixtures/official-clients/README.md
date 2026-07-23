@@ -30,6 +30,12 @@ python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify \
   --rust-server-bin src/target/debug/a3s-box-e2b-fixture-server
 ```
 
+The default recorder-backed matrix is cross-platform. The Rust fixture server
+also exercises production Volume content behavior, whose traversal and
+mutation guarantees rely on descriptor-relative Unix filesystem APIs.
+Consequently, `--rust-server-bin` is a Unix-only fixture path; Windows runs the
+recorder matrix and the native WHPX production lifecycle validation separately.
+
 The runner uses `uv` when it is available on `PATH`, then falls back to the
 standard-library `venv` module. On hosts where Python was packaged without
 `ensurepip`, pass a trusted pip wheel without installing it into the host:

@@ -20,6 +20,10 @@ feature manager requests it:
 Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 ```
 
+A3S Box does not enable this feature, install the Hyper-V role, or change the
+host hypervisor boot policy. It only opens the WHPX APIs after the operator has
+prepared Windows. WSL is neither started nor required.
+
 Run `a3s-box info` before starting a workload. It should report both
 `Virtualization: WHPX` and `OCI symlink support: available`.
 
@@ -90,6 +94,8 @@ the Cargo target directory.
 | POSIX ownership and modes | Validated for `chmod`, `chown`, and umask-created files and directories across clean stop, restart, and commit |
 | `diff`, `export`, stopped-box `commit`, and stopped-box filesystem snapshots | Validated through clean-stop metadata capture, committed-image re-run, snapshot restore, restart, and re-export. Running-box host-path capture remains unavailable because WHPX has no post-boot guest archive channel. |
 | `stats --no-stream` | Validated |
+| E2B-compatible service | The native WHPX MicroVM control lifecycle passed create, list, connect, timeout replacement, and kill through all six official/A3S lifecycle clients; authenticated direct wildcard broker health passed before and after kill |
+| E2B Process, PTY, file sessions, Volume content, and Code Interpreter | Not supported on Windows; the non-Unix session and descriptor-relative Volume adapters fail closed |
 | Container health checks | Not currently supported; `--health-*` requests and persisted health checks fail before workload start |
 | Bridge networks and Compose service networking | Not currently supported on Windows |
 | Interactive PTY (`attach -it`) and post-boot `exec` | Not currently supported on Windows |
@@ -129,6 +135,15 @@ guest-init unit tests inside a real WHPX guest, sent multiple requests through
 the same published TCP port, exercised Windows directory and single-file bind
 mounts, verified graceful and forced-stop cleanup without orphan processes,
 restarted a named volume, and restored and restarted a filesystem snapshot.
+
+On July 23, 2026, the production `a3s-box-e2b` service was also validated on
+this host with fresh-state and cached-image WHPX MicroVMs. The official Python
+sync/async and TypeScript clients and the A3S Python sync/async and TypeScript
+packages each completed create, list, connect, timeout replacement, and kill.
+The authenticated direct wildcard TLS broker returned `204` while a Sandbox
+was running and `502` after kill, and every run left zero active Sandboxes and
+zero shim processes. This evidence is deliberately limited to the control
+lifecycle and broker health boundary described above.
 
 Standard Compose services create a bridge network by default. Because native
 WHPX bridge networking is not implemented, Compose workload startup remains

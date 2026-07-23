@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -23,7 +24,8 @@ pub(crate) fn read_protobuf_contracts(
     let descriptor = tempfile::NamedTempFile::new()
         .context("failed to create temporary Protobuf descriptor file")?;
     let descriptor_path = descriptor.path().to_path_buf();
-    let mut command = Command::new("protoc");
+    let protoc = std::env::var_os("PROTOC").unwrap_or_else(|| "protoc".into());
+    let mut command = Command::new(&protoc);
     command
         .current_dir(proto_root)
         .arg("--include_imports")
@@ -32,15 +34,8 @@ pub(crate) fn read_protobuf_contracts(
             "--descriptor_set_out={}",
             descriptor_path.display()
         ));
-    for include in [
-        "/usr/include",
-        "/usr/local/include",
-        "/opt/homebrew/include",
-        "/usr/local/opt/protobuf/include",
-    ] {
-        if Path::new(include).is_dir() {
-            command.arg(format!("--proto_path={include}"));
-        }
+    for include in protoc_include_paths(std::env::var_os("PROTOC_INCLUDE").as_deref())? {
+        command.arg("--proto_path").arg(include);
     }
     for path in relative_paths {
         command.arg(path);
@@ -80,6 +75,39 @@ pub(crate) fn read_protobuf_contracts(
     }
     inventory.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(inventory)
+}
+
+fn protoc_include_paths(explicit: Option<&OsStr>) -> Result<Vec<PathBuf>> {
+    let mut includes = Vec::new();
+    if let Some(explicit) = explicit {
+        if explicit.is_empty() {
+            bail!("PROTOC_INCLUDE is empty");
+        }
+        for include in std::env::split_paths(explicit) {
+            if !include.is_dir() {
+                bail!(
+                    "PROTOC_INCLUDE path is not a directory: {}",
+                    include.display()
+                );
+            }
+            if !includes.contains(&include) {
+                includes.push(include);
+            }
+        }
+    }
+
+    for include in [
+        "/usr/include",
+        "/usr/local/include",
+        "/opt/homebrew/include",
+        "/usr/local/opt/protobuf/include",
+    ] {
+        let include = PathBuf::from(include);
+        if include.is_dir() && !includes.contains(&include) {
+            includes.push(include);
+        }
+    }
+    Ok(includes)
 }
 
 fn file_inventory(path: &str, file: &FileDescriptorProto) -> Result<ProtoFileInventory> {
@@ -229,6 +257,31 @@ fn enum_inventory(enumeration: &EnumDescriptorProto) -> ProtoEnum {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_protoc_includes_are_validated_and_deduplicated() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let joined = std::env::join_paths([first.path(), second.path(), first.path()]).unwrap();
+
+        let includes = protoc_include_paths(Some(&joined)).unwrap();
+        assert_eq!(includes[0], first.path());
+        assert_eq!(includes[1], second.path());
+        assert_eq!(
+            includes
+                .iter()
+                .filter(|include| include.as_path() == first.path())
+                .count(),
+            1
+        );
+
+        let missing = first.path().join("missing");
+        let missing = std::env::join_paths([missing]).unwrap();
+        let error = protoc_include_paths(Some(&missing))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("PROTOC_INCLUDE path is not a directory"));
+    }
 
     #[test]
     fn descriptor_inventory_preserves_streaming_and_oneofs() {

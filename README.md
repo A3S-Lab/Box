@@ -174,7 +174,7 @@ stated under [SDKs and Compatibility](#sdks-and-compatibility).
 | E2B protocol and language SDKs | Pinned contracts, durable lifecycle, memory-preserving and filesystem-only pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | The last certified A3S OS run proves the pinned official Python sync/async and TypeScript clients, plus the A3S Python sync/async and TypeScript packages, against the existing matrix, including Snapshot capture/list/restore/delete, filesystem and OCI-default fidelity, bidirectional Volume mounts, warm-pause process survival, and generation-fenced logs. The production gate is now extended to check cold-pause rootfs persistence, process replacement, environment reinitialization, and Volume remounting; that extension still requires its certified-host run. Templates/builds, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. PyPI/npm publication is also pending. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
-| Windows | Native x86_64 WHPX/libkrun MicroVM execution | Host-specific. Foreground and detached workloads, long arguments staged outside the guest kernel command line, live split logs, exit codes, TCP publishing, bind mounts, named-volume persistence, stats, stopped-box commit, and stopped-box filesystem snapshot flows have passed real-host validation. Running-box commit has no guest archive channel. The reliable path is currently limited to one vCPU; container health checks, bridge networking, interactive execution, TEE, snapshot-fork, and CRI remain unsupported. |
+| Windows | Native x86_64 WHPX/libkrun MicroVM execution | Host-specific. Foreground and detached workloads, long arguments staged outside the guest kernel command line, live split logs, exit codes, TCP publishing, bind mounts, named-volume persistence, stats, stopped-box commit, and stopped-box filesystem snapshot flows have passed real-host validation. The E2B MicroVM control lifecycle has also passed with the official Python sync/async and TypeScript clients plus the A3S Python sync/async and TypeScript packages. Running-box commit has no guest archive channel. The reliable path is currently limited to one vCPU; E2B Process/PTY/file sessions and Volume content, container health checks, bridge networking, interactive execution, TEE, snapshot-fork, and CRI remain unsupported. |
 
 An implemented API is not automatically a production guarantee for every host
 or threat model. Real-runtime validation evidence and remaining platform gaps
@@ -677,6 +677,20 @@ cargo run --locked -p a3s-box-compat --bin a3s-box-e2b -- \
   --config /etc/a3s-box/e2b.acl
 ```
 
+On Windows, a template policy that omits `isolation` selects the native WHPX
+MicroVM path and must use one vCPU. WSL is not involved, and A3S Box does not
+enable Windows Hypervisor Platform or other Windows features automatically.
+The operator must enable `HypervisorPlatform` before starting the service.
+
+Real WHPX validation on July 23, 2026 covered create, list, connect, timeout
+replacement, and kill through the official Python sync/async and TypeScript
+clients and the A3S Python sync/async and TypeScript packages. The authenticated
+direct wildcard TLS broker returned `204` while the MicroVM was running and
+`502` after kill, with no residual shim. This is a Windows control-lifecycle
+claim only: managed Process, PTY, and file sessions and Volume content
+operations intentionally fail closed on non-Unix hosts, so the complete data
+plane and Code Interpreter matrix still requires the certified A3S OS gate.
+
 The Python package under [`sdk/python`](sdk/python/README.md) and the TypeScript
 package under [`sdk/typescript`](sdk/typescript/README.md) pass the production
 matrix and are built as GitHub Release assets. They are not yet published to
@@ -837,8 +851,10 @@ cargo test -p a3s-box-sdk
 cargo run -p a3s-box-compat --bin a3s-box-e2b-contract -- verify
 ```
 
-The contract verification command requires `protoc`. Python and TypeScript SDK
-checks run in their own package directories:
+The contract verification command requires `protoc`. Portable installations
+may set `PROTOC` to the compiler executable and `PROTOC_INCLUDE` to one or more
+platform-separated include roots containing `google/protobuf/*.proto`. Python
+and TypeScript SDK checks run in their own package directories:
 
 ```bash
 cd sdk/python
@@ -849,6 +865,17 @@ cd ../typescript
 npm run build
 npm test
 ```
+
+The checksum-pinned official-client wire fixtures are also runnable on every
+development host:
+
+```bash
+python3 compat/e2b/fixtures/official-clients/run_fixtures.py verify
+```
+
+That default recorder-backed matrix is cross-platform. Its optional
+`--rust-server-bin` path also exercises Volume content through
+descriptor-relative filesystem APIs and therefore requires a Unix host.
 
 Host-backed MicroVM, Sandbox, networking, build, CRI, and endurance tests must
 run on an explicitly prepared host with isolated runtime state. The validation
