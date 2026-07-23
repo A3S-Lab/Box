@@ -1,5 +1,22 @@
-import { A3SBoxError } from './errors.js'
-import { A3SLocalRuntime, type BridgeResult, type LocalRuntime } from './runtime.js'
+import {
+  asRecord,
+  buildImageInfo,
+  filesystemSnapshotSummary,
+  imageHistoryInfo,
+  imageInfo,
+  imageInspectInfo,
+  networkInfo,
+  pushImageInfo,
+  recordArray,
+  runtimeDiagnostics,
+  runtimeDiskUsage,
+  sandboxSummary,
+  sdkCapabilities,
+  stringArray,
+  unknownRecordArray,
+  volumeInfo,
+} from './bridge-values.js'
+import { A3SLocalRuntime, type LocalRuntime } from './runtime.js'
 import {
   DEFAULT_IMAGE,
   Sandbox,
@@ -117,6 +134,94 @@ export interface PushImageInfo {
 export interface SdkCapabilities {
   protocolVersion: number
   operations: readonly string[]
+}
+
+export interface SandboxSummary {
+  id: string
+  shortId: string
+  name: string
+  image: string
+  isolation: string
+  status: string
+  statusSummary: string
+  active: boolean
+  pid?: number
+  cpus: number
+  memoryMb: number
+  ports: readonly string[]
+  command: readonly string[]
+  health: string
+  labels: Readonly<Record<string, string>>
+  createdAt: string
+  startedAt?: string
+  networkName?: string
+  volumeNames: readonly string[]
+}
+
+export interface SandboxLogEntry {
+  stream: string
+  message: string
+  timestamp?: string
+}
+
+export interface SandboxStats {
+  id: string
+  shortId: string
+  name: string
+  status: string
+  pid: number
+  cpus: number
+  cpuPercent: number
+  cpuPercentScaled: number
+  memoryBytes: number
+  memoryLimitBytes: number
+  memoryPercent: number
+  networkRxBytes: number
+  networkTxBytes: number
+  blockReadBytes: number
+  blockWriteBytes: number
+}
+
+export interface RuntimeVirtualization {
+  available: boolean
+  backend?: string
+  details: string
+}
+
+export interface RuntimeDiagnostics {
+  coreVersion: string
+  runtimeVersion: string
+  sdkVersion: string
+  home: string
+  virtualization: RuntimeVirtualization
+}
+
+export interface RuntimeDiskUsage {
+  home: string
+  totalBytes: number
+  boxesBytes: number
+  imagesBytes: number
+  volumesBytes: number
+  snapshotsBytes: number
+  stateBytes: number
+  otherBytes: number
+}
+
+export interface FilesystemSnapshotSummary {
+  id: string
+  name: string
+  sourceSandboxId: string
+  image: string
+  vcpus: number
+  memoryMb: number
+  volumes: readonly string[]
+  command: readonly string[]
+  ports: readonly string[]
+  labels: Readonly<Record<string, string>>
+  networkMode?: string
+  sizeBytes: number
+  createdAt: string
+  description: string
 }
 
 export interface VolumeInfo {
@@ -333,6 +438,55 @@ export class A3SBoxClient {
     return sdkCapabilities(
       await this.runtime.request({ operation: 'sdk_capabilities' })
     )
+  }
+
+  async listSandboxes(options: { all?: boolean } = {}): Promise<SandboxSummary[]> {
+    const result = await this.runtime.request({
+      operation: 'sandbox_list',
+      all: options.all ?? true,
+    })
+    return recordArray(result, 'sandboxes').map(sandboxSummary)
+  }
+
+  async getSandbox(query: string): Promise<SandboxSummary | undefined> {
+    const result = await this.runtime.request({
+      operation: 'sandbox_get',
+      query,
+    })
+    return result.sandbox === null || result.sandbox === undefined
+      ? undefined
+      : sandboxSummary(asRecord(result.sandbox))
+  }
+
+  async runtimeDiagnostics(): Promise<RuntimeDiagnostics> {
+    return runtimeDiagnostics(
+      await this.runtime.request({ operation: 'runtime_diagnostics' })
+    )
+  }
+
+  async runtimeDiskUsage(): Promise<RuntimeDiskUsage> {
+    return runtimeDiskUsage(
+      await this.runtime.request({ operation: 'runtime_disk_usage' })
+    )
+  }
+
+  async listFilesystemSnapshots(): Promise<FilesystemSnapshotSummary[]> {
+    const result = await this.runtime.request({
+      operation: 'filesystem_snapshot_list',
+    })
+    return recordArray(result, 'snapshots').map(filesystemSnapshotSummary)
+  }
+
+  async getFilesystemSnapshot(
+    snapshotId: string
+  ): Promise<FilesystemSnapshotSummary | undefined> {
+    const result = await this.runtime.request({
+      operation: 'filesystem_snapshot_get',
+      snapshot_id: snapshotId,
+    })
+    return result.snapshot === null || result.snapshot === undefined
+      ? undefined
+      : filesystemSnapshotSummary(asRecord(result.snapshot))
   }
 }
 
@@ -632,202 +786,4 @@ export class SandboxBuilder {
   start(): Promise<Sandbox> {
     return Sandbox.create(this.image, this.options)
   }
-}
-
-function buildImageInfo(result: BridgeResult): BuildImageInfo {
-  return {
-    reference: requiredString(result, 'reference'),
-    digest: requiredString(result, 'digest'),
-    sizeBytes: requiredNumber(result, 'size_bytes'),
-    layerCount: requiredNumber(result, 'layer_count'),
-  }
-}
-
-function imageInfo(result: BridgeResult): ImageInfo {
-  return {
-    reference: requiredString(result, 'reference'),
-    digest: requiredString(result, 'digest'),
-    sizeBytes: requiredNumber(result, 'size_bytes'),
-    pulledAt: requiredString(result, 'pulled_at'),
-    lastUsed: requiredString(result, 'last_used'),
-    path: requiredString(result, 'path'),
-  }
-}
-
-function imageInspectInfo(result: BridgeResult): ImageInspectInfo {
-  const healthCheck =
-    result.health_check === null || result.health_check === undefined
-      ? undefined
-      : imageHealthCheckInfo(asRecord(result.health_check))
-  return {
-    ...imageInfo(result),
-    manifestDigest: requiredString(result, 'manifest_digest'),
-    layerCount: requiredNumber(result, 'layer_count'),
-    entrypoint: optionalStringArray(result.entrypoint),
-    command: optionalStringArray(result.command),
-    env: stringRecord(result.env),
-    workingDir: optionalString(result, 'working_dir'),
-    user: optionalString(result, 'user'),
-    exposedPorts: stringArray(result.exposed_ports),
-    volumes: stringArray(result.volumes),
-    stopSignal: optionalString(result, 'stop_signal'),
-    healthCheck,
-    onbuild: stringArray(result.onbuild),
-    labels: stringRecord(result.labels),
-  }
-}
-
-function imageHealthCheckInfo(result: BridgeResult): ImageHealthCheckInfo {
-  return {
-    test: stringArray(result.test),
-    interval: optionalNumber(result, 'interval'),
-    timeout: optionalNumber(result, 'timeout'),
-    retries: optionalNumber(result, 'retries'),
-    startPeriod: optionalNumber(result, 'start_period'),
-  }
-}
-
-function imageHistoryInfo(result: BridgeResult): ImageHistoryInfo {
-  return {
-    created: optionalString(result, 'created'),
-    createdBy: requiredString(result, 'created_by'),
-    sizeBytes: requiredNumber(result, 'size_bytes'),
-    comment: requiredString(result, 'comment'),
-    emptyLayer: requiredBoolean(result, 'empty_layer'),
-  }
-}
-
-function pushImageInfo(result: BridgeResult): PushImageInfo {
-  return {
-    reference: requiredString(result, 'reference'),
-    manifestDigest: requiredString(result, 'manifest_digest'),
-    configUrl: requiredString(result, 'config_url'),
-    manifestUrl: requiredString(result, 'manifest_url'),
-  }
-}
-
-function sdkCapabilities(result: BridgeResult): SdkCapabilities {
-  return {
-    protocolVersion: requiredNumber(result, 'protocol_version'),
-    operations: stringArray(result.operations),
-  }
-}
-
-function volumeInfo(result: BridgeResult): VolumeInfo {
-  return {
-    name: requiredString(result, 'name'),
-    driver: requiredString(result, 'driver'),
-    mountPoint: requiredString(result, 'mount_point'),
-    labels: stringRecord(result.labels),
-    inUseBy: stringArray(result.in_use_by),
-    inUse: requiredBoolean(result, 'in_use'),
-    sizeLimit: requiredNumber(result, 'size_limit'),
-    createdAt: requiredString(result, 'created_at'),
-  }
-}
-
-function networkInfo(result: BridgeResult): NetworkInfo {
-  return {
-    name: requiredString(result, 'name'),
-    driver: requiredString(result, 'driver'),
-    subnet: requiredString(result, 'subnet'),
-    gateway: requiredString(result, 'gateway'),
-    labels: stringRecord(result.labels),
-    endpoints: recordArray(result, 'endpoints').map(networkEndpointInfo),
-    endpointCount: requiredNumber(result, 'endpoint_count'),
-    isolation: requiredString(result, 'isolation'),
-    createdAt: requiredString(result, 'created_at'),
-  }
-}
-
-function networkEndpointInfo(result: BridgeResult): NetworkEndpointInfo {
-  return {
-    boxId: requiredString(result, 'box_id'),
-    boxName: requiredString(result, 'box_name'),
-    aliases: stringArray(result.aliases),
-    ipAddress: requiredString(result, 'ip_address'),
-    macAddress: requiredString(result, 'mac_address'),
-  }
-}
-
-function requiredString(result: BridgeResult, key: string): string {
-  const value = result[key]
-  if (typeof value !== 'string') bridgeTypeError(key)
-  return value
-}
-
-function requiredNumber(result: BridgeResult, key: string): number {
-  const value = result[key]
-  if (typeof value !== 'number') bridgeTypeError(key)
-  return value
-}
-
-function requiredBoolean(result: BridgeResult, key: string): boolean {
-  const value = result[key]
-  if (typeof value !== 'boolean') bridgeTypeError(key)
-  return value
-}
-
-function optionalString(
-  result: BridgeResult,
-  key: string
-): string | undefined {
-  const value = result[key]
-  if (value === null || value === undefined) return undefined
-  if (typeof value !== 'string') bridgeTypeError(key)
-  return value
-}
-
-function optionalNumber(
-  result: BridgeResult,
-  key: string
-): number | undefined {
-  const value = result[key]
-  if (value === null || value === undefined) return undefined
-  if (typeof value !== 'number') bridgeTypeError(key)
-  return value
-}
-
-function recordArray(result: BridgeResult, key: string): BridgeResult[] {
-  const value = result[key]
-  if (!Array.isArray(value)) bridgeTypeError(key)
-  return value.map(asRecord)
-}
-
-function unknownRecordArray(value: unknown): BridgeResult[] {
-  if (!Array.isArray(value)) bridgeTypeError('array')
-  return value.map(asRecord)
-}
-
-function stringArray(value: unknown): string[] {
-  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) {
-    bridgeTypeError('array')
-  }
-  return value
-}
-
-function optionalStringArray(value: unknown): string[] | undefined {
-  return value === null || value === undefined ? undefined : stringArray(value)
-}
-
-function stringRecord(value: unknown): Readonly<Record<string, string>> {
-  const record = asRecord(value)
-  if (!Object.values(record).every((item) => typeof item === 'string')) {
-    bridgeTypeError('record')
-  }
-  return record as Record<string, string>
-}
-
-function asRecord(value: unknown): BridgeResult {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    bridgeTypeError('object')
-  }
-  return value as BridgeResult
-}
-
-function bridgeTypeError(key: string): never {
-  throw new A3SBoxError(
-    `Bridge result has an invalid ${key}`,
-    'bridge_protocol_error'
-  )
 }

@@ -179,9 +179,9 @@ If retained, the composition layer must:
 | Networking | list/create/get/remove/prune, typed attachment, published ports, and resolved endpoint inspection | Create/get/list/remove/prune, typed TSI/disabled/bridge selection, endpoint responses, and TCP publication have three-language parity. Live hot-plug is intentionally unsupported. |
 | Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have three-language parity and pass the real macOS/HVF builder-to-E2B smoke. Process handles, signals, wait, and streaming remain pending. |
 | Files and artifacts | binary/text read/write, stat, exists, list, mkdir, move, remove, streaming, confined export, size limits, and hashes | Core mutations implemented; artifact/export layer and large-file streaming pending. |
-| Filesystem snapshots | capture, size, restore, delete, in-use fencing, and cleanup | Rust and bridge foundations implemented; real-backend release gate pending. |
-| Lifecycle | create, connect, inspect, list, pause, resume, restart, timeout replacement, stop, kill, remove, and deterministic cleanup | Partial high-level parity. |
-| Observability | structured logs, stats, events, health, audit data, and runtime diagnostics | Partial Rust direct-client coverage; language parity pending. |
+| Filesystem snapshots | capture, size, restore, delete, in-use fencing, inspection, and cleanup | Capture/size/restore/delete and live-use fencing are implemented. Rust, Python sync/async, and TypeScript expose typed list/get inspection through the checked bridge; the real Sandbox gate exercises the complete local snapshot lifecycle. |
+| Lifecycle | create, connect, inspect, list, pause, resume, restart, timeout replacement, stop, kill, remove, and deterministic cleanup | Rust, Python sync/async, and TypeScript have parity for create/connect/inspect/list/pause/resume/stop/idempotent restart/kill/remove. Restart carries a durable operation identity and optional stop deadline; stop preserves the record, remove requires a terminal state, and kill composes both. Cancellation cleanup remains pending. |
+| Observability | structured logs, stats, events, health, audit data, and runtime diagnostics | Bounded structured log snapshots, active resource stats, runtime versions/virtualization diagnostics, disk usage, and Sandbox inventory have three-language parity. Event streams, health history, and audit queries remain pending. |
 | PTY | create, resize, input, output streaming, wait, and cancellation | Rust lower-level primitives only. |
 | Security | typed isolation, resource limits, read-only policy, capabilities, devices, secret injection, and attestation | Partial; unsupported policies must be rejected rather than represented as enforced. |
 
@@ -209,6 +209,13 @@ one-request/one-response bridge cannot represent live progress safely.
 - Add confined artifact export with hashes and limits.
 - Document named-volume cache patterns and warm-base snapshot patterns.
 - Add a checked API inventory so exported operations cannot drift silently.
+
+Lifecycle, bounded structured logs, current stats, runtime diagnostics/disk
+usage, Sandbox list/get, and filesystem snapshot list/get now have typed
+Rust/Python/TypeScript parity and are part of the checked bridge inventory.
+Restart retries use a durable operation ID, log tails are validated before
+runtime lookup, and stop is distinct from terminal removal. Confined artifact
+export and volume content helpers remain the unfinished Phase 2 work.
 
 ### Phase 3: Processes and interactive execution
 

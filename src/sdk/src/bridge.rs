@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionSnapshot, ExecutionSnapshotId,
-    ExecutionState, FilesystemEntry, FilesystemEntryKind, Platform, PortMapping,
+    ExecutionState, FilesystemEntry, FilesystemEntryKind, OperationId, Platform, PortMapping,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -19,9 +19,9 @@ use serde_json::{json, Value};
 
 use crate::{
     A3sBoxClient, BuildImage, ClientError, CommandRunOptions, CreateNetwork, CreateVolume,
-    FilesystemOptions, PullImage, PushImage, Sandbox, SandboxCommand, SandboxCreateOptions,
-    SandboxNetwork, TagImage, TmpfsMount, VolumeMount, DEFAULT_SANDBOX_IMAGE,
-    DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+    FilesystemOptions, ListBoxesOptions, PullImage, PushImage, Sandbox, SandboxCommand,
+    SandboxCreateOptions, SandboxLogOptions, SandboxNetwork, SandboxRestartOptions, TagImage,
+    TmpfsMount, VolumeMount, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_TIMEOUT_SECONDS,
 };
 
 mod request;
@@ -227,6 +227,8 @@ async fn execute_request(
             "protocol_version": BRIDGE_PROTOCOL_VERSION,
             "operations": BRIDGE_OPERATIONS,
         })),
+        BridgeRequest::RuntimeDiagnostics => serialize_value(client.runtime_diagnostics()),
+        BridgeRequest::RuntimeDiskUsage => serialize_value(client.runtime_disk_usage()?),
         BridgeRequest::ImageBuild {
             context_dir,
             dockerfile,
@@ -360,6 +362,10 @@ async fn execute_request(
         BridgeRequest::NetworkList => serialize_field("networks", client.list_networks()?),
         BridgeRequest::NetworkRemove { name } => serialize_value(client.remove_network(&name)?),
         BridgeRequest::NetworkPrune => serialize_field("names", client.prune_networks()?),
+        BridgeRequest::SandboxList { all } => {
+            serialize_field("sandboxes", client.list_boxes(ListBoxesOptions { all })?)
+        }
+        BridgeRequest::SandboxGet { query } => serialize_field("sandbox", client.get_box(&query)?),
         BridgeRequest::SandboxCreate(request) => {
             let BridgeSandboxCreateRequest {
                 image,
@@ -443,6 +449,44 @@ async fn execute_request(
             let sandbox = Sandbox::connect_with_client(client.clone(), sandbox_id).await?;
             Ok(sandbox_info_value(&sandbox))
         }
+        BridgeRequest::SandboxStop {
+            sandbox_id,
+            generation,
+        } => {
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            sandbox.stop().await?;
+            Ok(sandbox_info_value(&sandbox))
+        }
+        BridgeRequest::SandboxRestart {
+            sandbox_id,
+            generation,
+            operation_id,
+            stop_timeout_seconds,
+        } => {
+            let operation_id =
+                OperationId::new(operation_id).map_err(|error| invalid(error.to_string()))?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            sandbox
+                .restart(SandboxRestartOptions {
+                    operation_id: Some(operation_id),
+                    stop_timeout_seconds,
+                })
+                .await?;
+            Ok(sandbox_info_value(&sandbox))
+        }
+        BridgeRequest::SandboxRemove {
+            sandbox_id,
+            generation,
+        } => {
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            let sandbox_id = sandbox.id().to_string();
+            sandbox.remove().await?;
+            Ok(json!({
+                "sandbox_id": sandbox_id,
+                "generation": generation,
+                "state": "removed",
+            }))
+        }
         BridgeRequest::SandboxKill {
             sandbox_id,
             generation,
@@ -468,6 +512,22 @@ async fn execute_request(
             sandbox.resume().await?;
             Ok(sandbox_info_value(&sandbox))
         }
+        BridgeRequest::SandboxLogs {
+            sandbox_id,
+            generation,
+            tail,
+        } => {
+            let options = SandboxLogOptions::tail(tail).validate()?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            serialize_field("logs", sandbox.logs(options).await?)
+        }
+        BridgeRequest::SandboxStats {
+            sandbox_id,
+            generation,
+        } => {
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
+            serialize_field("stats", sandbox.stats().await?)
+        }
         BridgeRequest::SandboxSnapshotCreate {
             sandbox_id,
             generation,
@@ -478,6 +538,14 @@ async fn execute_request(
                 .map_err(|error| invalid(error.to_string()))?;
             let snapshot = sandbox.create_filesystem_snapshot(snapshot_id).await?;
             Ok(execution_snapshot_value(&snapshot))
+        }
+        BridgeRequest::FilesystemSnapshotList => {
+            serialize_field("snapshots", client.list_snapshots()?)
+        }
+        BridgeRequest::FilesystemSnapshotGet { snapshot_id } => {
+            let snapshot_id = ExecutionSnapshotId::new(snapshot_id)
+                .map_err(|error| invalid(error.to_string()))?;
+            serialize_field("snapshot", client.get_snapshot(snapshot_id.as_str())?)
         }
         BridgeRequest::FilesystemSnapshotSize { snapshot_id } => {
             let snapshot_id = ExecutionSnapshotId::new(snapshot_id)

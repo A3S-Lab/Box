@@ -57,6 +57,39 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Lifecycle and inspection
+
+Local Sandbox lifecycle calls are generation-fenced. `stop()` preserves the
+durable Sandbox, `restart()` advances its generation under a caller-supplied
+idempotency identity, `remove()` deletes a terminal Sandbox, and `kill()`
+performs stop plus removal. Reuse the same `operation_id` when retrying a
+restart whose outcome is not yet known.
+
+```python
+from a3s_box import A3SBoxClient, Sandbox
+
+client = A3SBoxClient()
+sandbox = Sandbox.create("alpine:3.20")
+
+try:
+    logs = sandbox.logs(tail=100)
+    stats = sandbox.stats()
+    print(len(logs), stats.memory_percent if stats else None)
+
+    sandbox.stop()
+    sandbox.restart(operation_id="ci-restart-1", stop_timeout=10)
+    print(client.get_sandbox(sandbox.id))
+finally:
+    sandbox.kill()
+```
+
+Log snapshots contain structured stream, message, and timestamp values, and
+accept tails from 1 through 10,000 entries. The runtime client also exposes
+`list_sandboxes()`, `get_sandbox()`, `runtime_diagnostics()`,
+`runtime_disk_usage()`, `list_filesystem_snapshots()`, and
+`get_filesystem_snapshot()`. `A3SAsyncBoxClient` and `AsyncSandbox` provide
+the same operations with `async` methods.
+
 ## Builder-style programmable CI/CD
 
 The E2B-style API remains available for direct execution. For build and CI

@@ -203,6 +203,190 @@ fn image_registry_options_deserialize_as_typed_requests() {
     ));
 }
 
+#[test]
+fn lifecycle_observability_and_inspection_shapes_are_typed() {
+    let shapes = [
+        (
+            r#"{"operation":"runtime_diagnostics"}"#,
+            "runtime_diagnostics",
+        ),
+        (
+            r#"{"operation":"runtime_disk_usage"}"#,
+            "runtime_disk_usage",
+        ),
+        (r#"{"operation":"sandbox_list"}"#, "sandbox_list"),
+        (
+            r#"{"operation":"sandbox_get","query":"ci-box"}"#,
+            "sandbox_get",
+        ),
+        (
+            r#"{"operation":"sandbox_stop","sandbox_id":"box-1","generation":1}"#,
+            "sandbox_stop",
+        ),
+        (
+            r#"{"operation":"sandbox_restart","sandbox_id":"box-1","generation":1,"operation_id":"restart-1","stop_timeout_seconds":7}"#,
+            "sandbox_restart",
+        ),
+        (
+            r#"{"operation":"sandbox_remove","sandbox_id":"box-1","generation":2}"#,
+            "sandbox_remove",
+        ),
+        (
+            r#"{"operation":"sandbox_logs","sandbox_id":"box-1","generation":2}"#,
+            "sandbox_logs",
+        ),
+        (
+            r#"{"operation":"sandbox_stats","sandbox_id":"box-1","generation":2}"#,
+            "sandbox_stats",
+        ),
+        (
+            r#"{"operation":"filesystem_snapshot_list"}"#,
+            "filesystem_snapshot_list",
+        ),
+        (
+            r#"{"operation":"filesystem_snapshot_get","snapshot_id":"ci-base"}"#,
+            "filesystem_snapshot_get",
+        ),
+    ];
+
+    for (shape, expected_operation) in shapes {
+        let request: BridgeRequest = serde_json::from_str(shape).unwrap();
+        assert_eq!(request.operation_name(), expected_operation);
+        match request {
+            BridgeRequest::SandboxList { all } => assert!(all),
+            BridgeRequest::SandboxLogs { tail, .. } => assert_eq!(tail, 100),
+            BridgeRequest::SandboxRestart {
+                stop_timeout_seconds,
+                ..
+            } => assert_eq!(stop_timeout_seconds, Some(7)),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_validation_precedes_runtime_lookup_or_mutation() {
+    let home = tempfile::tempdir().unwrap();
+    let client = A3sBoxClient::from_home(home.path());
+
+    let restart = handle_request(
+        &client,
+        BridgeRequest::SandboxRestart {
+            sandbox_id: "missing".to_string(),
+            generation: 1,
+            operation_id: " ".to_string(),
+            stop_timeout_seconds: None,
+        },
+    )
+    .await;
+    assert!(!restart.ok);
+    assert_eq!(restart.error.unwrap().code, "invalid_request");
+
+    for tail in [0, 10_001] {
+        let logs = handle_request(
+            &client,
+            BridgeRequest::SandboxLogs {
+                sandbox_id: "missing".to_string(),
+                generation: 1,
+                tail,
+            },
+        )
+        .await;
+        assert!(!logs.ok);
+        assert_eq!(logs.error.unwrap().code, "invalid_request");
+    }
+    assert!(!client.paths().boxes_file.exists());
+}
+
+#[tokio::test]
+async fn management_inspection_bridge_reads_typed_local_state() {
+    let home = tempfile::tempdir().unwrap();
+    let client = A3sBoxClient::from_home(home.path());
+    let sandbox_id = "11111111-1111-4111-8111-111111111111";
+    let box_dir = home.path().join("boxes").join(sandbox_id);
+    std::fs::create_dir_all(&box_dir).unwrap();
+    std::fs::write(box_dir.join("marker"), b"box").unwrap();
+    std::fs::write(
+        &client.paths().boxes_file,
+        serde_json::to_vec_pretty(&json!([{
+            "id": sandbox_id,
+            "short_id": "111111111111",
+            "name": "ci-box",
+            "image": "alpine:3.20",
+            "status": "stopped",
+            "pid": null,
+            "cpus": 2,
+            "memory_mb": 512,
+            "volumes": [],
+            "env": {},
+            "cmd": ["sh"],
+            "box_dir": box_dir,
+            "console_log": box_dir.join("console.log"),
+            "created_at": "2026-07-23T00:00:00Z",
+            "started_at": null,
+            "auto_remove": false
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let rootfs = home.path().join("snapshot-source");
+    std::fs::create_dir_all(&rootfs).unwrap();
+    std::fs::write(rootfs.join("marker"), b"snapshot").unwrap();
+    let metadata = a3s_box_core::snapshot::SnapshotMetadata::new(
+        "ci-base".to_string(),
+        "CI base".to_string(),
+        sandbox_id.to_string(),
+        "alpine:3.20".to_string(),
+    )
+    .with_description("Bridge inspection fixture");
+    client
+        .snapshot_store()
+        .unwrap()
+        .save(metadata, &rootfs)
+        .unwrap();
+
+    let diagnostics = handle_request(&client, BridgeRequest::RuntimeDiagnostics).await;
+    assert!(diagnostics.ok);
+    assert_eq!(
+        diagnostics.result.unwrap()["home"],
+        home.path().to_string_lossy().as_ref()
+    );
+
+    let disk = handle_request(&client, BridgeRequest::RuntimeDiskUsage).await;
+    assert!(disk.ok);
+    assert!(disk.result.unwrap()["total_bytes"].as_u64().unwrap() > 0);
+
+    let sandboxes = handle_request(&client, BridgeRequest::SandboxList { all: true }).await;
+    assert!(sandboxes.ok);
+    assert_eq!(sandboxes.result.unwrap()["sandboxes"][0]["name"], "ci-box");
+    let sandbox = handle_request(
+        &client,
+        BridgeRequest::SandboxGet {
+            query: "ci-box".to_string(),
+        },
+    )
+    .await;
+    assert!(sandbox.ok);
+    assert_eq!(sandbox.result.unwrap()["sandbox"]["id"], sandbox_id);
+
+    let snapshots = handle_request(&client, BridgeRequest::FilesystemSnapshotList).await;
+    assert!(snapshots.ok);
+    assert_eq!(snapshots.result.unwrap()["snapshots"][0]["id"], "ci-base");
+    let snapshot = handle_request(
+        &client,
+        BridgeRequest::FilesystemSnapshotGet {
+            snapshot_id: "ci-base".to_string(),
+        },
+    )
+    .await;
+    assert!(snapshot.ok);
+    assert_eq!(
+        snapshot.result.unwrap()["snapshot"]["description"],
+        "Bridge inspection fixture"
+    );
+}
+
 #[tokio::test]
 async fn capabilities_publish_a_unique_exhaustive_operation_inventory() {
     let mut sorted = BRIDGE_OPERATIONS.to_vec();

@@ -145,6 +145,10 @@ for name in (
 
 client = A3SBoxClient()
 isolation = os.environ["A3S_BOX_SDK_SMOKE_ISOLATION"]
+diagnostics = client.runtime_diagnostics()
+assert diagnostics.home == os.environ["A3S_HOME"]
+assert diagnostics.runtime_version
+assert client.runtime_disk_usage().total_bytes >= 0
 context = Path(os.environ["A3S_HOME"]) / "python-sdk-build-context"
 context.mkdir(parents=True, exist_ok=True)
 (context / "Dockerfile").write_text(
@@ -194,6 +198,8 @@ try:
         builder = builder.disable_network()
 
     with builder.start() as sandbox:
+        assert any(item.id == sandbox.id for item in client.list_sandboxes())
+        assert client.get_sandbox(sandbox.id) is not None
         result = sandbox.commands.run("printf 'python-sdk-ok'")
         assert result.exit_code == 0
         assert result.stdout == "python-sdk-ok"
@@ -205,6 +211,8 @@ try:
         sandbox.files.write("/tmp/a3s-python-sdk-smoke.txt", "hello")
         assert sandbox.files.read("/tmp/a3s-python-sdk-smoke.txt") == "hello"
         sandbox.files.remove("/tmp/a3s-python-sdk-smoke.txt")
+        assert len(sandbox.logs(tail=20)) <= 20
+        assert sandbox.stats() is not None
         if isolation == "sandbox":
             # `/tmp` is an ephemeral tmpfs and is intentionally excluded from
             # rootfs snapshots.
@@ -213,6 +221,11 @@ try:
             sandbox.files.write(marker, "snapshot-ok")
             snapshot = sandbox.create_filesystem_snapshot(snapshot_id)
             assert Sandbox.filesystem_snapshot_size(snapshot.snapshot_id) == snapshot.size_bytes
+            assert any(
+                item.id == snapshot.snapshot_id
+                for item in client.list_filesystem_snapshots()
+            )
+            assert client.get_filesystem_snapshot(snapshot.snapshot_id) is not None
             with Sandbox.create(
                 image.reference,
                 isolation="sandbox",
@@ -227,6 +240,18 @@ try:
                     raise AssertionError("active restored Sandbox did not fence snapshot deletion")
             assert Sandbox.delete_filesystem_snapshot(snapshot.snapshot_id)
             assert Sandbox.filesystem_snapshot_size(snapshot.snapshot_id) is None
+        previous_generation = sandbox.generation
+        sandbox.stop()
+        assert not sandbox.is_running()
+        sandbox.restart(
+            operation_id=f"python-smoke-restart-{sandbox.id}",
+            stop_timeout=5,
+        )
+        assert sandbox.generation == previous_generation + 1
+        assert sandbox.is_running()
+        sandbox.stop()
+        sandbox.remove()
+        assert client.get_sandbox(sandbox.id) is None
 finally:
     if network is not None:
         client.remove_network(network.name)
@@ -264,6 +289,13 @@ for (const name of [
 
 const client = new A3SBoxClient()
 const isolation = process.env.A3S_BOX_SDK_SMOKE_ISOLATION
+const diagnostics = await client.runtimeDiagnostics()
+if (diagnostics.home !== process.env.A3S_HOME || !diagnostics.runtimeVersion) {
+  throw new Error('runtime diagnostics returned an unexpected identity')
+}
+if ((await client.runtimeDiskUsage()).totalBytes < 0) {
+  throw new Error('runtime disk usage returned an invalid total')
+}
 const context = join(process.env.A3S_HOME, 'typescript-sdk-build-context')
 await mkdir(context, { recursive: true })
 await writeFile(
@@ -326,6 +358,12 @@ try {
   }
   const sandbox = await builder.start()
   try {
+    if (!(await client.listSandboxes()).some((item) => item.id === sandbox.id)) {
+      throw new Error('created Sandbox was absent from the management inventory')
+    }
+    if ((await client.getSandbox(sandbox.id)) === undefined) {
+      throw new Error('created Sandbox was not gettable through the management client')
+    }
     const result = await sandbox.commands.run("printf 'typescript-sdk-ok'")
     if (result.exitCode !== 0 || result.stdout !== 'typescript-sdk-ok') {
       throw new Error('TypeScript SDK command returned an unexpected result')
@@ -346,6 +384,12 @@ try {
       throw new Error('TypeScript SDK file read returned unexpected data')
     }
     await sandbox.files.remove('/tmp/a3s-typescript-sdk-smoke.txt')
+    if ((await sandbox.logs({ tail: 20 })).length > 20) {
+      throw new Error('Sandbox logs exceeded the requested tail')
+    }
+    if ((await sandbox.stats()) === undefined) {
+      throw new Error('running Sandbox did not expose a stats snapshot')
+    }
     if (isolation === 'sandbox') {
       // `/tmp` is an ephemeral tmpfs and is intentionally excluded from
       // rootfs snapshots.
@@ -355,6 +399,14 @@ try {
       const snapshot = await sandbox.createFilesystemSnapshot(snapshotId)
       if (await Sandbox.filesystemSnapshotSize(snapshot.snapshotId) !== snapshot.sizeBytes) {
         throw new Error('snapshot size lookup returned an unexpected value')
+      }
+      if (!(await client.listFilesystemSnapshots()).some(
+        (item) => item.id === snapshot.snapshotId
+      )) {
+        throw new Error('captured snapshot was absent from the management inventory')
+      }
+      if ((await client.getFilesystemSnapshot(snapshot.snapshotId)) === undefined) {
+        throw new Error('captured snapshot was not gettable through the management client')
       }
       const restored = await Sandbox.create(image.reference, {
         isolation: 'sandbox',
@@ -380,6 +432,23 @@ try {
       if (await Sandbox.filesystemSnapshotSize(snapshot.snapshotId) !== undefined) {
         throw new Error('deleted snapshot still reported a size')
       }
+    }
+    const previousGeneration = sandbox.generation
+    await sandbox.stop()
+    if (await sandbox.isRunning()) {
+      throw new Error('stopped Sandbox reports itself running')
+    }
+    await sandbox.restart({
+      operationId: `typescript-smoke-restart-${sandbox.id}`,
+      stopTimeoutSeconds: 5,
+    })
+    if (sandbox.generation !== previousGeneration + 1 || !(await sandbox.isRunning())) {
+      throw new Error('restarted Sandbox did not expose its new running generation')
+    }
+    await sandbox.stop()
+    await sandbox.remove()
+    if ((await client.getSandbox(sandbox.id)) !== undefined) {
+      throw new Error('removed Sandbox remained in the management inventory')
     }
   } finally {
     await sandbox.kill()

@@ -219,6 +219,15 @@ impl ExecutionManager for LocalExecutionManager {
         self.finish_kill(claimed).await
     }
 
+    async fn remove(
+        &self,
+        execution_id: &ExecutionId,
+        expected_generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<bool> {
+        self.remove_execution(execution_id, expected_generation)
+            .await
+    }
+
     async fn reconcile(
         &self,
         operation_id: &OperationId,

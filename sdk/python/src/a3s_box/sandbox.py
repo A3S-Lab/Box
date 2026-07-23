@@ -3,16 +3,33 @@
 from __future__ import annotations
 
 import base64
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
+from ._bridge_values import (
+    command_result as _command_result,
+    entry_info as _entry_info,
+    filesystem_snapshot_info as _snapshot_info,
+    mapping as _mapping,
+    mapping_sequence as _mapping_sequence,
+    sandbox_log_entry as _sandbox_log_entry,
+    sandbox_stats as _sandbox_stats,
+)
 from .exceptions import A3SBoxError
+from ._sandbox_requests import (
+    DEFAULT_IMAGE,
+    command_request as _command_request,
+    create_request as _create_request,
+)
 from .models import (
     CommandResult,
     EntryInfo,
     FilesystemSnapshotInfo,
     PortMapping,
     SandboxNetwork,
+    SandboxLogEntry,
+    SandboxStats,
     Script,
     TmpfsMount,
     VolumeMount,
@@ -25,8 +42,6 @@ from .runtime import (
     LocalRuntime,
 )
 from .script import AsyncScriptBuilder, ScriptBuilder
-
-DEFAULT_IMAGE = "alpine:3.20"
 
 
 class Sandbox:
@@ -134,10 +149,53 @@ class Sandbox:
         )
 
     def kill(self) -> None:
-        if self.state == "killed":
+        if self.state in {"killed", "removed"}:
             return
         self._runtime.request(self._lifecycle_request("sandbox_kill"))
         self.state = "killed"
+
+    def stop(self) -> None:
+        if self.state in {"killed", "removed"}:
+            return
+        result = self._runtime.request(
+            self._lifecycle_request("sandbox_stop")
+        )
+        self._update_lifecycle(result, fallback_state="stopped")
+
+    def restart(
+        self,
+        *,
+        operation_id: str | None = None,
+        stop_timeout: int | None = None,
+    ) -> None:
+        if self.state in {"killed", "removed"}:
+            raise ValueError(f"sandbox {self.sandbox_id} has been removed")
+        if operation_id is not None and not operation_id.strip():
+            raise ValueError("operation_id cannot be empty")
+        if stop_timeout is not None and stop_timeout < 0:
+            raise ValueError("stop_timeout cannot be negative")
+        result = self._runtime.request(
+            {
+                **self._lifecycle_request("sandbox_restart"),
+                "operation_id": (
+                    operation_id
+                    if operation_id is not None
+                    else f"sdk-restart-{uuid.uuid4()}"
+                ),
+                **(
+                    {}
+                    if stop_timeout is None
+                    else {"stop_timeout_seconds": stop_timeout}
+                ),
+            }
+        )
+        self._update_lifecycle(result, fallback_state="running")
+
+    def remove(self) -> None:
+        if self.state in {"removed", "killed"}:
+            return
+        self._runtime.request(self._lifecycle_request("sandbox_remove"))
+        self.state = "removed"
 
     def pause(self, *, keep_memory: bool = True) -> None:
         result = self._runtime.request(
@@ -166,6 +224,31 @@ class Sandbox:
             raise
         self._update_lifecycle(result, fallback_state=self.state)
         return self.state == "running"
+
+    def logs(self, *, tail: int = 100) -> list[SandboxLogEntry]:
+        if not 1 <= tail <= 10_000:
+            raise ValueError("tail must be between 1 and 10000")
+        if self.state in {"killed", "removed"}:
+            raise ValueError(f"sandbox {self.sandbox_id} has been removed")
+        result = self._runtime.request(
+            {
+                **self._lifecycle_request("sandbox_logs"),
+                "tail": tail,
+            }
+        )
+        return [
+            _sandbox_log_entry(item)
+            for item in _mapping_sequence(result["logs"])
+        ]
+
+    def stats(self) -> SandboxStats | None:
+        if self.state in {"killed", "removed"}:
+            return None
+        result = self._runtime.request(
+            self._lifecycle_request("sandbox_stats")
+        )
+        value = result.get("stats")
+        return None if value is None else _sandbox_stats(_mapping(value))
 
     def create_filesystem_snapshot(
         self,
@@ -506,10 +589,55 @@ class AsyncSandbox:
         )
 
     async def kill(self) -> None:
-        if self.state == "killed":
+        if self.state in {"killed", "removed"}:
             return
         await self._runtime.request(self._lifecycle_request("sandbox_kill"))
         self.state = "killed"
+
+    async def stop(self) -> None:
+        if self.state in {"killed", "removed"}:
+            return
+        result = await self._runtime.request(
+            self._lifecycle_request("sandbox_stop")
+        )
+        self._update_lifecycle(result, fallback_state="stopped")
+
+    async def restart(
+        self,
+        *,
+        operation_id: str | None = None,
+        stop_timeout: int | None = None,
+    ) -> None:
+        if self.state in {"killed", "removed"}:
+            raise ValueError(f"sandbox {self.sandbox_id} has been removed")
+        if operation_id is not None and not operation_id.strip():
+            raise ValueError("operation_id cannot be empty")
+        if stop_timeout is not None and stop_timeout < 0:
+            raise ValueError("stop_timeout cannot be negative")
+        result = await self._runtime.request(
+            {
+                **self._lifecycle_request("sandbox_restart"),
+                "operation_id": (
+                    operation_id
+                    if operation_id is not None
+                    else f"sdk-restart-{uuid.uuid4()}"
+                ),
+                **(
+                    {}
+                    if stop_timeout is None
+                    else {"stop_timeout_seconds": stop_timeout}
+                ),
+            }
+        )
+        self._update_lifecycle(result, fallback_state="running")
+
+    async def remove(self) -> None:
+        if self.state in {"removed", "killed"}:
+            return
+        await self._runtime.request(
+            self._lifecycle_request("sandbox_remove")
+        )
+        self.state = "removed"
 
     async def pause(self, *, keep_memory: bool = True) -> None:
         result = await self._runtime.request(
@@ -540,6 +668,31 @@ class AsyncSandbox:
             raise
         self._update_lifecycle(result, fallback_state=self.state)
         return self.state == "running"
+
+    async def logs(self, *, tail: int = 100) -> list[SandboxLogEntry]:
+        if not 1 <= tail <= 10_000:
+            raise ValueError("tail must be between 1 and 10000")
+        if self.state in {"killed", "removed"}:
+            raise ValueError(f"sandbox {self.sandbox_id} has been removed")
+        result = await self._runtime.request(
+            {
+                **self._lifecycle_request("sandbox_logs"),
+                "tail": tail,
+            }
+        )
+        return [
+            _sandbox_log_entry(item)
+            for item in _mapping_sequence(result["logs"])
+        ]
+
+    async def stats(self) -> SandboxStats | None:
+        if self.state in {"killed", "removed"}:
+            return None
+        result = await self._runtime.request(
+            self._lifecycle_request("sandbox_stats")
+        )
+        value = result.get("stats")
+        return None if value is None else _sandbox_stats(_mapping(value))
 
     async def create_filesystem_snapshot(
         self,
@@ -778,141 +931,3 @@ class AsyncFilesystem:
         if user is not None:
             request["user"] = user
         return request
-
-
-def _create_request(
-    template: str | None,
-    timeout: int,
-    envs: Mapping[str, str] | None,
-    metadata: Mapping[str, str] | None,
-    name: str | None,
-    cpus: int | None,
-    memory_mb: int | None,
-    isolation: str,
-    filesystem_snapshot_id: str | None,
-    workspace: str | None,
-    workdir: str | None,
-    user: str | None,
-    hostname: str | None,
-    mounts: Sequence[VolumeMount] | None,
-    tmpfs: Sequence[TmpfsMount] | None,
-    network: SandboxNetwork | None,
-    ports: Sequence[PortMapping] | None,
-    dns: Sequence[str] | None,
-    host_aliases: Mapping[str, str] | None,
-    read_only: bool,
-    persistent: bool,
-    auto_remove: bool,
-) -> dict[str, object]:
-    if timeout <= 0:
-        raise ValueError("timeout must be greater than zero")
-    request: dict[str, object] = {
-        "operation": "sandbox_create",
-        "image": template or DEFAULT_IMAGE,
-        "timeout_seconds": timeout,
-        "env": dict(envs or {}),
-        "labels": dict(metadata or {}),
-        "isolation": isolation,
-        "mounts": [mount.bridge_value() for mount in mounts or ()],
-        "tmpfs": [mount.bridge_value() for mount in tmpfs or ()],
-        "network": (network or SandboxNetwork.tsi()).bridge_value(),
-        "ports": [port.bridge_value() for port in ports or ()],
-        "dns": list(dns or ()),
-        "host_aliases": dict(host_aliases or {}),
-        "read_only": read_only,
-        "persistent": persistent,
-        "auto_remove": auto_remove,
-    }
-    if name is not None:
-        request["name"] = name
-    if cpus is not None:
-        request["cpus"] = cpus
-    if memory_mb is not None:
-        request["memory_mb"] = memory_mb
-    if filesystem_snapshot_id is not None:
-        request["filesystem_snapshot_id"] = filesystem_snapshot_id
-    if workspace is not None:
-        request["workspace"] = workspace
-    if workdir is not None:
-        request["workdir"] = workdir
-    if user is not None:
-        request["user"] = user
-    if hostname is not None:
-        request["hostname"] = hostname
-    return request
-
-
-def _snapshot_info(result: Mapping[str, Any]) -> FilesystemSnapshotInfo:
-    return FilesystemSnapshotInfo(
-        snapshot_id=str(result["snapshot_id"]),
-        size_bytes=int(result["size_bytes"]),
-        state=str(result["state"]),
-        generation=int(result["generation"]),
-    )
-
-
-def _command_request(
-    sandbox: Sandbox | AsyncSandbox,
-    command: str | Sequence[str],
-    timeout: float | None,
-    envs: Mapping[str, str] | None,
-    cwd: str | None,
-    user: str | None,
-    stdin: str | bytes | None,
-) -> dict[str, object]:
-    argv = ["/bin/sh", "-lc", command] if isinstance(command, str) else list(command)
-    if not argv:
-        raise ValueError("command cannot be empty")
-    request: dict[str, object] = {
-        "operation": "command_run",
-        "sandbox_id": sandbox.sandbox_id,
-        "generation": sandbox.generation,
-        "argv": argv,
-        "env": dict(envs or {}),
-    }
-    if timeout is not None:
-        if timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
-        request["timeout_ms"] = int(timeout * 1000)
-    if cwd is not None:
-        request["cwd"] = cwd
-    if user is not None:
-        request["user"] = user
-    if stdin is not None:
-        raw = stdin.encode() if isinstance(stdin, str) else stdin
-        request["stdin_base64"] = base64.b64encode(raw).decode()
-    return request
-
-
-def _command_result(result: Mapping[str, Any]) -> CommandResult:
-    stdout = base64.b64decode(str(result.get("stdout_base64", "")), validate=True)
-    stderr = base64.b64decode(str(result.get("stderr_base64", "")), validate=True)
-    return CommandResult(
-        stdout=stdout.decode(errors="replace"),
-        stderr=stderr.decode(errors="replace"),
-        exit_code=int(result["exit_code"]),
-        truncated=bool(result.get("truncated", False)),
-    )
-
-
-def _entry_info(entry: Mapping[str, Any]) -> EntryInfo:
-    return EntryInfo(
-        name=str(entry["name"]),
-        type=cast(
-            Literal["file", "directory", "unspecified"],
-            str(entry["type"]),
-        ),
-        path=str(entry["path"]),
-        size=int(entry["size"]),
-        mode=int(entry["mode"]),
-        permissions=str(entry["permissions"]),
-        owner=str(entry["owner"]),
-        group=str(entry["group"]),
-        modified_seconds=int(entry["modified_seconds"]),
-        modified_nanos=int(entry["modified_nanos"]),
-        symlink_target=(
-            None
-            if entry.get("symlink_target") is None
-            else str(entry["symlink_target"])
-        ),
-    )

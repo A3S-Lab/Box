@@ -14,7 +14,7 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#isolation-model">Isolation Model</a> •
   <a href="#runtime-model">Runtime Model</a> •
-  <a href="#sdks-and-compatibility">SDKs</a> •
+  <a href="#native-sdks">SDKs</a> •
   <a href="#integrations">Integrations</a> •
   <a href="#architecture">Architecture</a> •
   <a href="#development">Development</a>
@@ -38,10 +38,10 @@ development automation whose threat model does not include a working kernel
 exploit. Box never falls back from MicroVM to Sandbox when virtualization is
 unavailable.
 
-The local CLI and Rust SDK are the primary product surfaces. OCI Sandbox
-execution, the E2B protocol service, Kubernetes CRI/RuntimeClass integration,
-TEE workflows, and Windows support have different maturity and host
-requirements; the capability matrix below states those boundaries explicitly.
+The local CLI and native SDKs are the primary product surfaces. OCI Sandbox
+execution, Kubernetes CRI/RuntimeClass integration, TEE workflows, and Windows
+support have different maturity and host requirements; the capability matrix
+below states those boundaries explicitly.
 
 ### Basic usage
 
@@ -53,12 +53,11 @@ a3s-box run --rm alpine:latest -- uname -a
 a3s-box run --rm --isolation sandbox alpine:latest -- id
 ```
 
-### Local SDKs with E2B-like APIs
+### Local SDKs
 
 The A3S Rust, Python, and TypeScript packages expose familiar `Sandbox`,
 `commands`, and `files` namespaces while executing through the A3S Box runtime
-installed on the same machine. They do not wrap, import, depend on, or contact
-the official E2B SDK.
+installed on the same machine.
 
 Local SDK use is zero-configuration: do not set an endpoint, domain, or API
 key. The Rust SDK calls the runtime directly. Python and TypeScript find
@@ -112,7 +111,7 @@ try {
 
 The same packages also expose builder-style programmable CI/CD without
 introducing a separate workflow engine. Builders manage host-level images,
-named volumes, and bridge networks, then create the same E2B-style `Sandbox`
+named volumes, and bridge networks, then create the same local `Sandbox`
 handle:
 
 ```typescript
@@ -164,11 +163,14 @@ executable is not on `PATH`. Select `ExecutionIsolation::Sandbox`,
 `isolation="sandbox"`, or `isolation: 'sandbox'` respectively to opt into the
 shared-kernel backend on a certified Linux host.
 
-`A3S_BOX_ENDPOINT`, `A3S_BOX_API_KEY`, `A3S_BOX_DOMAIN`, and
-`A3S_BOX_SANDBOX_URL` are exclusively for an explicitly remote, self-hosted
-compatibility service. They are not read during local SDK use. The remote
-chapter below documents that separate deployment and the unchanged official
-E2B client used to validate it.
+The local handles also expose generation-fenced lifecycle and inspection
+operations. `stop()` leaves the durable Sandbox available for an idempotent
+`restart(...)`; `remove()` deletes a terminal Sandbox; and `kill()` composes
+stop plus removal. `logs(...)` returns a bounded structured stdout/stderr
+snapshot, while `stats()` returns the current host resource snapshot when the
+Sandbox is active. `A3SBoxClient` lists and gets Sandboxes and filesystem
+snapshots, and reports runtime diagnostics and disk usage. Python provides the
+same surface in synchronous and asynchronous forms.
 
 ## Features
 
@@ -192,10 +194,10 @@ E2B client used to validate it.
 - **Security and confidential computing**: Fail-closed option validation,
   resource and syscall controls, audit records, AMD SEV-SNP-oriented
   attestation, RA-TLS, sealing, and secret injection
-- **Typed SDKs and protocols**: Direct runtime-backed Rust management APIs,
-  a provider-neutral A3S Runtime adapter, an optional programmable pipeline
-  runner, and a production-tested E2B protocol subset with Python and
-  TypeScript source packages
+- **Typed native SDKs**: Direct runtime-backed Rust management APIs, a
+  provider-neutral A3S Runtime adapter, Python sync/async and TypeScript
+  packages over a checked machine bridge, and fluent programmable CI/CD
+  builders
 - **Operations and cluster integration**: Structured logs, stats, events,
   Prometheus endpoints, health monitoring, CRI, and containerd RuntimeClass
 
@@ -212,9 +214,8 @@ E2B client used to validate it.
 | Storage | Bind mounts, named volumes, tmpfs, `cp`, `diff`, `export`, `commit`, filesystem snapshots, and CoW restore | Implemented. Filesystem snapshots do not contain live VM RAM or device state. |
 | Networking and Compose | TSI, bridge networks, TCP publishing, peer discovery, and Compose lifecycle/config/logs | Implemented subset for MicroVM workloads. UDP publishing, host-IP binds, ranges, and live network hot-plug are not implemented. |
 | Warm pool and snapshot-fork | Pre-booted MicroVMs, one-shot runs, build leases, metrics, and CoW memory restore | Implemented. Native snapshot-fork is Linux/KVM-only and disabled by default. |
-| Rust SDK | Typed, direct runtime-backed management and guest-control APIs; E2B-like local `Sandbox`, commands, files, and lifecycle; fluent image, volume, network, Sandbox, and script builders | The zero-credential local facade and builder-style programmable CI/CD API are implemented and package-tested, default to MicroVM, and explicitly accept supported shared-kernel Sandbox configurations. Image get/inspect/history/pull/build/tag/push/remove/evict and volume/network pruning are direct runtime calls. The optional historical `pipeline-cli` feature remains separate. |
-| Local Python and TypeScript SDKs | E2B-like `Sandbox`, commands, files, lifecycle, plus fluent image-build, named-volume, bridge-network, typed Sandbox, stdin-backed script builders, full local image lifecycle, and resource pruning over the installed local runtime | Implemented and package-tested on `main`. The packages share the Rust implementation through the versioned bridge, expose a runtime capability inventory, typed registry credentials/signature policy, and require no endpoint or API key. The real macOS/HVF MicroVM three-language builder-to-E2B smoke passes; the expanded Ubuntu/crun 1.28 Sandbox matrix is a blocking CI gate and covers the local-store image and pruning operations. Linux/KVM MicroVM validation remains host-specific, structured build/registry progress is pending, and the native packages are not yet published to PyPI or npm. |
-| Remote E2B protocol service | Pinned contracts, durable lifecycle, memory-preserving and filesystem-only pause/resume, owner-scoped filesystem Snapshots and Volumes, v1/v2 listing and runtime-backed structured logs, current metrics, TLS routing, envd file/environment operations, Filesystem, Process, PTY, and Python Code Interpreter contexts | The certified A3S OS evidence uses unchanged official Python sync/async and TypeScript clients. Templates/builds, historical metrics, signed files, public-port breadth, MCP, cancellation/backpressure, deeper Snapshot/Volume failure recovery, and the rest of the pinned contract remain gates; `full_compatibility=false`. |
+| Rust SDK | Typed, direct runtime-backed management and guest-control APIs; local `Sandbox`, commands, files, generation-fenced lifecycle, bounded structured logs, stats, and filesystem snapshots; fluent image, volume, network, Sandbox, and script builders | The local facade and builder-style programmable CI/CD API are implemented and package-tested, default to MicroVM, and explicitly accept supported shared-kernel Sandbox configurations. Sandbox stop/restart/remove, management list/get, runtime diagnostics/disk usage, and snapshot list/get use direct runtime calls. The optional historical `pipeline-cli` feature remains separate. |
+| Local Python and TypeScript SDKs | Local `Sandbox`, commands, files, lifecycle, logs, and stats, plus fluent image-build, named-volume, bridge-network, typed Sandbox, stdin-backed script builders, full local image lifecycle, runtime inspection, snapshot inspection, and resource pruning over the installed local runtime | Implemented and package-tested on `main`. The packages share the Rust implementation through the checked versioned bridge, expose a runtime capability inventory and typed registry credentials/signature policy, and require no endpoint or API key. The real macOS/HVF MicroVM three-language smoke passes; the expanded Ubuntu/crun 1.28 Sandbox matrix is a blocking CI gate and covers the local-store image and pruning operations. Linux/KVM MicroVM validation remains host-specific, structured build/registry progress is pending, and the native packages are not yet published to PyPI or npm. |
 | TEE | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and simulation | Host-specific. Hardware claims require a supported SEV-SNP host and real attestation evidence. Simulation is development-only; TDX is not productized. |
 | Kubernetes | CRI server plus a containerd runtime-v2 shim and `runtimeClassName: a3s-box` | Preview. Core lifecycle, streaming, logs, resources, and RuntimeClass paths exist; complete CRI conformance is not claimed. |
 | Windows | Native x86_64 WHPX/libkrun MicroVM execution | Implemented and real-host validated from source; published Windows archives remain pending. Foreground and detached workloads, long arguments staged outside the guest kernel command line, live split logs, exit codes, TCP publishing, bind mounts, named-volume persistence, stats, stopped-box commit, and stopped-box filesystem snapshot flows pass. Running-box commit has no guest archive channel. The reliable path is currently limited to one vCPU; container health checks, bridge networking, interactive execution, TEE, snapshot-fork, and CRI remain unsupported. |
@@ -633,387 +634,182 @@ See [Monitor Service](docs/monitor-service.md) for systemd/launchd operation and
 [Host Integration](docs/host-integration.md) for real-runtime smoke and soak
 procedures.
 
-## SDKs and Compatibility
+## Native SDKs
 
-### Rust SDK
+A3S Box exposes one local runtime through Rust, Python, and TypeScript. All
+three SDKs manage the same OCI images, Sandboxes, volumes, networks, snapshots,
+logs, and runtime state used by the CLI. They do not introduce a separate
+scheduler or remote control plane.
 
-`a3s-box-sdk` provides typed, direct runtime-backed APIs. The default client
-does not spawn the `a3s-box` CLI and uses the same stores, execution manager,
-registry, build, volume, network, snapshot, exec, PTY, and attestation
-implementations as the runtime.
+| Language | Package | Runtime access |
+| --- | --- | --- |
+| Rust | `a3s-box-sdk` | Calls the runtime libraries and generation-fenced execution manager directly |
+| Python | `a3s-box` | Synchronous and asynchronous APIs over the installed `a3s-box` machine bridge |
+| TypeScript | `@a3s-lab/box` | Promise-based APIs over the installed `a3s-box` machine bridge |
 
-Use matching runtime and SDK minor versions. For source development, use the
-workspace crate and language packages from one checkout.
+MicroVM isolation is the default in every language. Shared-kernel Sandbox
+execution must be selected explicitly and is available only on a certified
+Linux host. Keep the runtime and SDKs on the same release or source revision.
 
-```toml
-[dependencies]
-a3s-box-sdk = "3.0"
-```
+### Sandbox execution and lifecycle
+
+`Sandbox` is the common high-level handle. It provides:
+
+- local creation and reconnection;
+- foreground commands with argv or an explicit shell, environment, working
+  directory, user, stdin, and timeout options;
+- text and binary file read/write plus stat, list, directory creation, move,
+  and remove operations;
+- pause, resume, stop, restart, remove, and deterministic cleanup;
+- bounded structured stdout/stderr log snapshots and current host resource
+  statistics;
+- filesystem snapshot creation and restoration through typed creation
+  options.
+
+Lifecycle transitions use the same durable, generation-fenced execution
+manager as the CLI. `stop()` preserves the Sandbox record, `restart()` starts a
+new generation, `remove()` deletes a created or terminal Sandbox, and `kill()`
+performs stop and removal. Reuse the same operation ID when retrying a restart
+whose outcome is unknown.
 
 ```rust,no_run
-use a3s_box_sdk::{A3sBoxClient, ListBoxesOptions};
+use a3s_box_sdk::{
+    OperationId, Sandbox, SandboxLogOptions, SandboxRestartOptions,
+};
 
-fn main() -> Result<(), a3s_box_sdk::ClientError> {
-    let client = A3sBoxClient::new();
-    for item in client.list_boxes(ListBoxesOptions::all())? {
-        println!("{} {}", item.name, item.status);
-    }
-    Ok(())
-}
+# async fn example() -> Result<(), a3s_box_sdk::ClientError> {
+let sandbox = Sandbox::create("alpine:3.20").await?;
+
+let output = sandbox.commands.run("printf 'ready\\n'").await?;
+assert_eq!(output.exit_code, 0);
+
+let logs = sandbox.logs(SandboxLogOptions::tail(100)).await?;
+let stats = sandbox.stats().await?;
+println!("{} log entries; stats available: {}", logs.len(), stats.is_some());
+
+sandbox.stop().await?;
+sandbox
+    .restart(
+        SandboxRestartOptions::default()
+            .operation_id(OperationId::new("ci-restart-1")?)
+            .stop_timeout_seconds(10),
+    )
+    .await?;
+sandbox.kill().await?;
+# Ok(()) }
 ```
 
-Managed create, start, run, inspect, pause, resume, restart, kill, and
-reconciliation all use the canonical generation-fenced execution manager.
-Additional APIs cover local state, images, builds, registries, volumes,
-networks, snapshots, logs, stats, file transfer, exec, PTY, and attestation.
+Log tails accept 1 through 10,000 entries. Statistics are a point-in-time host
+snapshot and are available only while the runtime can identify an active local
+process.
 
-The historical programmable CI pipeline remains behind the optional
-`pipeline-cli` feature. It shells out only for lifecycle-heavy operations not
-yet exposed by its pipeline abstraction. See
-[the SDK README](src/sdk/README.md) for the current API coverage.
+### Builder-style programmable CI/CD
 
-### E2B-compatible protocol preview
-
-A3S Box pins the public control, envd, volume-content, Process, Filesystem, MCP,
-Python, TypeScript, and Code Interpreter contracts under
-[`compat/e2b`](compat/e2b/README.md). Generated inventories and digests prevent
-silent upstream protocol drift.
-
-The current pin targets:
-
-| Client | Version |
-| --- | ---: |
-| Python `e2b` | 2.32.0 |
-| TypeScript `e2b` | 2.33.0 |
-| Python `e2b-code-interpreter` | 2.8.1 |
-| TypeScript `@e2b/code-interpreter` | 2.6.1 |
-
-The production-tested subset remains intentionally narrower than full
-compatibility:
-
-| Surface | Implemented preview | Not yet a release claim |
-| --- | --- | --- |
-| Control plane | Owner-scoped create, connect, get, memory-preserving and filesystem-only pause, connect/resume, v1 running list, v2 filtered running/paused list, timeout replacement, monotonic refresh, kill, current single/batch metrics, and structured v1/v2 logs for runtime-envd Sandboxes, with SQLite WAL persistence, restart reconciliation, cleanup, and a complete requested timeout measured from runtime and envd readiness | Templates/builds, network updates, historical metric retention, cache attribution, full pagination edge cases, and host-reboot recovery semantics |
-| Credentials and routing | PBKDF2 account-key hashes, encrypted scope-bound Sandbox tokens, generation-fenced leases, wildcard TLS, direct/shared routes, CORS, HTTP/2, and PID-fenced Sandbox access | Certificate rotation and the complete streaming, upgrade, signed-file, and public-port route matrix |
-| Volumes | Owner-scoped create, connect/get, list, and delete with durable records, encrypted tokens, startup reconciliation, authenticated content operations, and named Sandbox mounts; unchanged official clients pass bidirectional I/O, UID/GID mapping, public mount metadata, in-use deletion conflicts, and cleanup | Complete large-file, concurrent-mutation, service-crash, host-reboot, and negative-path breadth before treating Volume coverage as a standalone compatibility claim |
-| Filesystem Snapshots | Owner-scoped capture, source-filtered list, restore, and delete with durable records, startup reconciliation, quiesced rootfs capture, copy-on-write restore, OCI image-default and Unix metadata fidelity, and active-use deletion conflicts; unchanged official clients restore captured state after deleting the source Sandbox | Filesystem only: no process memory or device state. Named-reference, pagination, large-rootfs, concurrent mutation, service-crash, host-reboot, and broader negative-path coverage remain release gates |
-| envd | Authenticated health and production runtime-envd coverage; Broker-mode MicroVMs expose generation-fenced, binary-safe `GET /files`, raw or multipart `POST /files`, and the pinned unary Filesystem Stat/MakeDir/Move/ListDir/Remove procedures over Connect JSON and Protobuf through the guest session transport | Broker transfers are capped at 11 MiB per file; compression, ranges, xattr metadata, signed URLs, Filesystem watches, and production edge-case validation remain gates |
-| Process and PTY | Unchanged official Python sync/async and TypeScript clients pass foreground and background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output on real Sandboxes; the host broker also has bounded, fragmented, ordered JSON and Protobuf Connect framing coverage across every pinned Process procedure, including raw binary stdio, while the shared Exec/PTY transport implements the pinned SIGTERM and SIGKILL semantics with wire and guest process-group tests | Signals outside the pinned contract, reconnect, cancellation/backpressure stress, and adversarial concurrent-stream coverage |
-| Filesystem | The unchanged official clients pass the production runtime-envd subset; the host broker has bounded binary download, octet-stream upload, multi-file multipart, and JSON/Protobuf Stat, MakeDir, Move, ListDir, and Remove coverage with user-relative POSIX paths and generation fencing | Watches, xattr metadata, streaming large files, ownership edge cases, and negative-path breadth |
-| Code Interpreter and MCP | Unchanged official Python sync/async and TypeScript clients execute Python, validate stdout/results, and pass context create/list/run/restart/remove | Other languages, rich MIME/error/cancellation breadth, MCP execution, and the rest of the pinned interpreter contract |
-
-The production `a3s-box-e2b` process accepts only `.acl` configuration parsed
-by `a3s-acl`. For runtime-envd templates, create does not become visible until
-envd accepts initialization; failed initialization kills the execution and
-marks its lifecycle as failed and keeps it hidden instead of returning a
-partially usable Sandbox.
-
-Memory-preserving pause maps to certified `crun pause`; a later `connect` or
-deprecated `resume` request maps to `crun resume`. The production matrix starts
-a background process before pausing and proves that the same process continues
-after resume. Filesystem-only pause (`memory: false`) instead tears down the
-runtime while retaining its rootfs. Connect starts a new generation with the
-same Sandbox ID, preserved files, reinitialized environment and Volume mounts,
-and no process from the previous runtime. Both modes are durable,
-generation-fenced, and recover interrupted transitions after service restart.
-
-#### Self-hosted deployment and client configuration
-
-`a3s-box-e2b` is a separate network service for remote compatibility. It is
-not involved in normal local Python or TypeScript SDK use. The
-production-tested preview uses unchanged official E2B clients and requires a
-Linux Sandbox host with the certified `crun` runtime, a public control-plane
-address, and a TLS Sandbox gateway with wildcard DNS.
-See [Host Sandbox Backend Design](docs/host-sandbox-backend-design.md) for the
-host boundary and
-[E2B Protocol Compatibility and SDK Design](docs/e2b-compatible-sdk-design.md)
-for the complete protocol and release gates.
-
-##### Endpoint and network topology
-
-The simplest single-host production topology uses two public listeners:
-
-| Public address | Purpose | Service destination |
-| --- | --- | --- |
-| `https://api.box.example.com` | Remote control API (`E2B_API_URL`, or `A3S_BOX_ENDPOINT` when using the optional configuration helper) | TLS reverse proxy to `api_listen`, for example `127.0.0.1:3000` |
-| `https://<port>-<sandbox-id>.box.example.com:8443` | Direct Sandbox data plane | `gateway.listen`, for example `0.0.0.0:8443` |
-| `https://sandbox.box.example.com:8443` | Shared Sandbox route form | The same `gateway.listen` |
-
-Create explicit DNS for `api.box.example.com` and wildcard DNS for
-`*.box.example.com`. The Sandbox gateway terminates TLS itself and its
-certificate must cover `*.box.example.com`. Port `8443` avoids competing with
-the control-plane TLS proxy on a single IP. Deployments with separate IP
-addresses or an SNI-aware load balancer can use port `443` for both.
-
-The client and server settings map as follows:
-
-| Remote client setting | What to enter | Matching server setting |
-| --- | --- | --- |
-| `E2B_API_URL` / helper `A3S_BOX_ENDPOINT` | Externally reachable control API origin, including `http://` or `https://` and any non-default port | `e2b_compat.api_public_url` |
-| `E2B_API_KEY` / helper `A3S_BOX_API_KEY` | The **raw** API key issued to the remote client | The raw key whose PBKDF2-SHA256 encoding is stored in `account.hash` |
-| `E2B_DOMAIN` / helper `A3S_BOX_DOMAIN` | Sandbox wildcard suffix, with no scheme or port | `e2b_compat.sandbox_domain` |
-| `E2B_SANDBOX_URL` / helper `A3S_BOX_SANDBOX_URL` | Single-Sandbox fixture override only; normally unset | Not a production multi-Sandbox setting |
-
-Use the bare control origin for the remote API URL. Do not append `/api`,
-`/v1`, `/sandboxes`, a query string, or a fragment, and omit the trailing
-slash:
-
-| Deployment | Remote API URL | Additional setting |
-| --- | --- | --- |
-| Standard HTTPS | `https://api.box.example.com` | `E2B_DOMAIN=box.example.com` |
-| Non-default control port | `https://api.box.example.com:8444` | `E2B_DOMAIN=box.example.com` |
-| Custom/LAN hostname | `https://box-api.lab.example:8444` | `E2B_DOMAIN=sandboxes.lab.example` |
-| Loopback development | `http://127.0.0.1:3000` | Set `E2B_DOMAIN` to the configured local Sandbox DNS suffix |
-
-Plain HTTP is appropriate only on loopback. A loopback control endpoint does
-not remove the data-plane requirements: Filesystem, Process, PTY, health, and
-Code Interpreter calls still need wildcard DNS, a trusted TLS certificate, and
-reachability to the configured Sandbox gateway.
-
-##### Generate the client API key and server hash
-
-The remote compatibility service requires API keys in the form
-`e2b_[0-9a-f]+`, matching the unchanged official clients' validator. This
-credential belongs only to a deployed network service; local SDK use does not
-create or read it. Generate a high-entropy key and its server-side hash on a
-trusted administrative machine:
-
-```bash
-python3 - <<'PY'
-import hashlib
-import secrets
-
-iterations = 210_000
-salt = secrets.token_bytes(16)
-api_key = f"e2b_{secrets.token_hex(32)}"
-digest = hashlib.pbkdf2_hmac(
-    "sha256",
-    api_key.encode("utf-8"),
-    salt,
-    iterations,
-    dklen=32,
-)
-encoded = (
-    f"pbkdf2-sha256${iterations}${salt.hex()}${digest.hex()}"
-)
-
-print("Store this raw value in the remote client secret manager:")
-print(f"E2B_API_KEY={api_key}")
-print()
-print("Paste only this encoded value into the server account.hash:")
-print(encoded)
-PY
-```
-
-The command prints the raw key once. Store the `E2B_API_KEY=...` value in the
-remote client secret manager. Paste only the `pbkdf2-sha256$...` value into the
-server ACL. Do not put the raw key in the ACL, and do not give the encoded hash
-to a client.
-
-Sandbox tokens use two different 32-byte service keys. Generate and persist
-them separately; they are not account API keys:
-
-```bash
-export A3S_BOX_E2B_TOKEN_ENCRYPTION_KEY_V1="$(openssl rand -hex 32)"
-export A3S_BOX_E2B_TOKEN_DIGEST_KEY_V1="$(openssl rand -hex 32)"
-```
-
-Keep these values stable across service restarts. Losing or changing them
-without a versioned rotation makes existing Sandbox tokens fail closed.
-
-##### Configure the service
-
-The following single-host ACL keeps the plaintext control listener on
-loopback, exposes the Sandbox TLS gateway on port `8443`, and defines a
-broker-mode base template. Replace the account hash, certificate paths,
-runtime paths, and image with deployment values. Pin the image by digest for
-production.
-
-```acl
-e2b_compat {
-  api_listen             = "127.0.0.1:3000"
-  api_public_url         = "https://api.box.example.com"
-  sandbox_domain        = "box.example.com"
-  sandbox_public_domain = "box.example.com:8443"
-  database_path         = "/var/lib/a3s-box/e2b/lifecycle.sqlite3"
-  runtime_home          = "/var/lib/a3s"
-  runtime_state_path    = "/var/lib/a3s-box/e2b/managed-executions.json"
-
-  gateway {
-    listen                = "0.0.0.0:8443"
-    tls_certificate_path  = "/etc/a3s-box/tls/sandbox-chain.pem"
-    tls_private_key_path  = "/etc/a3s-box/tls/sandbox-key.pem"
-    max_connections       = 4096
-    handshake_timeout_ms  = 5000
-    connect_timeout_ms    = 2000
-    drain_timeout_seconds = 30
-  }
-
-  supervisor {
-    interval_seconds          = 5
-    batch_size                = 100
-    reconciliation_page_size = 100
-  }
-
-  account "primary" {
-    scheme    = "api_key"
-    owner_id  = "production-team"
-    client_id = "production-client"
-    hash      = "pbkdf2-sha256$210000$<salt-hex>$<digest-hex>"
-  }
-
-  token_key "2026-07" {
-    version        = 1
-    active         = true
-    encryption_key = env("A3S_BOX_E2B_TOKEN_ENCRYPTION_KEY_V1")
-    digest_key     = env("A3S_BOX_E2B_TOKEN_DIGEST_KEY_V1")
-  }
-
-  template_policy "a3s-base" {
-    image        = "docker.io/library/alpine:3.20"
-    envd_version = "0.1.3"
-    envd_mode    = "broker"
-    isolation    = "sandbox"
-    network      = "none"
-    command      = ["/bin/sh", "-c", "while :; do sleep 3600; done"]
-
-    resources {
-      vcpus     = 2
-      memory_mb = 512
-      disk_mb   = 1024
-    }
-
-    route {
-      port        = 49983
-      token_scope = "envd"
-    }
-  }
-}
-```
-
-`api_public_url` is the value official clients use as `E2B_API_URL` (and the
-optional `A3SRemoteConnection` helper accepts it as `A3S_BOX_ENDPOINT`).
-`api_listen` is an internal bind address and normally must not be given to
-remote clients. The TLS reverse proxy in front of `api_listen` must forward
-paths unchanged and preserve `X-API-Key`. The separate Sandbox gateway must be
-reachable on the port advertised by `sandbox_public_domain`.
-
-For an in-Sandbox envd and Code Interpreter template, use the immutable runtime
-image and policy described in [`deploy/e2b/README.md`](deploy/e2b/README.md).
-
-##### Start and verify the service
-
-Release archives install `a3s-box-e2b`. To build the same binary from this
-repository:
-
-```bash
-cd src
-cargo build --locked --release -p a3s-box-compat --bin a3s-box-e2b
-
-RUST_LOG=a3s_box_compat=info \
-  ./target/release/a3s-box-e2b --config /etc/a3s-box/e2b.acl
-```
-
-The two token-key environment variables referenced by the ACL must be present
-in the service process. Run the service under a supervisor and ensure its user
-can read the TLS private key and write the database, runtime home, and runtime
-state paths.
-
-Configure an unchanged official client with the **raw** API key printed by the
-generator. These variables are remote-only:
-
-```bash
-export E2B_API_URL="https://api.box.example.com"
-export E2B_API_KEY="<raw e2b_... value>"
-export E2B_DOMAIN="box.example.com"
-unset E2B_SANDBOX_URL
-```
-
-Verify the control API independently of Sandbox routing:
-
-```bash
-curl --fail --show-error --silent \
-  --header "X-API-Key: ${E2B_API_KEY}" \
-  "${E2B_API_URL}/v2/sandboxes"
-```
-
-A successful request returns HTTP `200`. This proves the control endpoint,
-TLS trust, reverse-proxy path, and account key. It does not prove wildcard
-Sandbox DNS or the data-plane gateway. Use an unchanged official E2B client
-against this remote service for that end-to-end check:
+The runtime client provides fluent builders for code-first build and delivery
+automation. A program can build a base image, create reusable storage and
+network resources, configure an isolated Sandbox, run scripts through stdin,
+inspect results, snapshot its filesystem, and clean up without adopting a
+second workflow language.
 
 ```python
-from e2b import Sandbox
+from a3s_box import A3SBoxClient
 
-sandbox = Sandbox.create("a3s-base")
-try:
-    print(sandbox.commands.run("printf remote-ok").stdout)
-finally:
-    sandbox.kill()
-```
-
-This remote example is intentionally separate from the zero-configuration
-local `a3s_box.Sandbox` examples near the beginning of the README.
-
-##### Use an unchanged official E2B SDK
-
-The unchanged official SDKs use the `E2B_*` variables shown above. If an
-application already uses the optional `A3SRemoteConnection` helper, it may keep
-remote deployment values under `A3S_BOX_*` and pass the returned options
-explicitly to an independently installed official SDK. The native local
-`Sandbox` never performs this translation and never reads these variables:
-
-```python
-from a3s_box import A3SRemoteConnection
-from e2b import Sandbox as RemoteSandbox
-
-connection = A3SRemoteConnection.from_environment()
-remote = RemoteSandbox.create(
-    "a3s-base",
-    **connection.official_python_options(),
+client = A3SBoxClient()
+image = (
+    client.image("./ci")
+    .dockerfile("Dockerfile")
+    .tag("local/ci-base:latest")
+    .build_arg("NODE_VERSION", "24")
+    .build()
 )
-remote.kill()
+cache = client.volume("npm-cache").label("purpose", "ci-cache").create()
+network = client.network("ci-net").subnet("10.89.40.0/24").create()
+
+with (
+    client.sandbox(image.reference)
+    .cpus(4)
+    .memory_mb(4096)
+    .mount_named(cache.name, "/root/.npm")
+    .network(network.name)
+    .publish_tcp(8080, 8080)
+    .workdir("/workspace")
+    .start()
+) as sandbox:
+    result = (
+        sandbox.script("npm ci\nnpm test\n")
+        .interpreter("/bin/sh", "-se")
+        .env("CI", "true")
+        .run()
+    )
+    if result.exit_code != 0:
+        raise RuntimeError(result.stderr)
 ```
 
-The generated `e2b_` key passes the official clients' default API-key
-validation. Do not set `E2B_SANDBOX_URL` to the shared
-`sandbox.<domain>` endpoint in a multi-Sandbox deployment: it is a fixed URL,
-and file-transfer URLs would lose the Sandbox identity.
+The same builder concepts are available in Rust, synchronous/asynchronous
+Python, and TypeScript:
 
-##### Troubleshooting and security
-
-| Symptom | Check |
+| Builder | Available configuration |
 | --- | --- |
-| Local `a3s_box.Sandbox.create()` reports that `a3s-box` is not installed | Install the A3S Box runtime or set only `A3S_BOX_BINARY` to its executable path. Do not configure an endpoint or API key. |
-| Remote helper reports `A3S_BOX_ENDPOINT is required for remote mode` | This helper is only for a deliberately remote self-hosted service. Set its remote variables, or use local `Sandbox.create()` with no credentials. |
-| Remote HTTP `401` | `E2B_API_KEY` (or helper `A3S_BOX_API_KEY`) must be the raw `e2b_...` value, not `account.hash`; confirm the reverse proxy preserves `X-API-Key`. |
-| Official SDK rejects the key before sending a request | Regenerate it in the required `e2b_[0-9a-f]+` form. Uppercase hex and `a3s_` prefixes are rejected by the current compatibility service. |
-| Remote HTTP `404` from every operation | Remove `/api`, `/v1`, `/sandboxes`, and the trailing slash from the remote API URL; ensure the proxy does not rewrite a path prefix. |
-| Control listing works but commands, files, PTY, or health fail | Check wildcard DNS, gateway firewall/port, wildcard certificate trust, and `sandbox_public_domain`. |
-| TLS hostname mismatch on a Sandbox URL | The certificate must cover `*.sandbox_domain`; `E2B_DOMAIN` contains only the DNS suffix, without a scheme or port. |
-| A custom control hostname routes Sandbox calls to the wrong domain | Set `E2B_DOMAIN` exactly to `e2b_compat.sandbox_domain`. |
-| Sandbox creation reports an unknown template | Pass a template ID declared by `template_policy`, such as `a3s-base`. |
-| Existing Sandbox tokens fail after a restart | Restore the token encryption/digest key version used to issue them; rotate with a new retained version instead of replacing key material in place. |
+| Image | Build context, Dockerfile, target, tag, platforms, build arguments, cache control, and quiet mode |
+| Volume | Name, labels, size limit, explicit creation, and typed mounting |
+| Network | Name, subnet, labels, explicit creation, and typed selection |
+| Sandbox | Image, isolation, CPU, memory, lifetime, environment, metadata, user, hostname, workdir, bind/named/tmpfs mounts, networking, DNS, host aliases, TCP ports, read-only root, persistence, cleanup, and snapshot restore |
+| Script | Source over stdin, explicit interpreter argv, environment, workdir, user, timeout, and structured exit result |
 
-Use HTTPS everywhere outside loopback, never commit raw account or token keys,
-and keep credentials out of logs. To rotate an account key without an outage,
-add a second `account` block with the same `owner_id`, a new label and
-`client_id`, and the new hash; restart the service, update clients, then remove
-the old account in a later restart.
+Named volumes and networks must exist before a Sandbox selects them. Script
+source is sent to the chosen interpreter over stdin and is never interpolated
+into a host shell command. Named bridge networks and published ports are
+currently MicroVM-only; shared-kernel Sandbox requests containing either are
+rejected before runtime state changes.
 
-The native local Python package under
-[`sdk/python`](sdk/python/README.md) and TypeScript package under
-[`sdk/typescript`](sdk/typescript/README.md) on `main` have no official E2B
-runtime dependency. Their bridge mapping, package tests, real macOS MicroVM
-smoke, and real Ubuntu/crun 1.28 Sandbox smoke are separate from the remote
-production compatibility matrix, which uses only unchanged official clients.
-The native local packages and remote protocol compatibility surface have
-separate test matrices. Passing either tested subset is not evidence for
-unimplemented protocol surfaces, so the generated manifest continues to
-report `full_compatibility=false`.
+See [SDK API and Programmable CI/CD](docs/sdk-api-and-programmable-cicd.md) for
+the cross-language contract and current completion gates.
 
-See [E2B Protocol Compatibility and SDK Design](docs/e2b-compatible-sdk-design.md)
-for the release definition, architecture, ACL schema, and remaining gates.
+### Runtime and resource management
+
+The following table distinguishes the implemented native surface from work
+that is not yet exposed consistently in every language:
+
+| Area | Available now | Current boundary |
+| --- | --- | --- |
+| Images and builds | Build, pull, get, list, inspect, history, tag, push, remove, and cache eviction; typed registry credentials, signature verification policy, platform, and registry protocol options | Build and registry progress is returned at completion rather than streamed |
+| Volumes | Create, get, list, remove, prune, and typed bind/named mounts | Direct volume-content helpers are not yet public |
+| Networks | Create, get, list, remove, prune, typed selection, and TCP publication | Bridge attachment and published ports are MicroVM-only; UDP, port ranges, and live hot-plug are not implemented |
+| Sandboxes | Create, connect, inspect, list, pause, resume, stop, idempotent restart, kill, remove, logs, stats, and filesystem snapshot creation | Cancellation-aware cleanup and event streaming remain pending |
+| Files and artifacts | Binary/text read and write, stat, list, mkdir, move, and remove | Confined artifact export, hashes, and large-file streaming remain pending |
+| Filesystem snapshots | Create, list, get, size, restore into a new Sandbox, delete, and live-use fencing | Filesystem state only; snapshots do not include VM memory or device state |
+| Diagnostics | Runtime/core/SDK versions, home path, virtualization availability, disk usage, and exact machine-bridge capability inventory | Historical health, event, and audit query APIs are not yet available in every language |
+| Commands | Foreground argv, explicit-shell, and stdin-backed script execution with structured stdout, stderr, exit code, and truncation state | Cross-language background process handles, output streaming, signals, and PTY are still pending |
+
+Private registry operations may require registry credentials, but normal local
+Sandbox and resource management require only the installed A3S Box runtime.
+
+### Language packages
+
+- Rust [`a3s-box-sdk`](src/sdk/README.md) is the implementation source of
+  truth. `A3sBoxClient` calls runtime services directly and
+  `A3sBoxClient::from_home(path)` supports isolated state directories.
+- Python [`a3s-box`](sdk/python/README.md) provides synchronous
+  `Sandbox`/`A3SBoxClient`, asynchronous `AsyncSandbox`/`A3SAsyncBoxClient`,
+  and context-manager cleanup.
+- TypeScript [`@a3s-lab/box`](sdk/typescript/README.md) provides promise-based
+  `Sandbox`/`A3SBoxClient` APIs for Node.js 20 or newer. Use `try`/`finally` to
+  own cleanup.
+
+The optional historical Rust pipeline runner remains behind the
+`pipeline-cli` feature and is separate from the fluent runtime builders.
+
+### Versioned local machine bridge
+
+Python and TypeScript invoke the hidden `a3s-box sdk-bridge` command with one
+structured request and response. They never parse human CLI output. The bridge
+returns a protocol version, stable machine error codes, typed response data,
+and an exact operation inventory through `client.capabilities()`.
+
+The SDK rejects an incompatible protocol version. Build or install the runtime
+and language packages from the same release. Set `A3S_BOX_BINARY` only when the
+matching `a3s-box` executable is not on `PATH`; normal local use needs no
+additional service configuration.
 
 ## Integrations
 
@@ -1084,9 +880,9 @@ resolver persists the requested isolation, selected backend, effective
 isolation class, policy, and required controls before runtime allocation:
 
 ```text
-CLI / Rust SDK / E2B service / CRI / containerd shim
-                         │
-                 ExecutionManager
+CLI / Rust SDK / local machine bridge / CRI / containerd shim
+                              │
+                      ExecutionManager
           durable state + generation fencing
                          │
           capability probe + policy resolver
@@ -1107,10 +903,10 @@ CLI / Rust SDK / E2B service / CRI / containerd shim
        snapshots / logs / audit / metrics
 ```
 
-The E2B compatibility service calls `ExecutionManager` instead of invoking
-`crun` or libkrun directly. That keeps lifecycle ownership, isolation
-selection, feature rejection, credentials, audit evidence, and cleanup inside
-the runtime boundary.
+The Python and TypeScript SDKs reach `ExecutionManager` through the local
+machine bridge instead of constructing CLI commands or invoking `crun` or
+libkrun directly. Lifecycle ownership, isolation selection, feature rejection,
+audit evidence, and cleanup therefore remain inside the runtime boundary.
 
 Main components:
 
@@ -1119,13 +915,12 @@ Main components:
 | `src/core` | Shared execution policy, configuration, protocol types, state primitives, events, logs, and errors |
 | `src/runtime` | Canonical execution manager, MicroVM/Sandbox backends, OCI images/builds, storage, networking, pools, snapshots, and TEE clients |
 | `src/cli` | Docker-like `a3s-box` command line |
-| `src/compat` | Pinned external contracts and the E2B control/data-plane service |
 | `src/shim` | libkrun bridge process and platform-specific host integration |
 | `src/guest/init` | Guest PID 1, exec, PTY, filesystem, and attestation services |
 | `src/netproxy` | macOS user-space bridge, DNS, inbound TCP, and outbound TCP |
 | `src/cri` | Kubernetes CRI server |
 | `containerd-shim` | containerd runtime-v2 adapter for RuntimeClass |
-| `src/sdk` | Direct runtime-backed Rust SDK, E2B-style local Sandbox facade, and optional pipeline runner |
+| `src/sdk` | Direct runtime-backed Rust SDK, native local Sandbox facade, fluent builders, and optional pipeline runner |
 | `src/lambda` | Workload-execution integration retained for higher-level runtimes |
 | `sdk/python`, `sdk/typescript` | Native local A3S language SDKs using the versioned machine bridge |
 
@@ -1145,11 +940,9 @@ cargo test -p a3s-box-core
 cargo test -p a3s-box-runtime --lib
 cargo test -p a3s-box-cli --test command_coverage
 cargo test -p a3s-box-sdk
-cargo run -p a3s-box-compat --bin a3s-box-e2b-contract -- verify
 ```
 
-The contract verification command requires `protoc`. Python and TypeScript SDK
-checks run in their own package directories:
+Python and TypeScript SDK checks run in their own package directories:
 
 ```bash
 cd sdk/python
@@ -1169,8 +962,6 @@ entry points are:
   macOS/HVF and Linux/KVM;
 - [`scripts/local-sdk-smoke.sh`](scripts/local-sdk-smoke.sh) for the
   zero-credential Rust/Python/TypeScript MicroVM and Sandbox API matrix;
-- [`scripts/e2b-production-smoke.sh`](scripts/e2b-production-smoke.sh) for the
-  destructive A3S OS Sandbox compatibility gate;
 - [Production Cluster Tests](docs/production-cluster-tests.md) for enrolled
   RuntimeClass nodes and soak evidence.
 
@@ -1180,5 +971,5 @@ evidence bundle for every real-runtime release gate.
 
 ## License
 
-MIT. Vendored protocol sources, generated fixtures, and language packages
-retain the license metadata shipped in their respective directories.
+MIT. Third-party sources, generated fixtures, and language packages retain the
+license metadata shipped in their respective directories.

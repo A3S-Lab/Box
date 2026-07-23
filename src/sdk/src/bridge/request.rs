@@ -12,6 +12,8 @@ use super::{default_depth, default_network_subnet, default_true, BridgeSandboxCr
 /// older runtime rather than discovering a missing operation after mutation.
 pub const BRIDGE_OPERATIONS: &[&str] = &[
     "sdk_capabilities",
+    "runtime_diagnostics",
+    "runtime_disk_usage",
     "image_build",
     "image_pull",
     "image_get",
@@ -32,12 +34,21 @@ pub const BRIDGE_OPERATIONS: &[&str] = &[
     "network_list",
     "network_remove",
     "network_prune",
+    "sandbox_list",
+    "sandbox_get",
     "sandbox_create",
     "sandbox_inspect",
+    "sandbox_stop",
+    "sandbox_restart",
+    "sandbox_remove",
     "sandbox_kill",
     "sandbox_pause",
     "sandbox_resume",
+    "sandbox_logs",
+    "sandbox_stats",
     "sandbox_snapshot_create",
+    "filesystem_snapshot_list",
+    "filesystem_snapshot_get",
     "filesystem_snapshot_size",
     "filesystem_snapshot_delete",
     "command_run",
@@ -54,6 +65,8 @@ pub const BRIDGE_OPERATIONS: &[&str] = &[
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum BridgeRequest {
     SdkCapabilities,
+    RuntimeDiagnostics,
+    RuntimeDiskUsage,
     ImageBuild {
         context_dir: String,
         #[serde(default)]
@@ -140,9 +153,31 @@ pub enum BridgeRequest {
         name: String,
     },
     NetworkPrune,
+    SandboxList {
+        #[serde(default = "default_true")]
+        all: bool,
+    },
+    SandboxGet {
+        query: String,
+    },
     SandboxCreate(Box<BridgeSandboxCreateRequest>),
     SandboxInspect {
         sandbox_id: String,
+    },
+    SandboxStop {
+        sandbox_id: String,
+        generation: u64,
+    },
+    SandboxRestart {
+        sandbox_id: String,
+        generation: u64,
+        operation_id: String,
+        #[serde(default)]
+        stop_timeout_seconds: Option<u64>,
+    },
+    SandboxRemove {
+        sandbox_id: String,
+        generation: u64,
     },
     SandboxKill {
         sandbox_id: String,
@@ -158,9 +193,23 @@ pub enum BridgeRequest {
         sandbox_id: String,
         generation: u64,
     },
+    SandboxLogs {
+        sandbox_id: String,
+        generation: u64,
+        #[serde(default = "default_log_tail")]
+        tail: usize,
+    },
+    SandboxStats {
+        sandbox_id: String,
+        generation: u64,
+    },
     SandboxSnapshotCreate {
         sandbox_id: String,
         generation: u64,
+        snapshot_id: String,
+    },
+    FilesystemSnapshotList,
+    FilesystemSnapshotGet {
         snapshot_id: String,
     },
     FilesystemSnapshotSize {
@@ -243,6 +292,8 @@ impl BridgeRequest {
     pub const fn operation_name(&self) -> &'static str {
         match self {
             Self::SdkCapabilities => "sdk_capabilities",
+            Self::RuntimeDiagnostics => "runtime_diagnostics",
+            Self::RuntimeDiskUsage => "runtime_disk_usage",
             Self::ImageBuild { .. } => "image_build",
             Self::ImagePull { .. } => "image_pull",
             Self::ImageGet { .. } => "image_get",
@@ -263,12 +314,21 @@ impl BridgeRequest {
             Self::NetworkList => "network_list",
             Self::NetworkRemove { .. } => "network_remove",
             Self::NetworkPrune => "network_prune",
+            Self::SandboxList { .. } => "sandbox_list",
+            Self::SandboxGet { .. } => "sandbox_get",
             Self::SandboxCreate(_) => "sandbox_create",
             Self::SandboxInspect { .. } => "sandbox_inspect",
+            Self::SandboxStop { .. } => "sandbox_stop",
+            Self::SandboxRestart { .. } => "sandbox_restart",
+            Self::SandboxRemove { .. } => "sandbox_remove",
             Self::SandboxKill { .. } => "sandbox_kill",
             Self::SandboxPause { .. } => "sandbox_pause",
             Self::SandboxResume { .. } => "sandbox_resume",
+            Self::SandboxLogs { .. } => "sandbox_logs",
+            Self::SandboxStats { .. } => "sandbox_stats",
             Self::SandboxSnapshotCreate { .. } => "sandbox_snapshot_create",
+            Self::FilesystemSnapshotList => "filesystem_snapshot_list",
+            Self::FilesystemSnapshotGet { .. } => "filesystem_snapshot_get",
             Self::FilesystemSnapshotSize { .. } => "filesystem_snapshot_size",
             Self::FilesystemSnapshotDelete { .. } => "filesystem_snapshot_delete",
             Self::CommandRun { .. } => "command_run",
@@ -281,6 +341,10 @@ impl BridgeRequest {
             Self::FilesystemRemove { .. } => "filesystem_remove",
         }
     }
+}
+
+const fn default_log_tail() -> usize {
+    100
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]

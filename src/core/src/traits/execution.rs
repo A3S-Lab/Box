@@ -627,6 +627,21 @@ pub trait ExecutionManager: Send + Sync {
         self.kill(execution_id, generation).await
     }
 
+    /// Remove one terminal execution and all runtime-owned resources.
+    ///
+    /// Implementations must fence removal by generation and make retries
+    /// idempotent. Active executions must be stopped explicitly before this
+    /// operation; removal must never imply an unrequested kill.
+    async fn remove(
+        &self,
+        _execution_id: &ExecutionId,
+        _generation: ExecutionGeneration,
+    ) -> ExecutionManagerResult<bool> {
+        Err(ExecutionManagerError::Unavailable(
+            "this execution manager does not support execution removal".to_string(),
+        ))
+    }
+
     async fn reconcile(
         &self,
         operation_id: &OperationId,

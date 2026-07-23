@@ -46,6 +46,42 @@ const sandbox = await Sandbox.create('python:3.12-alpine', {
 })
 ```
 
+## Lifecycle and inspection
+
+Local Sandbox lifecycle calls are generation-fenced. `stop()` preserves the
+durable Sandbox, `restart()` advances its generation under a caller-supplied
+idempotency identity, `remove()` deletes a terminal Sandbox, and `kill()`
+performs stop plus removal. Reuse the same `operationId` when retrying a
+restart whose outcome is not yet known.
+
+```typescript
+import { A3SBoxClient, Sandbox } from '@a3s-lab/box'
+
+const client = new A3SBoxClient()
+const sandbox = await Sandbox.create('alpine:3.20')
+
+try {
+  const logs = await sandbox.logs({ tail: 100 })
+  const stats = await sandbox.stats()
+  console.log(logs.length, stats?.memoryPercent)
+
+  await sandbox.stop()
+  await sandbox.restart({
+    operationId: 'ci-restart-1',
+    stopTimeoutSeconds: 10,
+  })
+  console.log(await client.getSandbox(sandbox.id))
+} finally {
+  await sandbox.kill()
+}
+```
+
+Log snapshots contain structured stream, message, and timestamp values, and
+accept tails from 1 through 10,000 entries. The runtime client also exposes
+`listSandboxes()`, `getSandbox()`, `runtimeDiagnostics()`,
+`runtimeDiskUsage()`, `listFilesystemSnapshots()`, and
+`getFilesystemSnapshot()`.
+
 ## Builder-style programmable CI/CD
 
 The E2B-style API remains available for direct execution. For build and CI

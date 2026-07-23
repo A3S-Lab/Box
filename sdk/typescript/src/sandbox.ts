@@ -1,4 +1,19 @@
+import { randomUUID } from 'node:crypto'
+
 import { A3SBoxError } from './errors.js'
+import {
+  asRecord,
+  decodeBase64,
+  entryInfo,
+  filesystemSnapshotInfo,
+  requiredNumber,
+  requiredRecord,
+  requiredString,
+  sandboxLogEntry,
+  sandboxStats,
+  unknownRecordArray,
+} from './bridge-values.js'
+import type { SandboxLogEntry, SandboxStats } from './client.js'
 import {
   A3SLocalRuntime,
   type BridgeResult,
@@ -218,9 +233,54 @@ export class Sandbox {
   }
 
   async kill(): Promise<void> {
-    if (this.state === 'killed') return
+    if (this.state === 'killed' || this.state === 'removed') return
     await this.runtime.request(this.lifecycleRequest('sandbox_kill'))
     this.state = 'killed'
+  }
+
+  async stop(): Promise<void> {
+    if (this.state === 'killed' || this.state === 'removed') return
+    const result = await this.runtime.request(
+      this.lifecycleRequest('sandbox_stop')
+    )
+    this.updateLifecycle(result, 'stopped')
+  }
+
+  async restart(
+    options: {
+      operationId?: string
+      stopTimeoutSeconds?: number
+    } = {}
+  ): Promise<void> {
+    if (this.state === 'killed' || this.state === 'removed') {
+      throw new Error(`sandbox ${this.sandboxId} has been removed`)
+    }
+    if (
+      options.operationId !== undefined &&
+      options.operationId.trim().length === 0
+    ) {
+      throw new Error('operationId cannot be empty')
+    }
+    if (
+      options.stopTimeoutSeconds !== undefined &&
+      options.stopTimeoutSeconds < 0
+    ) {
+      throw new Error('stopTimeoutSeconds cannot be negative')
+    }
+    const result = await this.runtime.request({
+      ...this.lifecycleRequest('sandbox_restart'),
+      operation_id: options.operationId ?? `sdk-restart-${randomUUID()}`,
+      ...(options.stopTimeoutSeconds === undefined
+        ? {}
+        : { stop_timeout_seconds: options.stopTimeoutSeconds }),
+    })
+    this.updateLifecycle(result, 'running')
+  }
+
+  async remove(): Promise<void> {
+    if (this.state === 'killed' || this.state === 'removed') return
+    await this.runtime.request(this.lifecycleRequest('sandbox_remove'))
+    this.state = 'removed'
   }
 
   async pause(options: { keepMemory?: boolean } = {}): Promise<void> {
@@ -252,6 +312,31 @@ export class Sandbox {
       }
       throw error
     }
+  }
+
+  async logs(options: { tail?: number } = {}): Promise<SandboxLogEntry[]> {
+    const tail = options.tail ?? 100
+    if (!Number.isInteger(tail) || tail < 1 || tail > 10_000) {
+      throw new Error('tail must be an integer between 1 and 10000')
+    }
+    if (this.state === 'killed' || this.state === 'removed') {
+      throw new Error(`sandbox ${this.sandboxId} has been removed`)
+    }
+    const result = await this.runtime.request({
+      ...this.lifecycleRequest('sandbox_logs'),
+      tail,
+    })
+    return unknownRecordArray(result.logs).map(sandboxLogEntry)
+  }
+
+  async stats(): Promise<SandboxStats | undefined> {
+    if (this.state === 'killed' || this.state === 'removed') return undefined
+    const result = await this.runtime.request(
+      this.lifecycleRequest('sandbox_stats')
+    )
+    return result.stats === null || result.stats === undefined
+      ? undefined
+      : sandboxStats(asRecord(result.stats))
   }
 
   async createFilesystemSnapshot(
@@ -587,72 +672,4 @@ function isScript(value: string | Uint8Array | Script): value is Script {
     !(value instanceof Uint8Array) &&
     'source' in value
   )
-}
-
-function entryInfo(entry: Record<string, unknown>): EntryInfo {
-  return {
-    name: requiredString(entry, 'name'),
-    type: entryType(entry.type),
-    path: requiredString(entry, 'path'),
-    size: requiredNumber(entry, 'size'),
-    mode: requiredNumber(entry, 'mode'),
-    permissions: requiredString(entry, 'permissions'),
-    owner: requiredString(entry, 'owner'),
-    group: requiredString(entry, 'group'),
-    modifiedSeconds: requiredNumber(entry, 'modified_seconds'),
-    modifiedNanos: requiredNumber(entry, 'modified_nanos'),
-    ...(typeof entry.symlink_target === 'string'
-      ? { symlinkTarget: entry.symlink_target }
-      : {}),
-  }
-}
-
-function filesystemSnapshotInfo(result: BridgeResult): FilesystemSnapshotInfo {
-  return {
-    snapshotId: requiredString(result, 'snapshot_id'),
-    sizeBytes: requiredNumber(result, 'size_bytes'),
-    state: requiredString(result, 'state'),
-    generation: requiredNumber(result, 'generation'),
-  }
-}
-
-function entryType(value: unknown): EntryInfo['type'] {
-  if (value === 'file' || value === 'directory' || value === 'unspecified') {
-    return value
-  }
-  throw new A3SBoxError('Bridge returned an invalid entry type', 'bridge_protocol_error')
-}
-
-function requiredString(result: BridgeResult, key: string): string {
-  const value = result[key]
-  if (typeof value !== 'string') {
-    throw new A3SBoxError(`Bridge result is missing ${key}`, 'bridge_protocol_error')
-  }
-  return value
-}
-
-function requiredNumber(result: BridgeResult, key: string): number {
-  const value = result[key]
-  if (typeof value !== 'number') {
-    throw new A3SBoxError(`Bridge result is missing ${key}`, 'bridge_protocol_error')
-  }
-  return value
-}
-
-function requiredRecord(
-  result: BridgeResult,
-  key: string
-): Record<string, unknown> {
-  return asRecord(result[key])
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new A3SBoxError('Bridge result is not an object', 'bridge_protocol_error')
-  }
-  return value as Record<string, unknown>
-}
-
-function decodeBase64(result: BridgeResult, key: string): Buffer {
-  return Buffer.from(requiredString(result, key), 'base64')
 }
