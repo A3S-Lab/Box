@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" role="img" aria-labelledby="title desc">
+  <title id="title">A3S Box — OCI workloads isolated by intent</title>
+  <desc id="desc">A technical system map showing OCI requests resolved to a dedicated-kernel MicroVM by default or an explicitly selected shared-kernel Sandbox.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#20262b" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="460" rx="24" fill="#0b0e11"/>
+  <rect width="1200" height="460" rx="24" fill="url(#grid)" opacity="0.65"/>
+  <path d="M640 32V428" stroke="#30363c" stroke-width="1"/>
+
+  <g id="title-block" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g transform="translate(62 54)">
+      <rect width="38" height="38" fill="none" stroke="#62d78b" stroke-width="2"/>
+      <rect x="8" y="8" width="22" height="22" fill="none" stroke="#f4f1ea" stroke-width="2"/>
+      <rect x="15" y="15" width="8" height="8" fill="#62d78b"/>
+    </g>
+    <text x="116" y="78" fill="#aab2b9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="700" letter-spacing="2.6">OCI WORKLOAD RUNTIME / v3.1</text>
+
+    <text x="62" y="158" fill="#f4f1ea" font-size="70" font-weight="760" letter-spacing="-2.5">A3S BOX</text>
+    <text x="62" y="233" fill="#f4f1ea" font-size="54" font-weight="720" letter-spacing="-1.8">OCI workloads,</text>
+    <text x="62" y="291" fill="#62d78b" font-size="54" font-weight="720" letter-spacing="-1.8">isolated by intent.</text>
+
+    <text x="64" y="337" fill="#aab2b9" font-size="23" font-weight="500">Dedicated-kernel MicroVMs by default.</text>
+    <text x="64" y="369" fill="#aab2b9" font-size="23" font-weight="500">Shared-kernel only by explicit opt-in.</text>
+
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" font-weight="700" letter-spacing="0.8">
+      <g transform="translate(62 399)">
+        <rect width="142" height="34" rx="6" fill="#12171b" stroke="#394148"/>
+        <circle cx="18" cy="17" r="4" fill="#62d78b"/>
+        <text x="31" y="23" fill="#d8dde1">LINUX / KVM</text>
+      </g>
+      <g transform="translate(216 399)">
+        <rect width="142" height="34" rx="6" fill="#12171b" stroke="#394148"/>
+        <circle cx="18" cy="17" r="4" fill="#62d78b"/>
+        <text x="31" y="23" fill="#d8dde1">macOS / HVF</text>
+      </g>
+      <g transform="translate(370 399)">
+        <rect width="180" height="34" rx="6" fill="#12171b" stroke="#394148"/>
+        <circle cx="18" cy="17" r="4" fill="#62d78b"/>
+        <text x="31" y="23" fill="#d8dde1">WINDOWS / WHPX</text>
+      </g>
+    </g>
+  </g>
+
+  <g id="isolation-resolver" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <rect x="688" y="54" width="142" height="62" rx="8" fill="#12171b" stroke="#59636b" stroke-width="1.5"/>
+    <text x="759" y="79" text-anchor="middle" fill="#8f9aa3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" font-weight="700" letter-spacing="1.5">INPUT</text>
+    <text x="759" y="102" text-anchor="middle" fill="#f4f1ea" font-size="22" font-weight="700">OCI request</text>
+
+    <path d="M830 85h54" stroke="#8f9aa3" stroke-width="2"/>
+    <path d="m877 78 8 7-8 7" fill="none" stroke="#8f9aa3" stroke-width="2"/>
+
+    <rect x="886" y="54" width="252" height="62" rx="8" fill="#18211d" stroke="#62d78b" stroke-width="2"/>
+    <text x="1012" y="79" text-anchor="middle" fill="#82dda2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" font-weight="700" letter-spacing="1.5">POLICY</text>
+    <text x="1012" y="103" text-anchor="middle" fill="#f4f1ea" font-size="24" font-weight="720">capability resolver</text>
+
+    <path d="M1012 116v44H790v35M1012 160h25v35" fill="none" stroke="#59636b" stroke-width="2"/>
+    <circle cx="1012" cy="160" r="5" fill="#62d78b"/>
+
+    <text x="790" y="183" text-anchor="middle" fill="#62d78b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="700">DEFAULT</text>
+    <text x="1037" y="183" text-anchor="middle" fill="#f5b95f" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="700">EXPLICIT OPT-IN</text>
+
+    <g id="microvm-card">
+      <rect x="676" y="195" width="228" height="198" rx="10" fill="#101613" stroke="#62d78b" stroke-width="2"/>
+      <rect x="690" y="209" width="200" height="170" rx="6" fill="none" stroke="#344b3c" stroke-width="1.5"/>
+      <text x="790" y="246" text-anchor="middle" fill="#f4f1ea" font-size="30" font-weight="760">MICROVM</text>
+      <text x="790" y="276" text-anchor="middle" fill="#82dda2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="21" font-weight="700">libkrun</text>
+      <rect x="713" y="296" width="154" height="48" rx="5" fill="#18211d" stroke="#477258"/>
+      <text x="790" y="316" text-anchor="middle" fill="#9da8a1" font-size="17" font-weight="650">DEDICATED</text>
+      <text x="790" y="337" text-anchor="middle" fill="#f4f1ea" font-size="19" font-weight="720">guest Linux kernel</text>
+      <text x="790" y="369" text-anchor="middle" fill="#82dda2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" font-weight="700">hardware-vm</text>
+    </g>
+
+    <g id="sandbox-card">
+      <rect x="923" y="195" width="228" height="198" rx="10" fill="#17140f" stroke="#f5b95f" stroke-width="2" stroke-dasharray="7 6"/>
+      <text x="1037" y="246" text-anchor="middle" fill="#f4f1ea" font-size="30" font-weight="760">SANDBOX</text>
+      <text x="1037" y="276" text-anchor="middle" fill="#f5c873" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="21" font-weight="700">crun 1.28</text>
+      <rect x="960" y="296" width="154" height="48" rx="5" fill="#211c14" stroke="#735e35"/>
+      <text x="1037" y="316" text-anchor="middle" fill="#aea28b" font-size="17" font-weight="650">SHARED</text>
+      <text x="1037" y="337" text-anchor="middle" fill="#f4f1ea" font-size="19" font-weight="720">host Linux kernel</text>
+      <text x="1037" y="369" text-anchor="middle" fill="#f5c873" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" font-weight="700">shared-kernel</text>
+    </g>
+
+    <text x="790" y="426" text-anchor="middle" fill="#8f9aa3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="650">omit --isolation</text>
+    <text x="1037" y="426" text-anchor="middle" fill="#f5b95f" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18" font-weight="650">--isolation sandbox</text>
+  </g>
+</svg>
