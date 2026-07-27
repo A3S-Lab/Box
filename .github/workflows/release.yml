@@ -498,7 +498,8 @@ jobs:
             done
             test "$(cat "$DIR/OCI-RUNTIME-REVISION")" = \
               "$A3S_OCI_RUNTIME_REV"
-            if find "$DIR" -maxdepth 2 -type f -iname 'crun*' -print -quit |
+            removed_runtime='cr'"un"
+            if find "$DIR" -maxdepth 2 -type f -iname "${removed_runtime}*" -print -quit |
               grep -q .; then
               echo "Linux release contains the removed Sandbox runtime" >&2
               exit 1

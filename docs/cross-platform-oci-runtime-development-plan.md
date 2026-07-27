@@ -45,17 +45,15 @@ The exact integration revision is
 
 ## Upgrade behavior
 
-New executions migrate automatically to A3S OCI Runtime even when a serialized
-pre-migration Box configuration still contains the obsolete runtime selector.
+This is a hard state-format cutover. Box accepts only execution plans and
+runtime records written for the current A3S OCI implementation. It does not
+decode removed selectors, recognize old runtime roots, or migrate an existing
+shared-kernel generation.
 
-An already-running legacy Sandbox is different: its persisted plan and runtime
-record remain recognizable solely for safe diagnostics. The OCI-only release
-does not execute the recorded external binary, signal an unverified PID, or
-delete a potentially live rootfs. Recovery fails closed with an instruction to
-stop that Sandbox with the previous Box release before upgrading.
-
-Operators must therefore drain or stop all legacy Sandbox generations before
-installing the OCI-only release. MicroVM generations are unaffected.
+Operators must drain or stop every pre-A3S OCI Sandbox generation before
+installing the OCI-only release. An unsupported record is rejected as invalid
+state before recovery or cleanup touches its recorded resources. MicroVM
+generations are unaffected.
 
 ## Qualification gates
 
@@ -131,7 +129,7 @@ The replacement is complete when all of the following are true:
 - [x] Box source contains no external runtime controller or handler.
 - [x] CI does not download or execute the removed runtime.
 - [x] Linux release packaging contains only the pinned A3S OCI artifacts.
-- [x] Legacy live records fail closed without executing their recorded binary.
+- [x] Only the current A3S OCI runtime-record schema is accepted.
 - [x] The pinned native matrix covers network, volume, tmpfs, and init profiles.
 - [x] Rust, Python, and TypeScript exercise the real Box lifecycle.
 - [x] Linux x86_64/aarch64, macOS arm64, and Windows x86_64 builds remain gated.

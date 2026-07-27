@@ -13,11 +13,6 @@ pub enum ExecutionBackend {
     /// libkrun-backed MicroVM execution.
     Krun,
     /// Shared-kernel execution through A3S OCI Runtime.
-    ///
-    /// The alias migrates execution plans persisted before A3S OCI Runtime
-    /// became the sole Sandbox implementation. Serialization always writes
-    /// `a3s-oci`.
-    #[serde(alias = "crun")]
     A3sOci,
 }
 
@@ -371,26 +366,6 @@ mod tests {
         for required in SANDBOX_REQUIRED_CONTROLS {
             assert!(plan.required_controls.iter().any(|value| value == required));
         }
-    }
-
-    #[test]
-    fn legacy_runtime_selector_migrates_new_executions_to_a3s_oci() {
-        let mut value = serde_json::to_value(sandbox_config()).unwrap();
-        value["sandbox_runtime"] = serde_json::json!("crun");
-        let config: BoxConfig = serde_json::from_value(value).unwrap();
-
-        let plan = resolve_execution(&config).unwrap();
-
-        assert_eq!(plan.backend, ExecutionBackend::A3sOci);
-    }
-
-    #[test]
-    fn legacy_backend_value_migrates_to_a3s_oci() {
-        let backend: ExecutionBackend = serde_json::from_str("\"crun\"").unwrap();
-
-        assert_eq!(backend, ExecutionBackend::A3sOci);
-        assert!(backend.is_sandbox());
-        assert_eq!(serde_json::to_string(&backend).unwrap(), "\"a3s-oci\"");
     }
 
     #[test]
