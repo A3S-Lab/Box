@@ -124,7 +124,7 @@ two resulting artifacts:
 
 ```bash
 git clone https://github.com/A3S-Lab/OCI-Runtime.git /tmp/a3s-oci-runtime
-git -C /tmp/a3s-oci-runtime checkout 503625b176de7f22b2e31c782b82e97897e8c368
+git -C /tmp/a3s-oci-runtime checkout 0f0face67c282cf535e352b4fe83af02055b7e08
 cargo build --manifest-path /tmp/a3s-oci-runtime/Cargo.toml \
   --locked --release -p a3s-oci-cli -p a3s-oci-agent
 
@@ -469,12 +469,14 @@ boundaries. Run it on an otherwise idle host:
   -DurationSeconds 7200
 ```
 
-The eleven-test default matrix contains only Windows-supported real tests,
-including a 4,096-byte workload argument, POSIX ownership and mode replay
+The twelve-test default matrix contains only Windows-supported real tests,
+including a 4,096-byte workload argument, a read-only volume-provided init
+script with success and exact failure paths, POSIX ownership and mode replay
 through restart and commit, and the full 2,048-file, five-pass virtio-fs stress.
-It writes per-test logs plus a
-machine-readable `summary.json` beneath `src/target/a3s-box-whpx-soak/` and
-fails if any test leaves an A3S Box CLI, VM shim, or forwarding worker alive.
+It writes per-test logs plus `summary.json`, operation/resource TSVs,
+start/final process inventories, and `verify.out` beneath
+`src/target/a3s-box-whpx-soak/`. It fails on count drift, resource guardrails,
+or any residual A3S Box/A3S OCI Runtime CLI, VM shim, or forwarding worker.
 Use `-ListTests` to inspect the matrix. `-SkipBuild` is intended only when the
 matching musl guest-init and Windows binaries were already built from the same
 commit.
