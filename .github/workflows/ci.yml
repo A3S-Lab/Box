@@ -303,6 +303,9 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: Init submodules
         run: git -c http.extraheader= submodule update --init --recursive
+      - name: Test native one-click installer
+        shell: bash
+        run: bash scripts/test-install.sh
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
 
@@ -391,6 +394,15 @@ jobs:
               throw "Required Windows artifact is missing: $path"
             }
           }
+      - name: Test native one-click installer
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File scripts/test-install.ps1 `
+            -A3sBoxPath src/target/x86_64-pc-windows-msvc/release/a3s-box.exe `
+            -ShimPath src/target/x86_64-pc-windows-msvc/release/a3s-box-shim.exe `
+            -KrunDllPath src/target/x86_64-pc-windows-msvc/release/krun.dll `
+            -FirmwareDllPath src/target/x86_64-pc-windows-msvc/release/libkrunfw.dll
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:

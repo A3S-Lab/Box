@@ -68,6 +68,8 @@ jobs:
         run: cargo test --locked --all-targets
       - name: Test RuntimeClass installer
         run: bash deploy/scripts/test-install-runtimeclass.sh
+      - name: Test user one-click installer
+        run: bash scripts/test-install.sh
 
   # ── Build native SDK release assets ───────────────────────────
   sdk:
@@ -526,17 +528,45 @@ jobs:
             grep -Fx "${DIR}/a3s-oci-agent" "${DIR}.contents"
             grep -Fx "${DIR}/OCI-RUNTIME-REVISION" "${DIR}.contents"
           fi
+          checksum_inputs=("${DIR}.tar.gz")
           if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
             grep -Fx "${DIR}/containerd-shim-a3s-box-v2" "${DIR}.contents"
-            sha256sum "${DIR}.tar.gz" "$SHIM_ASSET" > "${DIR}.sha256"
+            checksum_inputs+=("$SHIM_ASSET")
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${checksum_inputs[@]}" > "${DIR}.sha256"
             sha256sum --check "${DIR}.sha256"
+          else
+            shasum -a 256 "${checksum_inputs[@]}" > "${DIR}.sha256"
+            shasum -a 256 --check "${DIR}.sha256"
           fi
 
           mkdir release-assets
-          mv "${DIR}.tar.gz" release-assets/
+          mv "${DIR}.tar.gz" "${DIR}.sha256" release-assets/
           if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
-            mv "$SHIM_ASSET" "${DIR}.sha256" release-assets/
+            mv "$SHIM_ASSET" release-assets/
           fi
+
+      - name: Test packaged release with user installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          ARCHIVE="release-assets/a3s-box-${TAG}-${{ matrix.target }}.tar.gz"
+          if command -v sha256sum >/dev/null 2>&1; then
+            DIGEST="$(sha256sum "$ARCHIVE" | awk '{ print $1 }')"
+          else
+            DIGEST="$(shasum -a 256 "$ARCHIVE" | awk '{ print $1 }')"
+          fi
+          INSTALL_DIR="$(mktemp -d "${RUNNER_TEMP}/a3s-box-release-install.XXXXXX")"
+          trap 'rm -rf -- "$INSTALL_DIR"' EXIT
+          sh install.sh \
+            --version "$TAG" \
+            --archive "$ARCHIVE" \
+            --sha256 "$DIGEST" \
+            --install-dir "$INSTALL_DIR" \
+            --no-modify-path
+          "$INSTALL_DIR/a3s-box" --version
 
       # actions/upload-artifact v6.0.0
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
@@ -645,13 +675,47 @@ jobs:
 
           # Create zip archive (Windows-friendly)
           powershell Compress-Archive -Path "$DIR" -DestinationPath "${DIR}.zip"
+          sha256sum "${DIR}.zip" > "${DIR}.sha256"
+          sha256sum --check "${DIR}.sha256"
           echo "ASSET=${DIR}.zip" >> "$GITHUB_ENV"
+          echo "CHECKSUM_ASSET=${DIR}.sha256" >> "$GITHUB_ENV"
+
+      - name: Test packaged release with user installer
+        shell: pwsh
+        run: |
+          $installDirectory = Join-Path $env:RUNNER_TEMP (
+            'a3s-box-release-install-{0}' -f [Guid]::NewGuid().ToString('N')
+          )
+          try {
+            $digest = (Get-FileHash -LiteralPath $env:ASSET -Algorithm SHA256).Hash
+            powershell.exe -NoProfile -ExecutionPolicy Bypass `
+              -File install.ps1 `
+              -Version $env:GITHUB_REF_NAME `
+              -ArchivePath $env:ASSET `
+              -Sha256 $digest `
+              -InstallDir $installDirectory `
+              -NoModifyPath
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows installer smoke failed with exit code $LASTEXITCODE."
+            }
+            & (Join-Path $installDirectory 'a3s-box.exe') --version
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installed a3s-box failed with exit code $LASTEXITCODE."
+            }
+          }
+          finally {
+            if (Test-Path -LiteralPath $installDirectory) {
+              Remove-Item -LiteralPath $installDirectory -Recurse -Force
+            }
+          }
 
       # actions/upload-artifact v6.0.0
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: windows-x86_64
-          path: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.CHECKSUM_ASSET }}
 
   release:
     name: GitHub Release
@@ -673,18 +737,24 @@ jobs:
       - name: List artifacts
         run: find artifacts -type f
 
-      - name: Verify Linux package and RuntimeClass shim checksums
+      - name: Verify release package checksums
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -d '' checksum_files < <(
-            find artifacts -type f -name 'a3s-box-*-linux-*.sha256' -print0
-          )
-          if [ "${#checksum_files[@]}" -ne 2 ]; then
-            echo "expected two Linux checksum files, found ${#checksum_files[@]}" >&2
-            exit 1
-          fi
-          for checksum_file in "${checksum_files[@]}"; do
+          for target in \
+            linux-x86_64 \
+            linux-arm64 \
+            macos-arm64 \
+            windows-x86_64; do
+            mapfile -d '' checksum_files < <(
+              find artifacts -type f \
+                -name "a3s-box-${GITHUB_REF_NAME}-${target}.sha256" -print0
+            )
+            if [ "${#checksum_files[@]}" -ne 1 ]; then
+              echo "expected one checksum file for $target, found ${#checksum_files[@]}" >&2
+              exit 1
+            fi
+            checksum_file="${checksum_files[0]}"
             checksum_dir="$(dirname "$checksum_file")"
             checksum_name="$(basename "$checksum_file")"
             (cd "$checksum_dir" && sha256sum --check "$checksum_name")

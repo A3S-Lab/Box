@@ -42,12 +42,30 @@ workload so lifecycle recovery cannot reinterpret the request.
 
 ## Run your first box
 
-Install the current stable runtime on macOS or Linux:
+Install the current stable runtime on Linux or macOS:
 
 ```bash
-brew install a3s-lab/tap/a3s-box
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh | sh
+```
+
+On Windows x86_64, use PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1 | iex
+```
+
+Open a new terminal if needed, then verify the host:
+
+```text
+a3s-box --version
 a3s-box info
 ```
+
+The installers detect the platform, verify the release SHA-256 before
+extraction, and refuse unsupported architectures or unsafe replacement
+targets. See [Installation](docs/installation.md) for pinned versions, custom
+destinations, offline packages, Homebrew, PATH behavior, and uninstall steps.
 
 Run one command inside a MicroVM. Omitting `--isolation` selects the default
 hardware-backed path:
@@ -82,8 +100,7 @@ An explicit `--isolation microvm` value is intentionally rejected: omission is
 the only public way to select the default. This prevents scripts from treating
 backend names as interchangeable compatibility modes.
 
-Windows users should install the matching x86_64 archive from the
-[latest release](https://github.com/A3S-Lab/Box/releases/latest) and follow the
+Windows users must still enable and validate WHPX by following the
 [WHPX setup guide](docs/windows-whpx.md). Source builds use `just release`; see
 the host requirements below before running real workloads.
 
