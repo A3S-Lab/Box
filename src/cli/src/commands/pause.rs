@@ -52,7 +52,7 @@ async fn pause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
     {
         // The managed lifecycle uses the same cross-process lock. Release the
         // command guard before entering it so Sandbox pause is performed by
-        // crun and the durable generation advances exactly once.
+        // the A3S OCI owner and the durable generation advances exactly once.
         drop(lifecycle_lock);
         let home = a3s_box_core::dirs_home();
         let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);

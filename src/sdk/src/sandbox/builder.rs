@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use a3s_box_core::{ExecutionIsolation, ExecutionSnapshotId, PortMapping, SandboxRuntime};
+use a3s_box_core::{ExecutionIsolation, ExecutionSnapshotId, PortMapping};
 
 use super::{Sandbox, SandboxCreateOptions, SandboxNetwork, TmpfsMount, VolumeMount};
 use crate::{A3sBoxClient, Result};
@@ -52,12 +52,6 @@ impl SandboxBuilder {
 
     pub const fn isolation(mut self, isolation: ExecutionIsolation) -> Self {
         self.options.isolation = isolation;
-        self
-    }
-
-    /// Select the shared-kernel runtime implementation.
-    pub const fn sandbox_runtime(mut self, runtime: SandboxRuntime) -> Self {
-        self.options.sandbox_runtime = runtime;
         self
     }
 

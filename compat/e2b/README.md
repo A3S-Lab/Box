@@ -112,7 +112,7 @@ starts. With
 unchanged Python sync, Python async, TypeScript, and Code Interpreter packages
 through the production lifecycle listener, calls their official running-state
 health methods through the TLS gateway before and after kill, and verifies
-cleanup of every real `crun` execution. The clients exercise foreground and
+cleanup of every real A3S OCI execution. The clients exercise foreground and
 background commands, process listing, stdin send/close, wait, PTY
 create/resize/input/wait, Filesystem remove/mkdir/write/read/stat/list/rename,
 current Sandbox metrics with historical-range filtering, memory-preserving and

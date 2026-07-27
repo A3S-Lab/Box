@@ -124,10 +124,9 @@ pub const SANDBOX_LOG_WORKER_SCHEMA: &str = "a3s.box.sandbox-log-worker.v1";
 /// Configuration for the host process that projects Sandbox stdout/stderr into
 /// the configured logging driver after the launching client has detached.
 ///
-/// The worker watches the exact `crun run` wrapper PID identity. Once that
-/// process exits, both inherited output descriptors are closed and EOF is
-/// authoritative, so the worker can drain the final bytes without a fixed
-/// late-write delay.
+/// The worker watches the exact A3S OCI owner PID identity. Once that process
+/// exits, both inherited output descriptors are closed and EOF is authoritative,
+/// so the worker can drain the final bytes without a fixed late-write delay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxLogWorkerSpec {
     pub schema: String,
@@ -188,7 +187,7 @@ type ConsoleFileIdentity = ();
 /// Whether the producer may still publish bytes after its apparent exit.
 ///
 /// libkrun can return before its console backend's final host write becomes
-/// visible, whereas a reaped `crun run` wrapper has already closed stdout and
+/// visible, whereas a reaped A3S OCI owner has already closed stdout and
 /// stderr. Keeping the distinction explicit avoids imposing the MicroVM's
 /// half-second settle window on every short Sandbox execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -528,7 +527,7 @@ pub fn run_log_processor_with_ready(
 /// Run the log processor with an explicit final-EOF policy.
 ///
 /// Sandbox workers use [`ConsoleEofPolicy::WriterClosed`] only after the exact
-/// `crun run` wrapper has exited. Other callers should retain the conservative
+/// A3S OCI owner has exited. Other callers should retain the conservative
 /// default exposed by [`run_log_processor_with_ready`].
 pub fn run_log_processor_with_ready_and_eof_policy(
     console_log: &Path,

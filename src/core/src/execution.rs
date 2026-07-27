@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{BoxConfig, ExecutionIsolation, SandboxRuntime, TeeConfig};
+use crate::config::{BoxConfig, ExecutionIsolation, TeeConfig};
 use crate::error::{BoxError, Result};
 use crate::network::NetworkMode;
 
@@ -13,17 +13,18 @@ pub enum ExecutionBackend {
     /// libkrun-backed MicroVM execution.
     Krun,
     /// Shared-kernel execution through A3S OCI Runtime.
-    A3sOci,
-    /// OCI execution through the certified crun runtime.
     ///
-    /// Retained as an explicit rollback and legacy-recovery backend.
-    Crun,
+    /// The alias migrates execution plans persisted before A3S OCI Runtime
+    /// became the sole Sandbox implementation. Serialization always writes
+    /// `a3s-oci`.
+    #[serde(alias = "crun")]
+    A3sOci,
 }
 
 impl ExecutionBackend {
     /// Whether this backend provides shared-kernel Sandbox execution.
     pub const fn is_sandbox(self) -> bool {
-        matches!(self, Self::A3sOci | Self::Crun)
+        matches!(self, Self::A3sOci)
     }
 }
 
@@ -99,10 +100,7 @@ pub fn resolve_execution(config: &BoxConfig) -> Result<ResolvedExecutionPlan> {
             validate_sandbox_compatibility(config)?;
             Ok(ResolvedExecutionPlan {
                 requested_isolation: ExecutionIsolation::Sandbox,
-                backend: match config.sandbox_runtime {
-                    SandboxRuntime::A3sOci => ExecutionBackend::A3sOci,
-                    SandboxRuntime::Crun => ExecutionBackend::Crun,
-                },
+                backend: ExecutionBackend::A3sOci,
                 isolation_class: IsolationClass::SharedKernel,
                 required_controls: SANDBOX_REQUIRED_CONTROLS
                     .iter()
@@ -376,17 +374,23 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_can_explicitly_select_the_crun_rollback_backend() {
-        let config = BoxConfig {
-            sandbox_runtime: SandboxRuntime::Crun,
-            ..sandbox_config()
-        };
+    fn legacy_runtime_selector_migrates_new_executions_to_a3s_oci() {
+        let mut value = serde_json::to_value(sandbox_config()).unwrap();
+        value["sandbox_runtime"] = serde_json::json!("crun");
+        let config: BoxConfig = serde_json::from_value(value).unwrap();
 
         let plan = resolve_execution(&config).unwrap();
 
-        assert_eq!(plan.backend, ExecutionBackend::Crun);
-        assert!(plan.backend.is_sandbox());
-        assert_eq!(plan.isolation_class, IsolationClass::SharedKernel);
+        assert_eq!(plan.backend, ExecutionBackend::A3sOci);
+    }
+
+    #[test]
+    fn legacy_backend_value_migrates_to_a3s_oci() {
+        let backend: ExecutionBackend = serde_json::from_str("\"crun\"").unwrap();
+
+        assert_eq!(backend, ExecutionBackend::A3sOci);
+        assert!(backend.is_sandbox());
+        assert_eq!(serde_json::to_string(&backend).unwrap(), "\"a3s-oci\"");
     }
 
     #[test]

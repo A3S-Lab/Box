@@ -1,10 +1,9 @@
-//! Host path access required while `crun` enters a user namespace.
+//! Host path access required while A3S OCI Runtime enters a user namespace.
 //!
 //! A root-run service deliberately maps container root to a subordinate host
-//! identity.  `crun` changes into the OCI bundle before entering that user
-//! namespace, then resolves `/proc/self/cwd` while setting up the container.
-//! Every parent of the bundle and rootfs must therefore be searchable by the
-//! mapped identity even when the service uses a restrictive umask.
+//! identity. The runtime resolves the OCI bundle and rootfs while setting up
+//! the container in that namespace. Every managed parent must therefore be
+//! searchable by the mapped identity even with a restrictive service umask.
 
 use std::path::Path;
 
@@ -20,7 +19,7 @@ use super::SandboxIdMappingPlan;
 /// `A3S_HOME` are never modified; an inaccessible deployment parent is rejected
 /// with an actionable error instead.
 #[cfg(target_os = "linux")]
-pub fn prepare_crun_path_access(
+pub fn prepare_sandbox_path_access(
     home_dir: &Path,
     box_id: &str,
     bundle_dir: &Path,
@@ -62,7 +61,7 @@ pub fn prepare_crun_path_access(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn prepare_crun_path_access(
+pub fn prepare_sandbox_path_access(
     _home_dir: &Path,
     _box_id: &str,
     _bundle_dir: &Path,
@@ -254,7 +253,7 @@ mod tests {
         // that access without requiring this unit test to run as host root.
         set_mode(&rootfs, 0o701);
 
-        prepare_crun_path_access(&home, "execution-1", &bundle, &rootfs, &mappings(uid, gid))
+        prepare_sandbox_path_access(&home, "execution-1", &bundle, &rootfs, &mappings(uid, gid))
             .unwrap();
 
         for path in [
@@ -278,9 +277,14 @@ mod tests {
         let gid = unsafe { libc::getegid() }.saturating_add(200_000);
         set_mode(&rootfs, 0o701);
 
-        let error =
-            prepare_crun_path_access(&home, "execution-1", &bundle, &rootfs, &mappings(uid, gid))
-                .unwrap_err();
+        let error = prepare_sandbox_path_access(
+            &home,
+            "execution-1",
+            &bundle,
+            &rootfs,
+            &mappings(uid, gid),
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("not searchable"));
         assert_eq!(mode(outer.path()), 0o700);
@@ -292,7 +296,7 @@ mod tests {
         let wrong = home.join("other/bundle");
         std::fs::create_dir_all(&wrong).unwrap();
 
-        let error = prepare_crun_path_access(
+        let error = prepare_sandbox_path_access(
             &home,
             "execution-1",
             &wrong,

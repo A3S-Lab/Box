@@ -50,7 +50,7 @@ async fn unpause_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::
         generation,
     } = unpause_plan(&record)?
     {
-        // The runtime manager owns both crun resume and generation fencing for
+        // The runtime manager owns both A3S OCI resume and generation fencing for
         // current records. Keep direct SIGCONT only for legacy state files.
         drop(lifecycle_lock);
         let home = a3s_box_core::dirs_home();

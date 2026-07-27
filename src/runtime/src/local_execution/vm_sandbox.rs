@@ -155,20 +155,10 @@ impl VmLocalExecutionBackend {
                         )?;
                     }
                 }
-                crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
-                    if pause {
-                        crate::sandbox::handler::CrunHandler::pause_at(
-                            &inspection.runtime.runtime_path,
-                            &inspection.runtime.runtime_root,
-                            &box_id,
-                        )?;
-                    } else {
-                        crate::sandbox::handler::CrunHandler::resume_at(
-                            &inspection.runtime.runtime_path,
-                            &inspection.runtime.runtime_root,
-                            &box_id,
-                        )?;
-                    }
+                crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
+                    return Err(a3s_box_core::BoxError::StateError(format!(
+                        "Legacy Sandbox runtime record for {box_id} cannot be resumed; stop it with the previous Box release before upgrading"
+                    )));
                 }
             }
             inspect_recorded_sandbox(&home_dir, &box_dir, &box_id)?.ok_or_else(|| {
@@ -258,19 +248,11 @@ impl VmLocalExecutionBackend {
                     .map_err(|error| runtime_error("recover", record, error))?,
                 )
             }
-            crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
-                Box::new(crate::sandbox::handler::CrunHandler::from_recorded_runtime(
-                    crate::sandbox::handler::CrunHandlerSpec::new(
-                        inspection.runtime.runtime_path,
-                        inspection.runtime.runtime_root,
-                        record.id.clone(),
-                        inspection.pid,
-                        inspection.runtime.bundle_dir,
-                        record.box_dir.join("sandbox/runtime.json"),
-                    ),
-                    inspection.runtime.log_worker_pid,
-                    inspection.runtime.log_worker_pid_start_time,
-                ))
+            crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
+                return Err(ExecutionManagerError::Internal(format!(
+                    "Legacy Sandbox runtime record for {} cannot be recovered; stop it with the previous Box release before upgrading",
+                    record.id
+                )));
             }
         };
         *manager.handler.write().await = Some(handler);
@@ -398,15 +380,10 @@ fn inspect_recorded_sandbox(
                 None => ("stopped".to_string(), 0),
             }
         }
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
-            match crate::sandbox::handler::CrunHandler::query_state_at(
-                &runtime.runtime_path,
-                &runtime.runtime_root,
-                box_id,
-            )? {
-                Some(state) => (state.status, state.pid),
-                None => ("stopped".to_string(), 0),
-            }
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
+            return Err(a3s_box_core::BoxError::StateError(format!(
+                "Legacy Sandbox runtime record for {box_id} cannot be inspected; stop it with the previous Box release before upgrading"
+            )));
         }
     };
     if matches!(status.as_str(), "created" | "running" | "paused") && pid != runtime.init_pid {

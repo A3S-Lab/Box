@@ -42,9 +42,14 @@ fail() {
 [[ "$(basename "$A3S_HOME")" == *e2b-service-smoke* ]] ||
   fail 'A3S_HOME must have e2b-service-smoke in its final path component'
 [[ -x "${A3S_BOX_E2B_BIN:-}" ]] || fail 'A3S_BOX_E2B_BIN must be executable'
-[[ -x "${A3S_BOX_CRUN_PATH:-}" ]] || fail 'A3S_BOX_CRUN_PATH must be executable'
-[[ "$(realpath "$A3S_BOX_CRUN_PATH")" == "$(realpath "$A3S_HOME/bin/crun")" ]] ||
-  fail 'A3S_BOX_CRUN_PATH must equal A3S_HOME/bin/crun'
+[[ -x "${A3S_BOX_OCI_RUNTIME_PATH:-}" ]] ||
+  fail 'A3S_BOX_OCI_RUNTIME_PATH must be executable'
+[[ -x "${A3S_BOX_OCI_AGENT_PATH:-}" ]] ||
+  fail 'A3S_BOX_OCI_AGENT_PATH must be executable'
+[[ "$(realpath "$A3S_BOX_OCI_RUNTIME_PATH")" == "$(realpath "$A3S_HOME/bin/a3s-oci")" ]] ||
+  fail 'A3S_BOX_OCI_RUNTIME_PATH must equal A3S_HOME/bin/a3s-oci'
+[[ "$(realpath "$A3S_BOX_OCI_AGENT_PATH")" == "$(realpath "$A3S_HOME/bin/a3s-oci-agent")" ]] ||
+  fail 'A3S_BOX_OCI_AGENT_PATH must equal A3S_HOME/bin/a3s-oci-agent'
 [[ -x "$A3S_HOME/bin/a3s-box-guest-init" ]] || fail 'guest init is missing'
 [[ -x "$A3S_HOME/bin/a3s-box-shim" ]] || fail 'shim is missing'
 [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -gt 0 && "$PORT" -le 65535 ]] ||
@@ -143,7 +148,8 @@ start_service() {
   : >"$LOG"
   env \
     A3S_HOME="$A3S_HOME" \
-    A3S_BOX_CRUN_PATH="$A3S_BOX_CRUN_PATH" \
+    A3S_BOX_OCI_RUNTIME_PATH="$A3S_BOX_OCI_RUNTIME_PATH" \
+    A3S_BOX_OCI_AGENT_PATH="$A3S_BOX_OCI_AGENT_PATH" \
     TOKEN_ENCRYPTION="$TOKEN_ENCRYPTION" \
     TOKEN_DIGEST="$TOKEN_DIGEST" \
     RUST_LOG="${RUST_LOG:-a3s_box_compat=info}" \
@@ -235,7 +241,7 @@ preserve_failure_diagnostics() {
     [[ -n "$execution_id" && "$execution_id" != *[!a-zA-Z0-9._-]* ]] || continue
     local execution_diagnostics="$diagnostics/$execution_id"
     local box_dir="$A3S_HOME/boxes/$execution_id"
-    local runtime_root="$A3S_HOME/run/crun/$execution_id"
+    local runtime_root="$A3S_HOME/run/a3s-oci/$execution_id"
     mkdir -p "$execution_diagnostics"
     printf 'pid=%s\npid_start_time=%s\n' "$pid" "$pid_start_time" \
       >"$execution_diagnostics/process-identity.txt"
@@ -258,16 +264,16 @@ preserve_failure_diagnostics() {
           "$execution_diagnostics/$relative_path" || true
       fi
     done
-    # crun materializes a missing --root directory even for an absent
-    # container. Keep failure diagnostics side-effect free when startup did
-    # not reach the runtime.
     if [[ -e "$runtime_root" ]]; then
-      "$A3S_BOX_CRUN_PATH" --root "$runtime_root" state "$execution_id" \
-        >"$execution_diagnostics/crun-state.json" \
-        2>"$execution_diagnostics/crun-state.stderr" || true
+      find "$runtime_root" -maxdepth 2 -printf '%M %u:%g %s %p\n' \
+        >"$execution_diagnostics/a3s-oci-runtime-tree.txt" 2>&1 || true
+      if [[ -S "$runtime_root/runtime.sock" ]]; then
+        stat "$runtime_root/runtime.sock" \
+          >"$execution_diagnostics/a3s-oci-runtime-socket.txt" 2>&1 || true
+      fi
     else
-      printf 'runtime root was absent; crun state probe skipped\n' \
-        >"$execution_diagnostics/crun-state.stderr"
+      printf 'A3S OCI runtime root was absent\n' \
+        >"$execution_diagnostics/a3s-oci-runtime-tree.txt"
     fi
   done < <(python3 - "$records" <<'PY'
 import json
@@ -787,7 +793,8 @@ print(matches[0]["id"])
 PY
 )"
 [[ ! -e "$A3S_HOME/boxes/$EXECUTION_ID" ]] || fail 'box directory leaked after kill'
-[[ ! -e "$A3S_HOME/run/crun/$EXECUTION_ID" ]] || fail 'crun state leaked after kill'
+[[ ! -e "$A3S_HOME/run/a3s-oci/$EXECUTION_ID" ]] ||
+  fail 'A3S OCI runtime state leaked after kill'
 [[ ! -e "/tmp/a3s-box-sockets/$EXECUTION_ID" ]] || fail 'runtime socket directory leaked after kill'
 
 RESTORE_BODY="$(python3 - "$SNAPSHOT_ID" <<'PY'
@@ -842,8 +849,8 @@ PY
 )"
 [[ ! -e "$A3S_HOME/boxes/$RESTORED_EXECUTION_ID" ]] ||
   fail 'restored box directory leaked after kill'
-[[ ! -e "$A3S_HOME/run/crun/$RESTORED_EXECUTION_ID" ]] ||
-  fail 'restored crun state leaked after kill'
+[[ ! -e "$A3S_HOME/run/a3s-oci/$RESTORED_EXECUTION_ID" ]] ||
+  fail 'restored A3S OCI runtime state leaked after kill'
 [[ ! -e "/tmp/a3s-box-sockets/$RESTORED_EXECUTION_ID" ]] ||
   fail 'restored runtime socket directory leaked after kill'
 RESTORED_SANDBOX_ID=""
@@ -913,7 +920,7 @@ for record in records:
         raise SystemExit(f"managed execution {execution_id} is not stopped")
     for path in (
         home / "boxes" / execution_id,
-        home / "run" / "crun" / execution_id,
+        home / "run" / "a3s-oci" / execution_id,
         pathlib.Path("/tmp/a3s-box-sockets") / execution_id,
     ):
         if path.exists():

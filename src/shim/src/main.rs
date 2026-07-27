@@ -54,7 +54,7 @@ struct Args {
     config: Option<String>,
 
     /// Internal: project one Sandbox generation's split console into its
-    /// configured log driver until the exact crun wrapper exits.
+    /// configured log driver until the exact A3S OCI owner exits.
     #[cfg(target_os = "linux")]
     #[arg(long, hide = true)]
     sandbox_log_worker_config: Option<String>,
@@ -1409,7 +1409,7 @@ mod tests {
     #[test]
     fn parses_sandbox_worker_pid_identity_after_complex_comm() {
         let stat =
-            "123 (crun (sandbox) worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242";
+            "123 (a3s oci (sandbox) worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242";
         assert_eq!(linux_process_identity_from_stat(stat), Some(('S', 4242)));
         assert_eq!(linux_process_identity_from_stat("malformed"), None);
     }

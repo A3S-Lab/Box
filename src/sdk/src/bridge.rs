@@ -11,7 +11,6 @@ use std::time::Duration;
 use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionIsolation, ExecutionSnapshot, ExecutionSnapshotId,
     ExecutionState, FilesystemEntry, FilesystemEntryKind, OperationId, Platform, PortMapping,
-    SandboxRuntime,
 };
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -424,7 +423,6 @@ async fn execute_request(
                     cpus,
                     memory_mb,
                     isolation,
-                    sandbox_runtime: SandboxRuntime::A3sOci,
                     rootfs_snapshot_id,
                     workspace: workspace.map(PathBuf::from),
                     workdir,

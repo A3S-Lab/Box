@@ -1,4 +1,4 @@
-//! Durable bundle creation and `crun` process startup.
+//! Shared launch utilities for the A3S OCI Runtime Sandbox owner.
 
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -6,9 +6,8 @@ use std::fs::OpenOptions;
 #[cfg(target_os = "linux")]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 #[cfg(target_os = "linux")]
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
@@ -20,12 +19,7 @@ use a3s_box_core::log::{SandboxLogWorkerSpec, SANDBOX_LOG_WORKER_SCHEMA};
 use oci_spec::runtime::Spec;
 use serde::Serialize;
 
-use super::capability::{CertifiedCrun, SandboxCapabilitySnapshot};
-use super::handler::CrunHandler;
-#[cfg(target_os = "linux")]
-use super::handler::{CrunHandlerSpec, CrunState};
-#[cfg(target_os = "linux")]
-use super::runtime_record::SandboxRuntimeRecord;
+use super::capability::SandboxCapabilitySnapshot;
 
 #[cfg(target_os = "linux")]
 pub(crate) const EXEC_LISTENER_FD: i32 = 3;
@@ -33,8 +27,6 @@ pub(crate) const EXEC_LISTENER_FD: i32 = 3;
 pub(crate) const PTY_LISTENER_FD: i32 = 4;
 #[cfg(target_os = "linux")]
 pub(crate) const INIT_LOG_FD: i32 = 5;
-#[cfg(target_os = "linux")]
-const PRESERVED_FD_COUNT: usize = 3;
 #[cfg(target_os = "linux")]
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
@@ -55,284 +47,6 @@ pub struct SandboxLaunchSpec {
     pub log_worker_path: PathBuf,
     pub log_worker_log_path: PathBuf,
     pub log_worker_ready_path: PathBuf,
-}
-
-/// Controller pinned to one already-verified `crun` artifact.
-pub struct CrunController {
-    runtime: CertifiedCrun,
-}
-
-impl CrunController {
-    pub fn new(runtime: CertifiedCrun) -> Self {
-        Self { runtime }
-    }
-
-    /// Refuse to overwrite a live runtime generation with the same ID.
-    pub fn require_absent(&self, runtime_root: &Path, container_id: &str) -> Result<()> {
-        match std::fs::symlink_metadata(runtime_root) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(BoxError::BoxBootError {
-                    message: format!(
-                        "Failed to inspect Sandbox runtime root {}: {error}",
-                        runtime_root.display()
-                    ),
-                    hint: None,
-                })
-            }
-            Ok(metadata) if !metadata.file_type().is_dir() => {
-                return Err(BoxError::BoxBootError {
-                    message: format!(
-                        "Sandbox runtime root is not a directory: {}",
-                        runtime_root.display()
-                    ),
-                    hint: None,
-                })
-            }
-            Ok(_) => {}
-        }
-
-        // `crun state --root <missing>` materializes the root even when the
-        // container is absent. The metadata gate above keeps this safety probe
-        // side-effect free before image pulls and bundle preparation begin.
-        match CrunHandler::query_state_at(&self.runtime.path, runtime_root, container_id)? {
-            Some(state) if state.status == "stopped" => {
-                let output = Command::new(&self.runtime.path)
-                    .arg("--root")
-                    .arg(runtime_root)
-                    .arg("delete")
-                    .arg("--force")
-                    .arg(container_id)
-                    .env("LC_ALL", "C")
-                    .output()
-                    .map_err(|error| BoxError::BoxBootError {
-                        message: format!("Failed to delete stopped Sandbox generation: {error}"),
-                        hint: None,
-                    })?;
-                if !output.status.success() {
-                    return Err(BoxError::BoxBootError {
-                        message: format!(
-                            "Failed to delete stopped Sandbox generation: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        ),
-                        hint: None,
-                    });
-                }
-                Ok(())
-            }
-            Some(state) => Err(BoxError::BoxBootError {
-                message: format!(
-                    "Sandbox runtime ID {container_id} already exists in state {}",
-                    state.status
-                ),
-                hint: Some(
-                    "Reconcile or stop the existing Sandbox before restarting it".to_string(),
-                ),
-            }),
-            None => Ok(()),
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub async fn start(&self, launch: SandboxLaunchSpec) -> Result<CrunHandler> {
-        use std::os::fd::AsRawFd;
-        use std::os::unix::process::CommandExt;
-
-        self.require_absent(&launch.runtime_root, &launch.container_id)?;
-        create_private_dir(&launch.runtime_root)?;
-        let exec_listener = bind_control_listener(&launch.exec_socket_path)?;
-        let pty_listener = bind_control_listener(&launch.pty_socket_path)?;
-        let stdout = open_log(&launch.stdout_path)?;
-        let stderr = open_log(&launch.stderr_path)?;
-        let init_log = open_log(&launch.init_log_path)?;
-
-        let inherited_exec = duplicate_for_inheritance(exec_listener.as_raw_fd())?;
-        let inherited_pty = duplicate_for_inheritance(pty_listener.as_raw_fd())?;
-        let inherited_log = duplicate_for_inheritance(init_log.as_raw_fd())?;
-        let exec_fd = inherited_exec.as_raw_fd();
-        let pty_fd = inherited_pty.as_raw_fd();
-        let log_fd = inherited_log.as_raw_fd();
-
-        let mut command = Command::new(&self.runtime.path);
-        command
-            .arg("--root")
-            .arg(&launch.runtime_root)
-            .arg("run")
-            .arg("--bundle")
-            .arg(&launch.bundle_dir)
-            .arg("--preserve-fds")
-            .arg(PRESERVED_FD_COUNT.to_string())
-            .arg(&launch.container_id)
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
-
-        // The duplicated source descriptors are all >= 10, so the three dup2
-        // operations cannot clobber one another. dup2 clears CLOEXEC on 3/4/5.
-        unsafe {
-            command.pre_exec(move || {
-                for (source, destination) in [
-                    (exec_fd, EXEC_LISTENER_FD),
-                    (pty_fd, PTY_LISTENER_FD),
-                    (log_fd, INIT_LOG_FD),
-                ] {
-                    if libc::dup2(source, destination) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
-        }
-
-        let mut child = command.spawn().map_err(|error| BoxError::BoxBootError {
-            message: format!("Failed to start certified crun runtime: {error}"),
-            hint: None,
-        })?;
-        drop((inherited_exec, inherited_pty, inherited_log));
-        // `crun` and the container own duplicated descriptors now. The parent
-        // listener copies must close so socket EOF/lifetime is not extended.
-        drop((exec_listener, pty_listener, init_log));
-
-        let deadline = Instant::now() + START_TIMEOUT;
-        let init_pid = loop {
-            let child_status = match child.try_wait() {
-                Ok(status) => status,
-                Err(error) => {
-                    cleanup_failed_start(&self.runtime.path, &launch);
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(BoxError::IoError(error));
-                }
-            };
-            if let Some(status) = child_status {
-                let diagnostics = start_failure_diagnostics(&launch);
-                cleanup_failed_start(&self.runtime.path, &launch);
-                return Err(BoxError::BoxBootError {
-                    message: format!(
-                        "crun run exited before the Sandbox was running: {status}{diagnostics}"
-                    ),
-                    hint: None,
-                });
-            }
-            let runtime_state = match CrunHandler::query_state_at(
-                &self.runtime.path,
-                &launch.runtime_root,
-                &launch.container_id,
-            ) {
-                Ok(state) => state,
-                Err(error) => {
-                    cleanup_failed_start(&self.runtime.path, &launch);
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
-            };
-            if let Some(CrunState { status, pid }) = runtime_state {
-                if status == "running" && pid > 0 {
-                    break pid;
-                }
-                if status == "stopped" {
-                    let diagnostics = start_failure_diagnostics(&launch);
-                    cleanup_failed_start(&self.runtime.path, &launch);
-                    return Err(BoxError::BoxBootError {
-                        message: format!("Sandbox stopped during OCI startup{diagnostics}"),
-                        hint: None,
-                    });
-                }
-            }
-            if Instant::now() >= deadline {
-                let diagnostics = start_failure_diagnostics(&launch);
-                cleanup_failed_start(&self.runtime.path, &launch);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(BoxError::BoxBootError {
-                    message: format!(
-                        "Timed out waiting for the Sandbox OCI state to become running{diagnostics}"
-                    ),
-                    hint: None,
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        };
-
-        let watched_pid = child.id();
-        let watched_pid_start_time = match crate::process::pid_start_time(watched_pid) {
-            Some(start_time) => start_time,
-            None => {
-                cleanup_failed_start(&self.runtime.path, &launch);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(BoxError::BoxBootError {
-                    message: "Failed to capture crun wrapper process identity for Sandbox logs"
-                        .to_string(),
-                    hint: None,
-                });
-            }
-        };
-        let mut log_worker = match start_log_worker(&launch, watched_pid, watched_pid_start_time) {
-            Ok(worker) => worker,
-            Err(error) => {
-                cleanup_failed_start(&self.runtime.path, &launch);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
-        let log_worker_pid = log_worker.id();
-        let log_worker_pid_start_time = match crate::process::pid_start_time(log_worker_pid) {
-            Some(start_time) => start_time,
-            None => {
-                cleanup_failed_start(&self.runtime.path, &launch);
-                reap_failed_log_worker(&mut log_worker);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(BoxError::BoxBootError {
-                    message: "Failed to capture Sandbox log worker process identity".to_string(),
-                    hint: None,
-                });
-            }
-        };
-
-        let record = SandboxRuntimeRecord::crun(
-            launch.container_id.clone(),
-            self.runtime.path.clone(),
-            launch.runtime_root.clone(),
-            launch.bundle_dir.clone(),
-            init_pid,
-            log_worker_pid,
-            log_worker_pid_start_time,
-        );
-        if let Err(error) = write_json_atomic(&launch.runtime_record, &record) {
-            cleanup_failed_start(&self.runtime.path, &launch);
-            reap_failed_log_worker(&mut log_worker);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
-
-        Ok(CrunHandler::from_child(
-            CrunHandlerSpec::new(
-                self.runtime.path.clone(),
-                launch.runtime_root,
-                launch.container_id,
-                init_pid,
-                launch.bundle_dir,
-                launch.runtime_record,
-            ),
-            child,
-            log_worker,
-            log_worker_pid_start_time,
-        ))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    pub async fn start(&self, _launch: SandboxLaunchSpec) -> Result<CrunHandler> {
-        Err(BoxError::BoxBootError {
-            message: "Sandbox execution requires Linux".to_string(),
-            hint: Some("Run this workload on an A3S OS Sandbox host".to_string()),
-        })
-    }
 }
 
 /// Persist generated artifacts without accepting user-supplied OCI JSON.
@@ -390,7 +104,6 @@ pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn open_log(path: &Path) -> Result<File> {
-    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
 
     let parent = path.parent().ok_or_else(|| {
@@ -398,9 +111,7 @@ pub(crate) fn open_log(path: &Path) -> Result<File> {
     })?;
     create_private_dir(parent)?;
     let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
+    options.create(true).truncate(true).write(true).mode(0o600);
     options.open(path).map_err(BoxError::IoError)
 }
 
@@ -507,7 +218,7 @@ pub(crate) fn bind_control_listener(path: &Path) -> Result<std::os::unix::net::U
                     path.display()
                 ),
                 hint: None,
-            })
+            });
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(BoxError::IoError(error)),
@@ -521,33 +232,13 @@ pub(crate) fn bind_control_listener(path: &Path) -> Result<std::os::unix::net::U
 #[cfg(target_os = "linux")]
 pub(crate) fn duplicate_for_inheritance(fd: i32) -> Result<std::os::fd::OwnedFd> {
     use std::os::fd::{FromRawFd, OwnedFd};
+
     let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
     if duplicate < 0 {
         return Err(BoxError::IoError(std::io::Error::last_os_error()));
     }
     // SAFETY: F_DUPFD_CLOEXEC returned a new descriptor owned by this process.
     Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
-}
-
-#[cfg(target_os = "linux")]
-fn start_failure_diagnostics(launch: &SandboxLaunchSpec) -> String {
-    let diagnostics = [
-        ("crun stderr", &launch.stderr_path),
-        ("guest-init log", &launch.init_log_path),
-        ("Sandbox log worker", &launch.log_worker_log_path),
-    ]
-    .into_iter()
-    .filter_map(|(label, path)| {
-        read_log_tail(path, START_FAILURE_LOG_LIMIT_BYTES)
-            .map(|excerpt| format!("{label}: {excerpt}"))
-    })
-    .collect::<Vec<_>>();
-
-    if diagnostics.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", diagnostics.join("; "))
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -569,69 +260,14 @@ pub(crate) fn read_log_tail(path: &Path, limit: u64) -> Option<String> {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn cleanup_failed_start(runtime_path: &Path, launch: &SandboxLaunchSpec) {
-    let _ = Command::new(runtime_path)
-        .arg("--root")
-        .arg(&launch.runtime_root)
-        .arg("delete")
-        .arg("--force")
-        .arg(&launch.container_id)
-        .env("LC_ALL", "C")
-        .output();
-    let _ = std::fs::remove_file(&launch.runtime_record);
-    let _ = std::fs::remove_dir_all(&launch.runtime_root);
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
-    fn controller_with_runtime(path: PathBuf) -> CrunController {
-        CrunController::new(CertifiedCrun {
-            path,
-            version: "1.28".to_string(),
-            sha256: "test-digest".to_string(),
-            features: vec!["+CAP".to_string(), "+SECCOMP".to_string()],
-        })
-    }
-
-    #[test]
-    fn absent_runtime_root_is_not_materialized_by_state_probe() {
-        let temporary = tempfile::tempdir().unwrap();
-        let runtime_root = temporary.path().join("missing-runtime-root");
-        let controller = controller_with_runtime(temporary.path().join("must-not-run"));
-
-        controller
-            .require_absent(&runtime_root, "internal-execution-id")
-            .unwrap();
-
-        assert!(!runtime_root.exists());
-    }
-
-    #[test]
-    fn runtime_root_symlink_is_rejected_before_executing_crun() {
-        use std::os::unix::fs::symlink;
-
-        let temporary = tempfile::tempdir().unwrap();
-        let target = temporary.path().join("target");
-        let runtime_root = temporary.path().join("runtime-root");
-        std::fs::create_dir(&target).unwrap();
-        symlink(&target, &runtime_root).unwrap();
-        let controller = controller_with_runtime(temporary.path().join("must-not-run"));
-
-        let error = controller
-            .require_absent(&runtime_root, "internal-execution-id")
-            .unwrap_err();
-
-        assert!(error.to_string().contains("not a directory"));
-        assert!(target.read_dir().unwrap().next().is_none());
-    }
-
     #[test]
     fn startup_log_excerpt_is_bounded_and_keeps_the_tail() {
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("crun.stderr.log");
+        let path = temporary.path().join("runtime.stderr.log");
         let mut contents = "x".repeat(START_FAILURE_LOG_LIMIT_BYTES as usize + 512);
         contents.push_str("\nseccomp unknown architecture `NATIVE`\n");
         std::fs::write(&path, contents).unwrap();

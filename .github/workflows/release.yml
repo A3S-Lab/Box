@@ -10,7 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  A3S_OCI_RUNTIME_REV: 889cd29ffb399274657533234bf65c1dc58d785b
+  A3S_OCI_RUNTIME_REV: 503625b176de7f22b2e31c782b82e97897e8c368
 
 jobs:
   # ── Tests must pass before release ─────────────────────────────
@@ -498,6 +498,11 @@ jobs:
             done
             test "$(cat "$DIR/OCI-RUNTIME-REVISION")" = \
               "$A3S_OCI_RUNTIME_REV"
+            if find "$DIR" -maxdepth 2 -type f -iname 'crun*' -print -quit |
+              grep -q .; then
+              echo "Linux release contains the removed Sandbox runtime" >&2
+              exit 1
+            fi
           fi
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             for binary in a3s-box-cri a3s-box-e2b; do

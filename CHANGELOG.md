@@ -4,6 +4,18 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **A3S OCI Runtime is the sole Sandbox backend.** New shared-kernel Sandbox
+  executions use the pinned A3S OCI Runtime `v0.2.0`; the public rollback
+  selector, external-runtime discovery and invocation, and differential lane
+  are removed. Legacy live records remain readable only to fail closed with a
+  drain-before-upgrade diagnostic.
+- **Real configuration qualification.** The Box Linux integration gate runs
+  the pinned runtime's native private/host/donor network, read-write/read-only
+  volume, tmpfs, inline/file/direct initialization, failure, and cleanup
+  matrix before exercising the Rust, Python, and TypeScript SDK lifecycle.
+
 ## [3.1.0] — 2026-07-23
 
 ### Added
