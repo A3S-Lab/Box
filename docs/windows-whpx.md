@@ -87,6 +87,7 @@ the Cargo target directory.
 | Published TCP ports | Validated through the Windows named-pipe bridge, including sequential connections |
 | Bind mounts | Validated for drive-letter directory and single-file sources, including read-only enforcement |
 | Named volumes | Validated across `stop` and `restart`, including explicit removal |
+| Initialization scripts | Validated for a read-only host-provided script/config plus a named state volume, including exact success, exit 42 failure, and persisted evidence from both attempts |
 | POSIX ownership and modes | Validated for `chmod`, `chown`, and umask-created files and directories across clean stop, restart, and commit |
 | `diff`, `export`, stopped-box `commit`, and stopped-box filesystem snapshots | Validated through clean-stop metadata capture, committed-image re-run, snapshot restore, restart, and re-export. Running-box host-path capture remains unavailable because WHPX has no post-boot guest archive channel. |
 | `stats --no-stream` | Validated |
@@ -141,7 +142,9 @@ Run the Windows-specific soak harness from the Box repository root on an
 otherwise idle WHPX host. It builds the current guest-init and Windows binaries,
 then repeatedly exercises the supported lifecycle, logs, exit-code, long-argv,
 stats, published-port, bind-mount, named-volume, commit, snapshot, and virtio-fs
-paths.
+paths. The initialization profile additionally combines a read-only script
+mount with a named state volume and requires both a successful run and an exact
+nonzero failure.
 
 This runner supplies the `WIN-01` lane in the
 [Cross-Capability Soak Test Plan](soak-test-plan.md). Its evidence proves only
@@ -161,14 +164,16 @@ functional tests rather than being inferred from another host.
 ```
 
 Evidence is written under `src/target/a3s-box-whpx-soak/` by default. Each test
-has its own log, while `summary.json` records the commit, image digest, timings,
-failure, and any residual process details. The runner requires no active
-`a3s-box` or `a3s-box-shim` processes at startup and verifies the same invariant
-after every test.
+has its own log. `summary.json`, `operations.tsv`, `resource-samples.tsv`,
+start/final inventories, `host.json`, and `verify.out` record the commit, image
+digest, timings, peak runtime working set, handles, process counts, failures,
+and cleanup. The runner requires no active A3S Box or A3S OCI Runtime process
+at startup, verifies the same invariant after every test, and fails when
+requested/completed counts or resource guardrails drift.
 
-The eleven-test default matrix includes a 4,096-byte workload argument and
-POSIX ownership and mode replay through restart and commit. Use `-ListTests` to
-inspect the exact selection.
+The twelve-test default matrix includes a 4,096-byte workload argument,
+volume-backed init success/failure, and POSIX ownership and mode replay through
+restart and commit. Use `-ListTests` to inspect the exact selection.
 
 The virtio-fs case intentionally scans 2,048 files five times with cache mode
 `none`. Real WHPX validation took 373 seconds on the host described above, so

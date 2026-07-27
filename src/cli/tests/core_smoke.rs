@@ -1436,6 +1436,124 @@ fn real_core_named_volume_persists_across_stop_restart() {
     );
 }
 
+#[test]
+#[ignore]
+fn real_core_volume_backed_init_script_success_and_failure() {
+    let smoke = CoreSmoke::new();
+    let image = smoke_image();
+    let init_source = tempfile::tempdir().expect("temporary init-script source");
+    let init_script = init_source.path().join("init.sh");
+    let init_config = init_source.path().join("init.conf");
+    let volume = format!("{}-init-state", smoke.name);
+    let state_mount = format!("{volume}:/state");
+    let init_mount = format!("{}:/opt/a3s-init:ro", init_source.path().display());
+    let _volume_cleanup = NamedVolumeCleanup {
+        smoke: &smoke,
+        name: volume.clone(),
+    };
+
+    std::fs::write(
+        &init_script,
+        r#"#!/bin/sh
+set -eu
+
+test "$(cat /opt/a3s-init/init.conf)" = profile=windows-whpx
+if printf tamper >>/opt/a3s-init/init.conf 2>/dev/null; then
+    exit 31
+fi
+
+case "${A3S_INIT_MODE:-}" in
+    success)
+        printf success >/state/success
+        printf 'box-init-success\n'
+        ;;
+    failure)
+        printf failure >/state/failure
+        printf 'box-init-expected-failure\n' >&2
+        exit 42
+        ;;
+    *)
+        exit 32
+        ;;
+esac
+"#,
+    )
+    .expect("write init script");
+    std::fs::write(&init_config, "profile=windows-whpx").expect("write init config");
+
+    seed_smoke_image(&smoke, &image);
+    smoke.ok(&["volume", "create", &volume]);
+
+    let success = smoke.ok(&[
+        "run",
+        "--rm",
+        "--name",
+        &format!("{}-init-success", smoke.name),
+        "-e",
+        "A3S_INIT_MODE=success",
+        "-v",
+        &state_mount,
+        "-v",
+        &init_mount,
+        &image,
+        "--",
+        "/bin/sh",
+        "/opt/a3s-init/init.sh",
+    ]);
+    assert_contains(&success, "box-init-success", "successful init output");
+
+    let failure = smoke.output(&[
+        "run",
+        "--rm",
+        "--name",
+        &format!("{}-init-failure", smoke.name),
+        "-e",
+        "A3S_INIT_MODE=failure",
+        "-v",
+        &state_mount,
+        "-v",
+        &init_mount,
+        &image,
+        "--",
+        "/bin/sh",
+        "/opt/a3s-init/init.sh",
+    ]);
+    assert_eq!(
+        failure.code,
+        Some(42),
+        "failing init did not retain exit 42\nstdout:\n{}\nstderr:\n{}",
+        failure.stdout,
+        failure.stderr
+    );
+    assert_contains(
+        &failure.stderr,
+        "box-init-expected-failure",
+        "failing init stderr",
+    );
+
+    let persisted = smoke.ok(&[
+        "run",
+        "--rm",
+        "--name",
+        &format!("{}-init-state", smoke.name),
+        "-v",
+        &state_mount,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        "test \"$(cat /state/success)\" = success; test \"$(cat /state/failure)\" = failure; printf box-init-state-persisted",
+    ]);
+    assert_contains(
+        &persisted,
+        "box-init-state-persisted",
+        "init state volume evidence",
+    );
+
+    let config = std::fs::read_to_string(&init_config).expect("read init config");
+    assert_eq!(config, "profile=windows-whpx");
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore]

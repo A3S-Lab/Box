@@ -40,8 +40,8 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`503625b176de7f22b2e31c782b82e97897e8c368`, released as A3S OCI Runtime
-`v0.2.0`.
+`0f0face67c282cf535e352b4fe83af02055b7e08`, the post-`v0.2.0` Windows WHPX
+qualification commit.
 
 ## Upgrade behavior
 
