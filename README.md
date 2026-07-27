@@ -100,6 +100,13 @@ the host requirements below before running real workloads.
 | TEE, warm pool, and snapshot-fork | Available on qualifying MicroVM hosts | Rejected |
 | Automatic fallback | Never | Never |
 
+These are the complete execution-isolation choices in the current public
+contract, and both have real-runtime coverage. Network policy values such as
+`none`, `strict`, and `custom` are not additional execution classes:
+`strict` and `custom` remain unsupported admission modes and are covered by
+negative tests. TEE is a host-specific capability of a qualifying MicroVM, not
+a third execution backend.
+
 > [!IMPORTANT]
 > A shared-kernel Sandbox does not defend against a working host-kernel exploit,
 > a hostile host administrator, hardware side channels, or data deliberately
@@ -241,12 +248,22 @@ or go directly to the [Rust](src/sdk/README.md),
 
 | Path | Status | Host and current boundary |
 | --- | --- | --- |
-| Linux MicroVM | Primary local runtime | KVM and libkrun; real-host validation is required for releases |
-| macOS MicroVM | Implemented | Apple Silicon and Hypervisor.framework; Intel macOS is unsupported |
-| Windows MicroVM | Implemented and real-host validated | x86_64 WHPX; currently one vCPU, with no interactive exec, bridge networking, TEE, snapshot-fork, or CRI |
-| Linux Sandbox | Preview | Explicit `--isolation sandbox` through the packaged A3S OCI Runtime; shares the host kernel and rejects VM-only features |
+| Linux MicroVM | Primary local runtime; conditional real-host gate | KVM and libkrun; the self-hosted KVM job must be armed explicitly and hosted CI does not prove a real boot |
+| macOS MicroVM | Implemented and build-checked | Apple Silicon and Hypervisor.framework; real HVF host validation is still required, and Intel macOS is unsupported |
+| Windows MicroVM | Implemented and real-host soak validated | x86_64 WHPX; currently one vCPU, with no interactive exec, bridge networking, TEE, snapshot-fork, or CRI |
+| Linux Sandbox | Preview and real-runtime CI validated | Explicit `--isolation sandbox` through the packaged A3S OCI Runtime; shares the host kernel and rejects VM-only features |
 | Kubernetes | Preview | CRI v1 server plus containerd runtime-v2 shim and opt-in `runtimeClassName: a3s-box`; complete CRI conformance is not claimed |
 | TEE | Host-specific | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and development-only simulation; TDX is not productized |
+
+### What the validation covers
+
+| Execution path | Real-runtime evidence | Remaining boundary |
+| --- | --- | --- |
+| Default MicroVM on Windows/WHPX | [`scripts/windows-whpx-soak.ps1`](scripts/windows-whpx-soak.ps1) covers lifecycle and foreground exit, published-port networking, read-only bind mounts, named volumes, volume-backed initialization success and failure, metadata-preserving commit, filesystem commit/snapshot restore, and repeated virtio-fs traversal. The current qualification completed all 12 cases and returned the start and final runtime inventories to zero. | This proves the tested x86_64 Windows/WHPX host and workload matrix, not KVM, HVF, or TEE hardware. |
+| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles, then exercises the Rust, Python, and TypeScript local SDKs and verifies process cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
+| Linux/KVM MicroVM | A self-hosted real-KVM workflow covers the core lifecycle, SDK, CRI, leak, race, snapshot-fork, and soak paths when `KVM_CI=true`. | The job is conditionally skipped without the enrolled runner; a green hosted build alone is not real-KVM evidence. |
+| macOS/HVF MicroVM | Hosted macOS arm64 compilation checks the supported target. | A real Apple Silicon/HVF boot and soak are separate release evidence. |
+| SEV-SNP-oriented TEE | Unit and simulation tests cover application flow and protocol behavior. | No hardware security claim is made without a qualifying SEV-SNP host and attestation evidence. |
 
 An implemented API is not a production guarantee for every host or threat
 model. Unit tests, fixture servers, and simulated TEE results are not real-host
