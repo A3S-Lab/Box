@@ -786,34 +786,4 @@ mod tests {
 
         assert!(metadata.validate().is_err());
     }
-
-    #[test]
-    fn managed_execution_deserializes_the_legacy_backend_as_a3s_oci() {
-        let config = a3s_box_core::BoxConfig {
-            image: "alpine:latest".to_string(),
-            isolation: ExecutionIsolation::Sandbox,
-            ..Default::default()
-        };
-        let metadata = ManagedExecutionMetadata::new(
-            OperationId::new("create-op-legacy-sandbox").unwrap(),
-            ExecutionGeneration::INITIAL,
-            CreateExecutionRequest {
-                external_sandbox_id: "legacy-sandbox".to_string(),
-                config,
-                labels: Default::default(),
-                policy: Default::default(),
-                rootfs_snapshot_id: None,
-            },
-        )
-        .unwrap();
-        let mut value = serde_json::to_value(metadata).unwrap();
-        value["plan"]["backend"] = serde_json::json!("crun");
-        let metadata: ManagedExecutionMetadata = serde_json::from_value(value).unwrap();
-
-        assert_eq!(
-            metadata.plan.backend,
-            a3s_box_core::ExecutionBackend::A3sOci
-        );
-        metadata.validate().unwrap();
-    }
 }

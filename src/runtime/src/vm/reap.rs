@@ -133,7 +133,6 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(crate) struct RecordedSandboxRuntime {
-    pub(crate) backend: crate::sandbox::runtime_record::SandboxRuntimeBackend,
     pub(crate) runtime_path: std::path::PathBuf,
     pub(crate) runtime_sha256: Option<String>,
     pub(crate) agent_path: Option<std::path::PathBuf>,
@@ -162,14 +161,7 @@ pub(crate) fn load_recorded_sandbox_runtime(
     let Some(record) = load_recorded_sandbox_runtime_identity(home_dir, box_dir, box_id)? else {
         return Ok(None);
     };
-    match record.backend {
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
-            verify_recorded_a3s_oci_owner(&record, box_id)?;
-        }
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
-            return Err(legacy_sandbox_migration_error(box_id));
-        }
-    }
+    verify_recorded_a3s_oci_owner(&record, box_id)?;
     Ok(Some(record))
 }
 
@@ -198,11 +190,7 @@ fn load_recorded_sandbox_runtime_identity(
                 record_path.display()
             ))
         })?;
-    let expected_runtime_root = home_dir.join("run").join(match record.backend {
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => "a3s-oci",
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => "crun",
-    });
-    let expected_runtime_root = expected_runtime_root.join(box_id);
+    let expected_runtime_root = home_dir.join("run/a3s-oci").join(box_id);
     let expected_bundle = box_dir.join("sandbox/bundle");
     let log_worker_identity_valid = match (record.log_worker_pid, record.log_worker_pid_start_time)
     {
@@ -210,27 +198,17 @@ fn load_recorded_sandbox_runtime_identity(
         (Some(pid), Some(start_time)) => pid > 0 && start_time > 0,
         _ => false,
     };
-    let backend_identity_valid = match record.backend {
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
-            record.schema == crate::sandbox::runtime_record::SANDBOX_RUNTIME_RECORD_V1
-                && record.runtime_socket.is_none()
-                && record.generation.is_none()
-                && record.owner_pid.is_none()
-                && record.owner_pid_start_time.is_none()
-        }
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
-            record.schema == crate::sandbox::runtime_record::SANDBOX_RUNTIME_RECORD_V2
-                && record.runtime_socket.as_deref()
-                    == Some(expected_runtime_root.join("runtime.sock").as_path())
-                && record.generation.is_some_and(|generation| generation > 0)
-                && matches!(record.owner_pid, Some(pid) if pid > 0)
-                && matches!(record.owner_pid_start_time, Some(start_time) if start_time > 0)
-                && record.agent_path.is_some()
-                && record.runtime_sha256.as_deref().is_some_and(valid_sha256)
-                && record.agent_sha256.as_deref().is_some_and(valid_sha256)
-        }
-    };
-    if !backend_identity_valid
+    let runtime_identity_valid = record.schema
+        == crate::sandbox::runtime_record::SANDBOX_RUNTIME_RECORD_SCHEMA
+        && record.runtime_socket.as_deref()
+            == Some(expected_runtime_root.join("runtime.sock").as_path())
+        && record.generation.is_some_and(|generation| generation > 0)
+        && matches!(record.owner_pid, Some(pid) if pid > 0)
+        && matches!(record.owner_pid_start_time, Some(start_time) if start_time > 0)
+        && record.agent_path.is_some()
+        && record.runtime_sha256.as_deref().is_some_and(valid_sha256)
+        && record.agent_sha256.as_deref().is_some_and(valid_sha256);
+    if !runtime_identity_valid
         || record.container_id != box_id
         || record.runtime_root != expected_runtime_root
         || record.bundle_dir != expected_bundle
@@ -243,7 +221,6 @@ fn load_recorded_sandbox_runtime_identity(
     }
 
     Ok(Some(RecordedSandboxRuntime {
-        backend: record.backend,
         runtime_path: record.runtime_path,
         runtime_sha256: record.runtime_sha256,
         agent_path: record.agent_path,
@@ -258,13 +235,6 @@ fn load_recorded_sandbox_runtime_identity(
         log_worker_pid: record.log_worker_pid,
         log_worker_pid_start_time: record.log_worker_pid_start_time,
     }))
-}
-
-#[cfg(target_os = "linux")]
-fn legacy_sandbox_migration_error(box_id: &str) -> a3s_box_core::BoxError {
-    a3s_box_core::BoxError::StateError(format!(
-        "Legacy Sandbox runtime record for {box_id} cannot be recovered after the A3S OCI migration; stop it with the previous Box release before upgrading"
-    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -379,18 +349,7 @@ fn reap_recorded_sandbox(home_dir: &Path, box_dir: &Path, box_id: &str) -> Sandb
             return SandboxReap::Failed;
         }
     };
-    match record.backend {
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
-            reap_orphaned_a3s_oci(record, box_dir, box_id)
-        }
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
-            tracing::error!(
-                box_id,
-                "Legacy Sandbox runtime must be stopped before upgrading to the A3S OCI-only release"
-            );
-            SandboxReap::Failed
-        }
-    }
+    reap_orphaned_a3s_oci(record, box_dir, box_id)
 }
 
 #[cfg(target_os = "linux")]

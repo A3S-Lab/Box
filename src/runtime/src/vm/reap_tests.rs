@@ -1,8 +1,5 @@
 use super::*;
-use crate::sandbox::runtime_record::{
-    SandboxRuntimeBackend, SandboxRuntimeRecord, SANDBOX_RUNTIME_RECORD_V1,
-    SANDBOX_RUNTIME_RECORD_V2,
-};
+use crate::sandbox::runtime_record::{SandboxRuntimeRecord, SANDBOX_RUNTIME_RECORD_SCHEMA};
 
 fn write_runtime_record(
     home_dir: &Path,
@@ -10,21 +7,21 @@ fn write_runtime_record(
     box_id: &str,
     mutate: impl FnOnce(&mut SandboxRuntimeRecord),
 ) {
+    let runtime_root = home_dir.join("run/a3s-oci").join(box_id);
     let mut record = SandboxRuntimeRecord {
-        schema: SANDBOX_RUNTIME_RECORD_V1.to_string(),
-        backend: SandboxRuntimeBackend::LegacySandbox,
+        schema: SANDBOX_RUNTIME_RECORD_SCHEMA.to_string(),
         container_id: box_id.to_string(),
-        runtime_path: Path::new("/definitely/missing/legacy-runtime").to_path_buf(),
-        runtime_sha256: None,
-        agent_path: None,
-        agent_sha256: None,
-        runtime_root: home_dir.join("run/crun").join(box_id),
-        runtime_socket: None,
+        runtime_path: Path::new("/definitely/missing/a3s-oci").to_path_buf(),
+        runtime_sha256: Some("a".repeat(64)),
+        agent_path: Some(Path::new("/definitely/missing/a3s-oci-agent").to_path_buf()),
+        agent_sha256: Some("b".repeat(64)),
+        runtime_root: runtime_root.clone(),
+        runtime_socket: Some(runtime_root.join("runtime.sock")),
         bundle_dir: box_dir.join("sandbox/bundle"),
         init_pid: 42,
-        generation: None,
-        owner_pid: None,
-        owner_pid_start_time: None,
+        generation: Some(7),
+        owner_pid: Some(43),
+        owner_pid_start_time: Some(11),
         log_worker_pid: None,
         log_worker_pid_start_time: None,
     };
@@ -35,21 +32,6 @@ fn write_runtime_record(
         serde_json::to_vec(&record).unwrap(),
     )
     .unwrap();
-}
-
-fn configure_a3s_oci_record(record: &mut SandboxRuntimeRecord, home_dir: &Path, box_id: &str) {
-    let runtime_root = home_dir.join("run/a3s-oci").join(box_id);
-    record.schema = SANDBOX_RUNTIME_RECORD_V2.to_string();
-    record.backend = SandboxRuntimeBackend::A3sOci;
-    record.runtime_path = Path::new("/definitely/missing/a3s-oci").to_path_buf();
-    record.runtime_sha256 = Some("a".repeat(64));
-    record.agent_path = Some(Path::new("/definitely/missing/a3s-oci-agent").to_path_buf());
-    record.agent_sha256 = Some("b".repeat(64));
-    record.runtime_root = runtime_root.clone();
-    record.runtime_socket = Some(runtime_root.join("runtime.sock"));
-    record.generation = Some(7);
-    record.owner_pid = Some(43);
-    record.owner_pid_start_time = Some(11);
 }
 
 #[test]
@@ -69,7 +51,7 @@ fn test_reap_removes_box_dir() {
 #[test]
 fn test_reap_absent_box_is_noop() {
     let home = tempfile::tempdir().unwrap();
-    // No boxes/<id> dir at all — must not panic or error.
+    // No boxes/<id> dir at all - must not panic or error.
     reap_orphaned_box_in(home.path(), "absent-box-uuid");
 }
 
@@ -98,73 +80,54 @@ fn recorded_sandbox_runtime_rejects_an_unexpected_box_directory() {
 }
 
 #[test]
-fn recorded_sandbox_runtime_rejects_invalid_paths_before_migration_check() {
+fn recorded_sandbox_runtime_rejects_invalid_paths() {
     let home = tempfile::tempdir().unwrap();
     let box_id = "recorded-sandbox-invalid-paths";
     let box_dir = home.path().join("boxes").join(box_id);
     write_runtime_record(home.path(), &box_dir, box_id, |record| {
-        record.runtime_root = home.path().join("run/crun/another-box");
+        record.runtime_root = home.path().join("run/a3s-oci/another-box");
     });
 
     let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
-    let message = error.to_string();
 
-    assert!(message.contains("path or identity validation"));
-    assert!(!message.contains("cannot be recovered"));
+    assert!(error.to_string().contains("path or identity validation"));
 }
 
 #[test]
-fn legacy_v1_record_without_backend_remains_readable() {
+fn recorded_sandbox_runtime_rejects_an_unknown_schema() {
     let home = tempfile::tempdir().unwrap();
-    let box_id = "recorded-sandbox-legacy-v1";
-    let box_dir = home.path().join("boxes").join(box_id);
-    std::fs::create_dir_all(box_dir.join("sandbox")).unwrap();
-    std::fs::write(
-        box_dir.join("sandbox/runtime.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "schema": SANDBOX_RUNTIME_RECORD_V1,
-            "container_id": box_id,
-            "runtime_path": "/definitely/missing/legacy-runtime",
-            "runtime_root": home.path().join("run/crun").join(box_id),
-            "bundle_dir": box_dir.join("sandbox/bundle"),
-            "init_pid": 42
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-
-    let record = load_recorded_sandbox_runtime_identity(home.path(), &box_dir, box_id).unwrap();
-
-    assert!(matches!(
-        record.map(|record| record.backend),
-        Some(SandboxRuntimeBackend::LegacySandbox)
-    ));
-}
-
-#[test]
-fn structurally_valid_v2_record_loads_before_owner_certification() {
-    let home = tempfile::tempdir().unwrap();
-    let box_id = "recorded-sandbox-a3s-oci-v2";
+    let box_id = "recorded-sandbox-unknown-schema";
     let box_dir = home.path().join("boxes").join(box_id);
     write_runtime_record(home.path(), &box_dir, box_id, |record| {
-        configure_a3s_oci_record(record, home.path(), box_id);
+        record.schema = "unsupported".to_string();
     });
 
-    let record = load_recorded_sandbox_runtime_identity(home.path(), &box_dir, box_id).unwrap();
+    let error = load_recorded_sandbox_runtime_identity(home.path(), &box_dir, box_id).unwrap_err();
 
-    assert!(matches!(
-        record.map(|record| record.backend),
-        Some(SandboxRuntimeBackend::A3sOci)
-    ));
+    assert!(error.to_string().contains("path or identity validation"));
 }
 
 #[test]
-fn v2_record_rejects_a_socket_outside_its_runtime_root() {
+fn structurally_valid_runtime_record_loads_before_owner_certification() {
+    let home = tempfile::tempdir().unwrap();
+    let box_id = "recorded-sandbox-a3s-oci";
+    let box_dir = home.path().join("boxes").join(box_id);
+    write_runtime_record(home.path(), &box_dir, box_id, |_| {});
+
+    let record = load_recorded_sandbox_runtime_identity(home.path(), &box_dir, box_id).unwrap();
+
+    assert_eq!(
+        record.map(|record| record.runtime_root),
+        Some(home.path().join("run/a3s-oci").join(box_id))
+    );
+}
+
+#[test]
+fn runtime_record_rejects_a_socket_outside_its_runtime_root() {
     let home = tempfile::tempdir().unwrap();
     let box_id = "recorded-sandbox-a3s-oci-wrong-socket";
     let box_dir = home.path().join("boxes").join(box_id);
     write_runtime_record(home.path(), &box_dir, box_id, |record| {
-        configure_a3s_oci_record(record, home.path(), box_id);
         record.runtime_socket = Some(home.path().join("run/a3s-oci/other/runtime.sock"));
     });
 
@@ -174,12 +137,11 @@ fn v2_record_rejects_a_socket_outside_its_runtime_root() {
 }
 
 #[test]
-fn v2_record_rejects_invalid_generation_and_digest_identity() {
+fn runtime_record_rejects_invalid_generation_and_digest_identity() {
     let home = tempfile::tempdir().unwrap();
     let box_id = "recorded-sandbox-a3s-oci-invalid-identity";
     let box_dir = home.path().join("boxes").join(box_id);
     write_runtime_record(home.path(), &box_dir, box_id, |record| {
-        configure_a3s_oci_record(record, home.path(), box_id);
         record.generation = Some(0);
         record.agent_sha256 = Some("not-a-digest".to_string());
     });
@@ -190,7 +152,7 @@ fn v2_record_rejects_invalid_generation_and_digest_identity() {
 }
 
 #[test]
-fn legacy_record_is_read_only_and_never_executes_its_runtime_path() {
+fn current_record_log_drain_check_is_read_only() {
     let home = tempfile::tempdir().unwrap();
     let box_id = "recorded-sandbox-log-drain";
     let box_dir = home.path().join("boxes").join(box_id);
@@ -203,11 +165,6 @@ fn legacy_record_is_read_only_and_never_executes_its_runtime_path() {
         std::time::Duration::ZERO,
     )
     .unwrap());
-
-    let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("cannot be recovered after the A3S OCI migration"));
 }
 
 #[test]
@@ -217,7 +174,6 @@ fn cleanup_reaps_a_terminal_recovered_log_worker() {
     let start_time = crate::process::pid_start_time(pid).unwrap();
     drop(worker);
     let record = RecordedSandboxRuntime {
-        backend: SandboxRuntimeBackend::A3sOci,
         runtime_path: Path::new("/bin/true").to_path_buf(),
         runtime_sha256: None,
         agent_path: None,

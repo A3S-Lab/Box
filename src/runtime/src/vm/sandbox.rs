@@ -34,10 +34,7 @@ impl VmManager {
         if execution_plan.backend != a3s_box_core::ExecutionBackend::A3sOci {
             return Err(BoxError::BoxBootError {
                 message: "A3S OCI Runtime is the only supported Sandbox backend".to_string(),
-                hint: Some(
-                    "Stop legacy Sandbox executions with the previous Box release before upgrading"
-                        .to_string(),
-                ),
+                hint: None,
             });
         }
         // This probe is deliberately before image pulls, rootfs mounts, volume

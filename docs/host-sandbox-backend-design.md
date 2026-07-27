@@ -244,7 +244,7 @@ not a substitute for an advertised security property.
 The durable runtime record contains:
 
 - Box ID, owner, and execution generation;
-- backend identity;
+- current A3S OCI record schema;
 - bundle, rootfs, runtime, socket, and log roots;
 - container ID and init PID/process identity;
 - runtime and agent digests;
@@ -255,10 +255,10 @@ runtime-reported container state, and generation before reconstructing a live
 handler. Pause and resume are idempotent typed operations whose result must
 match the expected runtime state.
 
-Records from the removed external backend remain deserializable only so an
-upgrade can fail safely. Box never executes their recorded binary, signals an
-unverified PID, or deletes their potentially live rootfs. Operators must stop
-those generations with the previous Box release before upgrading.
+Only the current A3S OCI runtime-record schema and fixed runtime-root layout are
+accepted. Box has no compatibility decoder, old path recognition, or state
+migration branch. Operators must drain non-A3S OCI Sandbox generations before
+upgrading.
 
 Cleanup is restartable. It removes only identity-validated resources owned by
 the recorded generation and tolerates already-absent terminal resources.
@@ -313,7 +313,7 @@ The replacement is complete only when:
 - every new Sandbox plan resolves to A3S OCI Runtime;
 - no runtime selector or executable override is public;
 - no removed controller, handler, download, or invocation path exists;
-- legacy live records fail closed;
+- only the current A3S OCI runtime-record schema is accepted;
 - Linux release artifacts contain the pinned runtime and agent only;
 - native network, storage, initialization, and cleanup matrices pass;
 - Box's real SDK lifecycle passes on Linux;

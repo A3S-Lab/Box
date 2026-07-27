@@ -133,33 +133,24 @@ impl VmLocalExecutionBackend {
                         "Sandbox runtime record is missing for {box_id}"
                     ))
                 })?;
-            match inspection.runtime.backend {
-                crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
-                    let socket = inspection.runtime.runtime_socket.as_ref().ok_or_else(|| {
-                        a3s_box_core::BoxError::StateError(format!(
-                            "A3S OCI runtime socket is missing for {box_id}"
-                        ))
-                    })?;
-                    let generation = inspection.runtime.generation.ok_or_else(|| {
-                        a3s_box_core::BoxError::StateError(format!(
-                            "A3S OCI generation is missing for {box_id}"
-                        ))
-                    })?;
-                    if pause {
-                        crate::sandbox::a3s_oci_handler::A3sOciHandler::pause_at(
-                            socket, &box_id, generation,
-                        )?;
-                    } else {
-                        crate::sandbox::a3s_oci_handler::A3sOciHandler::resume_at(
-                            socket, &box_id, generation,
-                        )?;
-                    }
-                }
-                crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
-                    return Err(a3s_box_core::BoxError::StateError(format!(
-                        "Legacy Sandbox runtime record for {box_id} cannot be resumed; stop it with the previous Box release before upgrading"
-                    )));
-                }
+            let socket = inspection.runtime.runtime_socket.as_ref().ok_or_else(|| {
+                a3s_box_core::BoxError::StateError(format!(
+                    "A3S OCI runtime socket is missing for {box_id}"
+                ))
+            })?;
+            let generation = inspection.runtime.generation.ok_or_else(|| {
+                a3s_box_core::BoxError::StateError(format!(
+                    "A3S OCI generation is missing for {box_id}"
+                ))
+            })?;
+            if pause {
+                crate::sandbox::a3s_oci_handler::A3sOciHandler::pause_at(
+                    socket, &box_id, generation,
+                )?;
+            } else {
+                crate::sandbox::a3s_oci_handler::A3sOciHandler::resume_at(
+                    socket, &box_id, generation,
+                )?;
             }
             inspect_recorded_sandbox(&home_dir, &box_dir, &box_id)?.ok_or_else(|| {
                 a3s_box_core::BoxError::StateError(format!(
@@ -199,62 +190,51 @@ impl VmLocalExecutionBackend {
         manager.exec_socket_path = Some(socket_dir.join("exec.sock"));
         manager.pty_socket_path = Some(socket_dir.join("pty.sock"));
         manager.port_forward_socket_path = Some(socket_dir.join("portfwd.sock"));
-        let handler: Box<dyn a3s_box_core::vmm::VmHandler> = match inspection.runtime.backend {
-            crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
-                let runtime_socket = inspection.runtime.runtime_socket.ok_or_else(|| {
-                    ExecutionManagerError::Internal(format!(
-                        "A3S OCI runtime socket is missing for {}",
-                        record.id
-                    ))
-                })?;
-                let generation = inspection.runtime.generation.ok_or_else(|| {
-                    ExecutionManagerError::Internal(format!(
-                        "A3S OCI generation is missing for {}",
-                        record.id
-                    ))
-                })?;
-                let owner_pid = inspection.runtime.owner_pid.ok_or_else(|| {
-                    ExecutionManagerError::Internal(format!(
-                        "A3S OCI owner PID is missing for {}",
-                        record.id
-                    ))
-                })?;
-                let owner_pid_start_time =
-                    inspection.runtime.owner_pid_start_time.ok_or_else(|| {
-                        ExecutionManagerError::Internal(format!(
-                            "A3S OCI owner identity is missing for {}",
-                            record.id
-                        ))
-                    })?;
-                let container_id = a3s_oci_sdk::ContainerId::new(record.id.clone())
-                    .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
-                Box::new(
-                    crate::sandbox::a3s_oci_handler::A3sOciHandler::from_recorded_runtime(
-                        crate::sandbox::a3s_oci_handler::A3sOciHandlerSpec {
-                            runtime_socket,
-                            runtime_root: inspection.runtime.runtime_root,
-                            container_id,
-                            generation: a3s_oci_sdk::Generation(generation),
-                            init_pid: inspection.pid,
-                            owner_pid,
-                            owner_pid_start_time,
-                            bundle_dir: inspection.runtime.bundle_dir,
-                            runtime_record: record.box_dir.join("sandbox/runtime.json"),
-                        },
-                        inspection.runtime.log_worker_pid,
-                        inspection.runtime.log_worker_pid_start_time,
-                    )
-                    .await
-                    .map_err(|error| runtime_error("recover", record, error))?,
-                )
-            }
-            crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
-                return Err(ExecutionManagerError::Internal(format!(
-                    "Legacy Sandbox runtime record for {} cannot be recovered; stop it with the previous Box release before upgrading",
-                    record.id
-                )));
-            }
-        };
+        let runtime_socket = inspection.runtime.runtime_socket.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "A3S OCI runtime socket is missing for {}",
+                record.id
+            ))
+        })?;
+        let generation = inspection.runtime.generation.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "A3S OCI generation is missing for {}",
+                record.id
+            ))
+        })?;
+        let owner_pid = inspection.runtime.owner_pid.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "A3S OCI owner PID is missing for {}",
+                record.id
+            ))
+        })?;
+        let owner_pid_start_time = inspection.runtime.owner_pid_start_time.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "A3S OCI owner identity is missing for {}",
+                record.id
+            ))
+        })?;
+        let container_id = a3s_oci_sdk::ContainerId::new(record.id.clone())
+            .map_err(|error| ExecutionManagerError::Internal(error.to_string()))?;
+        let handler: Box<dyn a3s_box_core::vmm::VmHandler> = Box::new(
+            crate::sandbox::a3s_oci_handler::A3sOciHandler::from_recorded_runtime(
+                crate::sandbox::a3s_oci_handler::A3sOciHandlerSpec {
+                    runtime_socket,
+                    runtime_root: inspection.runtime.runtime_root,
+                    container_id,
+                    generation: a3s_oci_sdk::Generation(generation),
+                    init_pid: inspection.pid,
+                    owner_pid,
+                    owner_pid_start_time,
+                    bundle_dir: inspection.runtime.bundle_dir,
+                    runtime_record: record.box_dir.join("sandbox/runtime.json"),
+                },
+                inspection.runtime.log_worker_pid,
+                inspection.runtime.log_worker_pid_start_time,
+            )
+            .await
+            .map_err(|error| runtime_error("recover", record, error))?,
+        );
         *manager.handler.write().await = Some(handler);
         if !matches!(
             managed_state(record)?,
@@ -361,30 +341,19 @@ fn inspect_recorded_sandbox(
     else {
         return Ok(None);
     };
-    let (status, pid) = match runtime.backend {
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
-            let socket = runtime.runtime_socket.as_ref().ok_or_else(|| {
-                a3s_box_core::BoxError::StateError(format!(
-                    "A3S OCI runtime socket is missing for {box_id}"
-                ))
-            })?;
-            let generation = runtime.generation.ok_or_else(|| {
-                a3s_box_core::BoxError::StateError(format!(
-                    "A3S OCI generation is missing for {box_id}"
-                ))
-            })?;
-            match crate::sandbox::a3s_oci_handler::A3sOciHandler::query_state_at(
-                socket, box_id, generation,
-            )? {
-                Some(state) => (state.status, state.pid),
-                None => ("stopped".to_string(), 0),
-            }
-        }
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
-            return Err(a3s_box_core::BoxError::StateError(format!(
-                "Legacy Sandbox runtime record for {box_id} cannot be inspected; stop it with the previous Box release before upgrading"
-            )));
-        }
+    let socket = runtime.runtime_socket.as_ref().ok_or_else(|| {
+        a3s_box_core::BoxError::StateError(format!(
+            "A3S OCI runtime socket is missing for {box_id}"
+        ))
+    })?;
+    let generation = runtime.generation.ok_or_else(|| {
+        a3s_box_core::BoxError::StateError(format!("A3S OCI generation is missing for {box_id}"))
+    })?;
+    let (status, pid) = match crate::sandbox::a3s_oci_handler::A3sOciHandler::query_state_at(
+        socket, box_id, generation,
+    )? {
+        Some(state) => (state.status, state.pid),
+        None => ("stopped".to_string(), 0),
     };
     if matches!(status.as_str(), "created" | "running" | "paused") && pid != runtime.init_pid {
         return Err(a3s_box_core::BoxError::StateError(format!(

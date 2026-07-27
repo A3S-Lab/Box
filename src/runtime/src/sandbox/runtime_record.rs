@@ -4,27 +4,12 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) const SANDBOX_RUNTIME_RECORD_V1: &str = "a3s.box.sandbox-runtime.v1";
-pub(crate) const SANDBOX_RUNTIME_RECORD_V2: &str = "a3s.box.sandbox-runtime.v2";
-
-/// Runtime implementation that owns one persisted Sandbox generation.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum SandboxRuntimeBackend {
-    A3sOci,
-    /// Deserialization-only marker for records written by the removed
-    /// external Sandbox backend.
-    #[default]
-    #[serde(rename = "crun")]
-    LegacySandbox,
-}
+pub(crate) const SANDBOX_RUNTIME_RECORD_SCHEMA: &str = "a3s.box.sandbox-runtime.v2";
 
 /// Runtime-owned paths and process identities needed for detached recovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SandboxRuntimeRecord {
     pub(crate) schema: String,
-    #[serde(default)]
-    pub(crate) backend: SandboxRuntimeBackend,
     pub(crate) container_id: String,
     pub(crate) runtime_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,8 +54,7 @@ impl SandboxRuntimeRecord {
         log_worker_pid_start_time: u64,
     ) -> Self {
         Self {
-            schema: SANDBOX_RUNTIME_RECORD_V2.to_string(),
-            backend: SandboxRuntimeBackend::A3sOci,
+            schema: SANDBOX_RUNTIME_RECORD_SCHEMA.to_string(),
             container_id,
             runtime_path,
             runtime_sha256: Some(runtime_sha256),
@@ -86,5 +70,35 @@ impl SandboxRuntimeRecord {
             log_worker_pid: Some(log_worker_pid),
             log_worker_pid_start_time: Some(log_worker_pid_start_time),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_record_serializes_without_a_backend_selector() {
+        let record = SandboxRuntimeRecord::a3s_oci(
+            "box-id".to_string(),
+            PathBuf::from("/runtime"),
+            "a".repeat(64),
+            PathBuf::from("/agent"),
+            "b".repeat(64),
+            PathBuf::from("/run/a3s-oci/box-id"),
+            PathBuf::from("/run/a3s-oci/box-id/runtime.sock"),
+            PathBuf::from("/boxes/box-id/sandbox/bundle"),
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+        );
+
+        let value = serde_json::to_value(record).unwrap();
+
+        assert_eq!(value["schema"], SANDBOX_RUNTIME_RECORD_SCHEMA);
+        assert!(value.get("backend").is_none());
     }
 }

@@ -9,8 +9,9 @@ All notable changes to A3S Box will be documented in this file.
 - **A3S OCI Runtime is the sole Sandbox backend.** New shared-kernel Sandbox
   executions use the pinned A3S OCI Runtime `v0.2.0`; the public rollback
   selector, external-runtime discovery and invocation, and differential lane
-  are removed. Legacy live records remain readable only to fail closed with a
-  drain-before-upgrade diagnostic.
+  are removed. Records outside the current A3S OCI schema are unsupported and
+  must be drained before upgrade; no compatibility decoder or alternate path
+  recognition remains.
 - **Real configuration qualification.** The Box Linux integration gate runs
   the pinned runtime's native private/host/donor network, read-write/read-only
   volume, tmpfs, inline/file/direct initialization, failure, and cleanup
@@ -193,7 +194,7 @@ All notable changes to A3S Box will be documented in this file.
 ### Added
 
 - **Opt-in shared-kernel OCI Sandbox execution.** Linux operators can select
-  `--isolation sandbox` to run workloads through certified `crun` with
+  `--isolation sandbox` to run workloads through a certified OCI runtime with
   namespaces, seccomp, capabilities, `no_new_privs`, and cgroup v2. The
   hardware-backed MicroVM remains the default, and Box never silently falls
   back to the lower-isolation backend.
@@ -208,13 +209,13 @@ All notable changes to A3S Box will be documented in this file.
   startup reconciliation, generation-fenced source quiescing, copy-on-write
   restores, resolved OCI-default fidelity, Unix ownership/mode preservation,
   and in-use deletion conflicts. Official and A3S Python sync/async and
-  TypeScript clients pass the same real-`crun` matrix on A3S OS.
+  TypeScript clients pass the same real-runtime matrix on A3S OS.
 - **Owner-scoped E2B Volumes.** The compatibility service now provides durable
   create, connect, list, and delete operations plus authenticated
   volume-content directory, file, path, and metadata routes, with startup
   reconciliation for interrupted transitions. Official and A3S Python
   sync/async and TypeScript clients prove bidirectional Sandbox mounts, UID/GID
-  mapping, in-use deletion conflicts, and cleanup against real `crun`
+  mapping, in-use deletion conflicts, and cleanup against real Sandbox
   executions on A3S OS.
 - **Runtime-backed E2B Sandbox logs.** The compatibility service now exposes
   generation-fenced v1 and v2 Sandbox log routes over the canonical structured
@@ -223,8 +224,9 @@ All notable changes to A3S Box will be documented in this file.
   bounds, live partial tails are ignored safely, and responses are stably
   ordered by timestamp across concurrent stdout/stderr writers.
 - **Memory-preserving E2B Sandbox pause and resume.** The compatibility service
-  now exposes generation-fenced pause/resume transitions backed by certified
-  `crun`, preserves paused state across listing and reconciliation, and resumes
+  now exposes generation-fenced pause/resume transitions backed by a certified
+  shared-kernel runtime, preserves paused state across listing and
+  reconciliation, and resumes
   through `connect` without shortening the existing TTL. Official and A3S
   Python sync/async and TypeScript clients prove that an already-running
   process survives the cycle. Filesystem-only pause remains explicitly

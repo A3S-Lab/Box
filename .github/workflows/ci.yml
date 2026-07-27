@@ -32,17 +32,17 @@ jobs:
       - name: Reject removed Sandbox backend integrations
         run: |
           removed_patterns=(
-            'A3S_BOX_'"CRUN"'_PATH'
-            'Crun'"Controller"
-            'Crun'"Handler"
-            'Certified'"Crun"
-            'CERTIFIED_'"CRUN"
+            'A3S_BOX_CR'"UN_PATH"
+            'Cr'"unController"
+            'Cr'"unHandler"
+            'CertifiedCr'"un"
+            'CERTIFIED_CR'"UN"
             'pub enum Sandbox'"Runtime"
-            'SandboxRuntime::'"Crun"
+            'SandboxRuntime::Cr'"un"
             'sandbox_'"runtime:"
             '.sandbox_'"runtime("
-            'ExecutionBackend::'"Crun"
-            'sdk-local-sandbox-'"crun"
+            'ExecutionBackend::Cr'"un"
+            'sdk-local-sandbox-cr'"un"
           )
           found=0
           for pattern in "${removed_patterns[@]}"; do
