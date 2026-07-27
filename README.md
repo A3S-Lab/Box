@@ -32,8 +32,9 @@ SDKs. Every workload enters one of two explicit execution classes:
   by default; or
 - a shared-kernel [A3S OCI Runtime](https://github.com/A3S-Lab/OCI-Runtime)
   Sandbox only when a caller requests `--isolation sandbox` and the Linux host
-  passes the full capability probe. Certified `crun 1.28` remains an explicit
-  rollback and differential-testing backend during the deprecation cycle.
+  passes the full capability probe. A3S OCI Runtime is the sole Sandbox
+  implementation; Box no longer discovers, packages, or invokes an external
+  OCI runtime binary.
 
 Box never silently falls back to the lower-isolation backend. The requested
 isolation class, effective backend, policy, and controls are persisted with the
@@ -90,7 +91,7 @@ the host requirements below before running real workloads.
 
 | Contract | Default MicroVM | Explicit Sandbox |
 | --- | --- | --- |
-| Runtime backend | libkrun | A3S OCI Runtime; certified crun 1.28 is an explicit rollback |
+| Runtime backend | libkrun | A3S OCI Runtime |
 | Kernel boundary | Dedicated guest Linux kernel | Shared host Linux kernel |
 | Isolation class | `hardware-vm` | `shared-kernel` |
 | Intended workload | Untrusted workloads and stronger tenant boundaries | Trusted or semi-trusted tools, benchmarks, and automation |

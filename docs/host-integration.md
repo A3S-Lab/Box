@@ -124,7 +124,7 @@ two resulting artifacts:
 
 ```bash
 git clone https://github.com/A3S-Lab/OCI-Runtime.git /tmp/a3s-oci-runtime
-git -C /tmp/a3s-oci-runtime checkout 889cd29ffb399274657533234bf65c1dc58d785b
+git -C /tmp/a3s-oci-runtime checkout 503625b176de7f22b2e31c782b82e97897e8c368
 cargo build --manifest-path /tmp/a3s-oci-runtime/Cargo.toml \
   --locked --release -p a3s-oci-cli -p a3s-oci-agent
 
@@ -133,9 +133,9 @@ export A3S_BOX_OCI_AGENT_PATH=/tmp/a3s-oci-runtime/target/release/a3s-oci-agent
 scripts/local-sdk-smoke.sh sandbox
 ```
 
-Certified `crun 1.28` is retained only as an explicit rollback and
-differential qualification path. Production requests never fall back to it
-after an A3S OCI lifecycle has started.
+A3S OCI Runtime is the sole shared-kernel Sandbox backend. Production
+configuration has no backend override, and release archives contain only the
+pinned `a3s-oci` and `a3s-oci-agent` artifacts for Sandbox execution.
 
 `A3S_BOX_BINARY` is only an optional executable-path override for development;
 it is not a service endpoint or credential. Normal local SDK consumers set

@@ -21,15 +21,15 @@ unversioned claim.
 | Area | Implemented evidence | Remaining gate |
 | --- | --- | --- |
 | Pinned contract | Vendored control, envd, volume-content, Process, Filesystem, MCP, public-export, and package artifacts with generated digests | Keep the manifest pinned and regenerate it only through reviewed upstream updates |
-| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving and filesystem-only pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; durable cold-pause and crash-window behavior has in-process coverage, while unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass the previously certified production matrix with real `crun` Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Run the extended filesystem-only pause client matrix on a certified A3S OS host; complete templates/builds, network updates, historical metrics, pagination edge cases, and host-reboot recovery |
-| Volumes | Owner-scoped create, connect/get, list, and delete use durable SQLite records, encrypted scope-bound tokens, startup reconciliation, and runtime-managed storage; the authenticated volume-content routes implement directory, file, path, and metadata operations with descriptor-relative path safety; the unchanged official-client production matrix passes bidirectional Sandbox mounts, UID/GID mapping, public mount metadata, in-use deletion conflicts, and cleanup against real `crun` executions | Complete large-file, concurrent-mutation, service-crash, host-reboot, and negative-path breadth before treating Volume coverage as a standalone compatibility claim |
+| Lifecycle protocol | Owner-scoped create, connect, get, memory-preserving and filesystem-only pause, connect/resume, v1/v2 running/paused list, timeout, monotonic refresh, kill, and current single/batch metric routes for runtime-envd Sandboxes; durable cold-pause and crash-window behavior has in-process coverage, while unchanged pinned Python sync/async, TypeScript, and Code Interpreter clients pass the previously certified production matrix with real A3S OCI Runtime Sandbox executions; requested lifetime begins only after runtime and envd readiness, including startup recovery | Run the extended filesystem-only pause client matrix on a certified A3S OS host; complete templates/builds, network updates, historical metrics, pagination edge cases, and host-reboot recovery |
+| Volumes | Owner-scoped create, connect/get, list, and delete use durable SQLite records, encrypted scope-bound tokens, startup reconciliation, and runtime-managed storage; the authenticated volume-content routes implement directory, file, path, and metadata operations with descriptor-relative path safety; the unchanged official-client production matrix passes bidirectional Sandbox mounts, UID/GID mapping, public mount metadata, in-use deletion conflicts, and cleanup against real A3S OCI Runtime executions | Complete large-file, concurrent-mutation, service-crash, host-reboot, and negative-path breadth before treating Volume coverage as a standalone compatibility claim |
 | Filesystem Snapshots | Owner-scoped capture, source-filtered list, restore, and delete use durable SQLite records, startup reconciliation, generation-fenced runtime operations, quiesced rootfs capture, and copy-on-write restore; the unchanged official-client production matrix preserves captured content, Unix ownership/mode, resolved OCI defaults, source liveness, restored writability, in-use conflicts, and final cleanup | Complete named-reference and pagination edge cases, large-rootfs and concurrent-mutation behavior, service-crash and host-reboot recovery, and broader negative-path coverage; this surface captures filesystems, not process memory or device state |
 | Durable control state | SQLite WAL migrations, strict record validation, compare-and-swap transitions, generation-fenced expiry claims, startup reconciliation, and periodic reaping are composed into the production service; an A3S OS smoke preserves a running record across process restart | Exercise host-reboot recovery end to end |
-| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; existing A3S OS smoke evidence and unchanged official clients create through HTTP, start through certified `crun`, pause in memory, resume through connect, prove the same process survives, replace timeout, kill, and verify box, runtime-state, and socket cleanup. The gate is now extended with filesystem-only stop/restart assertions for rootfs persistence, old-process removal, environment reinitialization, and Volume remounting | Run the extended gate on a certified host; complete host-reboot recovery and the unimplemented control-plane surfaces |
-| Sandbox logs | Generation-fenced v1/v2 control routes read bounded current and rotated runtime JSON logs, tolerate a live partial tail, stably order concurrent stdout/stderr entries by timestamp, and implement cursor, direction, level, search, and limit filters; the real-`crun` A3S OS gate validates both response schemas and forward/backward ordering | Exercise retention limits and rotation races under sustained concurrent output in the complete black-box matrix |
+| Runtime lifecycle | The production compatibility process uses the canonical `LocalExecutionManager`; existing A3S OS smoke evidence and unchanged official clients create through HTTP, start through the pinned A3S OCI Runtime, pause in memory, resume through connect, prove the same process survives, replace timeout, kill, and verify box, runtime-state, and socket cleanup. The gate is now extended with filesystem-only stop/restart assertions for rootfs persistence, old-process removal, environment reinitialization, and Volume remounting | Run the extended gate on a certified host; complete host-reboot recovery and the unimplemented control-plane surfaces |
+| Sandbox logs | Generation-fenced v1/v2 control routes read bounded current and rotated runtime JSON logs, tolerate a live partial tail, stably order concurrent stdout/stderr entries by timestamp, and implement cursor, direction, level, search, and limit filters; the real A3S OCI Runtime A3S OS gate validates both response schemas and forward/backward ordering | Exercise retention limits and rotation races under sustained concurrent output in the complete black-box matrix |
 | Credentials and routing | ACL config wires salted PBKDF2-SHA256 account hashes, scope-bound AES-256-GCM sandbox tokens, independent HMAC validation, versioned key rotation, strict direct/shared parsing, durable-record-projected generation-fenced leases, wildcard TLS termination, and a generation/PID-fenced Sandbox network-namespace connector | Add certificate rotation and exercise every HTTP/2, Connect, WebSocket, and stream case in the complete matrix |
 | envd HTTP | The host broker implements authenticated running/terminal health; runtime-envd templates initialize fail closed and production tests validate `/metrics`, `/envs`, metadata-preserving multipart upload, and octet-stream download through wildcard TLS routing | Complete multi-file, large-file, invalid-path/user, not-found, insufficient-space, and remaining envd edge semantics |
-| Process and PTY | Unchanged official Python sync/async and TypeScript clients pass foreground/background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output against real `crun` Sandboxes; the host broker has pinned wire-level coverage for JSON and Protobuf Connect framing across every Process procedure and raw binary stdio; the shared Exec/PTY transport implements the pinned SIGTERM and SIGKILL semantics with wire and guest process-group tests | Complete signals outside the pinned contract, reconnect, cancellation, backpressure, and adversarial concurrent-stream cases |
+| Process and PTY | Unchanged official Python sync/async and TypeScript clients pass foreground/background commands, list, stdin send/close, wait, PTY create/resize/input/wait, and ordered output against real A3S OCI Runtime Sandboxes; the host broker has pinned wire-level coverage for JSON and Protobuf Connect framing across every Process procedure and raw binary stdio; the shared Exec/PTY transport implements the pinned SIGTERM and SIGKILL semantics with wire and guest process-group tests | Complete signals outside the pinned contract, reconnect, cancellation, backpressure, and adversarial concurrent-stream cases |
 | Filesystem | The unchanged official-client matrix passes remove, make-directory, write, read, stat, list, rename, exists, and cleanup through production TLS routing; the envd HTTP path separately passes upload/download with metadata | Complete watches, multi-file and ownership edge cases, signed URLs, large-file behavior, and negative-path breadth |
 | Code Interpreter | Unchanged official Python sync/async and TypeScript clients execute Python and pass context create/list/run/restart/remove | Complete other languages, rich MIME/error/cancellation breadth, MCP, and the rest of the pinned interpreter contract |
 | Local A3S SDKs | Native Python and TypeScript packages expose local `Sandbox`, commands, files, lifecycle, and a small Python Code Interpreter facade over the versioned `a3s-box sdk-bridge`; neither package has an official E2B runtime dependency or reads endpoint/API-key settings during local use; Python and TypeScript both pass real macOS MicroVM create/command/file/cleanup smokes | Complete a broader release-host MicroVM/Sandbox matrix before publication; expand only the local object model users actually need rather than implying full remote protocol parity |
@@ -97,9 +97,9 @@ response saying that an operation is unsupported does not count when the same
 request succeeds on the pinned upstream contract.
 
 The compatibility service must submit backend-neutral A3S execution requests.
-It must never invoke `crun`, libkrun, or a shim directly. Isolation selection,
-feature rejection, capability probing, audit records, and cleanup remain owned
-by A3S Box.
+It must never invoke A3S OCI Runtime, libkrun, or a shim directly. Isolation
+selection, feature rejection, capability probing, audit records, and cleanup
+remain owned by A3S Box.
 
 ## What “fully compatible” means
 
@@ -506,8 +506,8 @@ streaming success responses preserve the requested Connect encoding, while
 stream end and stream error envelopes remain JSON as required by the Connect
 protocol. StreamInput incrementally decodes bounded Connect envelopes, permits
 upstream keepalives and process reselection, and awaits each backend write
-before receiving the next message. On real `crun` Sandboxes, the production A3S
-OS gate proves
+before receiving the next message. On real A3S OCI Runtime Sandboxes, the
+production A3S OS gate proves
 foreground and background commands, process listing, stdin send/close, wait,
 PTY create/resize/input/wait, observable terminal sizing, ordered output, and
 successful exit as the image's default non-root user. It runs this matrix
@@ -558,8 +558,8 @@ capture from silently switching to another incarnation of the source Sandbox,
 and startup reconciliation completes or cleans interrupted captures and
 deletions without exposing another owner's Snapshot.
 
-Capture accepts running and memory-paused Sandbox executions on the certified
-`crun` backend. A running source is quiesced for the rootfs copy and resumed
+Capture accepts running and memory-paused Sandbox executions on the pinned A3S
+OCI Runtime backend. A running source is quiesced for the rootfs copy and resumed
 afterward; an already-paused source remains paused. Capture stores the resolved
 OCI image defaults and the rootfs's container-visible Unix ownership and mode
 metadata. Restore uses the Snapshot as a read-only lower layer with a private
@@ -855,9 +855,9 @@ templates/
 
 `src/compat` may depend on the backend-neutral runtime interfaces. Core and
 runtime crates must not depend on generated public API server code. SDK
-packages must not invoke `crun`, libkrun, local state files, or private runtime
-sockets directly; they reach the canonical manager through the versioned
-`a3s-box sdk-bridge`.
+packages must not invoke A3S OCI Runtime, libkrun, local state files, or private
+runtime sockets directly; they reach the canonical manager through the
+versioned `a3s-box sdk-bridge`.
 
 ## Phase 2 implementation architecture
 
@@ -1084,7 +1084,7 @@ Phase 2 is delivered as small, immediately merged changes:
    ACL-configured service binary.
 6. **Complete:** add wildcard TLS termination, bounded HTTP/1.1 and HTTP/2
    reverse proxying, CORS preflight, credential stripping, upgrade bridging,
-   and a Linux connector that enters the generation-fenced `crun` network
+   and a Linux connector that enters the generation-fenced Sandbox network
    namespace on a disposable OS thread. Pull the merge commit on an A3S OS
    server and prove direct/shared routing, restart recovery, scope denial, and
    stale-route fencing against a real `--isolation sandbox` execution.
@@ -1142,14 +1142,14 @@ later restart; auto-remove terminal kills remove them.
 
 The production VM/Sandbox backend is also complete for this slice. It owns live
 runtime handles, reconstructs MicroVM processes with PID identity fencing,
-reconstructs running and paused Sandbox executions from validated durable
-`crun` evidence, implements idempotent memory-preserving `crun pause` and
-`crun resume`, implements durable filesystem-only stop/restart without backend
-fallback while retaining the rootfs, and owns terminal cleanup. The opt-in A3S
+reconstructs running and paused Sandbox executions from validated durable A3S
+OCI records, implements idempotent memory-preserving pause and resume through
+the typed runtime API, implements durable filesystem-only stop/restart without
+backend fallback while retaining the rootfs, and owns terminal cleanup. The opt-in A3S
 OS smoke harness has proven that
 Sandbox `create` persists a `created` reservation without allocating a Box
 directory, runtime root, or sockets; manager reconstruction reconciles the same
-unstarted reservation; and explicit `start` launches through `crun`. It also
+unstarted reservation; and explicit `start` launches through A3S OCI Runtime. It also
 proves pause rollback, same-process survival after resume, kill, and terminal
 cleanup. Deterministic image-pull failure injection proves that a failed start
 does not create those runtime resources.
@@ -1213,7 +1213,7 @@ bidirectional Sandbox mounts, UID/GID mapping, in-use deletion conflicts,
 filesystem Snapshot capture/list/restore/delete, source-state preservation,
 OCI-default and Unix-metadata fidelity, restored writability, Python execution,
 context create/list/run/restart/remove, envd metrics/environment/HTTP
-upload/download, and cleanup for every real `crun` execution. It does not
+upload/download, and cleanup for every real A3S OCI Runtime execution. It does not
 route through the native local packages and does not cover the remaining
 protocol surfaces listed in the current evidence table.
 

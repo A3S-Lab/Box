@@ -135,7 +135,7 @@ pub fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
 
 /// Remove all host-side resources owned by a box record.
 pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()> {
-    // A Sandbox log worker exits only after crun closes both output streams.
+    // A Sandbox log worker exits only after the A3S OCI owner closes both output streams.
     // Reconcile that runtime first so the archive includes final stderr and a
     // complete structured projection. This does not remove the box log dir.
     cleanup_sandbox_runtime(record)?;

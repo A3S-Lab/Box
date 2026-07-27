@@ -640,7 +640,7 @@ async fn run_foreground(
     let sandbox_natural_exit =
         stop_reason == ForegroundStopReason::ProcessExited && ctx.record.isolation.is_sandbox();
     if sandbox_natural_exit {
-        // The generation-owned worker exits only after crun has closed both
+        // The generation-owned worker exits only after the A3S OCI owner has closed both
         // raw console streams and projected their final records. Once it is
         // gone, the terminal tailers can catch up to immutable file lengths
         // without an additional writer-quiet grace period.

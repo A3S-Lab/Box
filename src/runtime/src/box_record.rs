@@ -462,18 +462,7 @@ fn execution_plan_matches(
     resolved: &ResolvedExecutionPlan,
     persisted: &ResolvedExecutionPlan,
 ) -> bool {
-    if resolved == persisted {
-        return true;
-    }
-
-    // Box versions before the A3S OCI migration persisted `crun` for Sandbox
-    // requests. Keep those exact records recoverable without allowing drift in
-    // the requested isolation class or any required security control.
-    persisted.backend == a3s_box_core::ExecutionBackend::Crun
-        && resolved.backend == a3s_box_core::ExecutionBackend::A3sOci
-        && persisted.requested_isolation == resolved.requested_isolation
-        && persisted.isolation_class == resolved.isolation_class
-        && persisted.required_controls == resolved.required_controls
+    resolved == persisted
 }
 
 fn validate_pending_operation(
@@ -799,17 +788,17 @@ mod tests {
     }
 
     #[test]
-    fn managed_execution_validation_accepts_the_legacy_crun_sandbox_plan() {
+    fn managed_execution_deserializes_the_legacy_backend_as_a3s_oci() {
         let config = a3s_box_core::BoxConfig {
             image: "alpine:latest".to_string(),
             isolation: ExecutionIsolation::Sandbox,
             ..Default::default()
         };
-        let mut metadata = ManagedExecutionMetadata::new(
-            OperationId::new("create-op-legacy-crun").unwrap(),
+        let metadata = ManagedExecutionMetadata::new(
+            OperationId::new("create-op-legacy-sandbox").unwrap(),
             ExecutionGeneration::INITIAL,
             CreateExecutionRequest {
-                external_sandbox_id: "legacy-crun-sandbox".to_string(),
+                external_sandbox_id: "legacy-sandbox".to_string(),
                 config,
                 labels: Default::default(),
                 policy: Default::default(),
@@ -817,8 +806,14 @@ mod tests {
             },
         )
         .unwrap();
-        metadata.plan.backend = a3s_box_core::ExecutionBackend::Crun;
+        let mut value = serde_json::to_value(metadata).unwrap();
+        value["plan"]["backend"] = serde_json::json!("crun");
+        let metadata: ManagedExecutionMetadata = serde_json::from_value(value).unwrap();
 
+        assert_eq!(
+            metadata.plan.backend,
+            a3s_box_core::ExecutionBackend::A3sOci
+        );
         metadata.validate().unwrap();
     }
 }

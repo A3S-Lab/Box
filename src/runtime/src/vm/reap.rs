@@ -50,8 +50,7 @@ fn wait_for_recorded_sandbox_log_drain_in(
     timeout: std::time::Duration,
 ) -> a3s_box_core::Result<bool> {
     // Waiting is read-only: it neither executes the recorded runtime nor
-    // signals a process. Validate fixed paths and the PID/start-time pair, but
-    // leave runtime artifact certification to paths that query or execute crun.
+    // signals a process. Validate fixed paths and the PID/start-time pair.
     let Some(record) = load_recorded_sandbox_runtime_identity(home_dir, box_dir, box_id)? else {
         return Ok(true);
     };
@@ -153,31 +152,22 @@ pub(crate) struct RecordedSandboxRuntime {
 /// Load and validate the runtime-owned Sandbox record for one internal box ID.
 ///
 /// Every persisted path is checked against the expected internal layout and
-/// the recorded runtime binary is re-certified before callers may execute it.
+/// the recorded A3S OCI artifact identities are re-certified before use.
 #[cfg(target_os = "linux")]
 pub(crate) fn load_recorded_sandbox_runtime(
     home_dir: &Path,
     box_dir: &Path,
     box_id: &str,
 ) -> a3s_box_core::Result<Option<RecordedSandboxRuntime>> {
-    let Some(mut record) = load_recorded_sandbox_runtime_identity(home_dir, box_dir, box_id)?
-    else {
+    let Some(record) = load_recorded_sandbox_runtime_identity(home_dir, box_dir, box_id)? else {
         return Ok(None);
     };
     match record.backend {
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
-            let capabilities =
-                crate::sandbox::probe_sandbox_capabilities(Some(&record.runtime_path));
-            let runtime = capabilities.runtime.ok_or_else(|| {
-                a3s_box_core::BoxError::StateError(format!(
-                    "Cannot verify the recorded Sandbox runtime for {box_id}: {:?}",
-                    capabilities.failures
-                ))
-            })?;
-            record.runtime_path = runtime.path;
-        }
         crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
             verify_recorded_a3s_oci_owner(&record, box_id)?;
+        }
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
+            return Err(legacy_sandbox_migration_error(box_id));
         }
     }
     Ok(Some(record))
@@ -208,13 +198,11 @@ fn load_recorded_sandbox_runtime_identity(
                 record_path.display()
             ))
         })?;
-    let expected_runtime_root = home_dir
-        .join("run")
-        .join(match record.backend {
-            crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => "a3s-oci",
-            crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => "crun",
-        })
-        .join(box_id);
+    let expected_runtime_root = home_dir.join("run").join(match record.backend {
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => "a3s-oci",
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => "crun",
+    });
+    let expected_runtime_root = expected_runtime_root.join(box_id);
     let expected_bundle = box_dir.join("sandbox/bundle");
     let log_worker_identity_valid = match (record.log_worker_pid, record.log_worker_pid_start_time)
     {
@@ -223,7 +211,7 @@ fn load_recorded_sandbox_runtime_identity(
         _ => false,
     };
     let backend_identity_valid = match record.backend {
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
             record.schema == crate::sandbox::runtime_record::SANDBOX_RUNTIME_RECORD_V1
                 && record.runtime_socket.is_none()
                 && record.generation.is_none()
@@ -270,6 +258,13 @@ fn load_recorded_sandbox_runtime_identity(
         log_worker_pid: record.log_worker_pid,
         log_worker_pid_start_time: record.log_worker_pid_start_time,
     }))
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_sandbox_migration_error(box_id: &str) -> a3s_box_core::BoxError {
+    a3s_box_core::BoxError::StateError(format!(
+        "Legacy Sandbox runtime record for {box_id} cannot be recovered after the A3S OCI migration; stop it with the previous Box release before upgrading"
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -388,84 +383,14 @@ fn reap_recorded_sandbox(home_dir: &Path, box_dir: &Path, box_id: &str) -> Sandb
         crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
             reap_orphaned_a3s_oci(record, box_dir, box_id)
         }
-        crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
-            reap_orphaned_crun(record, box_dir, box_id)
-        }
-    }
-}
-
-/// Reconcile a durable `crun` record. Persisted PIDs remain diagnostic only;
-/// cleanup is always delegated to the certified runtime by exact ID.
-#[cfg(target_os = "linux")]
-fn reap_orphaned_crun(record: RecordedSandboxRuntime, box_dir: &Path, box_id: &str) -> SandboxReap {
-    use std::process::Command;
-
-    let record_path = box_dir.join("sandbox/runtime.json");
-    let state = match crate::sandbox::handler::CrunHandler::query_state_at(
-        &record.runtime_path,
-        &record.runtime_root,
-        box_id,
-    ) {
-        Ok(state) => state,
-        Err(error) => {
-            tracing::error!(box_id, %error, "Failed to query orphaned Sandbox state");
-            return SandboxReap::Failed;
-        }
-    };
-    if state.is_some_and(|state| state.status != "stopped") {
-        let output = Command::new(&record.runtime_path)
-            .arg("--root")
-            .arg(&record.runtime_root)
-            .arg("kill")
-            .arg(box_id)
-            .arg(libc::SIGKILL.to_string())
-            .env("LC_ALL", "C")
-            .output();
-        if let Err(error) = output {
-            tracing::error!(box_id, %error, "Failed to signal orphaned Sandbox");
-            return SandboxReap::Failed;
-        }
-    }
-
-    let output = Command::new(&record.runtime_path)
-        .arg("--root")
-        .arg(&record.runtime_root)
-        .arg("delete")
-        .arg("--force")
-        .arg(box_id)
-        .env("LC_ALL", "C")
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => {
-            match crate::sandbox::handler::CrunHandler::query_state_at(
-                &record.runtime_path,
-                &record.runtime_root,
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::LegacySandbox => {
+            tracing::error!(
                 box_id,
-            ) {
-                Ok(None) => {}
-                _ => {
-                    tracing::error!(
-                        box_id,
-                        stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                        "Failed to delete orphaned Sandbox runtime state"
-                    );
-                    return SandboxReap::Failed;
-                }
-            }
-        }
-        Err(error) => {
-            tracing::error!(box_id, %error, "Failed to start Sandbox cleanup command");
-            return SandboxReap::Failed;
+                "Legacy Sandbox runtime must be stopped before upgrading to the A3S OCI-only release"
+            );
+            SandboxReap::Failed
         }
     }
-
-    drain_recorded_log_worker(&record, box_id);
-    let _ = std::fs::remove_dir_all(&record.bundle_dir);
-    let _ = std::fs::remove_dir_all(&record.runtime_root);
-    let _ = std::fs::remove_file(&record_path);
-    tracing::info!(box_id, "Reaped orphaned crun Sandbox after runtime restart");
-    SandboxReap::Cleaned
 }
 
 #[cfg(target_os = "linux")]
@@ -627,7 +552,7 @@ fn drain_recorded_log_worker(record: &RecordedSandboxRuntime, box_id: &str) {
         tracing::warn!(
             box_id,
             log_worker_pid = pid,
-            "Recovered Sandbox log worker did not drain after crun cleanup; terminating it"
+            "Recovered Sandbox log worker did not drain after runtime cleanup; terminating it"
         );
         // Revalidate the stable identity immediately before signalling so a
         // PID reused during cleanup cannot be targeted.

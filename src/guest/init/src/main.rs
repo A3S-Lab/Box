@@ -1831,7 +1831,7 @@ mod linux {
                     flush_stdio_relays();
                     // MicroVM logging still needs a bounded handoff before PID 1
                     // halts the VMM. Host Sandbox logging has a generation-owned
-                    // worker that waits for crun to close both writers and drains
+                    // worker that waits for the runtime owner to close both writers and drains
                     // through EOF, so retaining this legacy delay there only adds
                     // fixed latency to every short command.
                     let handoff = console_handoff_delay(bootstrap_mode);

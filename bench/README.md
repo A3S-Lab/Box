@@ -72,7 +72,7 @@ Tunables (env):
   non-cold measurements: create/start, command execution, reconciliation, and
   removal. The CSV also retains the create/start internals (capability probe,
   layout, instance preparation, managed mount preparation, rootfs ownership,
-  OCI bundle, `crun` launch, and readiness) for regression diagnosis. When
+  OCI bundle, A3S OCI owner launch, and readiness) for regression diagnosis. When
   Docker is available, samples alternate runtime order and the matching hot
   `docker run --rm IMAGE true` totals are written to the same CSV. Profiling is
   opt-in and emits no workload arguments, paths, or credentials.

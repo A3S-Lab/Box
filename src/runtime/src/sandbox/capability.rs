@@ -1,7 +1,10 @@
 //! Linux capability evidence for the shared-kernel Sandbox backend.
 
-#[cfg(any(target_os = "linux", test))]
-use std::collections::BTreeSet;
+use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::ExecutionBackend;
+use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use sha2::{Digest, Sha256};
 #[cfg(target_os = "linux")]
 use std::fs::File;
 #[cfg(target_os = "linux")]
@@ -9,36 +12,12 @@ use std::io::Read;
 #[cfg(target_os = "linux")]
 use std::path::Component;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
-use std::process::Command;
-
-use a3s_box_core::error::{BoxError, Result};
-use a3s_box_core::ExecutionBackend;
-use serde::{Deserialize, Serialize};
-#[cfg(target_os = "linux")]
-use sha2::{Digest, Sha256};
 
 /// Capability snapshot schema persisted with a resolved execution plan.
 pub const SANDBOX_CAPABILITY_SCHEMA: &str = "a3s.box.sandbox-capabilities.v1";
 
-/// The only `crun` release accepted by the first Sandbox backend.
-pub const CERTIFIED_CRUN_VERSION: &str = "1.28";
-
-#[cfg(target_os = "linux")]
-const CRUN_AMD64_SHA256: &str = "2aa6b7024a9c9f153895c0d11ae233d3758f54844011c3a039e3e89048d01d42";
-#[cfg(target_os = "linux")]
-const CRUN_ARM64_SHA256: &str = "cc1e8ec89aef1422e0741be196f9ed099e2e09d2f48f30f27cd44a22ef1f0342";
 #[cfg(target_os = "linux")]
 const REQUIRED_CGROUP_CONTROLLERS: &[&str] = &["cpu", "memory", "pids"];
-
-/// Verified runtime artifact evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CertifiedCrun {
-    pub path: PathBuf,
-    pub version: String,
-    pub sha256: String,
-    pub features: Vec<String>,
-}
 
 /// Verified A3S OCI Runtime artifacts used by the native Linux owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +78,6 @@ pub struct SandboxCapabilitySnapshot {
     pub schema: String,
     pub platform: String,
     pub architecture: String,
-    pub runtime: Option<CertifiedCrun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a3s_oci: Option<CertifiedA3sOci>,
     pub namespaces: Vec<String>,
@@ -138,11 +116,11 @@ impl SandboxCapabilitySnapshot {
 
 /// Probe the current host without changing namespaces, cgroups, or mounts.
 ///
-/// An explicit runtime path is still subject to the pinned version and digest
-/// checks. When omitted, only packaged A3S locations are searched; `PATH` is
-/// deliberately ignored.
+/// An explicit runtime path is still subject to artifact validation. When
+/// omitted, only packaged A3S locations are searched; `PATH` is deliberately
+/// ignored.
 pub fn probe_sandbox_capabilities(runtime_path: Option<&Path>) -> SandboxCapabilitySnapshot {
-    probe_sandbox_capabilities_for(ExecutionBackend::Crun, runtime_path, None)
+    probe_sandbox_capabilities_for(ExecutionBackend::A3sOci, runtime_path, None)
 }
 
 /// Probe host controls and the artifacts required by one Sandbox backend.
@@ -155,7 +133,6 @@ pub fn probe_sandbox_capabilities_for(
         schema: SANDBOX_CAPABILITY_SCHEMA.to_string(),
         platform: std::env::consts::OS.to_string(),
         architecture: std::env::consts::ARCH.to_string(),
-        runtime: None,
         a3s_oci: None,
         namespaces: Vec::new(),
         user_namespace: None,
@@ -177,7 +154,7 @@ pub fn probe_sandbox_capabilities_for(
         snapshot
             .failures
             .push("Sandbox isolation is supported only on Linux".to_string());
-        return snapshot;
+        snapshot
     }
 
     #[cfg(target_os = "linux")]
@@ -187,16 +164,6 @@ pub fn probe_sandbox_capabilities_for(
                 Ok(runtime) => snapshot.a3s_oci = Some(runtime),
                 Err(error) => snapshot.failures.push(error.to_string()),
             },
-            ExecutionBackend::Crun => {
-                let runtime_path = runtime_path
-                    .map(Path::to_path_buf)
-                    .map(Ok)
-                    .unwrap_or_else(resolve_certified_crun_path);
-                match runtime_path.and_then(|path| verify_certified_crun(&path)) {
-                    Ok(runtime) => snapshot.runtime = Some(runtime),
-                    Err(error) => snapshot.failures.push(error.to_string()),
-                }
-            }
             ExecutionBackend::Krun => snapshot
                 .failures
                 .push("MicroVM execution is not a Sandbox backend".to_string()),
@@ -514,143 +481,6 @@ fn allocate_id_mappings(
 }
 
 #[cfg(target_os = "linux")]
-fn resolve_certified_crun_path() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("A3S_BOX_CRUN_PATH") {
-        if !path.is_empty() {
-            return Ok(PathBuf::from(path));
-        }
-    }
-
-    let mut candidates = Vec::new();
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            candidates.push(directory.join("crun"));
-        }
-    }
-    candidates.push(a3s_box_core::dirs_home().join("bin/crun"));
-
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-        .ok_or_else(|| BoxError::BoxBootError {
-            message: "Certified crun runtime not found in packaged A3S locations".to_string(),
-            hint: Some(
-                "Install the A3S Box Sandbox runtime package or set A3S_BOX_CRUN_PATH to its verified crun binary"
-                    .to_string(),
-            ),
-        })
-}
-
-#[cfg(target_os = "linux")]
-fn verify_certified_crun(path: &Path) -> Result<CertifiedCrun> {
-    let canonical = path
-        .canonicalize()
-        .map_err(|error| BoxError::BoxBootError {
-            message: format!("Failed to resolve crun path {}: {error}", path.display()),
-            hint: None,
-        })?;
-    let metadata = canonical
-        .metadata()
-        .map_err(|error| BoxError::BoxBootError {
-            message: format!(
-                "Failed to inspect crun artifact {}: {error}",
-                canonical.display()
-            ),
-            hint: None,
-        })?;
-    if !metadata.is_file() {
-        return Err(BoxError::BoxBootError {
-            message: format!(
-                "crun artifact is not a regular file: {}",
-                canonical.display()
-            ),
-            hint: None,
-        });
-    }
-
-    let expected_digest = expected_crun_digest()?;
-    let actual_digest = sha256_file(&canonical)?;
-    if actual_digest != expected_digest {
-        return Err(BoxError::BoxBootError {
-            message: format!(
-                "crun artifact digest mismatch for {}: expected {}, got {}",
-                canonical.display(),
-                expected_digest,
-                actual_digest
-            ),
-            hint: Some("Reinstall the certified A3S Box Sandbox runtime artifact".to_string()),
-        });
-    }
-
-    let output = Command::new(&canonical)
-        .arg("--version")
-        .env("LC_ALL", "C")
-        .output()
-        .map_err(|error| BoxError::BoxBootError {
-            message: format!(
-                "Failed to execute {} --version: {error}",
-                canonical.display()
-            ),
-            hint: None,
-        })?;
-    if !output.status.success() {
-        return Err(BoxError::BoxBootError {
-            message: format!(
-                "{} --version exited with {}",
-                canonical.display(),
-                output.status
-            ),
-            hint: None,
-        });
-    }
-    let stdout = String::from_utf8(output.stdout).map_err(|error| BoxError::BoxBootError {
-        message: format!("crun --version returned non-UTF-8 output: {error}"),
-        hint: None,
-    })?;
-    let version = parse_crun_version(&stdout).ok_or_else(|| BoxError::BoxBootError {
-        message: "Unable to parse crun version output".to_string(),
-        hint: None,
-    })?;
-    if version != CERTIFIED_CRUN_VERSION {
-        return Err(BoxError::BoxBootError {
-            message: format!(
-                "Unsupported crun version {version}; expected {CERTIFIED_CRUN_VERSION}"
-            ),
-            hint: Some("Install the certified A3S Box Sandbox runtime artifact".to_string()),
-        });
-    }
-
-    let features = parse_crun_features(&stdout);
-    for required in ["+CAP", "+SECCOMP"] {
-        if !features.iter().any(|feature| feature == required) {
-            return Err(BoxError::BoxBootError {
-                message: format!("Certified crun build does not advertise {required}"),
-                hint: None,
-            });
-        }
-    }
-
-    Ok(CertifiedCrun {
-        path: canonical,
-        version,
-        sha256: actual_digest,
-        features,
-    })
-}
-
-#[cfg(target_os = "linux")]
-fn expected_crun_digest() -> Result<&'static str> {
-    match std::env::consts::ARCH {
-        "x86_64" => Ok(CRUN_AMD64_SHA256),
-        "aarch64" => Ok(CRUN_ARM64_SHA256),
-        architecture => Err(BoxError::BoxBootError {
-            message: format!("No certified crun 1.28 artifact for Linux {architecture}"),
-            hint: None,
-        }),
-    }
-}
-
-#[cfg(target_os = "linux")]
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
@@ -663,27 +493,6 @@ fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_crun_version(output: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("crun version ")
-            .and_then(|rest| rest.split_whitespace().next())
-            .map(ToString::to_string)
-    })
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn parse_crun_features(output: &str) -> Vec<String> {
-    let mut features = BTreeSet::new();
-    for token in output.split_whitespace() {
-        if (token.starts_with('+') || token.starts_with('-')) && token.len() > 1 {
-            features.insert(token.trim_matches(',').to_string());
-        }
-    }
-    features.into_iter().collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -975,17 +784,6 @@ mod tests {
         let error = resolve_a3s_oci_artifacts(Some(&runtime), Some(&agent)).unwrap_err();
 
         assert!(error.to_string().contains("not executable"));
-    }
-
-    #[test]
-    fn parses_crun_version_and_features() {
-        let output =
-            "crun version 1.28\ncommit: abc\nspec: 1.0.0\n+SYSTEMD +CAP +SECCOMP -SELINUX\n";
-        assert_eq!(parse_crun_version(output).as_deref(), Some("1.28"));
-        assert_eq!(
-            parse_crun_features(output),
-            vec!["+CAP", "+SECCOMP", "+SYSTEMD", "-SELINUX"]
-        );
     }
 
     #[test]

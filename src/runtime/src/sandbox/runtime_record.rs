@@ -12,8 +12,11 @@ pub(crate) const SANDBOX_RUNTIME_RECORD_V2: &str = "a3s.box.sandbox-runtime.v2";
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum SandboxRuntimeBackend {
     A3sOci,
+    /// Deserialization-only marker for records written by the removed
+    /// external Sandbox backend.
     #[default]
-    Crun,
+    #[serde(rename = "crun")]
+    LegacySandbox,
 }
 
 /// Runtime-owned paths and process identities needed for detached recovery.
@@ -80,35 +83,6 @@ impl SandboxRuntimeRecord {
             generation: Some(generation),
             owner_pid: Some(owner_pid),
             owner_pid_start_time: Some(owner_pid_start_time),
-            log_worker_pid: Some(log_worker_pid),
-            log_worker_pid_start_time: Some(log_worker_pid_start_time),
-        }
-    }
-
-    pub(crate) fn crun(
-        container_id: String,
-        runtime_path: PathBuf,
-        runtime_root: PathBuf,
-        bundle_dir: PathBuf,
-        init_pid: u32,
-        log_worker_pid: u32,
-        log_worker_pid_start_time: u64,
-    ) -> Self {
-        Self {
-            schema: SANDBOX_RUNTIME_RECORD_V1.to_string(),
-            backend: SandboxRuntimeBackend::Crun,
-            container_id,
-            runtime_path,
-            runtime_sha256: None,
-            agent_path: None,
-            agent_sha256: None,
-            runtime_root,
-            runtime_socket: None,
-            bundle_dir,
-            init_pid,
-            generation: None,
-            owner_pid: None,
-            owner_pid_start_time: None,
             log_worker_pid: Some(log_worker_pid),
             log_worker_pid_start_time: Some(log_worker_pid_start_time),
         }

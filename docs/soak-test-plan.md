@@ -19,8 +19,7 @@ The soak program must detect failures that short functional tests rarely find:
 - cache corruption, unbounded cache growth, and cross-workload data leakage;
 - latency or throughput degradation after warm-up;
 - recovery failures after client, shim, daemon, runtime, or host interruption;
-- platform-specific regressions across KVM, HVF, WHPX, A3S OCI Runtime, and
-  the certified `crun` rollback differential;
+- platform-specific regressions across KVM, HVF, WHPX, and A3S OCI Runtime;
 - divergence between the Rust, Python, and TypeScript native SDKs;
 - incomplete cleanup after success, failure, cancellation, and rollback.
 
@@ -54,7 +53,7 @@ Short rehearsals validate runner mechanics but are never release evidence.
 | `R0` rehearsal | One complete scenario cycle, normally less than 30 minutes | Start, each phase, final | Before changing a runner, verifier, image, host configuration, or fault injector |
 | `G2` guardrail | 7,200 seconds | At most 300 seconds; at least 24 periodic samples plus start/final | Nightly on dedicated hosts and for every affected release-candidate capability |
 | `R24` release | 86,400 seconds | At most 300 seconds; at least 288 periodic samples plus start/final | Before release on the primary supported host for every changed capability class |
-| `E72` endurance | 259,200 seconds | At most 300 seconds; at least 864 periodic samples plus start/final | Major runtime, kernel, libkrun, A3S OCI, `crun` rollback, storage, networking, or state-schema changes |
+| `E72` endurance | 259,200 seconds | At most 300 seconds; at least 864 periodic samples plus start/final | Major runtime, kernel, libkrun, A3S OCI, storage, networking, or state-schema changes |
 
 The last operation may finish after the requested duration, but the measured
 sample span itself must meet the profile duration. A sample gap greater than
@@ -71,7 +70,7 @@ digest-pinned or supplied as a recorded OCI archive with a SHA-256 digest.
 | Linux arm64/KVM MicroVM | `G2` for affected changes and before publishing an arm64 release | Linux arm64 build and runtime behavior |
 | Apple Silicon/HVF MicroVM | `G2` for affected changes, `R24` before macOS runtime releases | Native macOS runtime behavior |
 | Windows x86_64/WHPX MicroVM | `G2` for affected supported features, `R24` before Windows runtime releases | Only the documented Windows feature subset |
-| Linux A3S OCI Sandbox | `G2` for affected changes and every release, `R24` before widening Sandbox use | Shared-kernel Sandbox behavior and fail-closed policy, never MicroVM equivalence; run certified `crun` as the rollback differential |
+| Linux A3S OCI Sandbox | `G2` for affected changes and every release, `R24` before widening Sandbox use | Shared-kernel Sandbox behavior and fail-closed policy, never MicroVM equivalence; exercise the pinned native profile matrix for network namespaces, bind volumes, tmpfs, and initialization |
 | Kubernetes RuntimeClass cohort | `G2` on three nodes, `R24` on the release cohort, `E72` before broad rollout | CRI and containerd integration |
 | A3S Runtime Provider host | `G2` after provider/runtime changes, `R24` before provider promotion | All advertised R17 profiles on the certified Sandbox backend |
 | AMD SEV-SNP host | `G2` after TEE changes, `R24` before any hardware-backed claim | Real attestation, sealing, and secret delivery; simulation is excluded |
@@ -95,7 +94,7 @@ Status has a narrow meaning:
 | ID | README capability | Soak workload and fault model | Required pass evidence | Current status |
 | --- | --- | --- | --- | --- |
 | `RUN-01` | MicroVM runtime | Mixed foreground/detached create, start, exec, pause, resume, restart, wait, stop, remove, and concurrent state updates; kill owned CLI/shim processes | Zero unexpected failures or lost records; exact return to owned shim/mount/socket/box baseline; state remains readable after faults | Existing on KVM/HVF; Windows has its supported subset |
-| `RUN-02` | OCI Sandbox | Hot A3S OCI lifecycle churn with CPU/memory/PID limits, pause/resume, logs, files, and repeated unsupported-option negatives; kill workload and runtime-owner processes; compare the retained crun rollback lane | Limits remain enforced; negative requests cause no state mutation; no cgroup, namespace, mount, process, rootfs, endpoint, owner, or state leak | Partial: real CI smoke and lifecycle benchmark exist, but no time-based Sandbox lane |
+| `RUN-02` | OCI Sandbox | Hot A3S OCI lifecycle churn with CPU/memory/PID limits, pause/resume, logs, files, network namespace variants, bind/read-only/tmpfs storage, initialization profiles, and repeated unsupported-option negatives; kill workload and runtime-owner processes | Limits remain enforced; negative requests cause no state mutation; no cgroup, namespace, mount, process, rootfs, endpoint, owner, or state leak | Partial: the real CI profile matrix and lifecycle benchmark exist, but no time-based Sandbox lane |
 | `RUN-03` | Lifecycle and exec | Long-lived foreground/background commands, stdin, stdout/stderr pressure, exit codes, PTY resize/input, health checks, signals, timeout, reconnect, and cancellation | Ordered bounded output, correct exit/signal result, no deadlock, recovery within the declared RTO, and no process-group leak | Partial |
 | `PRO-01` | A3S Runtime provider | Repeat every advertised R17 Base, Recovery, Networking, Mounts, Resources, Logs, Exec, and Security profile with driver restart between cycles | Advertised profile set stays constant; inventory before/after matches; idempotent operations do not duplicate resources | Planned: destructive real conformance is one-shot today |
 | `IMG-01` | OCI images | Concurrent pull/list/inspect/history/tag/save/load/push/remove/prune; interrupted and slow registry responses, auth redirects, Range resume, corrupt cache candidates, and shared layers | Every published blob matches declared size/digest; retry bounds hold; credentials never cross origins; cache and disk return to the declared budget after prune | Partial |
@@ -207,7 +206,7 @@ retention but cannot waive a capability owner's failed or missing gate.
 
 | Scenario IDs | Primary repository owner | Required co-review |
 | --- | --- | --- |
-| `RUN-01`, `RUN-02`, `RUN-03`, `OBS-01` | Core/runtime, CLI, shim, guest-control, and OCI Runtime maintainers | Platform owner for KVM, HVF, WHPX, A3S OCI, or the `crun` rollback lane |
+| `RUN-01`, `RUN-02`, `RUN-03`, `OBS-01` | Core/runtime, CLI, shim, guest-control, and OCI Runtime maintainers | Platform owner for KVM, HVF, WHPX, or A3S OCI |
 | `PRO-01` | A3S Runtime Provider adapter maintainers | Certified Sandbox and A3S Runtime maintainers |
 | `IMG-01`, `BLD-01` | OCI image, registry, and build maintainers | Security review for credentials/signatures; pool review for VM-backed `RUN` |
 | `STO-01`, `SNP-01` | Storage, rootfs, volume, and snapshot maintainers | Platform filesystem owner |

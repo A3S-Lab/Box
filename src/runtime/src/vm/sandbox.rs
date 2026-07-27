@@ -17,8 +17,8 @@ use crate::sandbox::rootfs::{
 };
 use crate::sandbox::A3sOciController;
 use crate::sandbox::{
-    compile_oci_spec, plan_id_mappings, prepare_crun_path_access, prepare_managed_mount_source,
-    probe_sandbox_capabilities_for, validate_external_mount_access, write_bundle, CrunController,
+    compile_oci_spec, plan_id_mappings, prepare_managed_mount_source, prepare_sandbox_path_access,
+    probe_sandbox_capabilities_for, validate_external_mount_access, write_bundle,
     SandboxBundleSpec, SandboxLaunchSpec, SandboxMount, SandboxResources, SandboxTmpfs,
 };
 
@@ -31,6 +31,15 @@ impl VmManager {
         boot_span: &tracing::Span,
         boot_start: std::time::Instant,
     ) -> Result<()> {
+        if execution_plan.backend != a3s_box_core::ExecutionBackend::A3sOci {
+            return Err(BoxError::BoxBootError {
+                message: "A3S OCI Runtime is the only supported Sandbox backend".to_string(),
+                hint: Some(
+                    "Stop legacy Sandbox executions with the previous Box release before upgrading"
+                        .to_string(),
+                ),
+            });
+        }
         // This probe is deliberately before image pulls, rootfs mounts, volume
         // creation, or bundle writes. Every mandatory control is fail-closed.
         let capability_start = std::time::Instant::now();
@@ -57,81 +66,18 @@ impl VmManager {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         let sandbox_dir = box_dir.join("sandbox");
         let bundle_dir = sandbox_dir.join("bundle");
-        let runtime_root = self
-            .home_dir
-            .join("run")
-            .join(match execution_plan.backend {
-                a3s_box_core::ExecutionBackend::A3sOci => "a3s-oci",
-                a3s_box_core::ExecutionBackend::Crun => "crun",
-                a3s_box_core::ExecutionBackend::Krun => {
-                    return Err(BoxError::BoxBootError {
-                        message: "MicroVM backend cannot enter Sandbox boot".to_string(),
-                        hint: None,
-                    })
-                }
-            })
-            .join(&self.box_id);
+        let runtime_root = self.home_dir.join("run").join("a3s-oci").join(&self.box_id);
         let runtime_record = sandbox_dir.join("runtime.json");
-        let runtime_digest = match execution_plan.backend {
-            a3s_box_core::ExecutionBackend::A3sOci => {
-                let runtime =
-                    capabilities
-                        .a3s_oci
-                        .as_ref()
-                        .ok_or_else(|| BoxError::BoxBootError {
-                            message: "Sandbox capability probe returned no A3S OCI artifacts"
-                                .to_string(),
-                            hint: None,
-                        })?;
-                combined_runtime_digest(&runtime.runtime_sha256, &runtime.agent_sha256)
-            }
-            a3s_box_core::ExecutionBackend::Crun => {
-                let runtime =
-                    capabilities
-                        .runtime
-                        .as_ref()
-                        .ok_or_else(|| BoxError::BoxBootError {
-                            message: "Sandbox capability probe returned no certified crun artifact"
-                                .to_string(),
-                            hint: None,
-                        })?;
-                format!("sha256:{}", runtime.sha256)
-            }
-            a3s_box_core::ExecutionBackend::Krun => {
-                return Err(BoxError::BoxBootError {
-                    message: "MicroVM backend cannot enter Sandbox boot".to_string(),
-                    hint: None,
-                })
-            }
-        };
-        match execution_plan.backend {
-            a3s_box_core::ExecutionBackend::A3sOci => {
-                A3sOciController::new(capabilities.a3s_oci.clone().ok_or_else(|| {
-                    BoxError::BoxBootError {
-                        message: "Sandbox capability probe returned no A3S OCI artifacts"
-                            .to_string(),
-                        hint: None,
-                    }
-                })?)
-                .require_absent(&runtime_root, &self.box_id)?
-            }
-            a3s_box_core::ExecutionBackend::Crun => {
-                CrunController::new(capabilities.runtime.clone().ok_or_else(|| {
-                    BoxError::BoxBootError {
-                        message: "Sandbox capability probe returned no certified crun artifact"
-                            .to_string(),
-                        hint: None,
-                    }
-                })?)
-                .require_absent(&runtime_root, &self.box_id)?
-            }
-            a3s_box_core::ExecutionBackend::Krun => {
-                return Err(BoxError::BoxBootError {
-                    message: "MicroVM backend cannot enter Sandbox boot".to_string(),
-                    hint: None,
-                })
-            }
-        }
+        let runtime = capabilities
+            .a3s_oci
+            .clone()
+            .ok_or_else(|| BoxError::BoxBootError {
+                message: "Sandbox capability probe returned no A3S OCI artifacts".to_string(),
+                hint: None,
+            })?;
+        let runtime_digest =
+            combined_runtime_digest(&runtime.runtime_sha256, &runtime.agent_sha256);
+        A3sOciController::new(runtime.clone()).require_absent(&runtime_root, &self.box_id)?;
 
         tracing::info!(
             parent: boot_span,
@@ -247,7 +193,7 @@ impl VmManager {
             };
             let oci_spec = compile_oci_spec(&bundle_spec)?;
             write_bundle(&bundle_dir, &oci_spec, &execution_plan, &capabilities)?;
-            prepare_crun_path_access(
+            prepare_sandbox_path_access(
                 &self.home_dir,
                 &self.box_id,
                 &bundle_dir,
@@ -290,46 +236,12 @@ impl VmManager {
             log_worker_ready_path: sandbox_dir.join("bundle").join("log-worker.ready"),
         };
         let launch_start = std::time::Instant::now();
-        let handler: Box<dyn a3s_box_core::vmm::VmHandler> = match execution_plan.backend {
-            a3s_box_core::ExecutionBackend::A3sOci => {
-                let controller =
-                    A3sOciController::new(capabilities.a3s_oci.clone().ok_or_else(|| {
-                        BoxError::BoxBootError {
-                            message: "Sandbox capability probe returned no A3S OCI artifacts"
-                                .to_string(),
-                            hint: None,
-                        }
-                    })?);
-                match controller.start(launch).await {
-                    Ok(handler) => Box::new(handler),
-                    Err(error) => {
-                        self.cleanup_boot_failure().await;
-                        return Err(error);
-                    }
-                }
-            }
-            a3s_box_core::ExecutionBackend::Crun => {
-                let controller =
-                    CrunController::new(capabilities.runtime.clone().ok_or_else(|| {
-                        BoxError::BoxBootError {
-                            message: "Sandbox capability probe returned no certified crun artifact"
-                                .to_string(),
-                            hint: None,
-                        }
-                    })?);
-                match controller.start(launch).await {
-                    Ok(handler) => Box::new(handler),
-                    Err(error) => {
-                        self.cleanup_boot_failure().await;
-                        return Err(error);
-                    }
-                }
-            }
-            a3s_box_core::ExecutionBackend::Krun => {
-                return Err(BoxError::BoxBootError {
-                    message: "MicroVM backend cannot enter Sandbox boot".to_string(),
-                    hint: None,
-                })
+        let controller = A3sOciController::new(runtime);
+        let handler: Box<dyn a3s_box_core::vmm::VmHandler> = match controller.start(launch).await {
+            Ok(handler) => Box::new(handler),
+            Err(error) => {
+                self.cleanup_boot_failure().await;
+                return Err(error);
             }
         };
         a3s_box_core::lifecycle_profile::record_lifecycle_phase(

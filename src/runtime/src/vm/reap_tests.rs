@@ -12,9 +12,9 @@ fn write_runtime_record(
 ) {
     let mut record = SandboxRuntimeRecord {
         schema: SANDBOX_RUNTIME_RECORD_V1.to_string(),
-        backend: SandboxRuntimeBackend::Crun,
+        backend: SandboxRuntimeBackend::LegacySandbox,
         container_id: box_id.to_string(),
-        runtime_path: Path::new("/definitely/missing/certified-crun").to_path_buf(),
+        runtime_path: Path::new("/definitely/missing/legacy-runtime").to_path_buf(),
         runtime_sha256: None,
         agent_path: None,
         agent_sha256: None,
@@ -98,7 +98,7 @@ fn recorded_sandbox_runtime_rejects_an_unexpected_box_directory() {
 }
 
 #[test]
-fn recorded_sandbox_runtime_rejects_invalid_paths_before_certification() {
+fn recorded_sandbox_runtime_rejects_invalid_paths_before_migration_check() {
     let home = tempfile::tempdir().unwrap();
     let box_id = "recorded-sandbox-invalid-paths";
     let box_dir = home.path().join("boxes").join(box_id);
@@ -110,7 +110,7 @@ fn recorded_sandbox_runtime_rejects_invalid_paths_before_certification() {
     let message = error.to_string();
 
     assert!(message.contains("path or identity validation"));
-    assert!(!message.contains("Cannot verify the recorded Sandbox runtime"));
+    assert!(!message.contains("cannot be recovered"));
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn legacy_v1_record_without_backend_remains_readable() {
         serde_json::to_vec(&serde_json::json!({
             "schema": SANDBOX_RUNTIME_RECORD_V1,
             "container_id": box_id,
-            "runtime_path": "/definitely/missing/certified-crun",
+            "runtime_path": "/definitely/missing/legacy-runtime",
             "runtime_root": home.path().join("run/crun").join(box_id),
             "bundle_dir": box_dir.join("sandbox/bundle"),
             "init_pid": 42
@@ -137,7 +137,7 @@ fn legacy_v1_record_without_backend_remains_readable() {
 
     assert!(matches!(
         record.map(|record| record.backend),
-        Some(SandboxRuntimeBackend::Crun)
+        Some(SandboxRuntimeBackend::LegacySandbox)
     ));
 }
 
@@ -190,7 +190,7 @@ fn v2_record_rejects_invalid_generation_and_digest_identity() {
 }
 
 #[test]
-fn log_drain_wait_validates_identity_without_recertifying_crun() {
+fn legacy_record_is_read_only_and_never_executes_its_runtime_path() {
     let home = tempfile::tempdir().unwrap();
     let box_id = "recorded-sandbox-log-drain";
     let box_dir = home.path().join("boxes").join(box_id);
@@ -207,7 +207,7 @@ fn log_drain_wait_validates_identity_without_recertifying_crun() {
     let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
     assert!(error
         .to_string()
-        .contains("Cannot verify the recorded Sandbox runtime"));
+        .contains("cannot be recovered after the A3S OCI migration"));
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn cleanup_reaps_a_terminal_recovered_log_worker() {
     let start_time = crate::process::pid_start_time(pid).unwrap();
     drop(worker);
     let record = RecordedSandboxRuntime {
-        backend: SandboxRuntimeBackend::Crun,
+        backend: SandboxRuntimeBackend::A3sOci,
         runtime_path: Path::new("/bin/true").to_path_buf(),
         runtime_sha256: None,
         agent_path: None,

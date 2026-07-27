@@ -650,7 +650,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                 .await;
         }
         match metadata.plan.backend {
-            ExecutionBackend::A3sOci | ExecutionBackend::Crun => {
+            ExecutionBackend::A3sOci => {
                 self.destroy_detached_sandbox(record, remove_anonymous_volumes, false, timeout_secs)
                     .await
             }
@@ -685,7 +685,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                 .await;
         }
         match metadata.plan.backend {
-            ExecutionBackend::A3sOci | ExecutionBackend::Crun => {
+            ExecutionBackend::A3sOci => {
                 self.destroy_detached_sandbox(record, false, true, timeout_secs)
                     .await
             }
