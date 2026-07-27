@@ -22,6 +22,8 @@ use super::{external, failure, require, Result};
 struct SeenResource {
     pid: Option<u32>,
     pid_start_time: Option<u64>,
+    owner_pid: Option<u32>,
+    owner_pid_start_time: Option<u64>,
     log_worker_pid: Option<u32>,
     log_worker_pid_start_time: Option<u64>,
 }
@@ -197,6 +199,8 @@ impl BoxRuntimeConformanceFixture {
         if let Ok(Some(runtime)) =
             crate::vm::reap::load_recorded_sandbox_runtime(home, &record.box_dir, &record.id)
         {
+            entry.owner_pid = runtime.owner_pid;
+            entry.owner_pid_start_time = runtime.owner_pid_start_time;
             entry.log_worker_pid = runtime.log_worker_pid;
             entry.log_worker_pid_start_time = runtime.log_worker_pid_start_time;
         }
@@ -226,7 +230,7 @@ impl BoxRuntimeConformanceFixture {
         for ((home, id), resource) in seen {
             for (kind, path) in [
                 ("box-dir", home.join("boxes").join(&id)),
-                ("crun-root", home.join("run/crun").join(&id)),
+                ("a3s-oci-root", home.join("run/a3s-oci").join(&id)),
                 (
                     "socket-dir",
                     PathBuf::from("/tmp/a3s-box-sockets").join(&id),
@@ -245,6 +249,11 @@ impl BoxRuntimeConformanceFixture {
             }
             for (kind, pid, start_time) in [
                 ("init", resource.pid, resource.pid_start_time),
+                (
+                    "runtime-owner",
+                    resource.owner_pid,
+                    resource.owner_pid_start_time,
+                ),
                 (
                     "log-worker",
                     resource.log_worker_pid,
@@ -328,7 +337,7 @@ impl BoxRuntimeConformanceFixture {
             }
         }
         remove_empty_directory(&self.home_dir.join("boxes"));
-        remove_empty_directory(&self.home_dir.join("run/crun"));
+        remove_empty_directory(&self.home_dir.join("run/a3s-oci"));
         remove_empty_directory(&self.home_dir.join("run"));
 
         if failures.is_empty() {
@@ -410,20 +419,27 @@ fn driver_config(home_dir: PathBuf) -> BoxRuntimeDriverConfig {
 }
 
 fn validate_runtime_assets(home_dir: &Path) -> Result<()> {
-    let crun = std::env::var_os("A3S_BOX_CRUN_PATH")
-        .map(PathBuf::from)
-        .ok_or_else(|| failure("A3S_BOX_CRUN_PATH must select the certified crun artifact"))?;
-    let expected = home_dir.join("bin/crun");
-    let canonical_crun = crun
-        .canonicalize()
-        .map_err(|error| external("canonicalize A3S_BOX_CRUN_PATH", error))?;
-    let canonical_expected = expected
-        .canonicalize()
-        .map_err(|error| external("canonicalize A3S_HOME/bin/crun", error))?;
-    require(
-        canonical_crun == canonical_expected,
-        "A3S_BOX_CRUN_PATH must equal A3S_HOME/bin/crun",
-    )?;
+    let mut artifacts = Vec::new();
+    for (variable, binary) in [
+        ("A3S_BOX_OCI_RUNTIME_PATH", "a3s-oci"),
+        ("A3S_BOX_OCI_AGENT_PATH", "a3s-oci-agent"),
+    ] {
+        let configured = std::env::var_os(variable)
+            .map(PathBuf::from)
+            .ok_or_else(|| failure(format!("{variable} must select {binary}")))?;
+        let expected = home_dir.join("bin").join(binary);
+        let canonical_configured = configured
+            .canonicalize()
+            .map_err(|error| external(variable, error))?;
+        let canonical_expected = expected
+            .canonicalize()
+            .map_err(|error| external("canonicalize packaged A3S OCI artifact", error))?;
+        require(
+            canonical_configured == canonical_expected,
+            format!("{variable} must equal A3S_HOME/bin/{binary}"),
+        )?;
+        artifacts.push(canonical_configured);
+    }
     for binary in ["a3s-box-guest-init", "a3s-box-shim"] {
         let path = home_dir.join("bin").join(binary);
         require(
@@ -431,7 +447,11 @@ fn validate_runtime_assets(home_dir: &Path) -> Result<()> {
             format!("required R17 binary is missing: {}", path.display()),
         )?;
     }
-    let snapshot = crate::sandbox::probe_sandbox_capabilities(Some(&canonical_crun));
+    let snapshot = crate::sandbox::probe_sandbox_capabilities_for(
+        a3s_box_core::ExecutionBackend::A3sOci,
+        artifacts.first().map(PathBuf::as_path),
+        artifacts.get(1).map(PathBuf::as_path),
+    );
     snapshot
         .require_ready()
         .map_err(|error| failure(error.to_string()))

@@ -439,7 +439,7 @@ impl ManagedExecutionMetadata {
             ));
         }
         let resolved = a3s_box_core::resolve_execution(&self.request.config)?;
-        if resolved != self.plan {
+        if !execution_plan_matches(&resolved, &self.plan) {
             return Err(a3s_box_core::BoxError::StateError(
                 "managed execution plan does not match its persisted creation request".to_string(),
             ));
@@ -456,6 +456,24 @@ impl ManagedExecutionMetadata {
         }
         Ok(())
     }
+}
+
+fn execution_plan_matches(
+    resolved: &ResolvedExecutionPlan,
+    persisted: &ResolvedExecutionPlan,
+) -> bool {
+    if resolved == persisted {
+        return true;
+    }
+
+    // Box versions before the A3S OCI migration persisted `crun` for Sandbox
+    // requests. Keep those exact records recoverable without allowing drift in
+    // the requested isolation class or any required security control.
+    persisted.backend == a3s_box_core::ExecutionBackend::Crun
+        && resolved.backend == a3s_box_core::ExecutionBackend::A3sOci
+        && persisted.requested_isolation == resolved.requested_isolation
+        && persisted.isolation_class == resolved.isolation_class
+        && persisted.required_controls == resolved.required_controls
 }
 
 fn validate_pending_operation(
@@ -778,5 +796,29 @@ mod tests {
             a3s_box_core::resolve_execution(&a3s_box_core::BoxConfig::default()).unwrap();
 
         assert!(metadata.validate().is_err());
+    }
+
+    #[test]
+    fn managed_execution_validation_accepts_the_legacy_crun_sandbox_plan() {
+        let config = a3s_box_core::BoxConfig {
+            image: "alpine:latest".to_string(),
+            isolation: ExecutionIsolation::Sandbox,
+            ..Default::default()
+        };
+        let mut metadata = ManagedExecutionMetadata::new(
+            OperationId::new("create-op-legacy-crun").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "legacy-crun-sandbox".to_string(),
+                config,
+                labels: Default::default(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        metadata.plan.backend = a3s_box_core::ExecutionBackend::Crun;
+
+        metadata.validate().unwrap();
     }
 }

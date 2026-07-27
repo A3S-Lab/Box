@@ -24,17 +24,19 @@ use super::capability::{CertifiedCrun, SandboxCapabilitySnapshot};
 use super::handler::CrunHandler;
 #[cfg(target_os = "linux")]
 use super::handler::{CrunHandlerSpec, CrunState};
+#[cfg(target_os = "linux")]
+use super::runtime_record::SandboxRuntimeRecord;
 
 #[cfg(target_os = "linux")]
-const EXEC_LISTENER_FD: i32 = 3;
+pub(crate) const EXEC_LISTENER_FD: i32 = 3;
 #[cfg(target_os = "linux")]
-const PTY_LISTENER_FD: i32 = 4;
+pub(crate) const PTY_LISTENER_FD: i32 = 4;
 #[cfg(target_os = "linux")]
-const INIT_LOG_FD: i32 = 5;
+pub(crate) const INIT_LOG_FD: i32 = 5;
 #[cfg(target_os = "linux")]
 const PRESERVED_FD_COUNT: usize = 3;
 #[cfg(target_os = "linux")]
-const START_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const START_FAILURE_LOG_LIMIT_BYTES: u64 = 4 * 1024;
 
@@ -53,19 +55,6 @@ pub struct SandboxLaunchSpec {
     pub log_worker_path: PathBuf,
     pub log_worker_log_path: PathBuf,
     pub log_worker_ready_path: PathBuf,
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Debug, Serialize)]
-struct SandboxRuntimeRecord<'a> {
-    schema: &'static str,
-    container_id: &'a str,
-    runtime_path: &'a Path,
-    runtime_root: &'a Path,
-    bundle_dir: &'a Path,
-    init_pid: u32,
-    log_worker_pid: u32,
-    log_worker_pid_start_time: u64,
 }
 
 /// Controller pinned to one already-verified `crun` artifact.
@@ -305,16 +294,15 @@ impl CrunController {
             }
         };
 
-        let record = SandboxRuntimeRecord {
-            schema: "a3s.box.sandbox-runtime.v1",
-            container_id: &launch.container_id,
-            runtime_path: &self.runtime.path,
-            runtime_root: &launch.runtime_root,
-            bundle_dir: &launch.bundle_dir,
+        let record = SandboxRuntimeRecord::crun(
+            launch.container_id.clone(),
+            self.runtime.path.clone(),
+            launch.runtime_root.clone(),
+            launch.bundle_dir.clone(),
             init_pid,
             log_worker_pid,
             log_worker_pid_start_time,
-        };
+        );
         if let Err(error) = write_json_atomic(&launch.runtime_record, &record) {
             cleanup_failed_start(&self.runtime.path, &launch);
             reap_failed_log_worker(&mut log_worker);
@@ -361,7 +349,7 @@ pub fn write_bundle(
     Ok(())
 }
 
-fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
@@ -389,7 +377,7 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-fn create_private_dir(path: &Path) -> Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(BoxError::IoError)?;
     #[cfg(unix)]
     {
@@ -401,7 +389,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_log(path: &Path) -> Result<File> {
+pub(crate) fn open_log(path: &Path) -> Result<File> {
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -417,7 +405,7 @@ fn open_log(path: &Path) -> Result<File> {
 }
 
 #[cfg(target_os = "linux")]
-fn start_log_worker(
+pub(crate) fn start_log_worker(
     launch: &SandboxLaunchSpec,
     watched_pid: u32,
     watched_pid_start_time: u64,
@@ -485,7 +473,7 @@ fn start_log_worker(
 }
 
 #[cfg(target_os = "linux")]
-fn reap_failed_log_worker(worker: &mut std::process::Child) {
+pub(crate) fn reap_failed_log_worker(worker: &mut std::process::Child) {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match worker.try_wait() {
@@ -501,7 +489,7 @@ fn reap_failed_log_worker(worker: &mut std::process::Child) {
 }
 
 #[cfg(target_os = "linux")]
-fn bind_control_listener(path: &Path) -> Result<std::os::unix::net::UnixListener> {
+pub(crate) fn bind_control_listener(path: &Path) -> Result<std::os::unix::net::UnixListener> {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
     let parent = path.parent().ok_or_else(|| {
@@ -531,7 +519,7 @@ fn bind_control_listener(path: &Path) -> Result<std::os::unix::net::UnixListener
 }
 
 #[cfg(target_os = "linux")]
-fn duplicate_for_inheritance(fd: i32) -> Result<std::os::fd::OwnedFd> {
+pub(crate) fn duplicate_for_inheritance(fd: i32) -> Result<std::os::fd::OwnedFd> {
     use std::os::fd::{FromRawFd, OwnedFd};
     let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 10) };
     if duplicate < 0 {
@@ -563,7 +551,7 @@ fn start_failure_diagnostics(launch: &SandboxLaunchSpec) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn read_log_tail(path: &Path, limit: u64) -> Option<String> {
+pub(crate) fn read_log_tail(path: &Path, limit: u64) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     let offset = length.saturating_sub(limit);

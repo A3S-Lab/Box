@@ -77,7 +77,7 @@
     <g id="sandbox-card">
       <rect x="923" y="195" width="228" height="198" rx="10" fill="#17140f" stroke="#f5b95f" stroke-width="2" stroke-dasharray="7 6"/>
       <text x="1037" y="246" text-anchor="middle" fill="#f4f1ea" font-size="30" font-weight="760">SANDBOX</text>
-      <text x="1037" y="276" text-anchor="middle" fill="#f5c873" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="21" font-weight="700">crun 1.28</text>
+      <text x="1037" y="276" text-anchor="middle" fill="#f5c873" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="21" font-weight="700">A3S OCI</text>
       <rect x="960" y="296" width="154" height="48" rx="5" fill="#211c14" stroke="#735e35"/>
       <text x="1037" y="316" text-anchor="middle" fill="#aea28b" font-size="17" font-weight="650">SHARED</text>
       <text x="1037" y="337" text-anchor="middle" fill="#f4f1ea" font-size="19" font-weight="720">host Linux kernel</text>

@@ -1,4 +1,4 @@
-//! `crun` Sandbox boot path.
+//! Shared-kernel Sandbox boot path.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -15,9 +15,10 @@ use sha2::{Digest, Sha256};
 use crate::sandbox::rootfs::{
     inspect_rootfs_identity_requirements_with_preference, prepare_rootfs_ownership_with_preference,
 };
+use crate::sandbox::A3sOciController;
 use crate::sandbox::{
     compile_oci_spec, plan_id_mappings, prepare_crun_path_access, prepare_managed_mount_source,
-    probe_sandbox_capabilities, validate_external_mount_access, write_bundle, CrunController,
+    probe_sandbox_capabilities_for, validate_external_mount_access, write_bundle, CrunController,
     SandboxBundleSpec, SandboxLaunchSpec, SandboxMount, SandboxResources, SandboxTmpfs,
 };
 
@@ -33,16 +34,8 @@ impl VmManager {
         // This probe is deliberately before image pulls, rootfs mounts, volume
         // creation, or bundle writes. Every mandatory control is fail-closed.
         let capability_start = std::time::Instant::now();
-        let capabilities = probe_sandbox_capabilities(None);
+        let capabilities = probe_sandbox_capabilities_for(execution_plan.backend, None, None);
         capabilities.require_ready()?;
-        let runtime = capabilities
-            .runtime
-            .clone()
-            .ok_or_else(|| BoxError::BoxBootError {
-                message: "Sandbox capability probe did not return a certified crun artifact"
-                    .to_string(),
-                hint: None,
-            })?;
         // Sandbox logging is hosted by the packaged shim in a dedicated worker
         // mode so it survives detached CLI clients. Resolve it before image or
         // rootfs preparation to keep a missing artifact side-effect free.
@@ -64,16 +57,87 @@ impl VmManager {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         let sandbox_dir = box_dir.join("sandbox");
         let bundle_dir = sandbox_dir.join("bundle");
-        let runtime_root = self.home_dir.join("run").join("crun").join(&self.box_id);
+        let runtime_root = self
+            .home_dir
+            .join("run")
+            .join(match execution_plan.backend {
+                a3s_box_core::ExecutionBackend::A3sOci => "a3s-oci",
+                a3s_box_core::ExecutionBackend::Crun => "crun",
+                a3s_box_core::ExecutionBackend::Krun => {
+                    return Err(BoxError::BoxBootError {
+                        message: "MicroVM backend cannot enter Sandbox boot".to_string(),
+                        hint: None,
+                    })
+                }
+            })
+            .join(&self.box_id);
         let runtime_record = sandbox_dir.join("runtime.json");
-        let controller = CrunController::new(runtime.clone());
-        controller.require_absent(&runtime_root, &self.box_id)?;
+        let runtime_digest = match execution_plan.backend {
+            a3s_box_core::ExecutionBackend::A3sOci => {
+                let runtime =
+                    capabilities
+                        .a3s_oci
+                        .as_ref()
+                        .ok_or_else(|| BoxError::BoxBootError {
+                            message: "Sandbox capability probe returned no A3S OCI artifacts"
+                                .to_string(),
+                            hint: None,
+                        })?;
+                combined_runtime_digest(&runtime.runtime_sha256, &runtime.agent_sha256)
+            }
+            a3s_box_core::ExecutionBackend::Crun => {
+                let runtime =
+                    capabilities
+                        .runtime
+                        .as_ref()
+                        .ok_or_else(|| BoxError::BoxBootError {
+                            message: "Sandbox capability probe returned no certified crun artifact"
+                                .to_string(),
+                            hint: None,
+                        })?;
+                format!("sha256:{}", runtime.sha256)
+            }
+            a3s_box_core::ExecutionBackend::Krun => {
+                return Err(BoxError::BoxBootError {
+                    message: "MicroVM backend cannot enter Sandbox boot".to_string(),
+                    hint: None,
+                })
+            }
+        };
+        match execution_plan.backend {
+            a3s_box_core::ExecutionBackend::A3sOci => {
+                A3sOciController::new(capabilities.a3s_oci.clone().ok_or_else(|| {
+                    BoxError::BoxBootError {
+                        message: "Sandbox capability probe returned no A3S OCI artifacts"
+                            .to_string(),
+                        hint: None,
+                    }
+                })?)
+                .require_absent(&runtime_root, &self.box_id)?
+            }
+            a3s_box_core::ExecutionBackend::Crun => {
+                CrunController::new(capabilities.runtime.clone().ok_or_else(|| {
+                    BoxError::BoxBootError {
+                        message: "Sandbox capability probe returned no certified crun artifact"
+                            .to_string(),
+                        hint: None,
+                    }
+                })?)
+                .require_absent(&runtime_root, &self.box_id)?
+            }
+            a3s_box_core::ExecutionBackend::Krun => {
+                return Err(BoxError::BoxBootError {
+                    message: "MicroVM backend cannot enter Sandbox boot".to_string(),
+                    hint: None,
+                })
+            }
+        }
 
         tracing::info!(
             parent: boot_span,
             box_id = %self.box_id,
             isolation_class = "shared-kernel",
-            runtime = %runtime.path.display(),
+            runtime = ?execution_plan.backend,
             "Booting Sandbox"
         );
 
@@ -94,7 +158,7 @@ impl VmManager {
         let prepare = (|| -> Result<_> {
             // Snapshot-backed rootfs overlays are mounted by `prepare_layout`.
             // Stage through the exact merged root before ownership planning or
-            // crun launch so the terminal completion marker is invalidated in
+            // runtime launch so the terminal completion marker is invalidated in
             // this box's writable upper, never in the shared Snapshot lower.
             a3s_box_core::rootfs_metadata::stage_terminal_rootfs_metadata_for_boot(
                 &layout.rootfs_path,
@@ -179,7 +243,7 @@ impl VmManager {
                 resources,
                 requested_capabilities: self.config.cap_add.clone(),
                 execution_plan_digest,
-                runtime_digest: format!("sha256:{}", runtime.sha256),
+                runtime_digest,
             };
             let oci_spec = compile_oci_spec(&bundle_spec)?;
             write_bundle(&bundle_dir, &oci_spec, &execution_plan, &capabilities)?;
@@ -226,22 +290,57 @@ impl VmManager {
             log_worker_ready_path: sandbox_dir.join("bundle").join("log-worker.ready"),
         };
         let launch_start = std::time::Instant::now();
-        let handler = match controller.start(launch).await {
-            Ok(handler) => handler,
-            Err(error) => {
-                self.cleanup_boot_failure().await;
-                return Err(error);
+        let handler: Box<dyn a3s_box_core::vmm::VmHandler> = match execution_plan.backend {
+            a3s_box_core::ExecutionBackend::A3sOci => {
+                let controller =
+                    A3sOciController::new(capabilities.a3s_oci.clone().ok_or_else(|| {
+                        BoxError::BoxBootError {
+                            message: "Sandbox capability probe returned no A3S OCI artifacts"
+                                .to_string(),
+                            hint: None,
+                        }
+                    })?);
+                match controller.start(launch).await {
+                    Ok(handler) => Box::new(handler),
+                    Err(error) => {
+                        self.cleanup_boot_failure().await;
+                        return Err(error);
+                    }
+                }
+            }
+            a3s_box_core::ExecutionBackend::Crun => {
+                let controller =
+                    CrunController::new(capabilities.runtime.clone().ok_or_else(|| {
+                        BoxError::BoxBootError {
+                            message: "Sandbox capability probe returned no certified crun artifact"
+                                .to_string(),
+                            hint: None,
+                        }
+                    })?);
+                match controller.start(launch).await {
+                    Ok(handler) => Box::new(handler),
+                    Err(error) => {
+                        self.cleanup_boot_failure().await;
+                        return Err(error);
+                    }
+                }
+            }
+            a3s_box_core::ExecutionBackend::Krun => {
+                return Err(BoxError::BoxBootError {
+                    message: "MicroVM backend cannot enter Sandbox boot".to_string(),
+                    hint: None,
+                })
             }
         };
         a3s_box_core::lifecycle_profile::record_lifecycle_phase(
             "sandbox.launch",
             launch_start.elapsed(),
         );
-        *self.handler.write().await = Some(Box::new(handler));
+        *self.handler.write().await = Some(handler);
 
         let readiness_start = std::time::Instant::now();
         if let Err(error) = async {
-            // CrunController::start only returns after the certified runtime
+            // The selected controller returns only after the exact runtime
             // reports this exact generation as running. The generic VM grace
             // period would merely recheck process liveness for a fixed 250 ms;
             // the heartbeat path below already checks liveness on every
@@ -712,6 +811,14 @@ fn digest_json(value: &impl serde::Serialize) -> Result<String> {
         BoxError::SerializationError(format!("Failed to encode execution plan: {error}"))
     })?;
     Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+fn combined_runtime_digest(runtime_sha256: &str, agent_sha256: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(runtime_sha256.as_bytes());
+    digest.update([0]);
+    digest.update(agent_sha256.as_bytes());
+    format!("sha256:{}", hex::encode(digest.finalize()))
 }
 
 #[cfg(test)]

@@ -1,13 +1,11 @@
 # Cross-Platform OCI Runtime Development Plan
 
-Status: **In development**
+Status: **M6 integrated; M7 release qualification in progress**
 
 Scope: repository extraction, runtime architecture, delivery order, migration
 from certified `crun`, and release gates
 
 Target repository: `git@github.com:A3S-Lab/OCI-Runtime.git`
-
-Target monorepo path: `crates/oci-runtime`
 
 Primary Rust packages: `a3s-oci-sdk` and `a3s-oci-runtime`
 
@@ -672,6 +670,11 @@ Exit criteria:
 
 ### M6: Box experimental backend
 
+Implementation status: complete. Box depends only on the pinned
+`a3s-oci-sdk`, owns product policy and image preparation, records the runtime
+and agent digests with each generation, and runs the no-KVM Rust, Python, and
+TypeScript Sandbox lifecycle gate. The certified crun lane remains separate.
+
 Deliverables:
 
 - released and digest-pinned runtime and SDK artifacts;
@@ -690,6 +693,12 @@ Exit criteria:
 - rollback to certified `crun` is possible before a new execution starts.
 
 ### M7: Replace certified crun
+
+Implementation status: migration candidate. New Box Sandbox requests resolve
+to `A3sOci` by default, Linux packages include the pinned runtime and agent,
+and `SandboxRuntime::Crun` is an explicit pre-create rollback selector. The
+security review, consecutive release candidates, host-reboot evidence, and
+release soak requirements below remain blocking before crun removal.
 
 Deliverables:
 
@@ -883,9 +892,10 @@ is a blocking M6 gate, including the no-KVM Linux matrix.
 
 ## Migration and rollback
 
-- The new runtime is introduced behind an internal experimental backend.
-- Until the native driver passes M5, existing non-KVM Linux Sandbox executions
-  continue to use certified `crun`.
+- New Sandbox executions select A3S OCI Runtime by default; Box packages pin
+  commit `889cd29ffb399274657533234bf65c1dc58d785b` for this migration.
+- Certified `crun` is available only through the typed pre-create rollback
+  selector and the differential CI lane.
 - New executions persist their runtime identity and can never be recovered by
   guessing a different backend.
 - No automatic fallback occurs after create begins.
@@ -922,4 +932,4 @@ The project replaces `crun` for A3S Box only when:
   shared host kernel isolation.
 
 Until all criteria pass, certified `crun` remains a supported rollback backend
-and the new runtime remains experimental.
+and the shared-kernel Sandbox product remains Preview.

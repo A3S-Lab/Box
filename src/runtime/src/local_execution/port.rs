@@ -2,8 +2,8 @@ use std::num::NonZeroU16;
 use std::time::Duration;
 
 use a3s_box_core::{
-    ExecutionBackend, ExecutionGeneration, ExecutionId, ExecutionManagerError,
-    ExecutionManagerResult, ExecutionPortConnector, ExecutionPortStream,
+    ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
+    ExecutionPortConnector, ExecutionPortStream,
 };
 use async_trait::async_trait;
 
@@ -89,7 +89,7 @@ impl LocalExecutionManager {
                     "execution {execution_id} has no managed execution plan"
                 ))
             })?;
-        if backend != ExecutionBackend::Crun {
+        if !backend.is_sandbox() {
             return Err(ExecutionManagerError::Unavailable(format!(
                 "execution {execution_id} does not expose a Sandbox network namespace"
             )));

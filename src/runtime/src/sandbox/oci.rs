@@ -1035,6 +1035,10 @@ const ALLOWED_SYSCALLS: &[&str] = &[
     "fremovexattr",
     "fsetxattr",
     "fstat",
+    // Linux names syscall 79 `fstatat` on aarch64 and syscall 262
+    // `newfstatat` on x86_64. Keep both portable aliases; the runtime drops
+    // only the name absent from the selected architecture.
+    "fstatat",
     "fstatfs",
     "fsync",
     "ftruncate",

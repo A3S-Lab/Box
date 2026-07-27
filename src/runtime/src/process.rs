@@ -93,6 +93,30 @@ pub fn is_process_running_with_identity(pid: u32, expected_start_time: Option<u6
     is_process_alive_with_identity(pid, expected_start_time)
 }
 
+/// Wait until a process identity is no longer actively executing.
+///
+/// Unlike [`wait_for_process_exit_with_identity`], this accepts an unreaped
+/// zombie as stopped. That distinction is required when a detached runtime
+/// owner was spawned by a short-lived client process: a later recovery process
+/// cannot reap the former client's child, but it can safely remove runtime
+/// state once that child has finished executing.
+pub(crate) fn wait_for_process_stop_with_identity(
+    pid: u32,
+    expected_start_time: u64,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !is_process_running_with_identity(pid, Some(expected_start_time)) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Wait for a Linux process identity to disappear, reaping it when it is an
 /// exited child of the current process.
 ///
@@ -209,5 +233,22 @@ mod tests {
             std::time::Duration::from_secs(1),
         ));
         assert!(!is_process_alive_with_identity(pid, Some(start_time)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stop_waiter_accepts_an_unreaped_completed_child() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let start_time = pid_start_time(pid).unwrap();
+
+        assert!(wait_for_process_stop_with_identity(
+            pid,
+            start_time,
+            std::time::Duration::from_secs(1),
+        ));
+        assert!(!is_process_running_with_identity(pid, Some(start_time)));
+
+        child.wait().unwrap();
     }
 }

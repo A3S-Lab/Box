@@ -2,7 +2,7 @@
 //!
 //! This module is deliberately compiled only for tests and its single test is
 //! ignored by default. The exact test name, explicit acknowledgement variable,
-//! dedicated home, certified runtime, pinned image, and single-threaded test
+//! dedicated home, pinned runtime artifacts, pinned image, and single-threaded test
 //! selection are all release-gate prerequisites.
 
 mod cases;

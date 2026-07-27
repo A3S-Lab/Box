@@ -64,7 +64,7 @@ pub(crate) fn cleanup_recorded_sandbox_runtime_in(
     box_dir: &Path,
     box_id: &str,
 ) -> a3s_box_core::Result<()> {
-    match reap_orphaned_crun(home_dir, box_dir, box_id) {
+    match reap_recorded_sandbox(home_dir, box_dir, box_id) {
         SandboxReap::NotPresent | SandboxReap::Cleaned => Ok(()),
         SandboxReap::Failed => Err(a3s_box_core::BoxError::StateError(format!(
             "Failed to clean recorded Sandbox runtime for {box_id}; refusing to touch its rootfs"
@@ -80,7 +80,7 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
         return;
     }
 
-    match reap_orphaned_crun(home_dir, &box_dir, box_id) {
+    match reap_recorded_sandbox(home_dir, &box_dir, box_id) {
         SandboxReap::NotPresent | SandboxReap::Cleaned => {}
         SandboxReap::Failed => {
             // A live shared-kernel process may still be using the rootfs. Never
@@ -130,29 +130,22 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
     }
 }
 
-#[cfg(target_os = "linux")]
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct SandboxRuntimeRecord {
-    schema: String,
-    container_id: String,
-    runtime_path: std::path::PathBuf,
-    runtime_root: std::path::PathBuf,
-    bundle_dir: std::path::PathBuf,
-    init_pid: u32,
-    #[serde(default)]
-    log_worker_pid: Option<u32>,
-    #[serde(default)]
-    log_worker_pid_start_time: Option<u64>,
-}
-
 /// Validated durable evidence for one live or stopped Sandbox generation.
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 pub(crate) struct RecordedSandboxRuntime {
+    pub(crate) backend: crate::sandbox::runtime_record::SandboxRuntimeBackend,
     pub(crate) runtime_path: std::path::PathBuf,
+    pub(crate) runtime_sha256: Option<String>,
+    pub(crate) agent_path: Option<std::path::PathBuf>,
+    pub(crate) agent_sha256: Option<String>,
     pub(crate) runtime_root: std::path::PathBuf,
+    pub(crate) runtime_socket: Option<std::path::PathBuf>,
     pub(crate) bundle_dir: std::path::PathBuf,
     pub(crate) init_pid: u32,
+    pub(crate) generation: Option<u64>,
+    pub(crate) owner_pid: Option<u32>,
+    pub(crate) owner_pid_start_time: Option<u64>,
     pub(crate) log_worker_pid: Option<u32>,
     pub(crate) log_worker_pid_start_time: Option<u64>,
 }
@@ -171,14 +164,22 @@ pub(crate) fn load_recorded_sandbox_runtime(
     else {
         return Ok(None);
     };
-    let capabilities = crate::sandbox::probe_sandbox_capabilities(Some(&record.runtime_path));
-    let runtime = capabilities.runtime.ok_or_else(|| {
-        a3s_box_core::BoxError::StateError(format!(
-            "Cannot verify the recorded Sandbox runtime for {box_id}: {:?}",
-            capabilities.failures
-        ))
-    })?;
-    record.runtime_path = runtime.path;
+    match record.backend {
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
+            let capabilities =
+                crate::sandbox::probe_sandbox_capabilities(Some(&record.runtime_path));
+            let runtime = capabilities.runtime.ok_or_else(|| {
+                a3s_box_core::BoxError::StateError(format!(
+                    "Cannot verify the recorded Sandbox runtime for {box_id}: {:?}",
+                    capabilities.failures
+                ))
+            })?;
+            record.runtime_path = runtime.path;
+        }
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
+            verify_recorded_a3s_oci_owner(&record, box_id)?;
+        }
+    }
     Ok(Some(record))
 }
 
@@ -200,13 +201,20 @@ fn load_recorded_sandbox_runtime_identity(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(a3s_box_core::BoxError::IoError(error)),
     };
-    let record: SandboxRuntimeRecord = serde_json::from_slice(&bytes).map_err(|error| {
-        a3s_box_core::BoxError::StateError(format!(
-            "Invalid Sandbox runtime record at {}: {error}",
-            record_path.display()
-        ))
-    })?;
-    let expected_runtime_root = home_dir.join("run/crun").join(box_id);
+    let record: crate::sandbox::runtime_record::SandboxRuntimeRecord =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            a3s_box_core::BoxError::StateError(format!(
+                "Invalid Sandbox runtime record at {}: {error}",
+                record_path.display()
+            ))
+        })?;
+    let expected_runtime_root = home_dir
+        .join("run")
+        .join(match record.backend {
+            crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => "a3s-oci",
+            crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => "crun",
+        })
+        .join(box_id);
     let expected_bundle = box_dir.join("sandbox/bundle");
     let log_worker_identity_valid = match (record.log_worker_pid, record.log_worker_pid_start_time)
     {
@@ -214,7 +222,27 @@ fn load_recorded_sandbox_runtime_identity(
         (Some(pid), Some(start_time)) => pid > 0 && start_time > 0,
         _ => false,
     };
-    if record.schema != "a3s.box.sandbox-runtime.v1"
+    let backend_identity_valid = match record.backend {
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
+            record.schema == crate::sandbox::runtime_record::SANDBOX_RUNTIME_RECORD_V1
+                && record.runtime_socket.is_none()
+                && record.generation.is_none()
+                && record.owner_pid.is_none()
+                && record.owner_pid_start_time.is_none()
+        }
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
+            record.schema == crate::sandbox::runtime_record::SANDBOX_RUNTIME_RECORD_V2
+                && record.runtime_socket.as_deref()
+                    == Some(expected_runtime_root.join("runtime.sock").as_path())
+                && record.generation.is_some_and(|generation| generation > 0)
+                && matches!(record.owner_pid, Some(pid) if pid > 0)
+                && matches!(record.owner_pid_start_time, Some(start_time) if start_time > 0)
+                && record.agent_path.is_some()
+                && record.runtime_sha256.as_deref().is_some_and(valid_sha256)
+                && record.agent_sha256.as_deref().is_some_and(valid_sha256)
+        }
+    };
+    if !backend_identity_valid
         || record.container_id != box_id
         || record.runtime_root != expected_runtime_root
         || record.bundle_dir != expected_bundle
@@ -227,13 +255,115 @@ fn load_recorded_sandbox_runtime_identity(
     }
 
     Ok(Some(RecordedSandboxRuntime {
+        backend: record.backend,
         runtime_path: record.runtime_path,
+        runtime_sha256: record.runtime_sha256,
+        agent_path: record.agent_path,
+        agent_sha256: record.agent_sha256,
         runtime_root: record.runtime_root,
+        runtime_socket: record.runtime_socket,
         bundle_dir: record.bundle_dir,
         init_pid: record.init_pid,
+        generation: record.generation,
+        owner_pid: record.owner_pid,
+        owner_pid_start_time: record.owner_pid_start_time,
         log_worker_pid: record.log_worker_pid,
         log_worker_pid_start_time: record.log_worker_pid_start_time,
     }))
+}
+
+#[cfg(target_os = "linux")]
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_recorded_a3s_oci_owner(
+    record: &RecordedSandboxRuntime,
+    box_id: &str,
+) -> a3s_box_core::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+
+    let (Some(owner_pid), Some(owner_start_time), Some(runtime_socket)) = (
+        record.owner_pid,
+        record.owner_pid_start_time,
+        record.runtime_socket.as_ref(),
+    ) else {
+        return Err(a3s_box_core::BoxError::StateError(format!(
+            "A3S OCI owner identity is incomplete for {box_id}"
+        )));
+    };
+    if !crate::process::is_process_running_with_identity(owner_pid, Some(owner_start_time)) {
+        return Err(a3s_box_core::BoxError::StateError(format!(
+            "A3S OCI owner process is not running for {box_id}"
+        )));
+    }
+
+    let runtime_path = record.runtime_path.canonicalize().map_err(|error| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Cannot resolve recorded A3S OCI runtime for {box_id}: {error}"
+        ))
+    })?;
+    if runtime_path != record.runtime_path
+        || std::fs::read_link(format!("/proc/{owner_pid}/exe"))
+            .ok()
+            .as_deref()
+            != Some(runtime_path.as_path())
+    {
+        return Err(a3s_box_core::BoxError::StateError(format!(
+            "A3S OCI owner executable identity is invalid for {box_id}"
+        )));
+    }
+    if sha256_file(&runtime_path).as_deref() != record.runtime_sha256.as_deref() {
+        return Err(a3s_box_core::BoxError::StateError(format!(
+            "A3S OCI runtime digest changed for {box_id}"
+        )));
+    }
+    let agent_path = record.agent_path.as_ref().ok_or_else(|| {
+        a3s_box_core::BoxError::StateError(format!(
+            "A3S OCI agent identity is missing for {box_id}"
+        ))
+    })?;
+    if agent_path.canonicalize().ok().as_deref() != Some(agent_path.as_path())
+        || sha256_file(agent_path).as_deref() != record.agent_sha256.as_deref()
+    {
+        return Err(a3s_box_core::BoxError::StateError(format!(
+            "A3S OCI agent artifact identity is invalid for {box_id}"
+        )));
+    }
+
+    let metadata = std::fs::symlink_metadata(runtime_socket).map_err(|error| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Cannot inspect A3S OCI endpoint for {box_id}: {error}"
+        ))
+    })?;
+    if !metadata.file_type().is_socket()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(a3s_box_core::BoxError::StateError(format!(
+            "A3S OCI endpoint identity is invalid for {box_id}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn sha256_file(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(hex::encode(hasher.finalize()))
 }
 
 #[cfg(target_os = "linux")]
@@ -243,14 +373,9 @@ enum SandboxReap {
     Failed,
 }
 
-/// Reconcile a durable `crun` record before touching its rootfs. All paths and
-/// the runtime artifact are revalidated; persisted PIDs are diagnostic only
-/// and are never signalled directly because PID reuse would make that unsafe.
+/// Reconcile one durable Sandbox record before touching its rootfs.
 #[cfg(target_os = "linux")]
-fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxReap {
-    use std::process::Command;
-
-    let record_path = box_dir.join("sandbox/runtime.json");
+fn reap_recorded_sandbox(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxReap {
     let record = match load_recorded_sandbox_runtime(home_dir, box_dir, box_id) {
         Ok(Some(record)) => record,
         Ok(None) => return SandboxReap::NotPresent,
@@ -259,6 +384,23 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
             return SandboxReap::Failed;
         }
     };
+    match record.backend {
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::A3sOci => {
+            reap_orphaned_a3s_oci(record, box_dir, box_id)
+        }
+        crate::sandbox::runtime_record::SandboxRuntimeBackend::Crun => {
+            reap_orphaned_crun(record, box_dir, box_id)
+        }
+    }
+}
+
+/// Reconcile a durable `crun` record. Persisted PIDs remain diagnostic only;
+/// cleanup is always delegated to the certified runtime by exact ID.
+#[cfg(target_os = "linux")]
+fn reap_orphaned_crun(record: RecordedSandboxRuntime, box_dir: &Path, box_id: &str) -> SandboxReap {
+    use std::process::Command;
+
+    let record_path = box_dir.join("sandbox/runtime.json");
     let state = match crate::sandbox::handler::CrunHandler::query_state_at(
         &record.runtime_path,
         &record.runtime_root,
@@ -324,6 +466,153 @@ fn reap_orphaned_crun(home_dir: &Path, box_dir: &Path, box_id: &str) -> SandboxR
     let _ = std::fs::remove_file(&record_path);
     tracing::info!(box_id, "Reaped orphaned crun Sandbox after runtime restart");
     SandboxReap::Cleaned
+}
+
+#[cfg(target_os = "linux")]
+fn reap_orphaned_a3s_oci(
+    record: RecordedSandboxRuntime,
+    box_dir: &Path,
+    box_id: &str,
+) -> SandboxReap {
+    use a3s_oci_sdk::{
+        ContainerId, ContainerTarget, DeleteMode, DeleteRequest, Generation, KillRequest,
+        OciContainerState, Signal, StateRequest, WaitRequest,
+    };
+
+    let (Some(runtime_socket), Some(generation), Some(owner_pid), Some(owner_start_time)) = (
+        record.runtime_socket.as_ref(),
+        record.generation,
+        record.owner_pid,
+        record.owner_pid_start_time,
+    ) else {
+        tracing::error!(
+            box_id,
+            "A3S OCI runtime record lost required recovery identity"
+        );
+        return SandboxReap::Failed;
+    };
+    let client = match crate::sandbox::a3s_oci_client::A3sOciClient::connect_blocking(
+        runtime_socket.clone(),
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(box_id, %error, "Failed to connect to orphaned A3S OCI owner");
+            return SandboxReap::Failed;
+        }
+    };
+    let container_id = match ContainerId::new(box_id) {
+        Ok(container_id) => container_id,
+        Err(error) => {
+            tracing::error!(box_id, %error, "Invalid A3S OCI container identity during recovery");
+            return SandboxReap::Failed;
+        }
+    };
+    let target = ContainerTarget::exact(container_id, Generation(generation));
+    let state = match client.state_optional(StateRequest {
+        target: target.clone(),
+    }) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(box_id, %error, "Failed to query orphaned A3S OCI state");
+            return SandboxReap::Failed;
+        }
+    };
+    if state.is_some_and(|state| *state.state.status() != OciContainerState::Stopped) {
+        let context = match recorded_operation_context(box_id, "reap-kill") {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::error!(box_id, %error, "Failed to construct A3S OCI recovery operation");
+                return SandboxReap::Failed;
+            }
+        };
+        let signal = match Signal::new(libc::SIGKILL) {
+            Ok(signal) => signal,
+            Err(error) => {
+                tracing::error!(box_id, %error, "Failed to construct A3S OCI recovery signal");
+                return SandboxReap::Failed;
+            }
+        };
+        if let Err(error) = client.kill(KillRequest {
+            context,
+            target: target.clone(),
+            signal,
+            all: true,
+        }) {
+            tracing::error!(box_id, %error, "Failed to signal orphaned A3S OCI Sandbox");
+            return SandboxReap::Failed;
+        }
+        if let Err(error) = client.wait(WaitRequest {
+            target: target.clone(),
+            timeout_ms: Some(5_000),
+        }) {
+            tracing::error!(box_id, %error, "Failed to wait for orphaned A3S OCI Sandbox");
+            return SandboxReap::Failed;
+        }
+    }
+
+    let context = match recorded_operation_context(box_id, "reap-delete") {
+        Ok(context) => context,
+        Err(error) => {
+            tracing::error!(box_id, %error, "Failed to construct A3S OCI delete operation");
+            return SandboxReap::Failed;
+        }
+    };
+    if let Err(error) = client.delete_if_present(DeleteRequest {
+        context,
+        target,
+        mode: DeleteMode::Force,
+    }) {
+        tracing::error!(box_id, %error, "Failed to delete orphaned A3S OCI state");
+        return SandboxReap::Failed;
+    }
+    client.close();
+
+    if crate::process::is_process_running_with_identity(owner_pid, Some(owner_start_time)) {
+        let Ok(raw_pid) = i32::try_from(owner_pid) else {
+            tracing::error!(box_id, owner_pid, "A3S OCI owner PID does not fit i32");
+            return SandboxReap::Failed;
+        };
+        if unsafe { libc::kill(raw_pid, libc::SIGTERM) } != 0 {
+            tracing::error!(
+                box_id,
+                owner_pid,
+                error = %std::io::Error::last_os_error(),
+                "Failed to terminate orphaned A3S OCI owner"
+            );
+            return SandboxReap::Failed;
+        }
+    }
+    if !crate::process::wait_for_process_stop_with_identity(
+        owner_pid,
+        owner_start_time,
+        std::time::Duration::from_secs(3),
+    ) {
+        tracing::error!(box_id, owner_pid, "Orphaned A3S OCI owner did not exit");
+        return SandboxReap::Failed;
+    }
+
+    drain_recorded_log_worker(&record, box_id);
+    let _ = std::fs::remove_dir_all(&record.bundle_dir);
+    let _ = std::fs::remove_dir_all(&record.runtime_root);
+    let _ = std::fs::remove_file(box_dir.join("sandbox/runtime.json"));
+    tracing::info!(
+        box_id,
+        "Reaped orphaned A3S OCI Sandbox after runtime restart"
+    );
+    SandboxReap::Cleaned
+}
+
+#[cfg(target_os = "linux")]
+fn recorded_operation_context(
+    box_id: &str,
+    operation: &str,
+) -> a3s_box_core::Result<a3s_oci_sdk::OperationContext> {
+    a3s_oci_sdk::OperationId::new(format!(
+        "{box_id}-{operation}-{}",
+        uuid::Uuid::new_v4().simple()
+    ))
+    .map(a3s_oci_sdk::OperationContext::new)
+    .map_err(|error| a3s_box_core::BoxError::StateError(error.to_string()))
 }
 
 #[cfg(target_os = "linux")]
@@ -479,136 +768,5 @@ fn kill_orphaned_shim(box_id: &str) -> Vec<i32> {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::*;
-
-    fn write_runtime_record(
-        home_dir: &Path,
-        box_dir: &Path,
-        box_id: &str,
-        mutate: impl FnOnce(&mut SandboxRuntimeRecord),
-    ) {
-        let mut record = SandboxRuntimeRecord {
-            schema: "a3s.box.sandbox-runtime.v1".to_string(),
-            container_id: box_id.to_string(),
-            runtime_path: Path::new("/definitely/missing/certified-crun").to_path_buf(),
-            runtime_root: home_dir.join("run/crun").join(box_id),
-            bundle_dir: box_dir.join("sandbox/bundle"),
-            init_pid: 42,
-            log_worker_pid: None,
-            log_worker_pid_start_time: None,
-        };
-        mutate(&mut record);
-        std::fs::create_dir_all(box_dir.join("sandbox")).unwrap();
-        std::fs::write(
-            box_dir.join("sandbox/runtime.json"),
-            serde_json::to_vec(&record).unwrap(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn test_reap_removes_box_dir() {
-        // A box dir with no live shim / mount (e.g. left by a crash) is removed.
-        let home = tempfile::tempdir().unwrap();
-        let box_id = "reap-test-no-such-shim-uuid";
-        let box_dir = home.path().join("boxes").join(box_id);
-        std::fs::create_dir_all(box_dir.join("logs")).unwrap();
-        std::fs::write(box_dir.join("logs/shim.stdout.log"), b"x").unwrap();
-        assert!(box_dir.exists());
-
-        reap_orphaned_box_in(home.path(), box_id);
-        assert!(!box_dir.exists(), "orphaned box dir should be removed");
-    }
-
-    #[test]
-    fn test_reap_absent_box_is_noop() {
-        let home = tempfile::tempdir().unwrap();
-        // No boxes/<id> dir at all — must not panic or error.
-        reap_orphaned_box_in(home.path(), "absent-box-uuid");
-    }
-
-    #[test]
-    fn cleanup_absent_sandbox_runtime_preserves_box_directory() {
-        let home = tempfile::tempdir().unwrap();
-        let box_id = "cleanup-test-no-runtime-record";
-        let box_dir = home.path().join("boxes").join(box_id);
-        std::fs::create_dir_all(&box_dir).unwrap();
-
-        cleanup_recorded_sandbox_runtime_in(home.path(), &box_dir, box_id).unwrap();
-
-        assert!(box_dir.exists());
-    }
-
-    #[test]
-    fn recorded_sandbox_runtime_rejects_an_unexpected_box_directory() {
-        let home = tempfile::tempdir().unwrap();
-        let box_id = "recorded-sandbox-unexpected-directory";
-        let box_dir = home.path().join("external").join(box_id);
-        write_runtime_record(home.path(), &box_dir, box_id, |_| {});
-
-        let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
-
-        assert!(error.to_string().contains("unexpected host directory"));
-    }
-
-    #[test]
-    fn recorded_sandbox_runtime_rejects_invalid_paths_before_certification() {
-        let home = tempfile::tempdir().unwrap();
-        let box_id = "recorded-sandbox-invalid-paths";
-        let box_dir = home.path().join("boxes").join(box_id);
-        write_runtime_record(home.path(), &box_dir, box_id, |record| {
-            record.runtime_root = home.path().join("run/crun/another-box");
-        });
-
-        let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
-        let message = error.to_string();
-
-        assert!(message.contains("path or identity validation"));
-        assert!(!message.contains("Cannot verify the recorded Sandbox runtime"));
-    }
-
-    #[test]
-    fn log_drain_wait_validates_identity_without_recertifying_crun() {
-        let home = tempfile::tempdir().unwrap();
-        let box_id = "recorded-sandbox-log-drain";
-        let box_dir = home.path().join("boxes").join(box_id);
-        write_runtime_record(home.path(), &box_dir, box_id, |_| {});
-
-        assert!(wait_for_recorded_sandbox_log_drain_in(
-            home.path(),
-            &box_dir,
-            box_id,
-            std::time::Duration::ZERO,
-        )
-        .unwrap());
-
-        let error = load_recorded_sandbox_runtime(home.path(), &box_dir, box_id).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("Cannot verify the recorded Sandbox runtime"));
-    }
-
-    #[test]
-    fn cleanup_reaps_a_terminal_recovered_log_worker() {
-        let worker = std::process::Command::new("true").spawn().unwrap();
-        let pid = worker.id();
-        let start_time = crate::process::pid_start_time(pid).unwrap();
-        drop(worker);
-        let record = RecordedSandboxRuntime {
-            runtime_path: Path::new("/bin/true").to_path_buf(),
-            runtime_root: Path::new("/tmp/recovered-runtime").to_path_buf(),
-            bundle_dir: Path::new("/tmp/recovered-bundle").to_path_buf(),
-            init_pid: 42,
-            log_worker_pid: Some(pid),
-            log_worker_pid_start_time: Some(start_time),
-        };
-
-        drain_recorded_log_worker(&record, "terminal-recovered-worker");
-
-        assert!(
-            !crate::process::is_process_alive_with_identity(pid, Some(start_time)),
-            "cleanup must not leave its completed child as a zombie"
-        );
-    }
-}
+#[path = "reap_tests.rs"]
+mod tests;

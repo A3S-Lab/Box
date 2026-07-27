@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use a3s_box_sdk::{
     A3sBoxClient, ClientError, ExecutionIsolation, ExecutionSnapshotId, ListBoxesOptions,
     OperationId, Sandbox, SandboxCreateOptions, SandboxLogOptions, SandboxNetwork,
-    SandboxRestartOptions, TagImage,
+    SandboxRestartOptions, SandboxRuntime, TagImage,
 };
 
 type AnyError = Box<dyn Error + Send + Sync>;
@@ -35,6 +35,7 @@ async fn e2b_style_local_sandbox_runs_without_remote_credentials() -> Result<(),
 
     let home = validated_home()?;
     let isolation = requested_isolation()?;
+    let sandbox_runtime = requested_sandbox_runtime()?;
     let base_image =
         std::env::var("A3S_BOX_SDK_SMOKE_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_string());
     let client = A3sBoxClient::from_home(&home);
@@ -92,6 +93,7 @@ async fn e2b_style_local_sandbox_runs_without_remote_credentials() -> Result<(),
         .timeout_seconds(300)
         .metadata("purpose", "local-sdk-smoke")
         .isolation(isolation)
+        .sandbox_runtime(sandbox_runtime)
         .mount_named(&volume.name, "/cache")
         .workdir("/workspace");
     let builder = match &network {
@@ -114,7 +116,14 @@ async fn e2b_style_local_sandbox_runs_without_remote_credentials() -> Result<(),
         "created Sandbox was not gettable through the management client",
     )?;
 
-    let exercise_result = exercise(&sandbox, &client, isolation, &image.reference).await;
+    let exercise_result = exercise(
+        &sandbox,
+        &client,
+        isolation,
+        sandbox_runtime,
+        &image.reference,
+    )
+    .await;
     let cleanup_result = sandbox.kill().await;
     if let Err(error) = exercise_result {
         if let Err(cleanup_error) = cleanup_result {
@@ -149,6 +158,7 @@ async fn exercise(
     sandbox: &Sandbox,
     client: &A3sBoxClient,
     expected_isolation: ExecutionIsolation,
+    sandbox_runtime: SandboxRuntime,
     image: &str,
 ) -> Result<(), AnyError> {
     require(
@@ -220,7 +230,7 @@ async fn exercise(
     )?;
 
     if expected_isolation == ExecutionIsolation::Sandbox {
-        exercise_filesystem_snapshot(sandbox, client, image).await?;
+        exercise_filesystem_snapshot(sandbox, client, sandbox_runtime, image).await?;
     }
 
     sandbox.pause(true).await?;
@@ -302,6 +312,7 @@ async fn exercise_image_management(client: &A3sBoxClient, reference: &str) -> Re
 async fn exercise_filesystem_snapshot(
     sandbox: &Sandbox,
     client: &A3sBoxClient,
+    sandbox_runtime: SandboxRuntime,
     image: &str,
 ) -> Result<(), AnyError> {
     // `/tmp` is an intentionally ephemeral tmpfs in Sandbox isolation and is
@@ -339,6 +350,7 @@ async fn exercise_filesystem_snapshot(
         client.clone(),
         SandboxCreateOptions::new(image)
             .isolation(ExecutionIsolation::Sandbox)
+            .sandbox_runtime(sandbox_runtime)
             .filesystem_snapshot(snapshot_id.clone()),
     )
     .await?;
@@ -384,6 +396,19 @@ fn requested_isolation() -> Result<ExecutionIsolation, AnyError> {
         "sandbox" => Ok(ExecutionIsolation::Sandbox),
         value => Err(failure(format!(
             "A3S_BOX_SDK_SMOKE_ISOLATION must be microvm or sandbox, got {value:?}"
+        ))),
+    }
+}
+
+fn requested_sandbox_runtime() -> Result<SandboxRuntime, AnyError> {
+    match std::env::var("A3S_BOX_SDK_SMOKE_SANDBOX_RUNTIME")
+        .unwrap_or_else(|_| "a3s-oci".to_string())
+        .as_str()
+    {
+        "a3s-oci" => Ok(SandboxRuntime::A3sOci),
+        "crun" => Ok(SandboxRuntime::Crun),
+        value => Err(failure(format!(
+            "A3S_BOX_SDK_SMOKE_SANDBOX_RUNTIME must be a3s-oci or crun, got {value:?}"
         ))),
     }
 }

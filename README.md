@@ -30,9 +30,10 @@ SDKs. Every workload enters one of two explicit execution classes:
 
 - a dedicated-kernel [libkrun](https://github.com/containers/libkrun) MicroVM
   by default; or
-- a shared-kernel [crun](https://github.com/containers/crun) Sandbox only when
-  a caller requests `--isolation sandbox` and the Linux host passes the full
-  capability probe.
+- a shared-kernel [A3S OCI Runtime](https://github.com/A3S-Lab/OCI-Runtime)
+  Sandbox only when a caller requests `--isolation sandbox` and the Linux host
+  passes the full capability probe. Certified `crun 1.28` remains an explicit
+  rollback and differential-testing backend during the deprecation cycle.
 
 Box never silently falls back to the lower-isolation backend. The requested
 isolation class, effective backend, policy, and controls are persisted with the
@@ -89,7 +90,7 @@ the host requirements below before running real workloads.
 
 | Contract | Default MicroVM | Explicit Sandbox |
 | --- | --- | --- |
-| Runtime backend | libkrun | Certified crun 1.28 |
+| Runtime backend | libkrun | A3S OCI Runtime; certified crun 1.28 is an explicit rollback |
 | Kernel boundary | Dedicated guest Linux kernel | Shared host Linux kernel |
 | Isolation class | `hardware-vm` | `shared-kernel` |
 | Intended workload | Untrusted workloads and stronger tenant boundaries | Trusted or semi-trusted tools, benchmarks, and automation |
@@ -242,7 +243,7 @@ or go directly to the [Rust](src/sdk/README.md),
 | Linux MicroVM | Primary local runtime | KVM and libkrun; real-host validation is required for releases |
 | macOS MicroVM | Implemented | Apple Silicon and Hypervisor.framework; Intel macOS is unsupported |
 | Windows MicroVM | Implemented and real-host validated | x86_64 WHPX; currently one vCPU, with no interactive exec, bridge networking, TEE, snapshot-fork, or CRI |
-| Linux Sandbox | Preview | Explicit `--isolation sandbox` through certified crun 1.28; shares the host kernel and rejects VM-only features |
+| Linux Sandbox | Preview | Explicit `--isolation sandbox` through the packaged A3S OCI Runtime; shares the host kernel and rejects VM-only features |
 | Kubernetes | Preview | CRI v1 server plus containerd runtime-v2 shim and opt-in `runtimeClassName: a3s-box`; complete CRI conformance is not claimed |
 | TEE | Host-specific | SEV-SNP-oriented attestation, RA-TLS, sealing, secret injection, and development-only simulation; TDX is not productized |
 
@@ -255,7 +256,7 @@ evidence. Review [Host Integration](docs/host-integration.md),
 ## Integrations
 
 - **A3S Runtime provider** — Maps digest-pinned Tasks and Services onto the
-  certified shared-kernel Sandbox with generation fencing, recovery,
+  A3S OCI shared-kernel Sandbox with generation fencing, recovery,
   structured logs, bounded idempotent exec, resource controls, and tmpfs.
 - **Kubernetes RuntimeClass** — The CRI server and containerd shim let selected
   Linux/KVM pods use `runtimeClassName: a3s-box`; installers and soak manifests
@@ -281,7 +282,7 @@ CLI · Rust SDK · local machine bridge · CRI · containerd shim
                     ┌─────────┴─────────┐
                     │                   │
            default MicroVM     explicit Sandbox
-              libkrun                crun
+              libkrun              a3s-oci
            guest kernel          host kernel
                     └─────────┬─────────┘
                               │

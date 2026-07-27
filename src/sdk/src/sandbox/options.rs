@@ -7,7 +7,7 @@ use a3s_box_core::dns::parse_add_host_entries;
 use a3s_box_core::network::NetworkMode;
 use a3s_box_core::{
     parse_port_mapping, resolve_execution, BoxConfig, CreateExecutionRequest, ExecutionIsolation,
-    ExecutionRecordPolicy, ExecutionSnapshotId, OperationId, PortMapping,
+    ExecutionRecordPolicy, ExecutionSnapshotId, OperationId, PortMapping, SandboxRuntime,
 };
 
 use crate::{A3sBoxClient, ClientError, Result};
@@ -163,6 +163,7 @@ pub struct SandboxCreateOptions {
     pub cpus: Option<u32>,
     pub memory_mb: Option<u32>,
     pub isolation: ExecutionIsolation,
+    pub sandbox_runtime: SandboxRuntime,
     pub rootfs_snapshot_id: Option<ExecutionSnapshotId>,
     pub workspace: Option<PathBuf>,
     pub workdir: Option<String>,
@@ -219,6 +220,15 @@ impl SandboxCreateOptions {
 
     pub const fn isolation(mut self, isolation: ExecutionIsolation) -> Self {
         self.isolation = isolation;
+        self
+    }
+
+    /// Select the implementation used for shared-kernel Sandbox execution.
+    ///
+    /// The default is A3S OCI Runtime. `Crun` exists only as a temporary,
+    /// explicit rollback and differential-testing path.
+    pub const fn sandbox_runtime(mut self, runtime: SandboxRuntime) -> Self {
+        self.sandbox_runtime = runtime;
         self
     }
 
@@ -339,6 +349,7 @@ impl SandboxCreateOptions {
 
         let config = BoxConfig {
             isolation: self.isolation,
+            sandbox_runtime: self.sandbox_runtime,
             image: self.image,
             workspace: self.workspace.unwrap_or_default(),
             resources,
@@ -425,6 +436,7 @@ impl Default for SandboxCreateOptions {
             cpus: None,
             memory_mb: None,
             isolation: ExecutionIsolation::Microvm,
+            sandbox_runtime: SandboxRuntime::A3sOci,
             rootfs_snapshot_id: None,
             workspace: None,
             workdir: None,

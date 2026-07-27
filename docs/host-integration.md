@@ -116,14 +116,26 @@ export A3S_BOX_BINARY="$PWD/src/target/debug/a3s-box"
 scripts/local-sdk-smoke.sh microvm
 ```
 
-On a certified Linux shared-kernel host, install `crun 1.28` at the normal A3S
-Box runtime location or select the verified artifact, then run the second
-isolation row:
+On a supported Linux shared-kernel host, the A3S Box release archive and
+Homebrew package install the matching `a3s-oci` and `a3s-oci-agent` artifacts
+beside `a3s-box`. Installed users do not set runtime paths. For a development
+checkout, build the pinned OCI Runtime revision and point the smoke gate at the
+two resulting artifacts:
 
 ```bash
-export A3S_BOX_CRUN_PATH="$A3S_HOME/bin/crun"
+git clone https://github.com/A3S-Lab/OCI-Runtime.git /tmp/a3s-oci-runtime
+git -C /tmp/a3s-oci-runtime checkout 889cd29ffb399274657533234bf65c1dc58d785b
+cargo build --manifest-path /tmp/a3s-oci-runtime/Cargo.toml \
+  --locked --release -p a3s-oci-cli -p a3s-oci-agent
+
+export A3S_BOX_OCI_RUNTIME_PATH=/tmp/a3s-oci-runtime/target/release/a3s-oci
+export A3S_BOX_OCI_AGENT_PATH=/tmp/a3s-oci-runtime/target/release/a3s-oci-agent
 scripts/local-sdk-smoke.sh sandbox
 ```
+
+Certified `crun 1.28` is retained only as an explicit rollback and
+differential qualification path. Production requests never fall back to it
+after an A3S OCI lifecycle has started.
 
 `A3S_BOX_BINARY` is only an optional executable-path override for development;
 it is not a service endpoint or credential. Normal local SDK consumers set

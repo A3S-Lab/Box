@@ -125,6 +125,7 @@ xz2 = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 a3s-runtime = { workspace = true }
+a3s-oci-sdk = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
