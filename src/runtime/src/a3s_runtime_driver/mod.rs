@@ -85,7 +85,11 @@ impl BoxRuntimeDriver {
                 let snapshot = tokio::time::timeout(
                     self.config.control_timeout,
                     tokio::task::spawn_blocking(|| {
-                        crate::sandbox::probe_sandbox_capabilities(None)
+                        crate::sandbox::probe_sandbox_capabilities_for(
+                            a3s_box_core::ExecutionBackend::A3sOci,
+                            None,
+                            None,
+                        )
                     }),
                 )
                 .await
@@ -102,16 +106,16 @@ impl BoxRuntimeDriver {
                 snapshot
                     .require_ready()
                     .map_err(|error| RuntimeError::ProviderUnavailable(error.to_string()))?;
-                let runtime = snapshot.runtime.ok_or_else(|| {
+                let runtime = snapshot.a3s_oci.ok_or_else(|| {
                     RuntimeError::ProviderUnavailable(
-                        "Box Sandbox capability probe returned no certified crun runtime".into(),
+                        "Box Sandbox capability probe returned no A3S OCI artifacts".into(),
                     )
                 })?;
                 Ok::<String, RuntimeError>(format!(
-                    "a3s-box/{} crun/{} sha256:{}",
+                    "a3s-box/{} a3s-oci/sha256:{} agent/sha256:{}",
                     env!("CARGO_PKG_VERSION"),
-                    runtime.version,
-                    &runtime.sha256[..16]
+                    &runtime.runtime_sha256[..16],
+                    &runtime.agent_sha256[..16]
                 ))
             })
             .await

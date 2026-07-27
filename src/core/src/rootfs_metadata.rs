@@ -88,13 +88,23 @@ pub fn is_runtime_internal_rootfs_path(path: &Path) -> bool {
 /// host, where following a guest-created link could rename a path outside the
 /// exported rootfs.
 pub fn stage_terminal_rootfs_metadata_for_boot(root: &Path) -> std::io::Result<bool> {
-    validate_plain_root(root)?;
+    validate_plain_root(root).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to validate rootfs before metadata staging: {error}"),
+        )
+    })?;
 
     // A temporary manifest is scoped to exactly one guest generation. Remove
     // leftovers before every boot so a later forced stop can never publish a
     // fully-written temporary manifest from an older generation.
     let temporary = root.join(ROOTFS_METADATA_TEMP_PATH.trim_start_matches('/'));
-    remove_path_no_follow(&temporary)?;
+    remove_path_no_follow(&temporary).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to remove stale rootfs metadata temporary: {error}"),
+        )
+    })?;
 
     let terminal = root.join(ROOTFS_METADATA_PATH.trim_start_matches('/'));
     let terminal_metadata = match std::fs::symlink_metadata(&terminal) {
@@ -103,7 +113,12 @@ pub fn stage_terminal_rootfs_metadata_for_boot(root: &Path) -> std::io::Result<b
             // Also fence an already-staged generation. A prior rename may have
             // succeeded before its directory sync reported an error; retries
             // must not bypass that durability failure as a no-op.
-            staging_directory_fence(root)?;
+            staging_directory_fence(root).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("failed to fence rootfs metadata staging directory: {error}"),
+                )
+            })?;
             return Ok(false);
         }
         Err(error) => return Err(error),

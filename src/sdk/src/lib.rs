@@ -37,7 +37,7 @@ pub use a3s_box_core::{
     ExecutionSnapshot, ExecutionSnapshotId, ExecutionState, ExecutionStatus, FileOp, FileRequest,
     FileResponse, FilesystemEntry, FilesystemEntryKind, FilesystemOp, FilesystemRequest,
     FilesystemResponse, KillOutcome, OperationId, Platform, PortMapping, PortProtocol,
-    ReconcileOutcome, RestartExecutionOptions,
+    ReconcileOutcome, RestartExecutionOptions, SandboxRuntime,
 };
 pub use a3s_box_runtime::{RegistryAuth, RegistryProtocol, SignaturePolicy};
 

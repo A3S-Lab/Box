@@ -9,7 +9,7 @@ use a3s_box_sdk::{
 };
 
 #[tokio::test]
-#[ignore = "requires a dedicated A3S OS home and certified Sandbox runtime"]
+#[ignore = "requires a dedicated A3S OS home and A3S OCI Runtime artifacts"]
 async fn sdk_create_start_run_and_kill_use_the_canonical_manager() {
     let home = validated_home();
     let client = A3sBoxClient::from_home(&home);
@@ -82,14 +82,23 @@ fn validated_home() -> PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("sdk-managed-smoke")));
-    let configured_crun = PathBuf::from(
-        std::env::var_os("A3S_BOX_CRUN_PATH").expect("A3S_BOX_CRUN_PATH is required"),
-    );
-    assert_eq!(
-        configured_crun.canonicalize().unwrap(),
-        home.join("bin/crun").canonicalize().unwrap()
-    );
-    for binary in ["crun", "a3s-box-shim", "a3s-box-guest-init"] {
+    for (variable, binary) in [
+        ("A3S_BOX_OCI_RUNTIME_PATH", "a3s-oci"),
+        ("A3S_BOX_OCI_AGENT_PATH", "a3s-oci-agent"),
+    ] {
+        let configured =
+            PathBuf::from(std::env::var_os(variable).expect("runtime path is required"));
+        assert_eq!(
+            configured.canonicalize().unwrap(),
+            home.join("bin").join(binary).canonicalize().unwrap()
+        );
+    }
+    for binary in [
+        "a3s-oci",
+        "a3s-oci-agent",
+        "a3s-box-shim",
+        "a3s-box-guest-init",
+    ] {
         assert!(home.join("bin").join(binary).is_file());
     }
     home
@@ -127,7 +136,7 @@ fn operation(suffix: &str) -> OperationId {
 
 fn assert_runtime_removed(home: &Path, execution_id: &str) {
     assert!(!home.join("boxes").join(execution_id).exists());
-    assert!(!home.join("run/crun").join(execution_id).exists());
+    assert!(!home.join("run/a3s-oci").join(execution_id).exists());
     assert!(!Path::new("/tmp/a3s-box-sockets")
         .join(execution_id)
         .exists());

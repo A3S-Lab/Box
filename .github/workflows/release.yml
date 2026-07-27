@@ -10,6 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  A3S_OCI_RUNTIME_REV: 889cd29ffb399274657533234bf65c1dc58d785b
 
 jobs:
   # ── Tests must pass before release ─────────────────────────────
@@ -145,6 +146,14 @@ jobs:
         run: |
           git -c http.extraheader= submodule update --init --recursive
 
+      - name: Checkout pinned A3S OCI Runtime
+        if: runner.os == 'Linux'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: A3S-Lab/OCI-Runtime
+          ref: ${{ env.A3S_OCI_RUNTIME_REV }}
+          path: oci-runtime
+
       # dtolnay/rust-toolchain stable (2026-07-16)
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
@@ -197,6 +206,14 @@ jobs:
               --target ${{ matrix.host_target }}
           fi
 
+      - name: Build A3S OCI Sandbox runtime
+        if: runner.os == 'Linux'
+        working-directory: oci-runtime
+        run: |
+          cargo build --locked --release \
+            -p a3s-oci-cli -p a3s-oci-agent \
+            --target ${{ matrix.host_target }}
+
       - name: Build containerd RuntimeClass shim
         if: matrix.build_containerd_shim
         working-directory: containerd-shim
@@ -228,6 +245,15 @@ jobs:
 
           cp "$HOST_RELEASE_DIR/a3s-box" "$DIR/"
           cp "$HOST_RELEASE_DIR/a3s-box-shim" "$DIR/"
+
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            OCI_RELEASE_DIR="oci-runtime/target/${{ matrix.host_target }}/release"
+            cp "$OCI_RELEASE_DIR/a3s-oci" "$DIR/"
+            cp "$OCI_RELEASE_DIR/a3s-oci-agent" "$DIR/"
+            cp oci-runtime/LICENSE "$DIR/OCI-RUNTIME-LICENSE"
+            printf '%s\n' "$A3S_OCI_RUNTIME_REV" \
+              > "$DIR/OCI-RUNTIME-REVISION"
+          fi
 
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             cp "$HOST_RELEASE_DIR/a3s-box-cri" "$DIR/"
@@ -302,7 +328,12 @@ jobs:
           if [ "${{ runner.os }}" = "Linux" ]; then
             # The main package has an explicit GNU/glibc contract because it
             # ships a dynamically loaded libkrun beside the host binaries.
-            HOST_BINARIES=("$DIR/a3s-box" "$DIR/a3s-box-shim")
+            HOST_BINARIES=(
+              "$DIR/a3s-box"
+              "$DIR/a3s-box-shim"
+              "$DIR/a3s-oci"
+              "$DIR/a3s-oci-agent"
+            )
             if [ "${{ matrix.build_cri }}" = "true" ]; then
               HOST_BINARIES+=("$DIR/a3s-box-cri" "$DIR/a3s-box-e2b")
             fi
@@ -461,6 +492,13 @@ jobs:
           for binary in a3s-box a3s-box-shim a3s-box-guest-init; do
             test -s "$DIR/$binary" && test -x "$DIR/$binary"
           done
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            for binary in a3s-oci a3s-oci-agent; do
+              test -s "$DIR/$binary" && test -x "$DIR/$binary"
+            done
+            test "$(cat "$DIR/OCI-RUNTIME-REVISION")" = \
+              "$A3S_OCI_RUNTIME_REV"
+          fi
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             for binary in a3s-box-cri a3s-box-e2b; do
               test -s "$DIR/$binary" && test -x "$DIR/$binary"
@@ -477,6 +515,11 @@ jobs:
           tar tzf "${DIR}.tar.gz" > "${DIR}.contents"
           grep -Fx "${DIR}/a3s-box" "${DIR}.contents"
           grep -Fx "${DIR}/a3s-box-guest-init" "${DIR}.contents"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            grep -Fx "${DIR}/a3s-oci" "${DIR}.contents"
+            grep -Fx "${DIR}/a3s-oci-agent" "${DIR}.contents"
+            grep -Fx "${DIR}/OCI-RUNTIME-REVISION" "${DIR}.contents"
+          fi
           if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
             grep -Fx "${DIR}/containerd-shim-a3s-box-v2" "${DIR}.contents"
             sha256sum "${DIR}.tar.gz" "$SHIM_ASSET" > "${DIR}.sha256"
@@ -875,6 +918,8 @@ jobs:
               bin.install "a3s-box"
               bin.install "a3s-box-shim"
               bin.install "a3s-box-guest-init"
+              bin.install "a3s-oci" if File.exist?("a3s-oci")
+              bin.install "a3s-oci-agent" if File.exist?("a3s-oci-agent")
               bin.install "a3s-box-cri" if File.exist?("a3s-box-cri")
               bin.install "a3s-box-e2b" if File.exist?("a3s-box-e2b")
               lib.install Dir["lib/*"] if Dir.exist?("lib")

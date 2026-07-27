@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(config.isolation, a3s_box_core::ExecutionIsolation::Sandbox);
         assert_eq!(
             a3s_box_core::resolve_execution(&config).unwrap().backend,
-            a3s_box_core::ExecutionBackend::Crun
+            a3s_box_core::ExecutionBackend::A3sOci
         );
     }
 

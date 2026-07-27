@@ -548,7 +548,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
         let metadata = self.metadata(record)?;
-        if metadata.plan.backend == ExecutionBackend::Crun {
+        if metadata.plan.backend.is_sandbox() {
             return self.inspect_sandbox(record).await;
         }
         if let Some(manager) = self.manager(&record.id) {
@@ -564,7 +564,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         keep_memory: bool,
     ) -> ExecutionManagerResult<LocalExecutionHandle> {
         let metadata = self.metadata(record)?;
-        if metadata.plan.backend == ExecutionBackend::Crun {
+        if metadata.plan.backend.is_sandbox() {
             if !keep_memory {
                 return Err(unsupported(
                     record,
@@ -593,7 +593,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
 
     async fn resume(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         let metadata = self.metadata(record)?;
-        if metadata.plan.backend == ExecutionBackend::Crun {
+        if metadata.plan.backend.is_sandbox() {
             return self.resume_sandbox(record).await;
         }
         let shared = self.require_microvm(record).await?;
@@ -650,7 +650,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                 .await;
         }
         match metadata.plan.backend {
-            ExecutionBackend::Crun => {
+            ExecutionBackend::A3sOci | ExecutionBackend::Crun => {
                 self.destroy_detached_sandbox(record, remove_anonymous_volumes, false, timeout_secs)
                     .await
             }
@@ -675,7 +675,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
     ) -> ExecutionManagerResult<KillOutcome> {
         let metadata = self.metadata(record)?;
         #[cfg(target_os = "linux")]
-        if metadata.plan.backend == ExecutionBackend::Crun {
+        if metadata.plan.backend.is_sandbox() {
             super::snapshot::persist_sandbox_snapshot_mappings(record)?;
         }
         let timeout_secs = timeout_secs.or(record.stop_timeout);
@@ -685,7 +685,7 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                 .await;
         }
         match metadata.plan.backend {
-            ExecutionBackend::Crun => {
+            ExecutionBackend::A3sOci | ExecutionBackend::Crun => {
                 self.destroy_detached_sandbox(record, false, true, timeout_secs)
                     .await
             }

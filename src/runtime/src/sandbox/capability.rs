@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use a3s_box_core::error::{BoxError, Result};
+use a3s_box_core::ExecutionBackend;
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
@@ -37,6 +38,15 @@ pub struct CertifiedCrun {
     pub version: String,
     pub sha256: String,
     pub features: Vec<String>,
+}
+
+/// Verified A3S OCI Runtime artifacts used by the native Linux owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertifiedA3sOci {
+    pub runtime_path: PathBuf,
+    pub runtime_sha256: String,
+    pub agent_path: PathBuf,
+    pub agent_sha256: String,
 }
 
 /// One contiguous user-namespace ID mapping.
@@ -90,6 +100,8 @@ pub struct SandboxCapabilitySnapshot {
     pub platform: String,
     pub architecture: String,
     pub runtime: Option<CertifiedCrun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a3s_oci: Option<CertifiedA3sOci>,
     pub namespaces: Vec<String>,
     pub user_namespace: Option<UserNamespaceEvidence>,
     pub seccomp_actions: Vec<String>,
@@ -117,7 +129,7 @@ impl SandboxCapabilitySnapshot {
                 self.failures.join("; ")
             ),
             hint: Some(
-                "Use a certified A3S OS Sandbox host with crun 1.28, user namespaces, and delegated cgroup v2"
+                "Use an A3S Sandbox host with the selected runtime artifacts, user namespaces, and delegated cgroup v2"
                     .to_string(),
             ),
         })
@@ -130,11 +142,21 @@ impl SandboxCapabilitySnapshot {
 /// checks. When omitted, only packaged A3S locations are searched; `PATH` is
 /// deliberately ignored.
 pub fn probe_sandbox_capabilities(runtime_path: Option<&Path>) -> SandboxCapabilitySnapshot {
+    probe_sandbox_capabilities_for(ExecutionBackend::Crun, runtime_path, None)
+}
+
+/// Probe host controls and the artifacts required by one Sandbox backend.
+pub fn probe_sandbox_capabilities_for(
+    backend: ExecutionBackend,
+    runtime_path: Option<&Path>,
+    agent_path: Option<&Path>,
+) -> SandboxCapabilitySnapshot {
     let mut snapshot = SandboxCapabilitySnapshot {
         schema: SANDBOX_CAPABILITY_SCHEMA.to_string(),
         platform: std::env::consts::OS.to_string(),
         architecture: std::env::consts::ARCH.to_string(),
         runtime: None,
+        a3s_oci: None,
         namespaces: Vec::new(),
         user_namespace: None,
         seccomp_actions: Vec::new(),
@@ -151,7 +173,7 @@ pub fn probe_sandbox_capabilities(runtime_path: Option<&Path>) -> SandboxCapabil
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = runtime_path;
+        let _ = (backend, runtime_path, agent_path);
         snapshot
             .failures
             .push("Sandbox isolation is supported only on Linux".to_string());
@@ -160,13 +182,24 @@ pub fn probe_sandbox_capabilities(runtime_path: Option<&Path>) -> SandboxCapabil
 
     #[cfg(target_os = "linux")]
     {
-        let runtime_path = runtime_path
-            .map(Path::to_path_buf)
-            .map(Ok)
-            .unwrap_or_else(resolve_certified_crun_path);
-        match runtime_path.and_then(|path| verify_certified_crun(&path)) {
-            Ok(runtime) => snapshot.runtime = Some(runtime),
-            Err(error) => snapshot.failures.push(error.to_string()),
+        match backend {
+            ExecutionBackend::A3sOci => match resolve_a3s_oci_artifacts(runtime_path, agent_path) {
+                Ok(runtime) => snapshot.a3s_oci = Some(runtime),
+                Err(error) => snapshot.failures.push(error.to_string()),
+            },
+            ExecutionBackend::Crun => {
+                let runtime_path = runtime_path
+                    .map(Path::to_path_buf)
+                    .map(Ok)
+                    .unwrap_or_else(resolve_certified_crun_path);
+                match runtime_path.and_then(|path| verify_certified_crun(&path)) {
+                    Ok(runtime) => snapshot.runtime = Some(runtime),
+                    Err(error) => snapshot.failures.push(error.to_string()),
+                }
+            }
+            ExecutionBackend::Krun => snapshot
+                .failures
+                .push("MicroVM execution is not a Sandbox backend".to_string()),
         }
 
         probe_namespaces(&mut snapshot);
@@ -181,6 +214,94 @@ pub fn probe_sandbox_capabilities(runtime_path: Option<&Path>) -> SandboxCapabil
 
         snapshot
     }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_a3s_oci_artifacts(
+    runtime_path: Option<&Path>,
+    agent_path: Option<&Path>,
+) -> Result<CertifiedA3sOci> {
+    let runtime_path = resolve_packaged_artifact(
+        runtime_path,
+        "A3S_BOX_OCI_RUNTIME_PATH",
+        "a3s-oci",
+        "A3S OCI Runtime",
+    )?;
+    let agent_path = resolve_packaged_artifact(
+        agent_path,
+        "A3S_BOX_OCI_AGENT_PATH",
+        "a3s-oci-agent",
+        "A3S OCI agent",
+    )?;
+    Ok(CertifiedA3sOci {
+        runtime_sha256: sha256_file(&runtime_path)?,
+        agent_sha256: sha256_file(&agent_path)?,
+        runtime_path,
+        agent_path,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_packaged_artifact(
+    explicit: Option<&Path>,
+    environment: &str,
+    filename: &str,
+    label: &str,
+) -> Result<PathBuf> {
+    let selected = if let Some(path) = explicit {
+        path.to_path_buf()
+    } else if let Some(path) = std::env::var_os(environment).filter(|path| !path.is_empty()) {
+        PathBuf::from(path)
+    } else {
+        let mut candidates = Vec::new();
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(directory) = executable.parent() {
+                candidates.push(directory.join(filename));
+                if directory.file_name().is_some_and(|name| name == "deps") {
+                    if let Some(target_directory) = directory.parent() {
+                        candidates.push(target_directory.join(filename));
+                    }
+                }
+            }
+        }
+        candidates.push(a3s_box_core::dirs_home().join("bin").join(filename));
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| BoxError::BoxBootError {
+                message: format!("{label} artifact was not found in packaged A3S locations"),
+                hint: Some(format!(
+                    "Install the A3S Box Sandbox runtime package or set {environment} to its packaged artifact"
+                )),
+            })?
+    };
+
+    let canonical = selected
+        .canonicalize()
+        .map_err(|error| BoxError::BoxBootError {
+            message: format!("Failed to resolve {label} {}: {error}", selected.display()),
+            hint: None,
+        })?;
+    let metadata = canonical
+        .metadata()
+        .map_err(|error| BoxError::BoxBootError {
+            message: format!("Failed to inspect {label} {}: {error}", canonical.display()),
+            hint: None,
+        })?;
+    if !metadata.is_file() {
+        return Err(BoxError::BoxBootError {
+            message: format!("{label} is not a regular file: {}", canonical.display()),
+            hint: None,
+        });
+    }
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(BoxError::BoxBootError {
+            message: format!("{label} is not executable: {}", canonical.display()),
+            hint: None,
+        });
+    }
+    Ok(canonical)
 }
 
 /// Produce complete UID and GID mappings for the IDs present in one rootfs.
@@ -815,6 +936,46 @@ fn parse_subordinate_ranges(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolves_and_digests_explicit_a3s_oci_artifacts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime = temporary.path().join("a3s-oci");
+        let agent = temporary.path().join("a3s-oci-agent");
+        std::fs::write(&runtime, b"runtime-artifact").unwrap();
+        std::fs::write(&agent, b"agent-artifact").unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let artifacts = resolve_a3s_oci_artifacts(Some(&runtime), Some(&agent)).unwrap();
+
+        assert_eq!(artifacts.runtime_path, runtime.canonicalize().unwrap());
+        assert_eq!(artifacts.agent_path, agent.canonicalize().unwrap());
+        assert_eq!(artifacts.runtime_sha256.len(), 64);
+        assert_eq!(artifacts.agent_sha256.len(), 64);
+        assert_ne!(artifacts.runtime_sha256, artifacts.agent_sha256);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_a_non_executable_a3s_oci_artifact() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime = temporary.path().join("a3s-oci");
+        let agent = temporary.path().join("a3s-oci-agent");
+        std::fs::write(&runtime, b"runtime-artifact").unwrap();
+        std::fs::write(&agent, b"agent-artifact").unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = resolve_a3s_oci_artifacts(Some(&runtime), Some(&agent)).unwrap_err();
+
+        assert!(error.to_string().contains("not executable"));
+    }
 
     #[test]
     fn parses_crun_version_and_features() {

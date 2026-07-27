@@ -13,7 +13,9 @@ use sysinfo::{Pid, System};
 // `crun kill` accepts Linux signal numbers even though this module must also
 // type-check on hosts where libc does not expose POSIX signal constants.
 const SIGKILL_NUMBER: i32 = 9;
+#[cfg(target_os = "linux")]
 const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
 const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +166,7 @@ impl CrunHandler {
         Ok(Some(state))
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn pause_at(
         runtime_path: &Path,
         runtime_root: &Path,
@@ -179,6 +182,7 @@ impl CrunHandler {
         )
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn resume_at(
         runtime_path: &Path,
         runtime_root: &Path,
@@ -194,6 +198,7 @@ impl CrunHandler {
         )
     }
 
+    #[cfg(target_os = "linux")]
     fn transition_state_at(
         runtime_path: &Path,
         runtime_root: &Path,

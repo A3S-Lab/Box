@@ -87,22 +87,32 @@ fn restore_rootfs_metadata_excluding(
     // the missing canonical marker immediately. Repeat it here for runtimes that
     // launch guest-init directly: replay is one-shot, and only a subsequent
     // clean shutdown may create a new terminal completion marker.
-    stage_terminal_rootfs_metadata_for_boot(root)?;
+    stage_terminal_rootfs_metadata_for_boot(root).map_err(|error| {
+        format!(
+            "failed to stage terminal rootfs metadata at {}: {error}",
+            root.display()
+        )
+    })?;
     // Runtime may update generated files such as resolv.conf after the image
     // rootfs cache is composed, so image replay validates type and symlink
     // identity but not regular-file size. The terminal snapshot was captured
     // after all container writes and remains strict.
-    apply_metadata_manifest(root, IMAGE_ROOTFS_METADATA_PATH, false, excluded_mounts)?;
-    apply_metadata_manifest(root, PREVIOUS_ROOTFS_METADATA_PATH, true, excluded_mounts)?;
+    apply_metadata_manifest(root, IMAGE_ROOTFS_METADATA_PATH, false, excluded_mounts)
+        .map_err(|error| format!("failed to replay image rootfs metadata: {error}"))?;
+    apply_metadata_manifest(root, PREVIOUS_ROOTFS_METADATA_PATH, true, excluded_mounts)
+        .map_err(|error| format!("failed to replay terminal rootfs metadata: {error}"))?;
     match std::fs::remove_file(root.join(PREVIOUS_ROOTFS_METADATA_PATH.trim_start_matches('/'))) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            return Err(format!("failed to consume terminal rootfs metadata: {error}").into())
+        }
     }
     // Fence even a not-found retry: a prior delete may have succeeded before
     // its directory sync reported an error. Never exec the workload until that
     // one-shot deletion is durably ordered.
-    sync_rootfs_directory(root)?;
+    sync_rootfs_directory(root)
+        .map_err(|error| format!("failed to sync replayed rootfs metadata: {error}"))?;
     Ok(())
 }
 

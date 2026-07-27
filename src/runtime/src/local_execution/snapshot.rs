@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use a3s_box_core::snapshot::SnapshotMetadata;
 use a3s_box_core::{
-    ExecutionBackend, ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManagerError,
+    ExecutionGeneration, ExecutionId, ExecutionLease, ExecutionManagerError,
     ExecutionManagerResult, ExecutionSnapshot, ExecutionSnapshotId, ExecutionState,
 };
 
@@ -46,7 +46,7 @@ impl LocalExecutionManager {
                 "execution {execution_id} lost managed lifecycle metadata"
             ))
         })?;
-        if metadata.plan.backend != ExecutionBackend::Crun {
+        if !metadata.plan.backend.is_sandbox() {
             return Err(ExecutionManagerError::Conflict {
                 execution_id: execution_id.clone(),
                 message: "filesystem snapshots currently require the Sandbox backend".to_string(),

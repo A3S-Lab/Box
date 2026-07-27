@@ -2,7 +2,8 @@
 //!
 //! The caller must set `A3S_BOX_MANAGED_SMOKE=1`, point `A3S_HOME` at a
 //! dedicated directory whose name contains `managed-smoke`, and set
-//! `A3S_BOX_CRUN_PATH` to that directory's certified `bin/crun` artifact.
+//! `A3S_BOX_OCI_RUNTIME_PATH` and `A3S_BOX_OCI_AGENT_PATH` to that directory's
+//! matching A3S OCI Runtime artifacts.
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -37,7 +38,7 @@ mod linux {
     type AnyError = Box<dyn Error + Send + Sync>;
 
     pub(super) async fn run() -> Result<(), AnyError> {
-        // Production services commonly use UMask=0077. Keep the real crun
+        // Production services commonly use UMask=0077. Keep the real runtime
         // smoke from accidentally relying on world-searchable runtime paths.
         let _umask = RestrictiveUmask::install();
         let home_dir = validated_home()?;
@@ -111,15 +112,20 @@ mod linux {
             "A3S_HOME must name a dedicated managed-smoke directory",
         )?;
 
-        let expected_crun = home_dir.join("bin/crun").canonicalize()?;
-        let configured_crun = std::env::var_os("A3S_BOX_CRUN_PATH")
-            .map(PathBuf::from)
-            .ok_or_else(|| failure("A3S_BOX_CRUN_PATH must select the isolated crun artifact"))?
-            .canonicalize()?;
-        require(
-            configured_crun == expected_crun,
-            "A3S_BOX_CRUN_PATH must equal A3S_HOME/bin/crun",
-        )?;
+        for (variable, filename) in [
+            ("A3S_BOX_OCI_RUNTIME_PATH", "a3s-oci"),
+            ("A3S_BOX_OCI_AGENT_PATH", "a3s-oci-agent"),
+        ] {
+            let expected = home_dir.join("bin").join(filename).canonicalize()?;
+            let configured = std::env::var_os(variable)
+                .map(PathBuf::from)
+                .ok_or_else(|| failure(format!("{variable} must select {filename}")))?
+                .canonicalize()?;
+            require(
+                configured == expected,
+                format!("{variable} must equal A3S_HOME/bin/{filename}"),
+            )?;
+        }
         require(
             home_dir.join("bin/a3s-box-guest-init").is_file(),
             "A3S_HOME/bin/a3s-box-guest-init is missing",
@@ -165,9 +171,9 @@ mod linux {
         let manager = LocalExecutionManager::with_vm_backend(state_path, home_dir);
         let reservation = manager.create(request, source_operation_id).await?;
         require(
-            reservation.plan.backend == ExecutionBackend::Crun
+            reservation.plan.backend == ExecutionBackend::A3sOci
                 && reservation.plan.isolation_class == IsolationClass::SharedKernel,
-            "Sandbox request did not resolve exclusively to the crun shared-kernel backend",
+            "Sandbox request did not resolve to the A3S OCI shared-kernel backend",
         )?;
         let execution_id = reservation.execution_id.clone();
         let status = manager.inspect(&execution_id).await?;
@@ -183,7 +189,7 @@ mod linux {
         let box_dir = home_dir.join("boxes").join(execution_id.as_str());
         validate_runtime_absent(home_dir, &execution_id)?;
         println!(
-            "created execution={} backend=crun state=created",
+            "created execution={} backend=a3s-oci state=created",
             execution_id
         );
 
@@ -306,10 +312,10 @@ mod linux {
         require(!box_dir.exists(), "managed Sandbox box directory leaked")?;
         require(
             !home_dir
-                .join("run/crun")
+                .join("run/a3s-oci")
                 .join(execution_id.as_str())
                 .exists(),
-            "managed Sandbox crun state directory leaked",
+            "managed Sandbox A3S OCI state directory leaked",
         )?;
         require(
             !Path::new("/tmp/a3s-box-sockets")
@@ -336,9 +342,9 @@ mod linux {
             .await?;
         let restore_elapsed = restore_started.elapsed();
         require(
-            restored_lease.plan.backend == ExecutionBackend::Crun
+            restored_lease.plan.backend == ExecutionBackend::A3sOci
                 && restored_lease.plan.isolation_class == IsolationClass::SharedKernel,
-            "restored Sandbox did not stay on the crun backend",
+            "restored Sandbox did not stay on the A3S OCI backend",
         )?;
         require(
             restore_elapsed <= std::time::Duration::from_secs(30),
@@ -514,10 +520,10 @@ mod linux {
         )?;
         require(
             !home_dir
-                .join("run/crun")
+                .join("run/a3s-oci")
                 .join(execution_id.as_str())
                 .exists(),
-            "created Sandbox unexpectedly allocated a crun state directory",
+            "created Sandbox unexpectedly allocated an A3S OCI state directory",
         )?;
         require(
             !Path::new("/tmp/a3s-box-sockets")
@@ -537,10 +543,10 @@ mod linux {
         )?;
         require(
             !home_dir
-                .join("run/crun")
+                .join("run/a3s-oci")
                 .join(execution_id.as_str())
                 .exists(),
-            "failed Sandbox restore leaked its crun state directory",
+            "failed Sandbox restore leaked its A3S OCI state directory",
         )?;
         require(
             !Path::new("/tmp/a3s-box-sockets")
@@ -588,8 +594,12 @@ mod linux {
         let record: serde_json::Value = serde_json::from_slice(&std::fs::read(&runtime_record)?)?;
         require(
             record.get("schema").and_then(serde_json::Value::as_str)
-                == Some("a3s.box.sandbox-runtime.v1"),
+                == Some("a3s.box.sandbox-runtime.v2"),
             "Sandbox runtime record has an unexpected schema",
+        )?;
+        require(
+            record.get("backend").and_then(serde_json::Value::as_str) == Some("a3s-oci"),
+            "Sandbox runtime record has an unexpected backend",
         )?;
         require(
             record
@@ -604,8 +614,49 @@ mod linux {
             .map(PathBuf::from)
             .ok_or_else(|| failure("Sandbox runtime record has no runtime path"))?;
         require(
-            runtime_path.canonicalize()? == home_dir.join("bin/crun").canonicalize()?,
-            "Sandbox runtime record does not reference the certified crun artifact",
+            runtime_path.canonicalize()? == home_dir.join("bin/a3s-oci").canonicalize()?,
+            "Sandbox runtime record does not reference the selected A3S OCI Runtime artifact",
+        )?;
+        let agent_path = record
+            .get("agent_path")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| failure("Sandbox runtime record has no agent path"))?;
+        require(
+            agent_path.canonicalize()? == home_dir.join("bin/a3s-oci-agent").canonicalize()?,
+            "Sandbox runtime record does not reference the selected A3S OCI agent artifact",
+        )?;
+        require(
+            record
+                .get("runtime_socket")
+                .and_then(serde_json::Value::as_str)
+                .map(Path::new)
+                == Some(
+                    home_dir
+                        .join("run/a3s-oci")
+                        .join(execution_id.as_str())
+                        .join("runtime.sock")
+                        .as_path(),
+                ),
+            "Sandbox runtime record has an unexpected SDK endpoint",
+        )?;
+        require(
+            record
+                .get("generation")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|generation| generation > 0),
+            "Sandbox runtime record has no exact generation",
+        )?;
+        require(
+            record
+                .get("owner_pid")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|pid| pid > 0)
+                && record
+                    .get("owner_pid_start_time")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some_and(|start_time| start_time > 0),
+            "Sandbox runtime record has no owner process identity",
         )?;
         let log_worker_pid = record
             .get("log_worker_pid")
@@ -690,7 +741,7 @@ mod linux {
         Ok(())
     }
 
-    fn require(condition: bool, message: &str) -> Result<(), AnyError> {
+    fn require(condition: bool, message: impl Into<String>) -> Result<(), AnyError> {
         if condition {
             Ok(())
         } else {

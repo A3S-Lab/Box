@@ -218,7 +218,7 @@ pub(super) fn fake_driver_with_backend(
     .unwrap();
     driver
         .provider_build
-        .set("a3s-box/test crun/test sha256:0123456789abcdef".into())
+        .set("a3s-box/test a3s-oci/sha256:0123456789abcdef agent/sha256:fedcba9876543210".into())
         .unwrap();
     driver
 }

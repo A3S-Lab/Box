@@ -78,7 +78,7 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
 
     if record.isolation.is_sandbox() {
         crate::vm::reap::cleanup_recorded_sandbox_runtime_in(home_dir, &record.box_dir, &record.id)
-            .map_err(|error| cleanup_error(record, "delete the recorded crun runtime", error))?;
+            .map_err(|error| cleanup_error(record, "delete the recorded Sandbox runtime", error))?;
     }
 
     remove_anonymous_volumes(home_dir, record)?;
@@ -95,9 +95,12 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
     remove_tree_if_present(&socket_dir)
         .map_err(|error| cleanup_error(record, "remove the runtime socket directory", error))?;
 
-    let runtime_root = home_dir.join("run/crun").join(&record.id);
-    remove_tree_if_present(&runtime_root)
-        .map_err(|error| cleanup_error(record, "remove the crun state directory", error))?;
+    for runtime in ["a3s-oci", "crun"] {
+        let runtime_root = home_dir.join("run").join(runtime).join(&record.id);
+        remove_tree_if_present(&runtime_root).map_err(|error| {
+            cleanup_error(record, "remove the Sandbox runtime state directory", error)
+        })?;
+    }
 
     let bind_mount_dir = std::env::temp_dir().join(format!("a3s-fs-mount-{}", record.id));
     remove_tree_if_present(&bind_mount_dir)

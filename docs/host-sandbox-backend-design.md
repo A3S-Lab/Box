@@ -1,23 +1,27 @@
 # Host Sandbox Backend Design
 
-Status: **Implementation in progress**
+Status: **A3S OCI migration in progress**
 
 Scope: architecture, implemented OCI runtime foundation, and remaining
 lifecycle/security/performance gates
 
-The certified `crun` launch path, protected OCI bundle construction, managed
-create/start/kill lifecycle, exec, health, named volumes, shared memory, and
-durable two-phase managed restart are implemented. This document remains the
-source for unfinished hardening, lifecycle parity, and a3s-bench gates; it is
+The A3S OCI launch path is now the default implementation for new Sandbox
+requests. Certified `crun 1.28` remains an explicit rollback and differential
+oracle for one deprecation cycle. Protected OCI bundle construction, managed
+lifecycle, exec, health, named volumes, shared memory, and durable two-phase
+managed restart are implemented. This document remains the source for the
+shared-host-kernel threat model and unfinished hardening and soak gates; it is
 not a claim that the complete validation matrix has passed.
 
 Target platform: Linux without `/dev/kvm`
 
 ## Executive decision
 
-A3S Box should support Linux hosts without `/dev/kvm` through a second,
-first-class execution backend. The backend should compile an A3S execution plan
-into an OCI bundle and launch it with a pinned `crun` release.
+A3S Box supports Linux hosts without `/dev/kvm` through a second, first-class
+execution class. The backend compiles an A3S execution plan into an OCI bundle
+and launches it through the digest-recorded A3S OCI Runtime. A typed internal
+selector can choose certified `crun` only for rollback and differential
+qualification; the public isolation request remains backend-neutral.
 
 The public API must describe the requested isolation posture, not the mechanism
 used to implement it. The only new CLI form is:
@@ -62,11 +66,11 @@ already implements most of that Linux container lifecycle correctly, so the
 host-sandbox backend should compile policy into OCI rather than construct an
 ad-hoc process wrapper command line.
 
-`crun` is the initial production backend because it supports OCI bundles,
+`crun` was the initial production baseline because it supports OCI bundles,
 rootless user mappings, namespaces, capabilities, seccomp, cgroup v2, and
-passing pre-opened file descriptors into a container. Only one tested version
-should be accepted in the first release. The resolver must not silently select
-an arbitrary host `crun` or `runc` binary.
+passing pre-opened file descriptors into a container. Only the certified 1.28
+artifact remains accepted for rollback comparison. The resolver never silently
+selects an arbitrary host `crun` or `runc` binary.
 
 ## Goals
 

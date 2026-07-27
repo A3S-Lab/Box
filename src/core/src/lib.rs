@@ -36,7 +36,7 @@ pub mod workload;
 // Re-export commonly used types
 pub use audit::{AuditAction, AuditConfig, AuditEvent, AuditOutcome};
 pub use compose::ComposeConfig;
-pub use config::{BoxConfig, ExecutionIsolation, ResourceConfig, ResourceLimits};
+pub use config::{BoxConfig, ExecutionIsolation, ResourceConfig, ResourceLimits, SandboxRuntime};
 pub use error::{BoxError, Result};
 pub use event::{BoxEvent, EventEmitter};
 pub use exec::{ExecChunk, ExecEvent, ExecExit, ExecMetrics, StreamType};

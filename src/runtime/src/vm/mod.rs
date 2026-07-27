@@ -22,7 +22,7 @@ use a3s_box_core::config::BoxConfig;
 use a3s_box_core::config::TeeConfig;
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::event::{BoxEvent, EventEmitter};
-use a3s_box_core::execution::{ExecutionBackend, ResolvedExecutionPlan};
+use a3s_box_core::execution::ResolvedExecutionPlan;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::Instrument;
@@ -1106,7 +1106,7 @@ impl VmManager {
 
         let execution_plan = a3s_box_core::resolve_execution(&self.config)?;
         self.resolved_execution_plan = Some(execution_plan.clone());
-        if execution_plan.backend == ExecutionBackend::Crun {
+        if execution_plan.backend.is_sandbox() {
             let boot_start = std::time::Instant::now();
             return self
                 .boot_sandbox(execution_plan, &boot_span, boot_start)
@@ -1684,7 +1684,7 @@ impl VmManager {
         if self
             .resolved_execution_plan
             .as_ref()
-            .is_some_and(|plan| plan.backend == ExecutionBackend::Crun)
+            .is_some_and(|plan| plan.backend.is_sandbox())
             || self.config.isolation.is_sandbox()
         {
             return Err(BoxError::StateError(
@@ -1719,7 +1719,7 @@ impl VmManager {
         if self
             .resolved_execution_plan
             .as_ref()
-            .is_some_and(|plan| plan.backend == ExecutionBackend::Crun)
+            .is_some_and(|plan| plan.backend.is_sandbox())
             || self.config.isolation.is_sandbox()
         {
             return Err(BoxError::StateError(
@@ -1838,7 +1838,7 @@ impl VmManager {
         if self
             .resolved_execution_plan
             .as_ref()
-            .is_some_and(|plan| plan.backend == ExecutionBackend::Crun)
+            .is_some_and(|plan| plan.backend.is_sandbox())
             || self.config.isolation.is_sandbox()
         {
             return Err(BoxError::StateError(

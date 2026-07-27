@@ -23,6 +23,18 @@ impl ExecutionIsolation {
     }
 }
 
+/// Runtime implementation selected for shared-kernel Sandbox execution.
+///
+/// A3S OCI Runtime is the default. `Crun` is retained for one deprecation
+/// cycle as an explicit rollback selector and for differential qualification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxRuntime {
+    #[default]
+    A3sOci,
+    Crun,
+}
+
 /// TEE (Trusted Execution Environment) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -293,6 +305,10 @@ pub struct BoxConfig {
     #[serde(default)]
     pub isolation: ExecutionIsolation,
 
+    /// Runtime used when `isolation` selects the shared-kernel Sandbox.
+    #[serde(default)]
+    pub sandbox_runtime: SandboxRuntime,
+
     /// OCI image reference (e.g., "nginx:alpine", "ghcr.io/org/app:latest")
     #[serde(default)]
     pub image: String,
@@ -473,6 +489,7 @@ impl Default for BoxConfig {
     fn default() -> Self {
         Self {
             isolation: ExecutionIsolation::default(),
+            sandbox_runtime: SandboxRuntime::default(),
             image: String::new(),
             // Empty path signals the runtime to create a per-box workspace
             // under ~/.a3s/boxes/<box_id>/workspace/ at boot time.
@@ -643,6 +660,7 @@ mod tests {
         let config = BoxConfig::default();
 
         assert!(config.image.is_empty());
+        assert_eq!(config.sandbox_runtime, SandboxRuntime::A3sOci);
         // Empty workspace signals the runtime to use a per-box directory at boot time.
         assert!(config.workspace.as_os_str().is_empty());
         assert_eq!(config.resources.vcpus, DEFAULT_VCPUS);
