@@ -50,6 +50,29 @@ fn stop_with_timeouts(
     }
 }
 
+fn signal_if_running(owner_pid: u32, owner_start_time: u64, signal: i32) -> Result<()> {
+    if !crate::process::is_process_running_with_identity(owner_pid, Some(owner_start_time)) {
+        return Ok(());
+    }
+    let raw_pid = i32::try_from(owner_pid).map_err(|_| {
+        BoxError::StateError(format!(
+            "A3S OCI runtime owner PID {owner_pid} does not fit i32"
+        ))
+    })?;
+    // SAFETY: the stable start-time check immediately before this call fences
+    // the numeric PID, and kill(2) has no memory-safety preconditions.
+    if unsafe { libc::kill(raw_pid, signal) } == 0
+        || !crate::process::is_process_running_with_identity(owner_pid, Some(owner_start_time))
+    {
+        Ok(())
+    } else {
+        Err(BoxError::StateError(format!(
+            "Failed to send signal {signal} to A3S OCI runtime owner {owner_pid}: {}",
+            std::io::Error::last_os_error()
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::BufRead;
@@ -104,28 +127,5 @@ mod tests {
 
         result.unwrap();
         assert!(still_running);
-    }
-}
-
-fn signal_if_running(owner_pid: u32, owner_start_time: u64, signal: i32) -> Result<()> {
-    if !crate::process::is_process_running_with_identity(owner_pid, Some(owner_start_time)) {
-        return Ok(());
-    }
-    let raw_pid = i32::try_from(owner_pid).map_err(|_| {
-        BoxError::StateError(format!(
-            "A3S OCI runtime owner PID {owner_pid} does not fit i32"
-        ))
-    })?;
-    // SAFETY: the stable start-time check immediately before this call fences
-    // the numeric PID, and kill(2) has no memory-safety preconditions.
-    if unsafe { libc::kill(raw_pid, signal) } == 0
-        || !crate::process::is_process_running_with_identity(owner_pid, Some(owner_start_time))
-    {
-        Ok(())
-    } else {
-        Err(BoxError::StateError(format!(
-            "Failed to send signal {signal} to A3S OCI runtime owner {owner_pid}: {}",
-            std::io::Error::last_os_error()
-        )))
     }
 }
