@@ -1385,15 +1385,10 @@ fn real_core_named_volume_persists_across_stop_restart() {
     let volume_after_stop = smoke.ok(&["volume", "ls", "--quiet"]);
     assert_contains(&volume_after_stop, &volume, "volume ls after stop");
 
-    #[cfg(target_os = "windows")]
-    {
-        // A stopped managed execution is terminal for its current generation.
-        // Restart advances the generation while retaining the named-volume
-        // attachment that this test is exercising.
-        smoke.ok(&["restart", &smoke.name]);
-    }
-    #[cfg(not(target_os = "windows"))]
-    smoke.ok(&["start", &smoke.name]);
+    // A stopped managed execution is terminal for its current generation.
+    // Restart advances the generation while retaining the named-volume
+    // attachment that this test is exercising on every platform.
+    smoke.ok(&["restart", &smoke.name]);
     smoke.wait_for_running();
 
     #[cfg(target_os = "windows")]
@@ -1802,19 +1797,19 @@ fn real_core_filesystem_image_snapshot_commands() {
         "--",
         "/bin/sh",
         "-c",
-        "if [ -f /tmp/core-smoke-storage.txt ]; then echo core-smoke-storage-restored; else printf core-smoke-storage-ok >/tmp/core-smoke-storage.txt; echo core-smoke-storage-ready; fi; sleep 3600",
+        "if [ -f /root/core-smoke-storage.txt ]; then echo core-smoke-storage-restored; else printf core-smoke-storage-ok >/root/core-smoke-storage.txt; echo core-smoke-storage-ready; fi; sleep 3600",
     ]);
     smoke.wait_for_running();
     smoke.wait_for_logs("core-smoke-storage-ready");
 
     let diff = smoke.ok(&["diff", &smoke.name]);
-    assert_contains(&diff, "A /tmp/core-smoke-storage.txt", "diff output");
+    assert_contains(&diff, "A /root/core-smoke-storage.txt", "diff output");
 
     let export_tar = smoke.home_path().join("core-smoke-export.tar");
     let export_tar_arg = export_tar.to_string_lossy().to_string();
     smoke.ok(&["export", &smoke.name, "--output", &export_tar_arg]);
     let exported_text =
-        tar_entry_text(&export_tar, "/tmp/core-smoke-storage.txt").expect("read exported file");
+        tar_entry_text(&export_tar, "/root/core-smoke-storage.txt").expect("read exported file");
     assert_eq!(exported_text, "core-smoke-storage-ok");
 
     // WHPX intentionally has no post-boot exec/archive channel. A clean stop
@@ -1830,7 +1825,7 @@ fn real_core_filesystem_image_snapshot_commands() {
         "--message",
         "core smoke commit",
         "--change",
-        "CMD cat /tmp/core-smoke-storage.txt",
+        "CMD cat /root/core-smoke-storage.txt",
     ]);
     assert_contains(&commit, "sha256:", "commit output");
 
@@ -1898,7 +1893,7 @@ fn real_core_filesystem_image_snapshot_commands() {
     let restored_tar_arg = restored_tar.to_string_lossy().to_string();
     smoke.ok(&["export", &restored_box, "--output", &restored_tar_arg]);
     let restored_text =
-        tar_entry_text(&restored_tar, "/tmp/core-smoke-storage.txt").expect("read restored file");
+        tar_entry_text(&restored_tar, "/root/core-smoke-storage.txt").expect("read restored file");
     assert_eq!(restored_text, "core-smoke-storage-ok");
 
     smoke.ok(&["stop", &restored_box]);
