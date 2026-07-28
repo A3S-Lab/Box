@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">A3S Box</title>
+  <desc id="desc">OCI workloads isolated by intent.</desc>
+  <defs>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#1d2621" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="accent" x1="0" x2="1">
+      <stop offset="0" stop-color="#f4f1ea"/>
+      <stop offset="1" stop-color="#62d78b"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="#090c0b"/>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+  <circle cx="1010" cy="90" r="330" fill="#62d78b" opacity=".07"/>
+  <g transform="translate(84 86)">
+    <rect width="58" height="58" rx="7" fill="#0d1511" stroke="#62d78b" stroke-width="3"/>
+    <rect x="14" y="14" width="30" height="30" rx="3" fill="none" stroke="#f4f1ea" stroke-width="3"/>
+    <rect x="24" y="24" width="10" height="10" rx="1" fill="#62d78b"/>
+  </g>
+  <text x="164" y="126" fill="#9ca7a0" font-family="ui-monospace, monospace" font-size="24" font-weight="700" letter-spacing="4">OCI WORKLOAD RUNTIME / v3</text>
+  <text x="84" y="280" fill="#f4f1ea" font-family="Inter, Arial, sans-serif" font-size="112" font-weight="760" letter-spacing="-5">A3S BOX</text>
+  <text x="84" y="390" fill="url(#accent)" font-family="Inter, Arial, sans-serif" font-size="68" font-weight="720" letter-spacing="-2">Isolated by intent.</text>
+  <text x="88" y="470" fill="#9ca7a0" font-family="Inter, Arial, sans-serif" font-size="30">MicroVMs by default. Shared kernel only by explicit opt-in.</text>
+  <g transform="translate(86 524)" font-family="ui-monospace, monospace" font-size="20" font-weight="700">
+    <rect width="174" height="48" rx="6" fill="#101713" stroke="#35443b"/>
+    <circle cx="24" cy="24" r="5" fill="#62d78b"/>
+    <text x="42" y="31" fill="#dbe2dd">LINUX / KVM</text>
+    <rect x="190" width="174" height="48" rx="6" fill="#101713" stroke="#35443b"/>
+    <circle cx="214" cy="24" r="5" fill="#62d78b"/>
+    <text x="232" y="31" fill="#dbe2dd">macOS / HVF</text>
+    <rect x="380" width="214" height="48" rx="6" fill="#101713" stroke="#35443b"/>
+    <circle cx="404" cy="24" r="5" fill="#62d78b"/>
+    <text x="422" y="31" fill="#dbe2dd">WINDOWS / WHPX</text>
+  </g>
+</svg>

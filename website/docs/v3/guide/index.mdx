@@ -1,0 +1,51 @@
+---
+title: Guides
+description: Learn how to install, operate, and integrate A3S Box.
+---
+
+# A3S Box guides
+
+A3S Box is a local OCI workload runtime. It is not a hosted sandbox service and
+does not expose a remote control plane. The CLI and native SDKs operate the
+runtime installed on the same machine.
+
+Every public lifecycle request reaches the same generation-fenced execution
+manager. Images, networks, volumes, snapshots, logs, policy checks, and cleanup
+therefore have one durable local owner.
+
+## Start here
+
+| Guide                                           | Use it to                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------- |
+| [Installation](./installation/)                 | Install a verified release on Linux, macOS, or Windows.       |
+| [Quick start](./quick-start/)                   | Run a MicroVM, manage a service, and inspect the runtime.     |
+| [Architecture](./architecture/)                 | Understand the isolation resolver and local runtime boundary. |
+| [Images and builds](./images-builds/)           | Pull, build, tag, save, load, and prune OCI images.           |
+| [Networking and Compose](./networking-compose/) | Configure TSI, named networks, published ports, and Compose.  |
+| [Storage and snapshots](./storage-snapshots/)   | Use bind mounts, volumes, tmpfs, commits, and snapshots.      |
+| [Windows WHPX](./windows/)                      | Enable WHPX and work within the Windows capability boundary.  |
+
+## Choose the execution boundary
+
+The default request runs in a MicroVM backed by libkrun. On a certified Linux
+host, `--isolation sandbox` explicitly selects the shared-kernel A3S OCI
+Runtime.
+
+| Contract           | Default MicroVM                                    | Explicit Sandbox                        |
+| ------------------ | -------------------------------------------------- | --------------------------------------- |
+| Kernel boundary    | Dedicated guest Linux kernel                       | Shared host Linux kernel                |
+| Isolation class    | `hardware-vm`                                      | `shared-kernel`                         |
+| Intended workload  | Untrusted workloads and stronger tenant boundaries | Trusted automation and controlled tools |
+| Host               | Linux/KVM, Apple Silicon/HVF, Windows/WHPX         | Certified Linux host                    |
+| Automatic fallback | Never                                              | Never                                   |
+
+> [!IMPORTANT]
+> A shared-kernel Sandbox does not protect against a host-kernel exploit, a
+> hostile host administrator, hardware side channels, or data deliberately
+> exposed through a bind mount. Use the default MicroVM when those risks matter.
+
+## Native automation
+
+Box also ships native [Rust, Go, Python, and TypeScript SDKs](/sdk/). They use
+the same local execution manager and return typed results instead of parsing
+human CLI output.

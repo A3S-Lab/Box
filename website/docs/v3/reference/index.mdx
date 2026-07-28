@@ -1,0 +1,106 @@
+---
+title: CLI reference
+description: Find A3S Box command groups and the correct source of detailed help.
+---
+
+# CLI reference
+
+The installed binary is the authoritative reference for its release:
+
+```bash
+a3s-box --help
+a3s-box <command> --help
+a3s-box <command> <subcommand> --help
+```
+
+Use `--version` and `info` when reporting a problem so command behavior can be
+matched to the runtime and host.
+
+## Command groups
+
+| Area              | Commands                                                                                                             |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Lifecycle         | `run`, `create`, `start`, `stop`, `restart`, `rm`, `kill`, `pause`, `unpause`, `wait`, `rename`                      |
+| Execution         | `exec`, `shell`, `attach`, `top`                                                                                     |
+| Images and builds | `pull`, `push`, `build`, `images`, `rmi`, `tag`, `image-inspect`, `history`, `image-prune`, `save`, `load`, `import` |
+| Filesystems       | `cp`, `diff`, `export`, `commit`, `volume`, `snapshot`                                                               |
+| Networking        | `network`, `port`, `port-forward`, `compose`                                                                         |
+| Security and TEE  | `attest`, `seal`, `unseal`, `inject-secret`                                                                          |
+| Observability     | `ps`, `logs`, `inspect`, `stats`, `events`, `df`, `audit`, `monitor`                                                 |
+| System            | `container-update`, `system-prune`, `pool`, `login`, `logout`, `version`, `info`                                     |
+
+## Lifecycle model
+
+`run` is the create-and-start composition. Use `create` when configuration
+must be persisted before allocation, then `start` it explicitly.
+
+```bash
+a3s-box create --name worker alpine:3.20 -- sleep 3600
+a3s-box start worker
+a3s-box inspect worker
+a3s-box stop worker
+a3s-box rm worker
+```
+
+`stop` preserves the box. `rm` deletes a terminal box. `kill` is the convenient
+stop-and-remove operation in APIs that expose it as a lifecycle composition.
+Lifecycle state is generation-fenced so a stale caller cannot mutate a newer
+incarnation.
+
+## Images
+
+```bash
+a3s-box pull alpine:3.20
+a3s-box images
+a3s-box image-inspect alpine:3.20
+a3s-box history alpine:3.20
+```
+
+See [Images and builds](/guide/images-builds) for build, registry, and archive
+workflows.
+
+## Storage
+
+```bash
+a3s-box volume --help
+a3s-box snapshot --help
+a3s-box cp --help
+a3s-box diff --help
+```
+
+Snapshots are created from stopped boxes. Named volumes have an independent
+lifetime and can be shared by multiple boxes when the workload semantics allow
+it.
+
+## Networking and projects
+
+```bash
+a3s-box network --help
+a3s-box port-forward --help
+a3s-box compose --help
+```
+
+Network capability varies by host and isolation backend. Read the
+[platform matrix](./platforms/) before depending on bridge networking,
+published ports, or Compose.
+
+## Structured automation
+
+Do not parse human tables in application code. Prefer command-specific JSON
+output where available or use a [native SDK](/sdk/), which shares the
+runtime's typed state and machine protocol.
+
+## Destructive maintenance
+
+Prune and removal commands are explicit operator actions. Inspect references
+and disk usage first:
+
+```bash
+a3s-box ps -a
+a3s-box images
+a3s-box volume ls
+a3s-box snapshot ls
+a3s-box df
+```
+
+Back up durable data before using force removal or broad system cleanup.

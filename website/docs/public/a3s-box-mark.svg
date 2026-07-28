@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-labelledby="title">
+  <title id="title">A3S Box</title>
+  <rect x="3" y="3" width="34" height="34" rx="5" fill="#0d1511" stroke="#62d78b" stroke-width="2"/>
+  <rect x="10" y="10" width="20" height="20" rx="2" fill="none" stroke="#f4f1ea" stroke-width="2"/>
+  <rect x="16" y="16" width="8" height="8" rx="1" fill="#62d78b"/>
+</svg>

@@ -1,0 +1,38 @@
+[
+  {
+    "text": "Guides",
+    "link": "/guide/",
+    "activeMatch": "^/guide/"
+  },
+  {
+    "text": "SDKs",
+    "link": "/sdk/",
+    "activeMatch": "^/sdk/"
+  },
+  {
+    "text": "Reference",
+    "link": "/reference/",
+    "activeMatch": "^/reference/"
+  },
+  {
+    "text": "Resources",
+    "items": [
+      {
+        "text": "GitHub",
+        "link": "https://github.com/A3S-Lab/Box"
+      },
+      {
+        "text": "Releases",
+        "link": "https://github.com/A3S-Lab/Box/releases"
+      },
+      {
+        "text": "Rust API",
+        "link": "https://docs.rs/a3s-box-sdk"
+      },
+      {
+        "text": "Go API",
+        "link": "https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3"
+      }
+    ]
+  }
+]

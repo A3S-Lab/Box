@@ -1,0 +1,141 @@
+---
+title: Go SDK
+description: Build context-aware local A3S Box workers and services in Go.
+---
+
+# Go SDK
+
+The Go SDK provides context-aware, concurrency-safe access to the installed
+A3S Box runtime. The v3 module requires Go 1.25 or newer.
+
+## Install
+
+```bash
+go get github.com/A3S-Lab/Box/sdk/go/v3
+```
+
+Install the matching A3S Box runtime and verify it with `a3s-box info`.
+
+## Create a Sandbox
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    box "github.com/A3S-Lab/Box/sdk/go/v3"
+)
+
+func main() {
+    ctx := context.Background()
+
+    sandbox, err := box.Create(ctx, "alpine:3.20")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sandbox.Close(context.Background())
+
+    result, err := sandbox.Run(
+        ctx,
+        box.Argv("sh", "-lc", "printf 'hello from A3S Box'"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println(result.StdoutString())
+}
+```
+
+Use `box.Argv(...)` for direct execution. Use `box.Shell(...)` only when guest
+shell syntax is intentional.
+
+## Builder-style CI/CD
+
+```go
+ctx := context.Background()
+
+client, err := box.NewClient(ctx)
+if err != nil {
+    return err
+}
+
+image, err := client.
+    Image("./ci").
+    Dockerfile("Dockerfile").
+    Tag("local/go-ci:latest").
+    BuildArg("GO_VERSION", "1.25").
+    Build(ctx)
+if err != nil {
+    return err
+}
+
+cache, err := client.
+    Volume("go-cache").
+    Label("purpose", "dependency-cache").
+    Create(ctx)
+if err != nil {
+    return err
+}
+
+sandbox, err := client.
+    Sandbox(image.Reference).
+    CPUs(4).
+    MemoryMiB(4096).
+    Mount(box.NamedVolume(cache.Name, "/go/pkg/mod")).
+    Start(ctx)
+if err != nil {
+    return err
+}
+defer sandbox.Close(context.Background())
+
+result, err := sandbox.
+    Script("go test ./...\n").
+    Interpreter("/bin/sh", "-se").
+    Env("CI", "true").
+    Directory("/workspace").
+    Run(ctx)
+if err != nil {
+    return err
+}
+if result.ExitCode != 0 {
+    return fmt.Errorf("tests failed: %s", result.StderrString())
+}
+```
+
+## Cancellation and errors
+
+Every runtime I/O method accepts `context.Context`. Set caller deadlines around
+guest work and lifecycle operations:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+defer cancel()
+
+result, err := sandbox.Run(ctx, box.Argv("make", "test"))
+if errors.Is(err, context.DeadlineExceeded) {
+    return fmt.Errorf("job deadline exceeded: %w", err)
+}
+```
+
+Use `errors.Is` for stable categories such as `box.ErrNotFound`,
+`box.ErrConflict`, and `box.ErrUnavailable`. Use `errors.As` to inspect the
+typed `*box.Error`.
+
+## Runtime selection
+
+The SDK resolves `A3S_BOX_BINARY` and then `a3s-box` on `PATH`:
+
+```bash
+A3S_BOX_BINARY=/opt/a3s/bin/a3s-box go run ./cmd/worker
+```
+
+Command and file data are binary-safe. String helpers are conveniences for
+text workloads.
+
+See the complete
+[module guide](https://github.com/A3S-Lab/Box/blob/main/sdk/go/README.md) and
+[Go API reference](https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3).
