@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -46,6 +46,39 @@ fn find_binary() -> PathBuf {
 pub struct CliTest {
     bin: PathBuf,
     home: tempfile::TempDir,
+}
+
+pub struct BackgroundProcessGuard<'a> {
+    cli: &'a CliTest,
+    child: Option<Child>,
+}
+
+impl BackgroundProcessGuard<'_> {
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("background process should still be owned")
+            .try_wait()
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        self.child
+            .as_mut()
+            .expect("background process should still be owned")
+            .wait()
+    }
+
+    pub fn interrupt(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            self.cli.interrupt_background(&mut child);
+        }
+    }
+}
+
+impl Drop for BackgroundProcessGuard<'_> {
+    fn drop(&mut self) {
+        self.interrupt();
+    }
 }
 
 impl CliTest {
@@ -142,6 +175,13 @@ impl CliTest {
                     args.join(" ")
                 )
             })
+    }
+
+    pub fn spawn_guarded_background(&self, args: &[&str]) -> BackgroundProcessGuard<'_> {
+        BackgroundProcessGuard {
+            cli: self,
+            child: Some(self.spawn_background(args)),
+        }
     }
 
     pub fn interrupt_background(&self, child: &mut std::process::Child) {

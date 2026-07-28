@@ -786,7 +786,7 @@ fn test_real_pool_warm_run() {
         .to_string();
 
     // Daemon: pre-warm the default pool + a second image via --warm; listen on the socket.
-    let mut daemon = cli.spawn_background(&[
+    let mut daemon = cli.spawn_guarded_background(&[
         "pool",
         "start",
         "--image",
@@ -806,7 +806,6 @@ fn test_real_pool_warm_run() {
     let start = std::time::Instant::now();
     while !sock_path.exists() {
         if start.elapsed() > Duration::from_secs(120) {
-            cli.interrupt_background(&mut daemon);
             panic!("pool daemon never created its socket");
         }
         if let Ok(Some(status)) = daemon.try_wait() {
@@ -873,7 +872,7 @@ fn test_real_pool_warm_run() {
                 let socket = socket.as_str();
                 s.spawn(move || {
                     let tag = format!("conc-{i}");
-                    let (out, _e, ok) = cli.output(&[
+                    let (out, err, ok) = cli.output(&[
                         "pool",
                         "run",
                         "--socket",
@@ -882,13 +881,16 @@ fn test_real_pool_warm_run() {
                         "echo",
                         tag.as_str(),
                     ]);
-                    (ok, out, tag)
+                    (ok, out, err, tag)
                 })
             })
             .collect();
         for h in handles {
-            let (ok, out, tag) = h.join().expect("concurrent run thread panicked");
-            assert!(ok, "concurrent pool run failed: {out}");
+            let (ok, out, err, tag) = h.join().expect("concurrent run thread panicked");
+            assert!(
+                ok,
+                "concurrent pool run failed\nstdout:\n{out}\nstderr:\n{err}"
+            );
             assert!(
                 out.contains(&tag),
                 "concurrent run output {out:?} missing {tag}"
@@ -922,7 +924,7 @@ fn test_real_pool_warm_run() {
         "status should list both warmed images:\n{status}"
     );
 
-    cli.interrupt_background(&mut daemon);
+    daemon.interrupt();
 }
 
 /// Dockerfile RUN over the warm-pool lease path: one build stage keeps a pooled
@@ -942,7 +944,7 @@ fn test_real_build_run_pool_smoke() {
         .expect("utf8 socket path")
         .to_string();
 
-    let mut daemon = cli.spawn_background(&[
+    let mut daemon = cli.spawn_guarded_background(&[
         "pool",
         "start",
         "--image",
@@ -959,7 +961,6 @@ fn test_real_build_run_pool_smoke() {
     let start = std::time::Instant::now();
     while !sock_path.exists() {
         if start.elapsed() > Duration::from_secs(120) {
-            cli.interrupt_background(&mut daemon);
             panic!("build pool daemon never created its socket");
         }
         if let Ok(Some(status)) = daemon.try_wait() {
@@ -1049,7 +1050,7 @@ fn test_real_pool_deferred_main() {
         .expect("utf8 socket path")
         .to_string();
 
-    let mut daemon = cli.spawn_background(&[
+    let mut daemon = cli.spawn_guarded_background(&[
         "pool",
         "start",
         "--deferred",
@@ -1067,7 +1068,6 @@ fn test_real_pool_deferred_main() {
     let start = std::time::Instant::now();
     while !sock_path.exists() {
         if start.elapsed() > Duration::from_secs(120) {
-            cli.interrupt_background(&mut daemon);
             panic!("deferred pool daemon never created its socket");
         }
         if let Ok(Some(status)) = daemon.try_wait() {
@@ -1108,5 +1108,5 @@ fn test_real_pool_deferred_main() {
     ]);
     assert!(!ok2, "expected a non-zero exit from the deferred main");
 
-    cli.interrupt_background(&mut daemon);
+    daemon.interrupt();
 }
