@@ -104,16 +104,13 @@ selected policy. For broader cleanup, review the proposed changes before using
 ## Build from an SDK
 
 All four SDKs expose typed image builders. This keeps build arguments and tags
-in application code without parsing human CLI output:
+in application code without parsing human CLI output. Each language guide
+contains a complete, runnable builder program:
 
-```go
-image, err := client.
-    Image("./ci").
-    Dockerfile("Dockerfile").
-    Tag("local/ci-base:latest").
-    BuildArg("GO_VERSION", "1.25").
-    Build(ctx)
-```
+- [Rust](/sdk/rust)
+- [TypeScript](/sdk/typescript)
+- [Python](/sdk/python)
+- [Go](/sdk/go)
 
 Continue with the [SDK overview](/sdk/) or the
 [networking and Compose guide](./networking-compose/).

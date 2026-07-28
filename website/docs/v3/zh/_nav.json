@@ -1,0 +1,38 @@
+[
+  {
+    "text": "指南",
+    "link": "/guide/",
+    "activeMatch": "^/guide/"
+  },
+  {
+    "text": "SDK",
+    "link": "/sdk/",
+    "activeMatch": "^/sdk/"
+  },
+  {
+    "text": "参考",
+    "link": "/reference/",
+    "activeMatch": "^/reference/"
+  },
+  {
+    "text": "资源",
+    "items": [
+      {
+        "text": "GitHub",
+        "link": "https://github.com/A3S-Lab/Box"
+      },
+      {
+        "text": "发布版本",
+        "link": "https://github.com/A3S-Lab/Box/releases"
+      },
+      {
+        "text": "Rust API",
+        "link": "https://docs.rs/a3s-box-sdk"
+      },
+      {
+        "text": "Go API",
+        "link": "https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3"
+      }
+    ]
+  }
+]

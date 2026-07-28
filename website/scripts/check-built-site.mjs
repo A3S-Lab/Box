@@ -9,14 +9,29 @@ const websiteRoot = path.resolve(
 const outputRoot = path.join(websiteRoot, 'doc_build');
 const base = '/Box/';
 
-const requiredFiles = [
+const routeFiles = [
   'index.html',
   'guide/index.html',
+  'guide/installation.html',
   'guide/quick-start.html',
+  'guide/architecture.html',
+  'guide/images-builds.html',
+  'guide/networking-compose.html',
+  'guide/storage-snapshots.html',
+  'guide/windows.html',
   'sdk/index.html',
+  'sdk/rust.html',
+  'sdk/typescript.html',
+  'sdk/python.html',
   'sdk/go.html',
   'reference/index.html',
   'reference/platforms.html',
+  'reference/troubleshooting.html',
+];
+
+const requiredFiles = [
+  ...routeFiles,
+  ...routeFiles.map((file) => `en/${file}`),
   'llms.txt',
   'llms-full.txt',
   'a3s-box-mark.svg',
@@ -41,6 +56,63 @@ async function collectHtmlFiles(directory) {
 
 for (const file of requiredFiles) {
   await access(path.join(outputRoot, file));
+}
+
+const rootHomepage = await readFile(
+  path.join(outputRoot, 'index.html'),
+  'utf8',
+);
+const englishHomepage = await readFile(
+  path.join(outputRoot, 'en', 'index.html'),
+  'utf8',
+);
+
+if (!rootHomepage.includes('让 Agent 任务')) {
+  throw new Error('The default homepage is not rendered in Chinese.');
+}
+if (!rootHomepage.includes(`${base}en/`)) {
+  throw new Error('The Chinese homepage does not expose the English locale.');
+}
+if (!englishHomepage.includes('Run agent workloads')) {
+  throw new Error('The /en/ homepage is not rendered in English.');
+}
+for (const route of [
+  `${base}en/guide/quick-start.html`,
+  `${base}en/sdk/rust.html`,
+  `${base}en/sdk/typescript.html`,
+  `${base}en/sdk/python.html`,
+  `${base}en/sdk/go.html`,
+]) {
+  if (!englishHomepage.includes(route)) {
+    throw new Error(
+      `The English homepage is missing its localized ${route} link.`,
+    );
+  }
+}
+
+for (const localePrefix of ['', 'en/']) {
+  const relativePath = `${localePrefix}guide/networking-compose.html`;
+  const html = await readFile(path.join(outputRoot, relativePath), 'utf8');
+  const aclStart = html.indexOf('class="rp-codeblock language-acl"');
+  const aclEnd = html.indexOf('</pre>', aclStart);
+  const aclMarkup =
+    aclStart >= 0 && aclEnd > aclStart ? html.slice(aclStart, aclEnd) : '';
+  const tokenKinds = new Set(
+    [...aclMarkup.matchAll(/var\(--shiki-token-([a-z-]+)\)/g)].map(
+      (match) => match[1],
+    ),
+  );
+
+  if (!aclMarkup.includes('data-lang="acl"')) {
+    throw new Error(
+      `${relativePath} does not contain an ACL-highlighted block.`,
+    );
+  }
+  if (tokenKinds.size < 3) {
+    throw new Error(
+      `${relativePath} did not receive token-level ACL syntax highlighting.`,
+    );
+  }
 }
 
 const brokenReferences = [];
@@ -99,5 +171,5 @@ if (brokenReferences.length > 0) {
 }
 
 console.log(
-  `Built-site references verified across ${htmlFiles.length} HTML pages.`,
+  `Bilingual built-site references and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
 );

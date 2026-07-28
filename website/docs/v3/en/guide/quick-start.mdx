@@ -88,8 +88,64 @@ interchangeable compatibility modes.
 
 ## Use a native SDK
 
-The Go SDK can create a Sandbox and run a command without constructing CLI
-arguments:
+Each SDK example below is a complete program that creates a Sandbox, runs one
+guest command, prints the result, and cleans up.
+
+### Rust
+
+```rust
+use a3s_box_sdk::Sandbox;
+
+#[tokio::main]
+async fn main() -> Result<(), a3s_box_sdk::ClientError> {
+    let sandbox = Sandbox::create("alpine:3.20").await?;
+    let result = sandbox.commands.run("printf ready").await?;
+
+    println!("{}", result.stdout);
+    sandbox.kill().await?;
+    Ok(())
+}
+```
+
+### TypeScript
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+### Python
+
+```python
+from a3s_box import Sandbox
+
+
+def main() -> None:
+    with Sandbox.create("alpine:3.20") as sandbox:
+        result = sandbox.commands.run("printf ready")
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### Go
 
 ```go
 package main

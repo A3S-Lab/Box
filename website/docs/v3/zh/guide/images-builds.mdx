@@ -1,0 +1,108 @@
+---
+title: 镜像与构建
+description: 使用 A3S Box 拉取、检查、构建、发布和迁移 OCI 镜像。
+---
+
+# 镜像与构建
+
+A3S Box 在本地保存 OCI 镜像，CLI 与所有原生 SDK 共用同一镜像存储。镜像只需拉取
+或构建一次，即可供后续 Sandbox 使用。
+
+## 拉取并检查镜像
+
+```bash
+a3s-box pull alpine:3.20
+a3s-box images
+a3s-box image-inspect alpine:3.20
+a3s-box history alpine:3.20
+```
+
+生产自动化应使用不可变摘要：
+
+```bash
+a3s-box pull alpine@sha256:<digest>
+a3s-box run --rm alpine@sha256:<digest> -- cat /etc/alpine-release
+```
+
+标签是可变名称，摘要则标识 Box 实际解析和校验的精确 manifest。
+
+## 从 Dockerfile 构建
+
+示例应用：
+
+```dockerfile title="Dockerfile"
+FROM alpine:3.20
+RUN adduser -D -u 10001 app
+COPY server /usr/local/bin/server
+USER app
+ENTRYPOINT ["/usr/local/bin/server"]
+```
+
+在本地构建并运行：
+
+```bash
+a3s-box build -t local/example-server:dev .
+a3s-box run --rm local/example-server:dev
+```
+
+使用 `-f` 选择其他构建文件：
+
+```bash
+a3s-box build \
+  -f ./containers/Containerfile \
+  -t local/example-server:test \
+  .
+```
+
+构建器支持多阶段构建、内容寻址缓存、构建参数和选定的 `RUN --mount` 形式。
+不支持的 Dockerfile 行为会明确失败，不会被忽略。
+
+## 标记与发布
+
+```bash
+a3s-box tag \
+  local/example-server:dev \
+  registry.example/team/example-server:3.2.0
+
+a3s-box login registry.example
+a3s-box push registry.example/team/example-server:3.2.0
+a3s-box logout registry.example
+```
+
+注册表令牌应只授予所需的最小权限。CI 应通过密钥存储传递凭据，避免在日志中打印
+登录命令或环境变量值。
+
+## 在主机之间迁移
+
+将镜像保存为 OCI 归档，并在另一台机器加载：
+
+```bash
+a3s-box save local/example-server:dev -o example-server.tar
+a3s-box load -i example-server.tar
+```
+
+`import` 从根文件系统归档创建镜像；`load` 读取 OCI 镜像归档并保留镜像元数据。
+
+## 回收空间
+
+删除前先检查运行时磁盘占用：
+
+```bash
+a3s-box df
+a3s-box image-prune
+```
+
+`image-prune` 根据选定策略移除不再被引用的镜像。使用更广泛的
+`a3s-box system-prune` 前，应先检查它将影响的资源。
+
+## 从 SDK 构建
+
+四种 SDK 都提供类型化镜像构建器，不需要解析 CLI 文本。每个语言指南都包含完整、
+可直接运行的构建程序：
+
+- [Rust](/sdk/rust)
+- [TypeScript](/sdk/typescript)
+- [Python](/sdk/python)
+- [Go](/sdk/go)
+
+接下来可阅读 [SDK 总览](/sdk/)或[网络与 Compose](./networking-compose/)。

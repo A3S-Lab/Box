@@ -1,0 +1,183 @@
+---
+title: 快速开始
+description: 运行并管理第一个 A3S Box 工作负载。
+---
+
+# 快速开始
+
+本指南假设 `a3s-box --version` 和 `a3s-box info` 已成功执行。尚未安装时，请先阅读
+[安装指南](./installation/)。
+
+## 检查主机能力
+
+```text
+a3s-box info
+```
+
+输出会显示主机架构、虚拟化后端、客体通道和运行时路径。只有主机能够强制执行请求的
+配置时，工作负载才会被准入。
+
+## 在 MicroVM 中运行命令
+
+省略 `--isolation` 即选择默认独立内核路径：
+
+```bash
+a3s-box run --rm alpine:3.20 -- \
+  sh -lc 'echo "inside $(uname -s)"; uname -r'
+```
+
+Box 会在需要时拉取 OCI 镜像、准备根文件系统、启动 MicroVM、传递工作负载退出码，
+并删除已经终止的盒子。
+
+## 管理长时间运行的服务
+
+```bash
+a3s-box run -d \
+  --name web \
+  --memory 1g \
+  -p 8080:80 \
+  nginx:alpine
+
+a3s-box ps
+a3s-box inspect web
+a3s-box logs -f web
+a3s-box exec web -- nginx -v
+a3s-box stats web --no-stream
+a3s-box stop web
+a3s-box rm web
+```
+
+名称是便捷查询条件；运行时内部使用稳定盒子 ID 和代际围栏，拒绝陈旧生命周期操作。
+
+## 持久化数据
+
+创建并挂载命名卷：
+
+```bash
+a3s-box volume create app-data
+
+a3s-box run --rm \
+  --mount type=volume,source=app-data,target=/data \
+  alpine:3.20 -- \
+  sh -lc 'date -u > /data/created-at'
+
+a3s-box volume inspect app-data
+```
+
+绑定挂载、tmpfs、提交、导出和文件系统快照见[存储与快照](./storage-snapshots/)。
+
+## 显式选择共享内核 Sandbox
+
+在经过认证的 Linux 主机上：
+
+```bash
+a3s-box run --rm \
+  --isolation sandbox \
+  --cpus 2 \
+  --memory 512m \
+  alpine:3.20 -- \
+  sh -lc 'id; cat /proc/self/status'
+```
+
+显式的 `--isolation microvm` 会被拒绝；省略参数才是默认 MicroVM 的公开选择方式。
+这样脚本不会误把后端名称当作可互换的兼容模式。
+
+## 使用原生 SDK
+
+以下四个示例都是完整程序：创建 Sandbox、执行客体命令、输出结果并清理资源。
+
+### Rust
+
+```rust
+use a3s_box_sdk::Sandbox;
+
+#[tokio::main]
+async fn main() -> Result<(), a3s_box_sdk::ClientError> {
+    let sandbox = Sandbox::create("alpine:3.20").await?;
+    let result = sandbox.commands.run("printf ready").await?;
+
+    println!("{}", result.stdout);
+    sandbox.kill().await?;
+    Ok(())
+}
+```
+
+### TypeScript
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+### Python
+
+```python
+from a3s_box import Sandbox
+
+
+def main() -> None:
+    with Sandbox.create("alpine:3.20") as sandbox:
+        result = sandbox.commands.run("printf ready")
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### Go
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    box "github.com/A3S-Lab/Box/sdk/go/v3"
+)
+
+func main() {
+    ctx := context.Background()
+    sandbox, err := box.Create(ctx, "alpine:3.20")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sandbox.Close(context.Background())
+
+    result, err := sandbox.Run(ctx, box.Argv("printf", "ready"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println(result.StdoutString())
+}
+```
+
+[SDK 总览](/sdk/)说明了四种语言共享的契约，并链接到每种语言的完整指南。
+
+## 平台提示
+
+- Linux/KVM 提供最完整的运行时能力。
+- macOS 仅支持 Apple Silicon，使用 HVF。
+- Windows x86_64 使用 WHPX；桥接网络、启动后 `exec`、内存快照、TEE、Compose
+  工作负载和 CRI 具有明确限制。
+
+依赖平台特性前，请检查[平台矩阵](/reference/platforms)和
+[Windows 指南](./windows/)。

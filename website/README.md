@@ -10,6 +10,9 @@ npm run build
 npm run check:site
 ```
 
-Use `npm run dev` for local authoring. The site is versioned under `docs/v3`;
-the default version is served without a version prefix. All internal links must
-remain valid when the site is hosted below the `/Box/` GitHub Pages base path.
+Use `npm run dev` for local authoring. The site is versioned under `docs/v3`.
+Chinese lives in `docs/v3/zh` and is served without a language prefix. The
+complete English mirror lives in `docs/v3/en` and is served below `/en/`.
+Language parity, complete SDK programs, and the custom ACL grammar are checked
+during every build. All internal links must remain valid when the site is hosted
+below the `/Box/` GitHub Pages base path.

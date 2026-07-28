@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { withBase } from '@rspress/core/runtime';
+import { useLang, withBase } from '@rspress/core/runtime';
 
 const installCommands = [
   {
@@ -41,100 +41,319 @@ const installCommands = [
   },
 ] as const;
 
-const capabilityCards = [
-  {
-    index: '01',
-    eyebrow: 'OCI IMAGES',
-    title: 'Pull, verify, build, cache, and move OCI artifacts',
-    body: 'Use resumable layer pulls, registry credentials, content-addressed rootfs caching, multi-stage builds, save/load, and explicit image lifecycle controls.',
-    tags: ['OCI', 'build', 'cache'],
-    className: 'box-capability--wide box-capability--images',
+const content = {
+  zh: {
+    eyebrow: 'OCI 工作负载运行时 · v3',
+    heroLineOne: '让 Agent 任务',
+    heroLineTwo: '运行于 MicroVM。',
+    heroSubtitle:
+      'A3S Box 是一个本地 OCI 运行时，将隔离策略作为每次请求的一部分。默认使用独立来宾内核；共享内核执行必须显式启用，并通过能力检查。',
+    getStarted: '快速开始',
+    copy: '复制',
+    copied: '已复制',
+    copyInstall: '复制安装命令',
+    isolationAria: 'A3S Box 隔离模型',
+    visual: {
+      resolver: '隔离解析器',
+      localRuntime: '本地运行时',
+      request: '请求',
+      requestTitle: 'OCI 镜像 + 类型化策略',
+      resolve: '解析主机能力',
+      admission: '准入',
+      noFallback: '不进行隐式降级',
+      default: '默认',
+      optIn: '显式启用',
+      hardwareVm: '硬件虚拟机',
+      dedicatedKernel: '独立来宾内核',
+      sharedKernel: '共享内核',
+      sandboxBoundary: '命名空间 + seccomp',
+      generation: '代际隔离',
+      durable: '持久状态',
+      localOnly: '仅限本地',
+    },
+    signals: [
+      ['独立内核', '默认隔离'],
+      ['OCI 原生', '镜像与构建'],
+      ['4 种 SDK', '统一运行时契约'],
+      ['3 类主机', 'KVM · HVF · WHPX'],
+    ],
+    principleKicker: '将隔离作为数据',
+    principleTitle: '让执行边界在代码中清晰可见。',
+    principleBody:
+      'Box 会解析主机真正能够执行的能力，在修改状态前拒绝不兼容的组合，并为每个工作负载记录实际采用的隔离等级。',
+    principles: [
+      {
+        label: '01 / 默认',
+        title: 'MicroVM',
+        body: '为不受信任的工作负载提供独立的来宾 Linux 内核，并在 KVM、HVF 或 WHPX 主机上形成更强的租户边界。',
+        command: 'a3s-box run --rm alpine:3.20 -- uname -a',
+      },
+      {
+        label: '02 / 显式',
+        title: 'Sandbox',
+        body: '面向可信自动化任务的 Linux 共享内核后端，仅在具备命名空间、seccomp、从属 ID 和 cgroup v2 的认证主机上使用。',
+        command: 'a3s-box run --isolation sandbox ...',
+      },
+      {
+        label: '03 / 契约',
+        title: '拒绝降级',
+        body: '不支持的隔离、网络、TEE、快照或主机组合会直接失败，不会静默削弱请求中的安全要求。',
+        command: '请求 → 校验 → 持久化 → 启动',
+      },
+    ],
+    capabilityKicker: '运行时工具箱',
+    capabilityTitle: 'Docker 风格工作流，由一个本地状态所有者统一管理。',
+    capabilityBody:
+      '镜像、执行实例、网络、卷、快照、日志、策略和清理由同一个具备代际隔离能力的运行时管理。',
+    capabilities: [
+      {
+        index: '01',
+        eyebrow: 'OCI 镜像',
+        title: '拉取、校验、构建、缓存和迁移 OCI 制品',
+        body: '支持可续传分层拉取、仓库凭据、内容寻址 rootfs 缓存、多阶段构建、保存与加载，以及显式镜像生命周期管理。',
+        tags: ['OCI', '构建', '缓存'],
+        className: 'box-capability--wide box-capability--images',
+      },
+      {
+        index: '02',
+        eyebrow: '生命周期',
+        title: '统一且具备代际隔离的执行模型',
+        body: '通过同一个持久化本地状态所有者完成运行、创建、启动、停止、重启、检查、等待、附加和删除。',
+        tags: ['状态', '健康检查', '日志'],
+        className: 'box-capability--lifecycle',
+      },
+      {
+        index: '03',
+        eyebrow: '存储',
+        title: '卷与文件系统快照',
+        body: '组合使用绑定挂载、命名卷、tmpfs、复制、差异、导出、提交和停止态文件系统快照。',
+        tags: ['卷', '快照', '差异'],
+        className: 'box-capability--storage',
+      },
+      {
+        index: '04',
+        eyebrow: '网络',
+        title: 'TSI、桥接网络与端口发布',
+        body: '显式选择网络模式、命名桥接网络、DNS 别名、节点发现，以及具备代际隔离的 TCP 端口发布。',
+        tags: ['TSI', 'DNS', '端口'],
+        className: 'box-capability--network',
+      },
+      {
+        index: '05',
+        eyebrow: '自动化',
+        title: '用于本地可编程基础设施的原生 SDK',
+        body: 'Rust 直接调用运行时；Go、Python 和 TypeScript 通过同一个受检查的机器桥接协议和版本化能力握手访问运行时。',
+        tags: ['Rust', 'Go', 'Python', 'TypeScript'],
+        className: 'box-capability--wide box-capability--sdk',
+      },
+    ],
+    sdkKicker: '原生 SDK',
+    sdkTitle: '无需解析 CLI 输出，也能自动化同一个运行时。',
+    sdkBody:
+      '使用你熟悉的语言构建镜像、配置资源、启动沙箱、运行脚本、检查结果，并以确定性的方式完成清理。',
+    sdkNotes: {
+      rust: '直接访问类型化运行时',
+      go: '支持 Context，且并发安全',
+      python: '同步与异步 API',
+      typescript: '面向 Node.js 20+ 的 Promise API',
+    },
+    platformKicker: '主机后端',
+    platformTitle: '统一请求模型，明确平台边界。',
+    platformBody:
+      '公共契约保持稳定，各主机则报告自身真正能够执行的虚拟化、网络和来宾通道能力。',
+    platformHeaders: ['主机', '虚拟机后端', '架构', '当前边界'],
+    platformStatuses: [
+      'MicroVM + 认证 Sandbox 主机',
+      'MicroVM 运行时',
+      'MicroVM 运行时（存在已记录限制）',
+    ],
+    platformLink: '查看完整平台矩阵',
+    ctaKicker: '准备在本地运行？',
+    ctaTitle: '从一条 OCI 命令开始，始终保持边界明确。',
+    openQuickStart: '打开快速开始',
+    viewSource: '查看源码',
   },
-  {
-    index: '02',
-    eyebrow: 'LIFECYCLE',
-    title: 'One generation-fenced execution model',
-    body: 'Run, create, start, stop, restart, inspect, wait, attach, and remove through the same durable local state owner.',
-    tags: ['state', 'health', 'logs'],
-    className: 'box-capability--lifecycle',
+  en: {
+    eyebrow: 'OCI WORKLOAD RUNTIME · v3',
+    heroLineOne: 'Run agent workloads',
+    heroLineTwo: 'inside MicroVMs.',
+    heroSubtitle:
+      'A3S Box is a local OCI runtime that makes isolation part of every request. Dedicated guest kernels are the default. Shared-kernel execution is an explicit, capability-checked opt-in.',
+    getStarted: 'Get started',
+    copy: 'Copy',
+    copied: 'Copied',
+    copyInstall: 'Copy install command',
+    isolationAria: 'A3S Box isolation model',
+    visual: {
+      resolver: 'isolation resolver',
+      localRuntime: 'local runtime',
+      request: 'REQUEST',
+      requestTitle: 'OCI image + typed policy',
+      resolve: 'resolve capabilities',
+      admission: 'ADMISSION',
+      noFallback: 'No implicit fallback',
+      default: 'default',
+      optIn: 'explicit opt-in',
+      hardwareVm: 'HARDWARE VM',
+      dedicatedKernel: 'dedicated guest kernel',
+      sharedKernel: 'SHARED KERNEL',
+      sandboxBoundary: 'namespaces + seccomp',
+      generation: 'generation fenced',
+      durable: 'durable state',
+      localOnly: 'local only',
+    },
+    signals: [
+      ['Dedicated kernel', 'default isolation'],
+      ['OCI-native', 'images and builds'],
+      ['4 SDKs', 'one runtime contract'],
+      ['3 hosts', 'KVM · HVF · WHPX'],
+    ],
+    principleKicker: 'ISOLATION AS DATA',
+    principleTitle: 'Make the execution boundary visible in code.',
+    principleBody:
+      'Box resolves what the host can actually enforce, rejects incompatible combinations before mutation, and records the effective isolation class with each workload.',
+    principles: [
+      {
+        label: '01 / DEFAULT',
+        title: 'MicroVM',
+        body: 'A dedicated guest Linux kernel for untrusted workloads and stronger tenant boundaries on KVM, HVF, or WHPX hosts.',
+        command: 'a3s-box run --rm alpine:3.20 -- uname -a',
+      },
+      {
+        label: '02 / EXPLICIT',
+        title: 'Sandbox',
+        body: 'A shared-kernel Linux backend for trusted automation on certified hosts with namespaces, seccomp, subordinate IDs, and cgroup v2.',
+        command: 'a3s-box run --isolation sandbox ...',
+      },
+      {
+        label: '03 / CONTRACT',
+        title: 'No fallback',
+        body: 'Unsupported isolation, network, TEE, snapshot, or host combinations fail closed instead of silently weakening the request.',
+        command: 'request → validate → persist → boot',
+      },
+    ],
+    capabilityKicker: 'RUNTIME TOOLBOX',
+    capabilityTitle: 'Docker-like workflows with one local state owner.',
+    capabilityBody:
+      'Images, executions, networks, volumes, snapshots, logs, policy, and cleanup all terminate at the same generation-fenced runtime.',
+    capabilities: [
+      {
+        index: '01',
+        eyebrow: 'OCI IMAGES',
+        title: 'Pull, verify, build, cache, and move OCI artifacts',
+        body: 'Use resumable layer pulls, registry credentials, content-addressed rootfs caching, multi-stage builds, save/load, and explicit image lifecycle controls.',
+        tags: ['OCI', 'build', 'cache'],
+        className: 'box-capability--wide box-capability--images',
+      },
+      {
+        index: '02',
+        eyebrow: 'LIFECYCLE',
+        title: 'One generation-fenced execution model',
+        body: 'Run, create, start, stop, restart, inspect, wait, attach, and remove through the same durable local state owner.',
+        tags: ['state', 'health', 'logs'],
+        className: 'box-capability--lifecycle',
+      },
+      {
+        index: '03',
+        eyebrow: 'STORAGE',
+        title: 'Volumes and filesystem snapshots',
+        body: 'Combine bind mounts, named volumes, tmpfs, copy, diff, export, commit, and stopped-filesystem snapshots.',
+        tags: ['volumes', 'snapshot', 'diff'],
+        className: 'box-capability--storage',
+      },
+      {
+        index: '04',
+        eyebrow: 'NETWORK',
+        title: 'TSI, bridge networks, and published ports',
+        body: 'Choose explicit network modes, named bridge networks, DNS aliases, peer discovery, and generation-fenced TCP publication.',
+        tags: ['TSI', 'DNS', 'ports'],
+        className: 'box-capability--network',
+      },
+      {
+        index: '05',
+        eyebrow: 'AUTOMATION',
+        title: 'Native SDKs for local programmable infrastructure',
+        body: 'Rust calls the runtime directly. Go, Python, and TypeScript use one checked machine bridge with a versioned capability handshake.',
+        tags: ['Rust', 'Go', 'Python', 'TypeScript'],
+        className: 'box-capability--wide box-capability--sdk',
+      },
+    ],
+    sdkKicker: 'NATIVE SDKs',
+    sdkTitle: 'Automate the same runtime without parsing CLI output.',
+    sdkBody:
+      'Build images, provision resources, start sandboxes, run scripts, inspect results, and clean up deterministically from your preferred language.',
+    sdkNotes: {
+      rust: 'Direct typed runtime access',
+      go: 'Context-aware and concurrency-safe',
+      python: 'Synchronous and asynchronous APIs',
+      typescript: 'Promise APIs for Node.js 20+',
+    },
+    platformKicker: 'HOST BACKENDS',
+    platformTitle: 'One request model, explicit platform boundaries.',
+    platformBody:
+      'The public contract stays stable while each host reports the virtualization, networking, and guest-channel capabilities it can enforce.',
+    platformHeaders: ['Host', 'VM backend', 'Architecture', 'Current boundary'],
+    platformStatuses: [
+      'MicroVM + certified Sandbox hosts',
+      'MicroVM runtime',
+      'MicroVM runtime with documented limits',
+    ],
+    platformLink: 'Read the complete platform matrix',
+    ctaKicker: 'READY TO RUN LOCALLY?',
+    ctaTitle: 'Start with one OCI command. Keep the boundary explicit.',
+    openQuickStart: 'Open the quick start',
+    viewSource: 'View source',
   },
-  {
-    index: '03',
-    eyebrow: 'STORAGE',
-    title: 'Volumes and filesystem snapshots',
-    body: 'Combine bind mounts, named volumes, tmpfs, copy, diff, export, commit, and stopped-filesystem snapshots.',
-    tags: ['volumes', 'snapshot', 'diff'],
-    className: 'box-capability--storage',
-  },
-  {
-    index: '04',
-    eyebrow: 'NETWORK',
-    title: 'TSI, bridge networks, and published ports',
-    body: 'Choose explicit network modes, named bridge networks, DNS aliases, peer discovery, and generation-fenced TCP publication.',
-    tags: ['TSI', 'DNS', 'ports'],
-    className: 'box-capability--network',
-  },
-  {
-    index: '05',
-    eyebrow: 'AUTOMATION',
-    title: 'Native SDKs for local programmable infrastructure',
-    body: 'Rust calls the runtime directly. Go, Python, and TypeScript use one checked machine bridge with a versioned capability handshake.',
-    tags: ['Rust', 'Go', 'Python', 'TypeScript'],
-    className: 'box-capability--wide box-capability--sdk',
-  },
-];
+} as const;
 
 const sdkCards = [
   {
+    id: 'rust',
     language: 'Rust',
     packageName: 'a3s-box-sdk',
     command: 'cargo add a3s-box-sdk',
     href: '/sdk/rust.html',
-    note: 'Direct typed runtime access',
   },
   {
+    id: 'go',
     language: 'Go',
     packageName: 'sdk/go/v3',
     command: 'go get github.com/A3S-Lab/Box/sdk/go/v3',
     href: '/sdk/go.html',
-    note: 'Context-aware and concurrency-safe',
   },
   {
+    id: 'python',
     language: 'Python',
     packageName: 'a3s-box',
     command: 'python -m pip install a3s-box',
     href: '/sdk/python.html',
-    note: 'Synchronous and asynchronous APIs',
   },
   {
+    id: 'typescript',
     language: 'TypeScript',
     packageName: '@a3s-lab/box',
     command: 'npm install @a3s-lab/box',
     href: '/sdk/typescript.html',
-    note: 'Promise APIs for Node.js 20+',
   },
-];
+] as const;
 
 const platformRows = [
   {
     platform: 'Linux',
     backend: 'KVM',
     architecture: 'x86_64 / arm64',
-    status: 'MicroVM + certified Sandbox hosts',
   },
   {
     platform: 'macOS',
     backend: 'HVF',
     architecture: 'Apple Silicon',
-    status: 'MicroVM runtime',
   },
   {
     platform: 'Windows',
     backend: 'WHPX',
     architecture: 'x86_64',
-    status: 'MicroVM runtime with documented limits',
   },
-];
+] as const;
 
 function ArrowIcon() {
   return (
@@ -174,6 +393,11 @@ function CheckIcon() {
 }
 
 export function HomeLayout() {
+  const lang = useLang();
+  const isChinese = lang.startsWith('zh');
+  const copy = isChinese ? content.zh : content.en;
+  const languagePrefix = isChinese ? '' : '/en';
+  const docLink = (href: string) => withBase(`${languagePrefix}${href}`);
   const [selectedInstall, setSelectedInstall] =
     useState<(typeof installCommands)[number]['id']>('unix');
   const [copied, setCopied] = useState(false);
@@ -197,23 +421,19 @@ export function HomeLayout() {
         <div className="box-hero-copy">
           <div className="box-eyebrow">
             <span />
-            OCI WORKLOAD RUNTIME · v3
+            {copy.eyebrow}
           </div>
           <h1 id="box-hero-title">
-            Run agent workloads
-            <span>inside MicroVMs.</span>
+            {copy.heroLineOne}
+            <span>{copy.heroLineTwo}</span>
           </h1>
-          <p className="box-hero-subtitle">
-            A3S Box is a local OCI runtime that makes isolation part of every
-            request. Dedicated guest kernels are the default. Shared-kernel
-            execution is an explicit, capability-checked opt-in.
-          </p>
+          <p className="box-hero-subtitle">{copy.heroSubtitle}</p>
           <div className="box-hero-actions">
             <a
               className="box-button box-button--primary"
-              href={withBase('/guide/quick-start.html')}
+              href={docLink('/guide/quick-start.html')}
             >
-              Get started
+              {copy.getStarted}
               <ArrowIcon />
             </a>
             <a
@@ -253,33 +473,33 @@ export function HomeLayout() {
                 type="button"
                 className="box-copy-button"
                 onClick={copyInstallCommand}
-                aria-label="Copy install command"
+                aria-label={copy.copyInstall}
               >
                 {copied ? <CheckIcon /> : <CopyIcon />}
-                {copied ? 'Copied' : 'Copy'}
+                {copied ? copy.copied : copy.copy}
               </button>
             </div>
           </div>
         </div>
 
-        <div className="box-hero-visual" aria-label="A3S Box isolation model">
+        <div className="box-hero-visual" aria-label={copy.isolationAria}>
           <div className="box-runtime-window">
             <header>
               <span className="box-runtime-status" />
-              isolation resolver
-              <small>local runtime</small>
+              {copy.visual.resolver}
+              <small>{copy.visual.localRuntime}</small>
             </header>
             <div className="box-request">
-              <span>REQUEST</span>
-              <strong>OCI image + typed policy</strong>
+              <span>{copy.visual.request}</span>
+              <strong>{copy.visual.requestTitle}</strong>
               <code>alpine:3.20 · 1 CPU · 512 MiB</code>
             </div>
             <div className="box-runtime-connector">
-              <span>resolve capabilities</span>
+              <span>{copy.visual.resolve}</span>
             </div>
             <div className="box-policy">
-              <span>ADMISSION</span>
-              <strong>No implicit fallback</strong>
+              <span>{copy.visual.admission}</span>
+              <strong>{copy.visual.noFallback}</strong>
               <div>
                 <code>host</code>
                 <code>isolation</code>
@@ -288,106 +508,69 @@ export function HomeLayout() {
               </div>
             </div>
             <div className="box-runtime-fork">
-              <span>default</span>
-              <span>explicit opt-in</span>
+              <span>{copy.visual.default}</span>
+              <span>{copy.visual.optIn}</span>
             </div>
             <div className="box-isolation-grid">
               <article className="box-isolation-card box-isolation-card--microvm">
-                <span>HARDWARE VM</span>
+                <span>{copy.visual.hardwareVm}</span>
                 <strong>MicroVM</strong>
                 <small>libkrun</small>
-                <div>dedicated guest kernel</div>
+                <div>{copy.visual.dedicatedKernel}</div>
               </article>
               <article className="box-isolation-card box-isolation-card--sandbox">
-                <span>SHARED KERNEL</span>
+                <span>{copy.visual.sharedKernel}</span>
                 <strong>Sandbox</strong>
                 <small>A3S OCI Runtime</small>
-                <div>namespaces + seccomp</div>
+                <div>{copy.visual.sandboxBoundary}</div>
               </article>
             </div>
             <footer>
-              <span>generation fenced</span>
-              <span>durable state</span>
-              <span>local only</span>
+              <span>{copy.visual.generation}</span>
+              <span>{copy.visual.durable}</span>
+              <span>{copy.visual.localOnly}</span>
             </footer>
           </div>
         </div>
       </section>
 
       <section className="box-signal-strip" aria-label="Runtime summary">
-        <div>
-          <strong>Dedicated kernel</strong>
-          <span>default isolation</span>
-        </div>
-        <div>
-          <strong>OCI-native</strong>
-          <span>images and builds</span>
-        </div>
-        <div>
-          <strong>4 SDKs</strong>
-          <span>one runtime contract</span>
-        </div>
-        <div>
-          <strong>3 hosts</strong>
-          <span>KVM · HVF · WHPX</span>
-        </div>
+        {copy.signals.map(([title, detail]) => (
+          <div key={title}>
+            <strong>{title}</strong>
+            <span>{detail}</span>
+          </div>
+        ))}
       </section>
 
       <section className="box-section box-principles">
         <div className="box-section-heading">
-          <span>ISOLATION AS DATA</span>
-          <h2>Make the execution boundary visible in code.</h2>
-          <p>
-            Box resolves what the host can actually enforce, rejects
-            incompatible combinations before mutation, and records the effective
-            isolation class with each workload.
-          </p>
+          <span>{copy.principleKicker}</span>
+          <h2>{copy.principleTitle}</h2>
+          <p>{copy.principleBody}</p>
         </div>
         <div className="box-principle-grid">
-          <article>
-            <span>01 / DEFAULT</span>
-            <h3>MicroVM</h3>
-            <p>
-              A dedicated guest Linux kernel for untrusted workloads and
-              stronger tenant boundaries on KVM, HVF, or WHPX hosts.
-            </p>
-            <code>a3s-box run --rm alpine:3.20 -- uname -a</code>
-          </article>
-          <article>
-            <span>02 / EXPLICIT</span>
-            <h3>Sandbox</h3>
-            <p>
-              A shared-kernel Linux backend for trusted automation on certified
-              hosts with namespaces, seccomp, subordinate IDs, and cgroup v2.
-            </p>
-            <code>a3s-box run --isolation sandbox ...</code>
-          </article>
-          <article>
-            <span>03 / CONTRACT</span>
-            <h3>No fallback</h3>
-            <p>
-              Unsupported isolation, network, TEE, snapshot, or host
-              combinations fail closed instead of silently weakening the
-              request.
-            </p>
-            <code>request → validate → persist → boot</code>
-          </article>
+          {copy.principles.map((principle) => (
+            <article key={principle.label}>
+              <span>{principle.label}</span>
+              <h3>{principle.title}</h3>
+              <p>{principle.body}</p>
+              <code>{principle.command}</code>
+            </article>
+          ))}
         </div>
       </section>
 
       <section className="box-section box-capabilities">
         <div className="box-section-heading box-section-heading--split">
           <div>
-            <span>RUNTIME TOOLBOX</span>
-            <h2>Docker-like workflows with one local state owner.</h2>
+            <span>{copy.capabilityKicker}</span>
+            <h2>{copy.capabilityTitle}</h2>
           </div>
-          <p>
-            Images, executions, networks, volumes, snapshots, logs, policy, and
-            cleanup all terminate at the same generation-fenced runtime.
-          </p>
+          <p>{copy.capabilityBody}</p>
         </div>
         <div className="box-capability-grid">
-          {capabilityCards.map((card) => (
+          {copy.capabilities.map((card) => (
             <article key={card.index} className={card.className}>
               <div className="box-card-index">{card.index}</div>
               <span>{card.eyebrow}</span>
@@ -405,23 +588,19 @@ export function HomeLayout() {
 
       <section className="box-section box-sdks">
         <div className="box-section-heading">
-          <span>NATIVE SDKs</span>
-          <h2>Automate the same runtime without parsing CLI output.</h2>
-          <p>
-            Build images, provision resources, start sandboxes, run scripts,
-            inspect results, and clean up deterministically from your preferred
-            language.
-          </p>
+          <span>{copy.sdkKicker}</span>
+          <h2>{copy.sdkTitle}</h2>
+          <p>{copy.sdkBody}</p>
         </div>
         <div className="box-sdk-grid">
           {sdkCards.map((sdk) => (
-            <a key={sdk.language} href={withBase(sdk.href)}>
+            <a key={sdk.language} href={docLink(sdk.href)}>
               <header>
                 <span>{sdk.language}</span>
                 <ArrowIcon />
               </header>
               <strong>{sdk.packageName}</strong>
-              <p>{sdk.note}</p>
+              <p>{copy.sdkNotes[sdk.id]}</p>
               <code>{sdk.command}</code>
             </a>
           ))}
@@ -431,51 +610,46 @@ export function HomeLayout() {
       <section className="box-section box-platforms">
         <div className="box-section-heading box-section-heading--split">
           <div>
-            <span>HOST BACKENDS</span>
-            <h2>One request model, explicit platform boundaries.</h2>
+            <span>{copy.platformKicker}</span>
+            <h2>{copy.platformTitle}</h2>
           </div>
-          <p>
-            The public contract stays stable while each host reports the
-            virtualization, networking, and guest-channel capabilities it can
-            enforce.
-          </p>
+          <p>{copy.platformBody}</p>
         </div>
         <div className="box-platform-table">
           <div className="box-platform-row box-platform-row--header">
-            <span>Host</span>
-            <span>VM backend</span>
-            <span>Architecture</span>
-            <span>Current boundary</span>
+            {copy.platformHeaders.map((header) => (
+              <span key={header}>{header}</span>
+            ))}
           </div>
-          {platformRows.map((row) => (
+          {platformRows.map((row, index) => (
             <div className="box-platform-row" key={row.platform}>
               <strong>{row.platform}</strong>
               <code>{row.backend}</code>
               <span>{row.architecture}</span>
-              <span>{row.status}</span>
+              <span>{copy.platformStatuses[index]}</span>
             </div>
           ))}
         </div>
         <a
           className="box-inline-link"
-          href={withBase('/reference/platforms.html')}
+          href={docLink('/reference/platforms.html')}
         >
-          Read the complete platform matrix
+          {copy.platformLink}
           <ArrowIcon />
         </a>
       </section>
 
       <section className="box-cta">
         <div>
-          <span>READY TO RUN LOCALLY?</span>
-          <h2>Start with one OCI command. Keep the boundary explicit.</h2>
+          <span>{copy.ctaKicker}</span>
+          <h2>{copy.ctaTitle}</h2>
         </div>
         <div>
           <a
             className="box-button box-button--primary"
-            href={withBase('/guide/quick-start.html')}
+            href={docLink('/guide/quick-start.html')}
           >
-            Open the quick start
+            {copy.openQuickStart}
             <ArrowIcon />
           </a>
           <a
@@ -484,7 +658,7 @@ export function HomeLayout() {
             target="_blank"
             rel="noreferrer"
           >
-            View source
+            {copy.viewSource}
           </a>
         </div>
       </section>

@@ -1,0 +1,98 @@
+---
+title: 存储与快照
+description: 持久化文件、挂载主机数据，并从停止的工作负载恢复。
+---
+
+# 存储与快照
+
+A3S Box 区分镜像层、盒子可写层、命名卷和快照。应选择与数据生命周期匹配的最小
+存储原语。
+
+## 存储选择
+
+| 原语         | 生命周期         | 常见用途                   |
+| ------------ | ---------------- | -------------------------- |
+| 盒子可写层   | 直到盒子被删除   | 临时应用状态               |
+| 绑定挂载     | 由主机管理       | 源代码和明确的主机集成     |
+| 命名卷       | 独立于盒子       | 数据库、缓存和持久服务数据 |
+| `tmpfs`      | 直到工作负载停止 | 密钥和一次性高 I/O 数据    |
+| 文件系统快照 | 直到显式删除     | 检查点和快速写时复制恢复   |
+
+## 命名卷
+
+创建卷、挂载并检查其所有权：
+
+```bash
+a3s-box volume create app-data --label purpose=application-state
+
+a3s-box run --rm \
+  --mount type=volume,source=app-data,target=/data \
+  alpine:3.20 -- \
+  sh -lc 'date -u > /data/created-at'
+
+a3s-box volume inspect app-data
+```
+
+盒子退出后卷仍然存在。除非显式强制，Box 不会删除正在使用的卷。
+
+## 绑定挂载与 tmpfs
+
+以只读方式挂载主机目录：
+
+```bash
+a3s-box run --rm \
+  --mount type=bind,source="$PWD/config",target=/etc/example,readonly \
+  alpine:3.20 -- \
+  cat /etc/example/app.conf
+```
+
+绑定挂载会有意向工作负载暴露主机路径。不要把凭据、容器运行时套接字或大范围主机
+目录挂载给不可信代码。
+
+需要随工作负载消失的数据使用 `--tmpfs`：
+
+```bash
+a3s-box run --rm --tmpfs /run/secrets:rw,size=16m alpine:3.20
+```
+
+## 复制、差异、导出和提交
+
+```bash
+a3s-box cp ./settings.json app:/etc/example/settings.json
+a3s-box diff app
+a3s-box export app -o app-rootfs.tar
+a3s-box commit app local/app:checkpoint
+```
+
+当前后端要求稳定、主机可见的文件系统时，应先停止盒子。
+
+## 创建与恢复快照
+
+文件系统快照从停止的盒子创建：
+
+```bash
+a3s-box stop app
+a3s-box snapshot create app \
+  --name checkpoint-1 \
+  --description "before schema migration"
+
+a3s-box snapshot ls
+a3s-box snapshot inspect checkpoint-1
+a3s-box snapshot restore checkpoint-1 --name app-restored
+a3s-box start app-restored
+```
+
+恢复会创建新的运行时记录。只要写时复制恢复仍依赖源快照，就必须保留该快照。
+
+## 清理策略
+
+清理由操作者显式触发：
+
+```bash
+a3s-box snapshot prune --keep 10
+a3s-box volume prune
+a3s-box df
+```
+
+快照清理还可以通过 `--max-bytes` 限制总字节数。快照和卷可能是工作负载数据的唯一
+持久副本，执行前必须确认保留和备份策略。

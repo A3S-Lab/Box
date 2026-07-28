@@ -1,0 +1,97 @@
+---
+title: CLI 参考
+description: 查找 A3S Box 命令组和准确的详细帮助入口。
+---
+
+# CLI 参考
+
+当前安装的二进制是对应发布版本的权威命令参考：
+
+```bash
+a3s-box --help
+a3s-box <command> --help
+a3s-box <command> <subcommand> --help
+```
+
+报告问题时同时提供 `--version` 和 `info`，以便把行为对应到准确运行时和主机。
+
+## 命令组
+
+| 领域       | 命令                                                                                                                 |
+| ---------- | -------------------------------------------------------------------------------------------------------------------- |
+| 生命周期   | `run`, `create`, `start`, `stop`, `restart`, `rm`, `kill`, `pause`, `unpause`, `wait`, `rename`                      |
+| 执行       | `exec`, `shell`, `attach`, `top`                                                                                     |
+| 镜像与构建 | `pull`, `push`, `build`, `images`, `rmi`, `tag`, `image-inspect`, `history`, `image-prune`, `save`, `load`, `import` |
+| 文件系统   | `cp`, `diff`, `export`, `commit`, `volume`, `snapshot`                                                               |
+| 网络       | `network`, `port`, `port-forward`, `compose`                                                                         |
+| 安全与 TEE | `attest`, `seal`, `unseal`, `inject-secret`                                                                          |
+| 可观测性   | `ps`, `logs`, `inspect`, `stats`, `events`, `df`, `audit`, `monitor`                                                 |
+| 系统       | `container-update`, `system-prune`, `pool`, `login`, `logout`, `version`, `info`                                     |
+
+## 生命周期模型
+
+`run` 是创建加启动的组合。需要在分配资源前持久化配置时，先 `create` 再显式 `start`：
+
+```bash
+a3s-box create --name worker alpine:3.20 -- sleep 3600
+a3s-box start worker
+a3s-box inspect worker
+a3s-box stop worker
+a3s-box rm worker
+```
+
+`stop` 保留盒子，`rm` 删除终态盒子。生命周期状态使用代际围栏，陈旧调用方不能修改
+更新后的实例。
+
+## 镜像
+
+```bash
+a3s-box pull alpine:3.20
+a3s-box images
+a3s-box image-inspect alpine:3.20
+a3s-box history alpine:3.20
+```
+
+构建、注册表和归档工作流见[镜像与构建](/guide/images-builds)。
+
+## 存储
+
+```bash
+a3s-box volume --help
+a3s-box snapshot --help
+a3s-box cp --help
+a3s-box diff --help
+```
+
+快照从停止的盒子创建。命名卷拥有独立生命周期，在工作负载语义允许时可由多个盒子
+共享。
+
+## 网络与项目
+
+```bash
+a3s-box network --help
+a3s-box port-forward --help
+a3s-box compose --help
+```
+
+网络能力取决于主机和隔离后端。依赖桥接网络、端口发布或 Compose 前，请阅读
+[平台矩阵](./platforms/)。
+
+## 结构化自动化
+
+应用程序不要解析人类可读表格。优先使用命令提供的 JSON 输出，或使用共享类型化状态
+和机器协议的[原生 SDK](/sdk/)。
+
+## 破坏性维护
+
+清理和删除由操作者显式触发。先检查引用和磁盘占用：
+
+```bash
+a3s-box ps -a
+a3s-box images
+a3s-box volume ls
+a3s-box snapshot ls
+a3s-box df
+```
+
+使用强制删除或广泛系统清理前，先备份持久数据。

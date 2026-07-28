@@ -64,7 +64,8 @@ async def main() -> None:
         print(result.stdout)
 
 
-asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
 Use the asynchronous API in services that already own an event loop. Do not
@@ -75,37 +76,39 @@ wrap synchronous SDK calls in blocking work inside async request handlers.
 ```python
 from a3s_box import A3SBoxClient
 
-client = A3SBoxClient()
 
-image = (
-    client.image("./ci")
-    .dockerfile("Dockerfile")
-    .tag("local/python-ci:latest")
-    .build_arg("PYTHON_VERSION", "3.12")
-    .build()
-)
-cache = (
-    client.volume("pip-cache")
-    .label("purpose", "dependency-cache")
-    .create()
-)
 
-with (
-    client.sandbox(image.reference)
-    .cpus(4)
-    .memory_mb(4096)
-    .mount_named(cache.name, "/root/.cache/pip")
-    .workdir("/workspace")
-    .start()
-) as sandbox:
-    result = (
-        sandbox.script("python -m pip install -r requirements.txt\npytest\n")
-        .interpreter("/bin/sh", "-se")
-        .env("CI", "true")
-        .run()
+def main() -> None:
+    client = A3SBoxClient()
+    image = (
+        client.image("./ci")
+        .dockerfile("Dockerfile")
+        .tag("local/python-ci:latest")
+        .build_arg("PYTHON_VERSION", "3.12")
+        .build()
     )
-    if result.exit_code != 0:
-        raise RuntimeError(result.stderr)
+
+    with (
+        client.sandbox(image.reference)
+        .cpus(4)
+        .memory_mb(4096)
+        .workdir("/workspace")
+        .start()
+    ) as sandbox:
+        result = (
+            sandbox.script(
+                "python -m pip install -r requirements.txt\npytest\n"
+            )
+            .interpreter("/bin/sh", "-se")
+            .env("CI", "true")
+            .run()
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 The same client exposes typed images, volumes, networks, snapshots,

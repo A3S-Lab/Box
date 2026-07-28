@@ -52,59 +52,61 @@ certified Linux host:
 ```rust
 use a3s_box_sdk::{ExecutionIsolation, Sandbox, SandboxCreateOptions};
 
-let sandbox = Sandbox::create_with_options(
-    SandboxCreateOptions::new("alpine:3.20")
-        .isolation(ExecutionIsolation::Sandbox)
-        .cpus(2)
-        .memory_mb(1024),
-)
-.await?;
+#[tokio::main]
+async fn main() -> Result<(), a3s_box_sdk::ClientError> {
+    let sandbox = Sandbox::create_with_options(
+        SandboxCreateOptions::new("alpine:3.20")
+            .isolation(ExecutionIsolation::Sandbox)
+            .cpus(2)
+            .memory_mb(1024),
+    )
+    .await?;
+
+    let result = sandbox.commands.run("id").await?;
+    println!("{}", result.stdout);
+
+    sandbox.kill().await?;
+    Ok(())
+}
 ```
 
 ## Build and test inside Box
 
 ```rust
-use a3s_box_sdk::{A3sBoxClient, SandboxNetwork};
+use a3s_box_sdk::A3sBoxClient;
 
-let client = A3sBoxClient::new();
-let image = client
-    .image("./ci")
-    .dockerfile("Dockerfile")
-    .tag("local/rust-ci:latest")
-    .build_arg("RUST_VERSION", "stable")
-    .build()
-    .await?;
+#[tokio::main]
+async fn main() -> Result<(), a3s_box_sdk::ClientError> {
+    let client = A3sBoxClient::new();
+    let image = client
+        .image("./ci")
+        .dockerfile("Dockerfile")
+        .tag("local/rust-ci:latest")
+        .build_arg("RUST_VERSION", "stable")
+        .build()
+        .await?;
 
-let cache = client
-    .volume("cargo-cache")
-    .label("purpose", "dependency-cache")
-    .create()?;
+    let sandbox = client
+        .sandbox(image.reference)
+        .cpus(4)
+        .memory_mb(4096)
+        .workdir("/workspace")
+        .start()
+        .await?;
 
-let network = client
-    .network("ci-network")
-    .subnet("10.89.30.0/24")
-    .create()?;
+    let result = sandbox
+        .script("cargo test --all-targets\n")
+        .interpreter(["/bin/sh", "-se"])
+        .env("CI", "true")
+        .run()
+        .await?;
 
-let sandbox = client
-    .sandbox(image.reference)
-    .cpus(4)
-    .memory_mb(4096)
-    .mount_named(cache.name, "/usr/local/cargo/registry")
-    .network(SandboxNetwork::bridge(network.name))
-    .workdir("/workspace")
-    .start()
-    .await?;
+    sandbox.kill().await?;
+    if result.exit_code != 0 {
+        return Err(a3s_box_sdk::ClientError::Guest(result.stderr));
+    }
 
-let result = sandbox
-    .script("cargo test --all-targets\n")
-    .interpreter(["/bin/sh", "-se"])
-    .env("CI", "true")
-    .run()
-    .await?;
-
-sandbox.kill().await?;
-if result.exit_code != 0 {
-    return Err(a3s_box_sdk::ClientError::Guest(result.stderr));
+    Ok(())
 }
 ```
 

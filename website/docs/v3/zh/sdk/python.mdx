@@ -1,0 +1,131 @@
+---
+title: Python SDK
+description: 使用同步或异步 Python 自动化本地 A3S Box Sandbox。
+---
+
+# Python SDK
+
+`a3s-box` 包通过已安装的本地运行时提供同步和异步 API。它需要 Python 3.10 或更高
+版本，不包含远程服务配置。
+
+## 安装
+
+```bash
+python -m pip install a3s-box
+```
+
+单独安装并验证 A3S Box 运行时：
+
+```bash
+a3s-box --version
+a3s-box info
+```
+
+## 同步用法
+
+下面是完整程序：
+
+```python
+from a3s_box import Sandbox
+
+
+def main() -> None:
+    with Sandbox.create("python:3.12-alpine") as sandbox:
+        result = sandbox.commands.run(
+            ["python", "-c", "print(6 * 7)"]
+        )
+        print(result.stdout)
+
+        sandbox.files.write("/workspace/note.txt", "hello")
+        print(sandbox.files.read("/workspace/note.txt"))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+即使客体执行抛出异常，上下文管理器也会清理 Sandbox。
+
+## 异步用法
+
+```python
+import asyncio
+
+from a3s_box import AsyncSandbox
+
+
+async def main() -> None:
+    async with await AsyncSandbox.create(
+        "python:3.12-alpine"
+    ) as sandbox:
+        result = await sandbox.commands.run(
+            ["python", "-c", "print(6 * 7)"]
+        )
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+已经拥有事件循环的服务应使用异步 API，不要在异步请求处理器中直接执行阻塞的同步
+SDK 调用。
+
+## 构建器式 CI/CD
+
+下面的完整程序从 `./ci/Dockerfile` 构建镜像并执行测试：
+
+```python
+from a3s_box import A3SBoxClient
+
+
+def main() -> None:
+    client = A3SBoxClient()
+    image = (
+        client.image("./ci")
+        .dockerfile("Dockerfile")
+        .tag("local/python-ci:latest")
+        .build_arg("PYTHON_VERSION", "3.12")
+        .build()
+    )
+
+    with (
+        client.sandbox(image.reference)
+        .cpus(4)
+        .memory_mb(4096)
+        .workdir("/workspace")
+        .start()
+    ) as sandbox:
+        result = (
+            sandbox.script(
+                "python -m pip install -r requirements.txt\npytest\n"
+            )
+            .interpreter("/bin/sh", "-se")
+            .env("CI", "true")
+            .run()
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+同一个客户端还提供类型化镜像、卷、网络、快照、诊断和磁盘占用操作。
+
+## 选择运行时
+
+包默认从 `PATH` 解析 `a3s-box`。只有应用有意使用非默认可执行文件时才设置
+`A3S_BOX_BINARY`：
+
+```bash
+A3S_BOX_BINARY=/opt/a3s/bin/a3s-box python worker.py
+```
+
+运行时和 SDK 包应来自同一发布版本。不兼容的机器桥接会在正常操作开始前的能力握手
+阶段失败。
+
+完整说明见
+[包指南](https://github.com/A3S-Lab/Box/blob/main/sdk/python/README.md)和
+[PyPI 项目](https://pypi.org/project/a3s-box/)。
