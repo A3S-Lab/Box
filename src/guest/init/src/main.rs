@@ -871,14 +871,14 @@ mod linux {
         ensure_dev_std_symlinks();
 
         // Per-container cgroup for run-path resource limits that have no VM-boundary
-        // equivalent — currently `pids.max` (`--pids-limit`). `--memory`/`--cpus` on
-        // `run` are enforced by sizing the microVM itself, so only the process-count
-        // cap needs an in-guest cgroup. Created here in PID 1 before the container
-        // fork; the child joins it from `child_process` before exec (so every worker
-        // it forks is bounded too), and it is removed when this binding drops at
-        // guest-init exit, by which point the container has been reaped. Best-effort:
-        // `create` returns `None` when no such limit is set or cgroup v2 is
-        // unavailable, leaving the normal boot path untouched.
+        // equivalent. Created here in PID 1 before the container fork; the child
+        // joins it from `child_process` before exec (so every worker it forks is
+        // bounded too), and it is removed when this binding drops at guest-init
+        // exit, by which point the container has been reaped. Keep an empty slice
+        // even when no initial cgroup limit was requested: `container-update` then
+        // has a unique, safe target when it applies the first live limit instead of
+        // failing or touching the guest's root cgroup. Cgroup-v2 unavailability is
+        // still best-effort and leaves the normal boot path untouched.
         // Build the per-container cgroup from the runtime's A3S_SEC_* control vars.
         // memory_max stays None on the boot path: `--memory` is enforced by sizing
         // the microVM RAM, not an in-guest cgroup (so the runtime emits no
@@ -889,7 +889,7 @@ mod linux {
         let container_cgroup = if bootstrap_mode.is_host_sandbox() {
             None
         } else {
-            a3s_box_guest_init::cgroup::ContainerCgroup::create(
+            a3s_box_guest_init::cgroup::ContainerCgroup::create_for_main(
                 None,
                 std::env::var("A3S_SEC_MEM_LOW")
                     .ok()

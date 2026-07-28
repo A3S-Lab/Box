@@ -4,6 +4,13 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **First live resource update.** MicroVM containers retain an otherwise-empty
+  per-container cgroup from startup, so `container-update` can safely apply the
+  first CPU, memory-reservation, swap, PID, or cpuset limit without targeting
+  the guest root cgroup or requiring an initial resource limit.
+
 ## [3.2.0] — 2026-07-28
 
 ### Added

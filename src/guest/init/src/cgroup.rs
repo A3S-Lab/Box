@@ -23,6 +23,32 @@ use tracing::{debug, warn};
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone, Copy, Debug, Default)]
+struct CgroupLimits {
+    memory_max: Option<u64>,
+    memory_low: Option<u64>,
+    memory_swap_max: Option<i64>,
+    cpu_quota: Option<i64>,
+    cpu_period: Option<u64>,
+    cpu_shares: Option<u64>,
+    pids_max: Option<u64>,
+}
+
+impl CgroupLimits {
+    fn has_enforceable_limit(self) -> bool {
+        self.memory_max.is_some_and(|value| value > 0)
+            || self.memory_low.is_some_and(|value| value > 0)
+            || self.memory_swap_max.is_some()
+            || self.cpu_quota.is_some_and(|value| value > 0)
+            || self.cpu_shares.is_some_and(|value| value > 0)
+            || self.pids_max.is_some_and(|value| value > 0)
+    }
+}
+
+fn should_create_cgroup(limits: CgroupLimits, retain_for_live_updates: bool) -> bool {
+    retain_for_live_updates || limits.has_enforceable_limit()
+}
+
 /// Ensure cgroup v2 is mounted at `/sys/fs/cgroup` with the `memory`, `cpu`, and
 /// `pids` controllers delegated to child cgroups. Idempotent; returns `false`
 /// only if cgroup v2 cannot be mounted or exposes no controllers at all. Each
@@ -119,32 +145,76 @@ impl ContainerCgroup {
         cpu_shares: Option<u64>,
         pids_max: Option<u64>,
     ) -> Option<Self> {
-        let want_memory = memory_max.is_some_and(|m| m > 0);
-        let want_memory_low = memory_low.is_some_and(|m| m > 0);
-        // memory.swap.max accepts a byte value or -1 (unlimited); any explicit
-        // value means the limit was requested.
-        let want_memory_swap = memory_swap_max.is_some();
-        let want_cpu = cpu_quota.is_some_and(|q| q > 0);
-        let want_weight = cpu_shares.is_some_and(|s| s > 0);
-        let want_pids = pids_max.is_some_and(|p| p > 0);
-        if (!want_memory
-            && !want_memory_low
-            && !want_memory_swap
-            && !want_cpu
-            && !want_weight
-            && !want_pids)
-            || !ensure_cgroup2_ready()
-        {
+        Self::create_with_policy(
+            CgroupLimits {
+                memory_max,
+                memory_low,
+                memory_swap_max,
+                cpu_quota,
+                cpu_period,
+                cpu_shares,
+                pids_max,
+            },
+            false,
+        )
+    }
+
+    /// Create the cgroup for a long-lived container main process.
+    ///
+    /// Unlike [`Self::create`], this retains an otherwise-unlimited cgroup so a
+    /// later `container-update` can apply its first cgroup-based resource limit
+    /// to the already-running process. Without the empty slice, live updates
+    /// have no safe per-container target and must fail rather than modifying the
+    /// guest's root cgroup.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_for_main(
+        memory_max: Option<u64>,
+        memory_low: Option<u64>,
+        memory_swap_max: Option<i64>,
+        cpu_quota: Option<i64>,
+        cpu_period: Option<u64>,
+        cpu_shares: Option<u64>,
+        pids_max: Option<u64>,
+    ) -> Option<Self> {
+        Self::create_with_policy(
+            CgroupLimits {
+                memory_max,
+                memory_low,
+                memory_swap_max,
+                cpu_quota,
+                cpu_period,
+                cpu_shares,
+                pids_max,
+            },
+            true,
+        )
+    }
+
+    fn create_with_policy(limits: CgroupLimits, retain_for_live_updates: bool) -> Option<Self> {
+        if !should_create_cgroup(limits, retain_for_live_updates) || !ensure_cgroup2_ready() {
             return None;
         }
+
+        Self::create_in_ready_hierarchy(CGROUP_ROOT, limits)
+    }
+
+    fn create_in_ready_hierarchy(cgroup_root: &str, limits: CgroupLimits) -> Option<Self> {
+        let want_memory = limits.memory_max.is_some_and(|value| value > 0);
+        let want_memory_low = limits.memory_low.is_some_and(|value| value > 0);
+        // memory.swap.max accepts a byte value or -1 (unlimited); any explicit
+        // value means the limit was requested.
+        let want_memory_swap = limits.memory_swap_max.is_some();
+        let want_cpu = limits.cpu_quota.is_some_and(|value| value > 0);
+        let want_weight = limits.cpu_shares.is_some_and(|value| value > 0);
+        let want_pids = limits.pids_max.is_some_and(|value| value > 0);
         let seq = CGROUP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = format!("{CGROUP_ROOT}/box-{}-{}", std::process::id(), seq);
+        let path = format!("{cgroup_root}/box-{}-{}", std::process::id(), seq);
         if let Err(error) = std::fs::create_dir(&path) {
             warn!(error = %error, path, "cgroup: failed to create container cgroup");
             return None;
         }
         if want_memory {
-            let limit = memory_max.unwrap_or(0);
+            let limit = limits.memory_max.unwrap_or(0);
             if let Err(error) = write_cgroup_file(&format!("{path}/memory.max"), &limit.to_string())
             {
                 warn!(error = %error, "cgroup: failed to set memory.max");
@@ -159,7 +229,7 @@ impl ContainerCgroup {
             // memory.low = best-effort soft reservation (--memory-reservation):
             // the kernel reclaims from this cgroup only after unprotected memory
             // is exhausted. Non-fatal so other limits still apply.
-            let low = memory_low.unwrap_or(0);
+            let low = limits.memory_low.unwrap_or(0);
             if let Err(error) = write_cgroup_file(&format!("{path}/memory.low"), &low.to_string()) {
                 warn!(error = %error, low, "cgroup: failed to set memory.low");
             }
@@ -167,7 +237,7 @@ impl ContainerCgroup {
         if want_memory_swap {
             // memory.swap.max (--memory-swap): a byte cap, or "max" for -1
             // (unlimited swap). Non-fatal.
-            let value = match memory_swap_max {
+            let value = match limits.memory_swap_max {
                 Some(v) if v < 0 => "max".to_string(),
                 Some(v) => v.to_string(),
                 None => "max".to_string(),
@@ -179,15 +249,18 @@ impl ContainerCgroup {
         if want_cpu {
             // cgroup v2 `cpu.max` = "<quota_us> <period_us>"; CRI defaults the
             // period to 100ms when unset.
-            let period = cpu_period.filter(|p| *p > 0).unwrap_or(100_000);
-            let value = format!("{} {}", cpu_quota.unwrap_or(0), period);
+            let period = limits
+                .cpu_period
+                .filter(|value| *value > 0)
+                .unwrap_or(100_000);
+            let value = format!("{} {}", limits.cpu_quota.unwrap_or(0), period);
             // Non-fatal: keep the cgroup so any memory limit still applies.
             if let Err(error) = write_cgroup_file(&format!("{path}/cpu.max"), &value) {
                 warn!(error = %error, value, "cgroup: failed to set cpu.max");
             }
         }
         if want_weight {
-            let weight = shares_to_weight(cpu_shares.unwrap_or(1024));
+            let weight = shares_to_weight(limits.cpu_shares.unwrap_or(1024));
             if let Err(error) =
                 write_cgroup_file(&format!("{path}/cpu.weight"), &weight.to_string())
             {
@@ -197,17 +270,17 @@ impl ContainerCgroup {
         if want_pids {
             // cgroup v2 `pids.max` caps the number of processes/threads in the
             // cgroup; a fork past the limit fails with EAGAIN.
-            let limit = pids_max.unwrap_or(0);
+            let limit = limits.pids_max.unwrap_or(0);
             if let Err(error) = write_cgroup_file(&format!("{path}/pids.max"), &limit.to_string()) {
                 warn!(error = %error, limit, "cgroup: failed to set pids.max");
             }
         }
         debug!(
             path,
-            ?memory_max,
-            ?cpu_quota,
-            ?cpu_shares,
-            ?pids_max,
+            memory_max = ?limits.memory_max,
+            cpu_quota = ?limits.cpu_quota,
+            cpu_shares = ?limits.cpu_shares,
+            pids_max = ?limits.pids_max,
             "cgroup: created container cgroup"
         );
         Some(Self { path })
@@ -247,7 +320,23 @@ impl Drop for ContainerCgroup {
 
 #[cfg(test)]
 mod tests {
-    use super::shares_to_weight;
+    use super::{shares_to_weight, should_create_cgroup, CgroupLimits, ContainerCgroup};
+
+    #[test]
+    fn main_container_keeps_an_empty_cgroup_for_future_live_updates() {
+        let limits = CgroupLimits::default();
+        assert!(!should_create_cgroup(limits, false));
+        assert!(should_create_cgroup(limits, true));
+
+        let root = tempfile::tempdir().unwrap();
+        let cgroup =
+            ContainerCgroup::create_in_ready_hierarchy(root.path().to_str().unwrap(), limits)
+                .expect("main container cgroup");
+        let path = cgroup.path.clone();
+        assert!(std::path::Path::new(&path).is_dir());
+        drop(cgroup);
+        assert!(!std::path::Path::new(&path).exists());
+    }
 
     #[test]
     fn test_shares_to_weight_mapping() {
