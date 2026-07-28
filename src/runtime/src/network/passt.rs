@@ -6,6 +6,7 @@
 
 use a3s_box_core::error::{BoxError, Result};
 use std::net::Ipv4Addr;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
@@ -20,6 +21,10 @@ pub struct PasstManager {
     child: Option<Child>,
     /// PID file path for the passt process.
     pid_file: PathBuf,
+    /// libkrun endpoint inherited by the shim.
+    net_socket_fd: Option<OwnedFd>,
+    /// Multiplexer endpoint inherited by the shim.
+    net_proxy_fd: Option<OwnedFd>,
 }
 
 impl PasstManager {
@@ -40,6 +45,8 @@ impl PasstManager {
             pcap_path: socket_dir.join("passt.pcap"),
             pid_file: socket_dir.join("passt.pid"),
             child: None,
+            net_socket_fd: None,
+            net_proxy_fd: None,
         }
     }
 
@@ -51,6 +58,38 @@ impl PasstManager {
     /// Get the passt packet capture path.
     pub fn pcap_path(&self) -> &Path {
         &self.pcap_path
+    }
+
+    /// Insert a shim-hosted peer switch between libkrun and this passt process.
+    pub fn enable_peer_bridge(&mut self) -> Result<()> {
+        if self.net_socket_fd.is_some() || self.net_proxy_fd.is_some() {
+            return Ok(());
+        }
+        let mut descriptors = [-1; 2];
+        #[cfg(target_os = "linux")]
+        let socket_type = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let socket_type = libc::SOCK_STREAM;
+        let result =
+            unsafe { libc::socketpair(libc::AF_UNIX, socket_type, 0, descriptors.as_mut_ptr()) };
+        if result != 0 {
+            return Err(BoxError::NetworkError(format!(
+                "failed to create passt bridge socketpair: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: socketpair returned two new, uniquely owned descriptors.
+        self.net_socket_fd = Some(unsafe { OwnedFd::from_raw_fd(descriptors[0]) });
+        self.net_proxy_fd = Some(unsafe { OwnedFd::from_raw_fd(descriptors[1]) });
+        Ok(())
+    }
+
+    pub fn net_socket_fd(&self) -> Option<RawFd> {
+        self.net_socket_fd.as_ref().map(AsRawFd::as_raw_fd)
+    }
+
+    pub fn net_proxy_fd(&self) -> Option<RawFd> {
+        self.net_proxy_fd.as_ref().map(AsRawFd::as_raw_fd)
     }
 
     /// Spawn the passt daemon.
@@ -253,6 +292,8 @@ impl PasstManager {
             }
         }
         self.child = None;
+        self.net_socket_fd = None;
+        self.net_proxy_fd = None;
 
         // Clean up socket and PID file
         std::fs::remove_file(&self.socket_path).ok();
@@ -387,6 +428,22 @@ mod tests {
         let mgr = PasstManager::new(dir.path());
         assert_eq!(mgr.socket_path(), dir.path().join("passt.sock"));
         assert_eq!(mgr.pcap_path(), dir.path().join("passt.pcap"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn peer_bridge_descriptors_are_close_on_exec_until_the_shim_claims_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut manager = PasstManager::new(dir.path());
+
+        manager.enable_peer_bridge().unwrap();
+
+        for descriptor in [manager.net_socket_fd(), manager.net_proxy_fd()] {
+            let descriptor = descriptor.unwrap();
+            let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+            assert_ne!(flags, -1);
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        }
     }
 
     #[test]

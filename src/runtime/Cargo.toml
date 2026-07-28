@@ -88,10 +88,6 @@ tempfile = { workspace = true }
 # Metrics
 prometheus = { workspace = true }
 
-# macOS userspace network proxy (replaces gvproxy)
-[target.'cfg(target_os = "macos")'.dependencies]
-a3s-box-netproxy = { version = "3.2", path = "../netproxy" }
-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.48", features = [
     "Win32_Foundation",
@@ -101,6 +97,10 @@ windows-sys = { version = "0.48", features = [
 ] }
 
 [target.'cfg(unix)'.dependencies]
+# Unix userspace network proxy and peer switch. macOS uses it as the full
+# network backend; Linux multiplexes peer Ethernet frames alongside passt.
+a3s-box-netproxy = { version = "3.2", path = "../netproxy" }
+
 # Filesystem Snapshot fidelity
 filetime = "0.2"
 xattr = "1.6"

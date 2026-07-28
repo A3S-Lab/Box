@@ -213,6 +213,11 @@ impl VmManager {
             }
         };
 
+        // `controller.start` launches PID 1 and the user command. Preserve the
+        // pristine baseline before that boundary so short-lived filesystem
+        // mutations cannot win a race against the CLI's post-start bookkeeping.
+        self.create_diff_baseline(&layout);
+
         let console_output = instance_spec
             .console_output
             .clone()

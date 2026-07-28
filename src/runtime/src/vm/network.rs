@@ -155,17 +155,20 @@ impl VmManager {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
 
         #[cfg(target_os = "linux")]
-        let (socket_path, net_stats_path, _net_socket_fd, _net_proxy_fd) = {
+        let (socket_path, net_stats_path, net_socket_fd, net_proxy_fd) = {
             // passt drops privileges to `nobody` when launched as root, so its
             // socket must live in the world-traversable runtime socket directory
             // (next to the exec/PTY sockets), not under the box's 0700 home.
             let passt_socket_dir = self.socket_dir();
             let mut passt = crate::network::PasstManager::new(&passt_socket_dir);
+            passt.enable_peer_bridge()?;
             passt.spawn(ip, gateway, prefix_len, &dns_servers, &self.config.port_map)?;
             let path = passt.socket_path().to_path_buf();
+            let net_socket_fd = passt.net_socket_fd();
+            let net_proxy_fd = passt.net_proxy_fd();
             self.net_manager = Some(Box::new(passt));
             tracing::info!(network = network_name, ip = %ip, gateway = %gateway, "Bridge networking configured via passt");
-            (path, None, None::<i32>, None::<i32>)
+            (path, None, net_socket_fd, net_proxy_fd)
         };
 
         #[cfg(target_os = "macos")]
@@ -184,12 +187,15 @@ impl VmManager {
         Ok(NetworkInstanceConfig {
             net_socket_path: socket_path,
             net_stats_path,
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             net_socket_fd,
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             net_proxy_fd,
-            #[cfg(target_os = "macos")]
-            bridge_socket_dir: Some(macos_bridge_socket_dir(&self.home_dir, network_name)),
+            #[cfg(unix)]
+            bridge_socket_dir: Some(crate::network::bridge_socket_dir(
+                &self.home_dir,
+                network_name,
+            )),
             ip_address: ip,
             gateway,
             prefix_len,
@@ -281,21 +287,6 @@ impl VmManager {
         tracing::debug!(hosts = %hosts_content.trim(), "Configured guest /etc/hosts for DNS discovery");
         Ok(())
     }
-}
-
-#[cfg(target_os = "macos")]
-fn macos_bridge_socket_dir(home: &std::path::Path, network_name: &str) -> std::path::PathBuf {
-    use sha2::{Digest, Sha256};
-
-    let mut digest = Sha256::new();
-    digest.update(home.as_os_str().as_encoded_bytes());
-    digest.update([0]);
-    digest.update(network_name.as_bytes());
-    let key = hex::encode(digest.finalize());
-    let uid = unsafe { libc::getuid() };
-    std::path::PathBuf::from("/private/tmp/a3s-box-switches")
-        .join(uid.to_string())
-        .join(&key[..24])
 }
 
 /// Parse a MAC address string "02:42:0a:58:00:02" into [u8; 6].

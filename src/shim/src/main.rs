@@ -25,6 +25,8 @@ use a3s_box_core::EXEC_VSOCK_PORT;
 use a3s_box_core::PORT_FWD_VSOCK_PORT;
 #[cfg(not(target_os = "windows"))]
 use a3s_box_core::{ATTEST_VSOCK_PORT, PORT_FWD_VSOCK_PORT, PTY_VSOCK_PORT};
+#[cfg(target_os = "linux")]
+use a3s_box_netproxy::spawn_inherited_passt_bridge;
 #[cfg(target_os = "macos")]
 use a3s_box_netproxy::{spawn_inherited_netproxy, InheritedNetProxyConfig};
 use clap::Parser;
@@ -178,7 +180,7 @@ fn run() -> Result<()> {
         hint: None,
     })?;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     tracing::info!(
         box_id = %spec.box_id,
         vcpus = spec.vcpus,
@@ -188,7 +190,7 @@ fn run() -> Result<()> {
         net_proxy_fd = spec.network.as_ref().and_then(|net| net.net_proxy_fd),
         "Starting VM"
     );
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(unix))]
     tracing::info!(
         box_id = %spec.box_id,
         vcpus = spec.vcpus,
@@ -892,7 +894,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
     // Configure networking: virtio-net (passt on Linux, gvproxy on macOS) or TSI (default)
     #[cfg(not(target_os = "windows"))]
     if let Some(ref net_config) = spec.network {
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         tracing::info!(
             ip = %net_config.ip_address,
             gateway = %net_config.gateway,
@@ -902,7 +904,7 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
             net_proxy_fd = net_config.net_proxy_fd,
             "Configuring virtio-net networking"
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(unix))]
         tracing::info!(
             ip = %net_config.ip_address,
             gateway = %net_config.gateway,
@@ -912,20 +914,45 @@ unsafe fn configure_and_start_vm(spec: &InstanceSpec) -> Result<()> {
         );
 
         #[cfg(target_os = "linux")]
-        let socket_str =
-            net_config
-                .net_socket_path
-                .to_str()
+        if let Some(fd) = net_config.net_socket_fd {
+            let proxy_fd = net_config
+                .net_proxy_fd
                 .ok_or_else(|| BoxError::BoxBootError {
-                    message: format!(
-                        "Invalid network socket path: {}",
-                        net_config.net_socket_path.display()
-                    ),
+                    message: "Linux bridge networking is missing its inherited proxy descriptor"
+                        .to_string(),
                     hint: None,
                 })?;
-
-        #[cfg(target_os = "linux")]
-        ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
+            let bridge_socket_dir =
+                net_config
+                    .bridge_socket_dir
+                    .clone()
+                    .ok_or_else(|| BoxError::BoxBootError {
+                        message: "Linux bridge networking is missing its peer switch directory"
+                            .to_string(),
+                        hint: None,
+                    })?;
+            spawn_inherited_passt_bridge(
+                proxy_fd,
+                net_config.net_socket_path.clone(),
+                bridge_socket_dir,
+                net_config.mac_address,
+            )?;
+            log_inherited_net_fd(fd);
+            ctx.add_net_unixstream_fd(fd, &net_config.mac_address)?;
+        } else {
+            let socket_str =
+                net_config
+                    .net_socket_path
+                    .to_str()
+                    .ok_or_else(|| BoxError::BoxBootError {
+                        message: format!(
+                            "Invalid network socket path: {}",
+                            net_config.net_socket_path.display()
+                        ),
+                        hint: None,
+                    })?;
+            ctx.add_net_unixstream(socket_str, &net_config.mac_address)?;
+        }
         #[cfg(target_os = "macos")]
         if let Some(fd) = net_config.net_socket_fd {
             if let Some(proxy_fd) = net_config.net_proxy_fd {
@@ -1323,7 +1350,7 @@ fn kernel_format_from_magic(magic: [u8; 4]) -> Option<u32> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn log_inherited_net_fd(fd: i32) {
     let fd_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
     let file_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -1628,11 +1655,11 @@ mod tests {
         a3s_box_core::vmm::NetworkInstanceConfig {
             net_socket_path: std::path::PathBuf::from("/tmp/a3s-box-test-net.sock"),
             net_stats_path: Some(std::path::PathBuf::from("/tmp/a3s-box-test-net.stats.json")),
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             net_socket_fd: Some(42),
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             net_proxy_fd: Some(43),
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             bridge_socket_dir: Some(std::path::PathBuf::from("/tmp/a3s-switch")),
             ip_address: "10.89.0.2".parse().unwrap(),
             gateway: "10.89.0.1".parse().unwrap(),

@@ -34,7 +34,10 @@ use a3s_box_core::{
     ExecutionGeneration, ExecutionId, ExecutionManagerError, ExecutionManagerResult,
 };
 
-pub use backend::{LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation};
+pub use backend::{
+    LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
+    LocalExecutionTermination,
+};
 use record::{build_managed_record, status_from_record};
 use store::RuntimeUpdate;
 #[cfg(feature = "vm")]

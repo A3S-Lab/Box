@@ -7,11 +7,15 @@
 //! - `CopyProvider` — full recursive copy (works everywhere)
 //! - `OverlayProvider` — Linux overlayfs mount (near-instant CoW)
 
+mod baseline;
 mod builder;
 mod layout;
 pub(crate) mod overlay;
 mod provider;
 
+pub use baseline::{
+    create_diff_baseline_if_absent, walk_rootfs, RootfsFileInfo, DIFF_BASELINE_FILE,
+};
 pub use builder::RootfsBuilder;
 pub use layout::{GuestLayout, GUEST_WORKDIR};
 pub use provider::{default_provider, CopyProvider, OverlayProvider, RootfsProvider};

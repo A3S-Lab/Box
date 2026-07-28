@@ -237,6 +237,19 @@ impl LocalExecutionBackend for FakeBackend {
         }
         Ok(KillOutcome::Killed)
     }
+
+    async fn kill_with_status(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionTermination> {
+        let outcome = self.kill(record).await?;
+        let exit_code = record
+            .stop_signal
+            .as_deref()
+            .map(a3s_box_core::vmm::parse_signal_name)
+            .map(|signal| 128 + signal);
+        Ok(LocalExecutionTermination { outcome, exit_code })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1312,6 +1325,33 @@ async fn kill_is_generation_fenced_and_idempotent() {
         ExecutionState::Stopped
     );
     assert!(persisted(&manager, &running.execution_id).stopped_by_user);
+}
+
+#[tokio::test]
+async fn option_aware_kill_persists_authoritative_backend_exit_code() {
+    let (_directory, manager, _backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("sandbox-exit-status"),
+            &operation("operation-exit-status"),
+        )
+        .await
+        .unwrap();
+
+    manager
+        .kill_with_options(
+            &running.execution_id,
+            running.generation,
+            KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(stopped.exit_code, Some(137));
 }
 
 #[tokio::test]

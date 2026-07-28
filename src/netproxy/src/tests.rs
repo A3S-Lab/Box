@@ -383,12 +383,19 @@ fn dns_response_preserves_queried_server_endpoint_end_to_end() {
 
 #[test]
 fn bridge_port_unicasts_frame_to_matching_peer_mac() {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = tempfile::tempdir().unwrap();
     let mac_a = [0x02, 0x42, 10, 88, 0, 2];
     let mac_b = [0x02, 0x42, 10, 88, 0, 3];
     let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
     let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
     let frame = ethernet_frame(mac_b, mac_a);
+
+    assert_eq!(
+        std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
 
     assert!(!bridge_a.forward_from_guest(&frame));
     let mut received = Vec::new();

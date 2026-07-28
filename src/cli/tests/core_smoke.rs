@@ -1743,7 +1743,7 @@ fn real_core_network_connect_disconnect_before_start() {
     assert_eq!(force_disconnected["network_name"], serde_json::Value::Null);
     assert_eq!(force_disconnected["network_mode"], serde_json::json!("tsi"));
 
-    smoke.ok(&["start", &box_name]);
+    smoke.ok(&["restart", &box_name]);
     smoke.wait_for_named_running(&box_name);
     let restarted = smoke.ok(&[
         "exec",
@@ -2296,7 +2296,7 @@ fn real_core_compose_single_service_lifecycle() {
             r#"services:
   {service}:
     image: {image}
-    command: ["/bin/sh", "-c", "printf 'core-smoke-compose:%s\n' \"$A3S_COMPOSE_SMOKE\"; sleep 3600"]
+    command: ["/bin/sh", "-c", "printf 'core-smoke-compose:%s\n' \"$$A3S_COMPOSE_SMOKE\"; sleep 3600"]
     environment:
       A3S_COMPOSE_SMOKE: "ok"
     labels:

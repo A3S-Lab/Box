@@ -60,13 +60,17 @@ All notable changes to A3S Box will be documented in this file.
 - **Poisoned build-cache recovery.** Layer cache hits verify the regular-file
   type, recorded size, and SHA-256 content before reuse. A later valid store
   repairs a corrupt content-addressed blob instead of repeatedly serving it.
-
-### Fixed
-
 - **Reliable Cloud Sandbox completion.** Managed Sandbox inspection retains an
   A3S OCI generation until its exact exit status is available, and the default
   seccomp profile permits namespaced System V shared-memory operations needed
   by PostgreSQL while retaining its default-deny host-control boundary.
+- **Deterministic termination and filesystem diffs.** Managed kill operations
+  retain the backend's authoritative signal exit status, while the runtime
+  installs a first-writer-wins rootfs baseline before the workload can mutate
+  the guest filesystem.
+- **Linux bridge peer switching.** Named-network peer Ethernet frames are
+  switched between libkrun guests by a bounded shim adapter while passt remains
+  responsible for gateway traffic, published ports, and outbound connectivity.
 
 ## [3.1.0] — 2026-07-23
 

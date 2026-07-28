@@ -350,6 +350,19 @@ impl KrunContext {
         )
     }
 
+    /// Add a virtio-net device connected to an inherited passt-compatible
+    /// Unix stream descriptor.
+    #[cfg(target_os = "linux")]
+    pub unsafe fn add_net_unixstream_fd(&self, fd: i32, mac: &[u8; 6]) -> Result<()> {
+        tracing::debug!(fd, mac = ?mac, "Adding virtio-net via inherited passt stream fd");
+
+        let features: u32 = (1 << 0) | (1 << 1) | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 14);
+        check_status(
+            "krun_add_net_unixstream",
+            krun_add_net_unixstream(self.ctx_id, ptr::null(), fd, mac.as_ptr(), features, 0),
+        )
+    }
+
     /// Add a virtio-net device connected to a gvproxy Unix datagram socket (macOS).
     ///
     /// Uses the vfkit protocol (NET_FLAG_VFKIT) for handshake with gvproxy.

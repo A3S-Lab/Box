@@ -302,17 +302,17 @@ impl LocalExecutionManager {
         if let Some(timeout_secs) = options.timeout_secs {
             backend_record.stop_timeout = Some(timeout_secs);
         }
-        match self.backend.kill(&backend_record).await {
-            Ok(outcome) => {
+        match self.backend.kill_with_status(&backend_record).await {
+            Ok(termination) => {
                 self.release_execution_resources(&record).await?;
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::KillTerminal(None),
+                    RuntimeUpdate::KillTerminal(termination.exit_code),
                 )
                 .await?;
-                Ok(outcome)
+                Ok(termination.outcome)
             }
             Err(ExecutionManagerError::NotFound(_)) => {
                 self.release_execution_resources(&record).await?;

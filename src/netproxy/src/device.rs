@@ -17,6 +17,9 @@ pub(super) const GATEWAY_MAC: EthernetAddress =
 pub(super) const MAX_FRAME: usize = 1514;
 /// Bound userspace buffering while the libkrun datagram endpoint catches up.
 const MAX_PENDING_TX_FRAMES: usize = 256;
+/// passt supports jumbo stream frames; keep peer-switch receive buffers large
+/// enough even though the macOS smoltcp device advertises a 1514-byte MTU.
+const MAX_BRIDGE_FRAME: usize = 65_550;
 /// Keep each non-blocking socket pass finite so network and VM work stay fair.
 const IO_BURST_FRAMES: usize = 64;
 
@@ -172,6 +175,8 @@ pub(super) struct BridgePort {
 impl BridgePort {
     pub(super) fn bind(directory: &Path, own_mac: [u8; 6]) -> io::Result<Self> {
         std::fs::create_dir_all(directory)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
         let own_path = directory.join(mac_socket_name(own_mac));
         match std::fs::remove_file(&own_path) {
             Ok(()) => {}
@@ -229,7 +234,7 @@ impl BridgePort {
     }
 
     pub(super) fn drain_frames(&self, frames: &mut Vec<Vec<u8>>, limit: usize) {
-        let mut buf = [0u8; MAX_FRAME];
+        let mut buf = [0u8; MAX_BRIDGE_FRAME];
         for _ in 0..limit {
             match self.socket.recv(&mut buf) {
                 Ok(size) => {
@@ -242,6 +247,11 @@ impl BridgePort {
                 }
             }
         }
+    }
+
+    pub(super) fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.socket.as_raw_fd()
     }
 }
 

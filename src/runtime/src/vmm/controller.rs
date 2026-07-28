@@ -11,6 +11,17 @@ use super::provider::VmmProvider;
 use super::spec::InstanceSpec;
 use super::VmHandler;
 
+#[cfg(unix)]
+fn clear_fd_close_on_exec(descriptor: i32) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags == -1
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "windows")]
 struct StandardHandleInheritanceGuard {
     _spawn_lock: std::sync::MutexGuard<'static, ()>,
@@ -501,7 +512,7 @@ impl VmmProvider for VmController {
         }
 
         // Spawn shim subprocess
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         tracing::info!(
             shim = %self.shim_path.display(),
             box_id = %spec.box_id,
@@ -509,7 +520,7 @@ impl VmmProvider for VmController {
             net_proxy_fd = spec.network.as_ref().and_then(|net| net.net_proxy_fd),
             "Spawning shim subprocess"
         );
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(unix))]
         tracing::info!(
             shim = %self.shim_path.display(),
             box_id = %spec.box_id,
@@ -590,10 +601,18 @@ impl VmmProvider for VmController {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
+            let net_socket_fd = spec.network.as_ref().and_then(|net| net.net_socket_fd);
+            let net_proxy_fd = spec.network.as_ref().and_then(|net| net.net_proxy_fd);
             unsafe {
-                cmd.pre_exec(|| {
+                cmd.pre_exec(move || {
                     // setsid() fails harmlessly if already a group leader; ignore.
                     libc::setsid();
+                    // Network descriptors are close-on-exec in the parent so
+                    // concurrent passt/shim launches cannot inherit each
+                    // other's connections. Only this child claims its pair.
+                    for descriptor in [net_socket_fd, net_proxy_fd].into_iter().flatten() {
+                        clear_fd_close_on_exec(descriptor)?;
+                    }
                     Ok(())
                 });
             }
@@ -695,6 +714,25 @@ exec /bin/sleep 30
         assert!(message.contains("Shim binary not found"));
         assert!(message.contains(&missing.display().to_string()));
         assert!(message.contains("cargo build -p a3s-box-shim"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_network_fd_can_be_claimed_for_the_shim_exec() {
+        use std::os::fd::AsRawFd;
+
+        let (left, _right) = std::os::unix::net::UnixStream::pair().unwrap();
+        let descriptor = left.as_raw_fd();
+        assert_ne!(
+            unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) },
+            -1
+        );
+
+        clear_fd_close_on_exec(descriptor).unwrap();
+
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert_ne!(flags, -1);
+        assert_eq!(flags & libc::FD_CLOEXEC, 0);
     }
 
     #[cfg(target_os = "windows")]

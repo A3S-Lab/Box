@@ -1218,6 +1218,12 @@ impl VmManager {
             spec.network = Some(net_config);
         }
 
+        // Capture the pristine, guest-visible filesystem after all host-side
+        // preparation but before the provider can launch the workload. A fast
+        // entrypoint can mutate the rootfs before `VmManager::boot` returns, so
+        // command-level snapshotting is inherently racy.
+        self.create_diff_baseline(&layout);
+
         #[cfg(target_os = "macos")]
         if spec.network.is_none()
             && matches!(self.config.network, a3s_box_core::NetworkMode::Tsi)
@@ -1376,6 +1382,19 @@ impl VmManager {
         tracing::info!(parent: &boot_span, box_id = %self.box_id, "VM ready");
 
         Ok(())
+    }
+
+    fn create_diff_baseline(&self, layout: &BoxLayout) {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        if let Err(error) =
+            crate::rootfs::create_diff_baseline_if_absent(&box_dir, &layout.rootfs_path)
+        {
+            tracing::warn!(
+                box_id = %self.box_id,
+                %error,
+                "Failed to create rootfs diff baseline before workload launch"
+            );
+        }
     }
 
     /// Destroy the VM with the default shutdown timeout and SIGTERM.

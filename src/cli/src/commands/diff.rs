@@ -4,8 +4,9 @@
 //! added, changed, and deleted files, similar to `docker diff`.
 
 use std::collections::HashMap;
-use std::path::{Component, Path};
+use std::path::Path;
 
+use a3s_box_runtime::rootfs::{RootfsFileInfo, DIFF_BASELINE_FILE};
 use clap::Args;
 
 use crate::resolve;
@@ -48,7 +49,7 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Snapshot the original image to compare against
-    let snapshot_path = record.box_dir.join("rootfs_snapshot.json");
+    let snapshot_path = record.box_dir.join(DIFF_BASELINE_FILE);
     if !snapshot_path.exists() {
         println!("No baseline snapshot found — cannot compute diff.");
         println!("(Snapshot is created at box creation time.)");
@@ -57,7 +58,7 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let snapshot_data = std::fs::read_to_string(&snapshot_path)
         .map_err(|e| format!("Failed to read snapshot: {e}"))?;
-    let baseline: HashMap<String, FileInfo> = serde_json::from_str(&snapshot_data)
+    let baseline: HashMap<String, RootfsFileInfo> = serde_json::from_str(&snapshot_data)
         .map_err(|e| format!("Failed to parse snapshot: {e}"))?;
 
     // Walk current rootfs
@@ -105,95 +106,24 @@ pub async fn execute(args: DiffArgs) -> Result<(), Box<dyn std::error::Error>> {
 pub(crate) fn create_box_baseline_snapshot(
     box_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let snapshot_path = box_dir.join("rootfs_snapshot.json");
-    if snapshot_path.exists() {
-        return Ok(());
-    }
     // Resolve the provider's rootfs: `merged` (overlay) is the freshly-mounted
     // pristine image at boot time; `rootfs` (plain provider) likewise.
     if let Some(rootfs_dir) = super::resolve_box_rootfs(box_dir) {
-        create_snapshot(&rootfs_dir, &snapshot_path)?;
+        a3s_box_runtime::rootfs::create_diff_baseline_if_absent(box_dir, &rootfs_dir)?;
     }
     Ok(())
 }
 
-/// Minimal file metadata for comparison.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct FileInfo {
-    pub size: u64,
-    pub mode: u32,
-    pub is_dir: bool,
-}
+/// Compatibility alias for the CLI-level diff tests.
+pub type FileInfo = RootfsFileInfo;
 
 /// Walk a directory tree and collect file metadata, keyed by relative path.
 pub fn walk_dir(root: &Path) -> Result<HashMap<String, FileInfo>, Box<dyn std::error::Error>> {
-    let mut map = HashMap::new();
-    walk_recursive(root, root, &mut map)?;
-    Ok(map)
+    Ok(a3s_box_runtime::rootfs::walk_rootfs(root)?)
 }
 
-fn walk_recursive(
-    root: &Path,
-    current: &Path,
-    map: &mut HashMap<String, FileInfo>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let entries = match std::fs::read_dir(current) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .map(rootfs_path_string)
-            .unwrap_or_default();
-
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        #[cfg(unix)]
-        let mode = {
-            use std::os::unix::fs::MetadataExt;
-            meta.mode()
-        };
-        #[cfg(not(unix))]
-        let mode = 0u32;
-
-        map.insert(
-            rel,
-            FileInfo {
-                size: meta.len(),
-                mode,
-                is_dir: meta.is_dir(),
-            },
-        );
-
-        if meta.is_dir() {
-            walk_recursive(root, &path, map)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn rootfs_path_string(relative: &Path) -> String {
-    let segments = relative
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(segment) => Some(segment.to_string_lossy()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    format!("/{}", segments.join("/"))
-}
-
-/// Create a baseline snapshot of a rootfs directory.
-///
-/// Called at box creation time to record the initial filesystem state.
+/// Create a standalone baseline snapshot for diff behavior tests.
+#[cfg(test)]
 pub fn create_snapshot(
     rootfs_dir: &Path,
     snapshot_path: &Path,

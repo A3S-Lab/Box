@@ -169,6 +169,13 @@ impl NetworkStore {
                     config.endpoints.len()
                 )));
             }
+            // Remove stale switch sockets while the same cross-process lock
+            // still fences recreation of this network name. Cleaning after
+            // releasing the lock could delete a newly-created network's peers.
+            #[cfg(unix)]
+            if let Some(home) = self.path.parent() {
+                super::cleanup_bridge_socket_dir(home, name);
+            }
             Ok(config)
         })
     }
@@ -293,6 +300,23 @@ mod tests {
 
         let networks = store.load().unwrap();
         assert!(networks.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_cleans_the_network_peer_switch_directory() {
+        let (dir, store) = temp_store();
+        let network_name = "switch-cleanup";
+        store
+            .create(NetworkConfig::new(network_name, "10.88.0.0/24").unwrap())
+            .unwrap();
+        let switch_dir = crate::network::bridge_socket_dir(dir.path(), network_name);
+        std::fs::create_dir_all(&switch_dir).unwrap();
+        std::fs::write(switch_dir.join("stale.sock"), b"stale").unwrap();
+
+        store.remove(network_name).unwrap();
+
+        assert!(!switch_dir.exists());
     }
 
     #[test]
