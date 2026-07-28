@@ -89,6 +89,11 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
+      # actions/setup-go v6.5.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: sdk/go/go.mod
       - name: Build and verify Python package
         run: |
           mkdir -p sdk-artifacts
@@ -104,6 +109,27 @@ jobs:
           npm run build
           npm test
           npm pack --pack-destination "$GITHUB_WORKSPACE/sdk-artifacts"
+      - name: Verify Go module and release path
+        working-directory: sdk/go
+        shell: bash
+        run: |
+          set -euo pipefail
+          major="${GITHUB_REF_NAME#v}"
+          major="${major%%.*}"
+          expected="github.com/A3S-Lab/Box/sdk/go/v${major}"
+          actual="$(go list -m)"
+          if [ "$actual" != "$expected" ]; then
+            echo "Go module $actual does not match release major v$major" >&2
+            exit 1
+          fi
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test ./...
+          go test -race ./...
       # actions/upload-artifact v6.0.0
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
@@ -917,6 +943,48 @@ jobs:
             esac
             wait_for_crate "$crate"
           done
+
+  # Go modules are published by a path-prefixed semantic version tag. The
+  # root vX.Y.Z tag alone cannot publish the nested sdk/go module.
+  publish-go-module:
+    name: Publish Go module tag
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+      - name: Create path-prefixed Go module tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="sdk/go/${GITHUB_REF_NAME}"
+          remote_tags="$(
+            git ls-remote --tags origin \
+              "refs/tags/$tag" "refs/tags/$tag^{}"
+          )"
+          remote_commit="$(
+            printf '%s\n' "$remote_tags" |
+              awk '$2 ~ /\^\{\}$/ { print $1; exit }'
+          )"
+          if [ -z "$remote_commit" ]; then
+            remote_commit="$(
+              printf '%s\n' "$remote_tags" |
+                awk 'NF == 2 { print $1; exit }'
+            )"
+          fi
+          if [ -n "$remote_commit" ]; then
+            if [ "$remote_commit" != "$GITHUB_SHA" ]; then
+              echo "$tag already points to $remote_commit, expected $GITHUB_SHA" >&2
+              exit 1
+            fi
+            echo "$tag already exists at $GITHUB_SHA"
+            exit 0
+          fi
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"
 
   # ── Update Homebrew Formula ────────────────────────────────────
   publish-homebrew:

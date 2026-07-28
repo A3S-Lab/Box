@@ -297,7 +297,7 @@ for:
 - pause, resume, stop, delete, and post-stop hooks;
 - PID, namespace, mount, cgroup, socket, owner, and session cleanup.
 
-Box then runs the real Rust, Python, and TypeScript SDK lifecycle against those
+Box then runs the real Rust, Python, TypeScript, and Go SDK lifecycle against those
 artifacts. It covers images, files, logs, metrics, named volumes, snapshots,
 pause/resume, filesystem-only restart, and final cleanup.
 

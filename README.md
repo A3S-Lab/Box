@@ -11,6 +11,7 @@
   <a href="https://github.com/A3S-Lab/Box/releases/latest"><img alt="Latest A3S Box release" src="https://img.shields.io/github/v/release/A3S-Lab/Box?display_name=tag&amp;sort=semver&amp;style=flat-square&amp;color=62d78b"></a>
   <a href="https://pypi.org/project/a3s-box/"><img alt="A3S Box Python package" src="https://img.shields.io/pypi/v/a3s-box?style=flat-square&amp;color=3775a9"></a>
   <a href="https://www.npmjs.com/package/@a3s-lab/box"><img alt="A3S Box TypeScript package" src="https://img.shields.io/npm/v/@a3s-lab/box?style=flat-square&amp;color=cb3837"></a>
+  <a href="https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3"><img alt="A3S Box Go package" src="https://pkg.go.dev/badge/github.com/A3S-Lab/Box/sdk/go/v3.svg"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-f5b95f?style=flat-square"></a>
 </p>
 
@@ -213,7 +214,7 @@ a3s-box compose -f compose.acl down
 
 ## Native SDKs
 
-Rust, Python, and TypeScript operate the same local images, Sandboxes, volumes,
+Rust, Python, TypeScript, and Go operate the same local images, Sandboxes, volumes,
 networks, snapshots, logs, and runtime state as the CLI. These packages expose
 no remote connection configuration: they require the installed runtime and do
 not read an endpoint, domain, or API key.
@@ -223,11 +224,13 @@ not read an endpoint, domain, or API key.
 | Rust | [`a3s-box-sdk`](https://crates.io/crates/a3s-box-sdk) | Direct typed calls into the runtime and generation-fenced execution manager |
 | Python | [`a3s-box`](https://pypi.org/project/a3s-box/) | Sync and async APIs over the installed versioned machine bridge |
 | TypeScript | [`@a3s-lab/box`](https://www.npmjs.com/package/@a3s-lab/box) | Promise APIs over the installed versioned machine bridge; Node.js 20+ |
+| Go | [`github.com/A3S-Lab/Box/sdk/go/v3`](https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3) | Context-aware, concurrency-safe APIs over the installed versioned machine bridge; Go 1.25+ |
 
 ```bash
 cargo add a3s-box-sdk
 python -m pip install a3s-box
 npm install @a3s-lab/box
+go get github.com/A3S-Lab/Box/sdk/go/v3
 ```
 
 The high-level `Sandbox`, `commands`, and `files` namespaces are intentionally
@@ -245,38 +248,39 @@ with Sandbox.create("python:3.12-alpine") as sandbox:
 The same clients expose fluent programmable CI/CD builders without adding a
 second workflow engine:
 
-```typescript
-import { A3SBoxClient } from '@a3s-lab/box'
+```go
+client, err := box.NewClient(ctx)
+if err != nil { return err }
 
-const client = new A3SBoxClient()
-const image = await client.image('./ci').tag('local/ci:latest').build()
-const sandbox = await client
-  .sandbox(image.reference)
-  .cpus(4)
-  .memoryMb(4096)
-  .start()
+image, err := client.Image("./ci").Tag("local/ci:latest").Build(ctx)
+if err != nil { return err }
 
-try {
-  const result = await sandbox
-    .script('npm ci\nnpm test\n')
-    .interpreter('/bin/sh', '-se')
-    .env('CI', 'true')
-    .run()
-  if (result.exitCode !== 0) throw new Error(result.stderr)
-} finally {
-  await sandbox.kill()
-}
+cache, err := client.Volume("go-cache").Create(ctx)
+if err != nil { return err }
+
+sandbox, err := client.Sandbox(image.Reference).
+    CPUs(4).
+    MemoryMiB(4096).
+    Mount(box.NamedVolume(cache.Name, "/go/pkg/mod")).
+    Start(ctx)
+if err != nil { return err }
+defer sandbox.Close(context.Background())
+
+result, err := sandbox.Script("go test ./...\n").Env("CI", "true").Run(ctx)
+if err != nil { return err }
+if result.ExitCode != 0 { return errors.New(result.StderrString()) }
 ```
 
-Python and TypeScript never parse human CLI output; they exchange one checked,
+Python, TypeScript, and Go never parse human CLI output; they exchange one checked,
 structured request and response with `a3s-box sdk-bridge`. Use runtime and SDK
 packages from the same release because the bridge rejects incompatible
 protocol versions.
 
 Read the [cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md)
 or go directly to the [Rust](src/sdk/README.md),
-[Python](sdk/python/README.md), and
-[TypeScript](sdk/typescript/README.md) package guides.
+[Python](sdk/python/README.md),
+[TypeScript](sdk/typescript/README.md), and
+[Go](sdk/go/README.md) package guides.
 
 ## Platform boundaries
 
@@ -294,7 +298,7 @@ or go directly to the [Rust](src/sdk/README.md),
 | Execution path | Real-runtime evidence | Remaining boundary |
 | --- | --- | --- |
 | Default MicroVM on Windows/WHPX | [`scripts/windows-whpx-soak.ps1`](scripts/windows-whpx-soak.ps1) covers lifecycle and foreground exit, published-port networking, read-only bind mounts, named volumes, volume-backed initialization success and failure, metadata-preserving commit, filesystem commit/snapshot restore, and repeated virtio-fs traversal. The current qualification completed all 12 cases and returned the start and final runtime inventories to zero. | This proves the tested x86_64 Windows/WHPX host and workload matrix, not KVM, HVF, or TEE hardware. |
-| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles, then exercises the Rust, Python, and TypeScript local SDKs and verifies process cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
+| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles, then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
 | Linux/KVM MicroVM | A self-hosted real-KVM workflow covers the core lifecycle, SDK, CRI, leak, race, snapshot-fork, and soak paths when `KVM_CI=true`. | The job is conditionally skipped without the enrolled runner; a green hosted build alone is not real-KVM evidence. |
 | macOS/HVF MicroVM | Hosted macOS arm64 compilation checks the supported target. | A real Apple Silicon/HVF boot and soak are separate release evidence. |
 | SEV-SNP-oriented TEE | Unit and simulation tests cover application flow and protocol behavior. | No hardware security claim is made without a qualifying SEV-SNP host and attestation evidence. |
@@ -326,7 +330,7 @@ Every shipped entry point submits the same backend-neutral local execution
 request:
 
 ```text
-CLI · Rust SDK · local machine bridge · CRI · containerd shim
+CLI · Rust SDK · Python · TypeScript · Go · CRI · containerd shim
                               │
                       ExecutionManager
            durable state · generation fencing
@@ -343,7 +347,7 @@ CLI · Rust SDK · local machine bridge · CRI · containerd shim
               logs · audit · metrics · TEE
 ```
 
-The runtime persists caller policy before allocation. Python and TypeScript
+The runtime persists caller policy before allocation. Python, TypeScript, and Go
 reach the same `ExecutionManager` through the machine bridge instead of
 constructing CLI commands; CRI and RuntimeClass adapters also reuse the same
 resolver. Lifecycle ownership, unsupported-feature rejection, audit evidence,
@@ -360,7 +364,7 @@ Repository components are grouped by responsibility:
   cluster adapters;
 - `src/shim`, `src/guest/init`, `src/netproxy` — host/guest control and
   platform integration;
-- `sdk/python`, `sdk/typescript` — native local language packages over the
+- `sdk/python`, `sdk/typescript`, `sdk/go` — native local language packages over the
   checked machine bridge.
 
 ## Documentation
@@ -400,6 +404,11 @@ cd ../typescript
 npm ci
 npm run build
 npm test
+
+cd ../go
+gofmt -w .
+go vet ./...
+go test -race ./...
 ```
 
 Host-backed MicroVM, Sandbox, networking, build, CRI, and endurance tests need

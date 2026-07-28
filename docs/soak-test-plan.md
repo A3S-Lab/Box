@@ -20,7 +20,7 @@ The soak program must detect failures that short functional tests rarely find:
 - latency or throughput degradation after warm-up;
 - recovery failures after client, shim, daemon, runtime, or host interruption;
 - platform-specific regressions across KVM, HVF, WHPX, and A3S OCI Runtime;
-- divergence between the Rust, Python, and TypeScript native SDKs;
+- divergence between the Rust, Python, TypeScript, and Go native SDKs;
 - incomplete cleanup after success, failure, cancellation, and rollback.
 
 The program covers implemented product behavior only. Unsupported combinations
@@ -36,7 +36,7 @@ evidence system.
 | Entry point | Existing coverage | Current limitation |
 | --- | --- | --- |
 | `scripts/host-integration-smoke.sh --soak` | Repeats real MicroVM core, host command, Dockerfile `RUN`, Compose, CRI, leak, and state-race suites; records host resource counts and verifies evidence | Sampling follows whole-suite iterations; it does not yet report per-capability operation rates, daemon RSS/FD slopes, or independent periodic samples |
-| `scripts/local-sdk-smoke.sh` | One real Rust/Python/TypeScript pass for MicroVM or certified Sandbox execution, including builders, lifecycle, resources, diagnostics, and snapshots | Functional smoke only; no duration loop, concurrency mix, cancellation, or longitudinal resource gates |
+| `scripts/local-sdk-smoke.sh` | One real Rust/Python/TypeScript/Go pass for MicroVM or certified Sandbox execution, including builders, lifecycle, resources, diagnostics, and snapshots | Functional smoke only; no duration loop, concurrency mix, cancellation, or longitudinal resource gates |
 | `scripts/macos-fault-soak.sh` | Isolated Apple Silicon/HVF lifecycle churn with CLI/shim termination and resource samples | Covers lifecycle recovery, not the complete image/build/storage/network/SDK surface |
 | `scripts/windows-whpx-soak.ps1` | Repeats the eleven Windows-supported real tests and rejects residual A3S Box processes | Uses a Windows-specific summary and has no shared cross-capability verifier or long-term handle/RSS slope gate |
 | `deploy/scripts/runtimeclass-soak.sh` | RuntimeClass jobs, long-lived services, exec, logs, events, cleanup, node selection, sampling, and verified cluster evidence | Cluster-focused; it does not replace node-local image, build, SDK, warm-pool, or TEE lanes |
@@ -103,7 +103,7 @@ Status has a narrow meaning:
 | `SNP-01` | Filesystem snapshots | Capture, list/get/size, concurrent restore fan-out, independent mutation, delete fencing, source removal, restart, and interrupted capture/restore | Restores preserve expected image defaults and Unix metadata; copies are independent; no partial snapshot is published; final snapshot count/bytes return to baseline | Partial |
 | `NET-01` | Networking and Compose | TSI outbound churn, named bridge peers, DNS/aliases, TCP publication and port reuse, connection pressure, Compose up/logs/down, netproxy/passt termination | Success/latency stay within threshold; no cross-network reachability; published ports close on cleanup; no network, forwarder, FD, or route leak | Partial |
 | `POL-01` | Warm pool and snapshot-fork | Long-running pool daemon, acquire/release churn, min/max resize, lease expiry, deferred main, build leases, snapshot-fork fan-out, daemon/client termination | No double lease or stale template reuse; idle/active/leased counts reconcile; snapshot count is flat; p95 acquire latency and RSS slope stay within bounds | Partial |
-| `SDK-01` | Rust, Python, and TypeScript SDKs | Run the checked native operation inventory in all languages under sequential and concurrent loops on MicroVM and Sandbox; retry restart IDs and stale generations; terminate clients mid-operation | Identical typed outcomes and stable error codes; no inventory drift; deterministic cleanup; bridge timeout/process/RSS/FD counts stay bounded | Partial: one-pass native smoke and legacy KVM pipeline soak exist |
+| `SDK-01` | Rust, Python, TypeScript, and Go SDKs | Run the checked native operation inventory in all languages under sequential and concurrent loops on MicroVM and Sandbox; retry restart IDs and stale generations; terminate clients mid-operation | Identical typed outcomes and stable error codes; no inventory drift; deterministic cleanup; bridge timeout/process/RSS/FD counts stay bounded | Partial: one-pass native smoke and legacy KVM pipeline soak exist |
 | `OBS-01` | Observability and safety | Continuous logs, stats, events, monitor health/metrics, audit reads, log rotation, slow readers, daemon restart, and state reconciliation | Sample sequence is monotonic; stream identity and timestamps remain usable; no writer deadlock or unbounded log growth; daemon RSS under 50 MiB/day after warm-up | Partial |
 | `TEE-01` | TEE | Repeated real SNP attestation, policy verification, RA-TLS, seal/unseal, rollback rejection, secret injection/rotation, restart, and negative evidence | Every report verifies against the recorded policy; stale/tampered evidence fails closed; secrets do not appear in logs/evidence and remain unavailable outside the intended guest | Planned on hardware; simulation never satisfies this row |
 | `K8S-01` | Kubernetes CRI and RuntimeClass | Short Job churn plus Redis/Postgres/nginx/Python services, exec/log/stats, deletion during boot, CRI/shim/containerd restart, cleanup and optional node reboot | Existing cluster verifier passes; success rate at least 99.5% excluding declared faults; no Warning events, unexpected restarts, Pending/Unknown workloads, or residual resources | Existing |
@@ -226,7 +226,7 @@ retention but cannot waive a capability owner's failed or missing gate.
 | Image or registry | Deterministic fault suite and `R0 IMG-01` | `G2` against each production registry class; `R24` for transfer/cache changes |
 | Build or warm pool | `R0 BLD-01` and `POL-01` | `G2`; `R24` for cache, lease, snapshot-fork, or BuildKit changes |
 | Storage, snapshot, networking, Compose | Affected `R0` scenario | `G2` on every affected backend; `R24` for data-format or netproxy/passt changes |
-| Native SDK or machine bridge | Package tests and `R0 SDK-01` on MicroVM and Sandbox | `G2` three-language matrix on both isolation classes |
+| Native SDK or machine bridge | Package tests and `R0 SDK-01` on MicroVM and Sandbox | `G2` four-language matrix on both isolation classes |
 | A3S Runtime Provider | One real R17 conformance pass | `G2 PRO-01`; `R24` before provider promotion |
 | CRI/containerd | RuntimeClass smoke | Three-node `G2`; cohort `R24`; `E72` before broad rollout |
 | TEE | Simulation regression plus hardware `R0` | Hardware `G2` and `R24`; no hardware claim without both |
