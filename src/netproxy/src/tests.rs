@@ -2,7 +2,7 @@ use super::device::{is_tx_backpressure, NetStatsSnapshot, MAX_FRAME};
 use super::manager::{parse_port_forwards, write_stats_file};
 use super::*;
 
-use smoltcp::wire::EthernetAddress;
+use smoltcp::wire::{EthernetAddress, IpProtocol, Ipv4Packet, TcpPacket, UdpPacket};
 
 const TEST_GUEST_IP: Ipv4Addr = Ipv4Addr::new(10, 88, 0, 2);
 const TEST_GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 88, 0, 1);
@@ -116,6 +116,54 @@ fn ethernet_frame(destination: [u8; 6], source: [u8; 6]) -> Vec<u8> {
     frame[12..14].copy_from_slice(&[0x08, 0x00]);
     frame[14..].fill(0x5a);
     frame
+}
+
+fn peer_udp_frame(
+    destination_mac: [u8; 6],
+    source_mac: [u8; 6],
+    source_ip: Ipv4Addr,
+    destination_ip: Ipv4Addr,
+) -> Vec<u8> {
+    const PAYLOAD: &[u8] = b"peer udp";
+    let udp_len = 8 + PAYLOAD.len();
+    let mut frame = vec![0u8; 14 + 20 + udp_len];
+    frame[..6].copy_from_slice(&destination_mac);
+    frame[6..12].copy_from_slice(&source_mac);
+    frame[12..14].copy_from_slice(&[0x08, 0x00]);
+
+    let ipv4 = &mut frame[14..34];
+    ipv4[0] = 0x45;
+    ipv4[2..4].copy_from_slice(&(20u16 + udp_len as u16).to_be_bytes());
+    ipv4[8] = 64;
+    ipv4[9] = u8::from(IpProtocol::Udp);
+    ipv4[12..16].copy_from_slice(&source_ip.octets());
+    ipv4[16..20].copy_from_slice(&destination_ip.octets());
+
+    let udp = &mut frame[34..];
+    udp[..2].copy_from_slice(&53000u16.to_be_bytes());
+    udp[2..4].copy_from_slice(&5353u16.to_be_bytes());
+    udp[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    // A zero checksum is legal for IPv4 UDP but is also what checksum
+    // offload presents before the host transport completes it.
+    udp[6..8].fill(0);
+    udp[8..].copy_from_slice(PAYLOAD);
+    frame
+}
+
+fn peer_transport_checksum_is_valid(frame: &[u8]) -> bool {
+    let Ok(ipv4) = Ipv4Packet::new_checked(&frame[14..]) else {
+        return false;
+    };
+    let source = IpAddress::Ipv4(ipv4.src_addr());
+    let destination = IpAddress::Ipv4(ipv4.dst_addr());
+    match ipv4.next_header() {
+        IpProtocol::Tcp => TcpPacket::new_checked(ipv4.payload())
+            .is_ok_and(|packet| packet.verify_checksum(&source, &destination)),
+        IpProtocol::Udp => UdpPacket::new_checked(ipv4.payload()).is_ok_and(|packet| {
+            packet.checksum() != 0 && packet.verify_checksum(&source, &destination)
+        }),
+        _ => false,
+    }
 }
 
 fn outbound_syn_frame(
@@ -414,6 +462,115 @@ fn bridge_port_floods_broadcast_and_keeps_gateway_delivery() {
     let frame = ethernet_frame([0xff; 6], mac_a);
 
     assert!(bridge_a.forward_from_guest(&frame));
+    let mut received = Vec::new();
+    bridge_b.drain_frames(&mut received, 1);
+
+    assert_eq!(received, vec![frame]);
+}
+
+#[test]
+fn bridge_port_completes_peer_tcp_checksum_without_mutating_guest_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let mac_a = [0x02, 0x42, 10, 88, 0, 2];
+    let mac_b = [0x02, 0x42, 10, 88, 0, 3];
+    let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
+    let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
+    let mut frame = outbound_syn_frame(
+        mac_b,
+        Ipv4Addr::new(10, 88, 0, 2),
+        50123,
+        Ipv4Addr::new(10, 88, 0, 3),
+        8080,
+        false,
+    );
+    // Match the CHECKSUM_PARTIAL pseudo-header seed observed from Linux
+    // virtio-net, rather than relying on a convenient all-zero fixture.
+    frame[50..52].copy_from_slice(&0x86e9u16.to_be_bytes());
+    let original = frame.clone();
+
+    assert!(!bridge_a.forward_from_guest(&frame));
+    let mut received = Vec::new();
+    bridge_b.drain_frames(&mut received, 1);
+
+    assert_eq!(
+        frame, original,
+        "the passt-facing guest frame must stay intact"
+    );
+    assert_eq!(received.len(), 1);
+    assert!(peer_transport_checksum_is_valid(&received[0]));
+    assert_ne!(received[0][50..52], original[50..52]);
+}
+
+#[test]
+fn bridge_port_completes_peer_udp_checksum_when_guest_supplies_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let mac_a = [0x02, 0x42, 10, 88, 0, 2];
+    let mac_b = [0x02, 0x42, 10, 88, 0, 3];
+    let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
+    let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
+    let frame = peer_udp_frame(
+        mac_b,
+        mac_a,
+        Ipv4Addr::new(10, 88, 0, 2),
+        Ipv4Addr::new(10, 88, 0, 3),
+    );
+
+    assert!(!bridge_a.forward_from_guest(&frame));
+    let mut received = Vec::new();
+    bridge_b.drain_frames(&mut received, 1);
+
+    assert_eq!(received.len(), 1);
+    assert!(peer_transport_checksum_is_valid(&received[0]));
+    assert_ne!(received[0][40..42], [0, 0]);
+}
+
+#[test]
+fn bridge_port_completes_broadcast_peer_copy_but_preserves_passt_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mac_a = [0x02, 0x42, 10, 88, 0, 2];
+    let mac_b = [0x02, 0x42, 10, 88, 0, 3];
+    let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
+    let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
+    let frame = peer_udp_frame(
+        [0xff; 6],
+        mac_a,
+        Ipv4Addr::new(10, 88, 0, 2),
+        Ipv4Addr::new(10, 88, 0, 255),
+    );
+    let original = frame.clone();
+
+    assert!(bridge_a.forward_from_guest(&frame));
+    let mut received = Vec::new();
+    bridge_b.drain_frames(&mut received, 1);
+
+    assert_eq!(
+        frame, original,
+        "the frame returned to passt must be unchanged"
+    );
+    assert_eq!(received.len(), 1);
+    assert!(peer_transport_checksum_is_valid(&received[0]));
+}
+
+#[test]
+fn bridge_port_does_not_recompute_incomplete_ipv4_fragments() {
+    let dir = tempfile::tempdir().unwrap();
+    let mac_a = [0x02, 0x42, 10, 88, 0, 2];
+    let mac_b = [0x02, 0x42, 10, 88, 0, 3];
+    let bridge_a = BridgePort::bind(dir.path(), mac_a).unwrap();
+    let bridge_b = BridgePort::bind(dir.path(), mac_b).unwrap();
+    let mut frame = outbound_syn_frame(
+        mac_b,
+        Ipv4Addr::new(10, 88, 0, 2),
+        50123,
+        Ipv4Addr::new(10, 88, 0, 3),
+        8080,
+        false,
+    );
+    // More-fragments on the first fragment means the complete TCP segment is
+    // unavailable, so calculating over this fragment would corrupt it.
+    frame[20..22].copy_from_slice(&0x2000u16.to_be_bytes());
+
+    assert!(!bridge_a.forward_from_guest(&frame));
     let mut received = Vec::new();
     bridge_b.drain_frames(&mut received, 1);
 

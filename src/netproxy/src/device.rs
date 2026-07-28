@@ -8,7 +8,10 @@ use std::sync::{
 };
 
 use smoltcp::time::Instant;
-use smoltcp::wire::EthernetAddress;
+use smoltcp::wire::{
+    EthernetAddress, EthernetFrame, EthernetProtocol, IpAddress, IpProtocol, Ipv4Packet, TcpPacket,
+    UdpPacket,
+};
 
 /// MAC address we assign to the virtual gateway interface.
 pub(super) const GATEWAY_MAC: EthernetAddress =
@@ -211,7 +214,8 @@ impl BridgePort {
             if let Some(peer_mac) = peer_mac_from_arp_request(frame) {
                 let peer = self.directory.join(mac_socket_name(peer_mac));
                 if peer != self.own_path && peer.exists() {
-                    if let Err(error) = self.socket.send_to(frame, &peer) {
+                    let peer_frame = prepare_peer_frame(frame);
+                    if let Err(error) = self.socket.send_to(&peer_frame, &peer) {
                         tracing::debug!(%error, peer = %peer.display(), "Bridge peer ARP send failed");
                     }
                     return false;
@@ -223,7 +227,8 @@ impl BridgePort {
 
         let peer = self.directory.join(mac_socket_name(destination));
         if peer != self.own_path && peer.exists() {
-            if let Err(error) = self.socket.send_to(frame, &peer) {
+            let peer_frame = prepare_peer_frame(frame);
+            if let Err(error) = self.socket.send_to(&peer_frame, &peer) {
                 tracing::debug!(%error, peer = %peer.display(), "Bridge peer send failed");
             }
             return false;
@@ -239,12 +244,13 @@ impl BridgePort {
         let Ok(entries) = std::fs::read_dir(&self.directory) else {
             return;
         };
+        let peer_frame = prepare_peer_frame(frame);
         for entry in entries.flatten() {
             let path = entry.path();
             if path == self.own_path || path.extension().and_then(|v| v.to_str()) != Some("sock") {
                 continue;
             }
-            let _ = self.socket.send_to(frame, path);
+            let _ = self.socket.send_to(&peer_frame, path);
         }
     }
 
@@ -282,6 +288,54 @@ fn ethernet_destination(frame: &[u8]) -> Option<[u8; 6]> {
 
 fn is_group_mac(mac: [u8; 6]) -> bool {
     mac[0] & 1 == 1
+}
+
+/// Build the switch-facing copy of a guest frame.
+///
+/// Linux virtio-net advertises guest checksum offload because passt completes
+/// transport checksums on its path. Same-network traffic bypasses passt, so the
+/// userspace switch must complete the checksum before delivering that copy to
+/// another guest. The caller retains the original frame for passt.
+fn prepare_peer_frame(frame: &[u8]) -> Vec<u8> {
+    let mut peer_frame = frame.to_vec();
+    complete_peer_ipv4_transport_checksum(&mut peer_frame);
+    peer_frame
+}
+
+fn complete_peer_ipv4_transport_checksum(frame: &mut [u8]) {
+    let Ok(mut ethernet) = EthernetFrame::new_checked(frame) else {
+        return;
+    };
+    if ethernet.ethertype() != EthernetProtocol::Ipv4 {
+        return;
+    }
+
+    let Ok(mut ipv4) = Ipv4Packet::new_checked(ethernet.payload_mut()) else {
+        return;
+    };
+    if ipv4.version() != 4 || ipv4.more_frags() || ipv4.frag_offset() != 0 {
+        // A fragment does not contain the complete transport segment. Leave it
+        // untouched rather than calculating a checksum over partial data.
+        return;
+    }
+
+    let source = IpAddress::Ipv4(ipv4.src_addr());
+    let destination = IpAddress::Ipv4(ipv4.dst_addr());
+    match ipv4.next_header() {
+        IpProtocol::Tcp => {
+            if let Ok(mut tcp) = TcpPacket::new_checked(ipv4.payload_mut()) {
+                tcp.fill_checksum(&source, &destination);
+            }
+        }
+        IpProtocol::Udp => {
+            if let Ok(mut udp) = UdpPacket::new_checked(ipv4.payload_mut()) {
+                // Filling a zero IPv4 UDP checksum is valid and also covers the
+                // checksum-offload representation observed from virtio-net.
+                udp.fill_checksum(&source, &destination);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn peer_mac_from_arp_request(frame: &[u8]) -> Option<[u8; 6]> {
