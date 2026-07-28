@@ -317,35 +317,36 @@ impl VmLocalExecutionBackend {
             ))
         })?;
         let box_id = record.id.clone();
-        let exit_code = tokio::task::spawn_blocking(move || {
-            let deadline = std::time::Instant::now() + TERMINAL_EXIT_POLL_TIMEOUT;
-            loop {
-                if let Some(exit_code) = crate::sandbox::A3sOciHandler::try_wait_at(
-                    &runtime_socket,
-                    &box_id,
-                    generation,
-                )? {
-                    return Ok(Some(exit_code));
+        let exit_code =
+            tokio::task::spawn_blocking(move || -> a3s_box_core::Result<Option<i32>> {
+                let deadline = std::time::Instant::now() + TERMINAL_EXIT_POLL_TIMEOUT;
+                loop {
+                    if let Some(exit_code) = crate::sandbox::A3sOciHandler::try_wait_at(
+                        &runtime_socket,
+                        &box_id,
+                        generation,
+                    )? {
+                        return Ok(Some(exit_code));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(TERMINAL_EXIT_POLL_INTERVAL);
                 }
-                if std::time::Instant::now() >= deadline {
-                    return Ok(None);
-                }
-                std::thread::sleep(TERMINAL_EXIT_POLL_INTERVAL);
-            }
-        })
-        .await
-        .map_err(|error| {
-            ExecutionManagerError::Unavailable(format!(
-                "Sandbox exit-status task failed for {}: {error}",
-                record.id
-            ))
-        })?
-        .map_err(|error| {
-            ExecutionManagerError::Unavailable(format!(
-                "failed to collect exact Sandbox exit status for {}: {error}",
-                record.id
-            ))
-        })?;
+            })
+            .await
+            .map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "Sandbox exit-status task failed for {}: {error}",
+                    record.id
+                ))
+            })?
+            .map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "failed to collect exact Sandbox exit status for {}: {error}",
+                    record.id
+                ))
+            })?;
         exit_code.ok_or_else(|| {
             ExecutionManagerError::Unavailable(format!(
                 "Sandbox reported execution {} as terminal before its exact exit status became available",
