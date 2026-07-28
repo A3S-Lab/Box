@@ -46,6 +46,7 @@ from .models import (
 from .runtime import (
     A3SAsyncLocalRuntime,
     A3SLocalRuntime,
+    BRIDGE_PROTOCOL_VERSION,
     SUPPORTED_BRIDGE_OPERATIONS,
 )
 from .script import AsyncScriptBuilder, ScriptBuilder
@@ -69,6 +70,7 @@ __all__ = [
     "AsyncScriptBuilder",
     "AsyncVolumeBuilder",
     "BuildImageInfo",
+    "BRIDGE_PROTOCOL_VERSION",
     "CommandResult",
     "DEFAULT_IMAGE",
     "EntryInfo",

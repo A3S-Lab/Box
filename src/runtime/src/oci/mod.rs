@@ -42,7 +42,7 @@ pub use build::{BuildConfig, BuildResult, BuildRunPoolConfig, Dockerfile, Instru
 pub use credentials::CredentialStore;
 pub use image::{OciHealthCheck, OciImage, OciImageConfig};
 pub use layers::extract_layer;
-pub use pull::ImagePuller;
+pub use pull::{prune_stale_pull_temp_dirs, ImagePuller, PullTempPruneResult};
 pub use reference::ImageReference;
 pub use registry::{
     PullProgress, PullProgressEventFn, PullProgressState, PushResult, RegistryAuth,

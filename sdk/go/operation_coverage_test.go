@@ -79,7 +79,7 @@ func TestPublicAPIExercisesEveryBridgeOperation(t *testing.T) {
 	mustNoError(t, files.Remove(ctx, "/tmp/moved"))
 	mustNoError(t, sandbox.Kill(ctx))
 
-	removable := newSandbox(runtime, SandboxInfo{SandboxID: "box-remove", Generation: 1, State: StateStopped})
+	removable := newSandbox(runtime, SandboxInfo{SandboxID: "box-remove", Generation: 1, State: StateStopped, Isolation: IsolationMicroVM})
 	mustNoError(t, removable.Remove(ctx))
 	check(client.ListFilesystemSnapshots(ctx))
 	check(client.GetFilesystemSnapshot(ctx, "snap-1"))
@@ -160,15 +160,15 @@ func operationFixture(_ context.Context, request map[string]any) (any, error) {
 	case "sandbox_get":
 		return map[string]any{"sandbox": SandboxSummary{ID: "box-1"}}, nil
 	case "sandbox_create", "sandbox_inspect":
-		return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning}, nil
+		return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationMicroVM}, nil
 	case "sandbox_stop":
-		return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateStopped}, nil
+		return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateStopped, Isolation: IsolationMicroVM}, nil
 	case "sandbox_restart":
-		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateRunning}, nil
+		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateRunning, Isolation: IsolationMicroVM}, nil
 	case "sandbox_pause":
-		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StatePaused}, nil
+		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StatePaused, Isolation: IsolationMicroVM}, nil
 	case "sandbox_resume":
-		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateRunning}, nil
+		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateRunning, Isolation: IsolationMicroVM}, nil
 	case "sandbox_logs":
 		return map[string]any{"logs": []SandboxLogEntry{}}, nil
 	case "sandbox_stats":
@@ -176,9 +176,9 @@ func operationFixture(_ context.Context, request map[string]any) (any, error) {
 	case "sandbox_snapshot_create":
 		return FilesystemSnapshotInfo{SnapshotID: "snap-1", Generation: 2}, nil
 	case "sandbox_kill":
-		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateFailed}, nil
+		return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateFailed, Isolation: IsolationMicroVM}, nil
 	case "sandbox_remove":
-		return SandboxInfo{SandboxID: "box-remove", Generation: 1, State: StateRemoved}, nil
+		return SandboxInfo{SandboxID: "box-remove", Generation: 1, State: StateRemoved, Isolation: IsolationMicroVM}, nil
 	case "command_run":
 		return map[string]any{"stdout_base64": "", "stderr_base64": "", "exit_code": 0, "truncated": false}, nil
 	case "file_write":

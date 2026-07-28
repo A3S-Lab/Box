@@ -17,6 +17,9 @@ import (
 
 func TestOperationInventoryMatchesRustContract(t *testing.T) {
 	payload, err := os.ReadFile("../bridge-operations.json")
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skip("repository bridge contract is not included in the Go module")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +29,22 @@ func TestOperationInventoryMatchesRustContract(t *testing.T) {
 	}
 	if !reflect.DeepEqual(inventory, bridge.RequiredOperations) {
 		t.Fatalf("Go operation inventory differs from Rust contract\nGo:   %v\nRust: %v", bridge.RequiredOperations, inventory)
+	}
+	protocolPayload, err := os.ReadFile("../bridge-protocol.json")
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skip("repository bridge contract is not included in the Go module")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var protocol struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(protocolPayload, &protocol); err != nil {
+		t.Fatal(err)
+	}
+	if protocol.Version != bridge.ProtocolVersion {
+		t.Fatalf("Go protocol %d differs from Rust contract %d", bridge.ProtocolVersion, protocol.Version)
 	}
 	seen := make(map[string]struct{}, len(inventory))
 	for _, operation := range inventory {
@@ -82,6 +101,21 @@ func TestNewClientRejectsCapabilityProtocolMismatch(t *testing.T) {
 	}
 }
 
+func TestNewClientRejectsDuplicateCapabilities(t *testing.T) {
+	operations := append([]string(nil), bridge.RequiredOperations...)
+	operations = append(operations, bridge.RequiredOperations[0])
+	runtime := runtimeFunc(func(_ context.Context, _ any, result any) error {
+		return assignResult(result, Capabilities{
+			ProtocolVersion: bridge.ProtocolVersion,
+			Operations:      operations,
+		})
+	})
+	_, err := NewClient(context.Background(), WithRuntime(runtime))
+	if !errors.Is(err, ErrProtocol) {
+		t.Fatalf("expected protocol error for duplicate capabilities, got %v", err)
+	}
+}
+
 func TestBuildersValidateBeforeMutation(t *testing.T) {
 	runtime := &fakeRuntime{}
 	client := mustClient(runtime)
@@ -130,7 +164,9 @@ func TestProgrammableBuildersEncodeTypedConfiguration(t *testing.T) {
 		case "network_create":
 			return NetworkInfo{Name: "ci-net", Subnet: "10.44.0.0/24"}, nil
 		case "sandbox_create":
-			return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning}, nil
+			return SandboxInfo{
+				SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationSandbox,
+			}, nil
 		default:
 			return map[string]any{}, nil
 		}
@@ -183,6 +219,9 @@ func TestProgrammableBuildersEncodeTypedConfiguration(t *testing.T) {
 		Start(ctx)
 	if err != nil || sandbox.ID() != "box-1" {
 		t.Fatalf("start sandbox: %v, %v", sandbox, err)
+	}
+	if sandbox.Isolation() != IsolationSandbox {
+		t.Fatalf("sandbox isolation=%s", sandbox.Isolation())
 	}
 
 	requests := runtime.Requests()

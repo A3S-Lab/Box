@@ -22,6 +22,7 @@ type Sandbox struct {
 	mu         sync.RWMutex
 	generation uint64
 	state      SandboxState
+	isolation  Isolation
 }
 
 func newSandbox(runtime Runtime, info SandboxInfo) *Sandbox {
@@ -30,6 +31,7 @@ func newSandbox(runtime Runtime, info SandboxInfo) *Sandbox {
 		id:         info.SandboxID,
 		generation: info.Generation,
 		state:      info.State,
+		isolation:  info.Isolation,
 	}
 }
 
@@ -40,6 +42,9 @@ func (client *Client) ConnectSandbox(ctx context.Context, sandboxID string) (*Sa
 	}
 	var info SandboxInfo
 	if err := client.request(ctx, op, map[string]any{"sandbox_id": sandboxID}, &info); err != nil {
+		return nil, err
+	}
+	if err := validateSandboxInfo(op, sandboxID, "", info); err != nil {
 		return nil, err
 	}
 	return newSandbox(client.runtime, info), nil
@@ -70,6 +75,15 @@ func (sandbox *Sandbox) State() SandboxState {
 	return sandbox.state
 }
 
+func (sandbox *Sandbox) Isolation() Isolation {
+	if sandbox == nil {
+		return ""
+	}
+	sandbox.mu.RLock()
+	defer sandbox.mu.RUnlock()
+	return sandbox.isolation
+}
+
 func (sandbox *Sandbox) Inspect(ctx context.Context) (SandboxInfo, error) {
 	const op = "sandbox_inspect"
 	if sandbox == nil || runtimeIsNil(sandbox.runtime) {
@@ -79,6 +93,9 @@ func (sandbox *Sandbox) Inspect(ctx context.Context) (SandboxInfo, error) {
 	defer sandbox.mu.Unlock()
 	var info SandboxInfo
 	if err := sandbox.requestLocked(ctx, op, map[string]any{"sandbox_id": sandbox.id}, &info); err != nil {
+		return SandboxInfo{}, err
+	}
+	if err := validateSandboxInfo(op, sandbox.id, sandbox.isolation, info); err != nil {
 		return SandboxInfo{}, err
 	}
 	sandbox.updateLocked(info, sandbox.state)
@@ -108,6 +125,9 @@ func (sandbox *Sandbox) Stop(ctx context.Context) error {
 	}
 	var info SandboxInfo
 	if err := sandbox.lifecycleRequestLocked(ctx, op, nil, &info); err != nil {
+		return err
+	}
+	if err := validateSandboxInfo(op, sandbox.id, sandbox.isolation, info); err != nil {
 		return err
 	}
 	sandbox.updateLocked(info, StateStopped)
@@ -169,6 +189,9 @@ func (sandbox *Sandbox) Restart(ctx context.Context, options ...RestartOption) e
 	if err := sandbox.lifecycleRequestLocked(ctx, op, extra, &info); err != nil {
 		return err
 	}
+	if err := validateSandboxInfo(op, sandbox.id, sandbox.isolation, info); err != nil {
+		return err
+	}
 	sandbox.updateLocked(info, StateRunning)
 	return nil
 }
@@ -187,6 +210,9 @@ func (sandbox *Sandbox) Remove(ctx context.Context) error {
 	if err := sandbox.lifecycleRequestLocked(ctx, op, nil, &info); err != nil {
 		return err
 	}
+	if err := validateSandboxInfo(op, sandbox.id, sandbox.isolation, info); err != nil {
+		return err
+	}
 	sandbox.updateLocked(info, StateRemoved)
 	return nil
 }
@@ -203,6 +229,9 @@ func (sandbox *Sandbox) Kill(ctx context.Context) error {
 	}
 	var info SandboxInfo
 	if err := sandbox.lifecycleRequestLocked(ctx, op, nil, &info); err != nil {
+		return err
+	}
+	if err := validateSandboxInfo(op, sandbox.id, sandbox.isolation, info); err != nil {
 		return err
 	}
 	sandbox.updateLocked(info, StateKilled)
@@ -224,6 +253,9 @@ func (sandbox *Sandbox) Pause(ctx context.Context, keepMemory bool) error {
 	if err := sandbox.lifecycleRequestLocked(ctx, op, map[string]any{"keep_memory": keepMemory}, &info); err != nil {
 		return err
 	}
+	if err := validateSandboxInfo(op, sandbox.id, sandbox.isolation, info); err != nil {
+		return err
+	}
 	sandbox.updateLocked(info, StatePaused)
 	return nil
 }
@@ -240,6 +272,9 @@ func (sandbox *Sandbox) Resume(ctx context.Context) error {
 	}
 	var info SandboxInfo
 	if err := sandbox.lifecycleRequestLocked(ctx, op, nil, &info); err != nil {
+		return err
+	}
+	if err := validateSandboxInfo(op, sandbox.id, sandbox.isolation, info); err != nil {
 		return err
 	}
 	sandbox.updateLocked(info, StateRunning)
@@ -366,6 +401,38 @@ func (sandbox *Sandbox) updateLocked(info SandboxInfo, fallback SandboxState) {
 	} else {
 		sandbox.state = fallback
 	}
+	if info.Isolation != "" {
+		sandbox.isolation = info.Isolation
+	}
+}
+
+func validateSandboxInfo(
+	operation string,
+	expectedID string,
+	expectedIsolation Isolation,
+	info SandboxInfo,
+) error {
+	if strings.TrimSpace(info.SandboxID) == "" {
+		return sdkError(operation, CodeProtocol, "bridge result is missing sandbox_id", nil)
+	}
+	if expectedID != "" && info.SandboxID != expectedID {
+		return sdkError(operation, CodeProtocol, "bridge result returned a different sandbox_id", nil)
+	}
+	if info.Generation == 0 {
+		return sdkError(operation, CodeProtocol, "bridge result has an invalid generation", nil)
+	}
+	switch info.State {
+	case StateCreated, StateCreating, StateRunning, StatePaused, StateStopped, StateFailed, StateKilled, StateRemoved:
+	default:
+		return sdkError(operation, CodeProtocol, "bridge result has an invalid sandbox state", nil)
+	}
+	if info.Isolation != IsolationMicroVM && info.Isolation != IsolationSandbox {
+		return sdkError(operation, CodeProtocol, "bridge result has an invalid isolation", nil)
+	}
+	if expectedIsolation != "" && info.Isolation != expectedIsolation {
+		return sdkError(operation, CodeProtocol, "bridge result changed sandbox isolation", nil)
+	}
+	return nil
 }
 
 func randomOperationID() (string, error) {

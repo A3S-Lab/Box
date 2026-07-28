@@ -6,8 +6,11 @@ import {
   decodeBase64,
   entryInfo,
   filesystemSnapshotInfo,
+  requiredBoolean,
+  requiredGeneration,
   requiredNumber,
   requiredRecord,
+  requiredSandboxState,
   requiredString,
   sandboxLogEntry,
   sandboxStats,
@@ -16,6 +19,7 @@ import {
 import type { SandboxLogEntry, SandboxStats } from './client.js'
 import {
   A3SLocalRuntime,
+  compatibleRuntime,
   type BridgeResult,
   type LocalRuntime,
 } from './runtime.js'
@@ -139,6 +143,7 @@ export class Sandbox {
   readonly id: string
   generation: number
   state: string
+  readonly isolation: Isolation
   readonly commands: Commands
   readonly files: Filesystem
   private readonly runtime: LocalRuntime
@@ -147,12 +152,14 @@ export class Sandbox {
     sandboxId: string,
     generation: number,
     state: string,
+    isolation: Isolation,
     runtime: LocalRuntime
   ) {
     this.sandboxId = sandboxId
     this.id = sandboxId
     this.generation = generation
     this.state = state
+    this.isolation = isolation
     this.runtime = runtime
     this.commands = new Commands(this)
     this.files = new Filesystem(this)
@@ -162,7 +169,9 @@ export class Sandbox {
     template = DEFAULT_IMAGE,
     options: SandboxCreateOptions = {}
   ): Promise<Sandbox> {
-    const runtime = options.runtime ?? new A3SLocalRuntime()
+    const runtime = compatibleRuntime(
+      options.runtime ?? new A3SLocalRuntime()
+    )
     const timeoutMs = options.timeoutMs ?? 3_600_000
     if (timeoutMs <= 0) throw new Error('timeoutMs must be greater than zero')
     const result = await runtime.request({
@@ -205,36 +214,54 @@ export class Sandbox {
       persistent: options.persistent ?? false,
       auto_remove: options.autoRemove ?? true,
     })
-    return Sandbox.fromResult(result, runtime)
+    return Sandbox.fromResult(
+      result,
+      runtime,
+      undefined,
+      options.isolation ?? 'microvm'
+    )
   }
 
   static async connect(
     sandboxId: string,
     options: SandboxConnectOptions = {}
   ): Promise<Sandbox> {
-    const runtime = options.runtime ?? new A3SLocalRuntime()
+    const runtime = compatibleRuntime(
+      options.runtime ?? new A3SLocalRuntime()
+    )
     const result = await runtime.request({
       operation: 'sandbox_inspect',
       sandbox_id: sandboxId,
     })
-    return Sandbox.fromResult(result, runtime)
+    return Sandbox.fromResult(result, runtime, sandboxId)
   }
 
   private static fromResult(
     result: BridgeResult,
-    runtime: LocalRuntime
+    runtime: LocalRuntime,
+    expectedId?: string,
+    expectedIsolation?: Isolation
   ): Sandbox {
+    const info = sandboxLifecycleInfo(
+      result,
+      expectedId,
+      expectedIsolation
+    )
     return new Sandbox(
-      requiredString(result, 'sandbox_id'),
-      requiredNumber(result, 'generation'),
-      requiredString(result, 'state'),
+      info.sandboxId,
+      info.generation,
+      info.state,
+      info.isolation,
       runtime
     )
   }
 
   async kill(): Promise<void> {
     if (this.state === 'killed' || this.state === 'removed') return
-    await this.runtime.request(this.lifecycleRequest('sandbox_kill'))
+    const result = await this.runtime.request(
+      this.lifecycleRequest('sandbox_kill')
+    )
+    this.updateLifecycle(result)
     this.state = 'killed'
   }
 
@@ -243,7 +270,7 @@ export class Sandbox {
     const result = await this.runtime.request(
       this.lifecycleRequest('sandbox_stop')
     )
-    this.updateLifecycle(result, 'stopped')
+    this.updateLifecycle(result)
   }
 
   async restart(
@@ -274,12 +301,15 @@ export class Sandbox {
         ? {}
         : { stop_timeout_seconds: options.stopTimeoutSeconds }),
     })
-    this.updateLifecycle(result, 'running')
+    this.updateLifecycle(result)
   }
 
   async remove(): Promise<void> {
     if (this.state === 'killed' || this.state === 'removed') return
-    await this.runtime.request(this.lifecycleRequest('sandbox_remove'))
+    const result = await this.runtime.request(
+      this.lifecycleRequest('sandbox_remove')
+    )
+    this.updateLifecycle(result)
     this.state = 'removed'
   }
 
@@ -288,14 +318,14 @@ export class Sandbox {
       ...this.lifecycleRequest('sandbox_pause'),
       keep_memory: options.keepMemory ?? true,
     })
-    this.updateLifecycle(result, 'paused')
+    this.updateLifecycle(result)
   }
 
   async resume(): Promise<void> {
     const result = await this.runtime.request(
       this.lifecycleRequest('sandbox_resume')
     )
-    this.updateLifecycle(result, 'running')
+    this.updateLifecycle(result)
   }
 
   async isRunning(): Promise<boolean> {
@@ -304,7 +334,7 @@ export class Sandbox {
         operation: 'sandbox_inspect',
         sandbox_id: this.sandboxId,
       })
-      this.updateLifecycle(result, this.state)
+      this.updateLifecycle(result)
       return this.state === 'running'
     } catch (error) {
       if (error instanceof A3SBoxError && error.code === 'not_found') {
@@ -346,8 +376,10 @@ export class Sandbox {
       ...this.lifecycleRequest('sandbox_snapshot_create'),
       snapshot_id: snapshotId,
     })
-    this.updateLifecycle(result, this.state)
-    return filesystemSnapshotInfo(result)
+    const snapshot = filesystemSnapshotInfo(result)
+    this.generation = snapshot.generation
+    this.state = snapshot.state
+    return snapshot
   }
 
   script(source: string | Uint8Array | Script): ScriptBuilder {
@@ -358,7 +390,9 @@ export class Sandbox {
     snapshotId: string,
     options: SandboxConnectOptions = {}
   ): Promise<number | undefined> {
-    const runtime = options.runtime ?? new A3SLocalRuntime()
+    const runtime = compatibleRuntime(
+      options.runtime ?? new A3SLocalRuntime()
+    )
     const result = await runtime.request({
       operation: 'filesystem_snapshot_size',
       snapshot_id: snapshotId,
@@ -378,7 +412,9 @@ export class Sandbox {
     snapshotId: string,
     options: SandboxConnectOptions = {}
   ): Promise<boolean> {
-    const runtime = options.runtime ?? new A3SLocalRuntime()
+    const runtime = compatibleRuntime(
+      options.runtime ?? new A3SLocalRuntime()
+    )
     const result = await runtime.request({
       operation: 'filesystem_snapshot_delete',
       snapshot_id: snapshotId,
@@ -406,12 +442,14 @@ export class Sandbox {
     }
   }
 
-  private updateLifecycle(result: BridgeResult, fallbackState: string): void {
-    if (typeof result.generation === 'number') {
-      this.generation = result.generation
-    }
-    this.state =
-      typeof result.state === 'string' ? result.state : fallbackState
+  private updateLifecycle(result: BridgeResult): void {
+    const info = sandboxLifecycleInfo(
+      result,
+      this.sandboxId,
+      this.isolation
+    )
+    this.generation = info.generation
+    this.state = info.state
   }
 }
 
@@ -451,7 +489,7 @@ export class Commands {
       stdout: decodeBase64(result, 'stdout_base64').toString('utf8'),
       stderr: decodeBase64(result, 'stderr_base64').toString('utf8'),
       exitCode: requiredNumber(result, 'exit_code'),
-      truncated: result.truncated === true,
+      truncated: requiredBoolean(result, 'truncated'),
     }
   }
 
@@ -672,4 +710,55 @@ function isScript(value: string | Uint8Array | Script): value is Script {
     !(value instanceof Uint8Array) &&
     'source' in value
   )
+}
+
+function requiredIsolation(result: BridgeResult): Isolation {
+  const isolation = requiredString(result, 'isolation')
+  if (isolation !== 'microvm' && isolation !== 'sandbox') {
+    throw new A3SBoxError(
+      'Bridge result has an invalid isolation',
+      'bridge_protocol_error'
+    )
+  }
+  return isolation
+}
+
+interface SandboxLifecycleInfo {
+  sandboxId: string
+  generation: number
+  state: string
+  isolation: Isolation
+}
+
+function sandboxLifecycleInfo(
+  result: BridgeResult,
+  expectedId?: string,
+  expectedIsolation?: Isolation
+): SandboxLifecycleInfo {
+  const sandboxId = requiredString(result, 'sandbox_id')
+  if (sandboxId.trim().length === 0) {
+    throw new A3SBoxError(
+      'Bridge result has an invalid sandbox_id',
+      'bridge_protocol_error'
+    )
+  }
+  if (expectedId !== undefined && sandboxId !== expectedId) {
+    throw new A3SBoxError(
+      'Bridge result returned a different sandbox_id',
+      'bridge_protocol_error'
+    )
+  }
+  const isolation = requiredIsolation(result)
+  if (expectedIsolation !== undefined && isolation !== expectedIsolation) {
+    throw new A3SBoxError(
+      'Bridge result changed sandbox isolation',
+      'bridge_protocol_error'
+    )
+  }
+  return {
+    sandboxId,
+    generation: requiredGeneration(result, 'generation'),
+    state: requiredSandboxState(result, 'state'),
+    isolation,
+  }
 }

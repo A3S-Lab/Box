@@ -9,7 +9,7 @@ source = "git+https://github.com/A3S-Lab/ACL.git?rev=fc041758758eba89dd5d22a3414
 
 [[package]]
 name = "a3s-box-cli"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-core"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-acl",
  "a3s-common",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-cri"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-guest-init"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-common",
@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-lambda"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-netproxy"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "libc",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-runtime"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-box-netproxy",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-sdk"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-box-runtime",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-box-shim"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-box-netproxy",
@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-libkrun-sys"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "libc",
  "num_cpus",

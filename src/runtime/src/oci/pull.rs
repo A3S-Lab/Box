@@ -21,6 +21,13 @@ type PullProgressFn = Arc<dyn Fn(usize, usize, &str, i64) + Send + Sync>;
 /// Per-process counter for unique pull temp dirs.
 static PULL_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Result of reclaiming interrupted image-pull working directories.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PullTempPruneResult {
+    pub directories_removed: usize,
+    pub bytes_freed: u64,
+}
+
 /// High-level image puller with caching.
 pub struct ImagePuller {
     store: Arc<ImageStore>,
@@ -432,6 +439,85 @@ fn unique_pull_tmp_dir(store_dir: &std::path::Path, digest_hex: &str) -> std::pa
         .join(format!("pull-{digest_hex}-{}-{seq}", std::process::id()))
 }
 
+/// Remove pull working directories whose owner process has exited.
+///
+/// Pull directory names carry the creating process ID. Unknown names and
+/// directories owned by a currently running process are preserved, so cleanup
+/// can safely run while another client is pulling an image.
+pub fn prune_stale_pull_temp_dirs(store_dir: &std::path::Path) -> Result<PullTempPruneResult> {
+    let tmp_root = store_dir.join("tmp");
+    if !tmp_root.exists() {
+        return Ok(PullTempPruneResult::default());
+    }
+
+    let mut result = PullTempPruneResult::default();
+    for entry in std::fs::read_dir(&tmp_root).map_err(|error| {
+        BoxError::OciImageError(format!(
+            "failed to inspect image pull temp directory {}: {error}",
+            tmp_root.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            BoxError::OciImageError(format!("failed to inspect image pull temp entry: {error}"))
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(owner_pid) = pull_temp_owner_pid(&name) else {
+            continue;
+        };
+        if crate::process::is_process_running_with_identity(owner_pid, None) {
+            continue;
+        }
+
+        let path = entry.path();
+        let bytes = crate::cache::layer_cache::dir_size(&path).map_err(|error| {
+            BoxError::OciImageError(format!(
+                "failed to measure stale image pull directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(BoxError::OciImageError(format!(
+                    "failed to inspect stale image pull directory {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        let removed = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match removed {
+            Ok(()) => {
+                result.directories_removed = result.directories_removed.saturating_add(1);
+                result.bytes_freed = result.bytes_freed.saturating_add(bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(BoxError::OciImageError(format!(
+                    "failed to remove stale image pull directory {}: {error}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn pull_temp_owner_pid(name: &str) -> Option<u32> {
+    let value = name.strip_prefix("pull-")?;
+    let (digest_and_pid, sequence) = value.rsplit_once('-')?;
+    sequence.parse::<u64>().ok()?;
+    let (digest, pid) = digest_and_pid.rsplit_once('-')?;
+    if digest.is_empty() || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !value.is_empty() && !values.iter().any(|existing| existing == &value) {
         values.push(value);
@@ -706,6 +792,37 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .contains("abc123"));
+    }
+
+    #[test]
+    fn stale_pull_temp_prune_preserves_live_and_unknown_owners() {
+        let tmp = TempDir::new().unwrap();
+        let tmp_root = tmp.path().join("tmp");
+        std::fs::create_dir_all(&tmp_root).unwrap();
+        let live = tmp_root.join(format!("pull-deadbeef-{}-0", std::process::id()));
+        let stale = tmp_root.join(format!("pull-cafebabe-{}-1", u32::MAX));
+        let unknown = tmp_root.join("manual-data");
+        for path in [&live, &stale, &unknown] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("data"), b"payload").unwrap();
+        }
+
+        let result = prune_stale_pull_temp_dirs(tmp.path()).unwrap();
+
+        assert_eq!(result.directories_removed, 1);
+        assert_eq!(result.bytes_freed, 7);
+        assert!(live.exists());
+        assert!(!stale.exists());
+        assert!(unknown.exists());
+    }
+
+    #[test]
+    fn pull_temp_owner_parser_rejects_ambiguous_names() {
+        assert_eq!(pull_temp_owner_pid("pull-deadbeef-42-7"), Some(42));
+        assert_eq!(pull_temp_owner_pid("pull-not_hex-42-7"), None);
+        assert_eq!(pull_temp_owner_pid("pull-deadbeef-nope-7"), None);
+        assert_eq!(pull_temp_owner_pid("pull-deadbeef-42-nope"), None);
+        assert_eq!(pull_temp_owner_pid("other-deadbeef-42-7"), None);
     }
 
     fn test_sha256_digest(bytes: &[u8]) -> String {

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import os
 import unittest
@@ -12,16 +13,20 @@ from unittest.mock import patch
 
 import a3s_box
 from a3s_box import (
+    A3SBoxError,
     A3SAsyncBoxClient,
     A3SBoxClient,
+    A3SBoxNotInstalledError,
     AsyncSandbox,
     RegistryCredentials,
     Sandbox,
     SignaturePolicy,
     SUPPORTED_BRIDGE_OPERATIONS,
+    BRIDGE_PROTOCOL_VERSION,
 )
 from a3s_box.code_interpreter import Sandbox as CodeInterpreter
-from a3s_box.runtime import _resolve_binary
+from a3s_box.runtime import _decode_response, _resolve_binary
+from a3s_box.sandbox import AsyncCommands, AsyncFilesystem, Commands, Filesystem
 
 
 class FakeRuntime:
@@ -30,7 +35,8 @@ class FakeRuntime:
 
     def request(self, request: Mapping[str, object]) -> dict[str, Any]:
         payload = dict(request)
-        self.requests.append(payload)
+        if payload["operation"] != "sdk_capabilities":
+            self.requests.append(payload)
         return response_for(payload)
 
 
@@ -40,9 +46,52 @@ class AsyncFakeRuntime:
 
     async def request(self, request: Mapping[str, object]) -> dict[str, Any]:
         payload = dict(request)
-        self.requests.append(payload)
+        if payload["operation"] != "sdk_capabilities":
+            self.requests.append(payload)
         await asyncio.sleep(0)
         return response_for(payload)
+
+
+class CapabilityRuntime:
+    def __init__(
+        self,
+        *,
+        protocol_version: int = 2,
+        operations: tuple[str, ...] = SUPPORTED_BRIDGE_OPERATIONS,
+    ) -> None:
+        self.protocol_version = protocol_version
+        self.operations = operations
+        self.requests: list[dict[str, Any]] = []
+
+    def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+        payload = dict(request)
+        self.requests.append(payload)
+        if payload["operation"] == "sdk_capabilities":
+            return {
+                "protocol_version": self.protocol_version,
+                "operations": list(self.operations),
+            }
+        raise AssertionError("a mutating request ran before capability validation")
+
+
+class AsyncCapabilityRuntime:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, Any]] = []
+
+    async def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+        payload = dict(request)
+        self.requests.append(payload)
+        if payload["operation"] == "sdk_capabilities":
+            await asyncio.sleep(0)
+            return {
+                "protocol_version": 2,
+                "operations": list(SUPPORTED_BRIDGE_OPERATIONS),
+            }
+        if payload["operation"] == "image_list":
+            return {"images": []}
+        if payload["operation"] == "volume_list":
+            return {"volumes": []}
+        raise AssertionError(f"unexpected operation {payload['operation']!r}")
 
 
 def response_for(request: Mapping[str, object]) -> dict[str, Any]:
@@ -111,9 +160,9 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         return {"names": ["old-network"]}
     if operation == "runtime_diagnostics":
         return {
-            "core_version": "3.1.0",
-            "runtime_version": "3.1.0",
-            "sdk_version": "3.1.0",
+            "core_version": "3.2.0",
+            "runtime_version": "3.2.0",
+            "sdk_version": "3.2.0",
             "home": "/tmp/a3s",
             "virtualization": {
                 "available": True,
@@ -134,18 +183,8 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
         }
     if operation == "sdk_capabilities":
         return {
-            "protocol_version": 1,
-            "operations": [
-                "sdk_capabilities",
-                "image_get",
-                "image_inspect",
-                "image_history",
-                "image_tag",
-                "image_push",
-                "image_evict",
-                "volume_prune",
-                "network_prune",
-            ],
+            "protocol_version": 2,
+            "operations": list(SUPPORTED_BRIDGE_OPERATIONS),
         }
     if operation == "sandbox_list":
         return {"sandboxes": [sandbox_summary_response("sandbox-local-1")]}
@@ -156,12 +195,14 @@ def response_for(request: Mapping[str, object]) -> dict[str, Any]:
             "sandbox_id": "sandbox-local-1",
             "generation": 1,
             "state": "running",
+            "isolation": request.get("isolation", "microvm"),
         }
     if operation == "sandbox_inspect":
         return {
             "sandbox_id": request["sandbox_id"],
             "generation": 2,
             "state": "paused",
+            "isolation": "sandbox",
         }
     if operation == "sandbox_stop":
         return {
@@ -388,6 +429,166 @@ def filesystem_snapshot_response(snapshot_id: str) -> dict[str, Any]:
 
 
 class SdkTests(unittest.TestCase):
+    def test_sync_and_async_public_surfaces_stay_aligned(self) -> None:
+        pairs = (
+            (A3SBoxClient, A3SAsyncBoxClient),
+            (Sandbox, AsyncSandbox),
+            (Commands, AsyncCommands),
+            (Filesystem, AsyncFilesystem),
+        )
+
+        def methods(cls: type[object]) -> dict[str, object]:
+            return {
+                name: value
+                for name, value in cls.__dict__.items()
+                if not name.startswith("_")
+                and name != "id"
+                and (
+                    inspect.isfunction(value)
+                    or isinstance(value, (classmethod, staticmethod))
+                )
+            }
+
+        def parameter_shape(value: object) -> tuple[tuple[object, ...], ...]:
+            if isinstance(value, (classmethod, staticmethod)):
+                value = value.__func__
+            parameters = list(inspect.signature(value).parameters.values())[1:]
+            return tuple(
+                (parameter.name, parameter.kind, parameter.default)
+                for parameter in parameters
+            )
+
+        for sync_type, async_type in pairs:
+            with self.subTest(sync=sync_type.__name__, async_=async_type.__name__):
+                sync_methods = methods(sync_type)
+                async_methods = methods(async_type)
+                self.assertEqual(sync_methods.keys(), async_methods.keys())
+                for name, sync_method in sync_methods.items():
+                    self.assertEqual(
+                        parameter_shape(sync_method),
+                        parameter_shape(async_methods[name]),
+                        name,
+                    )
+
+    def test_missing_binary_uses_the_cross_sdk_error_code(self) -> None:
+        error = A3SBoxNotInstalledError("/missing/a3s-box")
+        self.assertEqual(error.code, "binary_not_found")
+
+    def test_malformed_typed_result_is_a_protocol_error(self) -> None:
+        class MalformedRuntime(FakeRuntime):
+            def request(
+                self,
+                request: Mapping[str, object],
+            ) -> dict[str, Any]:
+                if request["operation"] == "sdk_capabilities":
+                    return response_for(request)
+                if request["operation"] == "image_list":
+                    return {
+                        "images": [
+                            {
+                                "reference": 42,
+                                "digest": "sha256:bad",
+                                "size_bytes": 1,
+                                "pulled_at": "2026-07-28T00:00:00Z",
+                                "last_used": "2026-07-28T00:00:00Z",
+                                "path": "/tmp/image",
+                            }
+                        ]
+                    }
+                return super().request(request)
+
+        with self.assertRaises(A3SBoxError) as raised:
+            A3SBoxClient(MalformedRuntime()).list_images()
+
+        self.assertEqual(raised.exception.code, "bridge_protocol_error")
+
+    def test_public_api_exercises_every_rust_bridge_operation(self) -> None:
+        runtime = FakeRuntime()
+        client = A3SBoxClient(runtime)
+
+        client.runtime_diagnostics()
+        client.runtime_disk_usage()
+        client.image(".").tag("local/test:latest").build()
+        client.pull_image("alpine:3.20")
+        client.get_image("alpine:3.20")
+        client.list_images()
+        client.inspect_image("alpine:3.20")
+        client.image_history("alpine:3.20")
+        client.tag_image("alpine:3.20", "local/alpine:latest")
+        client.push_image("local/alpine:latest", "registry/alpine:latest")
+        client.remove_image("local/alpine:latest")
+        client.evict_images()
+
+        client.volume("cache").create()
+        client.get_volume("cache")
+        client.list_volumes()
+        client.remove_volume("cache", force=True)
+        client.prune_volumes()
+        client.network("ci-net").create()
+        client.get_network("ci-net")
+        client.list_networks()
+        client.remove_network("ci-net")
+        client.prune_networks()
+        client.list_sandboxes()
+        client.get_sandbox("sandbox-local-1")
+
+        sandbox = client.sandbox().start()
+        sandbox.stop()
+        sandbox.restart(operation_id="coverage-restart")
+        sandbox.pause()
+        sandbox.resume()
+        sandbox.logs(tail=10)
+        sandbox.stats()
+        sandbox.create_filesystem_snapshot("snap-1")
+        sandbox.commands.run(["true"])
+        sandbox.files.write("/tmp/value", "value")
+        sandbox.files.read("/tmp/value")
+        sandbox.files.stat("/tmp/value")
+        sandbox.files.list("/tmp", depth=1)
+        sandbox.files.make_dir("/tmp/dir")
+        sandbox.files.rename("/tmp/dir", "/tmp/moved")
+        sandbox.files.remove("/tmp/moved")
+        sandbox.kill()
+
+        Sandbox.connect("sandbox-remove", runtime=runtime).remove()
+        client.list_filesystem_snapshots()
+        client.get_filesystem_snapshot("snap-1")
+        Sandbox.filesystem_snapshot_size("snap-1", runtime=runtime)
+        Sandbox.delete_filesystem_snapshot("snap-1", runtime=runtime)
+        client.capabilities()
+
+        called = {str(request["operation"]) for request in runtime.requests}
+        expected = set(SUPPORTED_BRIDGE_OPERATIONS) - {"sdk_capabilities"}
+        self.assertEqual(called, expected)
+
+    def test_client_fails_closed_before_an_unsupported_runtime_mutation(self) -> None:
+        operations = tuple(
+            operation
+            for operation in SUPPORTED_BRIDGE_OPERATIONS
+            if operation != "image_list"
+        )
+        runtime = CapabilityRuntime(operations=operations)
+
+        with self.assertRaises(A3SBoxError) as raised:
+            A3SBoxClient(runtime).list_images()
+
+        self.assertEqual(raised.exception.code, "unavailable")
+        self.assertIn("image_list", str(raised.exception))
+        self.assertEqual(
+            [request["operation"] for request in runtime.requests],
+            ["sdk_capabilities"],
+        )
+
+    def test_protocol_mismatch_is_a_stable_sdk_error(self) -> None:
+        envelope = json.dumps(
+            {"protocol_version": 3, "ok": True, "result": {}}
+        )
+
+        with self.assertRaises(A3SBoxError) as raised:
+            _decode_response(envelope, "", 0)
+
+        self.assertEqual(raised.exception.code, "bridge_protocol_error")
+
     def test_exports_native_local_clients(self) -> None:
         self.assertIs(a3s_box.Sandbox, Sandbox)
         self.assertIs(a3s_box.AsyncSandbox, AsyncSandbox)
@@ -402,13 +603,21 @@ class SdkTests(unittest.TestCase):
             "SandboxSummary",
         ):
             self.assertTrue(hasattr(a3s_box, exported_type), exported_type)
+
+    def test_operation_inventory_matches_rust_contract(self) -> None:
+        contract_root = Path(__file__).resolve().parents[2]
+        inventory_path = contract_root / "bridge-operations.json"
+        protocol_path = contract_root / "bridge-protocol.json"
+        if not inventory_path.exists() or not protocol_path.exists():
+            self.skipTest(
+                "repository bridge contract is not included in the Python package"
+            )
         inventory = json.loads(
-            (
-                Path(__file__).resolve().parents[2]
-                / "bridge-operations.json"
-            ).read_text()
+            inventory_path.read_text()
         )
         self.assertEqual(list(SUPPORTED_BRIDGE_OPERATIONS), inventory)
+        protocol = json.loads(protocol_path.read_text())
+        self.assertEqual(BRIDGE_PROTOCOL_VERSION, protocol["version"])
 
     def test_sync_sandbox_uses_local_runtime_surface(self) -> None:
         runtime = FakeRuntime()
@@ -535,7 +744,10 @@ class SdkTests(unittest.TestCase):
             .dockerfile("Dockerfile.ci")
             .tag("local/ci-base:latest")
             .build_arg("NODE_VERSION", "24")
+            .quiet(False)
             .platform("linux/arm64")
+            .target("test")
+            .no_cache()
             .build()
         )
         volume = (
@@ -552,12 +764,27 @@ class SdkTests(unittest.TestCase):
         )
         sandbox = (
             client.sandbox(image.reference)
+            .timeout(90)
+            .env("CI", "true")
+            .metadata("job", "test")
+            .name("python-test")
             .cpus(4)
             .memory_mb(4096)
-            .mount_named(volume.name, "/cache")
+            .isolation("sandbox")
+            .filesystem_snapshot("base-snapshot")
+            .workspace("/workspace")
+            .mount_named(volume.name, "/cache", read_only=True)
+            .mount_bind("./src", "/workspace/src")
+            .tmpfs("/scratch", size_bytes=1024, read_only=True)
             .network(network.name)
             .publish_tcp(8080, 80)
-            .workdir("/workspace")
+            .dns_server("1.1.1.1")
+            .host_alias("registry.local", "10.89.55.2")
+            .workdir("/workspace/src")
+            .user("1000:1000")
+            .hostname("python-ci")
+            .read_only()
+            .persistent()
             .auto_remove(False)
             .start()
         )
@@ -577,8 +804,23 @@ class SdkTests(unittest.TestCase):
         self.assertEqual(runtime.requests[0]["operation"], "image_build")
         self.assertEqual(runtime.requests[0]["dockerfile"], "Dockerfile.ci")
         self.assertEqual(runtime.requests[0]["platforms"], ["linux/arm64"])
+        self.assertFalse(runtime.requests[0]["quiet"])
+        self.assertEqual(runtime.requests[0]["target"], "test")
+        self.assertTrue(runtime.requests[0]["no_cache"])
         create = runtime.requests[3]
         self.assertEqual(create["operation"], "sandbox_create")
+        self.assertEqual(create["timeout_seconds"], 90)
+        self.assertEqual(create["env"], {"CI": "true"})
+        self.assertEqual(create["labels"], {"job": "test"})
+        self.assertEqual(create["name"], "python-test")
+        self.assertEqual(create["cpus"], 4)
+        self.assertEqual(create["memory_mb"], 4096)
+        self.assertEqual(create["isolation"], "sandbox")
+        self.assertEqual(create["filesystem_snapshot_id"], "base-snapshot")
+        self.assertEqual(create["workspace"], "/workspace")
+        self.assertEqual(create["workdir"], "/workspace/src")
+        self.assertEqual(create["user"], "1000:1000")
+        self.assertEqual(create["hostname"], "python-ci")
         self.assertEqual(
             create["mounts"],
             [
@@ -586,15 +828,31 @@ class SdkTests(unittest.TestCase):
                     "kind": "named",
                     "name": "ci-cache",
                     "target": "/cache",
+                    "read_only": True,
+                },
+                {
+                    "kind": "bind",
+                    "source": "./src",
+                    "target": "/workspace/src",
                     "read_only": False,
-                }
+                },
             ],
+        )
+        self.assertEqual(
+            create["tmpfs"],
+            [{"target": "/scratch", "size_bytes": 1024, "read_only": True}],
         )
         self.assertEqual(create["network"], {"mode": "bridge", "name": "ci-net"})
         self.assertEqual(
             create["ports"],
             [{"host_port": 8080, "guest_port": 80}],
         )
+        self.assertEqual(create["dns"], ["1.1.1.1"])
+        self.assertEqual(
+            create["host_aliases"], {"registry.local": "10.89.55.2"}
+        )
+        self.assertTrue(create["read_only"])
+        self.assertTrue(create["persistent"])
         self.assertFalse(create["auto_remove"])
         command = runtime.requests[4]
         self.assertEqual(command["argv"], ["python", "-"])
@@ -658,6 +916,7 @@ class SdkTests(unittest.TestCase):
         sandbox = Sandbox.create(isolation="sandbox", runtime=runtime)
         sandbox.kill()
 
+        self.assertEqual(sandbox.isolation, "sandbox")
         self.assertEqual(runtime.requests[0]["isolation"], "sandbox")
 
     def test_local_binary_resolution_uses_path_without_override(self) -> None:
@@ -726,6 +985,26 @@ class SdkTests(unittest.TestCase):
         )
 
 class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_async_client_verifies_capabilities_once_under_concurrency(
+        self,
+    ) -> None:
+        runtime = AsyncCapabilityRuntime()
+        client = A3SAsyncBoxClient(runtime)
+
+        images, volumes = await asyncio.gather(
+            client.list_images(),
+            client.list_volumes(),
+        )
+
+        self.assertEqual(images, [])
+        self.assertEqual(volumes, [])
+        operations = [request["operation"] for request in runtime.requests]
+        self.assertEqual(operations.count("sdk_capabilities"), 1)
+        self.assertEqual(
+            sorted(operation for operation in operations if operation != "sdk_capabilities"),
+            ["image_list", "volume_list"],
+        )
+
     async def test_async_sandbox_uses_the_same_local_protocol(self) -> None:
         runtime = AsyncFakeRuntime()
 
@@ -784,7 +1063,7 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.block_write_bytes, 40)
         self.assertEqual(sandboxes[0].id, "sandbox-local-1")
         self.assertEqual(snapshot.id, "ci-async")
-        self.assertEqual(diagnostics.sdk_version, "3.1.0")
+        self.assertEqual(diagnostics.sdk_version, "3.2.0")
         self.assertEqual(disk.snapshots_bytes, 4)
         restart = next(
             request
@@ -818,7 +1097,7 @@ class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evicted, ["local/old:latest"])
         self.assertEqual(volumes, ["old-cache"])
         self.assertEqual(networks, ["old-network"])
-        self.assertEqual(capabilities.protocol_version, 1)
+        self.assertEqual(capabilities.protocol_version, 2)
 
     async def test_async_filesystem_snapshot_lifecycle(self) -> None:
         runtime = AsyncFakeRuntime()

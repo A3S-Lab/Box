@@ -19,7 +19,7 @@ from ._bridge_values import (
     runtime_disk_usage as _runtime_disk_usage,
     sandbox_summary as _sandbox_summary,
     sdk_capabilities as _sdk_capabilities,
-    sequence as _sequence,
+    string_tuple as _string_tuple,
     volume_info as _volume_info,
 )
 
@@ -48,6 +48,8 @@ from .runtime import (
     A3SLocalRuntime,
     AsyncLocalRuntime,
     LocalRuntime,
+    _ensure_compatible_async_runtime,
+    _ensure_compatible_runtime,
 )
 from .sandbox import DEFAULT_IMAGE, AsyncSandbox, Sandbox
 
@@ -59,7 +61,7 @@ class A3SBoxClient:
     """Synchronous resource client with fluent terminal builders."""
 
     def __init__(self, runtime: LocalRuntime | None = None) -> None:
-        self._runtime = runtime or A3SLocalRuntime()
+        self._runtime = _ensure_compatible_runtime(runtime or A3SLocalRuntime())
 
     def image(self, context_dir: str) -> ImageBuilder:
         return ImageBuilder(self._runtime, context_dir)
@@ -180,7 +182,7 @@ class A3SBoxClient:
 
     def evict_images(self) -> list[str]:
         result = self._runtime.request({"operation": "image_evict"})
-        return [str(value) for value in _sequence(result["references"])]
+        return list(_string_tuple(result["references"]))
 
     def get_volume(self, name: str) -> VolumeInfo | None:
         result = self._runtime.request({"operation": "volume_get", "name": name})
@@ -204,7 +206,7 @@ class A3SBoxClient:
 
     def prune_volumes(self) -> list[str]:
         result = self._runtime.request({"operation": "volume_prune"})
-        return [str(value) for value in _sequence(result["names"])]
+        return list(_string_tuple(result["names"]))
 
     def get_network(self, name: str) -> NetworkInfo | None:
         result = self._runtime.request({"operation": "network_get", "name": name})
@@ -222,7 +224,7 @@ class A3SBoxClient:
 
     def prune_networks(self) -> list[str]:
         result = self._runtime.request({"operation": "network_prune"})
-        return [str(value) for value in _sequence(result["names"])]
+        return list(_string_tuple(result["names"]))
 
     def capabilities(self) -> SdkCapabilities:
         return _sdk_capabilities(
@@ -286,7 +288,9 @@ class A3SAsyncBoxClient:
     """Asynchronous counterpart of :class:`A3SBoxClient`."""
 
     def __init__(self, runtime: AsyncLocalRuntime | None = None) -> None:
-        self._runtime = runtime or A3SAsyncLocalRuntime()
+        self._runtime = _ensure_compatible_async_runtime(
+            runtime or A3SAsyncLocalRuntime()
+        )
 
     def image(self, context_dir: str) -> AsyncImageBuilder:
         return AsyncImageBuilder(self._runtime, context_dir)
@@ -410,7 +414,7 @@ class A3SAsyncBoxClient:
 
     async def evict_images(self) -> list[str]:
         result = await self._runtime.request({"operation": "image_evict"})
-        return [str(value) for value in _sequence(result["references"])]
+        return list(_string_tuple(result["references"]))
 
     async def get_volume(self, name: str) -> VolumeInfo | None:
         result = await self._runtime.request({"operation": "volume_get", "name": name})
@@ -434,7 +438,7 @@ class A3SAsyncBoxClient:
 
     async def prune_volumes(self) -> list[str]:
         result = await self._runtime.request({"operation": "volume_prune"})
-        return [str(value) for value in _sequence(result["names"])]
+        return list(_string_tuple(result["names"]))
 
     async def get_network(self, name: str) -> NetworkInfo | None:
         result = await self._runtime.request({"operation": "network_get", "name": name})
@@ -452,7 +456,7 @@ class A3SAsyncBoxClient:
 
     async def prune_networks(self) -> list[str]:
         result = await self._runtime.request({"operation": "network_prune"})
-        return [str(value) for value in _sequence(result["names"])]
+        return list(_string_tuple(result["names"]))
 
     async def capabilities(self) -> SdkCapabilities:
         return _sdk_capabilities(

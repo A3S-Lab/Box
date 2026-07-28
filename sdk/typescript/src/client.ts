@@ -16,7 +16,11 @@ import {
   unknownRecordArray,
   volumeInfo,
 } from './bridge-values.js'
-import { A3SLocalRuntime, type LocalRuntime } from './runtime.js'
+import {
+  A3SLocalRuntime,
+  compatibleRuntime,
+  type LocalRuntime,
+} from './runtime.js'
 import {
   DEFAULT_IMAGE,
   Sandbox,
@@ -257,7 +261,11 @@ export interface NetworkInfo {
 
 /** Host-level resource client and entry point for fluent builders. */
 export class A3SBoxClient {
-  constructor(readonly runtime: LocalRuntime = new A3SLocalRuntime()) {}
+  readonly runtime: LocalRuntime
+
+  constructor(runtime: LocalRuntime = new A3SLocalRuntime()) {
+    this.runtime = compatibleRuntime(runtime)
+  }
 
   image(contextDir: string): ImageBuilder {
     return new ImageBuilder(this.runtime, contextDir)

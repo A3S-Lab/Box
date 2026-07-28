@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/A3S-Lab/Box/sdk/go/v3/internal/bridge"
 )
 
 func TestMain(m *testing.M) {
@@ -27,11 +29,11 @@ func runBridgeHelper() {
 	case "malformed":
 		fmt.Print("not-json")
 	case "trailing":
-		fmt.Print(`{"protocol_version":1,"ok":true,"result":{}} {}`)
+		fmt.Printf(`{"protocol_version":%d,"ok":true,"result":{}} {}`, bridge.ProtocolVersion)
 	case "bad_version":
 		fmt.Print(`{"protocol_version":99,"ok":true,"result":{}}`)
 	case "non_object":
-		fmt.Print(`{"protocol_version":1,"ok":true,"result":[]}`)
+		fmt.Printf(`{"protocol_version":%d,"ok":true,"result":[]}`, bridge.ProtocolVersion)
 	case "exit":
 		fmt.Fprint(os.Stderr, "helper process failed")
 		os.Exit(7)
@@ -57,7 +59,7 @@ func runBridgeHelper() {
 }
 
 func writeHelperEnvelope(ok bool, result any, code, message string) {
-	envelope := map[string]any{"protocol_version": 1, "ok": ok}
+	envelope := map[string]any{"protocol_version": bridge.ProtocolVersion, "ok": ok}
 	if ok {
 		envelope["result"] = result
 	} else {
@@ -156,8 +158,12 @@ func TestLocalRuntimeRejectsMalformedProtocol(t *testing.T) {
 func TestLocalRuntimeReportsMissingBinary(t *testing.T) {
 	runtime := NewLocalRuntime(WithBinaryPath(t.TempDir() + "/missing"))
 	err := runtime.Request(context.Background(), map[string]any{"operation": "image_list"}, &struct{}{})
-	if !errors.Is(err, ErrNotInstalled) {
-		t.Fatalf("expected not-installed error, got %v", err)
+	if !errors.Is(err, ErrBinaryNotFound) || !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("expected binary-not-found error, got %v", err)
+	}
+	var sdkErr *Error
+	if !errors.As(err, &sdkErr) || sdkErr.Code != CodeBinaryNotFound {
+		t.Fatalf("expected stable %q code, got %v", CodeBinaryNotFound, err)
 	}
 }
 
@@ -189,7 +195,7 @@ func TestLocalRuntimePreservesCancellationAndDeadline(t *testing.T) {
 			map[string]any{"operation": "command_run"},
 			&struct{}{},
 		)
-		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrDeadlineExceeded) {
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrBridgeTimeout) {
 			t.Fatalf("expected bridge timeout, got %v", err)
 		}
 	})

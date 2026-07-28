@@ -17,6 +17,15 @@ versioned machine bridge and never parse human CLI output. Language differences
 are limited to normal conventions such as Python sync/async variants and
 JavaScript promises.
 
+Bridge protocol v2 has one checked 48-operation inventory shared by Rust,
+Python, TypeScript, and Go. A language client must validate the complete
+capability response before a normal operation, reject duplicate or missing
+entries, and fail closed on malformed response values. Lifecycle responses
+must preserve Sandbox identity, a positive generation, a recognized state,
+and the effective isolation class. Stable transport categories distinguish an
+unavailable operation, a missing binary, a bridge-process timeout, a stale
+generation conflict, and a malformed protocol response.
+
 Each language exposes two complementary entry styles over that single
 implementation:
 
@@ -175,7 +184,7 @@ If retained, the composition layer must:
 | Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have four-language parity. Go preserves binary output as `[]byte`; the other SDKs expose their language-native byte/text conventions. Process handles, signals, wait, and streaming remain pending. |
 | Files and artifacts | binary/text read/write, stat, exists, list, mkdir, move, remove, streaming, confined export, size limits, and hashes | Core mutations implemented; artifact/export layer and large-file streaming pending. |
 | Filesystem snapshots | capture, size, restore, delete, in-use fencing, inspection, and cleanup | Capture/size/restore/delete and live-use fencing are implemented. Rust, Python sync/async, TypeScript, and Go expose typed list/get inspection through the checked bridge; the real Sandbox gate exercises the complete local snapshot lifecycle. |
-| Lifecycle | create, connect, inspect, list, pause, resume, restart, timeout replacement, stop, kill, remove, and deterministic cleanup | Rust, Python sync/async, TypeScript, and Go have parity for create/connect/inspect/list/pause/resume/stop/idempotent restart/kill/remove. Go serializes lifecycle transitions against in-flight command and file calls. Restart carries a durable operation identity and optional stop deadline; stop preserves the record, remove requires a terminal state, and kill composes both. Cancellation cleanup remains pending across the full matrix. |
+| Lifecycle | create, connect, inspect, list, pause, resume, restart, timeout replacement, stop, kill, remove, and deterministic cleanup | Rust, Python sync/async, TypeScript, and Go have parity for create/connect/inspect/list/pause/resume/stop/idempotent restart/kill/remove. Go serializes lifecycle transitions against in-flight command and file calls. Go and TypeScript validate Sandbox identity, positive generation, recognized state, and stable isolation on lifecycle results. Restart carries a durable operation identity and optional stop deadline; stop preserves the record, remove requires a terminal state, and kill composes both. Cancellation cleanup remains pending across the full matrix. |
 | Observability | structured logs, stats, events, health, audit data, and runtime diagnostics | Bounded structured log snapshots, active resource stats, runtime versions/virtualization diagnostics, disk usage, and Sandbox inventory have four-language parity. Event streams, health history, and audit queries remain pending. |
 | PTY | create, resize, input, output streaming, wait, and cancellation | Rust lower-level primitives only. |
 | Security | typed isolation, resource limits, read-only policy, capabilities, devices, secret injection, and attestation | Partial; unsupported policies must be rejected rather than represented as enforced. |

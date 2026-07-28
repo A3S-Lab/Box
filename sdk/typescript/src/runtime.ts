@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 
 import { A3SBoxError, A3SBoxNotInstalledError } from './errors.js'
 
-export const BRIDGE_PROTOCOL_VERSION = 1
+export const BRIDGE_PROTOCOL_VERSION = 2
 export const SUPPORTED_BRIDGE_OPERATIONS = [
   'sdk_capabilities',
   'runtime_diagnostics',
@@ -59,6 +59,76 @@ export type BridgeResult = Record<string, unknown>
 
 export interface LocalRuntime {
   request(request: BridgeRequest): Promise<BridgeResult>
+}
+
+class CompatibleLocalRuntime implements LocalRuntime {
+  private verification?: Promise<BridgeResult>
+
+  constructor(private readonly runtime: LocalRuntime) {}
+
+  async request(request: BridgeRequest): Promise<BridgeResult> {
+    if (request.operation === 'sdk_capabilities') {
+      return { ...(await this.verify()) }
+    }
+    await this.verify()
+    return this.runtime.request(request)
+  }
+
+  private verify(): Promise<BridgeResult> {
+    this.verification ??= this.runtime
+      .request({ operation: 'sdk_capabilities' })
+      .then(validateCapabilities)
+    return this.verification
+  }
+}
+
+export function compatibleRuntime(runtime: LocalRuntime): LocalRuntime {
+  return runtime instanceof CompatibleLocalRuntime
+    ? runtime
+    : new CompatibleLocalRuntime(runtime)
+}
+
+function validateCapabilities(result: BridgeResult): BridgeResult {
+  if (result.protocol_version !== BRIDGE_PROTOCOL_VERSION) {
+    throw new A3SBoxError(
+      `Unsupported local A3S Box capability protocol version ${String(
+        result.protocol_version
+      )}`,
+      'bridge_protocol_error'
+    )
+  }
+  if (
+    !Array.isArray(result.operations) ||
+    result.operations.some((operation) => typeof operation !== 'string')
+  ) {
+    throw new A3SBoxError(
+      'Invalid local A3S Box capability inventory',
+      'bridge_protocol_error'
+    )
+  }
+  const operations = result.operations as string[]
+  if (new Set(operations).size !== operations.length) {
+    throw new A3SBoxError(
+      'Invalid local A3S Box capability inventory: duplicate operations',
+      'bridge_protocol_error'
+    )
+  }
+  const available = new Set(operations)
+  const missing = SUPPORTED_BRIDGE_OPERATIONS.filter(
+    (operation) => !available.has(operation)
+  ).sort()
+  if (missing.length !== 0) {
+    throw new A3SBoxError(
+      `Installed A3S Box runtime is missing required operations: ${missing.join(
+        ', '
+      )}`,
+      'unavailable'
+    )
+  }
+  return {
+    protocol_version: result.protocol_version,
+    operations: [...operations],
+  }
 }
 
 export interface A3SLocalRuntimeOptions {

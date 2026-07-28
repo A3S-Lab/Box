@@ -28,7 +28,8 @@ go get github.com/A3S-Lab/Box/sdk/go/v3
 ```
 
 Use the SDK and runtime from the same A3S Box release. `NewClient` performs a
-protocol and 48-operation capability handshake before it permits any mutation.
+protocol v2 and exact 48-operation capability handshake before it permits any
+mutation. Missing or duplicate operations fail closed.
 
 ## Quick start
 
@@ -176,8 +177,11 @@ _ = result
 ```
 
 The SDK preserves `context.Canceled` and `context.DeadlineExceeded` through
-error wrapping. Stable runtime categories include `ErrInvalidRequest`,
-`ErrNotFound`, `ErrConflict`, `ErrUnavailable`, and `ErrRuntime`.
+error wrapping. A caller deadline remains `context.DeadlineExceeded`, while the
+runtime process ceiling is `ErrBridgeTimeout`. Stable SDK categories include
+`ErrInvalidRequest`, `ErrNotFound`, `ErrConflict`, `ErrUnavailable`,
+`ErrRuntime`, `ErrProtocol`, `ErrBinaryNotFound`, and `ErrBridgeTimeout`.
+`ErrNotInstalled` remains a deprecated alias for source compatibility.
 
 ## Runtime selection
 

@@ -8,4 +8,4 @@ pub mod layer_cache;
 pub mod rootfs_cache;
 
 pub use layer_cache::LayerCache;
-pub use rootfs_cache::RootfsCache;
+pub use rootfs_cache::{prune_apfs_rootfs_cache_all, RootfsCache, RootfsPruneResult};

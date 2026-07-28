@@ -140,8 +140,13 @@ mutation; use `.disableNetwork()` or the default TSI-compatible configuration
 for supported Sandbox workloads.
 
 The package invokes the versioned machine bridge built into the installed
-`a3s-box` executable. It does not parse human CLI output. Set `A3S_BOX_BINARY`
-only when the executable is not on `PATH`, or inject a typed
+`a3s-box` executable. It does not parse human CLI output. Protocol v2 performs
+one shared, complete capability handshake before the first normal operation,
+including when callers start concurrently. Typed values, standard Base64, and
+Sandbox identity, generation, state, and isolation are validated fail-closed;
+malformed responses use `bridge_protocol_error`, a missing binary uses
+`binary_not_found`, and a local bridge deadline uses `bridge_timeout`. Set
+`A3S_BOX_BINARY` only when the executable is not on `PATH`, or inject a typed
 `A3SLocalRuntime` object in application tests.
 
 Host resources use the same typed client:
@@ -173,6 +178,6 @@ await client.pruneVolumes()
 await client.pruneNetworks()
 ```
 
-`client.capabilities()` returns the bridge protocol version and exact supported
-operation names. Registry passwords are passed only to the local runtime
-process.
+`client.capabilities()` returns bridge protocol version 2 and the exact 48
+supported operation names. Registry passwords are passed only to the local
+runtime process.
