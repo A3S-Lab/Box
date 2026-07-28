@@ -16,6 +16,7 @@
 
 <p align="center">
   <a href="#run-your-first-box">Quick start</a> ·
+  <a href="#local-runtime-boundary">Local boundary</a> ·
   <a href="#isolation-is-part-of-the-request">Isolation</a> ·
   <a href="#native-sdks">SDKs</a> ·
   <a href="#platform-boundaries">Platforms</a> ·
@@ -39,6 +40,21 @@ SDKs. Every workload enters one of two explicit execution classes:
 Box never silently falls back to the lower-isolation backend. The requested
 isolation class, effective backend, policy, and controls are persisted with the
 workload so lifecycle recovery cannot reinterpret the request.
+
+## Local runtime boundary
+
+A3S Box is a local runtime, not a hosted Sandbox service. The repository ships
+the CLI, native local SDKs, CRI/containerd adapters, and the host/guest runtime
+components required to execute workloads on the machine where Box is
+installed. It does not ship a remote Sandbox API, gateway, account service,
+connection adapter, or dedicated service image.
+
+Every public lifecycle request terminates at the same local
+`ExecutionManager`. Images, networks, volumes, snapshots, logs, generation
+fencing, policy checks, and cleanup therefore have one owner and one durable
+state model. Applications that need remote orchestration should place their own
+authenticated service in front of the native SDK instead of treating Box as a
+network control plane.
 
 ## Run your first box
 
@@ -198,8 +214,9 @@ a3s-box compose -f compose.acl down
 ## Native SDKs
 
 Rust, Python, and TypeScript operate the same local images, Sandboxes, volumes,
-networks, snapshots, logs, and runtime state as the CLI. Local use requires no
-endpoint, domain, or API key.
+networks, snapshots, logs, and runtime state as the CLI. These packages expose
+no remote connection configuration: they require the installed runtime and do
+not read an endpoint, domain, or API key.
 
 | Language | Package | Runtime access |
 | --- | --- | --- |
@@ -305,7 +322,8 @@ evidence. Review [Host Integration](docs/host-integration.md),
 
 ## Architecture
 
-Every entry point submits the same backend-neutral execution request:
+Every shipped entry point submits the same backend-neutral local execution
+request:
 
 ```text
 CLI · Rust SDK · local machine bridge · CRI · containerd shim
@@ -329,7 +347,8 @@ The runtime persists caller policy before allocation. Python and TypeScript
 reach the same `ExecutionManager` through the machine bridge instead of
 constructing CLI commands; CRI and RuntimeClass adapters also reuse the same
 resolver. Lifecycle ownership, unsupported-feature rejection, audit evidence,
-and cleanup therefore stay inside one runtime boundary.
+and cleanup therefore stay inside one runtime boundary. No separate HTTP
+control plane or remote lifecycle service sits beside this path.
 
 Repository components are grouped by responsibility:
 
