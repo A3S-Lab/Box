@@ -151,6 +151,16 @@ Box compiles the resolved plan into a protected OCI bundle containing:
 - guest-init bootstrap material;
 - Box control sockets and log paths.
 
+For the versioned `control-workload-v1` layout, `linux.resources` is the exact
+workload source of truth. Box adds only typed control-plane headroom
+annotations. A3S OCI Runtime derives the outer envelope, creates the fixed
+`a3s-control` and `a3s-workload` children, and passes their pre-opened
+`cgroup.procs` descriptors to Guest Init. The cgroup mount inside the Sandbox is
+read-only; Guest Init moves trusted bootstrap processes into the control child
+and joins every main, exec, streaming exec, and PTY process to the workload
+child through the inherited descriptor. Workload OOM kills therefore do not
+select the long-lived control transport or an otherwise healthy Service.
+
 Every host path is canonicalized and checked against an allowlisted Box-owned
 root before it enters the bundle. The checks run during planning and again
 immediately before launch.
@@ -161,9 +171,11 @@ Each execution generation starts one authenticated A3S OCI owner. The owner:
 
 - creates and starts the container through the typed SDK;
 - returns structured container state and PID identity;
-- performs pause, resume, stop, delete, and inspection;
+- performs pause, resume, complete resource update, stop, delete, and inspection;
 - scopes requests to the durable generation;
-- removes its session and runtime state during terminal cleanup.
+- atomically updates the exact workload and derived management envelope;
+- removes its session, complete cgroup topology, and runtime state during
+  terminal cleanup.
 
 Runtime and agent executables come from Box's pinned release artifacts. Startup
 records their canonical paths and SHA-256 digests. Box does not discover or
@@ -297,8 +309,12 @@ for:
 - pause, resume, stop, delete, and post-stop hooks;
 - PID, namespace, mount, cgroup, socket, owner, and session cleanup.
 
-Box then runs the real Rust, Python, TypeScript, and Go SDK lifecycle against those
-artifacts. It covers images, files, logs, metrics, named volumes, snapshots,
+Box then certifies every advertised R17 provider profile and runs the real Rust,
+Python, TypeScript, and Go SDK lifecycle against those artifacts. The resource
+profile observes exact CPU, memory, and PID limits, forces throttling, PID
+exhaustion, and a workload-only OOM, verifies the long-lived Service and exec
+transport remain available, and requires complete cgroup cleanup. The SDK
+matrix covers images, files, logs, metrics, named volumes, snapshots,
 pause/resume, filesystem-only restart, and final cleanup.
 
 Release gates also require formatting, strict linting, unit tests, supported

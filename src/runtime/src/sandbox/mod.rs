@@ -29,6 +29,56 @@ pub(crate) mod runtime_record;
 #[cfg(target_os = "linux")]
 pub(crate) const A3S_OCI_LIFECYCLE_TIMEOUT_MS: u64 = 15_000;
 
+/// Apply a complete resource contract to the exact recorded Sandbox generation.
+///
+/// The A3S OCI SDK is the only live-update path for a host Sandbox. MicroVM
+/// cgroup updates remain guest-local and never pass through this function.
+#[cfg(target_os = "linux")]
+pub fn update_recorded_resources(
+    box_dir: &std::path::Path,
+    box_id: &str,
+    config: &a3s_box_core::config::BoxConfig,
+) -> a3s_box_core::Result<()> {
+    if !config.isolation.is_sandbox() {
+        return Err(a3s_box_core::BoxError::ConfigError(
+            "A3S OCI resource updates require Sandbox isolation".to_string(),
+        ));
+    }
+    let runtime = crate::vm::reap::load_recorded_sandbox_runtime(
+        &a3s_box_core::dirs_home(),
+        box_dir,
+        box_id,
+    )?
+    .ok_or_else(|| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Recorded A3S OCI runtime is missing for Sandbox {box_id}"
+        ))
+    })?;
+    let socket = runtime.runtime_socket.as_deref().ok_or_else(|| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Recorded A3S OCI runtime socket is missing for Sandbox {box_id}"
+        ))
+    })?;
+    let generation = runtime.generation.ok_or_else(|| {
+        a3s_box_core::BoxError::StateError(format!(
+            "Recorded A3S OCI generation is missing for Sandbox {box_id}"
+        ))
+    })?;
+    let resources = oci::compile_resources(&SandboxResources::from_box_config(config)?)?;
+    A3sOciHandler::update_at(socket, box_id, generation, resources)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn update_recorded_resources(
+    _box_dir: &std::path::Path,
+    _box_id: &str,
+    _config: &a3s_box_core::config::BoxConfig,
+) -> a3s_box_core::Result<()> {
+    Err(a3s_box_core::BoxError::StateError(
+        "A3S OCI Sandbox resource updates require Linux".to_string(),
+    ))
+}
+
 #[cfg(target_os = "linux")]
 pub use a3s_oci_controller::A3sOciController;
 #[cfg(target_os = "linux")]

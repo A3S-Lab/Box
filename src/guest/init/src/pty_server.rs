@@ -288,8 +288,7 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
     // would turn one aggregate container budget into competing independent
     // limits and make live updates ambiguous.
     #[cfg(target_os = "linux")]
-    let cgroup_procs: Option<std::ffi::CString> = crate::exec_server::container_cgroup_procs()
-        .and_then(|path| std::ffi::CString::new(path).ok());
+    let cgroup_procs = crate::exec_server::container_cgroup_procs_descriptor();
 
     // Set up the container rootfs before the fork — the child shares this mount
     // namespace and chroots into it. The exec path does all of this per spawn;
@@ -336,32 +335,12 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
 
             // Join the per-container cgroup FIRST, before chroot makes
             // /sys/fs/cgroup unreachable, so this process and everything it forks
-            // is bounded from birth. Async-signal-safe: open + getpid + a
-            // stack-only itoa + write + close, no allocation.
+            // is bounded from birth. The inherited descriptor avoids reopening
+            // a host-owned cgroup file from the Sandbox user namespace.
             #[cfg(target_os = "linux")]
-            if let Some(ref procs) = cgroup_procs {
-                let fd = unsafe { libc::open(procs.as_ptr(), libc::O_WRONLY) };
-                if fd >= 0 {
-                    let mut buf = [0u8; 20];
-                    let mut i = buf.len();
-                    let mut n = unsafe { libc::getpid() } as u64;
-                    if n == 0 {
-                        i -= 1;
-                        buf[i] = b'0';
-                    }
-                    while n > 0 {
-                        i -= 1;
-                        buf[i] = b'0' + (n % 10) as u8;
-                        n /= 10;
-                    }
-                    unsafe {
-                        libc::write(
-                            fd,
-                            buf[i..].as_ptr() as *const libc::c_void,
-                            (buf.len() - i) as libc::size_t,
-                        );
-                        libc::close(fd);
-                    }
+            if let Some(descriptor) = cgroup_procs {
+                if crate::cgroup::join_current_process(descriptor).is_err() {
+                    unsafe { libc::_exit(1) };
                 }
             }
 

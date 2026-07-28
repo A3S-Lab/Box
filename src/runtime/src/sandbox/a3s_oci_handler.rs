@@ -9,8 +9,9 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::vmm::{VmHandler, VmMetrics};
 use a3s_oci_sdk::{
     ContainerId, ContainerOperationRequest, ContainerRecord, ContainerTarget, DeleteMode,
-    DeleteRequest, DriverKind, ExitStatus, Generation, KillRequest, OciContainerState,
-    OperationContext, OperationId, Signal, StateRequest, StatsRequest, WaitRequest,
+    DeleteRequest, DriverKind, ExitStatus, Generation, KillRequest, LinuxResources,
+    OciContainerState, OperationContext, OperationId, Signal, StateRequest, StatsRequest,
+    UpdateRequest, WaitRequest,
 };
 use sysinfo::{Pid, System};
 
@@ -169,6 +170,28 @@ impl A3sOciHandler {
         generation: u64,
     ) -> Result<()> {
         Self::transition_at(runtime_socket, container_id, generation, false)
+    }
+
+    /// Apply one complete resource contract to an exact live Sandbox generation.
+    pub(crate) fn update_at(
+        runtime_socket: &Path,
+        container_id: &str,
+        generation: u64,
+        resources: LinuxResources,
+    ) -> Result<()> {
+        let client = A3sOciClient::connect_blocking(runtime_socket.to_path_buf())?;
+        let result = (|| {
+            let id = ContainerId::new(container_id).map_err(sdk_argument_error)?;
+            let target = ContainerTarget::exact(id, Generation(generation));
+            let record = client.update(UpdateRequest {
+                context: operation_context(container_id, "update")?,
+                target: target.clone(),
+                resources,
+            })?;
+            validate_record(&record, &target, None)
+        })();
+        client.close();
+        result
     }
 
     fn transition_at(

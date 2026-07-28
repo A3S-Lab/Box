@@ -506,14 +506,14 @@ fn cleanup_stopped_box(paths: &A3sBoxPaths, record: &BoxRecord) {
     detach_volumes(paths, &record.volume_names, &record.id);
     a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
-    remove_host_cgroup(&record.id);
+    remove_host_cgroup(record);
 }
 
 fn cleanup_removed_box(paths: &A3sBoxPaths, record: &BoxRecord) {
     detach_volumes(paths, &record.volume_names, &record.id);
     cleanup_network_endpoint(paths, record);
     cleanup_anonymous_volumes(paths, &record.anonymous_volumes);
-    remove_host_cgroup(&record.id);
+    remove_host_cgroup(record);
     if record.box_dir.exists() {
         a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
         let _ = std::fs::remove_dir_all(&record.box_dir);
@@ -569,13 +569,16 @@ fn cleanup_external_socket_dir(box_dir: &Path, exec_socket_path: &Path) {
     let _ = std::fs::remove_dir_all(socket_dir);
 }
 
-fn remove_host_cgroup(box_id: &str) {
+fn remove_host_cgroup(record: &BoxRecord) {
+    if record.isolation.is_sandbox() {
+        return;
+    }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{box_id}"));
+        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{}", record.id));
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = box_id;
+    let _ = record;
 }
 
 #[cfg(unix)]

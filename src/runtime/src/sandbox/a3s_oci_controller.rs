@@ -352,6 +352,7 @@ fn validate_required_operations(info: &a3s_oci_sdk::RuntimeInfo) -> Result<()> {
         RuntimeOperation::Wait,
         RuntimeOperation::Pause,
         RuntimeOperation::Resume,
+        RuntimeOperation::Update,
         RuntimeOperation::Stats,
     ] {
         if !info.operations.contains(&operation) {

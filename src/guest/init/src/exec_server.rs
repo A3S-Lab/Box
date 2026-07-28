@@ -120,35 +120,63 @@ struct DeferredMainSpec {
 #[cfg(target_os = "linux")]
 static DEFERRED_MAIN: std::sync::Mutex<Option<DeferredMainSpec>> = std::sync::Mutex::new(None);
 
-/// The single workload cgroup's `cgroup.procs` path, stashed before any
-/// workload process starts. Main, deferred-main, exec, and PTY processes all
-/// join this cgroup so one exact aggregate limit governs the workload while
-/// trusted guest-init remains in its management cgroup.
+/// The single workload cgroup binding, stashed before any workload process
+/// starts. The path is read-only evidence for OOM accounting; every membership
+/// write uses the already-open descriptor so a host Sandbox never re-opens a
+/// host-root-owned cgroup file from its user namespace.
 #[cfg(target_os = "linux")]
-static CONTAINER_CGROUP_PROCS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-
-/// Publish the workload cgroup before the main process or session servers start.
-#[cfg(target_os = "linux")]
-pub fn set_container_cgroup_procs(procs_path: Option<String>) {
-    *CONTAINER_CGROUP_PROCS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = procs_path;
+#[derive(Clone)]
+struct ContainerCgroupBinding {
+    procs_path: String,
+    procs_descriptor: std::os::fd::RawFd,
 }
 
 #[cfg(target_os = "linux")]
-pub fn container_cgroup_procs() -> Option<String> {
-    CONTAINER_CGROUP_PROCS
+static CONTAINER_CGROUP: std::sync::Mutex<Option<ContainerCgroupBinding>> =
+    std::sync::Mutex::new(None);
+
+/// Publish the workload cgroup before the main process or session servers start.
+#[cfg(target_os = "linux")]
+pub fn set_container_cgroup(
+    procs_path: Option<String>,
+    procs_descriptor: Option<std::os::fd::RawFd>,
+) -> std::io::Result<()> {
+    let binding = match (procs_path, procs_descriptor) {
+        (Some(procs_path), Some(procs_descriptor)) => Some(ContainerCgroupBinding {
+            procs_path,
+            procs_descriptor,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "workload cgroup path and descriptor must be published together",
+            ))
+        }
+    };
+    *CONTAINER_CGROUP.lock().unwrap_or_else(|e| e.into_inner()) = binding;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn container_cgroup() -> Option<ContainerCgroupBinding> {
+    CONTAINER_CGROUP
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
 }
 
 #[cfg(target_os = "linux")]
+pub fn container_cgroup_procs_descriptor() -> Option<std::os::fd::RawFd> {
+    container_cgroup().map(|binding| binding.procs_descriptor)
+}
+
+#[cfg(target_os = "linux")]
 fn container_cgroup_oom_kills() -> u64 {
-    let Some(procs) = container_cgroup_procs() else {
+    let Some(binding) = container_cgroup() else {
         return 0;
     };
-    let Some(path) = Path::new(&procs).parent() else {
+    let Some(path) = Path::new(&binding.procs_path).parent() else {
         return 0;
     };
     let Ok(events) = std::fs::read_to_string(path.join("memory.events")) else {
@@ -235,7 +263,7 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
     // subject to the same pids.max / cpu.max as a boot-spawned main. Without
     // this the warm/IDLE-boot main runs outside the cgroup and the limits are
     // silently inert.
-    let cgroup_procs = container_cgroup_procs();
+    let cgroup_procs = container_cgroup_procs_descriptor();
     let (mut command, _timeout) = build_command(
         ExecCommandSpec {
             cmd: &cmd_vec,
@@ -247,7 +275,7 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
             stdin_streaming: false,
             user: user.as_deref(),
         },
-        cgroup_procs.as_deref(),
+        cgroup_procs,
     )
     .map_err(|out| String::from_utf8_lossy(&out.stderr).into_owned())?;
     command
@@ -1782,7 +1810,7 @@ struct ExecCommandSpec<'a> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn build_command(
     spec: ExecCommandSpec<'_>,
-    cgroup_procs: Option<&str>,
+    cgroup_procs: Option<std::os::fd::RawFd>,
 ) -> Result<(std::process::Command, Duration), ExecOutput> {
     if spec.cmd.is_empty() {
         return Err(ExecOutput {
@@ -2147,9 +2175,9 @@ fn execute_command(
     user: Option<&str>,
 ) -> ExecOutput {
     #[cfg(target_os = "linux")]
-    let cgroup_procs = container_cgroup_procs();
+    let cgroup_procs = container_cgroup_procs_descriptor();
     #[cfg(not(target_os = "linux"))]
-    let cgroup_procs: Option<String> = None;
+    let cgroup_procs: Option<i32> = None;
     let (mut command, timeout) = match build_command(
         ExecCommandSpec {
             cmd,
@@ -2161,7 +2189,7 @@ fn execute_command(
             stdin_streaming: false,
             user,
         },
-        cgroup_procs.as_deref(),
+        cgroup_procs,
     ) {
         Ok(command) => command,
         Err(output) => return output,
@@ -2459,13 +2487,13 @@ fn execute_command_streaming(
     writer: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
-    let cgroup_procs = container_cgroup_procs();
+    let cgroup_procs = container_cgroup_procs_descriptor();
     #[cfg(target_os = "linux")]
     let oom_kills_before = container_cgroup_oom_kills();
     #[cfg(not(target_os = "linux"))]
-    let cgroup_procs: Option<String> = None;
+    let cgroup_procs: Option<i32> = None;
 
-    let (mut command, timeout) = match build_command(spec, cgroup_procs.as_deref()) {
+    let (mut command, timeout) = match build_command(spec, cgroup_procs) {
         Ok(command) => command,
         Err(output) => {
             write_exec_stream_response(writer, &output)?;
@@ -2568,17 +2596,13 @@ fn configure_child_process(
     cap_keep: Option<Vec<String>>,
     seccomp_localhost: Vec<String>,
     no_new_privs: bool,
-    cgroup_procs: Option<&str>,
+    cgroup_procs: Option<std::os::fd::RawFd>,
 ) {
     use std::ffi::CString;
     use std::os::unix::process::CommandExt;
 
     let rootfs = rootfs
         .map(|rootfs| CString::new(rootfs.as_bytes()).expect("rootfs path was pre-validated"));
-    // The per-container cgroup's `cgroup.procs` path; the child writes its own
-    // PID here (before chroot) so it — and everything it forks — is bounded by
-    // the cgroup's memory.max / cpu.max from birth. Built pre-fork (allocates).
-    let cgroup_procs = cgroup_procs.and_then(|path| CString::new(path.as_bytes()).ok());
     // workdir (for chdir) is only used when chrooting into a rootfs, where
     // build_command has already rejected an embedded NUL. Build the CString only
     // in that case so a workdir containing a NUL with no rootfs set cannot panic
@@ -2611,37 +2635,18 @@ fn configure_child_process(
         let _ = &cap_keep;
         let _ = &seccomp_localhost;
         let _ = no_new_privs;
+        let _ = cgroup_procs;
     }
 
     unsafe {
         command.pre_exec(move || {
             // Join the per-container cgroup FIRST, before chroot (afterwards the
             // guest /sys/fs/cgroup is unreachable). Best-effort and entirely
-            // async-signal-safe: open + getpid + a stack-only itoa + write +
-            // close, no allocation. A failure here leaves the container
-            // unbounded rather than failing its launch.
-            if let Some(procs) = cgroup_procs.as_ref() {
-                let fd = libc::open(procs.as_ptr(), libc::O_WRONLY);
-                if fd >= 0 {
-                    let mut buf = [0u8; 20];
-                    let mut i = buf.len();
-                    let mut n = libc::getpid() as u64;
-                    if n == 0 {
-                        i -= 1;
-                        buf[i] = b'0';
-                    }
-                    while n > 0 {
-                        i -= 1;
-                        buf[i] = b'0' + (n % 10) as u8;
-                        n /= 10;
-                    }
-                    let _ = libc::write(
-                        fd,
-                        buf[i..].as_ptr() as *const libc::c_void,
-                        (buf.len() - i) as libc::size_t,
-                    );
-                    let _ = libc::close(fd);
-                }
+            // async-signal-safe: one write through the runtime/guest-init-owned
+            // descriptor. Fail closed instead of launching an unbounded process.
+            #[cfg(target_os = "linux")]
+            if let Some(descriptor) = cgroup_procs {
+                crate::cgroup::join_current_process(descriptor)?;
             }
             if libc::setpgid(0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -2715,7 +2720,7 @@ fn configure_child_process(
     _cap_keep: Option<Vec<String>>,
     _seccomp_localhost: Vec<String>,
     _no_new_privs: bool,
-    _cgroup_procs: Option<&str>,
+    _cgroup_procs: Option<i32>,
 ) {
 }
 

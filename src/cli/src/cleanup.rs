@@ -60,18 +60,22 @@ pub fn cleanup_record_resources(record: &BoxRecord) {
     );
 }
 
-/// Remove the box's host cgroup `/sys/fs/cgroup/a3s-box/<id>`. The shim creates
+/// Remove a MicroVM's host cgroup `/sys/fs/cgroup/a3s-box/<id>`. The shim creates
 /// it for `--cpu-shares`/`--cpu-quota`/`--memory-reservation`/`--memory-swap`
 /// and — taking over the process via libkrun — can never remove it; an empty-dir
 /// `rmdir` on cgroupfs removes the cgroup once the shim PID is gone. Best-effort:
-/// absent (no host cgroup limits were set) or non-empty is fine.
-pub(crate) fn remove_host_cgroup(box_id: &str) {
+/// absent (no host cgroup limits were set) or non-empty is fine. A3S OCI Runtime
+/// exclusively owns Sandbox cgroups and removes them through its delete path.
+pub(crate) fn remove_host_cgroup(record: &BoxRecord) {
+    if record.isolation.is_sandbox() {
+        return;
+    }
     #[cfg(target_os = "linux")]
     {
-        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{box_id}"));
+        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{}", record.id));
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = box_id;
+    let _ = record;
 }
 
 /// Remove transient host resources for a stopped box while keeping its state.
@@ -89,7 +93,7 @@ pub fn cleanup_stopped_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
     a3s_box_runtime::rootfs::unmount_box_overlay(&record.box_dir.join("merged"));
     a3s_box_runtime::rootfs::unmount_box_rootfs(&record.box_dir.join("rootfs"));
     cleanup_external_socket_dir(&record.box_dir, &record.exec_socket_path);
-    remove_host_cgroup(&record.id);
+    remove_host_cgroup(record);
     Ok(())
 }
 
@@ -152,7 +156,7 @@ pub fn cleanup_removed_box(record: &BoxRecord) -> a3s_box_core::error::Result<()
 
     cleanup_record_resources(record);
     cleanup_anonymous_volumes(&record.anonymous_volumes);
-    remove_host_cgroup(&record.id);
+    remove_host_cgroup(record);
 
     if record.box_dir.exists() {
         // Release the overlayfs mount FIRST: otherwise remove_dir_all deletes

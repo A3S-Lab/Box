@@ -7,6 +7,11 @@ use a3s_box_core::config::BoxConfig;
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::guest_exec::RUNTIME_EXEC_CONFIG_PATH;
 use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
+use a3s_oci_sdk::{
+    CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION, CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION,
+    CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION, CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION,
+    CONTROL_WORKLOAD_CGROUP_LAYOUT_V1,
+};
 use oci_spec::runtime::{
     Arch, Capabilities, Capability, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxCpuBuilder,
     LinuxDeviceBuilder, LinuxDeviceCgroupBuilder, LinuxDeviceType, LinuxIdMappingBuilder,
@@ -173,47 +178,6 @@ impl SandboxResources {
             pids_limit,
         })
     }
-
-    fn management_memory_limit(&self) -> Result<i64> {
-        self.memory_limit
-            .checked_add(SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES)
-            .ok_or_else(|| {
-                BoxError::ConfigError("Sandbox management memory envelope overflows i64".into())
-            })
-    }
-
-    fn management_memory_swap(&self) -> Result<Option<i64>> {
-        self.memory_swap
-            .map(|swap| {
-                if swap == -1 {
-                    Ok(-1)
-                } else {
-                    swap.checked_add(SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES)
-                        .ok_or_else(|| {
-                            BoxError::ConfigError(
-                                "Sandbox management swap envelope overflows i64".into(),
-                            )
-                        })
-                }
-            })
-            .transpose()
-    }
-
-    fn management_cpu_quota(&self) -> Result<i64> {
-        let control_quota = i64::try_from(self.cpu_period)
-            .map_err(|_| BoxError::ConfigError("Sandbox CPU period overflows i64".to_string()))?;
-        self.cpu_quota.checked_add(control_quota).ok_or_else(|| {
-            BoxError::ConfigError("Sandbox management CPU envelope overflows i64".into())
-        })
-    }
-
-    fn management_pids_limit(&self) -> Result<i64> {
-        self.pids_limit
-            .checked_add(SANDBOX_CONTROL_PIDS_HEADROOM)
-            .ok_or_else(|| {
-                BoxError::ConfigError("Sandbox management PID envelope overflows i64".into())
-            })
-    }
 }
 
 /// Backend-neutral inputs already validated and resolved by the runtime.
@@ -293,6 +257,22 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
     annotations.insert(
         "com.a3s.box.isolation-class".to_string(),
         "shared-kernel".to_string(),
+    );
+    annotations.insert(
+        CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION.to_string(),
+        CONTROL_WORKLOAD_CGROUP_LAYOUT_V1.to_string(),
+    );
+    annotations.insert(
+        CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION.to_string(),
+        SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES.to_string(),
+    );
+    annotations.insert(
+        CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION.to_string(),
+        input.resources.cpu_period.to_string(),
+    );
+    annotations.insert(
+        CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION.to_string(),
+        SANDBOX_CONTROL_PIDS_HEADROOM.to_string(),
     );
 
     SpecBuilder::default()
@@ -435,21 +415,22 @@ fn compile_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
     .collect()
 }
 
-fn compile_resources(resources: &SandboxResources) -> Result<oci_spec::runtime::LinuxResources> {
-    // OCI owns the outer management envelope. The exact product limits are
-    // enforced by guest-init's single workload child cgroup, keeping OOM and
-    // PID exhaustion from killing the exec/control plane before it can report
-    // the workload outcome.
-    let mut memory = LinuxMemoryBuilder::default().limit(resources.management_memory_limit()?);
+pub(crate) fn compile_resources(
+    resources: &SandboxResources,
+) -> Result<oci_spec::runtime::LinuxResources> {
+    // `linux.resources` is the exact workload source of truth. The versioned
+    // A3S OCI layout derives its outer management envelope from the annotations
+    // emitted above and applies these values unchanged to `a3s-workload`.
+    let mut memory = LinuxMemoryBuilder::default().limit(resources.memory_limit);
     if let Some(reservation) = resources.memory_reservation {
         memory = memory.reservation(reservation);
     }
-    if let Some(swap) = resources.management_memory_swap()? {
+    if let Some(swap) = resources.memory_swap {
         memory = memory.swap(swap);
     }
 
     let mut cpu = LinuxCpuBuilder::default()
-        .quota(resources.management_cpu_quota()?)
+        .quota(resources.cpu_quota)
         .period(resources.cpu_period);
     if let Some(shares) = resources.cpu_shares {
         cpu = cpu.shares(shares);
@@ -482,7 +463,7 @@ fn compile_resources(resources: &SandboxResources) -> Result<oci_spec::runtime::
         .cpu(cpu.build().map_err(oci_error)?)
         .pids(
             LinuxPidsBuilder::default()
-                .limit(resources.management_pids_limit()?)
+                .limit(resources.pids_limit)
                 .build()
                 .map_err(oci_error)?,
         )
@@ -574,11 +555,10 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             "/sys/fs/cgroup",
             "cgroup",
             "cgroup",
-            // guest-init is the trusted Sandbox control plane. It delegates the
-            // outer OCI cgroup to one workload child and must keep joining later
-            // exec/PTY processes to that child, so a read-only cgroup mount
-            // would silently disable every exact product limit.
-            &["nosuid", "noexec", "nodev", "relatime", "rw"],
+            // The runtime owns the complete topology and passes only two
+            // pre-opened membership descriptors to trusted guest-init. Paths
+            // remain read-only to the Sandbox user namespace.
+            &["nosuid", "noexec", "nodev", "relatime", "ro"],
         )?,
         mount(
             "/tmp",
@@ -1390,18 +1370,31 @@ mod tests {
         );
         assert_eq!(
             value["linux"]["resources"]["memory"]["limit"],
-            512 * 1024 * 1024i64 + SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES
+            512 * 1024 * 1024i64
         );
         assert_eq!(
             value["linux"]["resources"]["memory"]["swap"],
-            1024 * 1024 * 1024i64 + SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES
+            1024 * 1024 * 1024i64
         );
-        assert_eq!(value["linux"]["resources"]["cpu"]["quota"], 300000);
-        assert_eq!(
-            value["linux"]["resources"]["pids"]["limit"],
-            512 + SANDBOX_CONTROL_PIDS_HEADROOM
-        );
+        assert_eq!(value["linux"]["resources"]["cpu"]["quota"], 200000);
+        assert_eq!(value["linux"]["resources"]["pids"]["limit"], 512);
         assert_eq!(value["linux"]["resources"]["cpu"]["cpus"], "0-1");
+        assert_eq!(
+            value["annotations"][a3s_oci_sdk::CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION],
+            a3s_oci_sdk::CONTROL_WORKLOAD_CGROUP_LAYOUT_V1
+        );
+        assert_eq!(
+            value["annotations"][a3s_oci_sdk::CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION],
+            SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES.to_string()
+        );
+        assert_eq!(
+            value["annotations"][a3s_oci_sdk::CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION],
+            DEFAULT_CPU_PERIOD_US.to_string()
+        );
+        assert_eq!(
+            value["annotations"][a3s_oci_sdk::CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION],
+            SANDBOX_CONTROL_PIDS_HEADROOM.to_string()
+        );
         let cgroup_mount = value["mounts"]
             .as_array()
             .unwrap()
@@ -1413,12 +1406,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|option| option == "rw"));
+            .any(|option| option == "ro"));
         assert!(!cgroup_mount["options"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|option| option == "ro"));
+            .any(|option| option == "rw"));
     }
 
     #[test]

@@ -222,6 +222,27 @@ pub(super) async fn run(
         observation.state == RuntimeUnitState::Running,
         "resource-limit probes killed the Sandbox Service",
     )?;
+    let control_alive = client
+        .exec(&fixture.cases.exec(
+            "resources-control-after-oom",
+            &service.spec,
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'r17-control-alive\\n'".into(),
+            ],
+            5_000,
+        ))
+        .await?;
+    require(
+        control_alive.exit_code == 0
+            && control_alive.stdout == "r17-control-alive\n"
+            && control_alive.stderr.is_empty(),
+        format!(
+            "workload OOM damaged the Sandbox exec transport: exit_code={} stdout={:?} stderr={:?}",
+            control_alive.exit_code, control_alive.stdout, control_alive.stderr
+        ),
+    )?;
 
     let timeout = fixture
         .cases

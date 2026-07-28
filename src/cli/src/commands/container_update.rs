@@ -1,12 +1,12 @@
 //! `a3s-box container-update` command — Update resource limits on a running box.
 //!
-//! Similar to `docker update`, allows changing cgroup-based limits on a running
-//! box without restarting it. Changes are applied live via the exec channel and
-//! persisted to the state file.
+//! Allows changing cgroup-based limits on a running box without restarting it.
+//! MicroVM changes use the guest exec channel; host Sandbox changes use the
+//! exact-generation A3S OCI SDK update. Successful changes are then persisted.
 //!
-//! Tier 1 limits (--cpus, --memory) cannot be changed on a running microVM
-//! because libkrun does not expose a hot-resize API. These are rejected with
-//! a clear error message.
+//! Tier 1 provisioning (`--cpus`, `--memory`) remains immutable for a running
+//! Box and requires a stop/recreate cycle. MicroVMs cannot hot-resize the
+//! underlying libkrun allocation.
 
 use clap::Args;
 
@@ -181,75 +181,15 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     #[cfg(windows)]
     let live_tier2_applied = false;
 
-    // If the box is running, apply the already-validated live changes.
-    if requires_live_apply {
-        // Tier 2 changes use the guest exec channel on supported hosts.
-        if update.has_tier2_changes() {
-            #[cfg(not(windows))]
-            {
-                let exec_socket_path = crate::socket_paths::runtime_socket(
-                    record,
-                    crate::socket_paths::RuntimeSocket::Exec,
-                );
-
-                if !exec_socket_path.exists() {
-                    return Err(format!(
-                        "cannot apply live update to running box {}: exec socket is missing at {}; no state changes were persisted. Run `a3s-box ps` to reconcile state, then retry or restart {}",
-                        record.name,
-                        exec_socket_path.display(),
-                        record.name
-                    )
-                    .into());
-                } else {
-                    let client = ExecClient::connect(&exec_socket_path).await?;
-                    let commands = update.build_cgroup_commands();
-                    if commands.is_empty() {
-                        return Err(
-                            "live resource update produced no enforceable guest commands; no state changes were persisted"
-                                .into(),
-                        );
-                    }
-                    let request = ExecRequest {
-                        request_id: None,
-                        cmd: vec![
-                            "sh".to_string(),
-                            "-c".to_string(),
-                            format!("set -e; {}", commands.join(" && ")),
-                        ],
-                        timeout_ns: 5_000_000_000,
-                        env: vec![],
-                        working_dir: None,
-                        rootfs: None,
-                        stdin: None,
-                        stdin_streaming: false,
-                        user: None,
-                        streaming: false,
-                    };
-
-                    match client.exec_command(&request).await {
-                        Ok(output) if output.exit_code == 0 => {
-                            live_tier2_applied = true;
-                        }
-                        Ok(output) => {
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            return Err(format!(
-                                "live cgroup update failed for {} (exit {}): {}; no state changes were persisted, but the guest may have applied commands before the failure, so retry or restart the box",
-                                record.name,
-                                output.exit_code,
-                                stderr.trim()
-                            )
-                            .into());
-                        }
-                        Err(error) => {
-                            return Err(format!(
-                                "failed to apply live update to {}: {error}; no state changes were persisted",
-                                record.name
-                            )
-                            .into());
-                        }
-                    }
-                }
-            } // #[cfg(not(windows))]
+    // If the box is running, apply the already-validated live changes through
+    // exactly one backend-owned mechanism.
+    if requires_live_apply && update.has_tier2_changes() {
+        #[cfg(not(windows))]
+        {
+            apply_live_tier2_update(record, &update)
+                .await
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+            live_tier2_applied = true;
         }
     }
 
@@ -285,6 +225,93 @@ pub async fn execute(args: ContainerUpdateArgs) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+#[cfg(not(windows))]
+async fn apply_live_tier2_update(
+    record: &crate::state::BoxRecord,
+    update: &ResourceUpdate,
+) -> Result<(), String> {
+    if record.isolation.is_sandbox() {
+        let config = crate::boot::config_from_record(record)?;
+        let box_dir = record.box_dir.clone();
+        let box_id = record.id.clone();
+        let box_name = record.name.clone();
+        return tokio::task::spawn_blocking(move || {
+            a3s_box_runtime::sandbox::update_recorded_resources(&box_dir, &box_id, &config)
+        })
+        .await
+        .map_err(|error| {
+            format!(
+                "A3S OCI resource update worker failed for {box_name}: {error}; no state changes were persisted"
+            )
+        })?
+        .map_err(|error| {
+            format!(
+                "failed to apply A3S OCI resource update to {box_name}: {error}; no state changes were persisted"
+            )
+        });
+    }
+
+    let exec_socket_path =
+        crate::socket_paths::runtime_socket(record, crate::socket_paths::RuntimeSocket::Exec);
+    if !exec_socket_path.exists() {
+        return Err(format!(
+            "cannot apply live update to running box {}: exec socket is missing at {}; no state changes were persisted. Run `a3s-box ps` to reconcile state, then retry or restart {}",
+            record.name,
+            exec_socket_path.display(),
+            record.name
+        ));
+    }
+
+    let client = ExecClient::connect(&exec_socket_path)
+        .await
+        .map_err(|error| {
+            format!(
+                "failed to connect to {} for live update: {error}; no state changes were persisted",
+                record.name
+            )
+        })?;
+    let commands = update.build_microvm_cgroup_commands();
+    if commands.is_empty() {
+        return Err(
+            "live resource update produced no enforceable guest commands; no state changes were persisted"
+                .to_string(),
+        );
+    }
+    let request = ExecRequest {
+        request_id: None,
+        cmd: vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("set -e; {}", commands.join(" && ")),
+        ],
+        timeout_ns: 5_000_000_000,
+        env: vec![],
+        working_dir: None,
+        rootfs: None,
+        stdin: None,
+        stdin_streaming: false,
+        user: None,
+        streaming: false,
+    };
+
+    match client.exec_command(&request).await {
+        Ok(output) if output.exit_code == 0 => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "live cgroup update failed for {} (exit {}): {}; no state changes were persisted, but the guest may have applied commands before the failure, so retry or restart the box",
+                record.name,
+                output.exit_code,
+                stderr.trim()
+            ))
+        }
+        Err(error) => Err(format!(
+            "failed to apply live update to {}: {error}; no state changes were persisted",
+            record.name
+        )),
+    }
+}
+
 fn persist_update_error(error: &std::io::Error, live_tier2_applied: bool) -> String {
     if live_tier2_applied {
         format!(
@@ -302,27 +329,7 @@ fn apply_persisted_resource_update(record: &mut crate::state::BoxRecord, update:
     if let Some(memory_mb) = update.memory_mb {
         record.memory_mb = memory_mb;
     }
-    if let Some(value) = update.limits.memory_reservation {
-        record.resource_limits.memory_reservation = Some(value);
-    }
-    if let Some(value) = update.limits.memory_swap {
-        record.resource_limits.memory_swap = Some(value);
-    }
-    if let Some(value) = update.limits.pids_limit {
-        record.resource_limits.pids_limit = Some(value);
-    }
-    if let Some(value) = update.limits.cpu_shares {
-        record.resource_limits.cpu_shares = Some(value);
-    }
-    if let Some(value) = update.limits.cpu_quota {
-        record.resource_limits.cpu_quota = Some(value);
-    }
-    if let Some(value) = update.limits.cpu_period {
-        record.resource_limits.cpu_period = Some(value);
-    }
-    if let Some(value) = update.limits.cpuset_cpus.as_ref() {
-        record.resource_limits.cpuset_cpus = Some(value.clone());
-    }
+    update.apply_to_limits(&mut record.resource_limits);
 }
 
 fn validate_live_apply_target(
@@ -454,7 +461,7 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_update(&update).is_ok());
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert_eq!(cmds.len(), 2);
     }
 

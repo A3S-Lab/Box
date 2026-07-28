@@ -1880,29 +1880,18 @@ impl VmManager {
         })
     }
 
-    /// Apply a live resource update to the running VM.
+    /// Apply a live resource update to the running backend.
     ///
-    /// Tier 1 changes (vCPU count, memory size) are rejected with a clear error
-    /// because libkrun does not expose a hot-resize API.
+    /// Tier 1 changes (provisioned vCPU count and memory size) retain the public
+    /// stop/recreate contract across backends.
     ///
-    /// Tier 2 changes (cgroup-based limits) are applied by executing shell
-    /// commands inside the guest that write to cgroup v2 control files.
+    /// Tier 2 changes use one backend-owned path: the exact-generation A3S OCI
+    /// update for a host Sandbox, or guest cgroup writes for a MicroVM.
     #[cfg(unix)]
     pub async fn update_resources(
-        &self,
+        &mut self,
         update: &crate::resize::ResourceUpdate,
     ) -> Result<crate::resize::ResizeResult> {
-        if self
-            .resolved_execution_plan
-            .as_ref()
-            .is_some_and(|plan| plan.backend.is_sandbox())
-            || self.config.isolation.is_sandbox()
-        {
-            return Err(BoxError::StateError(
-                "Live resource updates are not supported by the Sandbox backend yet".to_string(),
-            ));
-        }
-        // Reject Tier 1 changes upfront
         crate::resize::validate_update(update)?;
 
         let mut result = crate::resize::ResizeResult {
@@ -1914,8 +1903,38 @@ impl VmManager {
             return Ok(result);
         }
 
+        let sandbox = self
+            .resolved_execution_plan
+            .as_ref()
+            .is_some_and(|plan| plan.backend.is_sandbox())
+            || self.config.isolation.is_sandbox();
+        if sandbox {
+            let mut next_config = self.config.clone();
+            update.apply_to_config(&mut next_config);
+            let runtime_config = next_config.clone();
+            let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+            let box_id = self.box_id.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::sandbox::update_recorded_resources(&box_dir, &box_id, &runtime_config)
+            })
+            .await
+            .map_err(|error| {
+                BoxError::StateError(format!(
+                    "A3S OCI resource update worker failed for {}: {error}",
+                    self.box_id
+                ))
+            })??;
+            self.config = next_config;
+            result.applied = update
+                .tier2_change_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            return Ok(result);
+        }
+
         // Build cgroup commands and execute them inside the guest
-        let commands = update.build_cgroup_commands();
+        let commands = update.build_microvm_cgroup_commands();
         for cmd_str in &commands {
             let shell_cmd = vec!["sh".to_string(), "-c".to_string(), cmd_str.clone()];
 

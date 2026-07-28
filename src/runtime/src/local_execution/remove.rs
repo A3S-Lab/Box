@@ -167,6 +167,11 @@ fn remove_tree_if_present(path: &Path) -> std::io::Result<()> {
 }
 
 fn remove_host_cgroup(record: &BoxRecord) -> ExecutionManagerResult<()> {
+    // A3S OCI Runtime owns and removes the complete Sandbox hierarchy. This
+    // compatibility cleanup is only for legacy MicroVM shim cgroups.
+    if record.isolation.is_sandbox() {
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     {
         let path = PathBuf::from("/sys/fs/cgroup/a3s-box").join(&record.id);

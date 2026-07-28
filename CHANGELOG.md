@@ -4,6 +4,15 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Single-owner Sandbox resource contract.** `linux.resources` now carries
+  exact workload CPU, memory, swap, and PID limits. The pinned A3S OCI Runtime
+  derives the control-plane headroom, owns the fixed control/workload cgroup
+  topology, performs atomic live updates, and removes both levels. Guest Init
+  uses the SDK-defined membership descriptors with read-only cgroupfs, keeping
+  long-lived services and control transports outside workload OOM selection.
+
 ### Fixed
 
 - **Managed stopped-box start.** `a3s-box start` now restarts stopped or failed
@@ -20,6 +29,10 @@ All notable changes to A3S Box will be documented in this file.
 - **Current guest-init qualification.** Linux host integration rebuilds the
   static musl guest init from the current checkout instead of building an
   unusable dynamic host binary and silently selecting an older musl artifact.
+- **Sandbox live resource updates.** Running shared-kernel Sandboxes now send
+  one complete resource update through the exact-generation A3S OCI SDK.
+  Guest-local `box-*` cgroup writes remain exclusive to MicroVMs, so Sandbox
+  creation, updates, and cleanup no longer have competing ownership paths.
 
 ## [3.2.0] — 2026-07-28
 

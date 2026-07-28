@@ -34,14 +34,18 @@ Box now:
 - packages the pinned `a3s-oci` and `a3s-oci-agent` artifacts in Linux
   releases;
 - records exact runtime and agent digests with the durable generation;
-- recovers, pauses, resumes, stops, and deletes through the typed A3S OCI SDK;
+- recovers, pauses, resumes, updates resources, stops, and deletes through the
+  typed A3S OCI SDK;
+- keeps exact workload limits in `linux.resources` while the runtime alone
+  derives, updates, and cleans the control-plane cgroup envelope;
 - has no external-runtime discovery environment variable, controller, handler,
   package, download, or differential CI lane;
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`0f0face67c282cf535e352b4fe83af02055b7e08`, the post-`v0.2.0` Windows WHPX
-qualification commit.
+`250315fc3aead8284affc361a9ee8bee1cdd15fd`, which implements the versioned
+control/workload cgroup layout and retains the earlier cross-platform
+qualification.
 
 ## Upgrade behavior
 
@@ -67,7 +71,8 @@ must:
 3. build Box, the shim, guest init, the runtime, and the agent;
 4. execute the unchanged Rust, Python, TypeScript, and Go local SDK lifecycles;
 5. cover image management, named volumes, files, logs, metrics, pause/resume,
-   stop/restart, filesystem snapshots, and complete cleanup;
+   exact CPU/memory/PID enforcement, stop/restart, filesystem snapshots, and
+   complete cleanup;
 6. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
    remains.
 
@@ -132,6 +137,8 @@ The replacement is complete when all of the following are true:
 - [x] Only the current A3S OCI runtime-record schema is accepted.
 - [x] The pinned native matrix covers network, volume, tmpfs, and init profiles.
 - [x] Rust, Python, TypeScript, and Go exercise the real Box lifecycle.
+- [x] Sandbox resource creation, live update, OOM isolation, and cleanup have
+  one A3S OCI owner and no guest cgroupfs write path.
 - [x] Linux x86_64/aarch64, macOS arm64, and Windows x86_64 builds remain gated.
 - [ ] The change's pull-request and main-branch CI runs are green.
 

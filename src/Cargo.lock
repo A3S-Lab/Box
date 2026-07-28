@@ -99,6 +99,7 @@ version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-common",
+ "a3s-oci-sdk",
  "base64 0.22.1",
  "clap",
  "libc",
@@ -273,7 +274,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-core"
 version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=771e5e27d005ed9eb2f52e19bdc64a43a6e4ff87#771e5e27d005ed9eb2f52e19bdc64a43a6e4ff87"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=250315fc3aead8284affc361a9ee8bee1cdd15fd#250315fc3aead8284affc361a9ee8bee1cdd15fd"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -282,7 +283,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-sdk"
 version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=771e5e27d005ed9eb2f52e19bdc64a43a6e4ff87#771e5e27d005ed9eb2f52e19bdc64a43a6e4ff87"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=250315fc3aead8284affc361a9ee8bee1cdd15fd#250315fc3aead8284affc361a9ee8bee1cdd15fd"
 dependencies = [
  "a3s-oci-core",
  "async-trait",

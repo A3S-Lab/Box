@@ -17,13 +17,20 @@
 
 #![cfg(target_os = "linux")]
 
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use a3s_oci_sdk::{CONTROL_CGROUP_NAME, WORKLOAD_CGROUP_NAME};
+pub use a3s_oci_sdk::{
+    CONTROL_CGROUP_PROCS_FD, CONTROL_CGROUP_PROCS_FD_ENV, WORKLOAD_CGROUP_PROCS_FD,
+    WORKLOAD_CGROUP_PROCS_FD_ENV,
+};
 use tracing::{debug, warn};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
-const CONTROL_CGROUP_NAME: &str = "a3s-control";
 static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -212,6 +219,8 @@ fn shares_to_weight(shares: u64) -> u64 {
 /// cgroup directory.
 pub struct ContainerCgroup {
     path: String,
+    procs: Option<File>,
+    remove_on_drop: bool,
 }
 
 impl ContainerCgroup {
@@ -233,7 +242,7 @@ impl ContainerCgroup {
         if !ensure_cgroup2_ready() {
             return None;
         }
-        Self::create_in_ready_hierarchy(
+        let mut cgroup = Self::create_in_ready_hierarchy(
             CGROUP_ROOT,
             CgroupLimits {
                 memory_max,
@@ -244,7 +253,71 @@ impl ContainerCgroup {
                 cpu_shares,
                 pids_max,
             },
-        )
+        )?;
+        let procs_path = format!("{}/cgroup.procs", cgroup.path);
+        let procs = match OpenOptions::new().write(true).open(&procs_path) {
+            Ok(procs) => procs,
+            Err(error) => {
+                warn!(error = %error, path = procs_path, "cgroup: failed to open workload membership descriptor");
+                return None;
+            }
+        };
+        if let Err(error) = protect_inherited_descriptor(procs.as_raw_fd()) {
+            warn!(error = %error, path = procs_path, "cgroup: failed to protect workload membership descriptor");
+            return None;
+        }
+        cgroup.procs = Some(procs);
+        Some(cgroup)
+    }
+
+    /// Adopt the two cgroup membership descriptors prepared by the native OCI
+    /// runtime before entering the Sandbox user namespace.
+    ///
+    /// The runtime owns both fixed child cgroups. Guest-init moves every trusted
+    /// bootstrap process into `a3s-control`, retains only the `a3s-workload`
+    /// descriptor, and never re-opens either host-owned `cgroup.procs` path.
+    pub fn adopt_runtime_delegation(
+        control_descriptor: RawFd,
+        workload_descriptor: RawFd,
+    ) -> std::io::Result<Self> {
+        if control_descriptor != CONTROL_CGROUP_PROCS_FD
+            || workload_descriptor != WORKLOAD_CGROUP_PROCS_FD
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "runtime cgroup descriptors must be {CONTROL_CGROUP_PROCS_FD} and {WORKLOAD_CGROUP_PROCS_FD}"
+                ),
+            ));
+        }
+        if control_descriptor == workload_descriptor {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "runtime cgroup descriptors must be distinct",
+            ));
+        }
+        validate_open_descriptor(control_descriptor)?;
+        validate_open_descriptor(workload_descriptor)?;
+
+        // SAFETY: the runtime transferred these two distinct descriptors to
+        // guest-init at exec. Validation above proves both are currently open,
+        // and no Rust owner exists in this process yet.
+        let control = unsafe { File::from_raw_fd(control_descriptor) };
+        let workload = unsafe { File::from_raw_fd(workload_descriptor) };
+        protect_inherited_descriptor(control.as_raw_fd())?;
+        protect_inherited_descriptor(workload.as_raw_fd())?;
+
+        let control_path = format!("{CGROUP_ROOT}/{CONTROL_CGROUP_NAME}/cgroup.procs");
+        let workload_path = format!("{CGROUP_ROOT}/{WORKLOAD_CGROUP_NAME}/cgroup.procs");
+        validate_descriptor_path(&control, &control_path)?;
+        validate_descriptor_path(&workload, &workload_path)?;
+        move_control_plane_to_descriptor(CGROUP_ROOT, control.as_raw_fd())?;
+
+        Ok(Self {
+            path: format!("{CGROUP_ROOT}/{WORKLOAD_CGROUP_NAME}"),
+            procs: Some(workload),
+            remove_on_drop: false,
+        })
     }
 
     fn create_in_ready_hierarchy(cgroup_root: &str, limits: CgroupLimits) -> Option<Self> {
@@ -335,7 +408,11 @@ impl ContainerCgroup {
             pids_max = ?limits.pids_max,
             "cgroup: created container cgroup"
         );
-        Some(Self { path })
+        Some(Self {
+            path,
+            procs: None,
+            remove_on_drop: true,
+        })
     }
 
     /// Path to this cgroup's `cgroup.procs` (where a process writes its own PID
@@ -345,10 +422,18 @@ impl ContainerCgroup {
     pub fn procs_path(&self) -> String {
         format!("{}/cgroup.procs", self.path)
     }
+
+    /// Already-open membership descriptor used by every workload process.
+    pub fn procs_descriptor(&self) -> Option<RawFd> {
+        self.procs.as_ref().map(AsRawFd::as_raw_fd)
+    }
 }
 
 impl Drop for ContainerCgroup {
     fn drop(&mut self) {
+        if !self.remove_on_drop {
+            return;
+        }
         // Safe only once the cgroup is empty (the container has been reaped).
         if let Err(error) = std::fs::remove_dir(&self.path) {
             debug!(error = %error, path = %self.path, "cgroup: cleanup rmdir failed");
@@ -356,9 +441,114 @@ impl Drop for ContainerCgroup {
     }
 }
 
+fn validate_open_descriptor(descriptor: RawFd) -> std::io::Result<()> {
+    if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn validate_descriptor_path(file: &File, path: &str) -> std::io::Result<()> {
+    let descriptor = file.metadata()?;
+    let path = std::fs::symlink_metadata(path)?;
+    if !path.file_type().is_file()
+        || path.file_type().is_symlink()
+        || descriptor.dev() != path.dev()
+        || descriptor.ino() != path.ino()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "runtime cgroup descriptor does not match its fixed workload layout",
+        ));
+    }
+    Ok(())
+}
+
+fn move_control_plane_to_descriptor(
+    cgroup_root: &str,
+    control_descriptor: RawFd,
+) -> std::io::Result<()> {
+    let root_procs = format!("{cgroup_root}/cgroup.procs");
+    let process_ids = read_cgroup_process_ids(&root_procs)?;
+    if process_ids.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "runtime cgroup root contains no bootstrap process",
+        ));
+    }
+    for process_id in &process_ids {
+        write_descriptor(control_descriptor, process_id.to_string().as_bytes())?;
+    }
+    let remaining = read_cgroup_process_ids(&root_procs)?;
+    if !remaining.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "runtime cgroup root remained populated by {remaining:?}"
+        )));
+    }
+    debug!(
+        process_count = process_ids.len(),
+        "cgroup: moved trusted bootstrap processes through the inherited control descriptor"
+    );
+    Ok(())
+}
+
+/// Prevent a trusted membership descriptor from leaking through workload exec.
+pub fn protect_inherited_descriptor(descriptor: RawFd) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if flags & libc::FD_CLOEXEC == 0
+        && unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Move the calling process into the workload through an already-open fd.
+///
+/// Writing `0` is the cgroup-v2 spelling for the caller. This is a single,
+/// allocation-free syscall and is safe from fork/pre-exec paths.
+pub fn join_current_process(descriptor: RawFd) -> std::io::Result<()> {
+    write_descriptor(descriptor, b"0")
+}
+
+fn write_descriptor(descriptor: RawFd, value: &[u8]) -> std::io::Result<()> {
+    loop {
+        let written = unsafe {
+            libc::write(
+                descriptor,
+                value.as_ptr().cast::<libc::c_void>(),
+                value.len(),
+            )
+        };
+        if written < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if written as usize != value.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "partial cgroup membership write",
+            ));
+        }
+        return Ok(());
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{read_cgroup_process_ids, shares_to_weight, CgroupLimits, ContainerCgroup};
+    use std::io::{Read, Seek};
+    use std::os::fd::AsRawFd;
+
+    use super::{
+        join_current_process, protect_inherited_descriptor, read_cgroup_process_ids,
+        shares_to_weight, CgroupLimits, ContainerCgroup,
+    };
 
     #[test]
     fn main_container_keeps_an_empty_cgroup_for_future_live_updates() {
@@ -401,5 +591,22 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn inherited_descriptor_is_cloexec_and_joins_without_reopening_cgroupfs() {
+        let mut procs = tempfile::tempfile().unwrap();
+        let descriptor = procs.as_raw_fd();
+
+        protect_inherited_descriptor(descriptor).unwrap();
+        join_current_process(descriptor).unwrap();
+
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        procs.rewind().unwrap();
+        let mut written = String::new();
+        procs.read_to_string(&mut written).unwrap();
+        assert_eq!(written, "0");
     }
 }
