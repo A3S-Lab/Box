@@ -157,6 +157,42 @@ async fn service_failure_restarts_the_same_durable_execution() {
 }
 
 #[tokio::test]
+async fn restart_completion_during_startup_uses_persisted_terminal_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, backend) = fake_driver(&directory);
+    let spec = runtime_spec("restart-startup-completion", 1, RuntimeUnitClass::Service);
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    let provider_id = running.provider_resource_id.clone().unwrap();
+    backend.finish(&provider_id, 17);
+    backend.finish_next_start(0);
+    backend.fail_next_start_response();
+
+    let inspection = driver.inspect(&unit(spec.clone(), running)).await.unwrap();
+
+    let RuntimeInspection::Found { observation, .. } = inspection else {
+        panic!("restart completion disappeared")
+    };
+    assert_eq!(observation.state, RuntimeUnitState::Stopped);
+    assert_eq!(
+        observation.provider_resource_id.as_deref(),
+        Some(provider_id.as_str())
+    );
+    assert_eq!(backend.starts(), 2);
+    let records = driver.manager.managed_records().await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].exit_code, Some(0));
+    assert_eq!(
+        records[0]
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .generation
+            .get(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn response_loss_reattaches_and_confirmed_provider_loss_replaces_once() {
     let response_loss_directory = tempfile::tempdir().unwrap();
     let (response_loss_driver, response_loss_backend) = fake_driver(&response_loss_directory);
