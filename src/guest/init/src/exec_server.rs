@@ -3442,14 +3442,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_build_command_uses_selected_users_home_unless_overridden() {
-        let rootfs = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("etc")).unwrap();
         std::fs::write(
-            rootfs.path().join("etc/passwd"),
+            directory.path().join("etc/passwd"),
             "tester:x:1000:1000:tester:/home/tester:/bin/sh\n",
         )
         .unwrap();
-        let rootfs = rootfs.path().to_str().unwrap();
+        let rootfs = directory.path().to_str().unwrap();
 
         let build = |env: &[String]| {
             build_command(
@@ -3481,6 +3483,14 @@ mod tests {
                 .any(|(key, value)| key == "HOME"
                     && value == Some(std::ffi::OsStr::new("/workspace")))
         );
+
+        let root_device = std::fs::metadata(directory.path()).unwrap().dev();
+        for subdir in ["sys", "proc"] {
+            let mountpoint = directory.path().join(subdir);
+            if std::fs::metadata(&mountpoint).is_ok_and(|metadata| metadata.dev() != root_device) {
+                nix::mount::umount(&mountpoint).unwrap();
+            }
+        }
     }
 
     #[test]
