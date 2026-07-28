@@ -267,42 +267,13 @@ impl CliTest {
     }
 
     pub fn ok_status(&self, args: &[&str]) {
-        eprintln!("    $ a3s-box {}", args.join(" "));
-
-        let mut command = self.command(args);
-        let mut child = command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| panic!("failed to run `a3s-box {}`: {e}", args.join(" ")));
-
-        let start = Instant::now();
-        let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .unwrap_or_else(|e| panic!("failed to poll `a3s-box {}`: {e}", args.join(" ")))
-            {
-                break status;
-            }
-
-            if start.elapsed() >= COMMAND_TIMEOUT {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!(
-                    "`a3s-box {}` timed out after {:?}",
-                    args.join(" "),
-                    COMMAND_TIMEOUT
-                );
-            }
-
-            std::thread::sleep(Duration::from_millis(50));
-        };
-
+        let (stdout, stderr, success) = self.output(args);
         assert!(
-            status.success(),
-            "`a3s-box {}` failed with status {}",
+            success,
+            "`a3s-box {}` failed\nstdout:\n{}\nstderr:\n{}",
             args.join(" "),
-            status
+            stdout,
+            stderr
         );
     }
 
