@@ -255,6 +255,7 @@ impl LocalExecutionManager {
                     if observation.state == ExecutionState::Creating {
                         return Ok(ReconcileOutcome::Creating);
                     }
+                    self.release_execution_resources(&record).await?;
                     let failed = self
                         .transition(
                             &record,

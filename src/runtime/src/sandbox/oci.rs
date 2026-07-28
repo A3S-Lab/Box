@@ -1189,6 +1189,10 @@ const ALLOWED_SYSCALLS: &[&str] = &[
     "setsid",
     "setsockopt",
     "setuid",
+    "shmat",
+    "shmctl",
+    "shmdt",
+    "shmget",
     "shutdown",
     "sigaltstack",
     "signalfd",
@@ -1384,6 +1388,24 @@ mod tests {
             "userfaultfd",
             "reboot",
         ] {
+            assert!(!allowed_names.iter().any(|name| name == forbidden));
+        }
+    }
+
+    #[test]
+    fn seccomp_allows_namespaced_sysv_shared_memory_for_postgresql() {
+        let value = as_json(&compile_oci_spec(&sample_input()).unwrap());
+        let allowed_names = value["linux"]["seccomp"]["syscalls"][0]["names"]
+            .as_array()
+            .unwrap();
+
+        for required in ["shmat", "shmctl", "shmdt", "shmget"] {
+            assert!(
+                allowed_names.iter().any(|name| name == required),
+                "missing {required}"
+            );
+        }
+        for forbidden in ["mount", "setns", "unshare", "bpf"] {
             assert!(!allowed_names.iter().any(|name| name == forbidden));
         }
     }

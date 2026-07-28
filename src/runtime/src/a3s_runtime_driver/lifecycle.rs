@@ -184,7 +184,7 @@ impl BoxRuntimeDriver {
                     .await;
                 if let Err(error) = result {
                     let current = self.load_record(spec, &execution_id).await?;
-                    if local_identity(&current)?.2.is_terminal() {
+                    if local_identity(&current)?.2.is_terminal() && current.exit_code.is_some() {
                         return Ok(current);
                     }
                     return Err(error);

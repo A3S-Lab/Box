@@ -5,7 +5,6 @@ mod sandbox;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(unix)]
 use std::time::Duration;
 
 use a3s_box_core::{
@@ -26,6 +25,9 @@ use crate::{
 };
 
 type SharedVm = Arc<Mutex<VmManager>>;
+
+const TERMINAL_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const TERMINAL_EXIT_POLL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Runtime adapter that owns live [`VmManager`] handles and reconstructs them
 /// from durable runtime evidence after a control-plane restart.
@@ -185,30 +187,16 @@ impl VmLocalExecutionBackend {
         let mut state = manager.state().await;
         let terminal = exit_code.is_some() || state == crate::BoxState::Stopped;
         if terminal {
-            let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
-            let exit_code = manager.exit_code().or(exit_code);
-            drop(manager);
-            self.remove_manager(&record.id, &shared);
-            cleanup.map_err(|error| runtime_error("clean up", record, error))?;
-            return Ok(LocalExecutionObservation {
-                state: ExecutionState::Stopped,
-                handle: None,
-                exit_code,
-            });
+            return self
+                .finish_registered_terminal(record, &shared, manager, preserve_rootfs, exit_code)
+                .await;
         }
 
         if state == crate::BoxState::Created {
             if manager.has_exited().await {
-                let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
-                let exit_code = manager.exit_code();
-                drop(manager);
-                self.remove_manager(&record.id, &shared);
-                cleanup.map_err(|error| runtime_error("clean up", record, error))?;
-                return Ok(LocalExecutionObservation {
-                    state: ExecutionState::Stopped,
-                    handle: None,
-                    exit_code,
-                });
+                return self
+                    .finish_registered_terminal(record, &shared, manager, preserve_rootfs, None)
+                    .await;
             }
             if !self.promote_if_ready(record, &mut manager).await {
                 return Ok(LocalExecutionObservation {
@@ -225,16 +213,9 @@ impl VmLocalExecutionBackend {
             .await
             .map_err(|error| runtime_error("inspect", record, error))?
         {
-            let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
-            let exit_code = manager.exit_code();
-            drop(manager);
-            self.remove_manager(&record.id, &shared);
-            cleanup.map_err(|error| runtime_error("clean up", record, error))?;
-            return Ok(LocalExecutionObservation {
-                state: ExecutionState::Stopped,
-                handle: None,
-                exit_code,
-            });
+            return self
+                .finish_registered_terminal(record, &shared, manager, preserve_rootfs, None)
+                .await;
         }
 
         if state != crate::BoxState::Ready
@@ -263,6 +244,47 @@ impl VmLocalExecutionBackend {
             state: visible_state,
             handle: Some(handle),
             exit_code: None,
+        })
+    }
+
+    async fn finish_registered_terminal(
+        &self,
+        record: &BoxRecord,
+        shared: &SharedVm,
+        mut manager: tokio::sync::MutexGuard<'_, VmManager>,
+        preserve_rootfs: bool,
+        exit_code: Option<i32>,
+    ) -> ExecutionManagerResult<LocalExecutionObservation> {
+        // A workload can exit between the first non-blocking wait and the
+        // following health probe. A3S OCI publishes the exact status shortly
+        // after the process becomes non-running, so retain its terminal record
+        // and poll within a strict bound before any teardown.
+        let deadline = tokio::time::Instant::now() + TERMINAL_EXIT_POLL_TIMEOUT;
+        let mut exit_code = manager.exit_code().or(exit_code);
+        while exit_code.is_none() {
+            exit_code = manager
+                .try_wait_exit()
+                .await
+                .map_err(|error| runtime_error("collect exit status", record, error))?;
+            if exit_code.is_some() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(TERMINAL_EXIT_POLL_INTERVAL).await;
+        }
+        let exit_code = exit_code.ok_or_else(|| {
+            ExecutionManagerError::Unavailable(format!(
+                "runtime reported execution {} as terminal before its exact exit status became available",
+                record.id
+            ))
+        })?;
+        let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
+        drop(manager);
+        self.remove_manager(&record.id, shared);
+        cleanup.map_err(|error| runtime_error("clean up", record, error))?;
+        Ok(LocalExecutionObservation {
+            state: ExecutionState::Stopped,
+            handle: None,
+            exit_code: Some(exit_code),
         })
     }
 
@@ -526,6 +548,25 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             }
         };
         if let Err(error) = guard.boot().await {
+            guard.config.persistent = requested_persistence;
+            // Sandbox boot cleanup synchronously asks the authoritative OCI
+            // handler for its exit status before tearing down transient host
+            // artifacts. A very short task can therefore complete while boot
+            // is still establishing readiness. Keep the manager whenever that
+            // cleanup captured an exact status so the normal inspect path can
+            // project it into the durable managed record.
+            if guard.exit_code().is_some() {
+                tracing::debug!(
+                    execution_id = %record.id,
+                    %error,
+                    "Runtime completed while startup was establishing readiness"
+                );
+                resources.disarm();
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "execution {} completed during startup",
+                    record.id
+                )));
+            }
             drop(guard);
             self.remove_manager(&record.id, &manager);
             let rollback = tokio::task::spawn_blocking(move || resources.rollback()).await;
@@ -540,6 +581,18 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         }
         guard.config.persistent = requested_persistence;
         resources.disarm();
+        let exited_during_start = guard
+            .try_wait_exit()
+            .await
+            .map_err(|error| runtime_error("collect startup exit status", record, error))?
+            .is_some()
+            || guard.has_exited().await;
+        if exited_during_start {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "execution {} completed during startup",
+                record.id
+            )));
+        }
         self.handle_from_manager(record, &guard).await
     }
 

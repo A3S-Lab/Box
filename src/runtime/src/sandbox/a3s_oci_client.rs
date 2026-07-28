@@ -148,6 +148,17 @@ impl A3sOciClient {
         self.call(|reply| ClientRequest::Wait(request, reply))
     }
 
+    /// Poll an exact container generation without turning a live process into
+    /// an error. A zero-timeout A3S OCI wait performs one authoritative child
+    /// poll and returns `DeadlineExceeded` only while no exit status exists.
+    pub(crate) fn try_wait(&self, request: WaitRequest) -> Result<Option<ExitStatus>> {
+        match self.call_sdk(|reply| ClientRequest::Wait(request, reply)) {
+            Ok(status) => Ok(Some(status)),
+            Err(error) if error.code == a3s_oci_sdk::ErrorCode::DeadlineExceeded => Ok(None),
+            Err(error) => Err(sdk_error("wait", error)),
+        }
+    }
+
     pub(crate) fn stats(&self, request: StatsRequest) -> Result<ContainerStats> {
         self.call(|reply| ClientRequest::Stats(request, reply))
     }

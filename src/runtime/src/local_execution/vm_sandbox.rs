@@ -60,12 +60,18 @@ impl VmLocalExecutionBackend {
                 })
             }
             "stopped" => {
-                let exit_code = crate::rootfs::read_persisted_exit_code(&record.box_dir);
+                let exit_code = match crate::rootfs::read_persisted_exit_code(&record.box_dir) {
+                    Some(exit_code) => exit_code,
+                    None => {
+                        self.collect_detached_sandbox_exit_code(record, &state)
+                            .await?
+                    }
+                };
                 self.cleanup_detached_sandbox(record).await?;
                 Ok(LocalExecutionObservation {
                     state: ExecutionState::Stopped,
                     handle: None,
-                    exit_code,
+                    exit_code: Some(exit_code),
                 })
             }
             status => Err(ExecutionManagerError::Internal(format!(
@@ -290,6 +296,76 @@ impl VmLocalExecutionBackend {
             self.cleanup_anonymous_volumes(anonymous_volumes).await;
         }
         Ok(KillOutcome::Killed)
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn collect_detached_sandbox_exit_code(
+        &self,
+        record: &BoxRecord,
+        state: &SandboxInspection,
+    ) -> ExecutionManagerResult<i32> {
+        let runtime_socket = state.runtime.runtime_socket.clone().ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "A3S OCI runtime socket is missing for {}",
+                record.id
+            ))
+        })?;
+        let generation = state.runtime.generation.ok_or_else(|| {
+            ExecutionManagerError::Internal(format!(
+                "A3S OCI generation is missing for {}",
+                record.id
+            ))
+        })?;
+        let box_id = record.id.clone();
+        let exit_code =
+            tokio::task::spawn_blocking(move || -> a3s_box_core::Result<Option<i32>> {
+                let deadline = std::time::Instant::now() + TERMINAL_EXIT_POLL_TIMEOUT;
+                loop {
+                    if let Some(exit_code) = crate::sandbox::A3sOciHandler::try_wait_at(
+                        &runtime_socket,
+                        &box_id,
+                        generation,
+                    )? {
+                        return Ok(Some(exit_code));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(TERMINAL_EXIT_POLL_INTERVAL);
+                }
+            })
+            .await
+            .map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "Sandbox exit-status task failed for {}: {error}",
+                    record.id
+                ))
+            })?
+            .map_err(|error| {
+                ExecutionManagerError::Unavailable(format!(
+                    "failed to collect exact Sandbox exit status for {}: {error}",
+                    record.id
+                ))
+            })?;
+        exit_code.ok_or_else(|| {
+            ExecutionManagerError::Unavailable(format!(
+                "Sandbox reported execution {} as terminal before its exact exit status became available",
+                record.id
+            ))
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn collect_detached_sandbox_exit_code(
+        &self,
+        record: &BoxRecord,
+        _state: &SandboxInspection,
+    ) -> ExecutionManagerResult<i32> {
+        Err(unsupported(
+            record,
+            "exit-status recovery",
+            "the Sandbox backend on this host",
+        ))
     }
 
     async fn cleanup_detached_sandbox(&self, record: &BoxRecord) -> ExecutionManagerResult<()> {

@@ -34,7 +34,7 @@ pub(super) struct DriverFakeBackend {
     starts: AtomicUsize,
     kills: AtomicUsize,
     fail_start_after_effect: AtomicBool,
-    next_start_terminal: Mutex<Option<(ExecutionState, i32)>>,
+    next_start_terminal: Mutex<Option<(ExecutionState, Option<i32>)>>,
 }
 
 impl DriverFakeBackend {
@@ -72,13 +72,18 @@ impl DriverFakeBackend {
         self.fail_start_after_effect.store(true, Ordering::SeqCst);
     }
 
+    pub(super) fn fail_next_start_without_exit_code(&self) {
+        *self.next_start_terminal.lock().unwrap() = Some((ExecutionState::Failed, None));
+        self.fail_start_after_effect.store(true, Ordering::SeqCst);
+    }
+
     pub(super) fn finish_next_start(&self, exit_code: i32) {
         let state = if exit_code == 0 {
             ExecutionState::Stopped
         } else {
             ExecutionState::Failed
         };
-        *self.next_start_terminal.lock().unwrap() = Some((state, exit_code));
+        *self.next_start_terminal.lock().unwrap() = Some((state, Some(exit_code)));
     }
 
     pub(super) fn finish(&self, execution_id: &str, exit_code: i32) {
@@ -120,9 +125,7 @@ impl LocalExecutionBackend for DriverFakeBackend {
         }
         self.starts.fetch_add(1, Ordering::SeqCst);
         let terminal = self.next_start_terminal.lock().unwrap().take();
-        let (state, exit_code) = terminal
-            .map(|(state, exit_code)| (state, Some(exit_code)))
-            .unwrap_or((ExecutionState::Running, None));
+        let (state, exit_code) = terminal.unwrap_or((ExecutionState::Running, None));
         executions.insert(
             record.id.clone(),
             FakeExecution {

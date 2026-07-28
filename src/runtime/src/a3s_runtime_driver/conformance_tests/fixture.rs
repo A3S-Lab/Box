@@ -306,6 +306,9 @@ impl BoxRuntimeConformanceFixture {
             };
             for record in records {
                 self.remember(&driver.config.home_dir, &record);
+                if record.exit_code.is_none() {
+                    emit_missing_exit_diagnostics(&driver.config.home_dir, &record);
+                }
                 let unit_id = record
                     .labels
                     .get(UNIT_LABEL)
@@ -485,4 +488,49 @@ fn remove_file(path: &Path) -> std::io::Result<()> {
 
 fn remove_empty_directory(path: &Path) {
     let _ = std::fs::remove_dir(path);
+}
+
+fn emit_missing_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
+    eprintln!(
+        "R17 missing-exit diagnostics: id={} status={} pid={:?} pid_start_time={:?} box_dir={} persisted_exit_code={:?}",
+        record.id,
+        record.status,
+        record.pid,
+        record.pid_start_time,
+        record.box_dir.display(),
+        crate::rootfs::read_persisted_exit_code(&record.box_dir),
+    );
+
+    let stderr_console = a3s_box_core::log::stderr_console_path(&record.console_log);
+    for (label, path) in [
+        ("console stdout", record.console_log.clone()),
+        ("console stderr", stderr_console),
+        ("Sandbox init", record.box_dir.join("logs/sandbox-init.log")),
+        (
+            "Sandbox log worker",
+            record.box_dir.join("logs/sandbox-log-worker.log"),
+        ),
+        (
+            "Sandbox runtime",
+            record.box_dir.join("sandbox/runtime.json"),
+        ),
+        (
+            "A3S OCI generation",
+            home_dir
+                .join("run/a3s-oci")
+                .join(&record.id)
+                .join("record.json"),
+        ),
+    ] {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+        let start = bytes.len().saturating_sub(MAX_DIAGNOSTIC_BYTES);
+        eprintln!(
+            "R17 {label} diagnostics ({}):\n{}",
+            path.display(),
+            String::from_utf8_lossy(&bytes[start..]),
+        );
+    }
 }
