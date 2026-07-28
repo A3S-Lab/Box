@@ -1,7 +1,18 @@
 ---
 title: Quick start
 description: Run and manage your first A3S Box workload.
+pageType: doc-wide
+outline: false
 ---
+
+import { Tab, Tabs } from '@rspress/core/theme';
+import CodeHikeCode from '../../../../theme/components/CodeHikeCode';
+import {
+  ScrollyCode,
+  ScrollyCoding,
+  ScrollyStep,
+  ScrollySteps,
+} from '../../../../theme/components/CodeWalkthrough';
 
 # Quick start
 
@@ -91,7 +102,8 @@ interchangeable compatibility modes.
 Each SDK example below is a complete program that creates a Sandbox, runs one
 guest command, prints the result, and cleans up.
 
-### Rust
+<Tabs groupId="box-sdk-language" className="box-sdk-tabs">
+<Tab label="Rust" value="rust">
 
 ```rust
 use a3s_box_sdk::Sandbox;
@@ -107,7 +119,8 @@ async fn main() -> Result<(), a3s_box_sdk::ClientError> {
 }
 ```
 
-### TypeScript
+</Tab>
+<Tab label="TypeScript" value="typescript">
 
 ```typescript
 import { Sandbox } from '@a3s-lab/box';
@@ -129,7 +142,8 @@ main().catch((error: unknown) => {
 });
 ```
 
-### Python
+</Tab>
+<Tab label="Python" value="python">
 
 ```python
 from a3s_box import Sandbox
@@ -145,7 +159,8 @@ if __name__ == "__main__":
     main()
 ```
 
-### Go
+</Tab>
+<Tab label="Go" value="go">
 
 ```go
 package main
@@ -174,6 +189,103 @@ func main() {
     fmt.Println(result.StdoutString())
 }
 ```
+
+</Tab>
+</Tabs>
+
+## Code Hike walkthrough
+
+Scroll through the steps or select a card. The code panel stays in view and
+animates the token-level changes between three complete, runnable TypeScript
+programs.
+
+<ScrollyCoding ariaLabel="A3S Box TypeScript SDK lifecycle walkthrough">
+<ScrollySteps>
+<ScrollyStep index={0}>
+  <h3>Establish the boundary</h3>
+  <p>
+    Create the Sandbox from an OCI image. MicroVM isolation remains the default,
+    and the top-level handler makes startup failures visible.
+  </p>
+</ScrollyStep>
+<ScrollyStep index={1}>
+  <h3>Run guest work</h3>
+  <p>
+    Execute an argv-safe guest command and inspect its typed result. Cleanup
+    moves into <code>finally</code> before more work is added.
+  </p>
+</ScrollyStep>
+<ScrollyStep index={2}>
+  <h3>Persist, verify, clean up</h3>
+  <p>
+    Write and read a workspace file, reject a non-zero guest exit, and always
+    release the Sandbox deterministically.
+  </p>
+</ScrollyStep>
+</ScrollySteps>
+<ScrollyCode title="sandbox.ts">
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+  await sandbox.kill();
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    await sandbox.files.write('/workspace/status.txt', 'ready\n');
+    console.log(await sandbox.files.read('/workspace/status.txt'));
+
+    const result = await sandbox.commands.run('test -s /workspace/status.txt');
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr);
+    }
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+</ScrollyCode>
+</ScrollyCoding>
 
 The [SDK overview](/sdk/) explains the shared contract and links to
 language-specific guides.

@@ -128,6 +128,7 @@ if (parityFailures.length > 0) {
 const placeholderFailures = [];
 const translationFailures = [];
 const programFailures = [];
+const experienceFailures = [];
 const programCounts = Object.fromEntries(
   languages.map((language) => [
     language,
@@ -223,6 +224,51 @@ for (const language of languages) {
       `${language}/guide/networking-compose.mdx: ACL example must use an acl fence`,
     );
   }
+
+  const tabsContract = [
+    '<Tabs groupId="box-sdk-language" className="box-sdk-tabs">',
+    '<Tab label="Rust" value="rust">',
+    '<Tab label="TypeScript" value="typescript">',
+    '<Tab label="Python" value="python">',
+    '<Tab label="Go" value="go">',
+  ];
+  for (const marker of tabsContract) {
+    if (!quickStart.includes(marker)) {
+      experienceFailures.push(
+        `${language}/guide/quick-start.mdx: missing SDK Tabs marker ${marker}`,
+      );
+    }
+  }
+
+  for (const marker of [
+    "import CodeHikeCode from '../../../../theme/components/CodeHikeCode';",
+    '<ScrollyCoding',
+    '<ScrollySteps>',
+    '<ScrollyCode title="sandbox.ts">',
+  ]) {
+    if (!quickStart.includes(marker)) {
+      experienceFailures.push(
+        `${language}/guide/quick-start.mdx: missing Code Hike marker ${marker}`,
+      );
+    }
+  }
+
+  const stepCount = (quickStart.match(/<ScrollyStep index=\{\d+\}>/g) ?? [])
+    .length;
+  if (stepCount !== 3) {
+    experienceFailures.push(
+      `${language}/guide/quick-start.mdx: expected 3 walkthrough steps, found ${stepCount}`,
+    );
+  }
+
+  const snapshotCount = (
+    quickStart.match(/^```typescript walkthrough\s*$/gm) ?? []
+  ).length;
+  if (snapshotCount !== 3) {
+    experienceFailures.push(
+      `${language}/guide/quick-start.mdx: expected 3 Code Hike snapshots, found ${snapshotCount}`,
+    );
+  }
 }
 
 if (programFailures.length > 0) {
@@ -233,6 +279,14 @@ if (programFailures.length > 0) {
   );
 }
 
+if (experienceFailures.length > 0) {
+  throw new Error(
+    `Documentation experience contract failed:\n${experienceFailures
+      .map((failure) => `  - ${failure}`)
+      .join('\n')}`,
+  );
+}
+
 console.log(
-  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, complete Rust/TypeScript/Python/Go programs, and ACL fences.`,
+  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, complete Rust/TypeScript/Python/Go programs in Tabs, Code Hike walkthroughs, and ACL fences.`,
 );

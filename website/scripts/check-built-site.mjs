@@ -91,6 +91,45 @@ for (const route of [
 }
 
 for (const localePrefix of ['', 'en/']) {
+  const quickStartPath = `${localePrefix}guide/quick-start.html`;
+  const quickStartHtml = await readFile(
+    path.join(outputRoot, quickStartPath),
+    'utf8',
+  );
+
+  for (const marker of [
+    'box-sdk-tabs',
+    'data-code-walkthrough="true"',
+    'data-codehike="true"',
+    'Code Hike',
+  ]) {
+    if (!quickStartHtml.includes(marker)) {
+      throw new Error(
+        `${quickStartPath} is missing its SDK Tabs or Code Hike marker: ${marker}`,
+      );
+    }
+  }
+  for (const language of ['Rust', 'TypeScript', 'Python', 'Go']) {
+    if (!quickStartHtml.includes(`>${language}<`)) {
+      throw new Error(
+        `${quickStartPath} does not render the ${language} SDK tab.`,
+      );
+    }
+  }
+
+  const snapshotCount = (quickStartHtml.match(/data-codehike="true"/g) ?? [])
+    .length;
+  if (snapshotCount !== 1) {
+    throw new Error(
+      `${quickStartPath} should server-render the selected Code Hike snapshot, found ${snapshotCount}.`,
+    );
+  }
+  if (!quickStartHtml.includes('3<!-- --> snapshots')) {
+    throw new Error(
+      `${quickStartPath} does not expose all 3 interactive Code Hike snapshots.`,
+    );
+  }
+
   const relativePath = `${localePrefix}guide/networking-compose.html`;
   const html = await readFile(path.join(outputRoot, relativePath), 'utf8');
   const aclStart = html.indexOf('class="rp-codeblock language-acl"');
@@ -171,5 +210,5 @@ if (brokenReferences.length > 0) {
 }
 
 console.log(
-  `Bilingual built-site references and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
+  `Bilingual Tabs, Code Hike walkthroughs, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
 );

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@rspress/core": "^2.0.17",
+    "codehike": "1.0.7",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
