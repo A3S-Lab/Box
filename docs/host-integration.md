@@ -15,7 +15,7 @@ capability scenario has soak coverage.
 | --- | --- | --- |
 | Stub baseline | macOS or Linux with Rust, C compiler, and protoc | `scripts/host-integration-smoke.sh` |
 | Core MicroVM smoke | macOS Apple Silicon/HVF or Linux KVM, libkrun, Linux guest init, runnable image | `scripts/host-integration-smoke.sh --core` |
-| Native local SDK smoke | Same as the selected MicroVM or certified Linux Sandbox backend, plus Python 3.10+ and Node.js 20+ | `scripts/local-sdk-smoke.sh microvm` or `scripts/local-sdk-smoke.sh sandbox` |
+| Native local SDK smoke | Same as the selected MicroVM or certified Linux Sandbox backend, plus Python 3.10+, Node.js 20+, and Go 1.25+ | `scripts/local-sdk-smoke.sh microvm` or `scripts/local-sdk-smoke.sh sandbox` |
 | Host command and warm-pool smoke | Same as core smoke; optional registry credentials for push coverage | `scripts/host-integration-smoke.sh --host` |
 | Linux Dockerfile `RUN` | Linux, root, chroot-capable filesystem, local Alpine OCI archive | `sudo -E scripts/host-integration-smoke.sh --linux-run --no-pure` |
 | CRI smoke | macOS or Linux MicroVM host, `crictl`, CRI images | `scripts/host-integration-smoke.sh --cri` |
@@ -95,7 +95,7 @@ sudo usermod -aG kvm "$USER"
 
 ## Native local SDK matrix
 
-The native Rust, Python, and TypeScript SDK smoke exercises the same local
+The native Rust, Python, TypeScript, and Go SDK smoke exercises the same local
 `Sandbox`, commands, files, pause/resume, kill, and cleanup behavior against a
 real backend. Before starting the box it also verifies the bridge capability
 inventory, built-image get/inspect/history/tag/remove calls, and unused

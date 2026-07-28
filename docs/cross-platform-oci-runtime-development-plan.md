@@ -65,7 +65,7 @@ must:
 1. check out the exact pinned OCI Runtime revision;
 2. run its native Linux qualification script;
 3. build Box, the shim, guest init, the runtime, and the agent;
-4. execute the unchanged Rust, Python, and TypeScript local SDK lifecycles;
+4. execute the unchanged Rust, Python, TypeScript, and Go local SDK lifecycles;
 5. cover image management, named volumes, files, logs, metrics, pause/resume,
    stop/restart, filesystem snapshots, and complete cleanup;
 6. prove no Box shim, OCI owner, agent, runtime root, socket, or Box directory
@@ -131,7 +131,7 @@ The replacement is complete when all of the following are true:
 - [x] Linux release packaging contains only the pinned A3S OCI artifacts.
 - [x] Only the current A3S OCI runtime-record schema is accepted.
 - [x] The pinned native matrix covers network, volume, tmpfs, and init profiles.
-- [x] Rust, Python, and TypeScript exercise the real Box lifecycle.
+- [x] Rust, Python, TypeScript, and Go exercise the real Box lifecycle.
 - [x] Linux x86_64/aarch64, macOS arm64, and Windows x86_64 builds remain gated.
 - [ ] The change's pull-request and main-branch CI runs are green.
 

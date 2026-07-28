@@ -145,7 +145,7 @@ automatic cleanup, and filesystem-snapshot restore are available on
 Named bridge networks and published ports are currently MicroVM-only. The
 shared-kernel Sandbox resolver rejects either before runtime mutation.
 
-The same native Python and TypeScript packages expose the Rust client's local
+The native Python, TypeScript, and Go packages expose the Rust client's local
 image lifecycle; Sandbox list/get/stop/restart/remove/logs/stats; runtime
 diagnostics and disk usage; and filesystem snapshot list/get. Pull accepts
 typed registry credentials and cosign verification policies; push accepts

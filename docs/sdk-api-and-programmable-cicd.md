@@ -1,7 +1,7 @@
 # SDK API and Programmable CI/CD Plan
 
 This document is the authoritative completion plan for the native local A3S
-Box SDKs. It covers Rust, Python, and TypeScript. Local calls remain
+Box SDKs. It covers Rust, Python, TypeScript, and Go. Local calls remain
 credential-free and execute directly through the installed A3S Box runtime.
 
 ## Product Contract
@@ -9,10 +9,10 @@ credential-free and execute directly through the installed A3S Box runtime.
 "Programmable CI/CD" means a code-first execution toolbox, similar in spirit
 to BoxLite. A user must be able to build an OCI base image, create reusable
 storage and networks, configure an isolated box, run scripts, capture results,
-and reuse a filesystem snapshot directly from normal Rust, Python, or
-TypeScript code. A separate YAML service or workflow engine is not required.
+and reuse a filesystem snapshot directly from normal Rust, Python, TypeScript,
+or Go code. A separate YAML service or workflow engine is not required.
 
-Rust is the implementation source of truth. Python and TypeScript use the
+Rust is the implementation source of truth. Python, TypeScript, and Go use the
 versioned machine bridge and never parse human CLI output. Language differences
 are limited to normal conventions such as Python sync/async variants and
 JavaScript promises.
@@ -116,17 +116,17 @@ artifact collection in application code without a dedicated pipeline engine.
 
 The naming follows each language while preserving the same concepts:
 
-| Concept | Rust | Python | TypeScript |
-| --- | --- | --- | --- |
-| Runtime client | `A3sBoxClient` | `A3SBoxClient` | `A3SBoxClient` |
-| Box handle | `Sandbox` | `Sandbox` / `AsyncSandbox` | `Sandbox` |
-| Build request | `BuildImage` | `BuildImageOptions` | `BuildImageOptions` |
-| Named volume | `CreateVolume` | `CreateVolumeOptions` | `CreateVolumeOptions` |
-| Named network | `CreateNetwork` | `CreateNetworkOptions` | `CreateNetworkOptions` |
-| Mount | `VolumeMount` | `VolumeMount` | `VolumeMount` |
-| Network selection | `SandboxNetwork` | `SandboxNetwork` | `SandboxNetwork` |
-| Published port | `PortMapping` | `PortMapping` | `PortMapping` |
-| Script | `Script` | `Script` | `Script` |
+| Concept | Rust | Python | TypeScript | Go |
+| --- | --- | --- | --- | --- |
+| Runtime client | `A3sBoxClient` | `A3SBoxClient` | `A3SBoxClient` | `Client` |
+| Box handle | `Sandbox` | `Sandbox` / `AsyncSandbox` | `Sandbox` | `Sandbox` |
+| Build request | `BuildImage` | `BuildImageOptions` | `BuildImageOptions` | `ImageBuilder` |
+| Named volume | `CreateVolume` | `CreateVolumeOptions` | `CreateVolumeOptions` | `VolumeBuilder` |
+| Named network | `CreateNetwork` | `CreateNetworkOptions` | `CreateNetworkOptions` | `NetworkBuilder` |
+| Mount | `VolumeMount` | `VolumeMount` | `VolumeMount` | `Mount` |
+| Network selection | `SandboxNetwork` | `SandboxNetwork` | `SandboxNetwork` | `SandboxNetwork` |
+| Published port | `PortMapping` | `PortMapping` | `PortMapping` | `PortMapping` |
+| Script | `Script` | `Script` | `Script` | `ScriptBuilder` |
 
 The existing `Sandbox` remains the convenient local execution facade. It is
 not overloaded with host-wide image, volume, and network management; those
@@ -168,15 +168,15 @@ If retained, the composition layer must:
 
 | Area | Required operations | Current state |
 | --- | --- | --- |
-| Images and builds | list, inspect, history, pull, build, tag, push, remove, cache eviction, platform selection, credentials, and progress | List/get/inspect/history/pull/build/tag/push/remove/evict, platform selection, registry credentials, pull signature policy, and push protocol have Rust/Python/TypeScript parity. The blocking real-Sandbox gate covers all local-store operations; authenticated registry push is covered by the opt-in host integration suite. Structured build and live pull/push progress remain pending. |
-| Typed box configuration | image, isolation, CPU/memory/lifetime, environment, workdir/user, mounts, tmpfs, network, ports, DNS/hosts, read-only root, persistence, cleanup, and snapshot restore | Implemented in Rust/Python/TypeScript options and fluent builders. The real macOS/HVF MicroVM builder gate passes; the no-KVM Ubuntu gate uses A3S OCI Runtime as the sole Sandbox backend, while Linux/KVM remains host-gated. |
-| Volumes | list, get, create, typed mount, content operations, remove, and prune | Create/get/list/remove/prune and typed bind/named mounts have three-language parity. Direct content helpers remain pending. |
-| Networking | list/create/get/remove/prune, typed attachment, published ports, and resolved endpoint inspection | Create/get/list/remove/prune, typed TSI/disabled/bridge selection, endpoint responses, and TCP publication have three-language parity. Live hot-plug is intentionally unsupported. |
-| Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have three-language parity and pass the real macOS/HVF builder-to-Sandbox smoke. Process handles, signals, wait, and streaming remain pending. |
+| Images and builds | list, inspect, history, pull, build, tag, push, remove, cache eviction, platform selection, credentials, and progress | List/get/inspect/history/pull/build/tag/push/remove/evict, platform selection, registry credentials, pull signature policy, and push protocol have Rust/Python/TypeScript/Go parity. The blocking real-Sandbox gate covers all local-store operations; authenticated registry push is covered by the opt-in host integration suite. Structured build and live pull/push progress remain pending. |
+| Typed box configuration | image, isolation, CPU/memory/lifetime, environment, workdir/user, mounts, tmpfs, network, ports, DNS/hosts, read-only root, persistence, cleanup, and snapshot restore | Implemented in Rust/Python/TypeScript/Go options and fluent builders. The real MicroVM gate remains host-specific; the no-KVM Ubuntu gate uses A3S OCI Runtime as the sole Sandbox backend, while Linux/KVM remains host-gated. |
+| Volumes | list, get, create, typed mount, content operations, remove, and prune | Create/get/list/remove/prune and typed bind/named mounts have four-language parity. Direct content helpers remain pending. |
+| Networking | list/create/get/remove/prune, typed attachment, published ports, and resolved endpoint inspection | Create/get/list/remove/prune, typed TSI/disabled/bridge selection, endpoint responses, and TCP publication have four-language parity. Live hot-plug is intentionally unsupported. |
+| Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have four-language parity. Go preserves binary output as `[]byte`; the other SDKs expose their language-native byte/text conventions. Process handles, signals, wait, and streaming remain pending. |
 | Files and artifacts | binary/text read/write, stat, exists, list, mkdir, move, remove, streaming, confined export, size limits, and hashes | Core mutations implemented; artifact/export layer and large-file streaming pending. |
-| Filesystem snapshots | capture, size, restore, delete, in-use fencing, inspection, and cleanup | Capture/size/restore/delete and live-use fencing are implemented. Rust, Python sync/async, and TypeScript expose typed list/get inspection through the checked bridge; the real Sandbox gate exercises the complete local snapshot lifecycle. |
-| Lifecycle | create, connect, inspect, list, pause, resume, restart, timeout replacement, stop, kill, remove, and deterministic cleanup | Rust, Python sync/async, and TypeScript have parity for create/connect/inspect/list/pause/resume/stop/idempotent restart/kill/remove. Restart carries a durable operation identity and optional stop deadline; stop preserves the record, remove requires a terminal state, and kill composes both. Cancellation cleanup remains pending. |
-| Observability | structured logs, stats, events, health, audit data, and runtime diagnostics | Bounded structured log snapshots, active resource stats, runtime versions/virtualization diagnostics, disk usage, and Sandbox inventory have three-language parity. Event streams, health history, and audit queries remain pending. |
+| Filesystem snapshots | capture, size, restore, delete, in-use fencing, inspection, and cleanup | Capture/size/restore/delete and live-use fencing are implemented. Rust, Python sync/async, TypeScript, and Go expose typed list/get inspection through the checked bridge; the real Sandbox gate exercises the complete local snapshot lifecycle. |
+| Lifecycle | create, connect, inspect, list, pause, resume, restart, timeout replacement, stop, kill, remove, and deterministic cleanup | Rust, Python sync/async, TypeScript, and Go have parity for create/connect/inspect/list/pause/resume/stop/idempotent restart/kill/remove. Go serializes lifecycle transitions against in-flight command and file calls. Restart carries a durable operation identity and optional stop deadline; stop preserves the record, remove requires a terminal state, and kill composes both. Cancellation cleanup remains pending across the full matrix. |
+| Observability | structured logs, stats, events, health, audit data, and runtime diagnostics | Bounded structured log snapshots, active resource stats, runtime versions/virtualization diagnostics, disk usage, and Sandbox inventory have four-language parity. Event streams, health history, and audit queries remain pending. |
 | PTY | create, resize, input, output streaming, wait, and cancellation | Rust lower-level primitives only. |
 | Security | typed isolation, resource limits, read-only policy, capabilities, devices, secret injection, and attestation | Partial; unsupported policies must be rejected rather than represented as enforced. |
 
@@ -186,14 +186,14 @@ If retained, the composition layer must:
 
 - Keep this plan and the capability matrix current.
 - Expose image build and resource-management operations through the bridge and
-  native Python/TypeScript clients.
+  native Python/TypeScript/Go clients.
 - Add typed volume mounts, network selection, published ports, workdir, and
   persistence controls to box creation.
-- Add explicit script execution and executable examples in all three languages.
+- Add explicit script execution and executable examples in all four languages.
 - Retain and validate runtime-managed filesystem snapshot operations.
 
 Implemented evidence now includes a versioned `sdk_capabilities` inventory and
-three-language parity for local image inspection/history/tagging/removal/cache
+four-language parity for local image inspection/history/tagging/removal/cache
 eviction, authenticated pull/push request shapes, and volume/network pruning.
 Structured registry/build progress remains in this phase because the current
 one-request/one-response bridge cannot represent live progress safely.
@@ -207,7 +207,7 @@ one-request/one-response bridge cannot represent live progress safely.
 
 Lifecycle, bounded structured logs, current stats, runtime diagnostics/disk
 usage, Sandbox list/get, and filesystem snapshot list/get now have typed
-Rust/Python/TypeScript parity and are part of the checked bridge inventory.
+Rust/Python/TypeScript/Go parity and are part of the checked bridge inventory.
 Restart retries use a durable operation ID, log tails are validated before
 runtime lookup, and stop is distinct from terminal removal. Confined artifact
 export and volume content helpers remain the unfinished Phase 2 work.
@@ -221,11 +221,11 @@ export and volume content helpers remain the unfinished Phase 2 work.
 ### Phase 4: Optional composition and release gates
 
 - Refactor any retained matrix or DAG helper onto the typed toolbox.
-- Run every supported operation through Rust, Python, and TypeScript against
+- Run every supported operation through Rust, Python, TypeScript, and Go against
   certified Linux Sandbox execution.
 - Run the supported matrix against Linux/KVM and macOS/HVF MicroVM execution.
 - Build and install clean package artifacts before testing them.
-- Publish Rust, Python, TypeScript, runtime, and documentation from one version
+- Publish Rust, Python, TypeScript, Go, runtime, and documentation from one version
   and verify the public registries after release.
 
 ## Completion Gates
@@ -233,10 +233,10 @@ export and volume content helpers remain the unfinished Phase 2 work.
 The SDK objective is complete only when all of the following are true:
 
 - the required native SDK surface table has no `Partial` or pending row;
-- the checked Rust/Python/TypeScript inventory reports parity;
+- the checked Rust/Python/TypeScript/Go inventory reports parity;
 - all bridge operations have success, validation, runtime-error, and malformed
   response tests;
-- the real Sandbox three-language matrix covers every supported operation;
+- the real Sandbox four-language matrix covers every supported operation;
 - the MicroVM matrix covers every operation supported on Linux/KVM and
   macOS/HVF;
 - build, volume, network, port, script, cache, snapshot, artifact, cancellation,

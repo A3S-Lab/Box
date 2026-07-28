@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Exercise the zero-configuration Rust, Python, and TypeScript local SDKs
+# Exercise the zero-configuration Rust, Python, TypeScript, and Go local SDKs
 # against one real A3S Box isolation backend.
 
 set -Eeuo pipefail
@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKSPACE="$REPO_ROOT/src"
 ISOLATION="${1:-microvm}"
 PYTHON="${PYTHON:-python3}"
+GO="${GO:-go}"
 A3S_BOX_BINARY="${A3S_BOX_BINARY:-$WORKSPACE/target/debug/a3s-box}"
 CARGO_PROFILE="${A3S_BOX_SDK_CARGO_PROFILE:-debug}"
 BINARY_DIR="$(cd "$(dirname "$A3S_BOX_BINARY")" && pwd)"
@@ -420,5 +421,16 @@ try {
   await rm(context, { recursive: true, force: true })
 }
 JS
+
+echo "==> Go SDK ($ISOLATION)"
+if ! command -v "$GO" >/dev/null 2>&1; then
+    echo "Go executable is not available: $GO" >&2
+    exit 1
+fi
+(
+    cd "$REPO_ROOT/sdk/go"
+    A3S_BOX_BINARY="$A3S_BOX_BINARY" \
+        "$GO" run ./cmd/local-sdk-smoke "$ISOLATION"
+)
 
 echo "All local SDK smokes passed for isolation=$ISOLATION"

@@ -4,12 +4,20 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Native Go SDK.** The nested `github.com/A3S-Lab/Box/sdk/go/v3` module
+  exposes the complete checked local bridge inventory through context-aware,
+  concurrency-safe clients, typed builders, binary-safe commands and files,
+  lifecycle generation fencing, and real MicroVM/Sandbox smoke coverage. Go
+  releases use the matching path-prefixed `sdk/go/vX.Y.Z` tag.
+
 ### Removed
 
 - **Remote E2B compatibility service.** The pinned upstream protocol corpus,
   official-client fixtures, ACL control/data-plane service, dedicated runtime
   image, release binary, and their CI/release plumbing are removed. Native
-  Rust, Python, and TypeScript SDKs remain local, credential-free entry points
+  Rust, Python, TypeScript, and Go SDKs remain local, credential-free entry points
   over the core A3S Box runtime.
 
 ### Changed
@@ -23,7 +31,7 @@ All notable changes to A3S Box will be documented in this file.
 - **Real configuration qualification.** The Box Linux integration gate runs
   the pinned runtime's native private/host/donor network, read-write/read-only
   volume, tmpfs, inline/file/direct initialization, failure, and cleanup
-  matrix before exercising the Rust, Python, and TypeScript SDK lifecycle.
+  matrix before exercising the Rust, Python, TypeScript, and Go SDK lifecycle.
 
 ## [3.1.0] — 2026-07-23
 

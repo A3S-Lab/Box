@@ -151,7 +151,7 @@ jobs:
       - name: Test RuntimeClass installer
         run: bash deploy/scripts/test-install-runtimeclass.sh
 
-  # ── Native Python and TypeScript SDK package gate ─────────────
+  # ── Native Python, TypeScript, and Go SDK package gate ─────────
   sdk-packages:
     name: SDK Packages
     runs-on: ubuntu-latest
@@ -165,6 +165,10 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: sdk/go/go.mod
       - name: Build and test Python package
         run: |
           python -m pip install build
@@ -179,6 +183,17 @@ jobs:
           npm run build
           npm test
           npm pack --dry-run
+      - name: Format, vet, and test Go module
+        working-directory: sdk/go
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            exit 1
+          fi
+          go vet ./...
+          go test ./...
+          go test -race ./...
 
   # ── Real shared-kernel local SDK gate ──────────────────────────
   sdk-local-sandbox:
@@ -207,6 +222,10 @@ jobs:
           node-version: '20'
           cache: npm
           cache-dependency-path: sdk/typescript/package-lock.json
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: sdk/go/go.mod
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-16
       - name: Install build dependencies
         run: |
@@ -241,7 +260,7 @@ jobs:
             echo 'root:100000:65536' | sudo tee -a /etc/subuid
           grep -q '^root:' /etc/subgid ||
             echo 'root:100000:65536' | sudo tee -a /etc/subgid
-      - name: Test Rust, Python, and TypeScript SDKs without credentials
+      - name: Test Rust, Python, TypeScript, and Go SDKs without credentials
         run: |
           sudo env \
               PATH="$PATH" \
@@ -257,6 +276,7 @@ jobs:
               A3S_BOX_GUEST_INIT_BINARY="$GITHUB_WORKSPACE/src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init" \
               RUST_MIN_STACK=16777216 \
               PYTHON=python3 \
+              GO=go \
               scripts/local-sdk-smoke.sh sandbox
       - name: Verify cleanup
         if: always()
