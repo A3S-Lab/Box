@@ -44,6 +44,7 @@ const TOP_LEVEL_COMMANDS: &[&str] = &[
     "wait",
     "rename",
     "port",
+    "port-forward",
     "export",
     "commit",
     "diff",

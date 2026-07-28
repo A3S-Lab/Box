@@ -130,7 +130,7 @@ the host requirements below before running real workloads.
 | Isolation class | `hardware-vm` | `shared-kernel` |
 | Intended workload | Untrusted workloads and stronger tenant boundaries | Trusted or semi-trusted tools, benchmarks, and automation |
 | Required host | Linux/KVM, Apple Silicon/HVF, or Windows/WHPX | Certified Linux host with namespaces, seccomp, subordinate IDs, and delegated cgroup v2 |
-| Bridge networking and published ports | Supported within platform limits | Rejected in the current release |
+| Bridge networking and published ports | Supported within platform limits | Static publication is rejected; generation-fenced loopback forwarding is explicit |
 | TEE, warm pool, and snapshot-fork | Available on qualifying MicroVM hosts | Rejected |
 | Automatic fallback | Never | Never |
 
@@ -165,8 +165,9 @@ runtime state changes instead of being silently stored or weakened.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
   commit, filesystem snapshots, and copy-on-write restore.
 - **Networking and Compose** — TSI, named bridge networks, peer discovery, TCP
-  publishing, and an explicit Compose subset. ACL is the canonical project
-  format; YAML is a bounded compatibility input.
+  publishing, generation-fenced Sandbox loopback forwarding, and an explicit
+  Compose subset. ACL is the canonical project format; YAML is a bounded
+  compatibility input.
 - **Startup acceleration** — rootfs and layer caches, pre-booted warm pools,
   build leases, one-shot pool routing, and opt-in Linux/KVM snapshot-fork.
 - **Security and operations** — resource and syscall controls, audit evidence,
@@ -190,6 +191,10 @@ a3s-box snapshot create app --name checkpoint-1
 a3s-box network create backend --subnet 10.89.0.0/24
 a3s-box run -d --name api --network backend -p 8080:80 local/app:dev
 
+# Explicit host-loopback access to a Sandbox workload
+a3s-box run -d --name sandbox-api --isolation sandbox local/app:dev
+a3s-box port-forward sandbox-api --host-port 18080 --guest-port 8080
+
 # Deterministic Compose normalization and lifecycle
 a3s-box compose -f compose.acl config
 a3s-box compose -f compose.acl up -d
@@ -205,7 +210,7 @@ a3s-box compose -f compose.acl down
 | Execution | `exec`, `shell`, `attach`, `top` |
 | Images and builds | `pull`, `push`, `build`, `images`, `rmi`, `tag`, `image-inspect`, `history`, `image-prune`, `save`, `load`, `import` |
 | Filesystems | `cp`, `diff`, `export`, `commit`, `volume`, `snapshot` |
-| Networking | `network`, `port`, `compose` |
+| Networking | `network`, `port`, `port-forward`, `compose` |
 | Security and TEE | `attest`, `seal`, `unseal`, `inject-secret` |
 | Observability | `ps`, `logs`, `inspect`, `stats`, `events`, `df`, `audit`, `monitor` |
 | System | `container-update`, `system-prune`, `pool`, `login`, `logout`, `version`, `info` |
