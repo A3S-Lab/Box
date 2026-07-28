@@ -98,7 +98,7 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
     assert_eq!(capabilities.provider_id.as_str(), "a3s-box");
     assert_eq!(
         capabilities.artifact_media_types,
-        vec![OCI_IMAGE_MANIFEST.into(), OCI_IMAGE_INDEX.into()]
+        vec![OCI_IMAGE_MANIFEST.to_string(), OCI_IMAGE_INDEX.to_string(),]
     );
     assert_eq!(
         capabilities.unit_classes,
