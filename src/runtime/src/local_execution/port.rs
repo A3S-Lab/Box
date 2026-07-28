@@ -8,6 +8,7 @@ use a3s_box_core::{
 use async_trait::async_trait;
 
 use super::LocalExecutionManager;
+#[cfg(target_os = "linux")]
 use crate::BoxRecord;
 
 #[async_trait]
@@ -71,6 +72,7 @@ impl ExecutionPortConnector for LocalExecutionManager {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl LocalExecutionManager {
     async fn require_connectable(
         &self,

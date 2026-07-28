@@ -36,6 +36,7 @@ pub(crate) mod network;
 mod pause;
 mod pool;
 mod port;
+mod port_forward;
 mod prune;
 mod ps;
 mod pull;
@@ -129,6 +130,8 @@ pub enum Command {
     Rename(rename::RenameArgs),
     /// List port mappings for a box
     Port(port::PortArgs),
+    /// Forward a loopback TCP port to a running Sandbox box
+    PortForward(port_forward::PortForwardArgs),
     /// Export a box's filesystem to a tar archive
     Export(export::ExportArgs),
     /// Create an image from a box's changes
@@ -642,6 +645,7 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Wait(args) => wait::execute(args).await,
         Command::Rename(args) => rename::execute(args).await,
         Command::Port(args) => port::execute(args).await,
+        Command::PortForward(args) => port_forward::execute(args).await,
         Command::Export(args) => export::execute(args).await,
         Command::Commit(args) => commit::execute(args).await,
         Command::Diff(args) => diff::execute(args).await,
