@@ -25,6 +25,33 @@ fn inspect_box(cli: &CliTest, name: &str) -> serde_json::Value {
     }
 }
 
+struct HostResourceCleanup<'a> {
+    cli: &'a CliTest,
+    boxes: &'a [&'a str],
+    networks: &'a [&'a str],
+    armed: bool,
+}
+
+impl HostResourceCleanup<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for HostResourceCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for name in self.boxes {
+            cleanup(self.cli, name);
+        }
+        for name in self.networks {
+            let _ = self.cli.output(&["network", "rm", name]);
+        }
+    }
+}
+
 #[test]
 #[ignore]
 #[cfg(target_os = "linux")]
@@ -133,6 +160,20 @@ fn test_real_vm_command_matrix() {
     let foreground_box = "cov-vm-foreground";
     let renamed_box = "cov-vm-renamed";
     let restored_box = "cov-vm-restored";
+    let cleanup_boxes = [
+        main_box,
+        built_box,
+        foreground_box,
+        renamed_box,
+        restored_box,
+    ];
+    let cleanup_networks = ["covvmnet"];
+    let mut resource_cleanup = HostResourceCleanup {
+        cli: &cli,
+        boxes: &cleanup_boxes,
+        networks: &cleanup_networks,
+        armed: true,
+    };
 
     cleanup(&cli, main_box);
     cleanup(&cli, built_box);
@@ -334,6 +375,10 @@ fn test_real_vm_command_matrix() {
     ]);
     cli.ok(&["image-inspect", "coverage-committed:latest"]);
 
+    // Snapshot creation intentionally rejects a running host-path rootfs: the
+    // guest could mutate it while the host traverses the tree. Stop once here;
+    // the following network-connect scenario also requires a stopped box.
+    cli.ok(&["stop", main_box]);
     let snapshot_id = cli
         .ok(&[
             "snapshot",
@@ -355,7 +400,6 @@ fn test_real_vm_command_matrix() {
     cli.ok(&["snapshot", "rm", &snapshot_id]);
 
     cli.ok(&["network", "create", "covvmnet", "--subnet", "10.124.0.0/24"]);
-    cli.ok(&["stop", main_box]);
     cli.ok(&["network", "connect", "covvmnet", main_box]);
     cli.ok(&["network", "inspect", "covvmnet"]);
     cli.ok_status(&["start", main_box]);
@@ -390,6 +434,7 @@ fn test_real_vm_command_matrix() {
     cli.ok(&["image-prune", "--force", "--all"]);
     cli.ok(&["system-prune", "--force", "--all"]);
     assert_no_new_host_socket_dirs(&socket_dirs_before);
+    resource_cleanup.disarm();
 }
 
 #[test]
