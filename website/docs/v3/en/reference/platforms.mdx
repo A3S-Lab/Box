@@ -1,0 +1,79 @@
+---
+title: Platform matrix
+description: Compare host backends, isolation modes, and validated A3S Box capabilities.
+---
+
+# Platform matrix
+
+An implemented API is not a production guarantee for every host. Admission
+depends on the operating system, architecture, virtualization backend, and
+requested isolation class.
+
+## Host execution paths
+
+| Path            | Current status                           | Boundary                                                                            |
+| --------------- | ---------------------------------------- | ----------------------------------------------------------------------------------- |
+| Linux MicroVM   | Primary local runtime                    | Requires KVM and libkrun; Linux/KVM has the broadest feature surface                |
+| macOS MicroVM   | Implemented and build-checked            | Apple Silicon and Hypervisor.framework only; Intel macOS is unsupported             |
+| Windows MicroVM | Implemented and real-host soak validated | x86_64 WHPX, exactly one vCPU, with the limitations below                           |
+| Linux Sandbox   | Preview and real-runtime CI validated    | Certified Linux hosts only; shares the host kernel                                  |
+| Kubernetes      | Preview                                  | Linux CRI v1 server and containerd runtime-v2 shim; full conformance is not claimed |
+| TEE             | Host-specific                            | SEV-SNP-oriented workflows; simulation is not hardware security evidence            |
+
+Run this on every target host before scheduling a workload:
+
+```bash
+a3s-box info
+```
+
+## Isolation comparison
+
+| Contract                                   | Default MicroVM                                    | Explicit Sandbox                                                                   |
+| ------------------------------------------ | -------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Selection                                  | Omit `--isolation`                                 | `--isolation sandbox`                                                              |
+| Runtime boundary                           | Dedicated guest Linux kernel                       | Shared host Linux kernel                                                           |
+| Intended trust                             | Untrusted workloads and stronger tenant boundaries | Trusted or semi-trusted tools and automation                                       |
+| Required host                              | Linux/KVM, Apple Silicon/HVF, or Windows/WHPX      | Certified Linux with namespaces, seccomp, subordinate IDs, and delegated cgroup v2 |
+| Bridge networks and static published ports | Supported within host limits                       | Rejected; use explicit loopback forwarding                                         |
+| TEE, warm pool, snapshot-fork              | Available only on qualifying hosts                 | Rejected                                                                           |
+| Automatic fallback                         | Never                                              | Never                                                                              |
+
+An explicit `--isolation microvm` value is rejected. Omission is the public
+default, which prevents scripts from treating backend labels as
+interchangeable compatibility modes.
+
+## Windows WHPX limits
+
+| Capability                                                              | Windows       |
+| ----------------------------------------------------------------------- | ------------- |
+| Linux OCI pull and run                                                  | Supported     |
+| Foreground and detached lifecycle                                       | Supported     |
+| Logs, inspect, stats, and read-only attach                              | Supported     |
+| Published TCP ports                                                     | Supported     |
+| Bind mounts, named volumes, stopped-box commit and filesystem snapshots | Supported     |
+| vCPUs                                                                   | Exactly one   |
+| Container health checks                                                 | Not supported |
+| Bridge networks and Compose service networking                          | Not supported |
+| Interactive PTY and post-boot `exec`                                    | Not supported |
+| Memory snapshot-fork, TEE, and CRI                                      | Not supported |
+
+Follow the [Windows WHPX guide](/guide/windows) before first use.
+
+## Evidence levels
+
+Different checks prove different things:
+
+- Unit and fixture tests prove deterministic logic and protocol behavior.
+- Hosted compilation proves that a supported target builds.
+- A real-host smoke test proves the observed workload on that host and backend.
+- A soak test adds repeated lifecycle and cleanup evidence.
+- Simulated TEE flow never proves hardware-backed confidentiality.
+
+Record the host, architecture, backend, image digest, runtime version, and
+evidence bundle for release qualification. A green hosted build does not prove
+a KVM, HVF, WHPX, or TEE boot unless that hardware path actually ran.
+
+For detailed release gates, see
+[Host integration](https://github.com/A3S-Lab/Box/blob/main/docs/host-integration.md)
+and the
+[soak test plan](https://github.com/A3S-Lab/Box/blob/main/docs/soak-test-plan.md).

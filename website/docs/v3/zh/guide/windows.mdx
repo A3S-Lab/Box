@@ -1,0 +1,97 @@
+---
+title: Windows WHPX
+description: 为 Linux OCI 工作负载准备 Windows，并理解当前能力边界。
+---
+
+# Windows WHPX
+
+A3S Box 通过 Windows Hypervisor Platform（WHPX）在 x86_64 Windows 上直接运行
+Linux OCI 工作负载，运行路径不依赖 WSL。
+
+## 要求
+
+- x86_64 Windows 10 或 Windows 11
+- 固件中已启用硬件虚拟化
+- 已启用 Windows Hypervisor Platform
+- 已启用 Windows 开发者模式，或进程具备等效符号链接权限
+- 完整且版本匹配的 A3S Box 发布包
+
+在管理员 PowerShell 中启用 WHPX；Windows 要求时需要重启：
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+```
+
+在普通 PowerShell 会话中安装：
+
+```powershell
+irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1 | iex
+```
+
+打开新终端并验证：
+
+```powershell
+a3s-box --version
+a3s-box info
+```
+
+诊断应显示 `Virtualization: WHPX` 和 `OCI symlink support: available`。
+
+## 为什么需要开发者模式
+
+Linux OCI 镜像通常把 `/bin`、动态加载器和共享库保存为符号链接。Windows 解压时必须
+保留真实符号链接；用复制文件、硬链接或 junction 替代会改变 OCI 文件系统语义。
+
+开发者模式关闭且进程缺少权限时，镜像解压会返回
+`ERROR_PRIVILEGE_NOT_HELD (1314)`。启用
+**设置 > 系统 > 高级 > 开发者选项** 后再重试。
+
+## 第一个工作负载
+
+PowerShell 使用自己的换行和引号规则：
+
+```powershell
+a3s-box run --name whpx-ok alpine:3.20 -- /bin/sh -c `
+  'echo WHPX_OK; echo WHPX_STDERR_OK >&2; uname -srm'
+
+a3s-box logs whpx-ok
+a3s-box inspect whpx-ok
+a3s-box rm whpx-ok
+```
+
+当前只支持一个 vCPU；省略 `--cpus` 会选择 Windows 默认值 1。
+
+## 当前能力边界
+
+| 能力                             | Windows 状态 |
+| -------------------------------- | ------------ |
+| 拉取并运行 Linux OCI 镜像        | 支持         |
+| 前台和后台生命周期               | 支持         |
+| 日志、检查、统计和只读 attach    | 支持         |
+| TCP 端口发布                     | 支持         |
+| 绑定挂载和命名卷                 | 支持         |
+| 停止盒子的 commit 与文件系统快照 | 支持         |
+| 容器健康检查                     | 不支持       |
+| 桥接网络和 Compose 服务网络      | 不支持       |
+| 交互式 PTY 和启动后 `exec`       | 不支持       |
+| 内存快照分叉、TEE 和 CRI         | 不支持       |
+
+不支持的请求在准入阶段失败，不会回退到较弱路径。
+
+## 发布包完整性
+
+以下文件必须保留在同一安装目录：
+
+```text
+a3s-box.exe
+a3s-box-shim.exe
+a3s-box-guest-init
+krun.dll
+libkrunfw.dll
+```
+
+混用不同发布版本的 DLL 或客体组件不受支持。应通过安装器把发布包作为一个经过校验的
+整体替换。
+
+源码构建和真实主机验证见完整
+[Windows WHPX 指南](https://github.com/A3S-Lab/Box/blob/main/docs/windows-whpx.md)。

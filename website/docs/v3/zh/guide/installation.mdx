@@ -1,0 +1,120 @@
+---
+title: 安装
+description: 在 Linux、macOS 和 Windows 上安装并校验 A3S Box。
+---
+
+# 安装 A3S Box
+
+A3S Box 为每类主机提供原生安装器：
+
+- Linux 和 macOS 使用 `install.sh`，不依赖 PowerShell。
+- Windows 使用 `install.ps1`，不依赖 Bash。
+
+安装器会检测主机、解析 GitHub Release、在解压前校验 SHA-256、验证包布局和版本，
+再以一次暂存替换完成升级。
+
+## 支持的发布目标
+
+| 主机    | 架构          | 发布目标         |
+| ------- | ------------- | ---------------- |
+| Linux   | x86_64        | `linux-x86_64`   |
+| Linux   | arm64         | `linux-arm64`    |
+| macOS   | Apple Silicon | `macos-arm64`    |
+| Windows | x86_64        | `windows-x86_64` |
+
+Intel macOS 和 Windows on ARM 会被明确拒绝。安装器只安装运行时分发包，不会自动
+启用 KVM、HVF、WHPX 或 Linux Sandbox 所需的主机能力。
+
+## 一行安装
+
+Linux 或 macOS：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh | sh
+```
+
+Windows PowerShell 5.1 或更高版本：
+
+```powershell
+irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1 | iex
+```
+
+如果当前终端没有读取新的 `PATH`，请打开一个新终端，然后验证：
+
+```text
+a3s-box --version
+a3s-box info
+```
+
+通过管道执行网络脚本会运行 `main` 分支的当前内容。需要先审阅时，请下载对应安装器，
+检查后再本地执行。
+
+Linux 和 macOS 也可以使用 Homebrew：
+
+```bash
+brew install a3s-lab/tap/a3s-box
+```
+
+## 固定版本和目标目录
+
+默认安装到：
+
+- 设置了 `XDG_DATA_HOME` 时的 `${XDG_DATA_HOME}/a3s-box`；
+- 其他 Linux/macOS 主机的 `$HOME/.local/share/a3s-box`；
+- Windows 的 `%LOCALAPPDATA%\Programs\A3S Box`。
+
+| 行为                 | Linux/macOS                   | Windows                         |
+| -------------------- | ----------------------------- | ------------------------------- |
+| 固定版本             | `--version v3.2.0`            | `-Version v3.2.0`               |
+| 指定目录             | `--install-dir PATH`          | `-InstallDir PATH`              |
+| 不修改 `PATH`        | `--no-modify-path`            | `-NoModifyPath`                 |
+| 替换非安装器管理目录 | `--force`                     | `-Force`                        |
+| 安装本地包           | `--archive FILE --sha256 HEX` | `-ArchivePath FILE -Sha256 HEX` |
+
+管道安装时，将 Unix 参数放在 `sh -s --` 之后：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh |
+  sh -s -- --version v3.2.0 --no-modify-path
+```
+
+Windows 带参数安装：
+
+```powershell
+$installer = irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1
+& ([scriptblock]::Create($installer)) -Version v3.2.0 -NoModifyPath
+```
+
+## 离线安装
+
+离线安装必须提供发布标签和可信 SHA-256。示例中的摘要需要替换为发布页给出的真实值：
+
+```bash
+sh ./install.sh \
+  --version v3.2.0 \
+  --archive ./a3s-box-v3.2.0-linux-x86_64.tar.gz \
+  --sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+```powershell
+.\install.ps1 `
+  -Version v3.2.0 `
+  -ArchivePath .\a3s-box-v3.2.0-windows-x86_64.zip `
+  -Sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+安装器不会安装缺少有效摘要的下载内容。
+
+## 升级与卸载
+
+成功安装后，目标目录包含 `.a3s-box-install.json`。后续安装可以安全替换带有该标记的
+目录；没有标记的非空目录不会被覆盖，除非显式使用 `--force` 或 `-Force`。
+
+卸载时删除安装器报告的准确目录。Unix 还需从 shell 配置中删除
+`# >>> a3s-box installer >>>` 与 `# <<< a3s-box installer <<<` 之间的块；
+Windows 需从用户 `PATH` 移除该目录。卸载二进制不会自动删除运行时数据。
+
+安装后继续阅读[快速开始](./quick-start/)；生产部署前请检查
+[平台矩阵](/reference/platforms)。

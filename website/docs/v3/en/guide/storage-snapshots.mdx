@@ -1,0 +1,107 @@
+---
+title: Storage and snapshots
+description: Persist files, mount host data, and restore stopped workloads.
+---
+
+# Storage and snapshots
+
+A3S Box separates image layers, writable box filesystems, named volumes, and
+snapshots. Choose the narrowest storage primitive that matches the lifetime of
+the data.
+
+## Storage choices
+
+| Primitive           | Lifetime                 | Typical use                                 |
+| ------------------- | ------------------------ | ------------------------------------------- |
+| Writable box layer  | Until the box is removed | Temporary application state                 |
+| Bind mount          | Managed by the host      | Source trees and explicit host integration  |
+| Named volume        | Independent of a box     | Databases, caches, and durable service data |
+| `tmpfs`             | Until the workload stops | Secrets and disposable high-I/O data        |
+| Filesystem snapshot | Until explicitly removed | Checkpoints and fast copy-on-write restores |
+
+## Named volumes
+
+Create a volume, attach it, and inspect its ownership:
+
+```bash
+a3s-box volume create app-data --label purpose=application-state
+
+a3s-box run --rm \
+  --mount type=volume,source=app-data,target=/data \
+  alpine:3.20 -- \
+  sh -lc 'date -u > /data/created-at'
+
+a3s-box volume inspect app-data
+```
+
+The volume remains after the box exits. Box refuses to remove an in-use volume
+unless force removal is explicitly requested.
+
+## Bind mounts and tmpfs
+
+Mount a host directory read-only:
+
+```bash
+a3s-box run --rm \
+  --mount type=bind,source="$PWD/config",target=/etc/example,readonly \
+  alpine:3.20 -- \
+  cat /etc/example/app.conf
+```
+
+Bind mounts deliberately expose host paths to the workload. Do not mount
+credentials, the container runtime socket, or broad host directories into
+untrusted code.
+
+Use `--tmpfs` for data that must disappear with the workload:
+
+```bash
+a3s-box run --rm --tmpfs /run/secrets:rw,size=16m alpine:3.20
+```
+
+## Copy, diff, export, and commit
+
+The familiar filesystem commands are available without turning a running
+workload into an image implicitly:
+
+```bash
+a3s-box cp ./settings.json app:/etc/example/settings.json
+a3s-box diff app
+a3s-box export app -o app-rootfs.tar
+a3s-box commit app local/app:checkpoint
+```
+
+Stop a box before operations that require a stable host-visible filesystem on
+the current backend.
+
+## Create and restore a snapshot
+
+Filesystem snapshots are created from a stopped box:
+
+```bash
+a3s-box stop app
+a3s-box snapshot create app \
+  --name checkpoint-1 \
+  --description "before schema migration"
+
+a3s-box snapshot ls
+a3s-box snapshot inspect checkpoint-1
+a3s-box snapshot restore checkpoint-1 --name app-restored
+a3s-box start app-restored
+```
+
+The restored box is a new runtime record. Keep the source snapshot until no
+copy-on-write restore depends on it.
+
+## Cleanup policy
+
+Cleanup is explicit:
+
+```bash
+a3s-box snapshot prune --keep 10
+a3s-box volume prune
+a3s-box df
+```
+
+Snapshot pruning can also enforce a total byte ceiling with `--max-bytes`.
+Review retention requirements before pruning because snapshots and volumes may
+contain the only durable copy of workload data.

@@ -1,0 +1,131 @@
+---
+title: Networking and Compose
+description: Connect workloads, publish ports, and define multi-service projects.
+---
+
+# Networking and Compose
+
+A3S Box treats network behavior as an admitted runtime capability. A request
+that the selected host or isolation backend cannot enforce is rejected instead
+of being silently weakened.
+
+## Publish a MicroVM port
+
+Map host TCP port `8080` to guest port `80`:
+
+```bash
+a3s-box run -d \
+  --name web \
+  -p 8080:80 \
+  nginx:alpine
+
+a3s-box port web
+```
+
+Published ports are MicroVM features within the limits of the current host
+backend. Remove the box when it is no longer needed:
+
+```bash
+a3s-box stop web
+a3s-box rm web
+```
+
+## Create a named network
+
+Named bridge networks provide stable peer connectivity for MicroVM workloads:
+
+```bash
+a3s-box network create backend --subnet 10.89.20.0/24
+
+a3s-box run -d \
+  --name api \
+  --network backend \
+  local/api:dev
+
+a3s-box network inspect backend
+```
+
+Network membership is part of the persisted box configuration. The
+`network connect` and `network disconnect` commands operate on inactive boxes
+so the next start has a deterministic topology.
+
+## Access a shared-kernel Sandbox
+
+The explicit Linux Sandbox backend does not use MicroVM bridge publication.
+Forward one host-loopback TCP port to a running Sandbox instead:
+
+```bash
+a3s-box run -d \
+  --name sandbox-api \
+  --isolation sandbox \
+  local/api:dev
+
+a3s-box port-forward \
+  sandbox-api \
+  --host-port 18080 \
+  --guest-port 8080
+```
+
+The forwarding worker is tied to the current Sandbox generation. A restart or
+replacement cannot inherit a stale forwarding session.
+
+## Define a project with ACL
+
+ACL is the canonical A3S Box project format:
+
+```acl title="compose.acl"
+service "db" {
+  image = "postgres:17"
+  environment = {
+    POSTGRES_PASSWORD = env("POSTGRES_PASSWORD")
+  }
+  volumes = ["database:/var/lib/postgresql/data"]
+  networks = {
+    backend = {}
+  }
+}
+
+service "api" {
+  image = "local/api:dev"
+  command = ["serve", "--port", "8080"]
+  ports = ["8080:8080/tcp"]
+  depends_on = {
+    db = { condition = "service_healthy" }
+  }
+  networks = {
+    backend = { aliases = ["api.internal"] }
+  }
+}
+
+volume "database" {
+  driver = "local"
+}
+
+network "backend" {
+  driver = "bridge"
+}
+```
+
+Normalize the project before changing runtime state:
+
+```bash
+a3s-box compose -f compose.acl config
+a3s-box compose -f compose.acl up -d
+a3s-box compose -f compose.acl down
+```
+
+Docker Compose YAML is accepted as a bounded compatibility input. ACL remains
+the source of truth for new A3S Box configuration because it has one
+deterministic parser and canonical form.
+
+## Platform limits
+
+- Linux/KVM provides the broadest named-network and publication surface.
+- The shared-kernel Sandbox uses explicit loopback forwarding, not static
+  bridge publication.
+- Native WHPX bridge networking and Compose service networking are not
+  currently supported on Windows.
+- `strict` and `custom` network admission modes are not currently supported.
+
+See the [platform matrix](/reference/platforms) before making network behavior
+part of a deployment contract.

@@ -1,0 +1,30 @@
+{
+  "name": "a3s-box-website",
+  "version": "0.0.0",
+  "description": "Official website and documentation for A3S Box.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "rspress build",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:site": "node scripts/check-built-site.mjs",
+    "dev": "rspress dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "tsc --noEmit && npm run check:docs",
+    "preview": "rspress preview"
+  },
+  "dependencies": {
+    "@rspress/core": "^2.0.17",
+    "codehike": "1.0.7",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.8.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "prettier": "^3.8.3",
+    "typescript": "^6.0.3"
+  }
+}

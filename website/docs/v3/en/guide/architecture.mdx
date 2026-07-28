@@ -1,0 +1,115 @@
+---
+title: Architecture
+description: Understand the A3S Box local runtime, isolation resolver, and durable state model.
+---
+
+# Architecture
+
+A3S Box separates the public workload contract from host-specific execution
+backends. The caller describes an OCI workload and required capabilities. The
+runtime resolves whether the current host can enforce that request before it
+creates durable execution state.
+
+```text
+CLI / Rust SDK / machine bridge
+              |
+              v
+      ExecutionManager
+       |     |      |
+       |     |      +-- images, volumes, networks, snapshots
+       |     +--------- durable records and generation fencing
+       +--------------- capability and policy validation
+              |
+              v
+    MicroVM or explicit Sandbox
+```
+
+## Local runtime boundary
+
+Box does not ship a hosted account service, remote sandbox API, gateway, or
+connection endpoint. CLI and SDK operations target the runtime installed on
+the same machine.
+
+Applications that need remote orchestration should place their own
+authenticated service in front of a native SDK. That service becomes
+responsible for authentication, authorization, tenancy, rate limiting, and
+network exposure.
+
+## Execution manager
+
+The `ExecutionManager` owns the lifecycle state machine for all public
+surfaces. It coordinates:
+
+- create, start, inspect, stop, restart, kill, pause, resume, and remove;
+- image resolution and effective image metadata;
+- network and volume attachment;
+- health and restart policies;
+- logs, stats, exit status, and cleanup;
+- operation identity and generation fencing.
+
+The same manager backs the CLI and all language SDKs, preventing each surface
+from inventing a second lifecycle model.
+
+## Isolation resolver
+
+The resolver treats isolation as request data:
+
+1. Validate the requested resource and policy values.
+2. Discover the current host capabilities.
+3. Select the requested backend without automatic fallback.
+4. Reject unsupported network, snapshot, TEE, health, or platform
+   combinations.
+5. Persist the effective isolation class.
+6. Prepare resources and start the workload.
+
+This ordering makes fail-before-mutation behavior part of the public contract.
+
+## MicroVM path
+
+The default backend uses libkrun and a dedicated guest Linux kernel:
+
+```text
+OCI image
+  -> verified layers
+  -> content-addressed rootfs cache
+  -> per-box rootfs provider
+  -> guest init and host/guest channel
+  -> libkrun VM backend
+```
+
+Host virtualization is KVM on Linux, HVF on Apple Silicon, and WHPX on Windows
+x86_64.
+
+## Sandbox path
+
+The explicit Linux Sandbox backend uses A3S OCI Runtime with a shared host
+kernel. Admission requires the namespaces, seccomp, subordinate IDs, cgroup
+delegation, and other host primitives required by the selected profile.
+
+Sandbox is not a transparent fallback for a failed MicroVM request. Its threat
+model and feature surface differ intentionally.
+
+## Root filesystem and image identity
+
+OCI manifests commit to the image config and layer descriptors. Rootfs cache
+keys include the resolved manifest digest, so a mutable tag cannot reuse stale
+filesystem contents after it moves.
+
+Persistent rootfs generations, filesystem snapshots, and warm-pool templates
+retain the exact cache identity paired with their saved state.
+
+## Runtime home
+
+`A3S_HOME` overrides the default runtime home. Box stores durable records,
+images, boxes, logs, volumes, networks, snapshots, and cache metadata beneath
+that directory.
+
+Use a dedicated `A3S_HOME` for integration tests and automation that must not
+interfere with a developer's default runtime.
+
+## Related guides
+
+- [Images and builds](./images-builds/)
+- [Networking and Compose](./networking-compose/)
+- [Storage and snapshots](./storage-snapshots/)
+- [Platform boundaries](/reference/platforms)

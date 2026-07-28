@@ -1,0 +1,131 @@
+---
+title: Python SDK
+description: Automate local A3S Box Sandboxes with synchronous or asynchronous Python.
+---
+
+# Python SDK
+
+The `a3s-box` package provides synchronous and asynchronous APIs over the
+installed local runtime. It requires Python 3.10 or newer and has no remote
+service configuration.
+
+## Install
+
+```bash
+python -m pip install a3s-box
+```
+
+Install and verify the A3S Box runtime separately:
+
+```bash
+a3s-box --version
+a3s-box info
+```
+
+## Synchronous use
+
+```python
+from a3s_box import Sandbox
+
+
+def main() -> None:
+    with Sandbox.create("python:3.12-alpine") as sandbox:
+        result = sandbox.commands.run(
+            ["python", "-c", "print(6 * 7)"]
+        )
+        print(result.stdout)
+
+        sandbox.files.write("/workspace/note.txt", "hello")
+        print(sandbox.files.read("/workspace/note.txt"))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+The context manager cleans up the Sandbox even when guest execution raises an
+exception.
+
+## Asynchronous use
+
+```python
+import asyncio
+
+from a3s_box import AsyncSandbox
+
+
+async def main() -> None:
+    async with await AsyncSandbox.create(
+        "python:3.12-alpine"
+    ) as sandbox:
+        result = await sandbox.commands.run(
+            ["python", "-c", "print(6 * 7)"]
+        )
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Use the asynchronous API in services that already own an event loop. Do not
+wrap synchronous SDK calls in blocking work inside async request handlers.
+
+## Builder-style CI/CD
+
+```python
+from a3s_box import A3SBoxClient
+
+
+
+def main() -> None:
+    client = A3SBoxClient()
+    image = (
+        client.image("./ci")
+        .dockerfile("Dockerfile")
+        .tag("local/python-ci:latest")
+        .build_arg("PYTHON_VERSION", "3.12")
+        .build()
+    )
+
+    with (
+        client.sandbox(image.reference)
+        .cpus(4)
+        .memory_mb(4096)
+        .workdir("/workspace")
+        .start()
+    ) as sandbox:
+        result = (
+            sandbox.script(
+                "python -m pip install -r requirements.txt\npytest\n"
+            )
+            .interpreter("/bin/sh", "-se")
+            .env("CI", "true")
+            .run()
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(result.stderr)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+The same client exposes typed images, volumes, networks, snapshots,
+diagnostics, and disk usage.
+
+## Runtime selection
+
+The package resolves `a3s-box` on `PATH`. Set `A3S_BOX_BINARY` only when an
+application intentionally uses a non-default executable:
+
+```bash
+A3S_BOX_BINARY=/opt/a3s/bin/a3s-box python worker.py
+```
+
+Use runtime and SDK packages from the same release. An incompatible machine
+bridge fails during its capability handshake before normal operations begin.
+
+See the complete
+[package guide](https://github.com/A3S-Lab/Box/blob/main/sdk/python/README.md)
+and [PyPI project](https://pypi.org/project/a3s-box/).

@@ -1,0 +1,190 @@
+---
+title: Go SDK
+description: 使用 Go 构建支持 context 的本地 A3S Box worker 和服务。
+---
+
+# Go SDK
+
+Go SDK 以支持 `context.Context`、并发安全的方式访问已安装的 A3S Box 运行时。
+v3 module 需要 Go 1.25 或更高版本。
+
+## 安装
+
+```bash
+go get github.com/A3S-Lab/Box/sdk/go/v3
+```
+
+安装匹配的 A3S Box 运行时，并用 `a3s-box info` 验证。
+
+## 创建 Sandbox
+
+下面是完整程序：
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    box "github.com/A3S-Lab/Box/sdk/go/v3"
+)
+
+func main() {
+    ctx := context.Background()
+
+    sandbox, err := box.Create(ctx, "alpine:3.20")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sandbox.Close(context.Background())
+
+    result, err := sandbox.Run(
+        ctx,
+        box.Argv("sh", "-lc", "printf 'hello from A3S Box'"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println(result.StdoutString())
+}
+```
+
+直接执行使用 `box.Argv(...)`；只有明确需要客体 shell 语法时才使用 `box.Shell(...)`。
+
+## 构建器式 CI/CD
+
+下面的完整程序从 `./ci/Dockerfile` 构建镜像并执行测试：
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    box "github.com/A3S-Lab/Box/sdk/go/v3"
+)
+
+func main() {
+    if err := run(); err != nil {
+        log.Fatal(err)
+    }
+}
+
+func run() error {
+    ctx := context.Background()
+    client, err := box.NewClient(ctx)
+    if err != nil {
+        return err
+    }
+
+    image, err := client.
+        Image("./ci").
+        Dockerfile("Dockerfile").
+        Tag("local/go-ci:latest").
+        BuildArg("GO_VERSION", "1.25").
+        Build(ctx)
+    if err != nil {
+        return err
+    }
+
+    sandbox, err := client.
+        Sandbox(image.Reference).
+        CPUs(4).
+        MemoryMiB(4096).
+        Start(ctx)
+    if err != nil {
+        return err
+    }
+    defer sandbox.Close(context.Background())
+
+    result, err := sandbox.
+        Script("go test ./...\n").
+        Interpreter("/bin/sh", "-se").
+        Env("CI", "true").
+        Directory("/workspace").
+        Run(ctx)
+    if err != nil {
+        return err
+    }
+    if result.ExitCode != 0 {
+        return fmt.Errorf("tests failed: %s", result.StderrString())
+    }
+
+    return nil
+}
+```
+
+## 取消与错误
+
+所有运行时 I/O 方法都接受 `context.Context`。下面的完整程序为客体操作设置调用方
+截止时间：
+
+```go
+package main
+
+import (
+    "context"
+    "errors"
+    "fmt"
+    "log"
+    "time"
+
+    box "github.com/A3S-Lab/Box/sdk/go/v3"
+)
+
+func main() {
+    if err := run(); err != nil {
+        log.Fatal(err)
+    }
+}
+
+func run() error {
+    sandbox, err := box.Create(context.Background(), "alpine:3.20")
+    if err != nil {
+        return err
+    }
+    defer sandbox.Close(context.Background())
+
+    ctx, cancel := context.WithTimeout(
+        context.Background(),
+        10*time.Minute,
+    )
+    defer cancel()
+
+    result, err := sandbox.Run(
+        ctx,
+        box.Argv("sh", "-lc", "sleep 1; printf done"),
+    )
+    if errors.Is(err, context.DeadlineExceeded) {
+        return fmt.Errorf("job deadline exceeded: %w", err)
+    }
+    if err != nil {
+        return err
+    }
+
+    fmt.Println(result.StdoutString())
+    return nil
+}
+```
+
+用 `errors.Is` 匹配 `box.ErrNotFound`、`box.ErrConflict` 和
+`box.ErrUnavailable` 等稳定类别；用 `errors.As` 检查类型化 `*box.Error`。
+
+## 选择运行时
+
+SDK 先解析 `A3S_BOX_BINARY`，再从 `PATH` 查找 `a3s-box`：
+
+```bash
+A3S_BOX_BINARY=/opt/a3s/bin/a3s-box go run ./cmd/worker
+```
+
+命令和文件数据支持二进制；字符串帮助方法只用于文本工作负载。
+
+完整说明见
+[module 指南](https://github.com/A3S-Lab/Box/blob/main/sdk/go/README.md)和
+[Go API 参考](https://pkg.go.dev/github.com/A3S-Lab/Box/sdk/go/v3)。

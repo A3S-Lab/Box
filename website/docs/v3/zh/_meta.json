@@ -1,0 +1,17 @@
+[
+  {
+    "type": "dir",
+    "name": "guide",
+    "label": "指南"
+  },
+  {
+    "type": "dir",
+    "name": "sdk",
+    "label": "SDK"
+  },
+  {
+    "type": "dir",
+    "name": "reference",
+    "label": "参考"
+  }
+]

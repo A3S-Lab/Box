@@ -1,0 +1,88 @@
+---
+title: SDK overview
+description: Choose a native A3S Box SDK and understand the shared local contract.
+---
+
+# Native SDKs
+
+A3S Box provides first-party Rust, Python, TypeScript, and Go SDKs. They manage
+the same local images, Sandboxes, volumes, networks, snapshots, logs, and
+runtime state as the CLI.
+
+## Choose a package
+
+| Language                    | Package                            | Best fit                                                     |
+| --------------------------- | ---------------------------------- | ------------------------------------------------------------ |
+| [Rust](./rust/)             | `a3s-box-sdk`                      | Direct typed runtime integration and management applications |
+| [Python](./python/)         | `a3s-box`                          | Synchronous or asynchronous automation and data tooling      |
+| [TypeScript](./typescript/) | `@a3s-lab/box`                     | Node.js applications and JavaScript build systems            |
+| [Go](./go/)                 | `github.com/A3S-Lab/Box/sdk/go/v3` | Context-aware services, agents, and CI workers               |
+
+Each language has its own guide and complete example. You do not need to
+translate a Python example into Go or switch languages halfway through a
+workflow.
+
+## Shared contract
+
+All SDKs are local-first:
+
+- Install the `a3s-box` runtime on the same host.
+- Do not configure a remote endpoint, domain, account, or API key.
+- Use the SDK and runtime from the same A3S Box release line.
+- Treat isolation as part of the request: MicroVM is the default; the
+  shared-kernel Sandbox is an explicit Linux-only selection.
+- Expect unsupported host and backend combinations to fail before mutation.
+
+Rust calls typed runtime components directly. Python, TypeScript, and Go use
+the installed runtime's versioned machine bridge and never parse human CLI
+output.
+
+## Common object model
+
+The high-level surface follows the same concepts in every language:
+
+```text
+Client
+├── images and builders
+├── named volumes
+├── named networks
+├── runtime diagnostics
+└── Sandbox
+    ├── lifecycle
+    ├── commands and scripts
+    ├── files
+    ├── logs and stats
+    └── filesystem snapshots
+```
+
+The SDK owns no separate daemon and creates no parallel state model. A box
+started from one SDK is visible to the CLI and the other SDKs.
+
+## Lifecycle rules
+
+Sandbox lifecycle is generation-fenced. A stale handle cannot mutate a newer
+incarnation of the same box. `stop` preserves a durable box, `restart`
+advances its generation, terminal removal deletes its runtime record, and the
+high-level cleanup helper combines stop and removal.
+
+For restart retries, persist and reuse the same operation identity until the
+original outcome is known. This prevents an ambiguous network or process
+failure from creating a second lifecycle transition.
+
+## Binary and text data
+
+Command output and file primitives are binary-safe. Language-specific string
+helpers are conveniences for text workloads; do not use them for archives,
+images, or arbitrary generated data.
+
+## Next step
+
+Pick one language:
+
+- [Rust SDK](./rust/)
+- [Python SDK](./python/)
+- [TypeScript SDK](./typescript/)
+- [Go SDK](./go/)
+
+For the underlying isolation model, read
+[Architecture and isolation](/guide/architecture).

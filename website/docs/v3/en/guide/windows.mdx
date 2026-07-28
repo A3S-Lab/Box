@@ -1,0 +1,104 @@
+---
+title: Windows WHPX
+description: Prepare Windows for Linux OCI workloads and understand current limits.
+---
+
+# Windows WHPX
+
+A3S Box runs Linux OCI workloads directly on x86_64 Windows through Windows
+Hypervisor Platform (WHPX). WSL is not part of the runtime path.
+
+## Requirements
+
+- x86_64 Windows 10 or Windows 11
+- Hardware virtualization enabled in firmware
+- Windows Hypervisor Platform enabled
+- Windows Developer Mode enabled, or equivalent symbolic-link privilege
+- The complete matching A3S Box release package
+
+Enable WHPX from an elevated PowerShell prompt and restart if Windows requests
+it:
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
+```
+
+Install A3S Box in a regular PowerShell session:
+
+```powershell
+irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1 | iex
+```
+
+Open a new terminal, then verify the host:
+
+```powershell
+a3s-box --version
+a3s-box info
+```
+
+The diagnostic output should report `Virtualization: WHPX` and
+`OCI symlink support: available`.
+
+## Why Developer Mode matters
+
+Linux OCI images commonly use symbolic links for `/bin`, dynamic loaders, and
+shared libraries. Windows extraction must preserve those entries as real
+symbolic links; replacing them with copied files, hard links, or junctions
+would change OCI filesystem semantics.
+
+If Developer Mode is disabled and the process lacks the required privilege,
+image extraction fails with `ERROR_PRIVILEGE_NOT_HELD (1314)`. Enable
+Developer Mode under **Settings > System > Advanced > For developers** before
+retrying.
+
+## First workload
+
+PowerShell uses its own line-continuation and quoting rules:
+
+```powershell
+a3s-box run --name whpx-ok alpine:3.20 -- /bin/sh -c `
+  'echo WHPX_OK; echo WHPX_STDERR_OK >&2; uname -srm'
+
+a3s-box logs whpx-ok
+a3s-box inspect whpx-ok
+a3s-box rm whpx-ok
+```
+
+Exactly one vCPU is currently supported. Omitting `--cpus` selects the Windows
+default of one.
+
+## Current boundary
+
+| Capability                                     | Status on Windows |
+| ---------------------------------------------- | ----------------- |
+| Pull and run Linux OCI images                  | Supported         |
+| Foreground and detached lifecycle              | Supported         |
+| Logs, inspect, stats, and read-only attach     | Supported         |
+| Published TCP ports                            | Supported         |
+| Bind mounts and named volumes                  | Supported         |
+| Stopped-box commit and filesystem snapshots    | Supported         |
+| Container health checks                        | Not supported     |
+| Bridge networks and Compose service networking | Not supported     |
+| Interactive PTY and post-boot `exec`           | Not supported     |
+| Memory snapshot-fork, TEE, and CRI             | Not supported     |
+
+Unsupported requests fail during admission. They do not fall back to a weaker
+runtime path.
+
+## Package integrity
+
+Keep these files together in the installed release directory:
+
+```text
+a3s-box.exe
+a3s-box-shim.exe
+a3s-box-guest-init
+krun.dll
+libkrunfw.dll
+```
+
+Mixing DLLs or guest components from different releases is unsupported. Use
+the installer to replace the package as one verified operation.
+
+For source builds and real-host validation, see the complete
+[Windows WHPX guide](https://github.com/A3S-Lab/Box/blob/main/docs/windows-whpx.md).

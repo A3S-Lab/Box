@@ -1,0 +1,136 @@
+---
+title: TypeScript SDK
+description: Control local A3S Box Sandboxes from Node.js and TypeScript.
+---
+
+# TypeScript SDK
+
+`@a3s-lab/box` provides Promise-based local APIs for Node.js 20 or newer. It
+uses the installed A3S Box runtime and does not require a server URL or API key.
+
+## Install
+
+```bash
+npm install @a3s-lab/box
+```
+
+Verify the runtime before starting the application:
+
+```bash
+a3s-box --version
+a3s-box info
+```
+
+## Create a Sandbox
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('node:22-alpine');
+
+  try {
+    const result = await sandbox.commands.run('node -e "console.log(6 * 7)"');
+    console.log(result.stdout);
+
+    await sandbox.files.write('/workspace/note.txt', 'hello');
+    console.log(await sandbox.files.read('/workspace/note.txt'));
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+Always clean up in `finally` when the Sandbox outlives a single expression.
+
+## Builder-style CI/CD
+
+```typescript
+import { A3SBoxClient } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const client = new A3SBoxClient();
+  const image = await client
+    .image('./ci')
+    .dockerfile('Dockerfile')
+    .tag('local/node-ci:latest')
+    .buildArg('NODE_VERSION', '22')
+    .build();
+
+  const sandbox = await client
+    .sandbox(image.reference)
+    .cpus(4)
+    .memoryMb(4096)
+    .workdir('/workspace')
+    .start();
+
+  try {
+    const result = await sandbox
+      .script('npm ci\nnpm test\n')
+      .interpreter('/bin/sh', '-se')
+      .env('CI', 'true')
+      .run();
+
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr);
+    }
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+Script contents travel through standard input to the guest interpreter. They
+are not interpolated into a host shell.
+
+## Isolation selection
+
+MicroVM is the default. On a certified Linux host, explicitly select the
+shared-kernel Sandbox:
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20', {
+    isolation: 'sandbox',
+    cpus: 2,
+    memoryMb: 1024,
+  });
+
+  try {
+    const result = await sandbox.commands.run('id');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+Named bridge networks and static published ports are MicroVM-only. Use
+generation-fenced loopback forwarding for supported shared-kernel workloads.
+
+## Runtime selection
+
+Set `A3S_BOX_BINARY` only when the executable is not on `PATH`, or inject a
+typed local runtime in application tests. The SDK exchanges structured machine
+messages with the runtime and never parses CLI tables.
+
+See the complete
+[package guide](https://github.com/A3S-Lab/Box/blob/main/sdk/typescript/README.md)
+and [npm package](https://www.npmjs.com/package/@a3s-lab/box).

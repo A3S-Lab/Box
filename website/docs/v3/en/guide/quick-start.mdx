@@ -1,0 +1,301 @@
+---
+title: Quick start
+description: Run and manage your first A3S Box workload.
+pageType: doc-wide
+outline: false
+---
+
+import { Tab, Tabs } from '@rspress/core/theme';
+import CodeHikeCode from '../../../../theme/components/CodeHikeCode';
+import {
+  ScrollyCode,
+  ScrollyCoding,
+  ScrollyStep,
+  ScrollySteps,
+} from '../../../../theme/components/CodeWalkthrough';
+
+# Quick start
+
+This guide assumes `a3s-box --version` and `a3s-box info` succeed. Follow the
+[installation guide](./installation/) first if the runtime is not installed.
+
+## Inspect host capabilities
+
+```text
+a3s-box info
+```
+
+The output identifies the host architecture, virtualization backend, supported
+guest channel, and runtime paths. A workload is admitted only when the host can
+enforce the requested configuration.
+
+## Run one command in a MicroVM
+
+Omitting `--isolation` selects the default dedicated-kernel path:
+
+```bash
+a3s-box run --rm alpine:3.20 -- \
+  sh -lc 'echo "inside $(uname -s)"; uname -r'
+```
+
+Box pulls the OCI image if required, prepares a root filesystem, starts the
+MicroVM, propagates the workload exit code, and removes the terminal box.
+
+## Manage a long-running service
+
+```bash
+a3s-box run -d \
+  --name web \
+  --memory 1g \
+  -p 8080:80 \
+  nginx:alpine
+
+a3s-box ps
+a3s-box inspect web
+a3s-box logs -f web
+a3s-box exec web -- nginx -v
+a3s-box stats web --no-stream
+a3s-box stop web
+a3s-box rm web
+```
+
+Names are convenient queries; the runtime internally uses stable box IDs and
+generation fencing to reject stale lifecycle operations.
+
+## Persist data
+
+Create and attach a named volume:
+
+```bash
+a3s-box volume create app-data
+
+a3s-box run --rm \
+  --mount type=volume,source=app-data,target=/data \
+  alpine:3.20 -- \
+  sh -lc 'date -u > /data/created-at'
+
+a3s-box volume inspect app-data
+```
+
+See [storage and snapshots](./storage-snapshots/) for bind mounts, tmpfs,
+commits, exports, and filesystem snapshots.
+
+## Select the shared-kernel Sandbox
+
+On a certified Linux host, request the Sandbox explicitly:
+
+```bash
+a3s-box run --rm \
+  --isolation sandbox \
+  --cpus 2 \
+  --memory 512m \
+  alpine:3.20 -- \
+  sh -lc 'id; cat /proc/self/status'
+```
+
+An explicit `--isolation microvm` value is rejected. Omission is the public way
+to select the default, which prevents scripts from treating backend names as
+interchangeable compatibility modes.
+
+## Use a native SDK
+
+Each SDK example below is a complete program that creates a Sandbox, runs one
+guest command, prints the result, and cleans up.
+
+<Tabs groupId="box-sdk-language" className="box-sdk-tabs">
+<Tab label="Rust" value="rust">
+
+```rust
+use a3s_box_sdk::Sandbox;
+
+#[tokio::main]
+async fn main() -> Result<(), a3s_box_sdk::ClientError> {
+    let sandbox = Sandbox::create("alpine:3.20").await?;
+    let result = sandbox.commands.run("printf ready").await?;
+
+    println!("{}", result.stdout);
+    sandbox.kill().await?;
+    Ok(())
+}
+```
+
+</Tab>
+<Tab label="TypeScript" value="typescript">
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+</Tab>
+<Tab label="Python" value="python">
+
+```python
+from a3s_box import Sandbox
+
+
+def main() -> None:
+    with Sandbox.create("alpine:3.20") as sandbox:
+        result = sandbox.commands.run("printf ready")
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+</Tab>
+<Tab label="Go" value="go">
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    box "github.com/A3S-Lab/Box/sdk/go/v3"
+)
+
+func main() {
+    ctx := context.Background()
+    sandbox, err := box.Create(ctx, "alpine:3.20")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sandbox.Close(context.Background())
+
+    result, err := sandbox.Run(ctx, box.Argv("printf", "ready"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println(result.StdoutString())
+}
+```
+
+</Tab>
+</Tabs>
+
+## Code Hike walkthrough
+
+Scroll through the steps or select a card. The code panel stays in view and
+animates the token-level changes between three complete, runnable TypeScript
+programs.
+
+<ScrollyCoding ariaLabel="A3S Box TypeScript SDK lifecycle walkthrough">
+<ScrollySteps>
+<ScrollyStep index={0}>
+  <h3>Establish the boundary</h3>
+  <p>
+    Create the Sandbox from an OCI image. MicroVM isolation remains the default,
+    and the top-level handler makes startup failures visible.
+  </p>
+</ScrollyStep>
+<ScrollyStep index={1}>
+  <h3>Run guest work</h3>
+  <p>
+    Execute an argv-safe guest command and inspect its typed result. Cleanup
+    moves into <code>finally</code> before more work is added.
+  </p>
+</ScrollyStep>
+<ScrollyStep index={2}>
+  <h3>Persist, verify, clean up</h3>
+  <p>
+    Write and read a workspace file, reject a non-zero guest exit, and always
+    release the Sandbox deterministically.
+  </p>
+</ScrollyStep>
+</ScrollySteps>
+<ScrollyCode title="sandbox.ts">
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+  await sandbox.kill();
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    await sandbox.files.write('/workspace/status.txt', 'ready\n');
+    console.log(await sandbox.files.read('/workspace/status.txt'));
+
+    const result = await sandbox.commands.run('test -s /workspace/status.txt');
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr);
+    }
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+</ScrollyCode>
+</ScrollyCoding>
+
+The [SDK overview](/sdk/) explains the shared contract and links to
+language-specific guides.
+
+## Platform notes
+
+- Linux/KVM supports the broadest runtime surface.
+- macOS requires Apple Silicon and uses HVF.
+- Windows x86_64 uses WHPX and has explicit limitations for bridge networking,
+  post-boot exec, memory snapshots, TEE, Compose workloads, and CRI.
+
+Review the [platform matrix](/reference/platforms) and the
+[Windows guide](./windows/) before relying on a platform-specific feature.

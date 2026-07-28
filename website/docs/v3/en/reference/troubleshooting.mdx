@@ -1,0 +1,138 @@
+---
+title: Troubleshooting
+description: Diagnose installation, host admission, workload, SDK, and storage failures.
+---
+
+# Troubleshooting
+
+Start with the runtime's own diagnostics. Most failures are attributable to
+the installed release, host capability, requested backend, or workload image.
+
+## Collect a baseline
+
+```bash
+a3s-box --version
+a3s-box info
+a3s-box ps -a
+a3s-box df
+```
+
+For a specific workload:
+
+```bash
+a3s-box inspect <box>
+a3s-box logs <box>
+a3s-box events
+```
+
+When opening an issue, include the operating system and architecture, the
+virtualization backend reported by `info`, the exact command with secrets
+removed, the image digest, the workload exit code, and relevant logs.
+
+## `a3s-box` is not found
+
+Open a new terminal after installation so the updated user `PATH` is loaded.
+If the binary still cannot be resolved:
+
+- Check the destination printed by the installer.
+- Re-run the installer without `--no-modify-path` or `-NoModifyPath`.
+- Invoke the executable by its full path to distinguish installation from
+  shell configuration.
+- Avoid copying only the executable out of its release directory; sibling
+  runtime libraries and guest components must stay together.
+
+## Virtualization is unavailable
+
+`a3s-box info` reports the detected backend. Check:
+
+- KVM access and device permissions on Linux.
+- Apple Silicon and Hypervisor.framework availability on macOS.
+- Firmware virtualization and the `HypervisorPlatform` Windows feature for
+  WHPX.
+
+Box does not automatically fall back from the default MicroVM to the
+shared-kernel Sandbox. On a certified Linux host, request that backend
+explicitly with `--isolation sandbox`.
+
+## Windows image extraction fails with error 1314
+
+`ERROR_PRIVILEGE_NOT_HELD (1314)` means Windows could not create the symbolic
+links required by the OCI filesystem. Enable Developer Mode, open a new
+terminal, and retry. Do not replace image symlinks with copies or junctions.
+
+See [Windows WHPX](/guide/windows) for the complete host checklist.
+
+## A request is rejected before image pull
+
+This is normally capability admission working as designed. Common examples:
+
+- More than one vCPU on Windows WHPX
+- Health checks on Windows
+- Bridge networks or static published ports with shared-kernel isolation
+- VM-only TEE, warm-pool, or snapshot-fork features with Sandbox isolation
+- `strict` or `custom` network admission modes
+
+Remove the unsupported option or move the workload to a host/backend that can
+enforce it. Do not expect silent degradation.
+
+## The workload exits immediately
+
+Inspect its final state and logs:
+
+```bash
+a3s-box inspect <box>
+a3s-box logs <box>
+```
+
+Confirm that the image architecture matches the host path, the entrypoint
+exists, arguments use the intended exec or shell form, required files are
+mounted at the expected paths, and the process does not daemonize and exit.
+Foreground `run` propagates the guest workload's exit code.
+
+## A lifecycle call reports a conflict
+
+The box generation changed after the caller obtained its handle. Refresh the
+box with `inspect` or the SDK's get operation, then decide whether the intended
+action still applies.
+
+Do not blindly replay a restart with a new operation identity when the first
+outcome is unknown. Reuse the original identity so reconciliation resolves the
+same durable transition.
+
+## An SDK reports a protocol or capability error
+
+Python, TypeScript, and Go validate the installed runtime before normal
+operations. Install SDK and runtime packages from the same A3S Box release.
+Also check that `A3S_BOX_BINARY` does not point to an older development build:
+
+```bash
+a3s-box --version
+```
+
+The SDK intentionally fails closed instead of guessing how to map an
+incompatible operation.
+
+## Disk usage keeps growing
+
+Inspect ownership before cleanup:
+
+```bash
+a3s-box df
+a3s-box ps -a
+a3s-box images
+a3s-box volume ls
+a3s-box snapshot ls
+```
+
+Remove terminal boxes and unused images deliberately. Apply snapshot retention
+with `snapshot prune --keep <count>` or `--max-bytes <bytes>`. Named volumes
+may contain durable application data and should not be pruned without a
+backup policy.
+
+## Still stuck?
+
+Search existing
+[GitHub issues](https://github.com/A3S-Lab/Box/issues) before opening a new
+report. Include a minimal reproducer and diagnostics, but redact registry
+passwords, tokens, environment secrets, bind-mounted credentials, and sealed
+data.

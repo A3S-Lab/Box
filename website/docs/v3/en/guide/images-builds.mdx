@@ -1,0 +1,116 @@
+---
+title: Images and builds
+description: Pull, inspect, build, publish, and move OCI images with A3S Box.
+---
+
+# Images and builds
+
+A3S Box stores OCI images locally and uses the same image store from the CLI
+and every native SDK. Pulling or building an image once makes it available to
+later Sandbox runs.
+
+## Pull and inspect an image
+
+```bash
+a3s-box pull alpine:3.20
+a3s-box images
+a3s-box image-inspect alpine:3.20
+a3s-box history alpine:3.20
+```
+
+Use immutable digests for production automation:
+
+```bash
+a3s-box pull alpine@sha256:<digest>
+a3s-box run --rm alpine@sha256:<digest> -- cat /etc/alpine-release
+```
+
+Tags are mutable names. A digest identifies the exact manifest that Box
+resolved and verified.
+
+## Build from a Dockerfile
+
+Given this application:
+
+```dockerfile title="Dockerfile"
+FROM alpine:3.20
+RUN adduser -D -u 10001 app
+COPY server /usr/local/bin/server
+USER app
+ENTRYPOINT ["/usr/local/bin/server"]
+```
+
+build and run it locally:
+
+```bash
+a3s-box build -t local/example-server:dev .
+a3s-box run --rm local/example-server:dev
+```
+
+Select another build file with `-f`:
+
+```bash
+a3s-box build \
+  -f ./containers/Containerfile \
+  -t local/example-server:test \
+  .
+```
+
+The builder supports multi-stage builds, content-addressed caching, build
+arguments, and selected `RUN --mount` forms. Unsupported Dockerfile behavior
+fails explicitly instead of being ignored.
+
+## Tag and publish
+
+```bash
+a3s-box tag \
+  local/example-server:dev \
+  registry.example/team/example-server:3.2.0
+
+a3s-box login registry.example
+a3s-box push registry.example/team/example-server:3.2.0
+a3s-box logout registry.example
+```
+
+Use a registry token with the narrowest required scope. CI systems should pass
+credentials through their secret store and avoid printing login commands or
+environment values in logs.
+
+## Move images between hosts
+
+Save an image as an OCI archive and load it on another machine:
+
+```bash
+a3s-box save local/example-server:dev -o example-server.tar
+a3s-box load -i example-server.tar
+```
+
+`import` creates an image from a root filesystem archive. It is different from
+`load`, which consumes an OCI image archive and preserves image metadata.
+
+## Reclaim space
+
+Inspect runtime disk use before deleting data:
+
+```bash
+a3s-box df
+a3s-box image-prune
+```
+
+`image-prune` removes images that are no longer referenced according to its
+selected policy. For broader cleanup, review the proposed changes before using
+`a3s-box system-prune`.
+
+## Build from an SDK
+
+All four SDKs expose typed image builders. This keeps build arguments and tags
+in application code without parsing human CLI output. Each language guide
+contains a complete, runnable builder program:
+
+- [Rust](/sdk/rust)
+- [TypeScript](/sdk/typescript)
+- [Python](/sdk/python)
+- [Go](/sdk/go)
+
+Continue with the [SDK overview](/sdk/) or the
+[networking and Compose guide](./networking-compose/).

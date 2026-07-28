@@ -1,0 +1,114 @@
+---
+title: Installation
+description: Install verified A3S Box release packages on Linux, macOS, and Windows.
+---
+
+# Installation
+
+A3S Box provides native launchers for every supported host:
+
+- `install.sh` for Linux and macOS, without requiring PowerShell.
+- `install.ps1` for Windows, without requiring Bash.
+
+Both launchers resolve a GitHub release, verify its SHA-256 digest before
+extraction, validate the package layout and reported version, and replace a
+previous installer-managed copy as one staged operation.
+
+## Supported release targets
+
+| Host    | Architecture  | Release target   |
+| ------- | ------------- | ---------------- |
+| Linux   | x86_64        | `linux-x86_64`   |
+| Linux   | arm64         | `linux-arm64`    |
+| macOS   | Apple Silicon | `macos-arm64`    |
+| Windows | x86_64        | `windows-x86_64` |
+
+Intel macOS and Windows on ARM are rejected rather than receiving an
+incompatible archive. The installer does not enable KVM, HVF, WHPX, or Linux
+Sandbox host capabilities.
+
+## One-line installation
+
+Linux or macOS:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh | sh
+```
+
+Windows PowerShell 5.1 or newer:
+
+```powershell
+irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1 | iex
+```
+
+Homebrew on Linux or macOS:
+
+```bash
+brew install a3s-lab/tap/a3s-box
+```
+
+Open a new terminal if the current process does not see the updated `PATH`,
+then verify the runtime:
+
+```text
+a3s-box --version
+a3s-box info
+```
+
+> [!TIP]
+> A network pipe executes the current `main` installer. Download and review the
+> launcher first when your environment requires a pinned or audited script.
+
+## Pin a version or destination
+
+| Behavior                       | Linux/macOS                   | Windows                         |
+| ------------------------------ | ----------------------------- | ------------------------------- |
+| Pin a release                  | `--version v3.2.0`            | `-Version v3.2.0`               |
+| Choose destination             | `--install-dir PATH`          | `-InstallDir PATH`              |
+| Do not change `PATH`           | `--no-modify-path`            | `-NoModifyPath`                 |
+| Replace an unmanaged directory | `--force`                     | `-Force`                        |
+| Install a local package        | `--archive FILE --sha256 HEX` | `-ArchivePath FILE -Sha256 HEX` |
+
+Pass Unix options after `sh -s --`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/install.sh |
+  sh -s -- --version v3.2.0 --no-modify-path
+```
+
+Invoke downloaded PowerShell text as a script block when options are needed:
+
+```powershell
+$installer = irm https://raw.githubusercontent.com/A3S-Lab/Box/main/install.ps1
+& ([scriptblock]::Create($installer)) -Version v3.2.0 -NoModifyPath
+```
+
+The corresponding environment variables are `A3S_BOX_VERSION`,
+`A3S_BOX_INSTALL_DIR`, `A3S_BOX_ARCHIVE`, and `A3S_BOX_SHA256`.
+
+## Managed upgrades
+
+Every successful install writes `.a3s-box-install.json` in its destination. A
+later installer run may replace a directory carrying that marker. A non-empty
+directory without the marker is left untouched unless force is explicit.
+
+The new package is copied to a sibling staging directory and checked before
+activation. If activation or the final version check fails, the previous
+managed directory is restored.
+
+## Uninstall
+
+Delete the exact installation directory reported by the installer. On Unix,
+remove the block between `# >>> a3s-box installer >>>` and
+`# <<< a3s-box installer <<<` from the selected shell profile. On Windows,
+remove that installation directory from the per-user `PATH`.
+
+Uninstalling binaries intentionally does not delete runtime state stored
+elsewhere.
+
+## Next step
+
+Continue with the [quick start](./quick-start/) or review the
+[platform matrix](/reference/platforms) before running production workloads.

@@ -1,0 +1,109 @@
+---
+title: 故障排查
+description: 排查安装、主机准入、工作负载、SDK 和存储故障。
+---
+
+# 故障排查
+
+先从运行时自身的诊断信息开始。大多数故障都可以归因到已安装版本、主机能力、请求的后端或工作负载镜像。
+
+## 收集基线信息
+
+```bash
+a3s-box --version
+a3s-box info
+a3s-box ps -a
+a3s-box df
+```
+
+针对特定工作负载：
+
+```bash
+a3s-box inspect <box>
+a3s-box logs <box>
+a3s-box events
+```
+
+提交问题时，请提供操作系统与架构、`info` 报告的虚拟化后端、已移除密钥的完整命令、镜像摘要、工作负载退出码和相关日志。
+
+## 找不到 `a3s-box`
+
+安装后打开一个新终端，让更新后的用户 `PATH` 生效。如果仍然无法解析命令：
+
+- 检查安装程序输出的目标目录。
+- 不带 `--no-modify-path` 或 `-NoModifyPath` 重新运行安装程序。
+- 使用可执行文件的完整路径，以区分安装问题与 Shell 配置问题。
+- 不要只把可执行文件移出发布目录；同级运行时库和来宾组件必须保持在一起。
+
+## 虚拟化不可用
+
+`a3s-box info` 会报告检测到的后端。请检查：
+
+- Linux 上的 KVM 访问权限和设备权限。
+- macOS 上是否使用 Apple Silicon，以及 Hypervisor.framework 是否可用。
+- Windows 固件虚拟化和 `HypervisorPlatform` 功能是否已启用，以便使用 WHPX。
+
+Box 不会从默认 MicroVM 自动降级到共享内核 Sandbox。在经过认证的 Linux 主机上，可以使用 `--isolation sandbox` 显式请求该后端。
+
+## Windows 镜像解压出现错误 1314
+
+`ERROR_PRIVILEGE_NOT_HELD (1314)` 表示 Windows 无法创建 OCI 文件系统所需的符号链接。启用“开发者模式”，打开新终端后重试。不要用副本或联接替换镜像中的符号链接。
+
+完整主机检查清单请参阅 [Windows WHPX](/guide/windows)。
+
+## 请求在拉取镜像前被拒绝
+
+这通常是能力准入按预期工作。常见情况包括：
+
+- Windows WHPX 上请求超过一个 vCPU
+- Windows 上请求健康检查
+- 使用共享内核隔离时请求桥接网络或静态发布端口
+- 使用 Sandbox 隔离时请求仅适用于虚拟机的 TEE、预热池或快照分叉能力
+- 请求 `strict` 或 `custom` 网络准入模式
+
+请移除不支持的选项，或将工作负载迁移到能够执行这些能力的主机和后端。不要依赖静默降级。
+
+## 工作负载立即退出
+
+检查最终状态和日志：
+
+```bash
+a3s-box inspect <box>
+a3s-box logs <box>
+```
+
+确认镜像架构与主机路径匹配、入口点存在、参数使用了预期的 exec 或 shell 形式、所需文件挂载到了预期路径，并且进程没有在守护化后立即退出。前台 `run` 会透传来宾工作负载的退出码。
+
+## 生命周期调用报告冲突
+
+调用方获得句柄后，Box 的代次已经变化。通过 `inspect` 或 SDK 的 get 操作刷新 Box，再判断原操作是否仍然适用。
+
+当第一次操作结果未知时，不要使用新的操作标识盲目重放重启。应复用原始标识，让协调逻辑解析同一个持久化状态转换。
+
+## SDK 报告协议或能力错误
+
+Python、TypeScript 和 Go 会在常规操作前校验已安装运行时。请安装同一 A3S Box 发布版本中的 SDK 与运行时包，并检查 `A3S_BOX_BINARY` 是否指向较旧的开发构建：
+
+```bash
+a3s-box --version
+```
+
+SDK 会按设计直接失败，而不会猜测如何映射不兼容的操作。
+
+## 磁盘占用持续增长
+
+清理前先检查数据归属：
+
+```bash
+a3s-box df
+a3s-box ps -a
+a3s-box images
+a3s-box volume ls
+a3s-box snapshot ls
+```
+
+有意识地删除已终止的 Box 和未使用镜像。使用 `snapshot prune --keep <count>` 或 `--max-bytes <bytes>` 应用快照保留策略。命名卷可能包含持久业务数据，没有备份策略时不应清理。
+
+## 仍未解决？
+
+提交新报告前，请先搜索已有的 [GitHub Issues](https://github.com/A3S-Lab/Box/issues)。请附上最小复现和诊断信息，但务必移除仓库密码、令牌、环境变量密钥、绑定挂载的凭据和密封数据。

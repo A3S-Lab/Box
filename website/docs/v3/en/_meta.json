@@ -1,0 +1,17 @@
+[
+  {
+    "type": "dir",
+    "name": "guide",
+    "label": "Guides"
+  },
+  {
+    "type": "dir",
+    "name": "sdk",
+    "label": "SDKs"
+  },
+  {
+    "type": "dir",
+    "name": "reference",
+    "label": "Reference"
+  }
+]

@@ -1,0 +1,72 @@
+---
+title: 平台矩阵
+description: 比较主机后端、隔离模式和经过验证的 A3S Box 能力。
+---
+
+# 平台矩阵
+
+API 已实现不等于它在每种主机上都有生产保证。准入取决于操作系统、架构、虚拟化后端
+和请求的隔离类别。
+
+## 主机执行路径
+
+| 路径            | 当前状态                     | 边界                                                         |
+| --------------- | ---------------------------- | ------------------------------------------------------------ |
+| Linux MicroVM   | 主要本地运行时               | 需要 KVM 和 libkrun，能力最完整                              |
+| macOS MicroVM   | 已实现并通过构建检查         | 仅 Apple Silicon 和 Hypervisor.framework，不支持 Intel macOS |
+| Windows MicroVM | 已实现并通过真实主机浸泡测试 | x86_64 WHPX，固定一个 vCPU，并受下列限制                     |
+| Linux Sandbox   | 预览，已通过真实运行时 CI    | 仅经过认证的 Linux 主机，共享主机内核                        |
+| Kubernetes      | 预览                         | Linux CRI v1 与 containerd runtime-v2 shim，不声明完整一致性 |
+| TEE             | 取决于主机                   | 面向 SEV-SNP 的流程；模拟不构成硬件安全证据                  |
+
+在每台目标主机调度工作负载前执行：
+
+```bash
+a3s-box info
+```
+
+## 隔离对比
+
+| 契约                   | 默认 MicroVM                                 | 显式 Sandbox                                                   |
+| ---------------------- | -------------------------------------------- | -------------------------------------------------------------- |
+| 选择                   | 省略 `--isolation`                           | `--isolation sandbox`                                          |
+| 运行时边界             | 独立 Linux 客体内核                          | 共享主机 Linux 内核                                            |
+| 预期信任               | 不可信工作负载和更强租户边界                 | 可信或半可信工具与自动化                                       |
+| 主机要求               | Linux/KVM、Apple Silicon/HVF 或 Windows/WHPX | 具备 namespace、seccomp、从属 ID 和 cgroup v2 委派的认证 Linux |
+| 桥接网络与静态端口发布 | 在主机边界内支持                             | 拒绝，使用显式回环转发                                         |
+| TEE、预热池、快照分叉  | 仅符合条件的主机                             | 拒绝                                                           |
+| 自动回退               | 永不                                         | 永不                                                           |
+
+显式 `--isolation microvm` 会被拒绝；省略参数才是公开默认方式。
+
+## Windows WHPX 限制
+
+| 能力                                             | Windows  |
+| ------------------------------------------------ | -------- |
+| Linux OCI 拉取与运行                             | 支持     |
+| 前台和后台生命周期                               | 支持     |
+| 日志、检查、统计和只读 attach                    | 支持     |
+| TCP 端口发布                                     | 支持     |
+| 绑定挂载、命名卷、停止盒子 commit 和文件系统快照 | 支持     |
+| vCPU                                             | 固定一个 |
+| 容器健康检查                                     | 不支持   |
+| 桥接网络和 Compose 服务网络                      | 不支持   |
+| 交互式 PTY 和启动后 `exec`                       | 不支持   |
+| 内存快照分叉、TEE 和 CRI                         | 不支持   |
+
+首次使用前阅读 [Windows WHPX 指南](/guide/windows)。
+
+## 证据等级
+
+- 单元与夹具测试证明确定性逻辑和协议行为。
+- 托管编译证明目标可以构建。
+- 真实主机冒烟测试证明该主机和后端上观察到的工作负载。
+- 浸泡测试增加重复生命周期和清理证据。
+- TEE 模拟永远不能证明硬件支持的机密性。
+
+发布资格应记录主机、架构、后端、镜像摘要、运行时版本和证据包。除非硬件路径实际
+运行，托管构建通过不能证明 KVM、HVF、WHPX 或 TEE 启动。
+
+详细发布门槛见
+[主机集成](https://github.com/A3S-Lab/Box/blob/main/docs/host-integration.md)和
+[浸泡测试计划](https://github.com/A3S-Lab/Box/blob/main/docs/soak-test-plan.md)。

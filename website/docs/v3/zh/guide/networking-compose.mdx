@@ -1,0 +1,123 @@
+---
+title: 网络与 Compose
+description: 连接工作负载、发布端口并定义多服务 ACL 项目。
+---
+
+# 网络与 Compose
+
+A3S Box 将网络行为作为需要准入的运行时能力。所选主机或隔离后端无法执行请求时，
+运行时会明确拒绝，而不是静默削弱策略。
+
+## 发布 MicroVM 端口
+
+将主机 TCP 端口 `8080` 映射到客体端口 `80`：
+
+```bash
+a3s-box run -d \
+  --name web \
+  -p 8080:80 \
+  nginx:alpine
+
+a3s-box port web
+```
+
+端口发布是 MicroVM 能力，并受当前主机后端限制。使用完毕后删除盒子：
+
+```bash
+a3s-box stop web
+a3s-box rm web
+```
+
+## 创建命名网络
+
+命名桥接网络为 MicroVM 工作负载提供稳定的对等连接：
+
+```bash
+a3s-box network create backend --subnet 10.89.20.0/24
+
+a3s-box run -d \
+  --name api \
+  --network backend \
+  local/api:dev
+
+a3s-box network inspect backend
+```
+
+网络成员关系属于持久盒子配置。`network connect` 和 `network disconnect` 操作未运行
+的盒子，使下一次启动拥有确定的拓扑。
+
+## 访问共享内核 Sandbox
+
+显式 Linux Sandbox 不使用 MicroVM 的静态桥接发布。应将主机回环端口显式转发到
+运行中的 Sandbox：
+
+```bash
+a3s-box run -d \
+  --name sandbox-api \
+  --isolation sandbox \
+  local/api:dev
+
+a3s-box port-forward \
+  sandbox-api \
+  --host-port 18080 \
+  --guest-port 8080
+```
+
+转发工作进程与当前 Sandbox 代绑定，重启或替换后的实例不会继承陈旧转发会话。
+
+## 使用 ACL 定义项目
+
+ACL 是 A3S Box 项目的规范配置格式。下面的代码块使用专属 ACL 语法高亮：
+
+```acl title="compose.acl"
+service "db" {
+  image = "postgres:17"
+  environment = {
+    POSTGRES_PASSWORD = env("POSTGRES_PASSWORD")
+  }
+  volumes = ["database:/var/lib/postgresql/data"]
+  networks = {
+    backend = {}
+  }
+}
+
+service "api" {
+  image = "local/api:dev"
+  command = ["serve", "--port", "8080"]
+  ports = ["8080:8080/tcp"]
+  depends_on = {
+    db = { condition = "service_healthy" }
+  }
+  networks = {
+    backend = { aliases = ["api.internal"] }
+  }
+}
+
+volume "database" {
+  driver = "local"
+}
+
+network "backend" {
+  driver = "bridge"
+}
+```
+
+修改运行时状态前先规范化项目：
+
+```bash
+a3s-box compose -f compose.acl config
+a3s-box compose -f compose.acl up -d
+a3s-box compose -f compose.acl down
+```
+
+Docker Compose YAML 是有限兼容输入。新配置默认使用 ACL，因为它只有一个确定的
+解析器和规范形式；ACL 必须由 `a3s-acl` 解析，不能交给 HCL 解析器。
+
+## 平台边界
+
+- Linux/KVM 提供最完整的命名网络和端口发布能力。
+- 共享内核 Sandbox 使用显式回环转发，不使用静态桥接发布。
+- Windows 当前不支持原生 WHPX 桥接网络和 Compose 服务网络。
+- `strict` 与 `custom` 网络准入模式当前不受支持。
+
+将网络行为写入部署契约前，请检查[平台矩阵](/reference/platforms)。
