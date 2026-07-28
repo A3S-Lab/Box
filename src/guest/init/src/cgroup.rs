@@ -139,16 +139,61 @@ fn move_control_plane_to_child(cgroup_root: &str) -> bool {
         }
     }
 
-    let procs = format!("{control}/cgroup.procs");
-    if let Err(error) = write_cgroup_file(&procs, &std::process::id().to_string()) {
-        warn!(error = %error, path = procs, "cgroup: failed to isolate the control plane");
-        return false;
+    // A native OCI PID namespace has a dedicated PID 1 reaper and launches
+    // guest-init as PID 2. Both are trusted control-plane processes, and both
+    // must leave the namespace-root cgroup before domain controllers can be
+    // enabled there. Snapshot the startup set before any user workload exists
+    // and move every process into the one management child.
+    let root_procs = format!("{cgroup_root}/cgroup.procs");
+    let process_ids = match read_cgroup_process_ids(&root_procs) {
+        Ok(process_ids) => process_ids,
+        Err(error) => {
+            warn!(error = %error, path = root_procs, "cgroup: failed to enumerate control-plane processes");
+            return false;
+        }
+    };
+    let control_procs = format!("{control}/cgroup.procs");
+    for process_id in &process_ids {
+        if let Err(error) = write_cgroup_file(&control_procs, &process_id.to_string()) {
+            warn!(error = %error, path = control_procs, process_id, "cgroup: failed to isolate a control-plane process");
+            return false;
+        }
+    }
+    match read_cgroup_process_ids(&root_procs) {
+        Ok(remaining) if remaining.is_empty() => {}
+        Ok(remaining) => {
+            warn!(
+                ?remaining,
+                path = root_procs,
+                "cgroup: control-plane parent remained populated"
+            );
+            return false;
+        }
+        Err(error) => {
+            warn!(error = %error, path = root_procs, "cgroup: failed to verify the empty control-plane parent");
+            return false;
+        }
     }
     debug!(
         path = control,
+        process_count = process_ids.len(),
         "cgroup: moved control plane out of workload parent"
     );
     true
+}
+
+fn read_cgroup_process_ids(path: &str) -> std::io::Result<Vec<u32>> {
+    std::fs::read_to_string(path)?
+        .lines()
+        .map(|value| {
+            value.trim().parse::<u32>().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid cgroup process ID {value:?}: {error}"),
+                )
+            })
+        })
+        .collect()
 }
 
 fn write_cgroup_file(path: &str, value: &str) -> std::io::Result<()> {
@@ -313,7 +358,7 @@ impl Drop for ContainerCgroup {
 
 #[cfg(test)]
 mod tests {
-    use super::{shares_to_weight, CgroupLimits, ContainerCgroup};
+    use super::{read_cgroup_process_ids, shares_to_weight, CgroupLimits, ContainerCgroup};
 
     #[test]
     fn main_container_keeps_an_empty_cgroup_for_future_live_updates() {
@@ -337,5 +382,24 @@ mod tests {
                                                 // Out-of-range inputs are clamped, never panic / overflow.
         assert_eq!(shares_to_weight(0), 1);
         assert_eq!(shares_to_weight(u64::MAX), 10_000);
+    }
+
+    #[test]
+    fn cgroup_process_ids_reject_malformed_membership() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("cgroup.procs");
+        std::fs::write(&path, "1\n2\n").unwrap();
+        assert_eq!(
+            read_cgroup_process_ids(path.to_str().unwrap()).unwrap(),
+            vec![1, 2]
+        );
+
+        std::fs::write(&path, "1\nnot-a-pid\n").unwrap();
+        assert_eq!(
+            read_cgroup_process_ids(path.to_str().unwrap())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
     }
 }
