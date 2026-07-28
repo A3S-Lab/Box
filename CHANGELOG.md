@@ -71,6 +71,9 @@ All notable changes to A3S Box will be documented in this file.
 - **Linux bridge peer switching.** Named-network peer Ethernet frames are
   switched between libkrun guests by a bounded shim adapter while passt remains
   responsible for gateway traffic, published ports, and outbound connectivity.
+- **Ubuntu passt sandbox startup.** Bridge startup now waits until passt has
+  completed sandbox initialization and, only for an explicit unprivileged-userns
+  denial under a root launcher, retries with root as passt's sandbox identity.
 
 ## [3.1.0] — 2026-07-23
 

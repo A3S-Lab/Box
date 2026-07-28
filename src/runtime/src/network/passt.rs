@@ -9,6 +9,11 @@ use std::net::Ipv4Addr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::time::{Duration, Instant};
+
+const PASST_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const PASST_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const PASST_STARTUP_STABILITY_WINDOW: Duration = Duration::from_millis(250);
 
 /// Manages a passt daemon instance for a single box.
 #[derive(Debug)]
@@ -139,15 +144,41 @@ impl PasstManager {
             }
         }
 
-        // Remove stale socket if it exists
-        if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path).ok();
+        self.remove_launch_artifacts();
+
+        match self.spawn_attempt(ip, gateway, prefix_len, dns_servers, port_map, false) {
+            Ok(()) => Ok(()),
+            Err(initial_error) => {
+                let stderr = self.read_stderr();
+                if !should_retry_passt_as_root(&stderr) {
+                    return Err(initial_error);
+                }
+
+                tracing::warn!(
+                    error = %initial_error,
+                    "passt could not create its unprivileged user namespace; retrying with root as the sandbox identity"
+                );
+                self.cleanup_failed_launch();
+                self.spawn_attempt(ip, gateway, prefix_len, dns_servers, port_map, true)
+            }
         }
-        if self.pcap_path.exists() {
-            std::fs::remove_file(&self.pcap_path).ok();
-        }
+    }
+
+    fn spawn_attempt(
+        &mut self,
+        ip: Ipv4Addr,
+        gateway: Ipv4Addr,
+        prefix_len: u8,
+        dns_servers: &[Ipv4Addr],
+        port_map: &[String],
+        run_as_root: bool,
+    ) -> Result<()> {
+        self.remove_launch_artifacts();
 
         let mut cmd = Command::new("passt");
+        if run_as_root {
+            cmd.arg("--runas").arg("0:0");
+        }
         cmd.arg("--socket")
             .arg(&self.socket_path)
             .arg("--pid")
@@ -186,9 +217,7 @@ impl PasstManager {
         // diagnosable instead of silently discarded to /dev/null.
         cmd.stdout(std::process::Stdio::null());
         match self
-            .socket_path
-            .parent()
-            .map(|p| p.join("passt.stderr.log"))
+            .stderr_path()
             .and_then(|p| std::fs::File::create(p).ok())
         {
             Some(file) => {
@@ -211,12 +240,16 @@ impl PasstManager {
             socket = %self.socket_path.display(),
             ip = %ip,
             gateway = %gateway,
+            run_as_root,
             "Passt daemon started"
         );
 
         self.child = Some(child);
 
-        // Wait briefly for the socket to appear
+        // A socket can appear before passt finishes creating its namespaces and
+        // seccomp sandbox. Require the process to remain alive briefly after
+        // the socket is visible so a late sandbox failure cannot be mistaken
+        // for a usable network backend.
         self.wait_for_socket()?;
 
         Ok(())
@@ -228,38 +261,26 @@ impl PasstManager {
     /// after dropping privileges) so the real cause is surfaced instead of a
     /// misleading 5-second timeout.
     fn wait_for_socket(&mut self) -> Result<()> {
-        let stderr_path = self
-            .socket_path
-            .parent()
-            .map(|p| p.join("passt.stderr.log"));
-        let read_stderr = |path: &Option<PathBuf>| -> String {
-            path.as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|s| {
-                    let mut tail: Vec<&str> = s.lines().rev().take(4).collect();
-                    tail.reverse();
-                    tail.join("; ")
-                })
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| format!(" (passt stderr: {s})"))
-                .unwrap_or_default()
-        };
-
-        let max_attempts = 50; // 5 seconds total
-        for _ in 0..max_attempts {
-            if self.socket_path.exists() {
-                return Ok(());
-            }
+        let started_at = Instant::now();
+        let mut socket_seen_at = None;
+        while started_at.elapsed() < PASST_STARTUP_TIMEOUT {
             if let Some(child) = self.child.as_mut() {
                 if let Ok(Some(status)) = child.try_wait() {
                     // Early exit — try_wait reaped it, so nothing lingers.
                     return Err(BoxError::NetworkError(format!(
-                        "passt exited early with {status} before creating its socket{}",
-                        read_stderr(&stderr_path)
+                        "passt exited early with {status} during startup{}",
+                        self.stderr_tail()
                     )));
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            if self.socket_path.exists() {
+                let seen_at = socket_seen_at.get_or_insert_with(Instant::now);
+                if seen_at.elapsed() >= PASST_STARTUP_STABILITY_WINDOW {
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(PASST_STARTUP_POLL_INTERVAL);
         }
 
         // Timed out with passt still alive: kill the child we spawned so it does
@@ -275,8 +296,53 @@ impl PasstManager {
         Err(BoxError::NetworkError(format!(
             "passt socket {} did not appear within 5 seconds{}",
             self.socket_path.display(),
-            read_stderr(&stderr_path)
+            self.stderr_tail()
         )))
+    }
+
+    fn stderr_path(&self) -> Option<PathBuf> {
+        self.socket_path
+            .parent()
+            .map(|parent| parent.join("passt.stderr.log"))
+    }
+
+    fn read_stderr(&self) -> String {
+        self.stderr_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default()
+    }
+
+    fn stderr_tail(&self) -> String {
+        let stderr = self.read_stderr();
+        let mut tail: Vec<&str> = stderr.lines().rev().take(4).collect();
+        tail.reverse();
+        if tail.is_empty() {
+            String::new()
+        } else {
+            format!(" (passt stderr: {})", tail.join("; "))
+        }
+    }
+
+    fn cleanup_failed_launch(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            match child.try_wait() {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        self.remove_launch_artifacts();
+    }
+
+    fn remove_launch_artifacts(&self) {
+        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.pcap_path);
+        let _ = std::fs::remove_file(&self.pid_file);
+        if let Some(stderr_path) = self.stderr_path() {
+            let _ = std::fs::remove_file(stderr_path);
+        }
     }
 
     /// Stop the passt daemon.
@@ -308,6 +374,23 @@ impl PasstManager {
             None => false,
         }
     }
+}
+
+fn passt_sandbox_was_denied(stderr: &str) -> bool {
+    stderr.contains("Failed to sandbox process")
+        && (stderr.contains("unshare: Operation not permitted")
+            || stderr.contains("Operation not permitted"))
+}
+
+#[cfg(target_os = "linux")]
+fn should_retry_passt_as_root(stderr: &str) -> bool {
+    let launcher_is_root = unsafe { libc::geteuid() == 0 };
+    launcher_is_root && passt_sandbox_was_denied(stderr)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn should_retry_passt_as_root(_stderr: &str) -> bool {
+    false
 }
 
 impl Drop for PasstManager {
@@ -420,6 +503,19 @@ mod tests {
         ]);
 
         assert_eq!(specs, vec!["8080:80", "9000:90"]);
+    }
+
+    #[test]
+    fn passt_root_retry_requires_an_explicit_sandbox_permission_failure() {
+        assert!(passt_sandbox_was_denied(
+            "unshare: Operation not permitted\nFailed to sandbox process, exiting"
+        ));
+        assert!(!passt_sandbox_was_denied(
+            "Failed to bind UNIX domain socket"
+        ));
+        assert!(!passt_sandbox_was_denied(
+            "Failed to sandbox process, exiting"
+        ));
     }
 
     #[test]
