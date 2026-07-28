@@ -10,9 +10,9 @@ All notable changes to A3S Box will be documented in this file.
   managed boxes through the generation-fenced restart protocol, preserving the
   Docker-like stop/start contract without reviving a terminal generation.
 - **Concurrent warm-pool cold starts.** Linux rootfs provider detection is
-  cached after one synchronized overlayfs capability probe, preventing parallel
-  pool misses from racing temporary overlay mount cleanup and overflowing a
-  runtime worker stack.
+  cached after one synchronized overlayfs capability probe, and the 84 KB VM
+  boot future is heap-indirected before a pool miss awaits it. Parallel misses
+  no longer multiply temporary overlay work or exhaust a Tokio worker stack.
 - **First live resource update.** MicroVM containers retain an otherwise-empty
   per-container cgroup from startup, so `container-update` can safely apply the
   first CPU, memory-reservation, swap, PID, or cpuset limit without targeting
