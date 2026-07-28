@@ -139,6 +139,20 @@ fn overlay_options(lower: &Path, upper: &Path, work: &Path, metadata_copy: bool)
 
 /// Unmount an overlayfs at `merged`.
 pub fn overlay_unmount(merged: &Path) -> Result<()> {
+    overlay_unmount_with_mode(merged, true)
+}
+
+/// Synchronously unmount an overlayfs before reusing its writable layer.
+///
+/// A lazy detach is appropriate when a box is being discarded, but it can
+/// leave the old mount alive through open namespace references. Reusing the
+/// same upper directory before that mount is gone violates overlayfs' single
+/// writer expectation and can hide writes from the replacement generation.
+pub(crate) fn overlay_unmount_for_reuse(merged: &Path) -> Result<()> {
+    overlay_unmount_with_mode(merged, false)
+}
+
+fn overlay_unmount_with_mode(merged: &Path, lazy: bool) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         use std::ffi::CString;
@@ -146,29 +160,34 @@ pub fn overlay_unmount(merged: &Path) -> Result<()> {
         let target = CString::new(merged.to_string_lossy().as_ref())
             .map_err(|e| BoxError::BuildError(format!("Invalid path for umount: {}", e)))?;
 
-        let ret = unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+        let flags = if lazy { libc::MNT_DETACH } else { 0 };
+        let ret = unsafe { libc::umount2(target.as_ptr(), flags) };
 
         if ret == 0 {
-            tracing::debug!(path = %merged.display(), "Overlay unmounted");
+            tracing::debug!(path = %merged.display(), lazy, "Overlay unmounted");
             return Ok(());
         }
 
         let errno = std::io::Error::last_os_error();
 
         // Fallback: try `umount` command
-        let status = std::process::Command::new("umount")
-            .arg("-l") // lazy unmount
+        let mut command = std::process::Command::new("umount");
+        if lazy {
+            command.arg("-l");
+        }
+        let status = command
             .arg(merged)
             .status()
             .map_err(|e| BoxError::BuildError(format!("Failed to run umount command: {}", e)))?;
 
         if status.success() {
-            tracing::debug!(path = %merged.display(), "Overlay unmounted via umount command");
+            tracing::debug!(path = %merged.display(), lazy, "Overlay unmounted via umount command");
             return Ok(());
         }
 
         Err(BoxError::BuildError(format!(
-            "Failed to unmount overlayfs at {}: umount2 returned {}, umount command exited with {}",
+            "Failed to {}unmount overlayfs at {}: umount2 returned {}, umount command exited with {}",
+            if lazy { "lazily " } else { "synchronously " },
             merged.display(),
             errno,
             status
@@ -177,7 +196,7 @@ pub fn overlay_unmount(merged: &Path) -> Result<()> {
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = merged;
+        let _ = (merged, lazy);
         Ok(())
     }
 }

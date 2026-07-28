@@ -29,12 +29,16 @@ use std::path::{Path, PathBuf};
 /// data directory inside the case-sensitive APFS mount on macOS.
 pub fn read_persisted_exit_code(box_dir: &Path) -> Option<i32> {
     let candidates = [
-        box_dir.join("upper").join(".a3s_exit_code"),
+        box_dir
+            .join("upper")
+            .join(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH.trim_start_matches('/')),
         box_dir
             .join("rootfs")
             .join(".a3s-rootfs")
-            .join(".a3s_exit_code"),
-        box_dir.join("rootfs").join(".a3s_exit_code"),
+            .join(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH.trim_start_matches('/')),
+        box_dir
+            .join("rootfs")
+            .join(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH.trim_start_matches('/')),
     ];
 
     candidates.into_iter().find_map(|path| {
@@ -153,6 +157,28 @@ pub fn unmount_box_overlay(merged: &Path) {
             break;
         }
     }
+}
+
+/// Fully unmount a box overlay before its writable layer is reused.
+///
+/// Unlike [`unmount_box_overlay`], this path never falls back to lazy detach:
+/// callers must not start another overlay writer until every stacked mount has
+/// been synchronously released.
+pub(crate) fn unmount_box_overlay_for_reuse(merged: &Path) -> a3s_box_core::error::Result<()> {
+    for _ in 0..8 {
+        if !is_mountpoint(merged) {
+            return Ok(());
+        }
+        overlay::overlay_unmount_for_reuse(merged)?;
+    }
+
+    if is_mountpoint(merged) {
+        return Err(a3s_box_core::error::BoxError::BuildError(format!(
+            "Overlay at {} remained mounted after synchronous cleanup",
+            merged.display()
+        )));
+    }
+    Ok(())
 }
 
 /// True if `path` is a mountpoint (its device id differs from its parent's).
@@ -297,5 +323,30 @@ mod tests {
 
         assert!(merged.join(previous_name).is_file());
         assert!(upper.join(previous_name).is_file());
+    }
+
+    #[test]
+    fn staging_box_roots_clears_every_previous_exit_status() {
+        let directory = tempfile::tempdir().unwrap();
+        let box_dir = directory.path().join("box");
+        for provider_root in ["rootfs", "upper", "merged"] {
+            let root = box_dir.join(provider_root);
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(
+                root.join(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH.trim_start_matches('/')),
+                b"17\n",
+            )
+            .unwrap();
+        }
+
+        stage_box_terminal_rootfs_metadata(&box_dir).unwrap();
+
+        assert_eq!(read_persisted_exit_code(&box_dir), None);
+        for provider_root in ["rootfs", "upper", "merged"] {
+            assert!(!box_dir
+                .join(provider_root)
+                .join(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH.trim_start_matches('/'))
+                .exists());
+        }
     }
 }

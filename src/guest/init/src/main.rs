@@ -1917,7 +1917,7 @@ mod linux {
     /// the host before PID 1 exits and the VM halts.
     fn persist_exit_code(code: i32) {
         use std::io::Write;
-        if let Ok(mut file) = std::fs::File::create("/.a3s_exit_code") {
+        if let Ok(mut file) = std::fs::File::create(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH) {
             let _ = write!(file, "{code}");
             let _ = file.sync_all();
         }
