@@ -789,6 +789,12 @@ pub(super) fn should_force_rootfs_preservation(record: &BoxRecord) -> ExecutionM
         ))
     })?;
     Ok(match state {
+        // A foreground one-shot can finish before readiness is published. Its
+        // exact status is already terminal, but the caller still has to drain
+        // stdout/stderr and archive an auto-removed result. Tear down mounts
+        // and runtime processes while retaining the box directory until that
+        // caller completes its normal terminal cleanup.
+        ManagedExecutionState::Starting => true,
         ManagedExecutionState::Pausing => matches!(
             metadata.pending_operation.as_ref(),
             Some(ManagedExecutionOperation::Pause { keep_memory: false })

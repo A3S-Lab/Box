@@ -43,10 +43,14 @@ impl LocalExecutionManager {
                             }
                             ExecutionState::Stopped | ExecutionState::Failed => {
                                 self.release_execution_resources(&record).await?;
+                                let terminal_state = startup_terminal_state(
+                                    observation.state,
+                                    observation.exit_code,
+                                );
                                 self.transition(
                                     &record,
                                     ManagedExecutionState::Starting,
-                                    ManagedExecutionState::Failed,
+                                    terminal_state,
                                     RuntimeUpdate::Terminal(observation.exit_code),
                                 )
                                 .await?;
@@ -187,11 +191,13 @@ impl LocalExecutionManager {
                     }
                     ExecutionState::Stopped | ExecutionState::Failed => {
                         self.release_execution_resources(&claimed).await?;
+                        let terminal_state =
+                            startup_terminal_state(observation.state, observation.exit_code);
                         let _ = self
                             .transition(
                                 &claimed,
                                 ManagedExecutionState::Starting,
-                                ManagedExecutionState::Failed,
+                                terminal_state,
                                 RuntimeUpdate::Terminal(observation.exit_code),
                             )
                             .await;
@@ -215,5 +221,16 @@ impl LocalExecutionManager {
             }
             Err(_) => Err(start_error),
         }
+    }
+}
+
+pub(super) fn startup_terminal_state(
+    backend_state: ExecutionState,
+    exit_code: Option<i32>,
+) -> ManagedExecutionState {
+    if backend_state == ExecutionState::Stopped && exit_code.is_some() {
+        ManagedExecutionState::Stopped
+    } else {
+        ManagedExecutionState::Failed
     }
 }

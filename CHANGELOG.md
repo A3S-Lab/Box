@@ -65,9 +65,12 @@ All notable changes to A3S Box will be documented in this file.
   seccomp profile permits namespaced System V shared-memory operations needed
   by PostgreSQL while retaining its default-deny host-control boundary.
 - **Deterministic termination and filesystem diffs.** Managed kill operations
-  retain the backend's authoritative signal exit status, while the runtime
-  installs a first-writer-wins rootfs baseline before the workload can mutate
-  the guest filesystem.
+  retain the backend's authoritative signal exit status and derive the
+  standard `128 + signal` result when an abruptly killed shim cannot be reaped.
+  One-shot commands that finish during readiness keep their exact status and
+  output for foreground draining, while the runtime installs a
+  first-writer-wins rootfs baseline before the workload can mutate the guest
+  filesystem.
 - **Linux bridge peer switching.** Named-network peer Ethernet frames are
   switched between libkrun guests by a bounded shim adapter while passt remains
   responsible for gateway traffic, published ports, and outbound connectivity.

@@ -2,6 +2,7 @@ use a3s_box_core::{
     ExecutionManagerError, ExecutionManagerResult, ExecutionState, ReconcileOutcome,
 };
 
+use super::create::startup_terminal_state;
 use super::record::{execution_id, lease_from_record};
 use super::support::{
     managed_state, outcome_from_record, paused_with_memory, pending_pause_policy,
@@ -256,15 +257,22 @@ impl LocalExecutionManager {
                         return Ok(ReconcileOutcome::Creating);
                     }
                     self.release_execution_resources(&record).await?;
-                    let failed = self
+                    let terminal_state =
+                        startup_terminal_state(observation.state, observation.exit_code);
+                    let terminal = self
                         .transition(
                             &record,
                             ManagedExecutionState::Starting,
-                            ManagedExecutionState::Failed,
+                            terminal_state,
                             RuntimeUpdate::Terminal(observation.exit_code),
                         )
                         .await?;
-                    return outcome_from_record(failed, ExecutionState::Failed);
+                    let state = if terminal_state == ManagedExecutionState::Stopped {
+                        ExecutionState::Stopped
+                    } else {
+                        ExecutionState::Failed
+                    };
+                    return outcome_from_record(terminal, state);
                 }
                 Err(error) => return Err(error),
             }

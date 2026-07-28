@@ -1,5 +1,6 @@
 use a3s_box_core::{
-    ExecutionLease, ExecutionManagerError, ExecutionManagerResult, ExecutionState, KillOutcome,
+    ExecutionLease, ExecutionManagerError, ExecutionManagerResult, ExecutionState,
+    KillExecutionOptions, KillOutcome,
 };
 
 use super::record::{execution_id, lease_from_record};
@@ -305,60 +306,71 @@ impl LocalExecutionManager {
         match self.backend.kill_with_status(&backend_record).await {
             Ok(termination) => {
                 self.release_execution_resources(&record).await?;
+                let exit_code = kill_terminal_exit_code(options, termination.exit_code);
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::KillTerminal(termination.exit_code),
+                    RuntimeUpdate::KillTerminal(exit_code),
                 )
                 .await?;
                 Ok(termination.outcome)
             }
             Err(ExecutionManagerError::NotFound(_)) => {
                 self.release_execution_resources(&record).await?;
+                let exit_code = kill_terminal_exit_code(options, None);
                 self.transition(
                     &record,
                     ManagedExecutionState::Killing,
                     ManagedExecutionState::Stopped,
-                    RuntimeUpdate::KillTerminal(None),
+                    RuntimeUpdate::KillTerminal(exit_code),
                 )
                 .await?;
                 Ok(KillOutcome::AlreadyStopped)
             }
-            Err(error) => match self.resolve_kill_error(record).await {
+            Err(error) => match self.resolve_kill_error(record, options).await {
                 Some(outcome) => Ok(outcome),
                 None => Err(error),
             },
         }
     }
 
-    async fn resolve_kill_error(&self, record: BoxRecord) -> Option<KillOutcome> {
-        let terminal = match self.backend.inspect(&record).await {
-            Err(ExecutionManagerError::NotFound(_)) => true,
+    async fn resolve_kill_error(
+        &self,
+        record: BoxRecord,
+        options: KillExecutionOptions,
+    ) -> Option<KillOutcome> {
+        let observed_exit_code = match self.backend.inspect(&record).await {
+            Err(ExecutionManagerError::NotFound(_)) => None,
             Ok(observation)
                 if matches!(
                     observation.state,
                     ExecutionState::Stopped | ExecutionState::Failed
                 ) =>
             {
-                true
+                observation.exit_code
             }
-            _ => false,
+            _ => return None,
         };
-        if !terminal {
-            return None;
-        }
         if self.release_execution_resources(&record).await.is_err() {
             return None;
         }
+        let exit_code = kill_terminal_exit_code(options, observed_exit_code);
         self.transition(
             &record,
             ManagedExecutionState::Killing,
             ManagedExecutionState::Stopped,
-            RuntimeUpdate::KillTerminal(None),
+            RuntimeUpdate::KillTerminal(exit_code),
         )
         .await
         .ok()?;
         Some(KillOutcome::Killed)
     }
+}
+
+fn kill_terminal_exit_code(
+    options: KillExecutionOptions,
+    observed_exit_code: Option<i32>,
+) -> Option<i32> {
+    observed_exit_code.or_else(|| options.signal.map(|signal| 128 + signal))
 }

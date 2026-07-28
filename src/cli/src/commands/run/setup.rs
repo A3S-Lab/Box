@@ -158,13 +158,24 @@ pub(super) async fn setup_and_boot(
         BoxRecord::make_short_id(&box_id)
     );
     let runtime_start = std::time::Instant::now();
-    let lease = match manager.start(&execution_id, reservation.generation).await {
-        Ok(lease) => lease,
-        Err(error) => {
-            cleanup_failed_managed_run(&box_id);
-            return Err(error.into());
-        }
-    };
+    let (generation, completed_record) =
+        match manager.start(&execution_id, reservation.generation).await {
+            Ok(lease) => (lease.generation, None),
+            Err(error) => match completed_start_record(&box_id) {
+                Ok(Some(record)) => (reservation.generation, Some(record)),
+                Ok(None) => {
+                    cleanup_failed_managed_run(&box_id);
+                    return Err(error.into());
+                }
+                Err(recovery_error) => {
+                    cleanup_failed_managed_run(&box_id);
+                    return Err(format!(
+                        "{error}; failed to inspect managed startup outcome: {recovery_error}"
+                    )
+                    .into());
+                }
+            },
+        };
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
         "cli.runtime_start",
         runtime_start.elapsed(),
@@ -172,10 +183,14 @@ pub(super) async fn setup_and_boot(
     // A short-lived command can exit between `start` and this reload. Use the
     // side-effect-free snapshot so legacy PID reconciliation cannot auto-remove
     // the just-created managed record before foreground cleanup observes it.
-    let record = StateFile::load_readonly()?
-        .find_by_id(&box_id)
-        .cloned()
-        .ok_or_else(|| format!("managed run {box_id} disappeared after startup"))?;
+    let completed_during_start = completed_record.is_some();
+    let record = match completed_record {
+        Some(record) => record,
+        None => StateFile::load_readonly()?
+            .find_by_id(&box_id)
+            .cloned()
+            .ok_or_else(|| format!("managed run {box_id} disappeared after startup"))?,
+    };
     let box_dir = record.box_dir.clone();
     let exec_socket_path = record.exec_socket_path.clone();
     let pty_socket_path = exec_socket_path
@@ -202,7 +217,7 @@ pub(super) async fn setup_and_boot(
     let context = RunContext {
         manager,
         execution_id,
-        generation: lease.generation,
+        generation,
         box_id,
         box_dir,
         name,
@@ -211,12 +226,28 @@ pub(super) async fn setup_and_boot(
         pty_socket_path,
         anonymous_volumes,
         health_checker: None,
+        completed_during_start,
     };
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
         "cli.create_start",
         create_start.elapsed(),
     );
     Ok(context)
+}
+
+fn completed_start_record(box_id: &str) -> Result<Option<BoxRecord>, Box<dyn std::error::Error>> {
+    let state = StateFile::load_readonly()?;
+    let Some(record) = state.find_by_id(box_id) else {
+        return Ok(None);
+    };
+    Ok(is_completed_managed_start(record).then(|| record.clone()))
+}
+
+pub(super) fn is_completed_managed_start(record: &BoxRecord) -> bool {
+    record.exit_code.is_some()
+        && record
+            .managed_state()
+            .is_ok_and(|state| state == Some(a3s_box_runtime::ManagedExecutionState::Stopped))
 }
 
 fn pull_progress_callback(image_name: String) -> a3s_box_runtime::PullProgressFn {

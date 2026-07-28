@@ -151,6 +151,7 @@ struct RunContext {
     pty_socket_path: PathBuf,
     anonymous_volumes: Vec<String>,
     health_checker: Option<tokio::task::JoinHandle<()>>,
+    completed_during_start: bool,
 }
 
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -177,22 +178,24 @@ pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
         &format!("started box from image {}", args.common.image),
     );
     if args.detach {
-        crate::health::spawn_detached_health_checker(&ctx.record)
-            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        if !ctx.completed_during_start {
+            crate::health::spawn_detached_health_checker(&ctx.record)
+                .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+        }
         println!("{}", ctx.box_id);
         return Ok(());
     }
 
-    ctx.health_checker = match ctx.record.health_check.as_ref() {
-        Some(health_check) => Some(crate::health::spawn_health_checker(
+    ctx.health_checker = match (ctx.completed_during_start, ctx.record.health_check.as_ref()) {
+        (false, Some(health_check)) => Some(crate::health::spawn_health_checker(
             ctx.box_id.clone(),
             ctx.exec_socket_path.clone(),
             health_check.clone(),
         )?),
-        None => None,
+        _ => None,
     };
 
-    if args.tty {
+    if args.tty && !ctx.completed_during_start {
         return run_tty(ctx, &args).await;
     }
 
@@ -397,7 +400,7 @@ use setup::setup_and_boot;
 #[cfg(test)]
 use setup::{
     build_box_config, build_execution_request, interactive_keepalive_entrypoint,
-    should_create_diff_baseline, RunRecordPolicy,
+    is_completed_managed_start, should_create_diff_baseline, RunRecordPolicy,
 };
 
 // ============================================================================
