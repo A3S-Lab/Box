@@ -1589,6 +1589,15 @@ impl VmManager {
         }
         self.net_manager = None;
 
+        let socket_dir = self.socket_dir();
+        // A detached CLI invocation recovers the shim but has no in-memory
+        // PasstManager child handle. Reap passt from its durable PID file before
+        // removing the socket directory that contains that identity; otherwise
+        // a later managed remove cannot find the daemon and it keeps published
+        // ports bound indefinitely.
+        #[cfg(target_os = "linux")]
+        crate::network::terminate_passt(&socket_dir);
+
         // Cleanup rootfs provider (unmount overlay if applicable)
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         if let Err(e) = self.rootfs_provider.cleanup(&box_dir, preserve_rootfs) {
@@ -1599,7 +1608,6 @@ impl VmManager {
             );
         }
 
-        let socket_dir = self.socket_dir();
         if let Err(e) = std::fs::remove_dir_all(&socket_dir) {
             tracing::debug!(
                 box_id = %self.box_id,
