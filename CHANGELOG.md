@@ -37,6 +37,13 @@ All notable changes to A3S Box will be documented in this file.
   volume, tmpfs, inline/file/direct initialization, failure, and cleanup
   matrix before exercising the Rust, Python, TypeScript, and Go SDK lifecycle.
 
+### Fixed
+
+- **Reliable Cloud Sandbox completion.** Managed Sandbox inspection retains an
+  A3S OCI generation until its exact exit status is available, and the default
+  seccomp profile permits namespaced System V shared-memory operations needed
+  by PostgreSQL while retaining its default-deny host-control boundary.
+
 ## [3.1.0] — 2026-07-23
 
 ### Added

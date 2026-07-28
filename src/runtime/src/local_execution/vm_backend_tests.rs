@@ -37,11 +37,12 @@ fn record(home_dir: &Path, isolation: ExecutionIsolation) -> BoxRecord {
     .unwrap()
 }
 
-struct ExitAfterHealthProbeHandler {
+struct DelayedExitStatusHandler {
     exit_polls: Arc<AtomicUsize>,
+    available_after: usize,
 }
 
-impl VmHandler for ExitAfterHealthProbeHandler {
+impl VmHandler for DelayedExitStatusHandler {
     fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> a3s_box_core::Result<()> {
         Ok(())
     }
@@ -63,12 +64,12 @@ impl VmHandler for ExitAfterHealthProbeHandler {
     }
 
     fn exit_code(&self) -> Option<i32> {
-        (self.exit_polls.load(Ordering::SeqCst) > 1).then_some(0)
+        (self.exit_polls.load(Ordering::SeqCst) > self.available_after).then_some(0)
     }
 
     fn try_wait_exit(&mut self) -> a3s_box_core::Result<Option<i32>> {
         let poll = self.exit_polls.fetch_add(1, Ordering::SeqCst);
-        Ok((poll > 0).then_some(0))
+        Ok((poll >= self.available_after).then_some(0))
     }
 }
 
@@ -181,8 +182,10 @@ async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
     let sentinel = record.box_dir.join("rootfs/cold-resume-state.txt");
     std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
     std::fs::write(&sentinel, b"retained").unwrap();
-    let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
-    *manager.lock().await.state.write().await = crate::BoxState::Ready;
+    let mut replacement = backend.new_manager(&record).unwrap();
+    replacement.shim_exit_code = Some(0);
+    *replacement.state.write().await = crate::BoxState::Ready;
+    let manager = Arc::new(Mutex::new(replacement));
     backend
         .managers
         .insert(record.id.clone(), Arc::clone(&manager));
@@ -190,6 +193,7 @@ async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
     let observation = backend.inspect_registered(&record, manager).await.unwrap();
 
     assert_eq!(observation.state, ExecutionState::Stopped);
+    assert_eq!(observation.exit_code, Some(0));
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained");
     assert!(backend.managers.is_empty());
 }
@@ -204,8 +208,9 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
     {
         let manager = manager.lock().await;
         *manager.state.write().await = crate::BoxState::Ready;
-        *manager.handler.write().await = Some(Box::new(ExitAfterHealthProbeHandler {
+        *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
             exit_polls: Arc::clone(&exit_polls),
+            available_after: 3,
         }));
     }
     backend
@@ -216,8 +221,41 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
 
     assert_eq!(observation.state, ExecutionState::Stopped);
     assert_eq!(observation.exit_code, Some(0));
-    assert_eq!(exit_polls.load(Ordering::SeqCst), 2);
+    assert_eq!(exit_polls.load(Ordering::SeqCst), 4);
     assert!(backend.managers.is_empty());
+}
+
+#[tokio::test]
+async fn terminal_observation_retains_runtime_without_an_exact_exit_status() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let record = record(temporary.path(), ExecutionIsolation::Sandbox);
+    let exit_polls = Arc::new(AtomicUsize::new(0));
+    let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
+    {
+        let manager = manager.lock().await;
+        *manager.state.write().await = crate::BoxState::Ready;
+        *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+            exit_polls: Arc::clone(&exit_polls),
+            available_after: usize::MAX,
+        }));
+    }
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let error = backend
+        .inspect_registered(&record, manager)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("exact exit status")
+    ));
+    assert!(exit_polls.load(Ordering::SeqCst) > 1);
+    assert!(backend.managers.contains_key(&record.id));
 }
 
 #[test]

@@ -137,6 +137,25 @@ impl A3sOciHandler {
             .transpose()
     }
 
+    /// Poll the exact detached A3S OCI generation for its terminal status.
+    /// The runtime retains this status until Box explicitly deletes it.
+    pub(crate) fn try_wait_at(
+        runtime_socket: &Path,
+        container_id: &str,
+        generation: u64,
+    ) -> Result<Option<i32>> {
+        let client = A3sOciClient::connect_blocking(runtime_socket.to_path_buf())?;
+        let id = ContainerId::new(container_id).map_err(sdk_argument_error)?;
+        let result = client
+            .try_wait(WaitRequest {
+                target: ContainerTarget::exact(id, Generation(generation)),
+                timeout_ms: Some(0),
+            })
+            .map(|status| status.map(|status| exit_code(&status)));
+        client.close();
+        result
+    }
+
     pub(crate) fn pause_at(
         runtime_socket: &Path,
         container_id: &str,
@@ -419,13 +438,16 @@ impl VmHandler for A3sOciHandler {
     }
 
     fn try_wait_exit(&mut self) -> Result<Option<i32>> {
-        if self
-            .query_state()?
-            .is_some_and(|record| *record.state.status() != OciContainerState::Stopped)
-        {
-            return Ok(None);
+        if self.exit_code.is_none() {
+            let Some(status) = self.client.try_wait(WaitRequest {
+                target: self.target.clone(),
+                timeout_ms: Some(0),
+            })?
+            else {
+                return Ok(None);
+            };
+            self.exit_code = Some(exit_code(&status));
         }
-        self.capture_exit_status()?;
         let exit_code = self.exit_code;
         self.delete_runtime_state()?;
         Ok(exit_code)

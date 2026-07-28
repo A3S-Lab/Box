@@ -5,7 +5,6 @@ mod sandbox;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(unix)]
 use std::time::Duration;
 
 use a3s_box_core::{
@@ -26,6 +25,9 @@ use crate::{
 };
 
 type SharedVm = Arc<Mutex<VmManager>>;
+
+const TERMINAL_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const TERMINAL_EXIT_POLL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Runtime adapter that owns live [`VmManager`] handles and reconstructs them
 /// from durable runtime evidence after a control-plane restart.
@@ -254,24 +256,35 @@ impl VmLocalExecutionBackend {
         exit_code: Option<i32>,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
         // A workload can exit between the first non-blocking wait and the
-        // following health probe. Poll the runtime once more before teardown so
-        // its terminal record and persisted guest marker remain available.
-        let exit_code = match manager.exit_code().or(exit_code) {
-            Some(exit_code) => Some(exit_code),
-            None => manager
+        // following health probe. A3S OCI publishes the exact status shortly
+        // after the process becomes non-running, so retain its terminal record
+        // and poll within a strict bound before any teardown.
+        let deadline = tokio::time::Instant::now() + TERMINAL_EXIT_POLL_TIMEOUT;
+        let mut exit_code = manager.exit_code().or(exit_code);
+        while exit_code.is_none() {
+            exit_code = manager
                 .try_wait_exit()
                 .await
-                .map_err(|error| runtime_error("collect exit status", record, error))?,
-        };
+                .map_err(|error| runtime_error("collect exit status", record, error))?;
+            if exit_code.is_some() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(TERMINAL_EXIT_POLL_INTERVAL).await;
+        }
+        let exit_code = exit_code.ok_or_else(|| {
+            ExecutionManagerError::Unavailable(format!(
+                "runtime reported execution {} as terminal before its exact exit status became available",
+                record.id
+            ))
+        })?;
         let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
-        let exit_code = manager.exit_code().or(exit_code);
         drop(manager);
         self.remove_manager(&record.id, shared);
         cleanup.map_err(|error| runtime_error("clean up", record, error))?;
         Ok(LocalExecutionObservation {
             state: ExecutionState::Stopped,
             handle: None,
-            exit_code,
+            exit_code: Some(exit_code),
         })
     }
 
