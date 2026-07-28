@@ -46,6 +46,8 @@ pub async fn execute(_args: PortForwardArgs) -> Result<(), Box<dyn std::error::E
 
 #[cfg(target_os = "linux")]
 pub async fn execute(args: PortForwardArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+
     use a3s_box_runtime::LocalExecutionManager;
     use tokio::net::TcpListener;
     use tokio::sync::Semaphore;
@@ -94,6 +96,7 @@ pub async fn execute(args: PortForwardArgs) -> Result<(), Box<dyn std::error::Er
         "Forwarding {bind_address} to {box_name}:{}",
         args.guest_port
     );
+    std::io::stdout().flush()?;
 
     loop {
         let permit = Arc::clone(&connection_limit)
