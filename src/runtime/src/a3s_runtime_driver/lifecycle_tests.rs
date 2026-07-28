@@ -1,5 +1,5 @@
 use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitClass, RuntimeUnitState};
-use a3s_runtime::RuntimeDriver;
+use a3s_runtime::{RuntimeDriver, RuntimeError};
 
 use super::metadata::GENERATION_LABEL;
 use super::test_support::{
@@ -214,4 +214,20 @@ async fn response_loss_reattaches_and_confirmed_provider_loss_replaces_once() {
         loss_driver.manager.managed_records().await.unwrap().len(),
         1
     );
+}
+
+#[tokio::test]
+async fn startup_failure_without_exit_code_preserves_the_provider_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, backend) = fake_driver(&directory);
+    let spec = runtime_spec("startup-provider-failure", 1, RuntimeUnitClass::Task);
+    backend.fail_next_start_without_exit_code();
+
+    let result = driver.apply(&spec, &accepted(&spec)).await;
+
+    assert!(matches!(
+        result,
+        Err(RuntimeError::ProviderUnavailable(message))
+            if message == "fake start response was lost"
+    ));
 }
