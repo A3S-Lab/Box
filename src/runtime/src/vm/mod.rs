@@ -427,6 +427,29 @@ impl VmManager {
     /// Remove host-side boot artifacts after a failed boot attempt.
     async fn cleanup_boot_failure(&mut self) {
         if let Some(mut handler) = self.handler.write().await.take() {
+            // A short-lived workload can finish before the runtime publishes
+            // its readiness endpoint. That is a normal terminal completion,
+            // not a failed rootfs build. Preserve its writable generation so a
+            // managed restart observes the same persistent filesystem while
+            // ephemeral mounts are recreated by the next runtime generation.
+            let completed_before_cleanup = match handler.try_wait_exit() {
+                Ok(Some(exit_code)) => {
+                    self.shim_exit_code = Some(exit_code);
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    tracing::debug!(
+                        box_id = %self.box_id,
+                        error = %error,
+                        "Failed to collect a terminal status before boot cleanup"
+                    );
+                    false
+                }
+            };
+            if completed_before_cleanup && self.config.persistent {
+                self.preserve_rootfs_on_boot_failure = true;
+            }
             if let Err(error) = handler.stop(default_stop_signal(), DEFAULT_SHUTDOWN_TIMEOUT_MS) {
                 tracing::warn!(
                     box_id = %self.box_id,
@@ -434,7 +457,7 @@ impl VmManager {
                     "Failed to stop VM handler after boot failure"
                 );
             }
-            self.shim_exit_code = handler.exit_code();
+            self.shim_exit_code = handler.exit_code().or(self.shim_exit_code);
         }
 
         if let Some(mut net_manager) = self.net_manager.take() {
@@ -2165,6 +2188,34 @@ mod tests {
         assert_eq!(vm.exit_code(), Some(23));
         assert!(vm.handler.read().await.is_none());
         assert!(!box_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_boot_completion_preserves_first_persistent_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-persistent-completed-during-boot".to_string();
+        let config = BoxConfig {
+            persistent: true,
+            ..BoxConfig::default()
+        };
+        let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+        *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 17 }));
+
+        let marker = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("rootfs/r17-restart-marker");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"generation-one").unwrap();
+
+        vm.cleanup_boot_failure().await;
+
+        assert_eq!(vm.exit_code(), Some(17));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"generation-one");
+        assert!(vm.preserve_rootfs_on_boot_failure);
     }
 
     #[tokio::test]

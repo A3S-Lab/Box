@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitClass, RuntimeUnitState};
+use a3s_runtime::contract::{RestartPolicy, RuntimeInspection, RuntimeUnitClass, RuntimeUnitState};
 use a3s_runtime::{RuntimeDriver, RuntimeError};
 
 use super::metadata::GENERATION_LABEL;
@@ -177,6 +177,34 @@ async fn restart_completion_during_startup_uses_persisted_terminal_evidence() {
         observation.provider_resource_id.as_deref(),
         Some(provider_id.as_str())
     );
+    assert_eq!(backend.starts(), 2);
+    let records = driver.manager.managed_records().await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].exit_code, Some(0));
+    assert_eq!(
+        records[0]
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .generation
+            .get(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn task_restart_completion_during_startup_reports_the_second_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, backend) = fake_driver(&directory);
+    let mut spec = runtime_spec("task-restart-startup-completion", 1, RuntimeUnitClass::Task);
+    spec.restart = RestartPolicy::OnFailure { max_retries: 1 };
+    backend.finish_next_start(17);
+    backend.finish_next_start(0);
+    backend.fail_start_response_at(2);
+
+    let observation = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+
+    assert_eq!(observation.state, RuntimeUnitState::Succeeded);
     assert_eq!(backend.starts(), 2);
     let records = driver.manager.managed_records().await.unwrap();
     assert_eq!(records.len(), 1);

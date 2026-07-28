@@ -54,12 +54,36 @@ async fn tmpfs_isolation(
     request.spec.mounts = vec![tmpfs("scratch", TARGET, false)];
     request.spec.restart = RestartPolicy::OnFailure { max_retries: 1 };
     let isolated = client.apply(&request).await?;
+    let record = fixture.record_for(&request.spec).await?;
+    let rootfs_marker = ["rootfs", "upper", "merged"].map(|root| {
+        record
+            .box_dir
+            .join(root)
+            .join("r17-tmpfs-restart-marker")
+            .exists()
+    });
+    let underlying_token = ["rootfs", "upper", "merged"].map(|root| {
+        record
+            .box_dir
+            .join(root)
+            .join("mnt/r17-isolation/token")
+            .exists()
+    });
     require(
         isolated.state == RuntimeUnitState::Succeeded,
-        "a restarted Runtime unit observed its prior tmpfs contents",
+        format!(
+            "tmpfs restart isolation failed: observation_state={:?}, observation_failure={:?}, managed_state={:?}, generation={:?}, exit_code={:?}, rootfs_marker[rootfs,upper,merged]={rootfs_marker:?}, underlying_token[rootfs,upper,merged]={underlying_token:?}",
+            isolated.state,
+            isolated.failure,
+            record.managed_state(),
+            record
+                .managed_execution
+                .as_ref()
+                .map(|metadata| metadata.generation.get()),
+            record.exit_code,
+        ),
     )?;
 
-    let record = fixture.record_for(&request.spec).await?;
     require(
         record
             .managed_execution
