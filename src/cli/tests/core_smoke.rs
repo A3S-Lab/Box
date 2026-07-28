@@ -1621,7 +1621,7 @@ fn real_core_bridge_network_hosts_and_endpoint_lifecycle() {
         "--",
         "/bin/sh",
         "-c",
-        "mkdir -p /www; printf core-smoke-bridge-peer-ok >/www/index.html; echo core-smoke-bridge-db-ready; exec httpd -f -p 8080 -h /www",
+        "echo core-smoke-bridge-db-ready; while true; do printf 'HTTP/1.1 200 OK\r\nContent-Length: 25\r\nConnection: close\r\n\r\ncore-smoke-bridge-peer-ok' | nc -l -p 8080; done",
     ]);
     smoke.wait_for_named_running(&db_box);
     smoke.wait_for_named_logs(&db_box, "core-smoke-bridge-db-ready");
