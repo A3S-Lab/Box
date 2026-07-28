@@ -97,6 +97,10 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
     let capabilities = driver.capabilities().await.unwrap();
     assert_eq!(capabilities.provider_id.as_str(), "a3s-box");
     assert_eq!(
+        capabilities.artifact_media_types,
+        vec![OCI_IMAGE_MANIFEST.into(), OCI_IMAGE_INDEX.into()]
+    );
+    assert_eq!(
         capabilities.unit_classes,
         vec![RuntimeUnitClass::Task, RuntimeUnitClass::Service]
     );
@@ -265,7 +269,7 @@ fn mapping_rejects_protected_or_unencodable_tmpfs_targets() {
 }
 
 #[test]
-fn mapping_rejects_unpinned_mismatched_and_unsupported_artifacts() {
+fn mapping_accepts_oci_indexes_and_rejects_unpinned_mismatched_or_unsupported_artifacts() {
     let mut value = spec(RuntimeUnitClass::Service);
     value.artifact.uri = "oci://registry.example/a3s/runtime:latest".into();
     assert!(creation_request(&value).is_err());
@@ -278,7 +282,11 @@ fn mapping_rejects_unpinned_mismatched_and_unsupported_artifacts() {
     assert!(creation_request(&value).is_err());
 
     let mut value = spec(RuntimeUnitClass::Service);
-    value.artifact.media_type = "application/vnd.oci.image.index.v1+json".into();
+    value.artifact.media_type = OCI_IMAGE_INDEX.into();
+    assert!(creation_request(&value).is_ok());
+
+    let mut value = spec(RuntimeUnitClass::Service);
+    value.artifact.media_type = "application/vnd.docker.distribution.manifest.v2+json".into();
     assert!(matches!(
         creation_request(&value),
         Err(RuntimeError::UnsupportedCapabilities(_))

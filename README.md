@@ -312,8 +312,10 @@ evidence. Review [Host Integration](docs/host-integration.md),
 ## Integrations
 
 - **A3S Runtime provider** — Maps digest-pinned Tasks and Services onto the
-  A3S OCI shared-kernel Sandbox with generation fencing, recovery,
-  structured logs, bounded idempotent exec, resource controls, and tmpfs.
+  A3S OCI shared-kernel Sandbox with generation fencing, recovery, structured
+  logs, bounded idempotent exec, resource controls, and tmpfs. Its artifact
+  contract accepts OCI image manifests and multi-platform OCI image indexes;
+  it does not advertise a Docker manifest media type.
 - **Kubernetes RuntimeClass** — The CRI server and containerd shim let selected
   Linux/KVM pods use `runtimeClassName: a3s-box`; installers and soak manifests
   live under [`deploy/`](deploy/).
