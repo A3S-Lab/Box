@@ -86,6 +86,14 @@ The explicit Linux Sandbox backend uses A3S OCI Runtime with a shared host
 kernel. Admission requires the namespaces, seccomp, subordinate IDs, cgroup
 delegation, and other host primitives required by the selected profile.
 
+Sandbox resource control has one owner. Box places the exact workload CPU,
+memory, swap, and PID limits in `linux.resources`; A3S OCI Runtime derives a
+bounded control-plane envelope, creates fixed `a3s-control` and `a3s-workload`
+cgroups, and owns their live update and cleanup. Guest Init joins workload
+processes through runtime-provided descriptors while cgroupfs remains read-only.
+This keeps the control and exec transports available when the workload reaches
+its memory limit.
+
 Sandbox is not a transparent fallback for a failed MicroVM request. Its threat
 model and feature surface differ intentionally.
 
