@@ -4,7 +4,6 @@ import { readFile } from 'node:fs/promises'
 import SandboxDefault, {
   A3SBoxClient,
   A3SLocalRuntime,
-  A3SRemoteConnection,
   DEFAULT_IMAGE,
   RegistryCredentials,
   Sandbox,
@@ -627,14 +626,8 @@ assert.equal(
 )
 
 const savedEnvironment = {
-  E2B_API_KEY: process.env.E2B_API_KEY,
-  A3S_BOX_API_KEY: process.env.A3S_BOX_API_KEY,
-  A3S_BOX_ENDPOINT: process.env.A3S_BOX_ENDPOINT,
   A3S_BOX_BINARY: process.env.A3S_BOX_BINARY,
 }
-process.env.E2B_API_KEY = 'must-not-be-read'
-process.env.A3S_BOX_API_KEY = 'must-not-be-read'
-process.env.A3S_BOX_ENDPOINT = 'https://must-not-be-read.invalid'
 delete process.env.A3S_BOX_BINARY
 assert.equal(new A3SLocalRuntime().binaryPath, 'a3s-box')
 for (const [key, value] of Object.entries(savedEnvironment)) {
@@ -646,21 +639,6 @@ const connected = await Sandbox.connect('existing-local', { runtime })
 assert.equal(connected.sandboxId, 'existing-local')
 assert.equal(connected.generation, 2)
 assert.equal(connected.state, 'paused')
-
-const remote = A3SRemoteConnection.fromEnvironment({
-  A3S_BOX_ENDPOINT: 'https://api.box.example.com',
-  A3S_BOX_API_KEY: 'e2b_a1b2c3',
-})
-assert.equal(remote.domain, 'box.example.com')
-assert.deepEqual(remote.officialSdkOptions(), {
-  apiUrl: 'https://api.box.example.com',
-  domain: 'box.example.com',
-  apiKey: 'e2b_a1b2c3',
-})
-assert.throws(
-  () => A3SRemoteConnection.fromEnvironment({}),
-  /A3S_BOX_ENDPOINT is required/
-)
 
 const interpreterRuntime = new FakeRuntime()
 const interpreter = await CodeInterpreter.create(undefined, {

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "a3s-box"
 version = "3.1.0"
-description = "Local-first Python SDK for A3S Box with E2B-like APIs"
+description = "Local-first Python SDK for the native A3S Box Sandbox API"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

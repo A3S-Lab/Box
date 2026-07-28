@@ -111,7 +111,7 @@ the request to a MicroVM or a direct host process.
 ## Architecture
 
 ```text
-CLI / Rust SDK / Python SDK / TypeScript SDK / E2B adapter
+CLI / Rust SDK / Python SDK / TypeScript SDK
                          |
                          v
               LocalExecutionManager
@@ -136,7 +136,7 @@ CLI / Rust SDK / Python SDK / TypeScript SDK / E2B adapter
 
 Public callers depend on backend-neutral execution interfaces.
 `A3sOciController` owns launch and `A3sOciHandler` owns the live lifecycle.
-Neither callers nor compatibility services execute a runtime binary directly.
+Callers never execute a runtime binary directly.
 
 ### Bundle compilation
 

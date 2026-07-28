@@ -12,7 +12,6 @@ from .client import (
     SandboxBuilder,
     VolumeBuilder,
 )
-from .connection import A3SConnectionConfig, A3SRemoteConnection
 from .exceptions import A3SBoxError, A3SBoxNotInstalledError
 from .models import (
     BuildImageInfo,
@@ -62,9 +61,7 @@ __all__ = [
     "A3SBoxClient",
     "A3SBoxError",
     "A3SBoxNotInstalledError",
-    "A3SConnectionConfig",
     "A3SLocalRuntime",
-    "A3SRemoteConnection",
     "AsyncSandbox",
     "AsyncImageBuilder",
     "AsyncNetworkBuilder",

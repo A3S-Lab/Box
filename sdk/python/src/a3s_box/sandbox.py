@@ -1,4 +1,4 @@
-"""E2B-like Python API backed by the local A3S Box runtime."""
+"""Native Python Sandbox API backed by the local A3S Box runtime."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ from .script import AsyncScriptBuilder, ScriptBuilder
 
 
 class Sandbox:
-    """A local A3S Box Sandbox with familiar E2B-style namespaces."""
+    """A local A3S Box Sandbox with command and filesystem namespaces."""
 
     def __init__(
         self,

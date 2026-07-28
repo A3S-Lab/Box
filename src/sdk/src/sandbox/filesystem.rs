@@ -30,7 +30,7 @@ impl FilesystemOptions {
     }
 }
 
-/// E2B-style file namespace attached to a local [`super::Sandbox`].
+/// File namespace attached to a local [`super::Sandbox`].
 #[derive(Clone)]
 pub struct Filesystem {
     pub(crate) inner: Arc<SandboxInner>,

@@ -14,7 +14,6 @@ import a3s_box
 from a3s_box import (
     A3SAsyncBoxClient,
     A3SBoxClient,
-    A3SRemoteConnection,
     AsyncSandbox,
     RegistryCredentials,
     Sandbox,
@@ -389,7 +388,7 @@ def filesystem_snapshot_response(snapshot_id: str) -> dict[str, Any]:
 
 
 class SdkTests(unittest.TestCase):
-    def test_exports_native_local_clients_without_importing_e2b(self) -> None:
+    def test_exports_native_local_clients(self) -> None:
         self.assertIs(a3s_box.Sandbox, Sandbox)
         self.assertIs(a3s_box.AsyncSandbox, AsyncSandbox)
         self.assertEqual(a3s_box.DEFAULT_IMAGE, "alpine:3.20")
@@ -411,7 +410,7 @@ class SdkTests(unittest.TestCase):
         )
         self.assertEqual(list(SUPPORTED_BRIDGE_OPERATIONS), inventory)
 
-    def test_sync_sandbox_uses_local_runtime_with_e2b_like_surface(self) -> None:
+    def test_sync_sandbox_uses_local_runtime_surface(self) -> None:
         runtime = FakeRuntime()
 
         with Sandbox.create(
@@ -527,7 +526,7 @@ class SdkTests(unittest.TestCase):
             ],
         )
 
-    def test_fluent_programmable_cicd_builders_share_the_e2b_sandbox(self) -> None:
+    def test_fluent_programmable_cicd_builders_share_the_local_sandbox(self) -> None:
         runtime = FakeRuntime()
         client = A3SBoxClient(runtime)
 
@@ -661,14 +660,9 @@ class SdkTests(unittest.TestCase):
 
         self.assertEqual(runtime.requests[0]["isolation"], "sandbox")
 
-    def test_local_binary_resolution_ignores_remote_credentials(self) -> None:
-        environment = {
-            "E2B_API_KEY": "must-not-be-read",
-            "A3S_BOX_API_KEY": "must-not-be-read",
-            "A3S_BOX_ENDPOINT": "https://must-not-be-read.invalid",
-        }
+    def test_local_binary_resolution_uses_path_without_override(self) -> None:
         with (
-            patch.dict(os.environ, environment, clear=True),
+            patch.dict(os.environ, {}, clear=True),
             patch("a3s_box.runtime.shutil.which", return_value="/usr/local/bin/a3s-box") as which,
         ):
             self.assertEqual(_resolve_binary(None), "/usr/local/bin/a3s-box")
@@ -730,27 +724,6 @@ class SdkTests(unittest.TestCase):
             runtime.requests[1]["argv"],
             ["python", "-c", "print(6 * 7)"],
         )
-
-    def test_remote_configuration_is_explicit_and_not_used_by_local_create(self) -> None:
-        connection = A3SRemoteConnection.from_environment(
-            {
-                "A3S_BOX_ENDPOINT": "https://api.box.example.com",
-                "A3S_BOX_API_KEY": "e2b_a1b2c3",
-            }
-        )
-        self.assertEqual(connection.domain, "box.example.com")
-        self.assertEqual(
-            connection.official_python_options(),
-            {
-                "api_url": "https://api.box.example.com",
-                "domain": "box.example.com",
-                "api_key": "e2b_a1b2c3",
-            },
-        )
-
-        with self.assertRaisesRegex(ValueError, "A3S_BOX_ENDPOINT is required"):
-            A3SRemoteConnection.from_environment({})
-
 
 class AsyncSdkTests(unittest.IsolatedAsyncioTestCase):
     async def test_async_sandbox_uses_the_same_local_protocol(self) -> None:

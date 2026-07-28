@@ -204,8 +204,6 @@ jobs:
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             cargo build --locked --release -p a3s-box-cri \
               --target ${{ matrix.host_target }}
-            cargo build --locked --release -p a3s-box-compat --bin a3s-box-e2b \
-              --target ${{ matrix.host_target }}
           fi
 
       - name: Build A3S OCI Sandbox runtime
@@ -259,7 +257,6 @@ jobs:
 
           if [ "${{ matrix.build_cri }}" = "true" ]; then
             cp "$HOST_RELEASE_DIR/a3s-box-cri" "$DIR/"
-            cp "$HOST_RELEASE_DIR/a3s-box-e2b" "$DIR/"
           fi
 
           if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
@@ -337,7 +334,7 @@ jobs:
               "$DIR/a3s-oci-agent"
             )
             if [ "${{ matrix.build_cri }}" = "true" ]; then
-              HOST_BINARIES+=("$DIR/a3s-box-cri" "$DIR/a3s-box-e2b")
+              HOST_BINARIES+=("$DIR/a3s-box-cri")
             fi
 
             assert_runpath() {
@@ -508,9 +505,8 @@ jobs:
             fi
           fi
           if [ "${{ matrix.build_cri }}" = "true" ]; then
-            for binary in a3s-box-cri a3s-box-e2b; do
-              test -s "$DIR/$binary" && test -x "$DIR/$binary"
-            done
+            test -s "$DIR/a3s-box-cri"
+            test -x "$DIR/a3s-box-cri"
           fi
           if [ "${{ matrix.build_containerd_shim }}" = "true" ]; then
             test -s "$DIR/containerd-shim-a3s-box-v2"
@@ -997,7 +993,6 @@ jobs:
               bin.install "a3s-oci" if File.exist?("a3s-oci")
               bin.install "a3s-oci-agent" if File.exist?("a3s-oci-agent")
               bin.install "a3s-box-cri" if File.exist?("a3s-box-cri")
-              bin.install "a3s-box-e2b" if File.exist?("a3s-box-e2b")
               lib.install Dir["lib/*"] if Dir.exist?("lib")
             end
 

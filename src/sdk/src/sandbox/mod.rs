@@ -1,4 +1,4 @@
-//! E2B-style local Sandbox API backed directly by the A3S Box runtime.
+//! Native local Sandbox API backed directly by the A3S Box runtime.
 //!
 //! This module never reads endpoint or API-key environment variables. The
 //! default constructor opens the installed local runtime state directly.
@@ -91,7 +91,7 @@ pub struct SandboxInfo {
     pub isolation: ExecutionIsolation,
 }
 
-/// A zero-configuration local A3S Box handle with an E2B-style surface.
+/// A zero-configuration local A3S Box handle.
 ///
 /// `Sandbox::create` uses MicroVM isolation by default. Pass
 /// [`ExecutionIsolation::Sandbox`] through [`SandboxCreateOptions`] to opt into

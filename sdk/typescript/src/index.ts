@@ -1,10 +1,3 @@
-export {
-  A3SConnectionConfig,
-  A3SRemoteConnection,
-  type A3SRemoteConnectionOptions,
-  type A3SRemoteEnvironment,
-  type OfficialSdkConnectionOptions,
-} from './connection.js'
 export { A3SBoxError, A3SBoxNotInstalledError } from './errors.js'
 export {
   A3SBoxClient,

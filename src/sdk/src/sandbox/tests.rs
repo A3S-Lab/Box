@@ -404,7 +404,7 @@ fn test_client(runtime: Arc<RecordingRuntime>, home: &std::path::Path) -> A3sBox
 }
 
 #[tokio::test]
-async fn e2b_style_rust_surface_supports_both_local_isolation_levels() {
+async fn local_sandbox_surface_supports_both_isolation_levels() {
     for isolation in [ExecutionIsolation::Microvm, ExecutionIsolation::Sandbox] {
         let temp = tempfile::tempdir().unwrap();
         let runtime = Arc::new(RecordingRuntime::new());

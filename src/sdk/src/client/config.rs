@@ -46,9 +46,8 @@ impl A3sBoxClient {
 
     /// Create a client with an explicit backend-neutral execution manager.
     ///
-    /// This keeps lifecycle calls on the same canonical facade used by the CLI
-    /// and remote compatibility service while allowing an embedding application
-    /// to inject its own manager implementation.
+    /// This keeps lifecycle calls on the canonical facade while allowing an
+    /// embedding application to inject its own manager implementation.
     pub fn with_execution_manager(
         paths: A3sBoxPaths,
         execution_manager: Arc<dyn ExecutionManager>,
@@ -63,7 +62,7 @@ impl A3sBoxClient {
 
     /// Create a client with explicit typed lifecycle and session managers.
     ///
-    /// This is useful for embedding the E2B-style [`crate::Sandbox`] facade in
+    /// This is useful for embedding the local [`crate::Sandbox`] facade in
     /// another local process without selecting backends by string.
     pub fn with_execution_services(
         paths: A3sBoxPaths,

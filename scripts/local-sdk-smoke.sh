@@ -84,45 +84,28 @@ mkdir -p "$A3S_HOME/bin"
 install -m 755 "$A3S_BOX_SHIM_BINARY" "$A3S_HOME/bin/a3s-box-shim"
 install -m 755 "$guest_init" "$A3S_HOME/bin/a3s-box-guest-init"
 
-remote_variables=(
-    E2B_API_KEY
-    E2B_API_URL
-    E2B_DOMAIN
-    A3S_BOX_API_KEY
-    A3S_BOX_ENDPOINT
-    A3S_BOX_DOMAIN
-    A3S_BOX_SANDBOX_URL
-)
-clean_env=(env)
-for variable in "${remote_variables[@]}"; do
-    clean_env+=(-u "$variable")
-done
-
 echo "==> Rust SDK ($ISOLATION)"
 (
     cd "$WORKSPACE"
     if [ "$cargo_release" -eq 1 ]; then
-        "${clean_env[@]}" \
-            A3S_BOX_SDK_LOCAL_SMOKE=1 \
+        A3S_BOX_SDK_LOCAL_SMOKE=1 \
             A3S_BOX_SDK_SMOKE_ISOLATION="$ISOLATION" \
             RUST_MIN_STACK="$RUST_MIN_STACK" \
             cargo test --locked --release -p a3s-box-sdk --test local_sandbox \
-            e2b_style_local_sandbox_runs_without_remote_credentials \
+            local_sandbox_exercises_real_runtime \
             -- --ignored --nocapture --test-threads=1
     else
-        "${clean_env[@]}" \
-            A3S_BOX_SDK_LOCAL_SMOKE=1 \
+        A3S_BOX_SDK_LOCAL_SMOKE=1 \
             A3S_BOX_SDK_SMOKE_ISOLATION="$ISOLATION" \
             RUST_MIN_STACK="$RUST_MIN_STACK" \
             cargo test --locked -p a3s-box-sdk --test local_sandbox \
-            e2b_style_local_sandbox_runs_without_remote_credentials \
+            local_sandbox_exercises_real_runtime \
             -- --ignored --nocapture --test-threads=1
     fi
 )
 
 echo "==> Python SDK ($ISOLATION)"
-"${clean_env[@]}" \
-    A3S_BOX_BINARY="$A3S_BOX_BINARY" \
+A3S_BOX_BINARY="$A3S_BOX_BINARY" \
     A3S_BOX_SDK_SMOKE_ISOLATION="$ISOLATION" \
     PYTHONPATH="$REPO_ROOT/sdk/python/src" \
     "$PYTHON" - <<'PY'
@@ -131,17 +114,6 @@ import shutil
 from pathlib import Path
 
 from a3s_box import A3SBoxClient, Sandbox
-
-for name in (
-    "E2B_API_KEY",
-    "E2B_API_URL",
-    "E2B_DOMAIN",
-    "A3S_BOX_API_KEY",
-    "A3S_BOX_ENDPOINT",
-    "A3S_BOX_DOMAIN",
-    "A3S_BOX_SANDBOX_URL",
-):
-    assert name not in os.environ
 
 client = A3SBoxClient()
 isolation = os.environ["A3S_BOX_SDK_SMOKE_ISOLATION"]
@@ -266,26 +238,13 @@ PY
 echo "==> TypeScript SDK ($ISOLATION)"
 npm --prefix "$REPO_ROOT/sdk/typescript" ci
 npm --prefix "$REPO_ROOT/sdk/typescript" run build
-"${clean_env[@]}" \
-    A3S_BOX_BINARY="$A3S_BOX_BINARY" \
+A3S_BOX_BINARY="$A3S_BOX_BINARY" \
     A3S_BOX_SDK_SMOKE_ISOLATION="$ISOLATION" \
 node --input-type=module <<'JS'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { A3SBoxClient, Sandbox } from './sdk/typescript/dist/index.js'
-
-for (const name of [
-  'E2B_API_KEY',
-  'E2B_API_URL',
-  'E2B_DOMAIN',
-  'A3S_BOX_API_KEY',
-  'A3S_BOX_ENDPOINT',
-  'A3S_BOX_DOMAIN',
-  'A3S_BOX_SANDBOX_URL',
-]) {
-  if (name in process.env) throw new Error(`${name} must be unset`)
-}
 
 const client = new A3SBoxClient()
 const isolation = process.env.A3S_BOX_SDK_SMOKE_ISOLATION

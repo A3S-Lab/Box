@@ -99,7 +99,7 @@ impl CommandRunOptions {
     }
 }
 
-/// Captured result of one E2B-style command execution.
+/// Captured result of one local Sandbox command execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandResult {
     pub stdout: String,
@@ -110,7 +110,7 @@ pub struct CommandResult {
     pub(crate) stderr_bytes: Vec<u8>,
 }
 
-/// E2B-style command namespace attached to a local [`super::Sandbox`].
+/// Command namespace attached to a local [`super::Sandbox`].
 #[derive(Clone)]
 pub struct Commands {
     pub(crate) inner: Arc<SandboxInner>,

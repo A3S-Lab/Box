@@ -1,13 +1,8 @@
 # SDK API and Programmable CI/CD Plan
 
 This document is the authoritative completion plan for the native local A3S
-Box SDKs. It covers Rust, Python, and TypeScript. It does not redefine the
-native SDKs as wrappers around the official E2B clients: local calls remain
-credential-free and execute through the installed A3S Box runtime.
-
-Remote E2B protocol compatibility is a separate product surface. Its pinned
-contract and official-client evidence remain tracked under
-[`compat/e2b`](../compat/e2b/README.md).
+Box SDKs. It covers Rust, Python, and TypeScript. Local calls remain
+credential-free and execute directly through the installed A3S Box runtime.
 
 ## Product Contract
 
@@ -25,13 +20,14 @@ JavaScript promises.
 Each language exposes two complementary entry styles over that single
 implementation:
 
-- the familiar E2B-style `Sandbox.create`, `commands`, and `files` surface for
-  low-friction migration and direct execution;
+- the direct `Sandbox.create`, `commands`, and `files` surface for local
+  execution;
 - a fluent builder surface for image, storage, network, box, and script
   configuration.
 
-The E2B-style surface remains supported as the builder API grows. Neither entry
-style may maintain a separate lifecycle or transport implementation.
+The direct `Sandbox` surface remains supported as the builder API grows.
+Neither entry style may maintain a separate lifecycle or transport
+implementation.
 `SandboxBuilder.start()` returns the same public `Sandbox` type used by
 `Sandbox.create()`, with the same `commands`, `files`, snapshot, and lifecycle
 namespaces.
@@ -132,9 +128,9 @@ The naming follows each language while preserving the same concepts:
 | Published port | `PortMapping` | `PortMapping` | `PortMapping` |
 | Script | `Script` | `Script` | `Script` |
 
-The existing E2B-style `Sandbox` remains the convenient local execution
-facade. It is not overloaded with host-wide image, volume, and network
-management; those operations belong to the runtime client.
+The existing `Sandbox` remains the convenient local execution facade. It is
+not overloaded with host-wide image, volume, and network management; those
+operations belong to the runtime client.
 
 The preferred fluent flow is:
 
@@ -142,8 +138,7 @@ The preferred fluent flow is:
 2. `client.volume(name)...create()` and
    `client.network(name)...create()` where required;
 3. `client.sandbox(image)...mount(...).network(...).start()`;
-4. `box.script(source)...run()` or the E2B-style
-   `box.commands.run(...)`;
+4. `box.script(source)...run()` or `box.commands.run(...)`;
 5. deterministic cleanup through `kill`, `close`, or a language context
    manager.
 
@@ -177,7 +172,7 @@ If retained, the composition layer must:
 | Typed box configuration | image, isolation, CPU/memory/lifetime, environment, workdir/user, mounts, tmpfs, network, ports, DNS/hosts, read-only root, persistence, cleanup, and snapshot restore | Implemented in Rust/Python/TypeScript options and fluent builders. The real macOS/HVF MicroVM builder gate passes; the no-KVM Ubuntu gate uses A3S OCI Runtime as the sole Sandbox backend, while Linux/KVM remains host-gated. |
 | Volumes | list, get, create, typed mount, content operations, remove, and prune | Create/get/list/remove/prune and typed bind/named mounts have three-language parity. Direct content helpers remain pending. |
 | Networking | list/create/get/remove/prune, typed attachment, published ports, and resolved endpoint inspection | Create/get/list/remove/prune, typed TSI/disabled/bridge selection, endpoint responses, and TCP publication have three-language parity. Live hot-plug is intentionally unsupported. |
-| Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have three-language parity and pass the real macOS/HVF builder-to-E2B smoke. Process handles, signals, wait, and streaming remain pending. |
+| Commands and scripts | foreground argv/shell/script execution, environment, cwd, user, stdin, timeout, binary-safe output, background processes, signals, wait, and streaming | Foreground argv/shell and stdin-backed fluent scripts have three-language parity and pass the real macOS/HVF builder-to-Sandbox smoke. Process handles, signals, wait, and streaming remain pending. |
 | Files and artifacts | binary/text read/write, stat, exists, list, mkdir, move, remove, streaming, confined export, size limits, and hashes | Core mutations implemented; artifact/export layer and large-file streaming pending. |
 | Filesystem snapshots | capture, size, restore, delete, in-use fencing, inspection, and cleanup | Capture/size/restore/delete and live-use fencing are implemented. Rust, Python sync/async, and TypeScript expose typed list/get inspection through the checked bridge; the real Sandbox gate exercises the complete local snapshot lifecycle. |
 | Lifecycle | create, connect, inspect, list, pause, resume, restart, timeout replacement, stop, kill, remove, and deterministic cleanup | Rust, Python sync/async, and TypeScript have parity for create/connect/inspect/list/pause/resume/stop/idempotent restart/kill/remove. Restart carries a durable operation identity and optional stop deadline; stop preserves the record, remove requires a terminal state, and kill composes both. Cancellation cleanup remains pending. |

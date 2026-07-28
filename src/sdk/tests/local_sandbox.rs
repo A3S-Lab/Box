@@ -1,4 +1,4 @@
-//! Opt-in real-runtime proof for the zero-configuration E2B-style Rust API.
+//! Opt-in real-runtime proof for the zero-configuration local Rust API.
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -13,26 +13,11 @@ type AnyError = Box<dyn Error + Send + Sync>;
 
 #[tokio::test]
 #[ignore = "requires a real local A3S Box runtime and runnable OCI image"]
-async fn e2b_style_local_sandbox_runs_without_remote_credentials() -> Result<(), AnyError> {
+async fn local_sandbox_exercises_real_runtime() -> Result<(), AnyError> {
     require(
         std::env::var("A3S_BOX_SDK_LOCAL_SMOKE").as_deref() == Ok("1"),
         "set A3S_BOX_SDK_LOCAL_SMOKE=1 to acknowledge the destructive smoke test",
     )?;
-    for variable in [
-        "E2B_API_KEY",
-        "E2B_API_URL",
-        "E2B_DOMAIN",
-        "A3S_BOX_API_KEY",
-        "A3S_BOX_ENDPOINT",
-        "A3S_BOX_DOMAIN",
-        "A3S_BOX_SANDBOX_URL",
-    ] {
-        require(
-            std::env::var_os(variable).is_none(),
-            format!("{variable} must be unset for the zero-configuration local SDK smoke"),
-        )?;
-    }
-
     let home = validated_home()?;
     let isolation = requested_isolation()?;
     let base_image =

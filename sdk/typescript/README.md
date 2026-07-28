@@ -1,9 +1,8 @@
 # A3S Box TypeScript SDK
 
-`@a3s-lab/box` is a local-first TypeScript SDK with familiar E2B-style
-`Sandbox`, `commands`, and `files` APIs. It controls the A3S Box runtime
-installed on the same machine. It does not depend on, wrap, import, or contact
-the official E2B SDK.
+`@a3s-lab/box` is a local-first TypeScript SDK with native `Sandbox`,
+`commands`, and `files` APIs. It controls the A3S Box runtime installed on the
+same machine.
 
 ## Local use
 
@@ -84,7 +83,7 @@ accept tails from 1 through 10,000 entries. The runtime client also exposes
 
 ## Builder-style programmable CI/CD
 
-The E2B-style API remains available for direct execution. For build and CI
+The direct `Sandbox` API remains available for execution. For build and CI
 tooling, `A3SBoxClient` adds fluent builders over the same local runtime and
 bridge:
 
@@ -175,32 +174,5 @@ await client.pruneNetworks()
 ```
 
 `client.capabilities()` returns the bridge protocol version and exact supported
-operation names. Passwords are passed only to the local runtime process and are
-not read from the remote-only endpoint/API-key environment variables.
-
-## Remote and self-hosted deployments
-
-`A3S_BOX_ENDPOINT`, `A3S_BOX_API_KEY`, `A3S_BOX_DOMAIN`, and
-`A3S_BOX_SANDBOX_URL` are remote-only settings. Local `Sandbox.create()` never
-reads them.
-
-The native package exposes `A3SRemoteConnection` as a typed configuration
-helper for applications that deliberately install an unchanged official E2B
-client and point it at a remote A3S Box compatibility service:
-
-```typescript
-import { A3SRemoteConnection } from '@a3s-lab/box'
-import { Sandbox as RemoteSandbox } from 'e2b'
-
-const connection = A3SRemoteConnection.fromEnvironment(process.env)
-const remote = await RemoteSandbox.create('code-interpreter-v1', {
-  ...connection.officialSdkOptions(),
-})
-await remote.kill()
-```
-
-This explicit migration path is separate from the native local SDK. The
-official client is not a dependency of `@a3s-lab/box`.
-
-See the repository README for complete self-hosted endpoint, wildcard DNS,
-TLS, and API-key setup.
+operation names. Registry passwords are passed only to the local runtime
+process.

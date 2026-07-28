@@ -95,20 +95,17 @@ sudo usermod -aG kvm "$USER"
 
 ## Native local SDK matrix
 
-The native Rust, Python, and TypeScript SDK smoke exercises the same E2B-style
+The native Rust, Python, and TypeScript SDK smoke exercises the same local
 `Sandbox`, commands, files, pause/resume, kill, and cleanup behavior against a
-real local backend. Before starting the box it also verifies the bridge
-capability inventory, built-image get/inspect/history/tag/remove calls, and
-unused volume/network pruning; cache eviction is exercised after cleanup. It
-fails if any remote endpoint, domain, or API-key variable is present.
+real backend. Before starting the box it also verifies the bridge capability
+inventory, built-image get/inspect/history/tag/remove calls, and unused
+volume/network pruning; cache eviction is exercised after cleanup.
 
 Build the host binary, shim, and matching Linux guest init first. Then use a
 dedicated state directory:
 
 ```bash
 export A3S_HOME=/var/tmp/a3s-local-sdk-smoke
-unset E2B_API_KEY E2B_API_URL E2B_DOMAIN
-unset A3S_BOX_API_KEY A3S_BOX_ENDPOINT A3S_BOX_DOMAIN A3S_BOX_SANDBOX_URL
 
 # Development-tree override only; installed packages normally find a3s-box on PATH.
 export A3S_BOX_BINARY="$PWD/src/target/debug/a3s-box"

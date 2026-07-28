@@ -4,6 +4,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- **Remote E2B compatibility service.** The pinned upstream protocol corpus,
+  official-client fixtures, ACL control/data-plane service, dedicated runtime
+  image, release binary, and their CI/release plumbing are removed. Native
+  Rust, Python, and TypeScript SDKs remain local, credential-free entry points
+  over the core A3S Box runtime.
+
 ### Changed
 
 - **A3S OCI Runtime is the sole Sandbox backend.** New shared-kernel Sandbox

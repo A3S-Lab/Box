@@ -6,10 +6,9 @@ By default, the SDK does not spawn the `a3s-box` CLI. `A3sBoxClient` calls
 `a3s-box-runtime` stores and socket clients directly, returning typed Rust data
 for management apps, automation, and tests.
 
-## E2B-Style Local Sandbox
+## Native Local Sandbox
 
-The high-level `Sandbox` API is local and zero-configuration. It does not read
-`E2B_API_KEY`, `A3S_BOX_API_KEY`, an endpoint, or a domain:
+The high-level `Sandbox` API is local and zero-configuration:
 
 ```rust
 use a3s_box_sdk::Sandbox;
@@ -86,8 +85,8 @@ allocating a second lifecycle transition. Log tails must contain 1 through
 
 ## Builder-Style Programmable CI/CD
 
-The E2B-style facade and the fluent builders are two entry styles over the
-same typed client and lifecycle implementation:
+The direct `Sandbox` facade and the fluent builders are two entry styles over
+the same typed client and lifecycle implementation:
 
 ```rust
 use a3s_box_sdk::{A3sBoxClient, SandboxNetwork};
@@ -215,8 +214,8 @@ non-default a3s-box state directory.
 ## Managed Lifecycle
 
 The SDK submits lifecycle requests directly to the same generation-fenced
-`ExecutionManager` used by the CLI and compatibility service. It does not spawn
-the CLI or construct a parallel box record.
+`ExecutionManager` used by the CLI. It does not spawn the CLI or construct a
+parallel box record.
 
 ```rust
 use std::collections::BTreeMap;
@@ -279,7 +278,7 @@ request semantics.
   volumes, snapshots, state files, and other local data.
 - Running boxes on Unix: exec, file transfer, heartbeat, main-process signal,
   deferred-main spawn, PTY client, and attestation report through runtime sockets.
-- E2B-style local use: zero-configuration `Sandbox`, `commands`, `files`,
+- Native local use: zero-configuration `Sandbox`, `commands`, `files`,
   lifecycle, explicit MicroVM/shared-kernel isolation, and typed client
   injection for embedding and tests.
 - Language bridge: versioned capability inventory plus image
