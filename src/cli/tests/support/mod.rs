@@ -51,6 +51,7 @@ pub struct CliTest {
 pub struct BackgroundProcessGuard<'a> {
     cli: &'a CliTest,
     child: Option<Child>,
+    command: String,
 }
 
 impl BackgroundProcessGuard<'_> {
@@ -69,15 +70,35 @@ impl BackgroundProcessGuard<'_> {
     }
 
     pub fn interrupt(&mut self) {
+        self.interrupt_with_diagnostics(false);
+    }
+
+    fn interrupt_with_diagnostics(&mut self, report_stdout: bool) {
         if let Some(mut child) = self.child.take() {
             self.cli.interrupt_background(&mut child);
+
+            let mut stdout = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+
+            if report_stdout && !stdout.trim().is_empty() {
+                eprintln!("background `a3s-box {}` stdout:\n{}", self.command, stdout);
+            }
+            if !stderr.trim().is_empty() {
+                eprintln!("background `a3s-box {}` stderr:\n{}", self.command, stderr);
+            }
         }
     }
 }
 
 impl Drop for BackgroundProcessGuard<'_> {
     fn drop(&mut self) {
-        self.interrupt();
+        self.interrupt_with_diagnostics(std::thread::panicking());
     }
 }
 
@@ -181,6 +202,7 @@ impl CliTest {
         BackgroundProcessGuard {
             cli: self,
             child: Some(self.spawn_background(args)),
+            command: args.join(" "),
         }
     }
 
