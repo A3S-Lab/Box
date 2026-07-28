@@ -432,7 +432,11 @@ impl VmManager {
             // not a failed rootfs build. Preserve its writable generation so a
             // managed restart observes the same persistent filesystem while
             // ephemeral mounts are recreated by the next runtime generation.
-            let completed_before_cleanup = match handler.try_wait_exit() {
+            // Process termination and publication of the exact wait result are
+            // separate events. Remember both: `stop` may collect the exact
+            // status only after this initial non-blocking poll.
+            let exited_before_cleanup = handler.has_exited();
+            let collected_before_cleanup = match handler.try_wait_exit() {
                 Ok(Some(exit_code)) => {
                     self.shim_exit_code = Some(exit_code);
                     true
@@ -447,9 +451,6 @@ impl VmManager {
                     false
                 }
             };
-            if completed_before_cleanup && self.config.persistent {
-                self.preserve_rootfs_on_boot_failure = true;
-            }
             if let Err(error) = handler.stop(default_stop_signal(), DEFAULT_SHUTDOWN_TIMEOUT_MS) {
                 tracing::warn!(
                     box_id = %self.box_id,
@@ -458,6 +459,12 @@ impl VmManager {
                 );
             }
             self.shim_exit_code = handler.exit_code().or(self.shim_exit_code);
+            if self.config.persistent
+                && self.shim_exit_code.is_some()
+                && (collected_before_cleanup || exited_before_cleanup)
+            {
+                self.preserve_rootfs_on_boot_failure = true;
+            }
         }
 
         if let Some(mut net_manager) = self.net_manager.take() {
@@ -2075,6 +2082,42 @@ mod tests {
         }
     }
 
+    struct CompletionCollectedByStopHandler {
+        code: i32,
+        collected: bool,
+    }
+
+    impl VmHandler for CompletionCollectedByStopHandler {
+        fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+            self.collected = true;
+            Ok(())
+        }
+
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+
+        fn is_running(&self) -> bool {
+            false
+        }
+
+        fn has_exited(&self) -> bool {
+            true
+        }
+
+        fn pid(&self) -> u32 {
+            42
+        }
+
+        fn exit_code(&self) -> Option<i32> {
+            self.collected.then_some(self.code)
+        }
+
+        fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+            Ok(None)
+        }
+    }
+
     /// A handler whose `stop` always fails — models a wedged VM that won't halt.
     struct FailingHandler;
 
@@ -2201,7 +2244,10 @@ mod tests {
         let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
         vm.home_dir = tmp.path().to_path_buf();
         vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
-        *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 17 }));
+        *vm.handler.write().await = Some(Box::new(CompletionCollectedByStopHandler {
+            code: 17,
+            collected: false,
+        }));
 
         let marker = tmp
             .path()
