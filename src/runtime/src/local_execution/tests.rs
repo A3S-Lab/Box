@@ -36,6 +36,7 @@ struct FakeBackend {
     fail_quiescent_rootfs_cleanup: AtomicBool,
     fail_start: AtomicBool,
     fail_start_after_effect: AtomicBool,
+    fail_inspect: AtomicBool,
     fail_kill: AtomicBool,
     fail_kill_after_effect: AtomicBool,
     omit_kill_exit_code: AtomicBool,
@@ -132,6 +133,11 @@ impl LocalExecutionBackend for FakeBackend {
         &self,
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
+        if self.fail_inspect.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake inspection is unavailable".to_string(),
+            ));
+        }
         let executions = self.executions.lock().unwrap();
         let execution = executions
             .get(&record.id)
@@ -1422,6 +1428,39 @@ async fn startup_completion_with_exact_exit_code_is_persisted_as_stopped() {
         Some(ManagedExecutionState::Stopped)
     );
     assert_eq!(stopped.exit_code, Some(23));
+}
+
+#[tokio::test]
+async fn startup_reconciliation_reports_the_secondary_inspection_error() {
+    let (_directory, manager, backend) = harness();
+    *backend.start_terminal_exit_code.lock().unwrap() = Some(23);
+    backend.fail_inspect.store(true, Ordering::Relaxed);
+    let reservation = manager
+        .create(
+            request("startup-reconciliation-error"),
+            &operation("operation-startup-reconciliation-error"),
+        )
+        .await
+        .unwrap();
+
+    let error = manager
+        .start(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("fake execution completed during startup")
+                && message.contains("failed to inspect backend state during reconciliation")
+                && message.contains("fake inspection is unavailable")
+    ));
+    let starting = persisted(&manager, &reservation.execution_id);
+    assert_eq!(
+        starting.managed_state().unwrap(),
+        Some(ManagedExecutionState::Starting)
+    );
+    assert_eq!(starting.exit_code, None);
 }
 
 #[tokio::test]

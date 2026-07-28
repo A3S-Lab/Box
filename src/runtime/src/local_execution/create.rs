@@ -190,17 +190,32 @@ impl LocalExecutionManager {
                         lease_from_record(&running)
                     }
                     ExecutionState::Stopped | ExecutionState::Failed => {
-                        self.release_execution_resources(&claimed).await?;
+                        if let Err(error) = self.release_execution_resources(&claimed).await {
+                            return Err(startup_reconciliation_error(
+                                &id,
+                                &start_error,
+                                "release execution resources",
+                                error,
+                            ));
+                        }
                         let terminal_state =
                             startup_terminal_state(observation.state, observation.exit_code);
-                        let _ = self
-                            .transition(
+                        if let Err(error) = self
+                            .complete_transition(
                                 &claimed,
                                 ManagedExecutionState::Starting,
                                 terminal_state,
                                 RuntimeUpdate::Terminal(observation.exit_code),
                             )
-                            .await;
+                            .await
+                        {
+                            return Err(startup_reconciliation_error(
+                                &id,
+                                &start_error,
+                                "persist terminal state",
+                                error,
+                            ));
+                        }
                         Err(start_error)
                     }
                     ExecutionState::Created | ExecutionState::Creating | ExecutionState::Paused => {
@@ -209,19 +224,43 @@ impl LocalExecutionManager {
                 }
             }
             Err(ExecutionManagerError::NotFound(_)) => {
-                let _ = self
-                    .transition(
+                if let Err(error) = self
+                    .complete_transition(
                         &claimed,
                         ManagedExecutionState::Starting,
                         ManagedExecutionState::Failed,
                         RuntimeUpdate::Terminal(None),
                     )
-                    .await;
+                    .await
+                {
+                    return Err(startup_reconciliation_error(
+                        &id,
+                        &start_error,
+                        "persist provider loss",
+                        error,
+                    ));
+                }
                 Err(start_error)
             }
-            Err(_) => Err(start_error),
+            Err(error) => Err(startup_reconciliation_error(
+                &id,
+                &start_error,
+                "inspect backend state",
+                error,
+            )),
         }
     }
+}
+
+fn startup_reconciliation_error(
+    execution_id: &a3s_box_core::ExecutionId,
+    start_error: &ExecutionManagerError,
+    action: &str,
+    reconciliation_error: ExecutionManagerError,
+) -> ExecutionManagerError {
+    ExecutionManagerError::Unavailable(format!(
+        "execution {execution_id} failed during startup: {start_error}; failed to {action} during reconciliation: {reconciliation_error}"
+    ))
 }
 
 pub(super) fn startup_terminal_state(
