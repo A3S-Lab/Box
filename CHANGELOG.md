@@ -6,6 +6,9 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Managed stopped-box start.** `a3s-box start` now restarts stopped or failed
+  managed boxes through the generation-fenced restart protocol, preserving the
+  Docker-like stop/start contract without reviving a terminal generation.
 - **First live resource update.** MicroVM containers retain an otherwise-empty
   per-container cgroup from startup, so `container-update` can safely apply the
   first CPU, memory-reservation, swap, PID, or cpuset limit without targeting
