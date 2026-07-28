@@ -65,7 +65,7 @@ tar = "0.4"
 tempfile = { workspace = true }
 
 # OCI image spec (for history command)
-oci-spec = "0.6"
+oci-spec = "0.10"
 
 # Hashing and compression (for commit command)
 sha2 = { workspace = true }

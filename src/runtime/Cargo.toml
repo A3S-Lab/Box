@@ -76,7 +76,7 @@ sysinfo = { workspace = true }
 dirs = { workspace = true }
 
 # OCI image support
-oci-spec = "0.6"
+oci-spec = "0.10"
 oci-distribution = { workspace = true }
 tar = "0.4"
 flate2 = "1.0"

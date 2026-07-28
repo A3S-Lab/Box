@@ -20,7 +20,7 @@ pub async fn execute(args: HistoryArgs) -> Result<(), Box<dyn std::error::Error>
     let images = store.list().await;
     let stored = image_usage::resolve_required_stored_image(&images, &args.image)?;
     let oci_config = load_image_configuration(&stored.path)?;
-    let history: &Vec<History> = oci_config.history();
+    let history: &[History] = oci_config.history().as_deref().unwrap_or_default();
 
     if args.quiet {
         let diff_ids: &Vec<String> = oci_config.rootfs().diff_ids();
