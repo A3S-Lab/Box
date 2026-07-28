@@ -10,6 +10,8 @@ pub(crate) mod a3s_oci_client;
 pub(crate) mod a3s_oci_controller;
 #[cfg(target_os = "linux")]
 pub(crate) mod a3s_oci_handler;
+#[cfg(target_os = "linux")]
+pub(crate) mod a3s_oci_owner;
 pub mod capability;
 pub mod controller;
 pub mod oci;
@@ -17,6 +19,15 @@ pub mod path_access;
 pub mod rootfs;
 #[cfg(target_os = "linux")]
 pub(crate) mod runtime_record;
+
+/// Lifecycle envelope certified by the pinned A3S OCI native service.
+///
+/// The native service allows its Linux executor up to ten seconds to reap a
+/// process and uses a fifteen-second shutdown envelope in its own lifecycle
+/// certification. Box must give container wait and owner shutdown that same
+/// bounded opportunity before declaring provider loss.
+#[cfg(target_os = "linux")]
+pub(crate) const A3S_OCI_LIFECYCLE_TIMEOUT_MS: u64 = 15_000;
 
 #[cfg(target_os = "linux")]
 pub use a3s_oci_controller::A3sOciController;

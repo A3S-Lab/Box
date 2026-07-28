@@ -179,6 +179,7 @@ impl VmManager {
                     .hostname
                     .clone()
                     .unwrap_or_else(|| self.box_id.clone()),
+                init_path: instance_spec.entrypoint.executable.clone(),
                 init_environment: instance_spec.entrypoint.env.clone(),
                 mounts,
                 tmpfs,

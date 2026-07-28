@@ -3,6 +3,8 @@
 mod api;
 mod backend;
 mod create;
+#[cfg(test)]
+mod inspection_cancellation_tests;
 mod lifecycle_lock;
 pub use lifecycle_lock::{
     acquire_blocking as acquire_execution_lifecycle_lock, ExecutionLifecycleLock,

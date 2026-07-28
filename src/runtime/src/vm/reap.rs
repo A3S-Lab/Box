@@ -65,8 +65,8 @@ pub(crate) fn cleanup_recorded_sandbox_runtime_in(
 ) -> a3s_box_core::Result<()> {
     match reap_recorded_sandbox(home_dir, box_dir, box_id) {
         SandboxReap::NotPresent | SandboxReap::Cleaned => Ok(()),
-        SandboxReap::Failed => Err(a3s_box_core::BoxError::StateError(format!(
-            "Failed to clean recorded Sandbox runtime for {box_id}; refusing to touch its rootfs"
+        SandboxReap::Failed(reason) => Err(a3s_box_core::BoxError::StateError(format!(
+            "Failed to clean recorded Sandbox runtime for {box_id}: {reason}; refusing to touch its rootfs"
         ))),
     }
 }
@@ -81,9 +81,10 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
 
     match reap_recorded_sandbox(home_dir, &box_dir, box_id) {
         SandboxReap::NotPresent | SandboxReap::Cleaned => {}
-        SandboxReap::Failed => {
+        SandboxReap::Failed(reason) => {
             // A live shared-kernel process may still be using the rootfs. Never
             // unmount or delete it after an unverified/failed runtime cleanup.
+            tracing::error!(box_id, %reason, "Refusing to touch an unreaped Sandbox rootfs");
             return;
         }
     }
@@ -335,7 +336,14 @@ fn sha256_file(path: &Path) -> Option<String> {
 enum SandboxReap {
     NotPresent,
     Cleaned,
-    Failed,
+    Failed(String),
+}
+
+#[cfg(target_os = "linux")]
+fn failed_sandbox_reap(box_id: &str, reason: impl Into<String>) -> SandboxReap {
+    let reason = reason.into();
+    tracing::error!(box_id, %reason, "Failed to reap recorded Sandbox runtime");
+    SandboxReap::Failed(reason)
 }
 
 /// Reconcile one durable Sandbox record before touching its rootfs.
@@ -345,8 +353,10 @@ fn reap_recorded_sandbox(home_dir: &Path, box_dir: &Path, box_id: &str) -> Sandb
         Ok(Some(record)) => record,
         Ok(None) => return SandboxReap::NotPresent,
         Err(error) => {
-            tracing::error!(box_id, %error, "Invalid Sandbox runtime record during crash recovery");
-            return SandboxReap::Failed;
+            return failed_sandbox_reap(
+                box_id,
+                format!("invalid runtime record during crash recovery: {error}"),
+            );
         }
     };
     reap_orphaned_a3s_oci(record, box_dir, box_id)
@@ -369,26 +379,29 @@ fn reap_orphaned_a3s_oci(
         record.owner_pid,
         record.owner_pid_start_time,
     ) else {
-        tracing::error!(
+        return failed_sandbox_reap(
             box_id,
-            "A3S OCI runtime record lost required recovery identity"
+            "A3S OCI runtime record lost required recovery identity",
         );
-        return SandboxReap::Failed;
     };
     let client = match crate::sandbox::a3s_oci_client::A3sOciClient::connect_blocking(
         runtime_socket.clone(),
     ) {
         Ok(client) => client,
         Err(error) => {
-            tracing::error!(box_id, %error, "Failed to connect to orphaned A3S OCI owner");
-            return SandboxReap::Failed;
+            return failed_sandbox_reap(
+                box_id,
+                format!("failed to connect to orphaned A3S OCI owner: {error}"),
+            );
         }
     };
     let container_id = match ContainerId::new(box_id) {
         Ok(container_id) => container_id,
         Err(error) => {
-            tracing::error!(box_id, %error, "Invalid A3S OCI container identity during recovery");
-            return SandboxReap::Failed;
+            return failed_sandbox_reap(
+                box_id,
+                format!("invalid A3S OCI container identity during recovery: {error}"),
+            );
         }
     };
     let target = ContainerTarget::exact(container_id, Generation(generation));
@@ -397,23 +410,29 @@ fn reap_orphaned_a3s_oci(
     }) {
         Ok(state) => state,
         Err(error) => {
-            tracing::error!(box_id, %error, "Failed to query orphaned A3S OCI state");
-            return SandboxReap::Failed;
+            return failed_sandbox_reap(
+                box_id,
+                format!("failed to query orphaned A3S OCI state: {error}"),
+            );
         }
     };
     if state.is_some_and(|state| *state.state.status() != OciContainerState::Stopped) {
         let context = match recorded_operation_context(box_id, "reap-kill") {
             Ok(context) => context,
             Err(error) => {
-                tracing::error!(box_id, %error, "Failed to construct A3S OCI recovery operation");
-                return SandboxReap::Failed;
+                return failed_sandbox_reap(
+                    box_id,
+                    format!("failed to construct A3S OCI recovery operation: {error}"),
+                );
             }
         };
         let signal = match Signal::new(libc::SIGKILL) {
             Ok(signal) => signal,
             Err(error) => {
-                tracing::error!(box_id, %error, "Failed to construct A3S OCI recovery signal");
-                return SandboxReap::Failed;
+                return failed_sandbox_reap(
+                    box_id,
+                    format!("failed to construct A3S OCI recovery signal: {error}"),
+                );
             }
         };
         if let Err(error) = client.kill(KillRequest {
@@ -422,23 +441,29 @@ fn reap_orphaned_a3s_oci(
             signal,
             all: true,
         }) {
-            tracing::error!(box_id, %error, "Failed to signal orphaned A3S OCI Sandbox");
-            return SandboxReap::Failed;
+            return failed_sandbox_reap(
+                box_id,
+                format!("failed to signal orphaned A3S OCI Sandbox: {error}"),
+            );
         }
         if let Err(error) = client.wait(WaitRequest {
             target: target.clone(),
-            timeout_ms: Some(5_000),
+            timeout_ms: Some(crate::sandbox::A3S_OCI_LIFECYCLE_TIMEOUT_MS),
         }) {
-            tracing::error!(box_id, %error, "Failed to wait for orphaned A3S OCI Sandbox");
-            return SandboxReap::Failed;
+            return failed_sandbox_reap(
+                box_id,
+                format!("failed to wait for orphaned A3S OCI Sandbox: {error}"),
+            );
         }
     }
 
     let context = match recorded_operation_context(box_id, "reap-delete") {
         Ok(context) => context,
         Err(error) => {
-            tracing::error!(box_id, %error, "Failed to construct A3S OCI delete operation");
-            return SandboxReap::Failed;
+            return failed_sandbox_reap(
+                box_id,
+                format!("failed to construct A3S OCI delete operation: {error}"),
+            );
         }
     };
     if let Err(error) = client.delete_if_present(DeleteRequest {
@@ -446,33 +471,18 @@ fn reap_orphaned_a3s_oci(
         target,
         mode: DeleteMode::Force,
     }) {
-        tracing::error!(box_id, %error, "Failed to delete orphaned A3S OCI state");
-        return SandboxReap::Failed;
+        return failed_sandbox_reap(
+            box_id,
+            format!("failed to delete orphaned A3S OCI state: {error}"),
+        );
     }
     client.close();
 
-    if crate::process::is_process_running_with_identity(owner_pid, Some(owner_start_time)) {
-        let Ok(raw_pid) = i32::try_from(owner_pid) else {
-            tracing::error!(box_id, owner_pid, "A3S OCI owner PID does not fit i32");
-            return SandboxReap::Failed;
-        };
-        if unsafe { libc::kill(raw_pid, libc::SIGTERM) } != 0 {
-            tracing::error!(
-                box_id,
-                owner_pid,
-                error = %std::io::Error::last_os_error(),
-                "Failed to terminate orphaned A3S OCI owner"
-            );
-            return SandboxReap::Failed;
-        }
-    }
-    if !crate::process::wait_for_process_stop_with_identity(
-        owner_pid,
-        owner_start_time,
-        std::time::Duration::from_secs(3),
-    ) {
-        tracing::error!(box_id, owner_pid, "Orphaned A3S OCI owner did not exit");
-        return SandboxReap::Failed;
+    if let Err(error) = crate::sandbox::a3s_oci_owner::stop(owner_pid, owner_start_time) {
+        return failed_sandbox_reap(
+            box_id,
+            format!("failed to stop orphaned A3S OCI owner {owner_pid}: {error}"),
+        );
     }
 
     drain_recorded_log_worker(&record, box_id);

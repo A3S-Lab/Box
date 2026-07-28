@@ -13,6 +13,7 @@ use a3s_runtime::contract::{
 };
 use a3s_runtime::RuntimeUnitRecord;
 use async_trait::async_trait;
+use tokio::sync::{oneshot, Semaphore};
 
 use crate::{
     BoxRecord, LocalExecutionBackend, LocalExecutionHandle, LocalExecutionManager,
@@ -28,13 +29,32 @@ struct FakeExecution {
     exit_code: Option<i32>,
 }
 
+struct CancelledInspection {
+    claimed: AtomicBool,
+    completed: AtomicBool,
+    started: Semaphore,
+    release: Semaphore,
+}
+
+impl CancelledInspection {
+    fn new() -> Self {
+        Self {
+            claimed: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct DriverFakeBackend {
-    executions: Mutex<HashMap<String, FakeExecution>>,
+    executions: Arc<Mutex<HashMap<String, FakeExecution>>>,
     starts: AtomicUsize,
     kills: AtomicUsize,
     fail_start_after_effect: AtomicBool,
     next_start_terminal: Mutex<Option<(ExecutionState, Option<i32>)>>,
+    cancelled_inspection: Mutex<Option<Arc<CancelledInspection>>>,
 }
 
 impl DriverFakeBackend {
@@ -108,6 +128,35 @@ impl DriverFakeBackend {
     pub(super) fn kills(&self) -> usize {
         self.kills.load(Ordering::SeqCst)
     }
+
+    pub(super) fn arm_cancelled_inspection(&self) {
+        *self.cancelled_inspection.lock().unwrap() = Some(Arc::new(CancelledInspection::new()));
+    }
+
+    pub(super) async fn wait_for_cancelled_inspection(&self) {
+        let inspection = self
+            .cancelled_inspection
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("cancelled inspection must be armed");
+        inspection
+            .started
+            .acquire()
+            .await
+            .expect("cancelled inspection start semaphore must remain open")
+            .forget();
+    }
+
+    pub(super) fn release_cancelled_inspection(&self) {
+        self.cancelled_inspection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("cancelled inspection must be armed")
+            .release
+            .add_permits(1);
+    }
 }
 
 #[async_trait]
@@ -146,6 +195,41 @@ impl LocalExecutionBackend for DriverFakeBackend {
         &self,
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
+        let cancelled_inspection = self.cancelled_inspection.lock().unwrap().clone();
+        if let Some(inspection) = cancelled_inspection {
+            if inspection
+                .claimed
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                let executions = Arc::clone(&self.executions);
+                let execution_id = record.id.clone();
+                let inspection_task = Arc::clone(&inspection);
+                let (completed_tx, completed_rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    inspection_task.started.add_permits(1);
+                    inspection_task
+                        .release
+                        .acquire()
+                        .await
+                        .expect("cancelled inspection release semaphore must remain open")
+                        .forget();
+                    if let Some(execution) = executions.lock().unwrap().get_mut(&execution_id) {
+                        execution.state = ExecutionState::Stopped;
+                        execution.exit_code = Some(0);
+                    }
+                    inspection_task.completed.store(true, Ordering::SeqCst);
+                    let _ = completed_tx.send(());
+                });
+                completed_rx.await.map_err(|error| {
+                    ExecutionManagerError::Internal(format!(
+                        "cancelled fake inspection task failed: {error}"
+                    ))
+                })?;
+            } else if !inspection.completed.load(Ordering::SeqCst) {
+                return Err(ExecutionManagerError::NotFound(Self::execution_id(record)));
+            }
+        }
         let executions = self.executions.lock().unwrap();
         let execution = executions
             .get(&record.id)
@@ -203,10 +287,13 @@ pub(super) fn fake_driver(
     (driver, backend)
 }
 
-pub(super) fn fake_driver_with_backend(
+pub(super) fn fake_driver_with_backend<B>(
     directory: &tempfile::TempDir,
-    backend: Arc<DriverFakeBackend>,
-) -> BoxRuntimeDriver {
+    backend: Arc<B>,
+) -> BoxRuntimeDriver
+where
+    B: LocalExecutionBackend + 'static,
+{
     let home_dir = directory.path().join("home");
     let manager =
         LocalExecutionManager::new(home_dir.join("boxes.json"), &home_dir, backend.clone());

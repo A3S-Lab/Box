@@ -194,7 +194,10 @@ async fn cancelled_task_apply_is_replayable(fixture: &BoxRuntimeConformanceFixtu
     require(
         recovered.state == RuntimeUnitState::Succeeded
             && recovered.provider_resource_id.as_deref() == Some(provider_id.as_str()),
-        "cancelled Task replay did not reattach to the original provider identity",
+        format!(
+            "cancelled Task replay did not reattach to the original provider identity: state={:?}, provider_resource_id={:?}, expected_provider_resource_id={provider_id}",
+            recovered.state, recovered.provider_resource_id
+        ),
     )?;
     let records = fixture
         .records_for(&restarted_driver, &request.spec)

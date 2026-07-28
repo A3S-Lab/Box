@@ -94,6 +94,22 @@ fn recorded_sandbox_runtime_rejects_invalid_paths() {
 }
 
 #[test]
+fn cleanup_reports_the_exact_runtime_record_failure_and_preserves_the_rootfs() {
+    let home = tempfile::tempdir().unwrap();
+    let box_id = "cleanup-recorded-sandbox-invalid-paths";
+    let box_dir = home.path().join("boxes").join(box_id);
+    write_runtime_record(home.path(), &box_dir, box_id, |record| {
+        record.runtime_root = home.path().join("run/a3s-oci/another-box");
+    });
+
+    let error = cleanup_recorded_sandbox_runtime_in(home.path(), &box_dir, box_id).unwrap_err();
+
+    assert!(error.to_string().contains("path or identity validation"));
+    assert!(error.to_string().contains("refusing to touch its rootfs"));
+    assert!(box_dir.exists());
+}
+
+#[test]
 fn recorded_sandbox_runtime_rejects_an_unknown_schema() {
     let home = tempfile::tempdir().unwrap();
     let box_id = "recorded-sandbox-unknown-schema";

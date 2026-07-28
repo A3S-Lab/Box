@@ -1,9 +1,13 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitClass, RuntimeUnitState};
 use a3s_runtime::{RuntimeDriver, RuntimeError};
 
 use super::metadata::GENERATION_LABEL;
 use super::test_support::{
     accepted, action, fake_driver, fake_driver_with_backend, runtime_spec, unit, unknown,
+    DriverFakeBackend,
 };
 
 #[tokio::test]
@@ -230,4 +234,63 @@ async fn startup_failure_without_exit_code_preserves_the_provider_error() {
         Err(RuntimeError::ProviderUnavailable(message))
             if message == "fake start response was lost"
     ));
+}
+
+#[tokio::test]
+async fn cancelled_task_inspection_completes_before_replay() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(DriverFakeBackend::default());
+    backend.arm_cancelled_inspection();
+    let driver = Arc::new(fake_driver_with_backend(&directory, Arc::clone(&backend)));
+    let mut spec = runtime_spec("cancelled-task-inspection", 1, RuntimeUnitClass::Task);
+    spec.resources.execution_timeout_ms = Some(2_000);
+    let current = accepted(&spec);
+    let apply = {
+        let driver = Arc::clone(&driver);
+        let spec = spec.clone();
+        let current = current.clone();
+        tokio::spawn(async move { driver.apply(&spec, &current).await })
+    };
+
+    backend.wait_for_cancelled_inspection().await;
+    let records = driver.manager.managed_records().await.unwrap();
+    assert_eq!(records.len(), 1);
+    let provider_id = records[0].id.clone();
+
+    apply.abort();
+    assert!(apply.await.unwrap_err().is_cancelled());
+
+    let restarted = Arc::new(fake_driver_with_backend(&directory, Arc::clone(&backend)));
+    let mut replay = {
+        let restarted = Arc::clone(&restarted);
+        let spec = spec.clone();
+        let current = current.clone();
+        tokio::spawn(async move { restarted.apply(&spec, &current).await })
+    };
+    let early = tokio::time::timeout(Duration::from_millis(50), &mut replay).await;
+    backend.release_cancelled_inspection();
+    let (waited_for_original_inspection, recovered) = match early {
+        Ok(result) => (false, result.unwrap().unwrap()),
+        Err(_) => (
+            true,
+            tokio::time::timeout(Duration::from_secs(2), replay)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+        ),
+    };
+
+    assert!(
+        waited_for_original_inspection,
+        "replay bypassed the cancelled inspection's lifecycle lock"
+    );
+    assert_eq!(recovered.state, RuntimeUnitState::Succeeded);
+    assert_eq!(
+        recovered.provider_resource_id.as_deref(),
+        Some(provider_id.as_str())
+    );
+    let records = restarted.manager.managed_records().await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id, provider_id);
 }
