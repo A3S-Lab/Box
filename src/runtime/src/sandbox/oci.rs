@@ -574,7 +574,11 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             "/sys/fs/cgroup",
             "cgroup",
             "cgroup",
-            &["nosuid", "noexec", "nodev", "relatime", "ro"],
+            // guest-init is the trusted Sandbox control plane. It delegates the
+            // outer OCI cgroup to one workload child and must keep joining later
+            // exec/PTY processes to that child, so a read-only cgroup mount
+            // would silently disable every exact product limit.
+            &["nosuid", "noexec", "nodev", "relatime", "rw"],
         )?,
         mount(
             "/tmp",
@@ -1398,6 +1402,23 @@ mod tests {
             512 + SANDBOX_CONTROL_PIDS_HEADROOM
         );
         assert_eq!(value["linux"]["resources"]["cpu"]["cpus"], "0-1");
+        let cgroup_mount = value["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["destination"] == "/sys/fs/cgroup")
+            .expect("cgroup mount");
+        assert_eq!(cgroup_mount["type"], "cgroup");
+        assert!(cgroup_mount["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option == "rw"));
+        assert!(!cgroup_mount["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option == "ro"));
     }
 
     #[test]
