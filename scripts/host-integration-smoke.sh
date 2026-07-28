@@ -337,21 +337,6 @@ guest_target() {
     esac
 }
 
-guest_init_exists() {
-    local target
-    target="$(guest_target)"
-    if [ -x "$WORKSPACE/target/$target/debug/a3s-box-guest-init" ] ||
-        [ -x "$WORKSPACE/target/$target/release/a3s-box-guest-init" ]; then
-        return 0
-    fi
-    if [ "$(host_os)" = "Linux" ]; then
-        [ -x "$WORKSPACE/target/debug/a3s-box-guest-init" ] ||
-            [ -x "$WORKSPACE/target/release/a3s-box-guest-init" ]
-        return
-    fi
-    return 1
-}
-
 offline_image_tar() {
     if [ -n "${A3S_BOX_TEST_ALPINE_TAR:-}" ]; then
         echo "$A3S_BOX_TEST_ALPINE_TAR"
@@ -399,7 +384,16 @@ EOF
 build_guest_init() {
     case "$(host_os)" in
         Linux)
-            run_real cargo build -p a3s-box-guest-init
+            local target
+            target="$(guest_target)"
+            if [ "$target" = "unsupported" ]; then
+                echo "unsupported Linux architecture for guest init: $(host_arch)" >&2
+                exit 1
+            fi
+            # The runtime rejects a dynamically linked host build for guest PID 1.
+            # Always rebuild the static musl artifact from the current checkout so
+            # a stale target/<triple>/ binary cannot silently qualify newer code.
+            run_real cargo build -p a3s-box-guest-init --target "$target"
             ;;
         Darwin)
             local target
@@ -410,19 +404,13 @@ build_guest_init() {
             fi
             if have_cmd cargo-zigbuild; then
                 run_real cargo zigbuild -p a3s-box-guest-init --target "$target"
-            elif guest_init_exists; then
-                log "Using existing Linux guest init binary"
-            else
+            elif ! run_real cargo build -p a3s-box-guest-init --target "$target"; then
                 cat >&2 <<EOF
-Linux guest init binary is missing.
-Build it for the Linux guest target, then rerun:
+Linux guest init cross-build failed for the current checkout.
+Install cargo-zigbuild and rerun, or build the same commit with:
   rustup target add $target
-  cargo build -p a3s-box-guest-init --target $target
-If direct cross-build linking fails, install cargo-zigbuild and use:
   cargo install cargo-zigbuild
   cargo zigbuild -p a3s-box-guest-init --target $target
-Expected artifact: $WORKSPACE/target/$target/debug/a3s-box-guest-init or
-  $WORKSPACE/target/$target/release/a3s-box-guest-init
 EOF
                 exit 1
             fi
