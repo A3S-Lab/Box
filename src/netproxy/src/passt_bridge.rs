@@ -325,6 +325,23 @@ mod tests {
         frame
     }
 
+    fn arp_request(source_mac: [u8; 6], source_ip: [u8; 4], target_ip: [u8; 4]) -> Vec<u8> {
+        let mut frame = vec![0u8; 60];
+        frame[..6].copy_from_slice(&[0xff; 6]);
+        frame[6..12].copy_from_slice(&source_mac);
+        frame[12..14].copy_from_slice(&[0x08, 0x06]);
+        frame[14..16].copy_from_slice(&1u16.to_be_bytes());
+        frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes());
+        frame[18] = 6;
+        frame[19] = 4;
+        frame[20..22].copy_from_slice(&1u16.to_be_bytes());
+        frame[22..28].copy_from_slice(&source_mac);
+        frame[28..32].copy_from_slice(&source_ip);
+        frame[32..38].fill(0);
+        frame[38..42].copy_from_slice(&target_ip);
+        frame
+    }
+
     fn write_frame(stream: &mut UnixStream, frame: &[u8]) {
         stream
             .write_all(&(frame.len() as u32).to_be_bytes())
@@ -399,6 +416,51 @@ mod tests {
 
         backend_a.write_all(&encoded[2..]).unwrap();
         assert_eq!(read_frame(&mut guest_a), from_passt);
+
+        drop(guest_a);
+        drop(guest_b);
+        assert!(thread_a.join().unwrap().is_ok());
+        assert!(thread_b.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn peer_arp_request_bypasses_passt_while_reaching_the_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let mac_a = [0x02, 0x42, 10, 91, 0, 2];
+        let mac_b = [0x02, 0x42, 10, 91, 0, 3];
+        let bridge_a = BridgePort::bind(directory.path(), mac_a).unwrap();
+        let bridge_b = BridgePort::bind(directory.path(), mac_b).unwrap();
+        let (mut guest_a, proxy_a) = UnixStream::pair().unwrap();
+        let (mut guest_b, proxy_b) = UnixStream::pair().unwrap();
+        let (passt_a, mut backend_a) = UnixStream::pair().unwrap();
+        let (passt_b, _backend_b) = UnixStream::pair().unwrap();
+        guest_b
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        backend_a
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+
+        let thread_a = std::thread::spawn(move || run_passt_bridge(proxy_a, passt_a, bridge_a));
+        let thread_b = std::thread::spawn(move || run_passt_bridge(proxy_b, passt_b, bridge_b));
+
+        let request = arp_request(mac_a, [10, 91, 0, 2], [10, 91, 0, 3]);
+        write_frame(&mut guest_a, &request);
+        assert_eq!(read_frame(&mut guest_b), request);
+
+        let mut byte = [0u8; 1];
+        assert!(matches!(
+            backend_a.read(&mut byte),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                )
+        ));
+
+        let gateway_request = arp_request(mac_a, [10, 91, 0, 2], [10, 91, 0, 1]);
+        write_frame(&mut guest_a, &gateway_request);
+        assert_eq!(read_frame(&mut backend_a), gateway_request);
 
         drop(guest_a);
         drop(guest_b);

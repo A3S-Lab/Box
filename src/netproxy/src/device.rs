@@ -202,6 +202,21 @@ impl BridgePort {
             return true;
         }
         if is_group_mac(destination) {
+            // passt proxy-answers ARP requests with its gateway MAC, including
+            // requests for another guest on the same logical A3S network. If
+            // that request also reaches the peer switch, the two replies race
+            // and the sender can cache passt's MAC for the peer IP. A3S derives
+            // every endpoint MAC from its IPv4 address, so route peer ARP
+            // requests only to the matching registered switch port.
+            if let Some(peer_mac) = peer_mac_from_arp_request(frame) {
+                let peer = self.directory.join(mac_socket_name(peer_mac));
+                if peer != self.own_path && peer.exists() {
+                    if let Err(error) = self.socket.send_to(frame, &peer) {
+                        tracing::debug!(%error, peer = %peer.display(), "Bridge peer ARP send failed");
+                    }
+                    return false;
+                }
+            }
             self.flood(frame);
             return true;
         }
@@ -267,6 +282,25 @@ fn ethernet_destination(frame: &[u8]) -> Option<[u8; 6]> {
 
 fn is_group_mac(mac: [u8; 6]) -> bool {
     mac[0] & 1 == 1
+}
+
+fn peer_mac_from_arp_request(frame: &[u8]) -> Option<[u8; 6]> {
+    // Ethernet II ARP for IPv4 with six-byte hardware and four-byte protocol
+    // addresses. The target protocol address starts at byte 38.
+    if frame.get(12..14)? != [0x08, 0x06]
+        || frame.get(14..22)? != [0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01]
+    {
+        return None;
+    }
+    let target_ip: [u8; 4] = frame.get(38..42)?.try_into().ok()?;
+    Some([
+        0x02,
+        0x42,
+        target_ip[0],
+        target_ip[1],
+        target_ip[2],
+        target_ip[3],
+    ])
 }
 
 fn mac_socket_name(mac: [u8; 6]) -> String {
