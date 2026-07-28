@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use a3s_box_core::{
     volume::VolumeConfig, BoxConfig, CreateExecutionRequest, ExecutionGeneration,
-    ExecutionIsolation, OperationId,
+    ExecutionIsolation, OperationId, VmHandler, VmMetrics,
 };
 
 use super::*;
@@ -34,6 +35,41 @@ fn record(home_dir: &Path, isolation: ExecutionIsolation) -> BoxRecord {
         chrono::Utc::now(),
     )
     .unwrap()
+}
+
+struct ExitAfterHealthProbeHandler {
+    exit_polls: Arc<AtomicUsize>,
+}
+
+impl VmHandler for ExitAfterHealthProbeHandler {
+    fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> a3s_box_core::Result<()> {
+        Ok(())
+    }
+
+    fn metrics(&self) -> VmMetrics {
+        VmMetrics::default()
+    }
+
+    fn is_running(&self) -> bool {
+        false
+    }
+
+    fn has_exited(&self) -> bool {
+        true
+    }
+
+    fn pid(&self) -> u32 {
+        42
+    }
+
+    fn exit_code(&self) -> Option<i32> {
+        (self.exit_polls.load(Ordering::SeqCst) > 1).then_some(0)
+    }
+
+    fn try_wait_exit(&mut self) -> a3s_box_core::Result<Option<i32>> {
+        let poll = self.exit_polls.fetch_add(1, Ordering::SeqCst);
+        Ok((poll > 0).then_some(0))
+    }
 }
 
 #[test]
@@ -155,6 +191,32 @@ async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
 
     assert_eq!(observation.state, ExecutionState::Stopped);
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"retained");
+    assert!(backend.managers.is_empty());
+}
+
+#[tokio::test]
+async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let record = record(temporary.path(), ExecutionIsolation::Sandbox);
+    let exit_polls = Arc::new(AtomicUsize::new(0));
+    let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
+    {
+        let manager = manager.lock().await;
+        *manager.state.write().await = crate::BoxState::Ready;
+        *manager.handler.write().await = Some(Box::new(ExitAfterHealthProbeHandler {
+            exit_polls: Arc::clone(&exit_polls),
+        }));
+    }
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let observation = backend.inspect_registered(&record, manager).await.unwrap();
+
+    assert_eq!(observation.state, ExecutionState::Stopped);
+    assert_eq!(observation.exit_code, Some(0));
+    assert_eq!(exit_polls.load(Ordering::SeqCst), 2);
     assert!(backend.managers.is_empty());
 }
 

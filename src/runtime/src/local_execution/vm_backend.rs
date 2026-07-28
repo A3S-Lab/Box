@@ -185,30 +185,16 @@ impl VmLocalExecutionBackend {
         let mut state = manager.state().await;
         let terminal = exit_code.is_some() || state == crate::BoxState::Stopped;
         if terminal {
-            let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
-            let exit_code = manager.exit_code().or(exit_code);
-            drop(manager);
-            self.remove_manager(&record.id, &shared);
-            cleanup.map_err(|error| runtime_error("clean up", record, error))?;
-            return Ok(LocalExecutionObservation {
-                state: ExecutionState::Stopped,
-                handle: None,
-                exit_code,
-            });
+            return self
+                .finish_registered_terminal(record, &shared, manager, preserve_rootfs, exit_code)
+                .await;
         }
 
         if state == crate::BoxState::Created {
             if manager.has_exited().await {
-                let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
-                let exit_code = manager.exit_code();
-                drop(manager);
-                self.remove_manager(&record.id, &shared);
-                cleanup.map_err(|error| runtime_error("clean up", record, error))?;
-                return Ok(LocalExecutionObservation {
-                    state: ExecutionState::Stopped,
-                    handle: None,
-                    exit_code,
-                });
+                return self
+                    .finish_registered_terminal(record, &shared, manager, preserve_rootfs, None)
+                    .await;
             }
             if !self.promote_if_ready(record, &mut manager).await {
                 return Ok(LocalExecutionObservation {
@@ -225,16 +211,9 @@ impl VmLocalExecutionBackend {
             .await
             .map_err(|error| runtime_error("inspect", record, error))?
         {
-            let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
-            let exit_code = manager.exit_code();
-            drop(manager);
-            self.remove_manager(&record.id, &shared);
-            cleanup.map_err(|error| runtime_error("clean up", record, error))?;
-            return Ok(LocalExecutionObservation {
-                state: ExecutionState::Stopped,
-                handle: None,
-                exit_code,
-            });
+            return self
+                .finish_registered_terminal(record, &shared, manager, preserve_rootfs, None)
+                .await;
         }
 
         if state != crate::BoxState::Ready
@@ -263,6 +242,36 @@ impl VmLocalExecutionBackend {
             state: visible_state,
             handle: Some(handle),
             exit_code: None,
+        })
+    }
+
+    async fn finish_registered_terminal(
+        &self,
+        record: &BoxRecord,
+        shared: &SharedVm,
+        mut manager: tokio::sync::MutexGuard<'_, VmManager>,
+        preserve_rootfs: bool,
+        exit_code: Option<i32>,
+    ) -> ExecutionManagerResult<LocalExecutionObservation> {
+        // A workload can exit between the first non-blocking wait and the
+        // following health probe. Poll the runtime once more before teardown so
+        // its terminal record and persisted guest marker remain available.
+        let exit_code = match manager.exit_code().or(exit_code) {
+            Some(exit_code) => Some(exit_code),
+            None => manager
+                .try_wait_exit()
+                .await
+                .map_err(|error| runtime_error("collect exit status", record, error))?,
+        };
+        let cleanup = destroy_after_observation(&mut manager, preserve_rootfs).await;
+        let exit_code = manager.exit_code().or(exit_code);
+        drop(manager);
+        self.remove_manager(&record.id, shared);
+        cleanup.map_err(|error| runtime_error("clean up", record, error))?;
+        Ok(LocalExecutionObservation {
+            state: ExecutionState::Stopped,
+            handle: None,
+            exit_code,
         })
     }
 
