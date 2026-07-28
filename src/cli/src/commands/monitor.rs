@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use a3s_box_core::{ExecutionGeneration, ExecutionManager, OperationId, RestartExecutionOptions};
+use a3s_box_runtime::{LocalExecutionManager, ManagedRestartOutcome};
 use clap::Args;
 
 use crate::boot;
@@ -26,6 +28,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// How long a box must stay alive before its backoff resets.
 const STABLE_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// Default graceful-stop timeout used by automatic managed restarts.
+const DEFAULT_RESTART_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Args)]
 pub struct MonitorArgs {
@@ -368,11 +373,55 @@ async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::erro
             println!("{}", restart_log_line(&record, RestartReason::Dead));
         }
 
-        // Attempt restart, SERIALIZED per box via a per-box boot lock so a
-        // concurrent user `restart`/`start` and this monitor restart cannot both
-        // boot the same box (the second record write would overwrite the first's
-        // pid, orphaning a VM). The orphan-on-`rm`-during-boot teardown now lives
-        // inside `boot_and_record`.
+        let restart_plan = super::restart::restart_plan(&record, DEFAULT_RESTART_TIMEOUT_SECS)?;
+        if let super::restart::RestartPlan::Managed {
+            execution_id,
+            generation,
+            operation_id,
+            stop_timeout_secs,
+        } = restart_plan
+        {
+            match restart_managed_candidate(
+                &record,
+                execution_id,
+                generation,
+                operation_id,
+                stop_timeout_secs,
+            )
+            .await
+            {
+                Ok(Some(restart_count)) => {
+                    tracker.record_attempt(&box_id);
+                    println!(
+                        "monitor: box {name} ({short_id}) restarted (count: {restart_count})",
+                        name = record.name,
+                        short_id = record.short_id,
+                    );
+                }
+                Ok(None) => {
+                    tracker.record_attempt(&box_id);
+                    eprintln!(
+                        "monitor: box {name} ({short_id}) was removed during managed restart",
+                        name = record.name,
+                        short_id = record.short_id,
+                    );
+                }
+                Err(error) => {
+                    tracker.record_attempt(&box_id);
+                    let delay = tracker.current_delay(&box_id);
+                    eprintln!(
+                        "monitor: failed to restart box {name} ({short_id}): {error} (next retry in {:.0}s)",
+                        delay.as_secs_f64(),
+                        name = record.name,
+                        short_id = record.short_id,
+                    );
+                }
+            }
+            continue;
+        }
+
+        // Attempt a legacy restart, serialized per box via the boot lock so a
+        // concurrent user restart/start cannot boot a duplicate VM.
         match boot::boot_and_record(&record, boot::RestartCountUpdate::Increment).await {
             Ok(boot::BootOutcome::Restarted { restart_count }) => {
                 tracker.record_attempt(&box_id);
@@ -413,6 +462,107 @@ async fn poll_once(tracker: &mut BackoffTracker) -> Result<(), Box<dyn std::erro
     }
 
     Ok(())
+}
+
+async fn restart_managed_candidate(
+    record: &BoxRecord,
+    execution_id: a3s_box_core::ExecutionId,
+    source_generation: ExecutionGeneration,
+    operation_id: Option<OperationId>,
+    stop_timeout_secs: Option<u64>,
+) -> Result<Option<u32>, Box<dyn std::error::Error>> {
+    let operation_id = match operation_id {
+        Some(operation_id) => operation_id,
+        None => OperationId::new(format!("monitor-restart-{}", uuid::Uuid::new_v4()))?,
+    };
+    let home = a3s_box_core::dirs_home();
+    let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
+    let lease = manager
+        .restart_with_options(
+            &execution_id,
+            source_generation,
+            &operation_id,
+            RestartExecutionOptions { stop_timeout_secs },
+        )
+        .await?;
+
+    let source_restart_count = record.restart_count;
+    let target_generation = lease.generation;
+    let restart_count = StateFile::modify(|state| {
+        let Some(current) = state.find_by_id_mut(execution_id.as_str()) else {
+            return Ok::<Option<u32>, std::io::Error>(None);
+        };
+        apply_completed_managed_restart(
+            current,
+            &operation_id,
+            source_generation,
+            target_generation,
+            source_restart_count,
+        )
+        .map(Some)
+        .map_err(std::io::Error::other)
+    })?;
+
+    if restart_count.is_some() {
+        super::restart::create_baseline_snapshot(&record.id, &record.box_dir).await;
+        let current = StateFile::load_default()?;
+        if let Some(current) = current.find_by_id(&record.id) {
+            if let Err(error) = crate::health::spawn_detached_health_checker(current) {
+                eprintln!(
+                    "monitor: box {} ({}) restarted, but its detached health checker failed to start: {error}",
+                    current.name, current.short_id,
+                );
+            }
+        }
+    }
+
+    Ok(restart_count)
+}
+
+fn apply_completed_managed_restart(
+    record: &mut BoxRecord,
+    operation_id: &OperationId,
+    source_generation: ExecutionGeneration,
+    target_generation: ExecutionGeneration,
+    source_restart_count: u32,
+) -> Result<u32, String> {
+    let metadata = record.managed_execution.as_ref().ok_or_else(|| {
+        format!(
+            "box {} lost managed lifecycle metadata after restart",
+            record.name
+        )
+    })?;
+    let completion = metadata.last_restart.as_ref().ok_or_else(|| {
+        format!(
+            "box {} did not persist managed restart completion",
+            record.name
+        )
+    })?;
+    if record.status != "running"
+        || metadata.generation != target_generation
+        || completion.operation_id != *operation_id
+        || completion.source_generation != source_generation
+        || completion.target_generation != target_generation
+        || completion.outcome != ManagedRestartOutcome::Running
+    {
+        return Err(format!(
+            "box {} changed lifecycle generation while recording its automatic restart",
+            record.name
+        ));
+    }
+
+    let incremented = source_restart_count.saturating_add(1);
+    match record.restart_count {
+        count if count == source_restart_count => record.restart_count = incremented,
+        count if count == incremented => {}
+        count => {
+            return Err(format!(
+                "box {} restart count changed from {} to {} while recording its automatic restart",
+                record.name, source_restart_count, count
+            ));
+        }
+    }
+    Ok(record.restart_count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -594,7 +744,95 @@ async fn run_due_health_checks(state: &StateFile) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_box_core::{BoxConfig, CreateExecutionRequest, ExecutionIsolation};
+    use a3s_box_runtime::{ManagedExecutionMetadata, ManagedRestartCompletion};
+    use std::collections::BTreeMap;
+
     use crate::test_helpers::fixtures::make_record;
+
+    fn completed_managed_restart_record(
+        operation_id: &OperationId,
+        restart_count: u32,
+    ) -> BoxRecord {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut record = make_record(id, "managed", "running", Some(123));
+        record.isolation = ExecutionIsolation::Microvm;
+        let mut metadata = ManagedExecutionMetadata::new(
+            OperationId::new("create-operation").unwrap(),
+            ExecutionGeneration::INITIAL,
+            CreateExecutionRequest {
+                external_sandbox_id: "external-managed".to_string(),
+                config: BoxConfig {
+                    isolation: ExecutionIsolation::Microvm,
+                    image: record.image.clone(),
+                    ..Default::default()
+                },
+                labels: BTreeMap::new(),
+                policy: Default::default(),
+                rootfs_snapshot_id: None,
+            },
+        )
+        .unwrap();
+        let target_generation = ExecutionGeneration::new(2).unwrap();
+        metadata.generation = target_generation;
+        metadata.last_restart = Some(ManagedRestartCompletion {
+            operation_id: operation_id.clone(),
+            source_generation: ExecutionGeneration::INITIAL,
+            target_generation,
+            outcome: ManagedRestartOutcome::Running,
+            stop_timeout_secs: Some(DEFAULT_RESTART_TIMEOUT_SECS),
+        });
+        record.managed_execution = Some(metadata);
+        record.restart_count = restart_count;
+        record
+    }
+
+    #[test]
+    fn completed_managed_restart_count_is_atomic_and_idempotent() {
+        let operation_id = OperationId::new("monitor-restart-test").unwrap();
+        let target_generation = ExecutionGeneration::new(2).unwrap();
+        let mut record = completed_managed_restart_record(&operation_id, 4);
+
+        let first = apply_completed_managed_restart(
+            &mut record,
+            &operation_id,
+            ExecutionGeneration::INITIAL,
+            target_generation,
+            4,
+        )
+        .unwrap();
+        let replay = apply_completed_managed_restart(
+            &mut record,
+            &operation_id,
+            ExecutionGeneration::INITIAL,
+            target_generation,
+            4,
+        )
+        .unwrap();
+
+        assert_eq!(first, 5);
+        assert_eq!(replay, 5);
+        assert_eq!(record.restart_count, 5);
+    }
+
+    #[test]
+    fn completed_managed_restart_count_rejects_a_different_operation() {
+        let operation_id = OperationId::new("monitor-restart-test").unwrap();
+        let other_operation_id = OperationId::new("monitor-restart-other").unwrap();
+        let mut record = completed_managed_restart_record(&operation_id, 4);
+
+        let error = apply_completed_managed_restart(
+            &mut record,
+            &other_operation_id,
+            ExecutionGeneration::INITIAL,
+            ExecutionGeneration::new(2).unwrap(),
+            4,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("changed lifecycle generation"));
+        assert_eq!(record.restart_count, 4);
+    }
 
     #[test]
     fn health_restart_aborts_if_user_stopped_during_window() {

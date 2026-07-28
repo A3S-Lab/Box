@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use a3s_box_core::{
     volume::VolumeConfig, BoxConfig, CreateExecutionRequest, ExecutionGeneration,
-    ExecutionIsolation, OperationId, VmHandler, VmMetrics,
+    ExecutionIsolation, NetworkMode, OperationId, VmHandler, VmMetrics,
 };
 
 use super::*;
@@ -91,6 +91,31 @@ fn manager_uses_the_full_persisted_request_config() {
     assert_eq!(manager.config.resources.memory_mb, 256);
     assert_eq!(manager.box_id(), record.id);
     assert_eq!(manager.home_dir, temporary.path());
+}
+
+#[test]
+fn manager_uses_the_mutable_record_network_config() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.network_mode = NetworkMode::Bridge {
+        network: "connected-after-create".to_string(),
+    };
+    record.network_name = Some("connected-after-create".to_string());
+
+    let manager = backend.new_manager(&record).unwrap();
+
+    assert_eq!(manager.config.network, record.network_mode);
+    assert!(matches!(
+        record
+            .managed_execution
+            .as_ref()
+            .unwrap()
+            .request
+            .config
+            .network,
+        NetworkMode::Tsi
+    ));
 }
 
 #[test]

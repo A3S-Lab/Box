@@ -176,7 +176,7 @@ async fn restart_one(
     Ok(())
 }
 
-async fn create_baseline_snapshot(box_id: &str, box_dir: &std::path::Path) {
+pub(crate) async fn create_baseline_snapshot(box_id: &str, box_dir: &std::path::Path) {
     let baseline_box_dir = box_dir.to_path_buf();
     let baseline_box_id = box_id.to_string();
     match tokio::task::spawn_blocking(move || {
@@ -204,7 +204,7 @@ async fn create_baseline_snapshot(box_id: &str, box_dir: &std::path::Path) {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RestartPlan {
+pub(crate) enum RestartPlan {
     LegacyStopThenStart,
     LegacyStartOnly,
     Managed {
@@ -215,7 +215,10 @@ enum RestartPlan {
     },
 }
 
-fn restart_plan(record: &crate::state::BoxRecord, timeout: u64) -> Result<RestartPlan, String> {
+pub(crate) fn restart_plan(
+    record: &crate::state::BoxRecord,
+    timeout: u64,
+) -> Result<RestartPlan, String> {
     if let Some(metadata) = record.managed_execution.as_ref() {
         let execution_id =
             ExecutionId::new(record.id.clone()).map_err(|error| error.to_string())?;

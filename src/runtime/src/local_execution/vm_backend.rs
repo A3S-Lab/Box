@@ -95,6 +95,11 @@ impl VmLocalExecutionBackend {
     fn new_manager(&self, record: &BoxRecord) -> ExecutionManagerResult<VmManager> {
         let metadata = self.metadata(record)?;
         let mut config = metadata.request.config.clone();
+        // Network connect/disconnect is intentionally mutable while an
+        // execution is inactive. The managed creation request remains the
+        // immutable idempotency identity, so apply the current record-level
+        // network selection when constructing each runtime generation.
+        config.network = record.network_mode.clone();
         if let Some(shm_size) = metadata.request.policy.shm_size {
             let has_shared_memory_mount = config
                 .tmpfs
