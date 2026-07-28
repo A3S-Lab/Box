@@ -48,15 +48,31 @@ impl ExecutionManager for LocalExecutionManager {
     }
 
     async fn inspect(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<ExecutionStatus> {
-        let _lifecycle_lock =
+        let lifecycle_lock =
             super::lifecycle_lock::acquire(&self.home_dir, execution_id.as_str()).await?;
-        let record = self
-            .get(execution_id)
-            .await?
-            .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
-        let record = self.stabilize_snapshot(record).await?;
-        let (record, state) = self.observe_record(record).await?;
-        status_from_record(&record, state)
+        let manager = self.clone();
+        let execution_id = execution_id.clone();
+        let execution_id_label = execution_id.clone();
+        tokio::spawn(async move {
+            // Inspection can reconcile provider state, release resources, and
+            // persist a terminal observation. Once its lifecycle lock has been
+            // acquired, finish that projection even if the caller is cancelled;
+            // a replay must wait for this same authoritative operation.
+            let _lifecycle_lock = lifecycle_lock;
+            let record = manager
+                .get(&execution_id)
+                .await?
+                .ok_or_else(|| ExecutionManagerError::NotFound(execution_id.clone()))?;
+            let record = manager.stabilize_snapshot(record).await?;
+            let (record, state) = manager.observe_record(record).await?;
+            status_from_record(&record, state)
+        })
+        .await
+        .map_err(|error| {
+            ExecutionManagerError::Internal(format!(
+                "inspection task failed for {execution_id_label}: {error}"
+            ))
+        })?
     }
 
     async fn read_logs(
