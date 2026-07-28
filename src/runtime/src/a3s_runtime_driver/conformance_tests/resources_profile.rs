@@ -57,7 +57,22 @@ pub(super) async fn run(
         "PID limit changed before provider launch",
     )?;
 
-    let cgroup = Path::new("/sys/fs/cgroup/a3s-box").join(&record.id);
+    let pid = record
+        .pid
+        .ok_or_else(|| super::protocol("resource fixture lost its Sandbox PID"))?;
+    let cgroup = crate::sandbox::capability::process_cgroup_v2_path(pid).ok_or_else(|| {
+        super::protocol(format!(
+            "could not resolve cgroup v2 path for Sandbox PID {pid}"
+        ))
+    })?;
+    let expected_suffix = Path::new("a3s-box").join(&record.id);
+    require(
+        cgroup.ends_with(&expected_suffix),
+        format!(
+            "Sandbox PID {pid} belongs to unexpected cgroup {}",
+            cgroup.display()
+        ),
+    )?;
     require(cgroup.is_dir(), "Sandbox cgroup was not created")?;
     require(
         read_trimmed(&cgroup.join("cpu.max"))? == format!("{CPU_QUOTA_US} {CPU_PERIOD_US}"),

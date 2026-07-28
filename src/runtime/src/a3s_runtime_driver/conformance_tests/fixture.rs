@@ -22,6 +22,7 @@ use super::{external, failure, require, Result};
 struct SeenResource {
     pid: Option<u32>,
     pid_start_time: Option<u64>,
+    cgroup_path: Option<PathBuf>,
     owner_pid: Option<u32>,
     owner_pid_start_time: Option<u64>,
     log_worker_pid: Option<u32>,
@@ -195,6 +196,11 @@ impl BoxRuntimeConformanceFixture {
             .or_default();
         entry.pid = record.pid;
         entry.pid_start_time = record.pid_start_time;
+        if let Some(pid) = record.pid {
+            if let Some(path) = crate::sandbox::capability::process_cgroup_v2_path(pid) {
+                entry.cgroup_path = Some(path);
+            }
+        }
         #[cfg(target_os = "linux")]
         if let Ok(Some(runtime)) =
             crate::vm::reap::load_recorded_sandbox_runtime(home, &record.box_dir, &record.id)
@@ -235,11 +241,18 @@ impl BoxRuntimeConformanceFixture {
                     "socket-dir",
                     PathBuf::from("/tmp/a3s-box-sockets").join(&id),
                 ),
-                ("cgroup", PathBuf::from("/sys/fs/cgroup/a3s-box").join(&id)),
             ] {
                 if path.exists() {
                     entries.insert(
                         format!("{kind}:{}:{id}", home.display()),
+                        path.display().to_string(),
+                    );
+                }
+            }
+            if let Some(path) = resource.cgroup_path.as_ref() {
+                if path.exists() {
+                    entries.insert(
+                        format!("cgroup:{}:{id}", home.display()),
                         path.display().to_string(),
                     );
                 }
