@@ -187,6 +187,18 @@ pub fn overlay_unmount(merged: &Path) -> Result<()> {
 /// Always returns `false` on non-Linux platforms (compile-time).
 #[cfg(target_os = "linux")]
 pub(crate) fn is_overlay_supported() -> bool {
+    static OVERLAY_SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+    cached_overlay_support(&OVERLAY_SUPPORTED, probe_overlay_support)
+}
+
+#[cfg(target_os = "linux")]
+fn cached_overlay_support(cache: &std::sync::OnceLock<bool>, probe: impl FnOnce() -> bool) -> bool {
+    *cache.get_or_init(probe)
+}
+
+#[cfg(target_os = "linux")]
+fn probe_overlay_support() -> bool {
     // Check /proc/filesystems for overlay support
     if let Ok(fs_list) = std::fs::read_to_string("/proc/filesystems") {
         if !fs_list.contains("overlay") {
@@ -238,6 +250,42 @@ mod tests {
     fn test_is_overlay_supported_returns_bool() {
         // Just verify it doesn't panic
         let _supported = is_overlay_supported();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_overlay_support_queries_probe_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, OnceLock};
+
+        const THREADS: usize = 8;
+        let cache = Arc::new(OnceLock::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        std::thread::scope(|scope| {
+            let handles = (0..THREADS)
+                .map(|_| {
+                    let cache = cache.clone();
+                    let calls = calls.clone();
+                    let barrier = barrier.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        cached_overlay_support(&cache, || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            true
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                assert!(handle.join().unwrap());
+            }
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[cfg(not(target_os = "linux"))]
