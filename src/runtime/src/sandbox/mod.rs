@@ -18,6 +18,16 @@ pub mod rootfs;
 #[cfg(target_os = "linux")]
 pub(crate) mod runtime_record;
 
+/// Bound for the pinned A3S OCI native service to stop its owned processes.
+///
+/// The native service allows its Linux executor up to ten seconds to reap a
+/// process and uses a fifteen-second shutdown envelope in its own lifecycle
+/// certification. Box must not declare provider loss before that one canonical
+/// shutdown path has had the same bounded opportunity to finish.
+#[cfg(target_os = "linux")]
+pub(crate) const A3S_OCI_OWNER_EXIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
 #[cfg(target_os = "linux")]
 pub use a3s_oci_controller::A3sOciController;
 #[cfg(target_os = "linux")]

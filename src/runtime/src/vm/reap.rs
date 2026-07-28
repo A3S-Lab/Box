@@ -469,7 +469,7 @@ fn reap_orphaned_a3s_oci(
     if !crate::process::wait_for_process_stop_with_identity(
         owner_pid,
         owner_start_time,
-        std::time::Duration::from_secs(3),
+        crate::sandbox::A3S_OCI_OWNER_EXIT_TIMEOUT,
     ) {
         tracing::error!(box_id, owner_pid, "Orphaned A3S OCI owner did not exit");
         return SandboxReap::Failed;

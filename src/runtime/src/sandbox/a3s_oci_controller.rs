@@ -25,8 +25,6 @@ use super::runtime_record::SandboxRuntimeRecord;
 use super::CertifiedA3sOci;
 
 const START_FAILURE_LOG_LIMIT_BYTES: u64 = 4 * 1024;
-const OWNER_EXIT_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// Controller pinned to one verified runtime/agent artifact pair.
 pub struct A3sOciController {
     runtime: CertifiedA3sOci,
@@ -431,7 +429,7 @@ fn cleanup_failed_owner(
     if !crate::process::wait_for_process_exit_with_identity(
         pid,
         owner_pid_start_time,
-        OWNER_EXIT_TIMEOUT,
+        super::A3S_OCI_OWNER_EXIT_TIMEOUT,
     ) {
         let _ = owner.kill();
     }

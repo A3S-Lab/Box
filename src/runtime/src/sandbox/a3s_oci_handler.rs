@@ -17,7 +17,6 @@ use sysinfo::{Pid, System};
 use super::a3s_oci_client::A3sOciClient;
 
 const SIGKILL_NUMBER: i32 = 9;
-const OWNER_EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CLEANUP_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -282,7 +281,7 @@ impl A3sOciHandler {
         if !crate::process::wait_for_process_stop_with_identity(
             self.owner_pid,
             self.owner_pid_start_time,
-            OWNER_EXIT_TIMEOUT,
+            super::A3S_OCI_OWNER_EXIT_TIMEOUT,
         ) {
             if crate::process::is_process_running_with_identity(
                 self.owner_pid,
