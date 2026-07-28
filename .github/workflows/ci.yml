@@ -251,11 +251,20 @@ jobs:
             --target x86_64-unknown-linux-musl
           cd ../oci-runtime
           cargo build --locked --release -p a3s-oci-cli -p a3s-oci-agent
-      - name: Install A3S OCI Runtime and host identity ranges
+      - name: Install R17 runtime artifacts and host identity ranges
         run: |
           sudo install -d -m 755 "$A3S_HOME/bin"
+          sudo install -m 755 src/target/debug/a3s-box-shim \
+            "$A3S_HOME/bin/a3s-box-shim"
+          sudo install -m 755 \
+            src/target/x86_64-unknown-linux-musl/release/a3s-box-guest-init \
+            "$A3S_HOME/bin/a3s-box-guest-init"
           sudo install -m 755 oci-runtime/target/release/a3s-oci "$A3S_BOX_OCI_RUNTIME_PATH"
           sudo install -m 755 oci-runtime/target/release/a3s-oci-agent "$A3S_BOX_OCI_AGENT_PATH"
+          test -x "$A3S_HOME/bin/a3s-box-shim"
+          test -x "$A3S_HOME/bin/a3s-box-guest-init"
+          test -x "$A3S_BOX_OCI_RUNTIME_PATH"
+          test -x "$A3S_BOX_OCI_AGENT_PATH"
           grep -q '^root:' /etc/subuid ||
             echo 'root:100000:65536' | sudo tee -a /etc/subuid
           grep -q '^root:' /etc/subgid ||
