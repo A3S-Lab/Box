@@ -39,11 +39,13 @@ fn record(home_dir: &Path, isolation: ExecutionIsolation) -> BoxRecord {
 
 struct DelayedExitStatusHandler {
     exit_polls: Arc<AtomicUsize>,
+    stop_calls: Arc<AtomicUsize>,
     available_after: usize,
 }
 
 impl VmHandler for DelayedExitStatusHandler {
     fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> a3s_box_core::Result<()> {
+        self.stop_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -204,12 +206,14 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let record = record(temporary.path(), ExecutionIsolation::Sandbox);
     let exit_polls = Arc::new(AtomicUsize::new(0));
+    let stop_calls = Arc::new(AtomicUsize::new(0));
     let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
     {
         let manager = manager.lock().await;
         *manager.state.write().await = crate::BoxState::Ready;
         *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
             exit_polls: Arc::clone(&exit_polls),
+            stop_calls: Arc::clone(&stop_calls),
             available_after: 3,
         }));
     }
@@ -222,6 +226,7 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
     assert_eq!(observation.state, ExecutionState::Stopped);
     assert_eq!(observation.exit_code, Some(0));
     assert_eq!(exit_polls.load(Ordering::SeqCst), 4);
+    assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
     assert!(backend.managers.is_empty());
 }
 
@@ -231,12 +236,14 @@ async fn terminal_observation_retains_runtime_without_an_exact_exit_status() {
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let record = record(temporary.path(), ExecutionIsolation::Sandbox);
     let exit_polls = Arc::new(AtomicUsize::new(0));
+    let stop_calls = Arc::new(AtomicUsize::new(0));
     let manager = Arc::new(Mutex::new(backend.new_manager(&record).unwrap()));
     {
         let manager = manager.lock().await;
         *manager.state.write().await = crate::BoxState::Ready;
         *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
             exit_polls: Arc::clone(&exit_polls),
+            stop_calls: Arc::clone(&stop_calls),
             available_after: usize::MAX,
         }));
     }
@@ -255,6 +262,7 @@ async fn terminal_observation_retains_runtime_without_an_exact_exit_status() {
             if message.contains("exact exit status")
     ));
     assert!(exit_polls.load(Ordering::SeqCst) > 1);
+    assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
     assert!(backend.managers.contains_key(&record.id));
 }
 

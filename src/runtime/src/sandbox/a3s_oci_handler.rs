@@ -448,9 +448,10 @@ impl VmHandler for A3sOciHandler {
             };
             self.exit_code = Some(exit_code(&status));
         }
-        let exit_code = self.exit_code;
-        self.delete_runtime_state()?;
-        Ok(exit_code)
+        // Polling observes completion but does not own teardown. Keeping the
+        // terminal generation lets the backend complete its one authoritative
+        // destroy path after it has durably projected this exact status.
+        Ok(self.exit_code)
     }
 }
 
