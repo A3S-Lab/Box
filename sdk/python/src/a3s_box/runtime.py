@@ -7,13 +7,14 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Mapping
+import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .exceptions import A3SBoxError, A3SBoxNotInstalledError
 
-BRIDGE_PROTOCOL_VERSION = 1
+BRIDGE_PROTOCOL_VERSION = 2
 SUPPORTED_BRIDGE_OPERATIONS = (
     "sdk_capabilities",
     "runtime_diagnostics",
@@ -78,6 +79,111 @@ class AsyncLocalRuntime(Protocol):
 
     async def request(self, request: Mapping[str, object]) -> dict[str, Any]:
         ...
+
+
+def _validate_capabilities(result: Mapping[str, object]) -> dict[str, Any]:
+    protocol_version = result.get("protocol_version")
+    if protocol_version != BRIDGE_PROTOCOL_VERSION:
+        raise A3SBoxError(
+            f"Unsupported local A3S Box capability protocol version "
+            f"{protocol_version!r}",
+            code="bridge_protocol_error",
+        )
+
+    raw_operations = result.get("operations")
+    if (
+        not isinstance(raw_operations, Sequence)
+        or isinstance(raw_operations, (str, bytes, bytearray))
+        or any(not isinstance(operation, str) for operation in raw_operations)
+    ):
+        raise A3SBoxError(
+            "Invalid local A3S Box capability inventory",
+            code="bridge_protocol_error",
+        )
+    operations = tuple(raw_operations)
+    if len(set(operations)) != len(operations):
+        raise A3SBoxError(
+            "Invalid local A3S Box capability inventory: duplicate operations",
+            code="bridge_protocol_error",
+        )
+    available = set(operations)
+    missing = sorted(
+        operation
+        for operation in SUPPORTED_BRIDGE_OPERATIONS
+        if operation not in available
+    )
+    if missing:
+        raise A3SBoxError(
+            "Installed A3S Box runtime is missing required operations: "
+            + ", ".join(missing),
+            code="unavailable",
+        )
+    return {
+        "protocol_version": protocol_version,
+        "operations": list(operations),
+    }
+
+
+class _CompatibleLocalRuntime:
+    def __init__(self, runtime: LocalRuntime) -> None:
+        self._runtime = runtime
+        self._lock = threading.Lock()
+        self._capabilities: dict[str, Any] | None = None
+
+    def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+        if request.get("operation") == "sdk_capabilities":
+            return dict(self._verify())
+        self._verify()
+        return self._runtime.request(request)
+
+    def _verify(self) -> dict[str, Any]:
+        if self._capabilities is not None:
+            return self._capabilities
+        with self._lock:
+            if self._capabilities is None:
+                result = self._runtime.request(
+                    {"operation": "sdk_capabilities"}
+                )
+                self._capabilities = _validate_capabilities(result)
+        return self._capabilities
+
+
+class _CompatibleAsyncLocalRuntime:
+    def __init__(self, runtime: AsyncLocalRuntime) -> None:
+        self._runtime = runtime
+        self._lock = asyncio.Lock()
+        self._capabilities: dict[str, Any] | None = None
+
+    async def request(self, request: Mapping[str, object]) -> dict[str, Any]:
+        if request.get("operation") == "sdk_capabilities":
+            return dict(await self._verify())
+        await self._verify()
+        return await self._runtime.request(request)
+
+    async def _verify(self) -> dict[str, Any]:
+        if self._capabilities is not None:
+            return self._capabilities
+        async with self._lock:
+            if self._capabilities is None:
+                result = await self._runtime.request(
+                    {"operation": "sdk_capabilities"}
+                )
+                self._capabilities = _validate_capabilities(result)
+        return self._capabilities
+
+
+def _ensure_compatible_runtime(runtime: LocalRuntime) -> LocalRuntime:
+    if isinstance(runtime, _CompatibleLocalRuntime):
+        return runtime
+    return _CompatibleLocalRuntime(runtime)
+
+
+def _ensure_compatible_async_runtime(
+    runtime: AsyncLocalRuntime,
+) -> AsyncLocalRuntime:
+    if isinstance(runtime, _CompatibleAsyncLocalRuntime):
+        return runtime
+    return _CompatibleAsyncLocalRuntime(runtime)
 
 
 @dataclass(frozen=True, slots=True)

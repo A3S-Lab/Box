@@ -102,7 +102,15 @@ func (runtime *LocalRuntime) Request(ctx context.Context, request any, result an
 	command.Stderr = &stderr
 	runErr := command.Run()
 	if requestContext.Err() != nil {
-		return contextError(operation, requestContext.Err())
+		if ctx.Err() != nil {
+			return contextError(operation, ctx.Err())
+		}
+		return sdkError(
+			operation,
+			CodeBridgeTimeout,
+			fmt.Sprintf("local A3S Box bridge timed out after %s", runtime.timeout),
+			requestContext.Err(),
+		)
 	}
 
 	decodeErr := decodeBridgeResponse(operation, stdout.Bytes(), result)

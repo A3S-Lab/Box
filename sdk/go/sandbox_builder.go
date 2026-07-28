@@ -215,6 +215,9 @@ func (builder *SandboxBuilder) Start(ctx context.Context) (*Sandbox, error) {
 	if err := builder.client.request(ctx, op, fields, &info); err != nil {
 		return nil, err
 	}
+	if err := validateSandboxInfo(op, "", builder.isolation, info); err != nil {
+		return nil, err
+	}
 	return newSandbox(builder.client.runtime, info), nil
 }
 

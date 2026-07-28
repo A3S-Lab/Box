@@ -192,6 +192,7 @@ type SandboxInfo struct {
 	SandboxID  string       `json:"sandbox_id"`
 	Generation uint64       `json:"generation"`
 	State      SandboxState `json:"state"`
+	Isolation  Isolation    `json:"isolation"`
 }
 
 type WriteInfo struct {

@@ -3,7 +3,10 @@ import { readFile } from 'node:fs/promises'
 
 import SandboxDefault, {
   A3SBoxClient,
+  A3SBoxError,
+  A3SBoxNotInstalledError,
   A3SLocalRuntime,
+  BRIDGE_PROTOCOL_VERSION,
   DEFAULT_IMAGE,
   RegistryCredentials,
   Sandbox,
@@ -14,9 +17,10 @@ import { Sandbox as CodeInterpreter } from '../dist/code-interpreter.js'
 
 class FakeRuntime {
   requests = []
+  isolations = new Map()
 
   async request(request) {
-    this.requests.push(request)
+    if (request.operation !== 'sdk_capabilities') this.requests.push(request)
     switch (request.operation) {
       case 'image_build':
         return {
@@ -80,9 +84,9 @@ class FakeRuntime {
         return { names: ['old-network'] }
       case 'runtime_diagnostics':
         return {
-          core_version: '3.1.0',
-          runtime_version: '3.1.0',
-          sdk_version: '3.1.0',
+          core_version: '3.2.0',
+          runtime_version: '3.2.0',
+          sdk_version: '3.2.0',
           home: '/tmp/a3s',
           virtualization: {
             available: true,
@@ -103,52 +107,75 @@ class FakeRuntime {
         }
       case 'sdk_capabilities':
         return {
-          protocol_version: 1,
-          operations: [
-            'sdk_capabilities',
-            'image_get',
-            'image_inspect',
-            'image_history',
-            'image_tag',
-            'image_push',
-            'image_evict',
-            'volume_prune',
-            'network_prune',
-          ],
+          protocol_version: 2,
+          operations: [...SUPPORTED_BRIDGE_OPERATIONS],
         }
       case 'sandbox_list':
         return { sandboxes: [sandboxSummaryResponse('sandbox-local-1')] }
       case 'sandbox_get':
         return { sandbox: sandboxSummaryResponse(request.query) }
-      case 'sandbox_create':
+      case 'sandbox_create': {
+        const isolation = request.isolation ?? 'microvm'
+        this.isolations.set('sandbox-local-1', isolation)
         return {
           sandbox_id: 'sandbox-local-1',
           generation: 1,
           state: 'running',
+          isolation,
         }
-      case 'sandbox_inspect':
+      }
+      case 'sandbox_inspect': {
+        const isolation =
+          this.isolations.get(request.sandbox_id) ?? 'sandbox'
+        this.isolations.set(request.sandbox_id, isolation)
         return {
           sandbox_id: request.sandbox_id,
           generation: 2,
           state: 'paused',
+          isolation,
         }
+      }
       case 'sandbox_stop':
         return {
           sandbox_id: request.sandbox_id,
           generation: request.generation,
           state: 'stopped',
+          isolation: this.isolations.get(request.sandbox_id) ?? 'microvm',
         }
       case 'sandbox_restart':
         return {
           sandbox_id: request.sandbox_id,
           generation: request.generation + 1,
           state: 'running',
+          isolation: this.isolations.get(request.sandbox_id) ?? 'microvm',
         }
       case 'sandbox_remove':
         return {
           sandbox_id: request.sandbox_id,
           generation: request.generation,
           state: 'removed',
+          isolation: this.isolations.get(request.sandbox_id) ?? 'microvm',
+        }
+      case 'sandbox_kill':
+        return {
+          sandbox_id: request.sandbox_id,
+          generation: request.generation,
+          state: 'stopped',
+          isolation: this.isolations.get(request.sandbox_id) ?? 'microvm',
+        }
+      case 'sandbox_pause':
+        return {
+          sandbox_id: request.sandbox_id,
+          generation: request.generation,
+          state: 'paused',
+          isolation: this.isolations.get(request.sandbox_id) ?? 'microvm',
+        }
+      case 'sandbox_resume':
+        return {
+          sandbox_id: request.sandbox_id,
+          generation: request.generation,
+          state: 'running',
+          isolation: this.isolations.get(request.sandbox_id) ?? 'microvm',
         }
       case 'sandbox_logs':
         return {
@@ -218,9 +245,6 @@ class FakeRuntime {
         }
       case 'filesystem_list':
         return { entries: [] }
-      case 'sandbox_kill':
-      case 'sandbox_pause':
-      case 'sandbox_resume':
       case 'filesystem_make_dir':
       case 'filesystem_move':
       case 'filesystem_remove':
@@ -228,6 +252,32 @@ class FakeRuntime {
       default:
         throw new Error(`unexpected operation: ${request.operation}`)
     }
+  }
+}
+
+class CapabilityRuntime {
+  requests = []
+
+  constructor({
+    protocolVersion = 2,
+    operations = SUPPORTED_BRIDGE_OPERATIONS,
+  } = {}) {
+    this.protocolVersion = protocolVersion
+    this.operations = operations
+  }
+
+  async request(request) {
+    this.requests.push(request)
+    if (request.operation === 'sdk_capabilities') {
+      await Promise.resolve()
+      return {
+        protocol_version: this.protocolVersion,
+        operations: [...this.operations],
+      }
+    }
+    if (request.operation === 'image_list') return { images: [] }
+    if (request.operation === 'volume_list') return { volumes: [] }
+    throw new Error(`unexpected operation: ${request.operation}`)
   }
 }
 
@@ -360,6 +410,239 @@ function filesystemSnapshotResponse(snapshotId) {
 assert.equal(SandboxDefault, Sandbox)
 assert.equal(DEFAULT_IMAGE, 'alpine:3.20')
 assert.notEqual(CodeInterpreter, Sandbox)
+assert.equal(
+  new A3SBoxNotInstalledError('/missing/a3s-box').code,
+  'binary_not_found'
+)
+
+const missingOperationRuntime = new CapabilityRuntime({
+  operations: SUPPORTED_BRIDGE_OPERATIONS.filter(
+    (operation) => operation !== 'image_list'
+  ),
+})
+await assert.rejects(
+  new A3SBoxClient(missingOperationRuntime).listImages(),
+  (error) =>
+    error instanceof A3SBoxError &&
+    error.code === 'unavailable' &&
+    error.message.includes('image_list')
+)
+assert.deepEqual(
+  missingOperationRuntime.requests.map((request) => request.operation),
+  ['sdk_capabilities']
+)
+
+const mismatchedRuntime = new CapabilityRuntime({ protocolVersion: 3 })
+await assert.rejects(
+  new A3SBoxClient(mismatchedRuntime).listImages(),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+assert.deepEqual(
+  mismatchedRuntime.requests.map((request) => request.operation),
+  ['sdk_capabilities']
+)
+
+const concurrentCapabilityRuntime = new CapabilityRuntime()
+const concurrentClient = new A3SBoxClient(concurrentCapabilityRuntime)
+await Promise.all([
+  concurrentClient.listImages(),
+  concurrentClient.listVolumes(),
+])
+assert.equal(
+  concurrentCapabilityRuntime.requests.filter(
+    (request) => request.operation === 'sdk_capabilities'
+  ).length,
+  1
+)
+assert.deepEqual(
+  concurrentCapabilityRuntime.requests
+    .map((request) => request.operation)
+    .filter((operation) => operation !== 'sdk_capabilities')
+    .sort(),
+  ['image_list', 'volume_list']
+)
+
+const coverageRuntime = new FakeRuntime()
+const coverageClient = new A3SBoxClient(coverageRuntime)
+await coverageClient.runtimeDiagnostics()
+await coverageClient.runtimeDiskUsage()
+await coverageClient.image('.').tag('local/test:latest').build()
+await coverageClient.pullImage('alpine:3.20')
+await coverageClient.getImage('alpine:3.20')
+await coverageClient.listImages()
+await coverageClient.inspectImage('alpine:3.20')
+await coverageClient.imageHistory('alpine:3.20')
+await coverageClient.tagImage('alpine:3.20', 'local/alpine:latest')
+await coverageClient.pushImage(
+  'local/alpine:latest',
+  'registry/alpine:latest'
+)
+await coverageClient.removeImage('local/alpine:latest')
+await coverageClient.evictImages()
+await coverageClient.volume('cache').create()
+await coverageClient.getVolume('cache')
+await coverageClient.listVolumes()
+await coverageClient.removeVolume('cache', { force: true })
+await coverageClient.pruneVolumes()
+await coverageClient.network('ci-net').create()
+await coverageClient.getNetwork('ci-net')
+await coverageClient.listNetworks()
+await coverageClient.removeNetwork('ci-net')
+await coverageClient.pruneNetworks()
+await coverageClient.listSandboxes()
+await coverageClient.getSandbox('sandbox-local-1')
+
+const coverageSandbox = await coverageClient.sandbox().start()
+await coverageSandbox.stop()
+await coverageSandbox.restart({ operationId: 'coverage-restart' })
+await coverageSandbox.pause()
+await coverageSandbox.resume()
+await coverageSandbox.logs({ tail: 10 })
+await coverageSandbox.stats()
+await coverageSandbox.createFilesystemSnapshot('snap-1')
+await coverageSandbox.commands.run(['true'])
+await coverageSandbox.files.write('/tmp/value', 'value')
+await coverageSandbox.files.read('/tmp/value')
+await coverageSandbox.files.stat('/tmp/value')
+await coverageSandbox.files.list('/tmp', { depth: 1 })
+await coverageSandbox.files.makeDir('/tmp/dir')
+await coverageSandbox.files.rename('/tmp/dir', '/tmp/moved')
+await coverageSandbox.files.remove('/tmp/moved')
+await coverageSandbox.kill()
+
+const removableSandbox = await Sandbox.connect('sandbox-remove', {
+  runtime: coverageRuntime,
+})
+await removableSandbox.remove()
+await coverageClient.listFilesystemSnapshots()
+await coverageClient.getFilesystemSnapshot('snap-1')
+await Sandbox.filesystemSnapshotSize('snap-1', { runtime: coverageRuntime })
+await Sandbox.deleteFilesystemSnapshot('snap-1', {
+  runtime: coverageRuntime,
+})
+await coverageClient.capabilities()
+
+assert.deepEqual(
+  [...new Set(coverageRuntime.requests.map((request) => request.operation))].sort(),
+  SUPPORTED_BRIDGE_OPERATIONS.filter(
+    (operation) => operation !== 'sdk_capabilities'
+  ).sort()
+)
+
+class MalformedBase64Runtime extends FakeRuntime {
+  async request(request) {
+    if (request.operation === 'command_run') {
+      return {
+        stdout_base64: 'not%base64',
+        stderr_base64: '',
+        exit_code: 0,
+        truncated: false,
+      }
+    }
+    return super.request(request)
+  }
+}
+
+const malformedSandbox = await Sandbox.create(undefined, {
+  runtime: new MalformedBase64Runtime(),
+})
+await assert.rejects(
+  malformedSandbox.commands.run(['true']),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+
+class MalformedSandboxRuntime extends FakeRuntime {
+  constructor(operation, result) {
+    super()
+    this.operation = operation
+    this.result = result
+  }
+
+  async request(request) {
+    if (request.operation === this.operation) return this.result
+    return super.request(request)
+  }
+}
+
+const invalidSandboxResults = [
+  {
+    sandbox_id: '',
+    generation: 1,
+    state: 'running',
+    isolation: 'microvm',
+  },
+  {
+    sandbox_id: 'sandbox-local-1',
+    generation: 0,
+    state: 'running',
+    isolation: 'microvm',
+  },
+  {
+    sandbox_id: 'sandbox-local-1',
+    generation: 1.5,
+    state: 'running',
+    isolation: 'microvm',
+  },
+  {
+    sandbox_id: 'sandbox-local-1',
+    generation: 1,
+    state: 'unknown',
+    isolation: 'microvm',
+  },
+  {
+    sandbox_id: 'sandbox-local-1',
+    generation: 1,
+    state: 'running',
+    isolation: 'process',
+  },
+]
+for (const invalidResult of invalidSandboxResults) {
+  await assert.rejects(
+    Sandbox.create(undefined, {
+      runtime: new MalformedSandboxRuntime(
+        'sandbox_create',
+        invalidResult
+      ),
+    }),
+    (error) =>
+      error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+  )
+}
+
+await assert.rejects(
+  Sandbox.connect('sandbox-expected', {
+    runtime: new MalformedSandboxRuntime('sandbox_inspect', {
+      sandbox_id: 'sandbox-other',
+      generation: 1,
+      state: 'running',
+      isolation: 'microvm',
+    }),
+  }),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+
+const changedIsolationRuntime = new MalformedSandboxRuntime(
+  'sandbox_stop',
+  {
+    sandbox_id: 'sandbox-local-1',
+    generation: 1,
+    state: 'stopped',
+    isolation: 'sandbox',
+  }
+)
+const changedIsolationSandbox = await Sandbox.create(undefined, {
+  runtime: changedIsolationRuntime,
+})
+await assert.rejects(
+  changedIsolationSandbox.stop(),
+  (error) =>
+    error instanceof A3SBoxError && error.code === 'bridge_protocol_error'
+)
+assert.equal(changedIsolationSandbox.generation, 1)
+assert.equal(changedIsolationSandbox.state, 'running')
 
 const runtime = new FakeRuntime()
 const sandbox = await Sandbox.create('python:3.12-alpine', {
@@ -458,7 +741,10 @@ const builtImage = await client
   .dockerfile('Dockerfile.ci')
   .tag('local/ci-base:latest')
   .buildArg('NODE_VERSION', '24')
+  .quiet(false)
   .platform('linux/arm64')
+  .target('test')
+  .noCache()
   .build()
 const cacheVolume = await client
   .volume('ci-cache')
@@ -472,12 +758,27 @@ const ciNetwork = await client
   .create()
 const builderSandbox = await client
   .sandbox(builtImage.reference)
+  .timeout(90_000)
+  .env('CI', 'true')
+  .metadata('job', 'test')
+  .name('typescript-test')
   .cpus(4)
   .memoryMb(4096)
-  .mountNamed(cacheVolume.name, '/cache')
+  .isolation('sandbox')
+  .filesystemSnapshot('base-snapshot')
+  .workspace('/workspace')
+  .mountNamed(cacheVolume.name, '/cache', { readOnly: true })
+  .mountBind('./src', '/workspace/src')
+  .tmpfs('/scratch', { sizeBytes: 1024, readOnly: true })
   .network(ciNetwork.name)
   .publishTcp(8080, 80)
-  .workdir('/workspace')
+  .dnsServer('1.1.1.1')
+  .hostAlias('registry.local', '10.89.55.2')
+  .workdir('/workspace/src')
+  .user('1000:1000')
+  .hostname('typescript-ci')
+  .readOnly()
+  .persistent()
   .autoRemove(false)
   .start()
 const scriptResult = await builderSandbox
@@ -491,13 +792,37 @@ assert.equal(scriptResult.stdout, '42\n')
 assert.equal(builderRuntime.requests[0].operation, 'image_build')
 assert.equal(builderRuntime.requests[0].dockerfile, 'Dockerfile.ci')
 assert.deepEqual(builderRuntime.requests[0].platforms, ['linux/arm64'])
+assert.equal(builderRuntime.requests[0].quiet, false)
+assert.equal(builderRuntime.requests[0].target, 'test')
+assert.equal(builderRuntime.requests[0].no_cache, true)
+assert.equal(builderRuntime.requests[3].timeout_seconds, 90)
+assert.deepEqual(builderRuntime.requests[3].env, { CI: 'true' })
+assert.deepEqual(builderRuntime.requests[3].labels, { job: 'test' })
+assert.equal(builderRuntime.requests[3].name, 'typescript-test')
+assert.equal(builderRuntime.requests[3].cpus, 4)
+assert.equal(builderRuntime.requests[3].memory_mb, 4096)
+assert.equal(builderRuntime.requests[3].isolation, 'sandbox')
+assert.equal(builderRuntime.requests[3].filesystem_snapshot_id, 'base-snapshot')
+assert.equal(builderRuntime.requests[3].workspace, '/workspace')
+assert.equal(builderRuntime.requests[3].workdir, '/workspace/src')
+assert.equal(builderRuntime.requests[3].user, '1000:1000')
+assert.equal(builderRuntime.requests[3].hostname, 'typescript-ci')
 assert.deepEqual(builderRuntime.requests[3].mounts, [
   {
     kind: 'named',
     name: 'ci-cache',
     target: '/cache',
+    read_only: true,
+  },
+  {
+    kind: 'bind',
+    source: './src',
+    target: '/workspace/src',
     read_only: false,
   },
+])
+assert.deepEqual(builderRuntime.requests[3].tmpfs, [
+  { target: '/scratch', size_bytes: 1024, read_only: true },
 ])
 assert.deepEqual(builderRuntime.requests[3].network, {
   mode: 'bridge',
@@ -506,6 +831,12 @@ assert.deepEqual(builderRuntime.requests[3].network, {
 assert.deepEqual(builderRuntime.requests[3].ports, [
   { host_port: 8080, guest_port: 80 },
 ])
+assert.deepEqual(builderRuntime.requests[3].dns, ['1.1.1.1'])
+assert.deepEqual(builderRuntime.requests[3].host_aliases, {
+  'registry.local': '10.89.55.2',
+})
+assert.equal(builderRuntime.requests[3].read_only, true)
+assert.equal(builderRuntime.requests[3].persistent, true)
 assert.equal(builderRuntime.requests[3].auto_remove, false)
 assert.deepEqual(builderRuntime.requests[4].argv, ['node', '-'])
 assert.equal(
@@ -586,6 +917,7 @@ const sharedKernelSandbox = await Sandbox.create(undefined, {
   runtime: sandboxIsolationRuntime,
 })
 await sharedKernelSandbox.kill()
+assert.equal(sharedKernelSandbox.isolation, 'sandbox')
 assert.equal(sandboxIsolationRuntime.requests[0].isolation, 'sandbox')
 
 const snapshotRuntime = new FakeRuntime()
@@ -665,3 +997,10 @@ const operationInventory = JSON.parse(
   )
 )
 assert.deepEqual(SUPPORTED_BRIDGE_OPERATIONS, operationInventory)
+const bridgeProtocol = JSON.parse(
+  await readFile(
+    new URL('../../bridge-protocol.json', import.meta.url),
+    'utf8'
+  )
+)
+assert.equal(BRIDGE_PROTOCOL_VERSION, bridgeProtocol.version)

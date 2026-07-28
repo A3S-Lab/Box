@@ -268,8 +268,8 @@ export function filesystemSnapshotInfo(
   return {
     snapshotId: requiredString(result, 'snapshot_id'),
     sizeBytes: requiredNumber(result, 'size_bytes'),
-    state: requiredString(result, 'state'),
-    generation: requiredNumber(result, 'generation'),
+    state: requiredSandboxState(result, 'state'),
+    generation: requiredGeneration(result, 'generation'),
   }
 }
 
@@ -298,6 +298,35 @@ export function requiredNumber(
 ): number {
   const value = result[key]
   if (typeof value !== 'number') bridgeTypeError(key)
+  return value
+}
+
+export function requiredGeneration(
+  result: BridgeResult,
+  key: string
+): number {
+  const value = requiredNumber(result, key)
+  if (!Number.isSafeInteger(value) || value <= 0) bridgeTypeError(key)
+  return value
+}
+
+export function requiredSandboxState(
+  result: BridgeResult,
+  key: string
+): string {
+  const value = requiredString(result, key)
+  if (
+    value !== 'created' &&
+    value !== 'creating' &&
+    value !== 'running' &&
+    value !== 'paused' &&
+    value !== 'stopped' &&
+    value !== 'failed' &&
+    value !== 'killed' &&
+    value !== 'removed'
+  ) {
+    bridgeTypeError(key)
+  }
   return value
 }
 
@@ -382,7 +411,18 @@ export function asRecord(value: unknown): BridgeResult {
 }
 
 export function decodeBase64(result: BridgeResult, key: string): Buffer {
-  return Buffer.from(requiredString(result, key), 'base64')
+  const encoded = requiredString(result, key)
+  if (
+    encoded.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      encoded
+    )
+  ) {
+    bridgeTypeError(key)
+  }
+  const decoded = Buffer.from(encoded, 'base64')
+  if (decoded.toString('base64') !== encoded) bridgeTypeError(key)
+  return decoded
 }
 
 function bridgeTypeError(key: string): never {

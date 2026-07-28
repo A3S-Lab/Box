@@ -3440,7 +3440,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn test_build_command_uses_selected_users_home_unless_overridden() {
         let rootfs = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
@@ -3718,7 +3718,8 @@ mod tests {
         assert!(response.success, "{:?}", response.error);
         let entry = response.entry.unwrap();
         assert_eq!(entry.kind, FilesystemEntryKind::File);
-        assert_eq!(entry.symlink_target.as_deref(), target.to_str());
+        let canonical_target = std::fs::canonicalize(&target).unwrap();
+        assert_eq!(entry.symlink_target.as_deref(), canonical_target.to_str());
         assert!(entry.permissions.starts_with('L'));
     }
 

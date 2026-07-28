@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use a3s_box_core::dirs_home;
 use serde::{Deserialize, Serialize};
 
-use super::layer::{sha256_bytes, LayerInfo};
+use super::layer::{sha256_bytes, sha256_file, LayerInfo};
 
 /// Per-process counter for unique staging-file names in `store`.
 static STORE_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -103,15 +103,15 @@ impl BuildCache {
 
     /// Look up a cached layer by chain key.
     ///
-    /// Returns the cached layer only if its key record exists AND the
-    /// referenced blob is still present on disk.
+    /// Returns the cached layer only if its key record exists and the
+    /// referenced blob is a regular file with the recorded size and digest.
     pub(crate) fn lookup(&self, key: &str) -> Option<CachedLayer> {
         let key_path = self.dir.join("keys").join(key);
         let bytes = std::fs::read(&key_path).ok()?;
         let record: KeyRecord = serde_json::from_slice(&bytes).ok()?;
 
         let blob_path = self.dir.join("blobs").join(&record.digest);
-        if !blob_path.exists() {
+        if !cached_blob_is_valid(&blob_path, &record.digest, record.size) {
             return None;
         }
 
@@ -125,16 +125,18 @@ impl BuildCache {
 
     /// Store a produced layer under the given chain key.
     ///
-    /// Copies `layer.path` to `blobs/<layer.digest>` (only if absent) and writes
-    /// the `keys/<key>` record. Best-effort: I/O errors are ignored.
+    /// Copies `layer.path` to `blobs/<layer.digest>` when the current blob is
+    /// absent or invalid, then writes the `keys/<key>` record. Best-effort: I/O
+    /// errors are ignored.
     pub(crate) fn store(&self, key: &str, layer: &LayerInfo, diff_id: &str) {
+        if !cached_blob_is_valid(&layer.path, &layer.digest, layer.size) {
+            return;
+        }
         let blob_path = self.dir.join("blobs").join(&layer.digest);
-        if !blob_path.exists() {
+        if !cached_blob_is_valid(&blob_path, &layer.digest, layer.size) {
             // Copy to a unique temp file then atomically rename into place, so a
             // concurrent build (or a copy that fails partway) never publishes a
-            // half-written blob that a key record then points at. The blob is
-            // content-addressed, so a rename that overwrites a racing winner is
-            // harmless (identical bytes).
+            // half-written blob that a key record then points at.
             let seq = STORE_SEQ.fetch_add(1, Ordering::Relaxed);
             let staging = self.dir.join("blobs").join(format!(
                 ".staging-{}-{}-{}",
@@ -143,6 +145,17 @@ impl BuildCache {
                 seq
             ));
             if std::fs::copy(&layer.path, &staging).is_err() {
+                let _ = std::fs::remove_file(&staging);
+                return;
+            }
+            if !cached_blob_is_valid(&staging, &layer.digest, layer.size) {
+                let _ = std::fs::remove_file(&staging);
+                return;
+            }
+            // Windows cannot rename over an existing file. Removing a corrupt
+            // destination first is safe because readers independently validate
+            // cache blobs and rebuild on a miss or race.
+            if blob_path.exists() && std::fs::remove_file(&blob_path).is_err() {
                 let _ = std::fs::remove_file(&staging);
                 return;
             }
@@ -227,6 +240,23 @@ impl BuildCache {
             }
         }
     }
+}
+
+fn cached_blob_is_valid(path: &Path, digest: &str, size: u64) -> bool {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return false;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.len() == size
+        && sha256_file(path).is_ok_and(|actual| actual == digest)
 }
 
 /// Hash the content of COPY/ADD source files for cache invalidation.
@@ -336,11 +366,12 @@ mod tests {
 
         // Create a fake layer blob to be cached.
         let layer_path = tmp.path().join("layer.tar.gz");
-        fs::write(&layer_path, b"fake layer contents").unwrap();
+        let contents = b"fake layer contents";
+        fs::write(&layer_path, contents).unwrap();
         let layer = LayerInfo {
             path: layer_path,
-            digest: "abc123def456".to_string(),
-            size: 19,
+            digest: sha256_bytes(contents),
+            size: contents.len() as u64,
         };
 
         let key = BuildCache::chain("", "RUN echo hi", None);
@@ -351,9 +382,9 @@ mod tests {
         let hit = cache
             .lookup(&key)
             .expect("expected a cache hit after store");
-        assert_eq!(hit.digest, "abc123def456");
+        assert_eq!(hit.digest, sha256_bytes(contents));
         assert_eq!(hit.diff_id, "diff-id-xyz");
-        assert_eq!(hit.size, 19);
+        assert_eq!(hit.size, contents.len() as u64);
         assert!(hit.blob_path.exists());
         assert_eq!(fs::read(&hit.blob_path).unwrap(), b"fake layer contents");
     }
@@ -365,16 +396,17 @@ mod tests {
         let cache = open_at(&cache_dir);
 
         let layer_path = tmp.path().join("layer.tar.gz");
-        fs::write(&layer_path, vec![0u8; 4096]).unwrap();
+        let contents = vec![0u8; 4096];
+        fs::write(&layer_path, &contents).unwrap();
         let layer = LayerInfo {
             path: layer_path,
-            digest: "cafef00d".to_string(),
+            digest: sha256_bytes(&contents),
             size: 4096,
         };
         let key = BuildCache::chain("", "RUN make", None);
         cache.store(&key, &layer, "diff");
 
-        let blob = cache_dir.join("blobs").join("cafef00d");
+        let blob = cache_dir.join("blobs").join(&layer.digest);
         let key_file = cache_dir.join("keys").join(&key);
         assert!(blob.exists() && key_file.exists());
 
@@ -391,18 +423,44 @@ mod tests {
         let cache = open_at(&tmp.path().join("buildcache"));
 
         let layer_path = tmp.path().join("layer.tar.gz");
-        fs::write(&layer_path, b"data").unwrap();
+        let contents = b"data";
+        fs::write(&layer_path, contents).unwrap();
         let layer = LayerInfo {
             path: layer_path,
-            digest: "deadbeef".to_string(),
-            size: 4,
+            digest: sha256_bytes(contents),
+            size: contents.len() as u64,
         };
         let key = BuildCache::chain("", "RUN x", None);
         cache.store(&key, &layer, "diff");
 
         // Remove the blob; the key record remains but lookup must miss.
-        fs::remove_file(tmp.path().join("buildcache/blobs/deadbeef")).unwrap();
+        fs::remove_file(tmp.path().join("buildcache/blobs").join(&layer.digest)).unwrap();
         assert!(cache.lookup(&key).is_none());
+    }
+
+    #[test]
+    fn test_lookup_rejects_and_store_repairs_corrupt_blob() {
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("buildcache");
+        let cache = open_at(&cache_dir);
+        let contents = b"verified layer";
+        let layer_path = tmp.path().join("layer.tar.gz");
+        fs::write(&layer_path, contents).unwrap();
+        let layer = LayerInfo {
+            path: layer_path,
+            digest: sha256_bytes(contents),
+            size: contents.len() as u64,
+        };
+        let key = BuildCache::chain("", "COPY value /value", None);
+        cache.store(&key, &layer, "diff");
+
+        let blob = cache_dir.join("blobs").join(&layer.digest);
+        fs::write(&blob, b"corrupted data").unwrap();
+        assert!(cache.lookup(&key).is_none());
+
+        cache.store(&key, &layer, "diff");
+        assert_eq!(fs::read(&blob).unwrap(), contents);
+        assert!(cache.lookup(&key).is_some());
     }
 
     #[test]
@@ -429,13 +487,13 @@ mod tests {
         let cache = open_at(&tmp.path().join("buildcache"));
 
         // Store three ~100-byte blobs under distinct keys/digests.
-        let payload = vec![b'x'; 100];
         for i in 0..3 {
+            let payload = vec![b'x' + i as u8; 100];
             let src = tmp.path().join(format!("src{i}"));
             fs::write(&src, &payload).unwrap();
             let layer = LayerInfo {
                 path: src,
-                digest: format!("digest{i:040}"),
+                digest: sha256_bytes(&payload),
                 size: payload.len() as u64,
             };
             cache.store(

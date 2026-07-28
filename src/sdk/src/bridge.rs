@@ -31,7 +31,7 @@ pub use request::{
     BRIDGE_OPERATIONS,
 };
 
-pub const BRIDGE_PROTOCOL_VERSION: u8 = 1;
+pub const BRIDGE_PROTOCOL_VERSION: u8 = 2;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct BridgeSandboxCreateRequest {
@@ -480,18 +480,20 @@ async fn execute_request(
         } => {
             let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let sandbox_id = sandbox.id().to_string();
+            let isolation = isolation_name(sandbox.isolation());
             sandbox.remove().await?;
             Ok(json!({
                 "sandbox_id": sandbox_id,
                 "generation": generation,
                 "state": "removed",
+                "isolation": isolation,
             }))
         }
         BridgeRequest::SandboxKill {
             sandbox_id,
             generation,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox.kill().await?;
             Ok(sandbox_info_value(&sandbox))
         }
@@ -500,7 +502,7 @@ async fn execute_request(
             generation,
             keep_memory,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox.pause(keep_memory).await?;
             Ok(sandbox_info_value(&sandbox))
         }
@@ -508,7 +510,7 @@ async fn execute_request(
             sandbox_id,
             generation,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Paused)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox.resume().await?;
             Ok(sandbox_info_value(&sandbox))
         }
@@ -582,7 +584,7 @@ async fn execute_request(
                         .map_err(|error| invalid(format!("stdin_base64 is invalid: {error}")))
                 })
                 .transpose()?;
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let output = sandbox
                 .commands
                 .run_with_options(
@@ -613,7 +615,7 @@ async fn execute_request(
             let data = STANDARD
                 .decode(&data_base64)
                 .map_err(|error| invalid(format!("data_base64 is invalid: {error}")))?;
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let result = sandbox
                 .files
                 .write_with_options(&path, data, FilesystemOptions { user })
@@ -629,7 +631,7 @@ async fn execute_request(
             path,
             user,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let data = sandbox
                 .files
                 .read_with_options(&path, FilesystemOptions { user })
@@ -646,7 +648,7 @@ async fn execute_request(
             path,
             user,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let entry = sandbox
                 .files
                 .stat_with_options(path, FilesystemOptions { user })
@@ -660,7 +662,7 @@ async fn execute_request(
             depth,
             user,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             let entries = sandbox
                 .files
                 .list_with_options(path, depth, FilesystemOptions { user })
@@ -675,7 +677,7 @@ async fn execute_request(
             path,
             user,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox
                 .files
                 .make_dir_with_options(path, FilesystemOptions { user })
@@ -689,7 +691,7 @@ async fn execute_request(
             destination,
             user,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox
                 .files
                 .move_path_with_options(path, destination, FilesystemOptions { user })
@@ -702,7 +704,7 @@ async fn execute_request(
             path,
             user,
         } => {
-            let sandbox = bridge_sandbox(client, sandbox_id, generation, ExecutionState::Running)?;
+            let sandbox = connected_sandbox(client, sandbox_id, generation).await?;
             sandbox
                 .files
                 .remove_with_options(path, FilesystemOptions { user })
@@ -710,21 +712,6 @@ async fn execute_request(
             Ok(json!({ "ok": true }))
         }
     }
-}
-
-fn bridge_sandbox(
-    client: &A3sBoxClient,
-    sandbox_id: String,
-    generation: u64,
-    state: ExecutionState,
-) -> Result<Sandbox, BridgeFailure> {
-    Ok(Sandbox::from_known_state(
-        client.clone(),
-        execution_id(sandbox_id)?,
-        parse_generation(generation)?,
-        state,
-        ExecutionIsolation::Microvm,
-    ))
 }
 
 async fn connected_sandbox(
@@ -736,7 +723,7 @@ async fn connected_sandbox(
     let expected_generation = parse_generation(generation)?;
     let status = client.inspect_execution(&execution_id).await?;
     if status.generation != expected_generation {
-        return Err(invalid(format!(
+        return Err(conflict(format!(
             "sandbox {} generation changed from {} to {}",
             execution_id,
             expected_generation.get(),
@@ -758,7 +745,15 @@ fn sandbox_info_value(sandbox: &Sandbox) -> Value {
         "sandbox_id": info.sandbox_id,
         "generation": info.generation,
         "state": state_name(info.state),
+        "isolation": isolation_name(info.isolation),
     })
+}
+
+const fn isolation_name(isolation: ExecutionIsolation) -> &'static str {
+    match isolation {
+        ExecutionIsolation::Microvm => "microvm",
+        ExecutionIsolation::Sandbox => "sandbox",
+    }
 }
 
 fn execution_snapshot_value(snapshot: &ExecutionSnapshot) -> Value {
@@ -845,6 +840,13 @@ const fn default_true() -> bool {
 fn invalid(message: impl Into<String>) -> BridgeFailure {
     BridgeFailure {
         code: "invalid_request",
+        message: message.into(),
+    }
+}
+
+fn conflict(message: impl Into<String>) -> BridgeFailure {
+    BridgeFailure {
+        code: "conflict",
         message: message.into(),
     }
 }

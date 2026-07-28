@@ -8,13 +8,17 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
 from ._bridge_values import (
+    boolean as _boolean,
     command_result as _command_result,
+    decoded_base64 as _decoded_base64,
     entry_info as _entry_info,
     filesystem_snapshot_info as _snapshot_info,
+    integer as _integer,
     mapping as _mapping,
     mapping_sequence as _mapping_sequence,
     sandbox_log_entry as _sandbox_log_entry,
     sandbox_stats as _sandbox_stats,
+    string as _string,
 )
 from .exceptions import A3SBoxError
 from ._sandbox_requests import (
@@ -40,8 +44,22 @@ from .runtime import (
     A3SLocalRuntime,
     AsyncLocalRuntime,
     LocalRuntime,
+    _ensure_compatible_async_runtime,
+    _ensure_compatible_runtime,
 )
 from .script import AsyncScriptBuilder, ScriptBuilder
+
+
+def _isolation(
+    result: Mapping[str, Any],
+) -> Literal["microvm", "sandbox"]:
+    isolation = _string(result.get("isolation"))
+    if isolation not in {"microvm", "sandbox"}:
+        raise A3SBoxError(
+            "Bridge result has an invalid isolation",
+            code="bridge_protocol_error",
+        )
+    return cast(Literal["microvm", "sandbox"], isolation)
 
 
 class Sandbox:
@@ -52,11 +70,13 @@ class Sandbox:
         sandbox_id: str,
         generation: int,
         state: str,
+        isolation: Literal["microvm", "sandbox"],
         runtime: LocalRuntime,
     ) -> None:
         self.sandbox_id = sandbox_id
         self.generation = generation
         self.state = state
+        self.isolation = isolation
         self._runtime = runtime
         self.commands = Commands(self)
         self.files = Filesystem(self)
@@ -93,7 +113,7 @@ class Sandbox:
         auto_remove: bool = True,
         runtime: LocalRuntime | None = None,
     ) -> Sandbox:
-        local_runtime = runtime or A3SLocalRuntime()
+        local_runtime = _ensure_compatible_runtime(runtime or A3SLocalRuntime())
         result = local_runtime.request(
             _create_request(
                 template,
@@ -129,7 +149,7 @@ class Sandbox:
         *,
         runtime: LocalRuntime | None = None,
     ) -> Sandbox:
-        local_runtime = runtime or A3SLocalRuntime()
+        local_runtime = _ensure_compatible_runtime(runtime or A3SLocalRuntime())
         result = local_runtime.request(
             {"operation": "sandbox_inspect", "sandbox_id": sandbox_id}
         )
@@ -142,9 +162,10 @@ class Sandbox:
         runtime: LocalRuntime,
     ) -> Sandbox:
         return cls(
-            sandbox_id=str(result["sandbox_id"]),
-            generation=int(result["generation"]),
-            state=str(result["state"]),
+            sandbox_id=_string(result["sandbox_id"]),
+            generation=_integer(result["generation"]),
+            state=_string(result["state"]),
+            isolation=_isolation(result),
             runtime=runtime,
         )
 
@@ -273,14 +294,14 @@ class Sandbox:
         *,
         runtime: LocalRuntime | None = None,
     ) -> int | None:
-        result = (runtime or A3SLocalRuntime()).request(
+        result = _ensure_compatible_runtime(runtime or A3SLocalRuntime()).request(
             {
                 "operation": "filesystem_snapshot_size",
                 "snapshot_id": snapshot_id,
             }
         )
         size = result.get("size_bytes")
-        return None if size is None else int(size)
+        return None if size is None else _integer(size)
 
     @classmethod
     def delete_filesystem_snapshot(
@@ -289,13 +310,13 @@ class Sandbox:
         *,
         runtime: LocalRuntime | None = None,
     ) -> bool:
-        result = (runtime or A3SLocalRuntime()).request(
+        result = _ensure_compatible_runtime(runtime or A3SLocalRuntime()).request(
             {
                 "operation": "filesystem_snapshot_delete",
                 "snapshot_id": snapshot_id,
             }
         )
-        return bool(result["deleted"])
+        return _boolean(result["deleted"])
 
     def _lifecycle_request(self, operation: str) -> dict[str, object]:
         return {
@@ -310,8 +331,12 @@ class Sandbox:
         *,
         fallback_state: str,
     ) -> None:
-        self.generation = int(result.get("generation", self.generation))
-        self.state = str(result.get("state", fallback_state))
+        self.generation = _integer(
+            result.get("generation", self.generation)
+        )
+        self.state = _string(result.get("state", fallback_state))
+        if "isolation" in result:
+            self.isolation = _isolation(result)
 
     def __enter__(self) -> Sandbox:
         return self
@@ -390,7 +415,10 @@ class Filesystem:
                 "data_base64": base64.b64encode(raw).decode(),
             }
         )
-        return WriteInfo(path=str(result["path"]), size=int(result["size"]))
+        return WriteInfo(
+            path=_string(result["path"]),
+            size=_integer(result["size"]),
+        )
 
     def read(
         self,
@@ -402,14 +430,14 @@ class Filesystem:
         result = self._sandbox._runtime.request(
             self._request("file_read", path, user=user)
         )
-        data = base64.b64decode(str(result["data_base64"]), validate=True)
+        data = _decoded_base64(result["data_base64"], "data_base64")
         return data if format == "bytes" else data.decode()
 
     def stat(self, path: str, *, user: str | None = None) -> EntryInfo:
         result = self._sandbox._runtime.request(
             self._request("filesystem_stat", path, user=user)
         )
-        return _entry_info(cast(Mapping[str, Any], result["entry"]))
+        return _entry_info(_mapping(result["entry"]))
 
     def exists(self, path: str, *, user: str | None = None) -> bool:
         try:
@@ -434,8 +462,8 @@ class Filesystem:
             }
         )
         return [
-            _entry_info(cast(Mapping[str, Any], entry))
-            for entry in cast(list[object], result["entries"])
+            _entry_info(entry)
+            for entry in _mapping_sequence(result["entries"])
         ]
 
     def make_dir(self, path: str, *, user: str | None = None) -> EntryInfo | None:
@@ -443,7 +471,7 @@ class Filesystem:
             self._request("filesystem_make_dir", path, user=user)
         )
         entry = result.get("entry")
-        return _entry_info(cast(Mapping[str, Any], entry)) if entry else None
+        return None if entry is None else _entry_info(_mapping(entry))
 
     def rename(
         self,
@@ -459,7 +487,7 @@ class Filesystem:
             }
         )
         entry = result.get("entry")
-        return _entry_info(cast(Mapping[str, Any], entry)) if entry else None
+        return None if entry is None else _entry_info(_mapping(entry))
 
     def remove(self, path: str, *, user: str | None = None) -> None:
         self._sandbox._runtime.request(
@@ -492,11 +520,13 @@ class AsyncSandbox:
         sandbox_id: str,
         generation: int,
         state: str,
+        isolation: Literal["microvm", "sandbox"],
         runtime: AsyncLocalRuntime,
     ) -> None:
         self.sandbox_id = sandbox_id
         self.generation = generation
         self.state = state
+        self.isolation = isolation
         self._runtime = runtime
         self.commands = AsyncCommands(self)
         self.files = AsyncFilesystem(self)
@@ -533,7 +563,9 @@ class AsyncSandbox:
         auto_remove: bool = True,
         runtime: AsyncLocalRuntime | None = None,
     ) -> AsyncSandbox:
-        local_runtime = runtime or A3SAsyncLocalRuntime()
+        local_runtime = _ensure_compatible_async_runtime(
+            runtime or A3SAsyncLocalRuntime()
+        )
         result = await local_runtime.request(
             _create_request(
                 template,
@@ -569,7 +601,9 @@ class AsyncSandbox:
         *,
         runtime: AsyncLocalRuntime | None = None,
     ) -> AsyncSandbox:
-        local_runtime = runtime or A3SAsyncLocalRuntime()
+        local_runtime = _ensure_compatible_async_runtime(
+            runtime or A3SAsyncLocalRuntime()
+        )
         result = await local_runtime.request(
             {"operation": "sandbox_inspect", "sandbox_id": sandbox_id}
         )
@@ -582,9 +616,10 @@ class AsyncSandbox:
         runtime: AsyncLocalRuntime,
     ) -> AsyncSandbox:
         return cls(
-            sandbox_id=str(result["sandbox_id"]),
-            generation=int(result["generation"]),
-            state=str(result["state"]),
+            sandbox_id=_string(result["sandbox_id"]),
+            generation=_integer(result["generation"]),
+            state=_string(result["state"]),
+            isolation=_isolation(result),
             runtime=runtime,
         )
 
@@ -717,14 +752,16 @@ class AsyncSandbox:
         *,
         runtime: AsyncLocalRuntime | None = None,
     ) -> int | None:
-        result = await (runtime or A3SAsyncLocalRuntime()).request(
+        result = await _ensure_compatible_async_runtime(
+            runtime or A3SAsyncLocalRuntime()
+        ).request(
             {
                 "operation": "filesystem_snapshot_size",
                 "snapshot_id": snapshot_id,
             }
         )
         size = result.get("size_bytes")
-        return None if size is None else int(size)
+        return None if size is None else _integer(size)
 
     @classmethod
     async def delete_filesystem_snapshot(
@@ -733,13 +770,15 @@ class AsyncSandbox:
         *,
         runtime: AsyncLocalRuntime | None = None,
     ) -> bool:
-        result = await (runtime or A3SAsyncLocalRuntime()).request(
+        result = await _ensure_compatible_async_runtime(
+            runtime or A3SAsyncLocalRuntime()
+        ).request(
             {
                 "operation": "filesystem_snapshot_delete",
                 "snapshot_id": snapshot_id,
             }
         )
-        return bool(result["deleted"])
+        return _boolean(result["deleted"])
 
     def _lifecycle_request(self, operation: str) -> dict[str, object]:
         return {
@@ -754,8 +793,12 @@ class AsyncSandbox:
         *,
         fallback_state: str,
     ) -> None:
-        self.generation = int(result.get("generation", self.generation))
-        self.state = str(result.get("state", fallback_state))
+        self.generation = _integer(
+            result.get("generation", self.generation)
+        )
+        self.state = _string(result.get("state", fallback_state))
+        if "isolation" in result:
+            self.isolation = _isolation(result)
 
     async def __aenter__(self) -> AsyncSandbox:
         return self
@@ -834,7 +877,10 @@ class AsyncFilesystem:
                 "data_base64": base64.b64encode(raw).decode(),
             }
         )
-        return WriteInfo(path=str(result["path"]), size=int(result["size"]))
+        return WriteInfo(
+            path=_string(result["path"]),
+            size=_integer(result["size"]),
+        )
 
     async def read(
         self,
@@ -846,14 +892,14 @@ class AsyncFilesystem:
         result = await self._sandbox._runtime.request(
             self._request("file_read", path, user=user)
         )
-        data = base64.b64decode(str(result["data_base64"]), validate=True)
+        data = _decoded_base64(result["data_base64"], "data_base64")
         return data if format == "bytes" else data.decode()
 
     async def stat(self, path: str, *, user: str | None = None) -> EntryInfo:
         result = await self._sandbox._runtime.request(
             self._request("filesystem_stat", path, user=user)
         )
-        return _entry_info(cast(Mapping[str, Any], result["entry"]))
+        return _entry_info(_mapping(result["entry"]))
 
     async def exists(self, path: str, *, user: str | None = None) -> bool:
         try:
@@ -878,8 +924,8 @@ class AsyncFilesystem:
             }
         )
         return [
-            _entry_info(cast(Mapping[str, Any], entry))
-            for entry in cast(list[object], result["entries"])
+            _entry_info(entry)
+            for entry in _mapping_sequence(result["entries"])
         ]
 
     async def make_dir(
@@ -892,7 +938,7 @@ class AsyncFilesystem:
             self._request("filesystem_make_dir", path, user=user)
         )
         entry = result.get("entry")
-        return _entry_info(cast(Mapping[str, Any], entry)) if entry else None
+        return None if entry is None else _entry_info(_mapping(entry))
 
     async def rename(
         self,
@@ -908,7 +954,7 @@ class AsyncFilesystem:
             }
         )
         entry = result.get("entry")
-        return _entry_info(cast(Mapping[str, Any], entry)) if entry else None
+        return None if entry is None else _entry_info(_mapping(entry))
 
     async def remove(self, path: str, *, user: str | None = None) -> None:
         await self._sandbox._runtime.request(

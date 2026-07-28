@@ -553,8 +553,13 @@ async fn process_session_inherits_environment_from_persisted_record() {
         .await
         .unwrap();
 
-    let socket_path = record.box_dir.join("sockets/exec.sock");
-    std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    // Keep the Unix-domain socket path well below macOS's short SUN_LEN even
+    // when the execution harness lives under a long per-user temp path.
+    let socket_directory = tempfile::Builder::new()
+        .prefix("a3s-exec-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket_path = socket_directory.path().join("exec.sock");
     let process_id = std::process::id();
     let record = manager
         .complete_with_handle(

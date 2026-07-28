@@ -217,6 +217,11 @@ a3s-box compose -f compose.acl down
 
 </details>
 
+`a3s-box system-prune --all` also removes rootfs cache entries that no active
+Box references and interrupted image-pull work directories whose owner process
+has exited. It preserves active rootfs markers, live pulls, concurrent
+publication staging paths, and cache lock files.
+
 ## Native SDKs
 
 Rust, Python, TypeScript, and Go operate the same local images, Sandboxes, volumes,
@@ -276,10 +281,14 @@ if err != nil { return err }
 if result.ExitCode != 0 { return errors.New(result.StderrString()) }
 ```
 
-Python, TypeScript, and Go never parse human CLI output; they exchange one checked,
-structured request and response with `a3s-box sdk-bridge`. Use runtime and SDK
-packages from the same release because the bridge rejects incompatible
-protocol versions.
+Python, TypeScript, and Go never parse human CLI output; they exchange one
+checked, structured request and response with `a3s-box sdk-bridge`. Protocol v2
+validates the exact 48-operation inventory before normal calls and fails closed
+on missing, duplicate, or malformed capabilities and typed results. Sandbox
+handles retain the effective `microvm` or `sandbox` isolation reported by the
+runtime, and stale generations return the stable `conflict` code. Use runtime
+and SDK packages from the same release because incompatible protocol versions
+are rejected before mutation.
 
 Read the [cross-language SDK contract](docs/sdk-api-and-programmable-cicd.md)
 or go directly to the [Rust](src/sdk/README.md),

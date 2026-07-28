@@ -10,6 +10,20 @@ use a3s_box_core::error::{BoxError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Result of explicitly reclaiming unused rootfs cache entries.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RootfsPruneResult {
+    pub entries_removed: usize,
+    pub bytes_freed: u64,
+}
+
+impl RootfsPruneResult {
+    pub fn merge(&mut self, other: Self) {
+        self.entries_removed = self.entries_removed.saturating_add(other.entries_removed);
+        self.bytes_freed = self.bytes_freed.saturating_add(other.bytes_freed);
+    }
+}
+
 /// Metadata for a cached rootfs entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RootfsMeta {
@@ -258,6 +272,59 @@ impl RootfsCache {
         Ok(evicted)
     }
 
+    /// Remove every complete or orphaned entry not referenced by a live box.
+    ///
+    /// Dot-prefixed staging paths are left alone because they may belong to a
+    /// concurrent cache publication. A crashed publication's staging directory
+    /// is intentionally not guessed at here; only addressable cache keys and
+    /// their metadata are reclaimed.
+    pub fn prune_all_protecting(
+        &self,
+        protected: &std::collections::HashSet<String>,
+    ) -> Result<RootfsPruneResult> {
+        let mut keys = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&self.cache_dir).map_err(|error| {
+            BoxError::CacheError(format!(
+                "Failed to read rootfs cache directory {}: {error}",
+                self.cache_dir.display()
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                BoxError::CacheError(format!("Failed to read rootfs cache entry: {error}"))
+            })?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name.ends_with(".meta.json.lock") {
+                continue;
+            }
+            let key = name.strip_suffix(".meta.json").unwrap_or(&name);
+            keys.insert(key.to_string());
+        }
+
+        let mut result = RootfsPruneResult::default();
+        for key in keys {
+            if protected.contains(&key) {
+                continue;
+            }
+            let paths = [
+                self.cache_dir.join(&key),
+                self.cache_dir.join(format!("{key}.meta.json")),
+            ];
+            let mut removed = false;
+            for path in paths {
+                let Some(size) = removable_path_size(&path)? else {
+                    continue;
+                };
+                remove_path_no_follow(&path)?;
+                result.bytes_freed = result.bytes_freed.saturating_add(size);
+                removed = true;
+            }
+            if removed {
+                result.entries_removed = result.entries_removed.saturating_add(1);
+            }
+        }
+        Ok(result)
+    }
+
     /// List all cached rootfs entries with their metadata.
     pub fn list_entries(&self) -> Result<Vec<RootfsMeta>> {
         let mut entries = Vec::new();
@@ -298,6 +365,93 @@ impl RootfsCache {
     /// Get the number of cached rootfs entries.
     pub fn entry_count(&self) -> Result<usize> {
         Ok(self.list_entries()?.len())
+    }
+}
+
+/// Remove unreferenced APFS sparse-image rootfs cache entries.
+///
+/// The APFS cache uses `<key>.sparseimage` instead of directory + metadata
+/// pairs. Dot-prefixed publication temporaries remain protected from a
+/// concurrent `system-prune` invocation.
+pub fn prune_apfs_rootfs_cache_all(
+    cache_dir: &Path,
+    protected: &std::collections::HashSet<String>,
+) -> Result<RootfsPruneResult> {
+    if !cache_dir.exists() {
+        return Ok(RootfsPruneResult::default());
+    }
+    let mut result = RootfsPruneResult::default();
+    for entry in std::fs::read_dir(cache_dir).map_err(|error| {
+        BoxError::CacheError(format!(
+            "Failed to read APFS rootfs cache directory {}: {error}",
+            cache_dir.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            BoxError::CacheError(format!("Failed to read APFS rootfs cache entry: {error}"))
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let Some(key) = name.strip_suffix(".sparseimage") else {
+            continue;
+        };
+        if protected.contains(key) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(size) = removable_path_size(&path)? else {
+            continue;
+        };
+        remove_path_no_follow(&path)?;
+        result.entries_removed = result.entries_removed.saturating_add(1);
+        result.bytes_freed = result.bytes_freed.saturating_add(size);
+    }
+    Ok(result)
+}
+
+fn removable_path_size(path: &Path) -> Result<Option<u64>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => super::layer_cache::dir_size(path)
+            .map(Some)
+            .map_err(|error| {
+                BoxError::CacheError(format!(
+                    "Failed to measure cached path {}: {error}",
+                    path.display()
+                ))
+            }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(BoxError::CacheError(format!(
+            "Failed to inspect cached path {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn remove_path_no_follow(path: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(BoxError::CacheError(format!(
+                "Failed to inspect cached path {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let removed = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match removed {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(BoxError::CacheError(format!(
+            "Failed to remove cached path {}: {error}",
+            path.display()
+        ))),
     }
 }
 
@@ -566,6 +720,53 @@ mod tests {
         let evicted = cache.prune_protecting(0, 0, &protected).unwrap();
         assert_eq!(evicted, 0, "all in-use -> nothing evicted");
         assert_eq!(cache.entry_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn prune_all_protecting_removes_complete_and_orphaned_entries() {
+        let tmp = TempDir::new().unwrap();
+        let cache = RootfsCache::new(tmp.path()).unwrap();
+        for key in ["protected", "unused"] {
+            let source = tmp.path().join(format!("source-{key}"));
+            create_test_rootfs(&source, &[("file", key)]);
+            cache.put(key, &source, key).unwrap();
+            std::fs::remove_dir_all(source).unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("orphan-dir")).unwrap();
+        std::fs::write(tmp.path().join("orphan-meta.meta.json"), "broken").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".staging-active")).unwrap();
+        std::fs::write(tmp.path().join("unused.meta.json.lock"), "").unwrap();
+
+        let protected = ["protected".to_string()].into_iter().collect();
+        let result = cache.prune_all_protecting(&protected).unwrap();
+
+        assert_eq!(result.entries_removed, 3);
+        assert!(result.bytes_freed > 0);
+        assert!(cache.get("protected").unwrap().is_some());
+        assert!(cache.get("unused").unwrap().is_none());
+        assert!(!tmp.path().join("orphan-dir").exists());
+        assert!(!tmp.path().join("orphan-meta.meta.json").exists());
+        assert!(tmp.path().join(".staging-active").exists());
+        assert!(tmp.path().join("unused.meta.json.lock").exists());
+    }
+
+    #[test]
+    fn apfs_prune_all_preserves_live_and_publication_entries() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("protected.sparseimage"), b"live").unwrap();
+        std::fs::write(tmp.path().join("unused.sparseimage"), b"unused").unwrap();
+        std::fs::write(tmp.path().join(".unused.tmp-42"), b"publishing").unwrap();
+        std::fs::write(tmp.path().join("unrelated"), b"keep").unwrap();
+
+        let protected = ["protected".to_string()].into_iter().collect();
+        let result = prune_apfs_rootfs_cache_all(tmp.path(), &protected).unwrap();
+
+        assert_eq!(result.entries_removed, 1);
+        assert_eq!(result.bytes_freed, 6);
+        assert!(tmp.path().join("protected.sparseimage").exists());
+        assert!(!tmp.path().join("unused.sparseimage").exists());
+        assert!(tmp.path().join(".unused.tmp-42").exists());
+        assert!(tmp.path().join("unrelated").exists());
     }
 
     #[test]

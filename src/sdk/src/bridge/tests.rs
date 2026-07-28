@@ -389,6 +389,12 @@ async fn management_inspection_bridge_reads_typed_local_state() {
 
 #[tokio::test]
 async fn capabilities_publish_a_unique_exhaustive_operation_inventory() {
+    let checked_protocol: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../sdk/bridge-protocol.json")).unwrap();
+    assert_eq!(
+        checked_protocol["version"],
+        serde_json::json!(BRIDGE_PROTOCOL_VERSION)
+    );
     let mut sorted = BRIDGE_OPERATIONS.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
@@ -405,6 +411,51 @@ async fn capabilities_publish_a_unique_exhaustive_operation_inventory() {
     let checked_inventory: Vec<String> =
         serde_json::from_str(include_str!("../../../../sdk/bridge-operations.json")).unwrap();
     assert_eq!(checked_inventory, BRIDGE_OPERATIONS);
+}
+
+#[test]
+fn sandbox_bridge_identity_preserves_rust_isolation() {
+    let sandbox = Sandbox::from_known_state(
+        A3sBoxClient::new(),
+        ExecutionId::new("sandbox-isolation").unwrap(),
+        ExecutionGeneration::INITIAL,
+        ExecutionState::Running,
+        ExecutionIsolation::Sandbox,
+    );
+
+    let value = sandbox_info_value(&sandbox);
+
+    assert_eq!(value["isolation"], "sandbox");
+}
+
+#[tokio::test]
+async fn connected_bridge_sandbox_reads_isolation_and_fences_stale_generation() {
+    let home = tempfile::tempdir().unwrap();
+    let client = A3sBoxClient::from_home(home.path());
+    let (request, _) = SandboxCreateOptions::new("alpine:3.20")
+        .isolation(ExecutionIsolation::Sandbox)
+        .into_runtime_request(&client)
+        .unwrap();
+    let operation_id = OperationId::new("bridge-isolation-create").unwrap();
+    let reservation = client.create_box(request, &operation_id).await.unwrap();
+
+    let sandbox = connected_sandbox(
+        &client,
+        reservation.execution_id.to_string(),
+        reservation.generation.get(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sandbox.isolation(), ExecutionIsolation::Sandbox);
+
+    let stale = connected_sandbox(
+        &client,
+        reservation.execution_id.to_string(),
+        reservation.generation.get() + 1,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.code, "conflict");
 }
 
 #[tokio::test]

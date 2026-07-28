@@ -63,6 +63,14 @@ func NewClient(ctx context.Context, options ...ClientOption) (*Client, error) {
 	}
 	available := make(map[string]struct{}, len(capabilities.Operations))
 	for _, operation := range capabilities.Operations {
+		if _, duplicate := available[operation]; duplicate {
+			return nil, sdkError(
+				"sdk_capabilities",
+				CodeProtocol,
+				"runtime capability inventory contains duplicate operation "+operation,
+				nil,
+			)
+		}
 		available[operation] = struct{}{}
 	}
 	missing := make([]string, 0)

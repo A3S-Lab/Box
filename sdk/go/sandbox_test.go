@@ -16,22 +16,22 @@ func TestSandboxLifecycleTracksGenerationAndState(t *testing.T) {
 		operation := request["operation"]
 		switch operation {
 		case "sandbox_inspect":
-			return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning}, nil
+			return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationSandbox}, nil
 		case "sandbox_stop":
 			assertGeneration(t, request, 1)
-			return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateStopped}, nil
+			return SandboxInfo{SandboxID: "box-1", Generation: 2, State: StateStopped, Isolation: IsolationSandbox}, nil
 		case "sandbox_restart":
 			assertGeneration(t, request, 2)
 			if !strings.HasPrefix(stringValue(request["operation_id"]), "sdk-restart-") {
 				t.Fatalf("restart operation ID was not generated: %#v", request)
 			}
-			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StateRunning}, nil
+			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StateRunning, Isolation: IsolationSandbox}, nil
 		case "sandbox_pause":
 			assertGeneration(t, request, 3)
-			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StatePaused}, nil
+			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StatePaused, Isolation: IsolationSandbox}, nil
 		case "sandbox_resume":
 			assertGeneration(t, request, 3)
-			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StateRunning}, nil
+			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StateRunning, Isolation: IsolationSandbox}, nil
 		case "sandbox_logs":
 			return map[string]any{"logs": []map[string]any{{"stream": "stdout", "log": "ready"}}}, nil
 		case "sandbox_stats":
@@ -40,14 +40,19 @@ func TestSandboxLifecycleTracksGenerationAndState(t *testing.T) {
 			return FilesystemSnapshotInfo{SnapshotID: "snap-1", SizeBytes: 12, State: StateRunning, Generation: 3}, nil
 		case "sandbox_kill":
 			assertGeneration(t, request, 3)
-			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StateFailed}, nil
+			return SandboxInfo{SandboxID: "box-1", Generation: 3, State: StateFailed, Isolation: IsolationSandbox}, nil
 		default:
 			t.Fatalf("unexpected operation: %v", operation)
 			return nil, nil
 		}
 	}}
-	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning})
+	sandbox := newSandbox(runtime, SandboxInfo{
+		SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationSandbox,
+	})
 	ctx := context.Background()
+	if sandbox.Isolation() != IsolationSandbox {
+		t.Fatalf("isolation=%s", sandbox.Isolation())
+	}
 
 	running, err := sandbox.IsRunning(ctx)
 	if err != nil || !running {
@@ -96,10 +101,10 @@ func TestSandboxRemoveAndConnect(t *testing.T) {
 	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
 		switch request["operation"] {
 		case "sandbox_inspect":
-			return SandboxInfo{SandboxID: "box-2", Generation: 4, State: StateStopped}, nil
+			return SandboxInfo{SandboxID: "box-2", Generation: 4, State: StateStopped, Isolation: IsolationMicroVM}, nil
 		case "sandbox_remove":
 			assertGeneration(t, request, 4)
-			return SandboxInfo{SandboxID: "box-2", Generation: 4, State: StateRemoved}, nil
+			return SandboxInfo{SandboxID: "box-2", Generation: 4, State: StateRemoved, Isolation: IsolationMicroVM}, nil
 		default:
 			return map[string]any{}, nil
 		}
@@ -118,6 +123,63 @@ func TestSandboxRemoveAndConnect(t *testing.T) {
 	}
 }
 
+func TestConnectRejectsMissingIsolation(t *testing.T) {
+	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+		if request["operation"] == "sandbox_inspect" {
+			return SandboxInfo{SandboxID: "box-2", Generation: 4, State: StateStopped}, nil
+		}
+		return map[string]any{}, nil
+	}}
+	client := mustClient(runtime)
+	sandbox, err := client.ConnectSandbox(context.Background(), "box-2")
+	if sandbox != nil || !errors.Is(err, ErrProtocol) {
+		t.Fatalf("expected protocol error for missing isolation, sandbox=%v err=%v", sandbox, err)
+	}
+}
+
+func TestConnectRejectsMalformedSandboxIdentityAndState(t *testing.T) {
+	tests := []struct {
+		name string
+		info SandboxInfo
+	}{
+		{
+			name: "missing sandbox ID",
+			info: SandboxInfo{Generation: 4, State: StateStopped, Isolation: IsolationMicroVM},
+		},
+		{
+			name: "different sandbox ID",
+			info: SandboxInfo{SandboxID: "box-other", Generation: 4, State: StateStopped, Isolation: IsolationMicroVM},
+		},
+		{
+			name: "zero generation",
+			info: SandboxInfo{SandboxID: "box-2", State: StateStopped, Isolation: IsolationMicroVM},
+		},
+		{
+			name: "unknown state",
+			info: SandboxInfo{SandboxID: "box-2", Generation: 4, State: "unknown", Isolation: IsolationMicroVM},
+		},
+		{
+			name: "unknown isolation",
+			info: SandboxInfo{SandboxID: "box-2", Generation: 4, State: StateStopped, Isolation: "process"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
+				if request["operation"] == "sandbox_inspect" {
+					return test.info, nil
+				}
+				return map[string]any{}, nil
+			}}
+			client := mustClient(runtime)
+			sandbox, err := client.ConnectSandbox(context.Background(), "box-2")
+			if sandbox != nil || !errors.Is(err, ErrProtocol) {
+				t.Fatalf("expected protocol error, sandbox=%v err=%v", sandbox, err)
+			}
+		})
+	}
+}
+
 func TestCloseFailureRemainsRetryable(t *testing.T) {
 	var attempts atomic.Int32
 	runtime := &fakeRuntime{handler: func(_ context.Context, request map[string]any) (any, error) {
@@ -127,9 +189,9 @@ func TestCloseFailureRemainsRetryable(t *testing.T) {
 		if attempts.Add(1) == 1 {
 			return nil, sdkError("sandbox_kill", CodeUnavailable, "runtime busy", nil)
 		}
-		return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateFailed}, nil
+		return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateFailed, Isolation: IsolationMicroVM}, nil
 	}}
-	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning})
+	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationMicroVM})
 	if err := sandbox.Close(context.Background()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("expected first cleanup failure, got %v", err)
 	}
@@ -156,12 +218,12 @@ func TestLifecycleWaitsForInFlightCommand(t *testing.T) {
 			return map[string]any{"stdout_base64": "", "stderr_base64": "", "exit_code": 0, "truncated": false}, nil
 		case "sandbox_kill":
 			close(killReachedRuntime)
-			return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateFailed}, nil
+			return SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateFailed, Isolation: IsolationMicroVM}, nil
 		default:
 			return map[string]any{}, nil
 		}
 	}}
-	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning})
+	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationMicroVM})
 	commandDone := make(chan error, 1)
 	go func() {
 		_, err := sandbox.Run(context.Background(), Argv("true"))
@@ -216,7 +278,7 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 			return nil, errors.New("unexpected operation")
 		}
 	}}
-	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 9, State: StateRunning})
+	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 9, State: StateRunning, Isolation: IsolationMicroVM})
 	ctx := context.Background()
 
 	result, err := sandbox.Run(
@@ -291,7 +353,7 @@ func TestCommandsScriptsAndFilesystemAreBinarySafe(t *testing.T) {
 
 func TestCommandValidationDoesNotReachRuntime(t *testing.T) {
 	runtime := &fakeRuntime{}
-	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning})
+	sandbox := newSandbox(runtime, SandboxInfo{SandboxID: "box-1", Generation: 1, State: StateRunning, Isolation: IsolationMicroVM})
 	if _, err := sandbox.Run(context.Background(), Argv()); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("expected empty command validation, got %v", err)
 	}

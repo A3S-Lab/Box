@@ -10,27 +10,35 @@ import (
 type ErrorCode string
 
 const (
-	CodeInvalidRequest   ErrorCode = "invalid_request"
-	CodeNotFound         ErrorCode = "not_found"
-	CodeConflict         ErrorCode = "conflict"
-	CodeUnavailable      ErrorCode = "unavailable"
-	CodeRuntime          ErrorCode = "runtime_error"
-	CodeProtocol         ErrorCode = "bridge_protocol_error"
-	CodeNotInstalled     ErrorCode = "not_installed"
+	CodeInvalidRequest ErrorCode = "invalid_request"
+	CodeNotFound       ErrorCode = "not_found"
+	CodeConflict       ErrorCode = "conflict"
+	CodeUnavailable    ErrorCode = "unavailable"
+	CodeRuntime        ErrorCode = "runtime_error"
+	CodeProtocol       ErrorCode = "bridge_protocol_error"
+	CodeBinaryNotFound ErrorCode = "binary_not_found"
+	// CodeNotInstalled is retained as a source-compatible alias.
+	// Deprecated: use CodeBinaryNotFound.
+	CodeNotInstalled     ErrorCode = CodeBinaryNotFound
 	CodeCanceled         ErrorCode = "canceled"
 	CodeDeadlineExceeded ErrorCode = "deadline_exceeded"
+	CodeBridgeTimeout    ErrorCode = "bridge_timeout"
 )
 
 var (
-	ErrInvalidRequest   = &Error{Code: CodeInvalidRequest}
-	ErrNotFound         = &Error{Code: CodeNotFound}
-	ErrConflict         = &Error{Code: CodeConflict}
-	ErrUnavailable      = &Error{Code: CodeUnavailable}
-	ErrRuntime          = &Error{Code: CodeRuntime}
-	ErrProtocol         = &Error{Code: CodeProtocol}
-	ErrNotInstalled     = &Error{Code: CodeNotInstalled}
+	ErrInvalidRequest = &Error{Code: CodeInvalidRequest}
+	ErrNotFound       = &Error{Code: CodeNotFound}
+	ErrConflict       = &Error{Code: CodeConflict}
+	ErrUnavailable    = &Error{Code: CodeUnavailable}
+	ErrRuntime        = &Error{Code: CodeRuntime}
+	ErrProtocol       = &Error{Code: CodeProtocol}
+	ErrBinaryNotFound = &Error{Code: CodeBinaryNotFound}
+	// ErrNotInstalled is retained as a source-compatible alias.
+	// Deprecated: use ErrBinaryNotFound.
+	ErrNotInstalled     = ErrBinaryNotFound
 	ErrCanceled         = &Error{Code: CodeCanceled}
 	ErrDeadlineExceeded = &Error{Code: CodeDeadlineExceeded}
+	ErrBridgeTimeout    = &Error{Code: CodeBridgeTimeout}
 )
 
 // Error is returned for validation, transport, protocol, and runtime failures.

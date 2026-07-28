@@ -4,6 +4,8 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-07-28
+
 ### Added
 
 - **Cloud Runtime contract alignment.** The shared `BoxRuntimeDriver` now pins
@@ -15,6 +17,11 @@ All notable changes to A3S Box will be documented in this file.
   concurrency-safe clients, typed builders, binary-safe commands and files,
   lifecycle generation fencing, and real MicroVM/Sandbox smoke coverage. Go
   releases use the matching path-prefixed `sdk/go/vX.Y.Z` tag.
+- **Safe runtime cache reclamation.** `system-prune --all` now reclaims
+  unreferenced directory and APFS sparse-image rootfs caches plus image-pull
+  work directories whose owner process has exited. Active Box markers, live
+  pull owners, publication staging paths, and persistent cache lock files are
+  preserved.
 
 ### Removed
 
@@ -36,6 +43,23 @@ All notable changes to A3S Box will be documented in this file.
   the pinned runtime's native private/host/donor network, read-write/read-only
   volume, tmpfs, inline/file/direct initialization, failure, and cleanup
   matrix before exercising the Rust, Python, TypeScript, and Go SDK lifecycle.
+- **Machine bridge protocol v2.** Python and TypeScript share one complete
+  capability handshake across concurrent first calls, while Go rejects
+  duplicate capabilities during client construction. The native packages fail
+  closed on malformed typed values and standard Base64, expose the effective
+  `microvm` or `sandbox` isolation returned by the runtime, and use stable
+  `bridge_timeout`, `binary_not_found`, and protocol error categories.
+
+### Fixed
+
+- **Generation and isolation fidelity.** Stale generation requests return
+  `conflict`; command and filesystem bridge operations reconnect through the
+  persisted execution record instead of assuming MicroVM isolation; Go and
+  TypeScript reject invalid Sandbox identity, generation, state, isolation, or
+  an isolation change in a lifecycle response.
+- **Poisoned build-cache recovery.** Layer cache hits verify the regular-file
+  type, recorded size, and SHA-256 content before reuse. A later valid store
+  repairs a corrupt content-addressed blob instead of repeatedly serving it.
 
 ## [3.1.0] — 2026-07-23
 
