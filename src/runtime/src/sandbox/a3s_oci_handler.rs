@@ -267,44 +267,7 @@ impl A3sOciHandler {
     }
 
     fn stop_owner(&mut self) -> Result<()> {
-        if crate::process::is_process_running_with_identity(
-            self.owner_pid,
-            Some(self.owner_pid_start_time),
-        ) {
-            let owner_pid = i32::try_from(self.owner_pid).map_err(|_| {
-                BoxError::StateError("A3S OCI owner PID does not fit i32".to_string())
-            })?;
-            if unsafe { libc::kill(owner_pid, libc::SIGTERM) } != 0 {
-                return Err(BoxError::IoError(std::io::Error::last_os_error()));
-            }
-        }
-        if !crate::process::wait_for_process_stop_with_identity(
-            self.owner_pid,
-            self.owner_pid_start_time,
-            super::A3S_OCI_OWNER_EXIT_TIMEOUT,
-        ) {
-            if crate::process::is_process_running_with_identity(
-                self.owner_pid,
-                Some(self.owner_pid_start_time),
-            ) {
-                let owner_pid = i32::try_from(self.owner_pid).map_err(|_| {
-                    BoxError::StateError("A3S OCI owner PID does not fit i32".to_string())
-                })?;
-                unsafe {
-                    libc::kill(owner_pid, libc::SIGKILL);
-                }
-            }
-            if !crate::process::wait_for_process_stop_with_identity(
-                self.owner_pid,
-                self.owner_pid_start_time,
-                Duration::from_secs(1),
-            ) {
-                return Err(BoxError::StateError(format!(
-                    "A3S OCI runtime owner {} did not exit",
-                    self.owner_pid
-                )));
-            }
-        }
+        super::a3s_oci_owner::stop(self.owner_pid, self.owner_pid_start_time)?;
         if let Some(mut owner) = self.owner.take() {
             let _ = owner.try_wait();
             let _ = owner.wait();

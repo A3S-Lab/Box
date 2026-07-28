@@ -419,18 +419,7 @@ fn cleanup_failed_owner(
         client.close();
     }
     let pid = owner.id();
-    if crate::process::is_process_alive_with_identity(pid, Some(owner_pid_start_time)) {
-        if let Ok(pid) = i32::try_from(pid) {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-        }
-    }
-    if !crate::process::wait_for_process_exit_with_identity(
-        pid,
-        owner_pid_start_time,
-        super::A3S_OCI_OWNER_EXIT_TIMEOUT,
-    ) {
+    if super::a3s_oci_owner::stop(pid, owner_pid_start_time).is_err() {
         let _ = owner.kill();
     }
     let _ = owner.wait();
