@@ -163,6 +163,13 @@ impl A3sOciController {
                     "A3S OCI create did not return the created state".to_string(),
                 ));
             }
+            let created_init_pid = created
+                .state
+                .pid()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .ok_or_else(|| {
+                    BoxError::StateError("A3S OCI create returned no valid init PID".to_string())
+                })?;
             target = Some(exact_target.clone());
 
             let started = lifecycle_client.start(StartRequest {
@@ -170,20 +177,17 @@ impl A3sOciController {
                 target: exact_target.clone(),
             })?;
             validate_record(&started, &exact_target, None)?;
-            if *started.state.status() != OciContainerState::Running
-                || started.driver != DriverKind::NativeLinux
-            {
+            let started_status = *started.state.status();
+            if started.driver != DriverKind::NativeLinux {
                 return Err(BoxError::StateError(
-                    "A3S OCI start did not return a running native Linux container".to_string(),
+                    "A3S OCI start did not return a native Linux container".to_string(),
                 ));
             }
-            let init_pid = started
-                .state
-                .pid()
-                .and_then(|pid| u32::try_from(pid).ok())
-                .ok_or_else(|| {
-                    BoxError::StateError("A3S OCI start returned no valid init PID".to_string())
-                })?;
+            let init_pid = started_generation_init_pid(
+                created_init_pid,
+                started_status,
+                *started.state.pid(),
+            )?;
             Ok((init_pid, started.generation))
         }
         .await;
@@ -362,6 +366,37 @@ fn validate_required_operations(info: &a3s_oci_sdk::RuntimeInfo) -> Result<()> {
     Ok(())
 }
 
+fn started_generation_init_pid(
+    created_init_pid: u32,
+    status: OciContainerState,
+    started_init_pid: Option<i32>,
+) -> Result<u32> {
+    match status {
+        OciContainerState::Running => {
+            let started_init_pid = started_init_pid
+                .and_then(|pid| u32::try_from(pid).ok())
+                .ok_or_else(|| {
+                    BoxError::StateError(
+                        "A3S OCI running state returned no valid init PID".to_string(),
+                    )
+                })?;
+            if started_init_pid != created_init_pid {
+                return Err(BoxError::StateError(
+                    "A3S OCI start changed the init PID".to_string(),
+                ));
+            }
+            Ok(started_init_pid)
+        }
+        // OCI stopped state deliberately has no live PID. Retain the exact
+        // PID allocated behind the create/start barrier so the durable Box
+        // record still identifies this generation.
+        OciContainerState::Stopped => Ok(created_init_pid),
+        _ => Err(BoxError::StateError(
+            "A3S OCI start did not return a running or stopped container".to_string(),
+        )),
+    }
+}
+
 fn operation_context(container_id: &str, operation: &str) -> Result<OperationContext> {
     OperationId::new(format!("{container_id}-{operation}"))
         .map(OperationContext::new)
@@ -430,5 +465,36 @@ fn sdk_boot_error(error: a3s_oci_sdk::Error) -> BoxError {
     BoxError::BoxBootError {
         message: format!("A3S OCI SDK rejected Sandbox launch: {error}"),
         hint: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopped_start_retains_the_created_generation_pid() {
+        let init_pid =
+            started_generation_init_pid(4_242, OciContainerState::Stopped, None).unwrap();
+
+        assert_eq!(init_pid, 4_242);
+    }
+
+    #[test]
+    fn running_start_requires_the_same_generation_pid() {
+        let error = started_generation_init_pid(4_242, OciContainerState::Running, Some(4_243))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("changed the init PID"));
+    }
+
+    #[test]
+    fn start_rejects_non_terminal_contract_states() {
+        let error = started_generation_init_pid(4_242, OciContainerState::Created, Some(4_242))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("did not return a running or stopped container"));
     }
 }

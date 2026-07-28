@@ -562,6 +562,18 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         }
         guard.config.persistent = requested_persistence;
         resources.disarm();
+        let exited_during_start = guard
+            .try_wait_exit()
+            .await
+            .map_err(|error| runtime_error("collect startup exit status", record, error))?
+            .is_some()
+            || guard.has_exited().await;
+        if exited_during_start {
+            return Err(ExecutionManagerError::Unavailable(format!(
+                "execution {} completed during startup",
+                record.id
+            )));
+        }
         self.handle_from_manager(record, &guard).await
     }
 
