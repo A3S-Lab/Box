@@ -7,7 +7,7 @@ use a3s_runtime::contract::{
 };
 use a3s_runtime::{RuntimeBaseConformanceCase, RuntimeConformanceCase};
 
-use super::super::{DOCKER_IMAGE_MANIFEST, OCI_IMAGE_MANIFEST};
+use super::super::{OCI_IMAGE_INDEX, OCI_IMAGE_MANIFEST};
 use super::{require, Result};
 
 const DEFAULT_CPU_MILLIS: u64 = 500;
@@ -75,13 +75,10 @@ impl CaseFactory {
             "A3S_BOX_RUNTIME_CONFORMANCE_IMAGE is not canonical",
         )?;
         let media_type = std::env::var("A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE")
-            .unwrap_or_else(|_| DOCKER_IMAGE_MANIFEST.to_string());
+            .unwrap_or_else(|_| OCI_IMAGE_MANIFEST.to_string());
         require(
-            matches!(
-                media_type.as_str(),
-                OCI_IMAGE_MANIFEST | DOCKER_IMAGE_MANIFEST
-            ),
-            "A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE is not a supported image manifest",
+            matches!(media_type.as_str(), OCI_IMAGE_MANIFEST | OCI_IMAGE_INDEX),
+            "A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE is not a supported OCI image manifest or index",
         )?;
         let digest = format!("sha256:{digest_hex}");
         let artifact = ArtifactRef {

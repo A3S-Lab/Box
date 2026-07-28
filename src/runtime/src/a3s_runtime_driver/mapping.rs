@@ -15,7 +15,7 @@ use a3s_runtime::{RuntimeError, RuntimeResult};
 use url::Position;
 
 use super::metadata::{managed_labels, operation_id};
-use super::{DOCKER_IMAGE_MANIFEST, OCI_IMAGE_MANIFEST};
+use super::{OCI_IMAGE_INDEX, OCI_IMAGE_MANIFEST};
 
 const CPU_PERIOD_US: u64 = 100_000;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
@@ -117,7 +117,7 @@ pub(super) fn operation(spec: &RuntimeUnitSpec) -> RuntimeResult<a3s_box_core::O
 fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
     if !matches!(
         spec.artifact.media_type.as_str(),
-        OCI_IMAGE_MANIFEST | DOCKER_IMAGE_MANIFEST
+        OCI_IMAGE_MANIFEST | OCI_IMAGE_INDEX
     ) {
         return Err(RuntimeError::UnsupportedCapabilities(vec![format!(
             "artifact_media_type:{}",

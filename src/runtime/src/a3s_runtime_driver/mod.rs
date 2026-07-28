@@ -23,8 +23,7 @@ use tokio::sync::OnceCell;
 use crate::LocalExecutionManager;
 
 pub(super) const OCI_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
-pub(super) const DOCKER_IMAGE_MANIFEST: &str =
-    "application/vnd.docker.distribution.manifest.v2+json";
+pub(super) const OCI_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 
 /// Host paths and bounds for one Box Runtime provider instance.
 #[derive(Debug, Clone)]
@@ -162,7 +161,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
             provider_id: self.provider_id.clone(),
             provider_build: self.provider_build().await?,
             unit_classes: vec![RuntimeUnitClass::Task, RuntimeUnitClass::Service],
-            artifact_media_types: vec![OCI_IMAGE_MANIFEST.into(), DOCKER_IMAGE_MANIFEST.into()],
+            artifact_media_types: vec![OCI_IMAGE_MANIFEST.into(), OCI_IMAGE_INDEX.into()],
             isolation_levels: vec![IsolationLevel::Sandbox],
             network_modes: vec![NetworkMode::None],
             mount_kinds: vec![MountKind::Tmpfs],

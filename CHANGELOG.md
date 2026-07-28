@@ -6,6 +6,10 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Added
 
+- **Cloud Runtime contract alignment.** The shared `BoxRuntimeDriver` now pins
+  the exact A3S Runtime revision used by A3S Cloud and accepts digest-pinned OCI
+  image manifests and multi-platform OCI image indexes without advertising a
+  Docker manifest media type.
 - **Native Go SDK.** The nested `github.com/A3S-Lab/Box/sdk/go/v3` module
   exposes the complete checked local bridge inventory through context-aware,
   concurrency-safe clients, typed builders, binary-safe commands and files,
