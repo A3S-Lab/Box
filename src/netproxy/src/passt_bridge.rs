@@ -460,6 +460,7 @@ mod tests {
 
         let gateway_request = arp_request(mac_a, [10, 91, 0, 2], [10, 91, 0, 1]);
         write_frame(&mut guest_a, &gateway_request);
+        assert_eq!(read_frame(&mut guest_b), gateway_request);
         assert_eq!(read_frame(&mut backend_a), gateway_request);
 
         drop(guest_a);

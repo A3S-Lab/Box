@@ -76,6 +76,8 @@ All notable changes to A3S Box will be documented in this file.
 - **Ubuntu passt sandbox startup.** Bridge startup now waits until passt has
   completed sandbox initialization and, only for an explicit unprivileged-userns
   denial under a root launcher, retries with root as passt's sandbox identity.
+  Teardown also recognizes the packaged `passt.avx2` process name so optimized
+  passt daemons cannot survive box removal.
 
 ## [3.1.0] — 2026-07-23
 

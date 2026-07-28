@@ -439,8 +439,17 @@ pub fn terminate_passt(socket_dir: &Path) {
 #[cfg(target_os = "linux")]
 fn pid_is_passt(pid: i32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|comm| comm.trim() == "passt")
+        .map(|comm| passt_process_name_is_known(comm.trim()))
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn passt_process_name_is_known(name: &str) -> bool {
+    // Debian/Ubuntu's passt executable selects its optimized implementation at
+    // startup and re-execs the packaged passt.avx2 binary. Keep this allowlist
+    // explicit so a recycled PID with a merely similar process name is not
+    // signalled during box teardown.
+    matches!(name, "passt" | "passt.avx2")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -712,5 +721,14 @@ mod tests {
     fn test_pid_is_passt_rejects_non_passt_processes() {
         assert!(!pid_is_passt(std::process::id() as i32));
         assert!(!pid_is_passt(2_147_483_647));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn passt_process_name_accepts_the_packaged_simd_variant() {
+        assert!(passt_process_name_is_known("passt"));
+        assert!(passt_process_name_is_known("passt.avx2"));
+        assert!(!passt_process_name_is_known("passt-helper"));
+        assert!(!passt_process_name_is_known("passt.avx2.old"));
     }
 }
