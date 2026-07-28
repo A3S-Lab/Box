@@ -2016,6 +2016,10 @@ mod tests {
             42
         }
 
+        fn exit_code(&self) -> Option<i32> {
+            Some(self.code)
+        }
+
         fn try_wait_exit(&mut self) -> Result<Option<i32>> {
             Ok(Some(self.code))
         }
@@ -2114,6 +2118,25 @@ mod tests {
         assert_eq!(vm.anonymous_volumes, vec!["reused-volume".to_string()]);
         assert!(store.get("created-volume").unwrap().is_none());
         assert!(store.get("reused-volume").unwrap().is_some());
+        assert!(!box_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_boot_failure_retains_an_exact_terminal_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-completed-during-boot".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        *vm.handler.write().await = Some(Box::new(CompletedHandler { code: 23 }));
+
+        let box_dir = tmp.path().join("boxes").join(&box_id);
+        std::fs::create_dir_all(box_dir.join("logs")).unwrap();
+
+        vm.cleanup_boot_failure().await;
+
+        assert_eq!(vm.exit_code(), Some(23));
+        assert!(vm.handler.read().await.is_none());
         assert!(!box_dir.exists());
     }
 

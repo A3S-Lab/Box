@@ -548,6 +548,25 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
             }
         };
         if let Err(error) = guard.boot().await {
+            guard.config.persistent = requested_persistence;
+            // Sandbox boot cleanup synchronously asks the authoritative OCI
+            // handler for its exit status before tearing down transient host
+            // artifacts. A very short task can therefore complete while boot
+            // is still establishing readiness. Keep the manager whenever that
+            // cleanup captured an exact status so the normal inspect path can
+            // project it into the durable managed record.
+            if guard.exit_code().is_some() {
+                tracing::debug!(
+                    execution_id = %record.id,
+                    %error,
+                    "Runtime completed while startup was establishing readiness"
+                );
+                resources.disarm();
+                return Err(ExecutionManagerError::Unavailable(format!(
+                    "execution {} completed during startup",
+                    record.id
+                )));
+            }
             drop(guard);
             self.remove_manager(&record.id, &manager);
             let rollback = tokio::task::spawn_blocking(move || resources.rollback()).await;

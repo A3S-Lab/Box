@@ -42,6 +42,7 @@ impl LocalExecutionManager {
                                 )))
                             }
                             ExecutionState::Stopped | ExecutionState::Failed => {
+                                self.release_execution_resources(&record).await?;
                                 self.transition(
                                     &record,
                                     ManagedExecutionState::Starting,
@@ -185,6 +186,7 @@ impl LocalExecutionManager {
                         lease_from_record(&running)
                     }
                     ExecutionState::Stopped | ExecutionState::Failed => {
+                        self.release_execution_resources(&claimed).await?;
                         let _ = self
                             .transition(
                                 &claimed,
