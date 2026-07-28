@@ -24,6 +24,8 @@ pub const SANDBOX_BUNDLE_SCHEMA: &str = "a3s.box.sandbox-bundle.v1";
 pub const DEFAULT_SANDBOX_PIDS_LIMIT: i64 = 4096;
 const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
 const DEFAULT_TMPFS_SIZE: &str = "67108864";
+const SBIN_INIT: &str = "/sbin/init";
+const USR_SBIN_INIT: &str = "/usr/sbin/init";
 const LINUX_EPERM: u32 = 1;
 const LINUX_ENOSYS: u32 = 38;
 const LINUX_CLONE_NAMESPACE_MASK: u64 =
@@ -178,6 +180,8 @@ pub struct SandboxBundleSpec {
     pub rootfs_path: PathBuf,
     pub rootfs_read_only: bool,
     pub hostname: String,
+    /// Guest-init location already resolved against the prepared rootfs.
+    pub init_path: String,
     pub init_environment: Vec<(String, String)>,
     pub mounts: Vec<SandboxMount>,
     pub tmpfs: Vec<SandboxTmpfs>,
@@ -194,6 +198,7 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
     validate_box_id(&input.box_id)?;
     validate_rootfs_path(&input.rootfs_path)?;
     validate_hostname(&input.hostname)?;
+    validate_init_path(&input.init_path)?;
     validate_digest("execution plan", &input.execution_plan_digest)?;
     validate_digest("runtime", &input.runtime_digest)?;
     validate_id_mapping_plan(&input.id_mappings)?;
@@ -207,7 +212,7 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
                 .build()
                 .map_err(oci_error)?,
         )
-        .args(vec!["/sbin/init".to_string()])
+        .args(vec![input.init_path.clone()])
         .env(compile_environment(&input.init_environment)?)
         .cwd(PathBuf::from("/"))
         .capabilities(compile_capabilities(&input.requested_capabilities)?)
@@ -791,7 +796,8 @@ fn validate_user_mount(mount: &SandboxMount) -> Result<()> {
         "/dev",
         "/proc",
         "/run/a3s-box",
-        "/sbin/init",
+        SBIN_INIT,
+        USR_SBIN_INIT,
         "/sys",
         RUNTIME_EXEC_CONFIG_PATH,
         RUNTIME_ENV_PATH,
@@ -825,6 +831,16 @@ fn validate_rootfs_path(path: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_init_path(path: &str) -> Result<()> {
+    if matches!(path, SBIN_INIT | USR_SBIN_INIT) {
+        Ok(())
+    } else {
+        Err(BoxError::ConfigError(format!(
+            "Sandbox init path must be {SBIN_INIT} or {USR_SBIN_INIT}: {path:?}"
+        )))
+    }
 }
 
 fn validate_host_absolute_normalized(path: &Path, label: &str) -> Result<()> {
@@ -1249,6 +1265,7 @@ mod tests {
             rootfs_path: std::env::temp_dir().join("a3s/boxes/box-123/rootfs"),
             rootfs_read_only: false,
             hostname: "box-123".to_string(),
+            init_path: "/sbin/init".to_string(),
             init_environment: vec![
                 ("PATH".to_string(), "/bin".to_string()),
                 (
@@ -1326,6 +1343,29 @@ mod tests {
         );
         assert_eq!(value["linux"]["resources"]["pids"]["limit"], 512);
         assert_eq!(value["linux"]["resources"]["cpu"]["cpus"], "0-1");
+    }
+
+    #[test]
+    fn compiler_uses_the_resolved_usr_sbin_init_path() {
+        let mut input = sample_input();
+        input.init_path = "/usr/sbin/init".to_string();
+
+        let value = as_json(&compile_oci_spec(&input).unwrap());
+
+        assert_eq!(
+            value["process"]["args"],
+            serde_json::json!(["/usr/sbin/init"])
+        );
+    }
+
+    #[test]
+    fn compiler_rejects_an_unresolved_init_path() {
+        let mut input = sample_input();
+        input.init_path = "/bin/sh".to_string();
+
+        let error = compile_oci_spec(&input).unwrap_err().to_string();
+
+        assert!(error.contains("Sandbox init path"), "{error}");
     }
 
     #[test]
@@ -1418,6 +1458,10 @@ mod tests {
 
         let mut input = sample_input();
         input.mounts.push(input.mounts[0].clone());
+        assert!(compile_oci_spec(&input).is_err());
+
+        let mut input = sample_input();
+        input.mounts[0].destination = PathBuf::from("/usr/sbin/init");
         assert!(compile_oci_spec(&input).is_err());
     }
 
