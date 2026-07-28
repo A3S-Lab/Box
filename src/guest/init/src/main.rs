@@ -880,41 +880,40 @@ mod linux {
         // failing or touching the guest's root cgroup. Cgroup-v2 unavailability is
         // still best-effort and leaves the normal boot path untouched.
         // Build the per-container cgroup from the runtime's A3S_SEC_* control vars.
-        // memory_max stays None on the boot path: `--memory` is enforced by sizing
-        // the microVM RAM, not an in-guest cgroup (so the runtime emits no
-        // A3S_SEC_MEM_LIMIT here). The CPU/pids caps and the memory soft-reservation
-        // (--memory-reservation) / swap cap (--memory-swap) DO have to be applied
-        // in-guest, mirrored from the same A3S_SEC_* env vars.
+        // MicroVMs omit A3S_SEC_MEM_LIMIT because VM sizing is their hard memory
+        // boundary. Host Sandboxes provide it so the workload child receives the
+        // exact product limit while guest-init stays in the outer management
+        // envelope. Every main/exec/PTY process joins this one child cgroup.
         #[cfg(target_os = "linux")]
-        let container_cgroup = if bootstrap_mode.is_host_sandbox() {
-            None
-        } else {
-            a3s_box_guest_init::cgroup::ContainerCgroup::create_for_main(
-                None,
-                std::env::var("A3S_SEC_MEM_LOW")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok()),
-                std::env::var("A3S_SEC_MEM_SWAP")
-                    .ok()
-                    .and_then(|value| value.parse::<i64>().ok()),
-                std::env::var("A3S_SEC_CPU_QUOTA")
-                    .ok()
-                    .and_then(|value| value.parse::<i64>().ok()),
-                std::env::var("A3S_SEC_CPU_PERIOD")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok()),
-                std::env::var("A3S_SEC_CPU_SHARES")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok()),
-                std::env::var("A3S_SEC_PIDS_LIMIT")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok()),
-            )
-        };
+        let container_cgroup = a3s_box_guest_init::cgroup::ContainerCgroup::create_for_main(
+            std::env::var("A3S_SEC_MEM_LIMIT")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+            std::env::var("A3S_SEC_MEM_LOW")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+            std::env::var("A3S_SEC_MEM_SWAP")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok()),
+            std::env::var("A3S_SEC_CPU_QUOTA")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok()),
+            std::env::var("A3S_SEC_CPU_PERIOD")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+            std::env::var("A3S_SEC_CPU_SHARES")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+            std::env::var("A3S_SEC_PIDS_LIMIT")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok()),
+        );
         #[cfg(target_os = "linux")]
         let cgroup_procs = container_cgroup.as_ref().map(|cgroup| cgroup.procs_path());
         #[cfg(not(target_os = "linux"))]
         let cgroup_procs: Option<String> = None;
+        #[cfg(target_os = "linux")]
+        exec_server::set_container_cgroup_procs(cgroup_procs.clone());
 
         let deferred_main = std::env::var("BOX_DEFERRED_MAIN")
             .map(|v| v == "1")
@@ -940,12 +939,6 @@ mod linux {
                 exec_config.user.clone(),
                 exec_config.stdin_null,
             );
-            // Stash the cgroup's procs path too, so the deferred main joins the
-            // per-container cgroup when spawned (the non-deferred branch below
-            // passes it to spawn_isolated). Without this a warm/IDLE-boot box runs
-            // its main outside the cgroup and pids.max / cpu.max are unenforced.
-            #[cfg(target_os = "linux")]
-            exec_server::set_deferred_cgroup_procs(cgroup_procs.clone());
             nix::unistd::Pid::from_raw(-1)
         } else {
             // Hand the main process re-openable pipe write-ends as fd 1/2 (see

@@ -24,6 +24,8 @@ pub const SANDBOX_BUNDLE_SCHEMA: &str = "a3s.box.sandbox-bundle.v1";
 pub const DEFAULT_SANDBOX_PIDS_LIMIT: i64 = 4096;
 const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
 const DEFAULT_TMPFS_SIZE: &str = "67108864";
+const SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES: i64 = 128 * 1024 * 1024;
+const SANDBOX_CONTROL_PIDS_HEADROOM: i64 = 128;
 const SBIN_INIT: &str = "/sbin/init";
 const USR_SBIN_INIT: &str = "/usr/sbin/init";
 const LINUX_EPERM: u32 = 1;
@@ -170,6 +172,47 @@ impl SandboxResources {
             cpuset_cpus: config.resource_limits.cpuset_cpus.clone(),
             pids_limit,
         })
+    }
+
+    fn management_memory_limit(&self) -> Result<i64> {
+        self.memory_limit
+            .checked_add(SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES)
+            .ok_or_else(|| {
+                BoxError::ConfigError("Sandbox management memory envelope overflows i64".into())
+            })
+    }
+
+    fn management_memory_swap(&self) -> Result<Option<i64>> {
+        self.memory_swap
+            .map(|swap| {
+                if swap == -1 {
+                    Ok(-1)
+                } else {
+                    swap.checked_add(SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES)
+                        .ok_or_else(|| {
+                            BoxError::ConfigError(
+                                "Sandbox management swap envelope overflows i64".into(),
+                            )
+                        })
+                }
+            })
+            .transpose()
+    }
+
+    fn management_cpu_quota(&self) -> Result<i64> {
+        let control_quota = i64::try_from(self.cpu_period)
+            .map_err(|_| BoxError::ConfigError("Sandbox CPU period overflows i64".to_string()))?;
+        self.cpu_quota.checked_add(control_quota).ok_or_else(|| {
+            BoxError::ConfigError("Sandbox management CPU envelope overflows i64".into())
+        })
+    }
+
+    fn management_pids_limit(&self) -> Result<i64> {
+        self.pids_limit
+            .checked_add(SANDBOX_CONTROL_PIDS_HEADROOM)
+            .ok_or_else(|| {
+                BoxError::ConfigError("Sandbox management PID envelope overflows i64".into())
+            })
     }
 }
 
@@ -393,16 +436,20 @@ fn compile_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
 }
 
 fn compile_resources(resources: &SandboxResources) -> Result<oci_spec::runtime::LinuxResources> {
-    let mut memory = LinuxMemoryBuilder::default().limit(resources.memory_limit);
+    // OCI owns the outer management envelope. The exact product limits are
+    // enforced by guest-init's single workload child cgroup, keeping OOM and
+    // PID exhaustion from killing the exec/control plane before it can report
+    // the workload outcome.
+    let mut memory = LinuxMemoryBuilder::default().limit(resources.management_memory_limit()?);
     if let Some(reservation) = resources.memory_reservation {
         memory = memory.reservation(reservation);
     }
-    if let Some(swap) = resources.memory_swap {
+    if let Some(swap) = resources.management_memory_swap()? {
         memory = memory.swap(swap);
     }
 
     let mut cpu = LinuxCpuBuilder::default()
-        .quota(resources.cpu_quota)
+        .quota(resources.management_cpu_quota()?)
         .period(resources.cpu_period);
     if let Some(shares) = resources.cpu_shares {
         cpu = cpu.shares(shares);
@@ -435,7 +482,7 @@ fn compile_resources(resources: &SandboxResources) -> Result<oci_spec::runtime::
         .cpu(cpu.build().map_err(oci_error)?)
         .pids(
             LinuxPidsBuilder::default()
-                .limit(resources.pids_limit)
+                .limit(resources.management_pids_limit()?)
                 .build()
                 .map_err(oci_error)?,
         )
@@ -1339,9 +1386,17 @@ mod tests {
         );
         assert_eq!(
             value["linux"]["resources"]["memory"]["limit"],
-            512 * 1024 * 1024i64
+            512 * 1024 * 1024i64 + SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES
         );
-        assert_eq!(value["linux"]["resources"]["pids"]["limit"], 512);
+        assert_eq!(
+            value["linux"]["resources"]["memory"]["swap"],
+            1024 * 1024 * 1024i64 + SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES
+        );
+        assert_eq!(value["linux"]["resources"]["cpu"]["quota"], 300000);
+        assert_eq!(
+            value["linux"]["resources"]["pids"]["limit"],
+            512 + SANDBOX_CONTROL_PIDS_HEADROOM
+        );
         assert_eq!(value["linux"]["resources"]["cpu"]["cpus"], "0-1");
     }
 
