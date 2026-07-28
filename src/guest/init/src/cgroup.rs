@@ -79,13 +79,12 @@ pub fn ensure_cgroup2_ready() -> bool {
     // trusted guest-init into a management child before that leaf can delegate
     // controllers to the workload child. Keep that topology here as the single
     // setup path for main, exec, and PTY workloads.
-    if !enable_subtree_controllers(CGROUP_ROOT, &available) {
-        if !move_control_plane_to_child(CGROUP_ROOT)
-            || !enable_subtree_controllers(CGROUP_ROOT, &available)
-        {
-            warn!("cgroup: failed to prepare a delegated workload hierarchy");
-            return false;
-        }
+    if !enable_subtree_controllers(CGROUP_ROOT, &available)
+        && (!move_control_plane_to_child(CGROUP_ROOT)
+            || !enable_subtree_controllers(CGROUP_ROOT, &available))
+    {
+        warn!("cgroup: failed to prepare a delegated workload hierarchy");
+        return false;
     }
 
     if available.split_whitespace().next().is_none() {
