@@ -618,11 +618,27 @@ capture_cli_snapshot() {
     } >"$SOAK_EVIDENCE_DIR/${label}-cli-snapshot.txt"
 }
 
+prepare_bench_image() {
+    local tar_path bin image
+    tar_path="$(offline_image_tar)"
+    if [ -z "$tar_path" ]; then
+        return
+    fi
+
+    prepare_offline_image_env
+    bin="${A3S_BOX:-$WORKSPACE/target/debug/a3s-box}"
+    image="${IMAGE:-alpine:latest}"
+    log "Seeding offline benchmark image $image"
+    run_real "$bin" load --input "$tar_path" --tag "$image"
+}
+
 run_bench_leak() {
+    prepare_bench_image
     A3S_BOX="${A3S_BOX:-$WORKSPACE/target/debug/a3s-box}" run_real "$REPO_ROOT/bench/bench.sh" leak
 }
 
 run_bench_race() {
+    prepare_bench_image
     A3S_BOX="${A3S_BOX:-$WORKSPACE/target/debug/a3s-box}" run_real "$REPO_ROOT/bench/bench.sh" race
 }
 

@@ -85,7 +85,8 @@ Tunables (env):
 - **leak** — snapshots host-side resources a leak would grow (orphan
   `a3s-box-shim` processes, overlay mounts under `~/.a3s/boxes`, box dirs),
   runs `CHURN` `run --rm` cycles, then asserts they return to baseline.
-  **Exits non-zero on any leak**, so it is CI-gateable.
+  **Exits non-zero when any churn run fails or any resource grows**, so a
+  missing image or boot failure cannot be reported as a leak-free pass.
 - **race** — starts `RACE` detached boxes from separate CLI processes and
   requires every launch to succeed, every unique record to persist in
   `boxes.json`, and every race box to disappear during cleanup. Per-launch

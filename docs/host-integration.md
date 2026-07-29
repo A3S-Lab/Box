@@ -387,6 +387,11 @@ runner repeats the selected real suites, runs `bench/bench.sh leak` and
 `bench/bench.sh race` by default, samples host resource counts, and writes an
 evidence directory under `src/target/a3s-box-soak/`.
 
+When `A3S_BOX_TEST_ALPINE_TAR` or `A3S_BOX_SMOKE_IMAGE_TAR` is set, the runner
+reloads that archive with the configured `IMAGE` tag before each benchmark
+step. This keeps the leak and race gates reproducibly offline even when an
+earlier host suite intentionally runs `system-prune --all`.
+
 ```bash
 cd crates/box
 export A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar

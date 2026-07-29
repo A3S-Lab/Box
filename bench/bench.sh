@@ -485,18 +485,37 @@ bench_leak() {
   local b_shim b_mount b_dir
   b_shim=$(shim_count); b_mount=$(mount_count); b_dir=$(boxdir_count)
   echo "  baseline: shims=$b_shim mounts=$b_mount box-dirs=$b_dir"
-  for _ in $(seq 1 "$CHURN"); do
-    "$A3S_BOX" run --rm "$IMAGE" -- true >/dev/null 2>&1
+
+  local log_dir="${TMPDIR:-/tmp}/a3s-box-bench-leak-$$"
+  rm -rf -- "$log_dir"
+  mkdir -p "$log_dir"
+
+  local i run_failures=0
+  for i in $(seq 1 "$CHURN"); do
+    if ! "$A3S_BOX" run --rm "$IMAGE" -- true >"$log_dir/run-$i.log" 2>&1; then
+      echo "  FAIL: churn run $i exited unsuccessfully"
+      sed 's/^/    /' "$log_dir/run-$i.log" | tail -n 80
+      run_failures=$(( run_failures + 1 ))
+    fi
   done
   sleep 3
   local a_shim a_mount a_dir
   a_shim=$(shim_count); a_mount=$(mount_count); a_dir=$(boxdir_count)
   echo "  after:    shims=$a_shim mounts=$a_mount box-dirs=$a_dir"
   local leak=0
+  if [ "$run_failures" -gt 0 ]; then
+    echo "  FAIL: $run_failures/$CHURN churn runs failed"
+    leak=1
+  fi
   [ "$a_shim" -gt "$b_shim" ]  && { echo "  LEAK: $(( a_shim - b_shim )) orphan shim(s)"; leak=1; }
   [ "$a_mount" -gt "$b_mount" ] && { echo "  LEAK: $(( a_mount - b_mount )) leaked overlay mount(s)"; leak=1; }
   [ "$a_dir" -gt "$b_dir" ]    && { echo "  LEAK: $(( a_dir - b_dir )) leaked box dir(s)"; leak=1; }
-  if [ "$leak" -eq 0 ]; then echo "  PASS: no orphan shims / mounts / box dirs after churn"; else echo "  FAIL: resource leak detected"; fi
+  if [ "$leak" -eq 0 ]; then
+    echo "  PASS: all churn runs completed with no orphan shims / mounts / box dirs"
+  else
+    echo "  FAIL: churn execution or resource leak assertion failed"
+  fi
+  rm -rf -- "$log_dir"
   return "$leak"
 }
 
