@@ -410,11 +410,13 @@ async fn metadata_tamper_fails_closed(
 }
 
 async fn namespace_separation(fixture: &BoxRuntimeConformanceFixture) -> Result<()> {
-    let sibling_home = fixture
-        .home_dir
-        .join("namespaces")
-        .join(uuid::Uuid::new_v4().simple().to_string());
-    std::fs::create_dir_all(&sibling_home)
+    // Keep this independent provider namespace short enough for the fixed
+    // A3S OCI `runtime.sock` path. This profile certifies namespace separation;
+    // nesting it under the already isolated primary home would instead test
+    // the platform `sockaddr_un.sun_path` limit.
+    let namespace_id = uuid::Uuid::new_v4().simple().to_string();
+    let sibling_home = std::env::temp_dir().join(format!("a3s-r17n-{}", &namespace_id[..16]));
+    std::fs::create_dir(&sibling_home)
         .map_err(|error| super::external("create sibling provider namespace", error))?;
     fixture.register_removable_home(sibling_home.clone());
     let sibling_state_root = sibling_home.join("runtime-state");
