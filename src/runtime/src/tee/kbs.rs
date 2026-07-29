@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// KBS endpoint configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KbsConfig {
-    /// KBS server URL (e.g., "https://kbs.example.com")
+    /// KBS server URL (e.g., <https://kbs.example.com>)
     pub url: String,
     /// Optional API key for authentication
     #[serde(default)]

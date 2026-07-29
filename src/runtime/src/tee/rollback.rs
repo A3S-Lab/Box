@@ -165,7 +165,7 @@ fn versioned_seal_context(context: &str, version: u64) -> String {
 ///
 /// Advances the version counter for the context, then seals the data with the
 /// version cryptographically bound into the sealing context (see
-/// [`versioned_seal_context`]).
+/// `versioned_seal_context`).
 pub fn seal_versioned(
     report: &[u8],
     plaintext: &[u8],

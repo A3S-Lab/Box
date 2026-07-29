@@ -202,6 +202,15 @@ guest-init brings up loopback only. Named bridge networking and published ports
 are rejected during plan resolution. Exact-host and donor-shared namespace
 profiles are not public Box modes.
 
+The A3S Runtime provider may declare `service` networking for TCP ports. Box
+keeps the Sandbox on that same private loopback-only profile, binds an ephemeral
+host-loopback listener for every declared port, and relays accepted streams
+through the generation-fenced `ExecutionPortConnector`. Runtime evidence is the
+only endpoint publication. Listener and relay ownership stays in memory and is
+reconstructed from the durable execution on apply or inspect; stop, removal,
+provider loss, generation replacement, and driver drop close it. This does not
+grant workload egress and does not advertise UDP or named networking.
+
 The pinned A3S OCI Runtime is nevertheless qualified for private, exact-host,
 and donor-shared namespace operations. That gate validates namespace identity,
 ownership, and cleanup in the runtime layer before Box considers exposing a
@@ -318,6 +327,10 @@ exhaustion, and a workload-only OOM, verifies the long-lived Service and exec
 transport remain available, and requires complete cgroup cleanup. The SDK
 matrix covers images, files, logs, metrics, named volumes, snapshots,
 pause/resume, filesystem-only restart, and final cleanup.
+
+The Runtime networking profile also starts two real private Sandbox Services on
+the same guest TCP port, requires distinct typed host-loopback endpoints, sends
+traffic through both relays, and verifies that removal closes both listeners.
 
 Release gates also require formatting, strict linting, unit tests, supported
 platform build checks, deterministic archives, and an artifact-content guard.

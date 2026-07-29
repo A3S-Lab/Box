@@ -37,7 +37,7 @@ pub enum SignaturePolicy {
     },
     /// Require a valid cosign keyless signature (Fulcio + Rekor transparency log).
     CosignKeyless {
-        /// Expected OIDC issuer (e.g., "https://accounts.google.com").
+        /// Expected OIDC issuer (e.g., <https://accounts.google.com>).
         issuer: String,
         /// Expected certificate identity (e.g., "user@example.com").
         identity: String,
