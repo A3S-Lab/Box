@@ -220,7 +220,7 @@ async fn registry_credentials_resolve_only_for_an_uncached_start_and_never_persi
     let state = std::fs::read_to_string(driver.manager.state_path()).unwrap();
     assert!(!state.contains("box-registry-user"));
     assert!(!state.contains("box-registry-password"));
-    assert!(state.contains(reference));
+    assert!(!state.contains(reference));
 
     let reopened = fake_driver_with_backend_and_secret_materializer(
         &directory,

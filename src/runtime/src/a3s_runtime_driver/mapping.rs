@@ -235,17 +235,6 @@ fn compile_secret_inputs(
             "Runtime process environment cannot use reserved Box key {SECRET_ENVIRONMENT_MANIFEST:?}"
         )));
     }
-    if spec
-        .secrets
-        .iter()
-        .filter(|secret| matches!(secret.target, SecretTarget::RegistryCredential))
-        .count()
-        > 1
-    {
-        return Err(RuntimeError::InvalidRequest(
-            "Box Runtime specification has multiple registry credential Secrets".into(),
-        ));
-    }
     let digest = spec_digest.strip_prefix("sha256:").ok_or_else(|| {
         RuntimeError::Protocol("Box Secret compilation requires a SHA-256 spec digest".into())
     })?;

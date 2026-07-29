@@ -446,7 +446,7 @@ fn mapping_rejects_secret_collisions_and_unencodable_targets() {
     });
     assert!(matches!(
         creation_request(&registry, TEST_EXECUTION_ISOLATION),
-        Err(RuntimeError::InvalidRequest(message)) if message.contains("multiple registry")
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("unique")
     ));
 }
 
