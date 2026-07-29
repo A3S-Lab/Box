@@ -257,7 +257,7 @@ async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
 }
 
 #[tokio::test]
-async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
+async fn terminal_health_probe_waits_for_delayed_durable_exit_status_before_cleanup() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let record = record(temporary.path(), ExecutionIsolation::Sandbox);
@@ -270,7 +270,7 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
         *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
             exit_polls: Arc::clone(&exit_polls),
             stop_calls: Arc::clone(&stop_calls),
-            available_after: 3,
+            available_after: 60,
         }));
     }
     backend
@@ -281,7 +281,7 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
 
     assert_eq!(observation.state, ExecutionState::Stopped);
     assert_eq!(observation.exit_code, Some(0));
-    assert_eq!(exit_polls.load(Ordering::SeqCst), 4);
+    assert_eq!(exit_polls.load(Ordering::SeqCst), 61);
     assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
     assert!(backend.managers.is_empty());
 }
