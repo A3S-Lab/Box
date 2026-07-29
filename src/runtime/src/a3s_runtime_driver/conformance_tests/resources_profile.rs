@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use a3s_oci_sdk::{CONTROL_CGROUP_NAME, WORKLOAD_CGROUP_NAME};
 use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitState};
 use a3s_runtime::RuntimeClient;
 
@@ -60,21 +61,39 @@ pub(super) async fn run(
     let pid = record
         .pid
         .ok_or_else(|| super::protocol("resource fixture lost its Sandbox PID"))?;
-    let cgroup = crate::sandbox::capability::process_cgroup_v2_path(pid).ok_or_else(|| {
-        super::protocol(format!(
-            "could not resolve cgroup v2 path for Sandbox PID {pid}"
-        ))
-    })?;
-    let expected_suffix = Path::new("a3s-box").join(&record.id);
+    let control_cgroup =
+        crate::sandbox::capability::process_cgroup_v2_path(pid).ok_or_else(|| {
+            super::protocol(format!(
+                "could not resolve cgroup v2 path for Sandbox PID {pid}"
+            ))
+        })?;
+    let expected_management_suffix = Path::new("a3s-box").join(&record.id);
+    let expected_control_suffix = expected_management_suffix.join(CONTROL_CGROUP_NAME);
     require(
-        cgroup.ends_with(&expected_suffix),
+        control_cgroup.ends_with(&expected_control_suffix),
         format!(
-            "Sandbox PID {pid} belongs to unexpected cgroup {}",
-            cgroup.display()
+            "Sandbox PID {pid} does not belong to the runtime-owned control cgroup: {}",
+            control_cgroup.display()
         ),
     )?;
-    require(cgroup.is_dir(), "Sandbox cgroup was not created")?;
-    let outer_cpu_max = read_trimmed(&cgroup.join("cpu.max"))?;
+    let management_cgroup = control_cgroup.parent().ok_or_else(|| {
+        super::protocol(format!(
+            "Sandbox control cgroup has no management parent: {}",
+            control_cgroup.display()
+        ))
+    })?;
+    require(
+        management_cgroup.ends_with(&expected_management_suffix),
+        format!(
+            "Sandbox control cgroup has an unexpected management parent: {}",
+            management_cgroup.display()
+        ),
+    )?;
+    require(
+        management_cgroup.is_dir() && control_cgroup.is_dir(),
+        "Sandbox management/control cgroups were not created",
+    )?;
+    let outer_cpu_max = read_trimmed(&management_cgroup.join("cpu.max"))?;
     let mut outer_cpu_fields = outer_cpu_max.split_whitespace();
     let outer_cpu_quota = outer_cpu_fields
         .next()
@@ -89,13 +108,13 @@ pub(super) async fn run(
         "Sandbox management cpu.max does not reserve control-plane headroom",
     )?;
     require(
-        read_trimmed(&cgroup.join("memory.max"))?
+        read_trimmed(&management_cgroup.join("memory.max"))?
             .parse::<u64>()
             .is_ok_and(|value| value > MEMORY_BYTES),
         "Sandbox management memory.max does not reserve control-plane headroom",
     )?;
     require(
-        read_trimmed(&cgroup.join("pids.max"))?
+        read_trimmed(&management_cgroup.join("pids.max"))?
             .parse::<u64>()
             .is_ok_and(|value| value > u64::from(PIDS)),
         "Sandbox management pids.max does not reserve control-plane headroom",
@@ -138,11 +157,12 @@ pub(super) async fn run(
             visible.stdout
         ),
     )?;
-    let workload_cgroup = descendant_cgroup_path(&cgroup, workload_namespace_path)?;
+    let workload_cgroup = descendant_cgroup_path(management_cgroup, workload_namespace_path)?;
+    let expected_workload_cgroup = management_cgroup.join(WORKLOAD_CGROUP_NAME);
     require(
-        workload_cgroup != cgroup && workload_cgroup.is_dir(),
+        workload_cgroup == expected_workload_cgroup && workload_cgroup.is_dir(),
         format!(
-            "workload cgroup is not a distinct Sandbox descendant: {}",
+            "workload cgroup is not the runtime-owned workload leaf: {}",
             workload_cgroup.display()
         ),
     )?;
