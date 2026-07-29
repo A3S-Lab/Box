@@ -319,7 +319,7 @@ or go directly to the [Rust](src/sdk/README.md),
 | Execution path | Real-runtime evidence | Remaining boundary |
 | --- | --- | --- |
 | Default MicroVM on Windows/WHPX | [`scripts/windows-whpx-soak.ps1`](scripts/windows-whpx-soak.ps1) covers lifecycle and foreground exit, published-port networking, read-only bind mounts, named volumes, volume-backed initialization success and failure, metadata-preserving commit, filesystem commit/snapshot restore, and repeated virtio-fs traversal. The current qualification completed all 12 cases and returned the start and final runtime inventories to zero. | This proves the tested x86_64 Windows/WHPX host and workload matrix, not KVM, HVF, or TEE hardware. |
-| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles; certifies every advertised R17 Base, Recovery, Networking, Mounts, Resources, Logs, Exec, and Security profile; then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process/cgroup cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
+| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles; certifies every advertised R17 Base, Recovery, Networking, Mounts, Health, Resources, Logs, Exec, and Security profile; then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process/cgroup cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
 | Linux/KVM MicroVM | A self-hosted real-KVM workflow covers the core lifecycle, SDK, CRI, leak, race, snapshot-fork, and soak paths when `KVM_CI=true`. | The job is conditionally skipped without the enrolled runner; a green hosted build alone is not real-KVM evidence. |
 | macOS/HVF MicroVM | Hosted macOS arm64 compilation checks the supported target. | A real Apple Silicon/HVF boot and soak are separate release evidence. |
 | SEV-SNP-oriented TEE | Unit and simulation tests cover application flow and protocol behavior. | No hardware security claim is made without a qualifying SEV-SNP host and attestation evidence. |
@@ -334,13 +334,15 @@ evidence. Review [Host Integration](docs/host-integration.md),
 
 - **A3S Runtime provider** — Maps digest-pinned Tasks and Services onto the
   A3S OCI shared-kernel Sandbox with generation fencing, recovery, structured
-  logs, bounded idempotent exec, resource controls, tmpfs, and exact node-local
-  TCP endpoints for declared Service ports. Endpoint listeners are in-memory,
-  bound to the Box execution generation, and relayed through the canonical
-  Sandbox port connector; Box does not create a second lifecycle store or
-  durable endpoint registry. The artifact contract accepts OCI image manifests
-  and multi-platform OCI image indexes; it does not advertise a Docker manifest
-  media type.
+  logs, bounded idempotent exec, resource controls, tmpfs, exact node-local TCP
+  endpoints, and HTTP, TCP, or command health probes for Services. Endpoint
+  listeners and probes are bound to the Box execution generation and reuse the
+  canonical Sandbox port connector or exec session boundary. Runtime health is
+  sampled directly into the current observation and is never copied into the
+  CLI monitor policy, so Box creates no second lifecycle store, durable endpoint
+  registry, health registry, or health worker for the same Service. The artifact
+  contract accepts OCI image manifests and multi-platform OCI image indexes; it
+  does not advertise a Docker manifest media type.
 - **Kubernetes RuntimeClass** — The CRI server and containerd shim let selected
   Linux/KVM pods use `runtimeClassName: a3s-box`; installers and soak manifests
   live under [`deploy/`](deploy/).

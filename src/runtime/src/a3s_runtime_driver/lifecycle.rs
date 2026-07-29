@@ -71,6 +71,9 @@ impl BoxRuntimeDriver {
 
         match spec.class {
             RuntimeUnitClass::Task => self.wait_for_task(spec, record).await,
+            RuntimeUnitClass::Service if spec.health.is_some() => {
+                self.wait_for_service_health(spec, record).await
+            }
             RuntimeUnitClass::Service => self.observation(spec, &record, None, None).await,
         }
     }
@@ -101,7 +104,7 @@ impl BoxRuntimeDriver {
         } else {
             record
         };
-        let observation = self.observation(&unit.spec, &record, None, None).await?;
+        let observation = self.observe_service_health(&unit.spec, &record).await?;
         Ok(RuntimeInspection::Found {
             schema: RuntimeInspection::SCHEMA.into(),
             observation: Box::new(observation),
@@ -296,7 +299,7 @@ impl BoxRuntimeDriver {
         }
     }
 
-    async fn refresh_record(
+    pub(super) async fn refresh_record(
         &self,
         spec: &RuntimeUnitSpec,
         record: BoxRecord,

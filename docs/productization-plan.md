@@ -145,6 +145,14 @@ Current notes:
   logic. The long-running `monitor` command runs due probes itself, so detached
   boxes no longer depend on short-lived CLI health-check tasks to move from
   `starting` to `healthy`/`unhealthy` and trigger restart policy handling.
+- The A3S Runtime provider now advertises HTTP, TCP, and command health probes
+  for Services. HTTP and TCP reuse the generation-fenced
+  `ExecutionPortConnector`; command probes reuse the generation-fenced exec
+  session manager. Apply honors the Runtime start period and success/failure
+  thresholds, while inspect and exec return one current bounded sample and
+  re-read lifecycle state so a Service exit wins a probe race. Runtime policies
+  are not copied into `ExecutionRecordPolicy.health_check`, so a Runtime-owned
+  Service never starts a second CLI monitor or health worker.
 - `logs` now treats missing log files for an existing box as empty output
   instead of an error, waits for the first log file when following a running box,
   prefers structured JSON logs when available, and starts `--follow --tail`

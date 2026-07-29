@@ -116,7 +116,7 @@ impl BoxRuntimeDriver {
                 unit_id: unit.spec.unit_id.clone(),
             })?;
         validate_record_for_spec(&record, &unit.spec)?;
-        let observation = self.observation(&unit.spec, &record, None, None).await?;
+        let observation = self.observe_service_health(&unit.spec, &record).await?;
         let result = RuntimeExecResult {
             schema: RuntimeExecResult::SCHEMA.into(),
             request_id: request.request_id.clone(),

@@ -8,6 +8,7 @@
 mod cases;
 mod exec_profile;
 mod fixture;
+mod health_profile;
 mod logs_profile;
 mod mounts_profile;
 mod networking_profile;
@@ -88,6 +89,7 @@ async fn run_all_advertised_profiles() {
         RuntimeConformanceProfile::Recovery,
         RuntimeConformanceProfile::Networking,
         RuntimeConformanceProfile::Mounts,
+        RuntimeConformanceProfile::Health,
         RuntimeConformanceProfile::Resources,
         RuntimeConformanceProfile::Logs,
         RuntimeConformanceProfile::Exec,

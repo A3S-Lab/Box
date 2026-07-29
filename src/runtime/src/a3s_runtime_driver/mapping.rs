@@ -99,6 +99,8 @@ pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateEx
         policy: ExecutionRecordPolicy {
             auto_remove: false,
             restart_policy: ExecutionRestartPolicy::No,
+            health_check: None,
+            healthcheck_disabled: true,
             log_config: LogConfig::default(),
             init: true,
             ..Default::default()
@@ -163,11 +165,6 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
                 .map(|kind| format!("mount_kind:{kind:?}"))
                 .collect(),
         ));
-    }
-    if spec.health.is_some() {
-        return Err(RuntimeError::UnsupportedCapabilities(vec![
-            "health checks are not supported by the Box Runtime driver".into(),
-        ]));
     }
     if !spec.secrets.is_empty() {
         return Err(RuntimeError::UnsupportedCapabilities(vec![

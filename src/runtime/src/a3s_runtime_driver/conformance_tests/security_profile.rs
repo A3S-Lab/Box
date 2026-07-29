@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use a3s_runtime::contract::{
-    HealthProbe, NetworkMode, RuntimeHealthCheck, RuntimeInspection, RuntimeMount,
-    RuntimeMountSource, RuntimeUnitState, SecretReference, SecretTarget,
+    NetworkMode, RuntimeInspection, RuntimeMount, RuntimeMountSource, RuntimeUnitState,
+    SecretReference, SecretTarget,
 };
 use a3s_runtime::{
     FileRuntimeStateStore, RuntimeClient, RuntimeDriver, RuntimeError, RuntimeStateStore,
@@ -143,28 +143,6 @@ async fn reject_hostile_inputs(
                 if missing == vec!["mount_kind:Volume"]
         ),
         "Box accepted an unadvertised volume mount",
-    )?;
-
-    let mut health = template.clone();
-    health.request_id = fixture.cases.request_id("security-health");
-    health.spec.unit_id = fixture.cases.unit_id("security-health");
-    health.spec.health = Some(RuntimeHealthCheck {
-        probe: HealthProbe::Command {
-            command: vec!["/bin/true".into()],
-        },
-        interval_ms: 1_000,
-        timeout_ms: 500,
-        start_period_ms: 0,
-        success_threshold: 1,
-        failure_threshold: 3,
-    });
-    require(
-        matches!(
-            client.apply(&health).await,
-            Err(RuntimeError::UnsupportedCapabilities(missing))
-                if missing == vec!["health_check:Command"]
-        ),
-        "Box accepted an unadvertised health check",
     )?;
 
     let mut secret = template.clone();

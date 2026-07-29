@@ -378,6 +378,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Recovery,
             RuntimeConformanceProfile::Networking,
             RuntimeConformanceProfile::Mounts,
+            RuntimeConformanceProfile::Health,
             RuntimeConformanceProfile::Resources,
             RuntimeConformanceProfile::Logs,
             RuntimeConformanceProfile::Exec,
@@ -403,6 +404,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
                 super::networking_profile::run(self, client).await?
             }
             RuntimeConformanceProfile::Mounts => super::mounts_profile::run(self, client).await?,
+            RuntimeConformanceProfile::Health => super::health_profile::run(self, client).await?,
             RuntimeConformanceProfile::Resources => {
                 super::resources_profile::run(self, client).await?
             }
