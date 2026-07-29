@@ -183,11 +183,9 @@ impl BoxRuntimeDriver {
                     })
                     .await;
                 if let Err(error) = result {
-                    let current = self.load_record(spec, &execution_id).await?;
-                    if local_identity(&current)?.2.is_terminal() && current.exit_code.is_some() {
-                        return Ok(current);
-                    }
-                    return Err(error);
+                    return self
+                        .load_terminal_after_control_error(spec, &execution_id, error)
+                        .await;
                 }
                 self.load_record(spec, &execution_id).await
             }
@@ -309,6 +307,20 @@ impl BoxRuntimeDriver {
         Ok(record)
     }
 
+    async fn load_terminal_after_control_error(
+        &self,
+        spec: &RuntimeUnitSpec,
+        execution_id: &a3s_box_core::ExecutionId,
+        control_error: RuntimeError,
+    ) -> RuntimeResult<BoxRecord> {
+        let current = self.load_record(spec, execution_id).await?;
+        if local_identity(&current)?.2.is_terminal() && current.exit_code.is_some() {
+            Ok(current)
+        } else {
+            Err(control_error)
+        }
+    }
+
     async fn restart_record(
         &self,
         spec: &RuntimeUnitSpec,
@@ -316,13 +328,19 @@ impl BoxRuntimeDriver {
     ) -> RuntimeResult<BoxRecord> {
         let (execution_id, generation, _) = local_identity(&record)?;
         let operation_id = restart_operation(spec, generation)?;
-        self.bounded("restart", async {
-            self.manager
-                .restart(&execution_id, generation, &operation_id)
-                .await
-                .map_err(|error| map_execution_error(&spec.unit_id, error))
-        })
-        .await?;
+        let result = self
+            .bounded("restart", async {
+                self.manager
+                    .restart(&execution_id, generation, &operation_id)
+                    .await
+                    .map_err(|error| map_execution_error(&spec.unit_id, error))
+            })
+            .await;
+        if let Err(error) = result {
+            return self
+                .load_terminal_after_control_error(spec, &execution_id, error)
+                .await;
+        }
         self.load_record(spec, &execution_id).await
     }
 

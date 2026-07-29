@@ -23,6 +23,8 @@ pub const IMAGE_ROOTFS_METADATA_PATH: &str = "/.a3s_image_metadata_v1.json";
 pub const IMAGE_ROOTFS_METADATA_TEMP_PATH: &str = "/.a3s_image_metadata_v1.json.tmp";
 /// Runtime-staged container environment consumed by guest-init before exec.
 pub const RUNTIME_ENV_PATH: &str = "/.a3s-box-env";
+/// Exit status written by guest-init after the container main terminates.
+pub const EXIT_CODE_PATH: &str = "/.a3s_exit_code";
 /// Stable manifest schema identifier.
 pub const ROOTFS_METADATA_SCHEMA: &str = "a3s.box.rootfs-metadata.v1";
 
@@ -80,8 +82,12 @@ pub fn is_runtime_internal_rootfs_path(path: &Path) -> bool {
     INTERNAL.contains(&name)
 }
 
-/// Atomically invalidate the last terminal manifest before boot while retaining
-/// it at the one-shot replay path.
+/// Atomically invalidate the last terminal generation before boot.
+///
+/// The terminal manifest is retained at the one-shot replay path. The prior
+/// exit code is removed because it belongs only to the completed generation;
+/// leaving it in a persistent writable layer makes the replacement generation
+/// appear terminal before its process has actually exited.
 ///
 /// `root` must be the plain rootfs directory, not a link/reparse point. The
 /// source manifest must likewise be a regular file. These checks matter on the
@@ -103,6 +109,14 @@ pub fn stage_terminal_rootfs_metadata_for_boot(root: &Path) -> std::io::Result<b
         std::io::Error::new(
             error.kind(),
             format!("failed to remove stale rootfs metadata temporary: {error}"),
+        )
+    })?;
+
+    let exit_code = root.join(EXIT_CODE_PATH.trim_start_matches('/'));
+    remove_path_no_follow(&exit_code).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to remove stale rootfs exit code: {error}"),
         )
     })?;
 
@@ -472,6 +486,16 @@ mod tests {
 
         assert!(!stage_terminal_rootfs_metadata_for_boot(root.path()).unwrap());
         assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn boot_staging_removes_previous_generation_exit_code() {
+        let root = tempfile::tempdir().unwrap();
+        let exit_code = root.path().join(EXIT_CODE_PATH.trim_start_matches('/'));
+        std::fs::write(&exit_code, b"17\n").unwrap();
+
+        assert!(!stage_terminal_rootfs_metadata_for_boot(root.path()).unwrap());
+        assert!(!exit_code.exists());
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! - [`VmHandler`] — lifecycle operations on a running VM
 
 use std::net::Ipv4Addr;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 
@@ -63,18 +63,18 @@ pub struct NetworkInstanceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub net_stats_path: Option<PathBuf>,
 
-    /// Pre-opened Unix datagram socket fd inherited by the shim on macOS.
-    #[cfg(target_os = "macos")]
+    /// Pre-opened network socket fd inherited by the shim on Unix.
+    #[cfg(unix)]
     #[serde(default)]
     pub net_socket_fd: Option<RawFd>,
 
-    /// Proxy-side Unix datagram socket fd inherited by the shim on macOS.
-    #[cfg(target_os = "macos")]
+    /// Proxy-side network socket fd inherited by the shim on Unix.
+    #[cfg(unix)]
     #[serde(default)]
     pub net_proxy_fd: Option<RawFd>,
 
     /// Shared Unix-datagram Ethernet switch directory for this bridge network.
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_socket_dir: Option<PathBuf>,
 
@@ -508,11 +508,11 @@ mod tests {
             network: Some(NetworkInstanceConfig {
                 net_socket_path: PathBuf::from("/tmp/net.sock"),
                 net_stats_path: Some(PathBuf::from("/tmp/net.stats.json")),
-                #[cfg(target_os = "macos")]
+                #[cfg(unix)]
                 net_socket_fd: Some(42),
-                #[cfg(target_os = "macos")]
+                #[cfg(unix)]
                 net_proxy_fd: Some(43),
-                #[cfg(target_os = "macos")]
+                #[cfg(unix)]
                 bridge_socket_dir: Some(PathBuf::from("/tmp/a3s-switch")),
                 ip_address: "10.0.0.2".parse().unwrap(),
                 gateway: "10.0.0.1".parse().unwrap(),
@@ -531,9 +531,9 @@ mod tests {
             net.net_stats_path,
             Some(PathBuf::from("/tmp/net.stats.json"))
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         assert_eq!(net.net_socket_fd, Some(42));
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         assert_eq!(net.net_proxy_fd, Some(43));
         assert_eq!(net.ip_address, "10.0.0.2".parse::<Ipv4Addr>().unwrap());
         assert_eq!(net.gateway, "10.0.0.1".parse::<Ipv4Addr>().unwrap());

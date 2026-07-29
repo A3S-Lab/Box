@@ -174,7 +174,7 @@ pub fn spawn_isolated(
     user: Option<&str>,
     stdin_null: bool,
     main_stdio: Option<(RawFd, RawFd)>,
-    cgroup_procs: Option<&str>,
+    cgroup_procs: Option<RawFd>,
 ) -> Result<u32, NamespaceError> {
     tracing::info!(
         command = %command,
@@ -229,7 +229,7 @@ pub fn spawn_isolated(
     _user: Option<&str>,
     stdin_null: bool,
     _main_stdio: Option<(RawFd, RawFd)>,
-    _cgroup_procs: Option<&str>,
+    _cgroup_procs: Option<RawFd>,
 ) -> Result<u32, NamespaceError> {
     tracing::warn!("Namespace isolation and security enforcement not available on this platform");
 
@@ -265,7 +265,7 @@ fn child_process(
     user: Option<&str>,
     stdin_null: bool,
     main_stdio: Option<(RawFd, RawFd)>,
-    cgroup_procs: Option<&str>,
+    cgroup_procs: Option<RawFd>,
 ) -> Result<(), NamespaceError> {
     // Create new namespaces
     let flags = config.to_clone_flags();
@@ -310,19 +310,12 @@ fn child_process(
     // Join the per-container cgroup (e.g. `pids.max` for `--pids-limit`) before
     // exec, so this process — now the final container task, after any PID-ns
     // fork above — and every worker it forks are bounded from birth. We move
-    // ourselves in by writing our own PID (resolved in our PID namespace) to the
-    // cgroup's `cgroup.procs`. Best-effort: a failure means no enforcement, not a
-    // failed launch. Plain file I/O is fine here — this is ordinary forked-child
-    // code (not a `pre_exec` hook), like the user/path resolution above.
-    if let Some(procs_path) = cgroup_procs {
-        let pid = std::process::id().to_string();
-        if let Err(e) = std::fs::write(procs_path, &pid) {
-            tracing::warn!(
-                error = %e,
-                procs_path,
-                "Failed to join container cgroup; resource limit not enforced"
-            );
-        }
+    // ourselves through the descriptor opened before the Sandbox user
+    // namespace existed. A failed membership write must fail the launch: an
+    // apparently successful but unbounded workload violates the resource
+    // contract.
+    if let Some(descriptor) = cgroup_procs {
+        crate::cgroup::join_current_process(descriptor).map_err(NamespaceError::ExecFailed)?;
     }
 
     // Resolve bare OCI entrypoints through the container PATH. Rust's
@@ -1186,7 +1179,7 @@ fn child_process(
     _user: Option<&str>,
     stdin_null: bool,
     _main_stdio: Option<(RawFd, RawFd)>,
-    _cgroup_procs: Option<&str>,
+    _cgroup_procs: Option<RawFd>,
 ) -> Result<(), NamespaceError> {
     // On non-Linux, just exec without namespace isolation or security
     tracing::warn!("Namespace isolation and security enforcement not available on this platform");

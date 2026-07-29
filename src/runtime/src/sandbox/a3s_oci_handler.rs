@@ -9,8 +9,9 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::vmm::{VmHandler, VmMetrics};
 use a3s_oci_sdk::{
     ContainerId, ContainerOperationRequest, ContainerRecord, ContainerTarget, DeleteMode,
-    DeleteRequest, DriverKind, ExitStatus, Generation, KillRequest, OciContainerState,
-    OperationContext, OperationId, Signal, StateRequest, StatsRequest, WaitRequest,
+    DeleteRequest, DriverKind, ExitStatus, Generation, KillRequest, LinuxResources,
+    OciContainerState, OperationContext, OperationId, Signal, StateRequest, StatsRequest,
+    UpdateRequest, WaitRequest,
 };
 use sysinfo::{Pid, System};
 
@@ -171,6 +172,28 @@ impl A3sOciHandler {
         Self::transition_at(runtime_socket, container_id, generation, false)
     }
 
+    /// Apply one complete resource contract to an exact live Sandbox generation.
+    pub(crate) fn update_at(
+        runtime_socket: &Path,
+        container_id: &str,
+        generation: u64,
+        resources: LinuxResources,
+    ) -> Result<()> {
+        let client = A3sOciClient::connect_blocking(runtime_socket.to_path_buf())?;
+        let result = (|| {
+            let id = ContainerId::new(container_id).map_err(sdk_argument_error)?;
+            let target = ContainerTarget::exact(id, Generation(generation));
+            let record = client.update(UpdateRequest {
+                context: operation_context(container_id, "update")?,
+                target: target.clone(),
+                resources,
+            })?;
+            validate_record(&record, &target, None)
+        })();
+        client.close();
+        result
+    }
+
     fn transition_at(
         runtime_socket: &Path,
         container_id: &str,
@@ -321,19 +344,19 @@ impl VmHandler for A3sOciHandler {
         let mut first_error = None;
         match self.query_state()? {
             Some(record) if *record.state.status() != OciContainerState::Stopped => {
-                if let Err(error) = self.signal_container(signal, "stop") {
-                    first_error = Some(error);
-                }
-                match self.wait_for_exit(timeout_ms) {
-                    Ok(true) => {}
-                    Ok(false) => {
+                let signal_error = self.signal_container(signal, "stop").err();
+                let wait_result = self.wait_for_exit(timeout_ms);
+                match reconcile_signal_with_wait(signal_error, wait_result) {
+                    SignalWaitOutcome::Exited => {}
+                    SignalWaitOutcome::Running(error) => {
+                        first_error = error;
                         if let Err(error) = self.signal_container(SIGKILL_NUMBER, "force-stop") {
                             first_error.get_or_insert(error);
                         }
                         let _ = self.wait_for_exit(2_000);
                     }
-                    Err(error) => {
-                        first_error.get_or_insert(error);
+                    SignalWaitOutcome::Failed(error) => {
+                        first_error = Some(error);
                         let _ = self.signal_container(SIGKILL_NUMBER, "failed-stop-cleanup");
                     }
                 }
@@ -414,6 +437,30 @@ impl VmHandler for A3sOciHandler {
         // terminal generation lets the backend complete its one authoritative
         // destroy path after it has durably projected this exact status.
         Ok(self.exit_code)
+    }
+}
+
+enum SignalWaitOutcome {
+    Exited,
+    Running(Option<BoxError>),
+    Failed(BoxError),
+}
+
+/// Resolve a signal result against the later authoritative lifecycle state.
+///
+/// A workload can exit naturally after `state` reports it running but before
+/// the runtime handles `kill`. If the subsequent wait captures that terminal
+/// generation, a "stopped container" signal error is stale and cleanup is
+/// already successful. When the workload is still live or wait itself fails,
+/// retain the first lifecycle error as before.
+fn reconcile_signal_with_wait(
+    signal_error: Option<BoxError>,
+    wait_result: Result<bool>,
+) -> SignalWaitOutcome {
+    match wait_result {
+        Ok(true) => SignalWaitOutcome::Exited,
+        Ok(false) => SignalWaitOutcome::Running(signal_error),
+        Err(wait_error) => SignalWaitOutcome::Failed(signal_error.unwrap_or(wait_error)),
     }
 }
 
@@ -513,5 +560,45 @@ fn remove_dir_until_absent(path: &Path) -> Result<()> {
                 )))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reconcile_signal_with_wait, SignalWaitOutcome};
+    use a3s_box_core::error::BoxError;
+
+    fn state_error(message: &str) -> BoxError {
+        BoxError::StateError(message.to_string())
+    }
+
+    #[test]
+    fn authoritative_exit_suppresses_a_stale_signal_failure() {
+        let outcome = reconcile_signal_with_wait(
+            Some(state_error("cannot signal stopped container")),
+            Ok(true),
+        );
+
+        assert!(matches!(outcome, SignalWaitOutcome::Exited));
+    }
+
+    #[test]
+    fn signal_failure_is_retained_while_the_container_remains_live() {
+        let outcome = reconcile_signal_with_wait(Some(state_error("signal failed")), Ok(false));
+
+        let SignalWaitOutcome::Running(Some(error)) = outcome else {
+            panic!("expected a live container with its signal failure");
+        };
+        assert!(error.to_string().contains("signal failed"));
+    }
+
+    #[test]
+    fn wait_failure_is_retained_when_signaling_succeeded() {
+        let outcome = reconcile_signal_with_wait(None, Err(state_error("wait failed")));
+
+        let SignalWaitOutcome::Failed(error) = outcome else {
+            panic!("expected the wait failure");
+        };
+        assert!(error.to_string().contains("wait failed"));
     }
 }

@@ -50,6 +50,14 @@ pub struct LocalExecutionObservation {
     pub exit_code: Option<i32>,
 }
 
+/// Result of a terminal backend operation, including authoritative status when
+/// the runtime was able to observe it before teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalExecutionTermination {
+    pub outcome: KillOutcome,
+    pub exit_code: Option<i32>,
+}
+
 impl LocalExecutionObservation {
     pub(crate) fn validate(&self, execution_id: &ExecutionId) -> ExecutionManagerResult<()> {
         match self.state {
@@ -117,4 +125,17 @@ pub trait LocalExecutionBackend: Send + Sync {
     }
 
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome>;
+
+    /// Kill the current execution and return its exact terminal status when the
+    /// backend provides one. Implementations that cannot observe status retain
+    /// the legacy `kill` behavior through this default.
+    async fn kill_with_status(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionTermination> {
+        Ok(LocalExecutionTermination {
+            outcome: self.kill(record).await?,
+            exit_code: None,
+        })
+    }
 }

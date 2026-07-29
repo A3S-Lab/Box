@@ -7,6 +7,11 @@ use a3s_box_core::config::BoxConfig;
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::guest_exec::RUNTIME_EXEC_CONFIG_PATH;
 use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
+use a3s_oci_sdk::{
+    CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION, CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION,
+    CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION, CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION,
+    CONTROL_WORKLOAD_CGROUP_LAYOUT_V1,
+};
 use oci_spec::runtime::{
     Arch, Capabilities, Capability, LinuxBuilder, LinuxCapabilitiesBuilder, LinuxCpuBuilder,
     LinuxDeviceBuilder, LinuxDeviceCgroupBuilder, LinuxDeviceType, LinuxIdMappingBuilder,
@@ -24,6 +29,8 @@ pub const SANDBOX_BUNDLE_SCHEMA: &str = "a3s.box.sandbox-bundle.v1";
 pub const DEFAULT_SANDBOX_PIDS_LIMIT: i64 = 4096;
 const DEFAULT_CPU_PERIOD_US: u64 = 100_000;
 const DEFAULT_TMPFS_SIZE: &str = "67108864";
+const SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES: i64 = 128 * 1024 * 1024;
+const SANDBOX_CONTROL_PIDS_HEADROOM: i64 = 128;
 const SBIN_INIT: &str = "/sbin/init";
 const USR_SBIN_INIT: &str = "/usr/sbin/init";
 const LINUX_EPERM: u32 = 1;
@@ -251,6 +258,22 @@ pub fn compile_oci_spec(input: &SandboxBundleSpec) -> Result<Spec> {
         "com.a3s.box.isolation-class".to_string(),
         "shared-kernel".to_string(),
     );
+    annotations.insert(
+        CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION.to_string(),
+        CONTROL_WORKLOAD_CGROUP_LAYOUT_V1.to_string(),
+    );
+    annotations.insert(
+        CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION.to_string(),
+        SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES.to_string(),
+    );
+    annotations.insert(
+        CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION.to_string(),
+        input.resources.cpu_period.to_string(),
+    );
+    annotations.insert(
+        CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION.to_string(),
+        SANDBOX_CONTROL_PIDS_HEADROOM.to_string(),
+    );
 
     SpecBuilder::default()
         .version("1.1.0".to_string())
@@ -392,7 +415,12 @@ fn compile_namespaces() -> Result<Vec<oci_spec::runtime::LinuxNamespace>> {
     .collect()
 }
 
-fn compile_resources(resources: &SandboxResources) -> Result<oci_spec::runtime::LinuxResources> {
+pub(crate) fn compile_resources(
+    resources: &SandboxResources,
+) -> Result<oci_spec::runtime::LinuxResources> {
+    // `linux.resources` is the exact workload source of truth. The versioned
+    // A3S OCI layout derives its outer management envelope from the annotations
+    // emitted above and applies these values unchanged to `a3s-workload`.
     let mut memory = LinuxMemoryBuilder::default().limit(resources.memory_limit);
     if let Some(reservation) = resources.memory_reservation {
         memory = memory.reservation(reservation);
@@ -527,6 +555,9 @@ fn compile_mounts(user_mounts: &[SandboxMount], user_tmpfs: &[SandboxTmpfs]) -> 
             "/sys/fs/cgroup",
             "cgroup",
             "cgroup",
+            // The runtime owns the complete topology and passes only two
+            // pre-opened membership descriptors to trusted guest-init. Paths
+            // remain read-only to the Sandbox user namespace.
             &["nosuid", "noexec", "nodev", "relatime", "ro"],
         )?,
         mount(
@@ -1341,8 +1372,46 @@ mod tests {
             value["linux"]["resources"]["memory"]["limit"],
             512 * 1024 * 1024i64
         );
+        assert_eq!(
+            value["linux"]["resources"]["memory"]["swap"],
+            1024 * 1024 * 1024i64
+        );
+        assert_eq!(value["linux"]["resources"]["cpu"]["quota"], 200000);
         assert_eq!(value["linux"]["resources"]["pids"]["limit"], 512);
         assert_eq!(value["linux"]["resources"]["cpu"]["cpus"], "0-1");
+        assert_eq!(
+            value["annotations"][a3s_oci_sdk::CONTROL_WORKLOAD_CGROUP_LAYOUT_ANNOTATION],
+            a3s_oci_sdk::CONTROL_WORKLOAD_CGROUP_LAYOUT_V1
+        );
+        assert_eq!(
+            value["annotations"][a3s_oci_sdk::CONTROL_CGROUP_MEMORY_HEADROOM_ANNOTATION],
+            SANDBOX_CONTROL_MEMORY_HEADROOM_BYTES.to_string()
+        );
+        assert_eq!(
+            value["annotations"][a3s_oci_sdk::CONTROL_CGROUP_CPU_HEADROOM_ANNOTATION],
+            DEFAULT_CPU_PERIOD_US.to_string()
+        );
+        assert_eq!(
+            value["annotations"][a3s_oci_sdk::CONTROL_CGROUP_PIDS_HEADROOM_ANNOTATION],
+            SANDBOX_CONTROL_PIDS_HEADROOM.to_string()
+        );
+        let cgroup_mount = value["mounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|mount| mount["destination"] == "/sys/fs/cgroup")
+            .expect("cgroup mount");
+        assert_eq!(cgroup_mount["type"], "cgroup");
+        assert!(cgroup_mount["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option == "ro"));
+        assert!(!cgroup_mount["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option == "rw"));
     }
 
     #[test]

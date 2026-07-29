@@ -48,18 +48,46 @@ async fn tmpfs_isolation(
     const TARGET: &str = "/mnt/r17-isolation";
     let mut request = fixture.cases.task(
         "mount-tmpfs-isolation",
-        "if [ ! -e /r17-tmpfs-restart-marker ]; then touch /r17-tmpfs-restart-marker; printf private > /mnt/r17-isolation/token; exit 17; fi; test ! -e /mnt/r17-isolation/token",
+        "if [ ! -e /workspace/r17-tmpfs-restart-generation ]; then touch /workspace/r17-tmpfs-restart-generation /r17-tmpfs-restart-marker; printf private > /mnt/r17-isolation/token; exit 17; fi; test -e /r17-tmpfs-restart-marker || exit 72; test ! -e /mnt/r17-isolation/token || exit 73",
         10_000,
     );
     request.spec.mounts = vec![tmpfs("scratch", TARGET, false)];
     request.spec.restart = RestartPolicy::OnFailure { max_retries: 1 };
     let isolated = client.apply(&request).await?;
+    let record = fixture.record_for(&request.spec).await?;
+    let rootfs_marker = ["rootfs", "upper", "merged"].map(|root| {
+        record
+            .box_dir
+            .join(root)
+            .join("r17-tmpfs-restart-marker")
+            .exists()
+    });
+    let underlying_token = ["rootfs", "upper", "merged"].map(|root| {
+        record
+            .box_dir
+            .join(root)
+            .join("mnt/r17-isolation/token")
+            .exists()
+    });
+    let workspace_marker = record
+        .box_dir
+        .join("workspace/r17-tmpfs-restart-generation")
+        .exists();
     require(
         isolated.state == RuntimeUnitState::Succeeded,
-        "a restarted Runtime unit observed its prior tmpfs contents",
+        format!(
+            "tmpfs restart isolation failed: observation_state={:?}, observation_failure={:?}, managed_state={:?}, generation={:?}, exit_code={:?}, workspace_marker={workspace_marker}, rootfs_marker[rootfs,upper,merged]={rootfs_marker:?}, underlying_token[rootfs,upper,merged]={underlying_token:?}",
+            isolated.state,
+            isolated.failure,
+            record.managed_state(),
+            record
+                .managed_execution
+                .as_ref()
+                .map(|metadata| metadata.generation.get()),
+            record.exit_code,
+        ),
     )?;
 
-    let record = fixture.record_for(&request.spec).await?;
     require(
         record
             .managed_execution

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,7 +53,8 @@ pub(super) struct DriverFakeBackend {
     starts: AtomicUsize,
     kills: AtomicUsize,
     fail_start_after_effect: AtomicBool,
-    next_start_terminal: Mutex<Option<(ExecutionState, Option<i32>)>>,
+    fail_start_after_effect_at: AtomicUsize,
+    next_start_terminal: Mutex<VecDeque<(ExecutionState, Option<i32>)>>,
     cancelled_inspection: Mutex<Option<Arc<CancelledInspection>>>,
 }
 
@@ -92,8 +93,17 @@ impl DriverFakeBackend {
         self.fail_start_after_effect.store(true, Ordering::SeqCst);
     }
 
+    pub(super) fn fail_start_response_at(&self, start_number: usize) {
+        assert!(start_number > 0);
+        self.fail_start_after_effect_at
+            .store(start_number, Ordering::SeqCst);
+    }
+
     pub(super) fn fail_next_start_without_exit_code(&self) {
-        *self.next_start_terminal.lock().unwrap() = Some((ExecutionState::Failed, None));
+        self.next_start_terminal
+            .lock()
+            .unwrap()
+            .push_back((ExecutionState::Failed, None));
         self.fail_start_after_effect.store(true, Ordering::SeqCst);
     }
 
@@ -103,7 +113,10 @@ impl DriverFakeBackend {
         } else {
             ExecutionState::Failed
         };
-        *self.next_start_terminal.lock().unwrap() = Some((state, Some(exit_code)));
+        self.next_start_terminal
+            .lock()
+            .unwrap()
+            .push_back((state, Some(exit_code)));
     }
 
     pub(super) fn finish(&self, execution_id: &str, exit_code: i32) {
@@ -172,8 +185,8 @@ impl LocalExecutionBackend for DriverFakeBackend {
                 return Ok(execution.handle.clone());
             }
         }
-        self.starts.fetch_add(1, Ordering::SeqCst);
-        let terminal = self.next_start_terminal.lock().unwrap().take();
+        let start_number = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
+        let terminal = self.next_start_terminal.lock().unwrap().pop_front();
         let (state, exit_code) = terminal.unwrap_or((ExecutionState::Running, None));
         executions.insert(
             record.id.clone(),
@@ -183,7 +196,11 @@ impl LocalExecutionBackend for DriverFakeBackend {
                 exit_code,
             },
         );
-        if self.fail_start_after_effect.swap(false, Ordering::SeqCst) {
+        let failed_at_scheduled_start = self
+            .fail_start_after_effect_at
+            .compare_exchange(start_number, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if self.fail_start_after_effect.swap(false, Ordering::SeqCst) || failed_at_scheduled_start {
             return Err(ExecutionManagerError::Unavailable(
                 "fake start response was lost".into(),
             ));

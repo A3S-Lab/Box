@@ -8,7 +8,7 @@ use a3s_box_core::error::{BoxError, Result};
 use a3s_oci_sdk::{
     ContainerOperationRequest, ContainerRecord, ContainerStats, CreateRequest, DeleteRequest,
     ExitStatus, KillRequest, LocalIpcEndpoint, RuntimeClient, RuntimeInfo, StartRequest,
-    StateRequest, StatsRequest, WaitRequest,
+    StateRequest, StatsRequest, UpdateRequest, WaitRequest,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,6 +30,7 @@ enum ClientRequest {
         ContainerOperationRequest,
         SyncSender<SdkResult<ContainerRecord>>,
     ),
+    Update(Box<UpdateRequest>, SyncSender<SdkResult<ContainerRecord>>),
     Wait(WaitRequest, SyncSender<SdkResult<ExitStatus>>),
     Stats(StatsRequest, SyncSender<SdkResult<ContainerStats>>),
     Close(SyncSender<()>),
@@ -46,6 +47,7 @@ impl ClientRequest {
             Self::Delete(request, reply) => send_reply(reply, client.delete(request).await),
             Self::Pause(request, reply) => send_reply(reply, client.pause(request).await),
             Self::Resume(request, reply) => send_reply(reply, client.resume(request).await),
+            Self::Update(request, reply) => send_reply(reply, client.update(*request).await),
             Self::Wait(request, reply) => send_reply(reply, client.wait(request).await),
             Self::Stats(request, reply) => send_reply(reply, client.stats(request).await),
             Self::Close(reply) => {
@@ -142,6 +144,10 @@ impl A3sOciClient {
 
     pub(crate) fn resume(&self, request: ContainerOperationRequest) -> Result<ContainerRecord> {
         self.call(|reply| ClientRequest::Resume(request, reply))
+    }
+
+    pub(crate) fn update(&self, request: UpdateRequest) -> Result<ContainerRecord> {
+        self.call(|reply| ClientRequest::Update(Box::new(request), reply))
     }
 
     pub(crate) fn wait(&self, request: WaitRequest) -> Result<ExitStatus> {

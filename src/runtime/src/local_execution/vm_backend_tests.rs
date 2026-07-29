@@ -198,6 +198,37 @@ fn transitional_states_retry_idempotent_pause_and_resume_operations() {
 }
 
 #[tokio::test]
+async fn startup_terminal_observation_preserves_assets_for_foreground_drain() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Microvm);
+    record.status = ManagedExecutionState::Starting.as_status().to_string();
+    record.managed_execution.as_mut().unwrap().pending_operation =
+        Some(crate::ManagedExecutionOperation::Start);
+    let console = record.box_dir.join("logs/console.log");
+    let rootfs_sentinel = record.box_dir.join("rootfs/startup-result.txt");
+    std::fs::create_dir_all(console.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(rootfs_sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&console, b"startup output\n").unwrap();
+    std::fs::write(&rootfs_sentinel, b"retained").unwrap();
+    let mut runtime = backend.new_manager(&record).unwrap();
+    runtime.shim_exit_code = Some(17);
+    *runtime.state.write().await = crate::BoxState::Ready;
+    let manager = Arc::new(Mutex::new(runtime));
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let observation = backend.inspect_registered(&record, manager).await.unwrap();
+
+    assert_eq!(observation.state, ExecutionState::Stopped);
+    assert_eq!(observation.exit_code, Some(17));
+    assert_eq!(std::fs::read(&console).unwrap(), b"startup output\n");
+    assert_eq!(std::fs::read(&rootfs_sentinel).unwrap(), b"retained");
+    assert!(backend.managers.is_empty());
+}
+
+#[tokio::test]
 async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
@@ -226,7 +257,7 @@ async fn cold_resume_observation_preserves_rootfs_when_the_replacement_exits() {
 }
 
 #[tokio::test]
-async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
+async fn terminal_health_probe_waits_for_delayed_durable_exit_status_before_cleanup() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());
     let record = record(temporary.path(), ExecutionIsolation::Sandbox);
@@ -239,7 +270,7 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
         *manager.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
             exit_polls: Arc::clone(&exit_polls),
             stop_calls: Arc::clone(&stop_calls),
-            available_after: 3,
+            available_after: 60,
         }));
     }
     backend
@@ -250,7 +281,7 @@ async fn terminal_health_probe_repolls_the_runtime_exit_code_before_cleanup() {
 
     assert_eq!(observation.state, ExecutionState::Stopped);
     assert_eq!(observation.exit_code, Some(0));
-    assert_eq!(exit_polls.load(Ordering::SeqCst), 4);
+    assert_eq!(exit_polls.load(Ordering::SeqCst), 61);
     assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
     assert!(backend.managers.is_empty());
 }

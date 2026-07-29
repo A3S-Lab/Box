@@ -715,6 +715,50 @@ fn test_mark_record_stopped_persists_exit_context() {
     assert!(record.stopped_by_user);
 }
 
+#[test]
+fn test_completed_managed_start_requires_stopped_state_and_exact_exit_code() {
+    fn managed_record(status: a3s_box_runtime::ManagedExecutionState) -> BoxRecord {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut record = crate::test_helpers::fixtures::make_record(
+            id,
+            "startup-completion",
+            status.as_status(),
+            None,
+        );
+        record.isolation = a3s_box_core::ExecutionIsolation::Sandbox;
+        record.managed_execution = Some(
+            a3s_box_runtime::ManagedExecutionMetadata::new(
+                OperationId::new("operation-startup-completion").unwrap(),
+                ExecutionGeneration::INITIAL,
+                CreateExecutionRequest {
+                    external_sandbox_id: "startup-completion".to_string(),
+                    config: BoxConfig {
+                        isolation: a3s_box_core::ExecutionIsolation::Sandbox,
+                        image: record.image.clone(),
+                        ..Default::default()
+                    },
+                    labels: std::collections::BTreeMap::new(),
+                    policy: Default::default(),
+                    rootfs_snapshot_id: None,
+                },
+            )
+            .unwrap(),
+        );
+        record
+    }
+
+    let mut stopped = managed_record(a3s_box_runtime::ManagedExecutionState::Stopped);
+    stopped.exit_code = Some(17);
+    assert!(is_completed_managed_start(&stopped));
+
+    stopped.exit_code = None;
+    assert!(!is_completed_managed_start(&stopped));
+
+    let mut failed = managed_record(a3s_box_runtime::ManagedExecutionState::Failed);
+    failed.exit_code = Some(17);
+    assert!(!is_completed_managed_start(&failed));
+}
+
 #[tokio::test]
 async fn test_cleanup_failure_is_reported_and_preserves_recovery_state() {
     let temporary = tempfile::tempdir().unwrap();
@@ -743,6 +787,7 @@ async fn test_cleanup_failure_is_reported_and_preserves_recovery_state() {
         pty_socket_path: temporary.path().join("pty.sock"),
         anonymous_volumes: Vec::new(),
         health_checker: None,
+        completed_during_start: false,
     };
 
     let error = cleanup_managed_execution(&mut context, true, Some(1), false, false)

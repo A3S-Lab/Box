@@ -116,7 +116,9 @@ impl VmManager {
             self.write_hostname_file(&layout)?;
             self.write_standalone_hosts_file(&layout)?;
 
-            let instance_spec = self.build_instance_spec(&layout)?;
+            let resources = SandboxResources::from_box_config(&self.config)?;
+            let mut instance_spec = self.build_instance_spec(&layout)?;
+            apply_sandbox_workload_resources(&mut instance_spec.entrypoint.env, &resources)?;
             if !matches!(
                 instance_spec.entrypoint.executable.as_str(),
                 "/sbin/init" | "/usr/sbin/init"
@@ -168,7 +170,6 @@ impl VmManager {
             );
 
             let bundle_start = std::time::Instant::now();
-            let resources = SandboxResources::from_box_config(&self.config)?;
             let execution_plan_digest = digest_json(&execution_plan)?;
             let bundle_spec = SandboxBundleSpec {
                 box_id: self.box_id.clone(),
@@ -213,6 +214,11 @@ impl VmManager {
                 return Err(error);
             }
         };
+
+        // `controller.start` launches PID 1 and the user command. Preserve the
+        // pristine baseline before that boundary so short-lived filesystem
+        // mutations cannot win a race against the CLI's post-start bookkeeping.
+        self.create_diff_baseline(&layout);
 
         let console_output = instance_spec
             .console_output
@@ -416,6 +422,57 @@ impl VmManager {
         }
 
         Ok(managed)
+    }
+}
+
+fn apply_sandbox_workload_resources(
+    environment: &mut Vec<(String, String)>,
+    resources: &SandboxResources,
+) -> Result<()> {
+    set_environment_value(
+        environment,
+        "A3S_SEC_MEM_LIMIT",
+        resources.memory_limit.to_string(),
+    );
+    set_environment_value(
+        environment,
+        "A3S_SEC_CPU_QUOTA",
+        resources.cpu_quota.to_string(),
+    );
+    set_environment_value(
+        environment,
+        "A3S_SEC_CPU_PERIOD",
+        resources.cpu_period.to_string(),
+    );
+    set_environment_value(
+        environment,
+        "A3S_SEC_PIDS_LIMIT",
+        resources.pids_limit.to_string(),
+    );
+    if let Some(reservation) = resources.memory_reservation {
+        set_environment_value(environment, "A3S_SEC_MEM_LOW", reservation.to_string());
+    }
+    if let Some(swap) = resources.memory_swap {
+        let swap_only = if swap == -1 {
+            -1
+        } else {
+            swap.checked_sub(resources.memory_limit).ok_or_else(|| {
+                BoxError::ConfigError("Sandbox workload swap limit underflows".to_string())
+            })?
+        };
+        set_environment_value(environment, "A3S_SEC_MEM_SWAP", swap_only.to_string());
+    }
+    if let Some(shares) = resources.cpu_shares {
+        set_environment_value(environment, "A3S_SEC_CPU_SHARES", shares.to_string());
+    }
+    Ok(())
+}
+
+fn set_environment_value(environment: &mut Vec<(String, String)>, key: &str, value: String) {
+    if let Some((_, current)) = environment.iter_mut().find(|(name, _)| name == key) {
+        *current = value;
+    } else {
+        environment.push((key.to_string(), value));
     }
 }
 
@@ -782,6 +839,43 @@ mod tests {
         assert_eq!(
             maximum_process_ids(rootfs.path(), &environment).unwrap(),
             (1234, 5678)
+        );
+    }
+
+    #[test]
+    fn sandbox_workload_environment_keeps_exact_limits_in_one_cgroup() {
+        let mut environment = vec![("A3S_SEC_CPU_QUOTA".to_string(), "stale".to_string())];
+        let resources = SandboxResources {
+            memory_limit: 128 * 1024 * 1024,
+            memory_reservation: Some(64 * 1024 * 1024),
+            memory_swap: Some(256 * 1024 * 1024),
+            cpu_shares: Some(1024),
+            cpu_quota: 10_000,
+            cpu_period: 100_000,
+            cpuset_cpus: None,
+            pids_limit: 32,
+        };
+
+        apply_sandbox_workload_resources(&mut environment, &resources).unwrap();
+
+        let value = |key: &str| {
+            environment
+                .iter()
+                .find_map(|(name, value)| (name == key).then_some(value.as_str()))
+        };
+        assert_eq!(value("A3S_SEC_MEM_LIMIT"), Some("134217728"));
+        assert_eq!(value("A3S_SEC_MEM_LOW"), Some("67108864"));
+        assert_eq!(value("A3S_SEC_MEM_SWAP"), Some("134217728"));
+        assert_eq!(value("A3S_SEC_CPU_QUOTA"), Some("10000"));
+        assert_eq!(value("A3S_SEC_CPU_PERIOD"), Some("100000"));
+        assert_eq!(value("A3S_SEC_CPU_SHARES"), Some("1024"));
+        assert_eq!(value("A3S_SEC_PIDS_LIMIT"), Some("32"));
+        assert_eq!(
+            environment
+                .iter()
+                .filter(|(name, _)| name == "A3S_SEC_CPU_QUOTA")
+                .count(),
+            1
         );
     }
 

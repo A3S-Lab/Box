@@ -332,13 +332,13 @@ impl RootfsProvider for OverlayProvider {
 
     fn cleanup(&self, box_dir: &Path, persistent: bool) -> Result<()> {
         let merged = box_dir.join("merged");
-        // Bounded unmount-retry rather than a single attempt: a transient EBUSY
-        // must not leave the overlay mounted, or the remove_dir_all below would
-        // recurse into the live mount and leak it. Mirrors the cleanup paths in
-        // cleanup_stopped_box/cleanup_removed_box.
-        super::unmount_box_overlay(&merged);
 
         if persistent {
+            // A retained upper is about to become the next generation's
+            // writable layer. Fully release every old mount before reuse;
+            // lazy detach can keep an old namespace writer alive and make the
+            // replacement generation observe stale rootfs state.
+            super::unmount_box_overlay_for_reuse(&merged)?;
             // Keep both possible persistent generations: a cache-miss generation
             // lives in `rootfs`, while later overlay writes live in `upper`.
             // The next prepare mounts their union again.
@@ -353,6 +353,10 @@ impl RootfsProvider for OverlayProvider {
             }
             return Ok(());
         }
+
+        // A discarded rootfs can use bounded lazy unmount cleanup. It will
+        // never be mounted as a replacement generation.
+        super::unmount_box_overlay(&merged);
 
         for dir_name in &["rootfs", "upper", "work", "merged"] {
             let dir = box_dir.join(dir_name);
@@ -646,5 +650,38 @@ mod tests {
         assert!(!box_dir.join("merged").exists());
         assert!(!box_dir.join("upper").exists());
         assert!(!box_dir.join("work").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_overlay_provider_persistent_cleanup_remounts_retained_upper() {
+        if !super::super::overlay::is_overlay_supported() {
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let cache_dir = tmp.path().join("cache");
+        let box_dir = tmp.path().join("box");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::create_dir_all(&box_dir).unwrap();
+        make_sample_rootfs(&cache_dir);
+
+        let provider = OverlayProvider;
+        let first = provider.prepare(&box_dir, &cache_dir).unwrap();
+        std::fs::write(first.join("restart-proof"), "generation-one").unwrap();
+
+        provider.cleanup(&box_dir, true).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(box_dir.join("upper/restart-proof")).unwrap(),
+            "generation-one"
+        );
+
+        let second = provider.prepare(&box_dir, &cache_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(second.join("restart-proof")).unwrap(),
+            "generation-one"
+        );
+
+        provider.cleanup(&box_dir, false).unwrap();
     }
 }

@@ -590,14 +590,9 @@ fn probe_seccomp_and_privileges(snapshot: &mut SandboxCapabilitySnapshot) {
 
 #[cfg(target_os = "linux")]
 fn probe_cgroup_v2() -> CgroupV2Evidence {
-    let mountpoint = read_trimmed("/proc/self/mountinfo")
-        .and_then(|contents| parse_cgroup2_mountpoint(&contents));
-    let relative = read_trimmed("/proc/self/cgroup")
-        .and_then(|contents| parse_current_cgroup_path(&contents).map(ToString::to_string));
-    let current_path = match (&mountpoint, &relative) {
-        (Some(mountpoint), Some(relative)) => safe_join_cgroup(mountpoint, relative),
-        _ => None,
-    };
+    let mountinfo = read_trimmed("/proc/self/mountinfo");
+    let mountpoint = mountinfo.as_deref().and_then(parse_cgroup2_mountpoint);
+    let current_path = process_cgroup_v2_path(std::process::id());
     let controllers: Vec<String> = current_path
         .as_ref()
         .and_then(|path| read_trimmed(path.join("cgroup.controllers")))
@@ -621,6 +616,24 @@ fn probe_cgroup_v2() -> CgroupV2Evidence {
         controllers,
         delegated,
     }
+}
+
+/// Resolve the host cgroup v2 directory containing `pid`.
+///
+/// OCI runtimes may place a workload below a private manager cgroup, so callers
+/// must derive this path from the process rather than assume a fixed hierarchy.
+#[cfg(target_os = "linux")]
+pub(crate) fn process_cgroup_v2_path(pid: u32) -> Option<PathBuf> {
+    let mountinfo = read_trimmed("/proc/self/mountinfo")?;
+    let cgroup = read_trimmed(PathBuf::from("/proc").join(pid.to_string()).join("cgroup"))?;
+    parse_cgroup_v2_path(&mountinfo, &cgroup)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_v2_path(mountinfo: &str, cgroup: &str) -> Option<PathBuf> {
+    let mountpoint = parse_cgroup2_mountpoint(mountinfo)?;
+    let relative = parse_current_cgroup_path(cgroup)?;
+    safe_join_cgroup(&mountpoint, relative)
 }
 
 #[cfg(target_os = "linux")]
@@ -928,6 +941,11 @@ mod tests {
             parse_current_cgroup_path("0::/user.slice/a3s.service\n"),
             Some("/user.slice/a3s.service")
         );
+        assert_eq!(
+            parse_cgroup_v2_path(mountinfo, "0::/a3s-oci-42/a3s-box/unit-1\n").as_deref(),
+            Some(Path::new("/sys/fs/cgroup/a3s-oci-42/a3s-box/unit-1"))
+        );
         assert!(safe_join_cgroup(Path::new("/sys/fs/cgroup"), "/../../etc").is_none());
+        assert!(parse_cgroup_v2_path(mountinfo, "0::/../../etc\n").is_none());
     }
 }

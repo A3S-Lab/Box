@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -46,6 +46,60 @@ fn find_binary() -> PathBuf {
 pub struct CliTest {
     bin: PathBuf,
     home: tempfile::TempDir,
+}
+
+pub struct BackgroundProcessGuard<'a> {
+    cli: &'a CliTest,
+    child: Option<Child>,
+    command: String,
+}
+
+impl BackgroundProcessGuard<'_> {
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.child
+            .as_mut()
+            .expect("background process should still be owned")
+            .try_wait()
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        self.child
+            .as_mut()
+            .expect("background process should still be owned")
+            .wait()
+    }
+
+    pub fn interrupt(&mut self) {
+        self.interrupt_with_diagnostics(false);
+    }
+
+    fn interrupt_with_diagnostics(&mut self, report_stdout: bool) {
+        if let Some(mut child) = self.child.take() {
+            self.cli.interrupt_background(&mut child);
+
+            let mut stdout = String::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                let _ = pipe.read_to_string(&mut stdout);
+            }
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+
+            if report_stdout && !stdout.trim().is_empty() {
+                eprintln!("background `a3s-box {}` stdout:\n{}", self.command, stdout);
+            }
+            if !stderr.trim().is_empty() {
+                eprintln!("background `a3s-box {}` stderr:\n{}", self.command, stderr);
+            }
+        }
+    }
+}
+
+impl Drop for BackgroundProcessGuard<'_> {
+    fn drop(&mut self) {
+        self.interrupt_with_diagnostics(std::thread::panicking());
+    }
 }
 
 impl CliTest {
@@ -142,6 +196,14 @@ impl CliTest {
                     args.join(" ")
                 )
             })
+    }
+
+    pub fn spawn_guarded_background(&self, args: &[&str]) -> BackgroundProcessGuard<'_> {
+        BackgroundProcessGuard {
+            cli: self,
+            child: Some(self.spawn_background(args)),
+            command: args.join(" "),
+        }
     }
 
     pub fn interrupt_background(&self, child: &mut std::process::Child) {
@@ -267,42 +329,13 @@ impl CliTest {
     }
 
     pub fn ok_status(&self, args: &[&str]) {
-        eprintln!("    $ a3s-box {}", args.join(" "));
-
-        let mut command = self.command(args);
-        let mut child = command
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap_or_else(|e| panic!("failed to run `a3s-box {}`: {e}", args.join(" ")));
-
-        let start = Instant::now();
-        let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .unwrap_or_else(|e| panic!("failed to poll `a3s-box {}`: {e}", args.join(" ")))
-            {
-                break status;
-            }
-
-            if start.elapsed() >= COMMAND_TIMEOUT {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!(
-                    "`a3s-box {}` timed out after {:?}",
-                    args.join(" "),
-                    COMMAND_TIMEOUT
-                );
-            }
-
-            std::thread::sleep(Duration::from_millis(50));
-        };
-
+        let (stdout, stderr, success) = self.output(args);
         assert!(
-            status.success(),
-            "`a3s-box {}` failed with status {}",
+            success,
+            "`a3s-box {}` failed\nstdout:\n{}\nstderr:\n{}",
             args.join(" "),
-            status
+            stdout,
+            stderr
         );
     }
 

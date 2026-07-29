@@ -79,15 +79,16 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
         return;
     }
 
-    match reap_recorded_sandbox(home_dir, &box_dir, box_id) {
-        SandboxReap::NotPresent | SandboxReap::Cleaned => {}
+    let runtime_owned_cgroup = match reap_recorded_sandbox(home_dir, &box_dir, box_id) {
+        SandboxReap::NotPresent => false,
+        SandboxReap::Cleaned => true,
         SandboxReap::Failed(reason) => {
             // A live shared-kernel process may still be using the rootfs. Never
             // unmount or delete it after an unverified/failed runtime cleanup.
             tracing::error!(box_id, %reason, "Refusing to touch an unreaped Sandbox rootfs");
             return;
         }
-    }
+    };
 
     let killed = kill_orphaned_shim(box_id);
     // Wait for the killed shim(s) to actually exit before touching the overlay:
@@ -120,10 +121,12 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
         }
     }
 
-    // Remove the box's host cgroup (the shim creates `/sys/fs/cgroup/a3s-box/<id>`
-    // for host-side cgroup limits and can never remove it; an empty-dir rmdir
-    // clears it now that the shim is killed).
-    let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{box_id}"));
+    // A legacy MicroVM shim could leave an empty host cgroup behind. A3S OCI
+    // Runtime instead owns and removes the complete Sandbox hierarchy as part
+    // of the successful delete above.
+    if !runtime_owned_cgroup {
+        let _ = std::fs::remove_dir(format!("/sys/fs/cgroup/a3s-box/{box_id}"));
+    }
 
     if !killed.is_empty() {
         tracing::info!(box_id = %box_id, "Reaped orphaned sandbox microVM after CRI restart");

@@ -18,7 +18,10 @@ use tokio::sync::Mutex;
 
 use super::resources::ExecutionResourceGuard;
 use super::vm_process::{locate_microvm_process, LocatedProcess};
-use super::{LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation};
+use super::{
+    LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
+    LocalExecutionTermination,
+};
 use crate::{
     BoxRecord, ManagedExecutionMetadata, ManagedExecutionOperation, ManagedExecutionState,
     VmManager,
@@ -27,7 +30,7 @@ use crate::{
 type SharedVm = Arc<Mutex<VmManager>>;
 
 const TERMINAL_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const TERMINAL_EXIT_POLL_TIMEOUT: Duration = Duration::from_secs(1);
+const TERMINAL_EXIT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runtime adapter that owns live [`VmManager`] handles and reconstructs them
 /// from durable runtime evidence after a control-plane restart.
@@ -370,7 +373,7 @@ impl VmLocalExecutionBackend {
         remove_anonymous_volumes: bool,
         force_preserve_rootfs: bool,
         timeout_secs: Option<u64>,
-    ) -> ExecutionManagerResult<KillOutcome> {
+    ) -> ExecutionManagerResult<LocalExecutionTermination> {
         let mut manager = shared.lock().await;
         let mut anonymous_volumes = if manager.anonymous_volumes().is_empty() {
             record.anonymous_volumes.clone()
@@ -392,6 +395,7 @@ impl VmLocalExecutionBackend {
             (None, true) => manager.destroy_preserving_rootfs().await,
             (None, false) => manager.destroy().await,
         };
+        let exit_code = manager.exit_code();
         drop(manager);
         self.remove_manager(&record.id, &shared);
         result.map_err(|error| runtime_error("kill", record, error))?;
@@ -401,7 +405,10 @@ impl VmLocalExecutionBackend {
             }
             self.cleanup_anonymous_volumes(anonymous_volumes).await;
         }
-        Ok(KillOutcome::Killed)
+        Ok(LocalExecutionTermination {
+            outcome: KillOutcome::Killed,
+            exit_code,
+        })
     }
 
     async fn anonymous_volumes_for_record(&self, record: &BoxRecord) -> Vec<String> {
@@ -472,6 +479,58 @@ impl VmLocalExecutionBackend {
         .await;
         if let Err(error) = task {
             tracing::warn!(%error, "Anonymous volume cleanup task failed");
+        }
+    }
+
+    async fn terminate_execution(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionTermination> {
+        let metadata = self.metadata(record)?;
+        let remove_anonymous_volumes = record.auto_remove;
+        let timeout_secs = record.stop_timeout;
+        if let Some(manager) = self.manager(&record.id) {
+            return self
+                .destroy_registered(
+                    record,
+                    manager,
+                    remove_anonymous_volumes,
+                    false,
+                    timeout_secs,
+                )
+                .await;
+        }
+        // A filesystem-only pause deliberately has no live provider evidence,
+        // but a later terminal kill must still apply the configured rootfs and
+        // anonymous-volume cleanup policy to the retained generation.
+        if !metadata.paused_with_memory {
+            let manager = Arc::new(Mutex::new(self.new_manager(record)?));
+            return self
+                .destroy_registered(
+                    record,
+                    manager,
+                    remove_anonymous_volumes,
+                    false,
+                    timeout_secs,
+                )
+                .await;
+        }
+        match metadata.plan.backend {
+            ExecutionBackend::A3sOci => {
+                self.destroy_detached_sandbox(record, remove_anonymous_volumes, false, timeout_secs)
+                    .await
+            }
+            ExecutionBackend::Krun => {
+                let manager = self.recover_microvm(record).await?;
+                self.destroy_registered(
+                    record,
+                    manager,
+                    remove_anonymous_volumes,
+                    false,
+                    timeout_secs,
+                )
+                .await
+            }
         }
     }
 }
@@ -678,52 +737,14 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
     }
 
     async fn kill(&self, record: &BoxRecord) -> ExecutionManagerResult<KillOutcome> {
-        let metadata = self.metadata(record)?;
-        let remove_anonymous_volumes = record.auto_remove;
-        let timeout_secs = record.stop_timeout;
-        if let Some(manager) = self.manager(&record.id) {
-            return self
-                .destroy_registered(
-                    record,
-                    manager,
-                    remove_anonymous_volumes,
-                    false,
-                    timeout_secs,
-                )
-                .await;
-        }
-        // A filesystem-only pause deliberately has no live provider evidence,
-        // but a later terminal kill must still apply the configured rootfs and
-        // anonymous-volume cleanup policy to the retained generation.
-        if !metadata.paused_with_memory {
-            let manager = Arc::new(Mutex::new(self.new_manager(record)?));
-            return self
-                .destroy_registered(
-                    record,
-                    manager,
-                    remove_anonymous_volumes,
-                    false,
-                    timeout_secs,
-                )
-                .await;
-        }
-        match metadata.plan.backend {
-            ExecutionBackend::A3sOci => {
-                self.destroy_detached_sandbox(record, remove_anonymous_volumes, false, timeout_secs)
-                    .await
-            }
-            ExecutionBackend::Krun => {
-                let manager = self.recover_microvm(record).await?;
-                self.destroy_registered(
-                    record,
-                    manager,
-                    remove_anonymous_volumes,
-                    false,
-                    timeout_secs,
-                )
-                .await
-            }
-        }
+        Ok(self.terminate_execution(record).await?.outcome)
+    }
+
+    async fn kill_with_status(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionTermination> {
+        self.terminate_execution(record).await
     }
 
     async fn stop_for_restart(
@@ -738,19 +759,22 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
         }
         let timeout_secs = timeout_secs.or(record.stop_timeout);
         if let Some(manager) = self.manager(&record.id) {
-            return self
+            return Ok(self
                 .destroy_registered(record, manager, false, true, timeout_secs)
-                .await;
+                .await?
+                .outcome);
         }
         match metadata.plan.backend {
-            ExecutionBackend::A3sOci => {
-                self.destroy_detached_sandbox(record, false, true, timeout_secs)
-                    .await
-            }
+            ExecutionBackend::A3sOci => Ok(self
+                .destroy_detached_sandbox(record, false, true, timeout_secs)
+                .await?
+                .outcome),
             ExecutionBackend::Krun => {
                 let manager = self.recover_microvm(record).await?;
-                self.destroy_registered(record, manager, false, true, timeout_secs)
-                    .await
+                Ok(self
+                    .destroy_registered(record, manager, false, true, timeout_secs)
+                    .await?
+                    .outcome)
             }
         }
     }
@@ -765,6 +789,12 @@ pub(super) fn should_force_rootfs_preservation(record: &BoxRecord) -> ExecutionM
         ))
     })?;
     Ok(match state {
+        // A foreground one-shot can finish before readiness is published. Its
+        // exact status is already terminal, but the caller still has to drain
+        // stdout/stderr and archive an auto-removed result. Tear down mounts
+        // and runtime processes while retaining the box directory until that
+        // caller completes its normal terminal cleanup.
+        ManagedExecutionState::Starting => true,
         ManagedExecutionState::Pausing => matches!(
             metadata.pending_operation.as_ref(),
             Some(ManagedExecutionOperation::Pause { keep_memory: false })

@@ -2793,12 +2793,13 @@ impl RuntimeService for BoxRuntimeService {
         // Tier 1: memory_limit is a hard VM limit, cannot change after boot
         if linux.memory_limit_in_bytes > 0 {
             return Err(Status::unimplemented(
-                "Cannot change memory limit on a running microVM: libkrun does not support \
-                 memory ballooning. Recreate the pod with the desired memory size.",
+                "Cannot change provisioned memory on a running Box. Recreate the pod with \
+                 the desired memory size.",
             ));
         }
 
-        // Tier 2: cgroup-based limits — apply via guest exec
+        // Tier 2: cgroup-based limits — apply through the selected backend's
+        // single resource-update mechanism.
         if linux.cpu_quota != 0 {
             update.limits.cpu_quota = Some(linux.cpu_quota);
         }
@@ -2829,8 +2830,8 @@ impl RuntimeService for BoxRuntimeService {
         }
 
         // Find the VM manager for this container's sandbox
-        let managers = self.vm_managers.read().await;
-        let vm = managers.get(&container.sandbox_id).ok_or_else(|| {
+        let mut managers = self.vm_managers.write().await;
+        let vm = managers.get_mut(&container.sandbox_id).ok_or_else(|| {
             Status::failed_precondition(format!(
                 "Sandbox {} not running (VM not found)",
                 container.sandbox_id
@@ -2844,7 +2845,7 @@ impl RuntimeService for BoxRuntimeService {
             cpu_quota = linux.cpu_quota,
             cpu_period = linux.cpu_period,
             cpu_shares = linux.cpu_shares,
-            "CRI UpdateContainerResources: applying Tier 2 cgroup changes"
+            "CRI UpdateContainerResources: applying Tier 2 resource changes"
         );
 
         let result = vm

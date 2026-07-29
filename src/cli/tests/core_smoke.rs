@@ -869,6 +869,41 @@ fn kill_host_pid(pid: u64, signal: libc::c_int) {
     );
 }
 
+#[cfg(target_os = "linux")]
+fn passt_pid_for_box(smoke: &CoreSmoke, name: &str) -> u32 {
+    let inspect = smoke.inspect_json(name);
+    let id = json_string_field(&inspect, "id");
+    let pid_path = PathBuf::from("/tmp/a3s-box-sockets")
+        .join(id)
+        .join("passt.pid");
+    let pid = std::fs::read_to_string(&pid_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", pid_path.display()))
+        .trim()
+        .parse::<u32>()
+        .unwrap_or_else(|error| panic!("invalid passt PID in {}: {error}", pid_path.display()));
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .unwrap_or_else(|error| panic!("failed to inspect passt PID {pid}: {error}"));
+    assert!(
+        matches!(comm.trim(), "passt" | "passt.avx2"),
+        "PID {pid} from {} is not passt: {comm:?}",
+        pid_path.display()
+    );
+    pid
+}
+
+#[cfg(target_os = "linux")]
+fn assert_process_exits(pid: u32, context: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("{context} left host process {pid} running");
+}
+
 fn seed_smoke_image(smoke: &CoreSmoke, image: &str) {
     if let Some(tar_path) = smoke_image_tar() {
         smoke.ok(&["load", "--input", &tar_path, "--tag", image]);
@@ -1586,7 +1621,7 @@ fn real_core_bridge_network_hosts_and_endpoint_lifecycle() {
         "--",
         "/bin/sh",
         "-c",
-        "mkdir -p /www; printf core-smoke-bridge-peer-ok >/www/index.html; echo core-smoke-bridge-db-ready; exec httpd -f -p 8080 -h /www",
+        "echo core-smoke-bridge-db-ready; while true; do printf 'HTTP/1.1 200 OK\r\nContent-Length: 25\r\nConnection: close\r\n\r\ncore-smoke-bridge-peer-ok' | nc -l -p 8080; done",
     ]);
     smoke.wait_for_named_running(&db_box);
     smoke.wait_for_named_logs(&db_box, "core-smoke-bridge-db-ready");
@@ -1606,6 +1641,11 @@ fn real_core_bridge_network_hosts_and_endpoint_lifecycle() {
     ]);
     smoke.wait_for_named_running(&web_box);
     smoke.wait_for_named_logs(&web_box, "core-smoke-bridge-web-ready");
+
+    #[cfg(target_os = "linux")]
+    let db_passt_pid = passt_pid_for_box(&smoke, &db_box);
+    #[cfg(target_os = "linux")]
+    let web_passt_pid = passt_pid_for_box(&smoke, &web_box);
 
     let web_hosts = smoke.ok(&["exec", &web_box, "--", "/bin/sh", "-c", "cat /etc/hosts"]);
     assert_contains(&web_hosts, &db_box, "web /etc/hosts");
@@ -1634,8 +1674,12 @@ fn real_core_bridge_network_hosts_and_endpoint_lifecycle() {
     );
 
     smoke.ok(&["stop", &web_box]);
+    #[cfg(target_os = "linux")]
+    assert_process_exits(web_passt_pid, "stopping the bridge peer box");
     smoke.ok(&["rm", &web_box]);
     smoke.ok(&["stop", &db_box]);
+    #[cfg(target_os = "linux")]
+    assert_process_exits(db_passt_pid, "stopping the bridge server box");
     smoke.ok(&["rm", &db_box]);
     smoke.ok(&["network", "rm", &network]);
 }
@@ -1743,7 +1787,7 @@ fn real_core_network_connect_disconnect_before_start() {
     assert_eq!(force_disconnected["network_name"], serde_json::Value::Null);
     assert_eq!(force_disconnected["network_mode"], serde_json::json!("tsi"));
 
-    smoke.ok(&["start", &box_name]);
+    smoke.ok(&["restart", &box_name]);
     smoke.wait_for_named_running(&box_name);
     let restarted = smoke.ok(&[
         "exec",
@@ -2296,7 +2340,7 @@ fn real_core_compose_single_service_lifecycle() {
             r#"services:
   {service}:
     image: {image}
-    command: ["/bin/sh", "-c", "printf 'core-smoke-compose:%s\n' \"$A3S_COMPOSE_SMOKE\"; sleep 3600"]
+    command: ["/bin/sh", "-c", "printf 'core-smoke-compose:%s\n' \"$$A3S_COMPOSE_SMOKE\"; sleep 3600"]
     environment:
       A3S_COMPOSE_SMOKE: "ok"
     labels:

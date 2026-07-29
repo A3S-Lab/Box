@@ -25,6 +25,33 @@ fn inspect_box(cli: &CliTest, name: &str) -> serde_json::Value {
     }
 }
 
+struct HostResourceCleanup<'a> {
+    cli: &'a CliTest,
+    boxes: &'a [&'a str],
+    networks: &'a [&'a str],
+    armed: bool,
+}
+
+impl HostResourceCleanup<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for HostResourceCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for name in self.boxes {
+            cleanup(self.cli, name);
+        }
+        for name in self.networks {
+            let _ = self.cli.output(&["network", "rm", name]);
+        }
+    }
+}
+
 #[test]
 #[ignore]
 #[cfg(target_os = "linux")]
@@ -133,6 +160,20 @@ fn test_real_vm_command_matrix() {
     let foreground_box = "cov-vm-foreground";
     let renamed_box = "cov-vm-renamed";
     let restored_box = "cov-vm-restored";
+    let cleanup_boxes = [
+        main_box,
+        built_box,
+        foreground_box,
+        renamed_box,
+        restored_box,
+    ];
+    let cleanup_networks = ["covvmnet"];
+    let mut resource_cleanup = HostResourceCleanup {
+        cli: &cli,
+        boxes: &cleanup_boxes,
+        networks: &cleanup_networks,
+        armed: true,
+    };
 
     cleanup(&cli, main_box);
     cleanup(&cli, built_box);
@@ -334,6 +375,10 @@ fn test_real_vm_command_matrix() {
     ]);
     cli.ok(&["image-inspect", "coverage-committed:latest"]);
 
+    // Snapshot creation intentionally rejects a running host-path rootfs: the
+    // guest could mutate it while the host traverses the tree. Stop once here;
+    // the following network-connect scenario also requires a stopped box.
+    cli.ok(&["stop", main_box]);
     let snapshot_id = cli
         .ok(&[
             "snapshot",
@@ -355,7 +400,6 @@ fn test_real_vm_command_matrix() {
     cli.ok(&["snapshot", "rm", &snapshot_id]);
 
     cli.ok(&["network", "create", "covvmnet", "--subnet", "10.124.0.0/24"]);
-    cli.ok(&["stop", main_box]);
     cli.ok(&["network", "connect", "covvmnet", main_box]);
     cli.ok(&["network", "inspect", "covvmnet"]);
     cli.ok_status(&["start", main_box]);
@@ -390,6 +434,7 @@ fn test_real_vm_command_matrix() {
     cli.ok(&["image-prune", "--force", "--all"]);
     cli.ok(&["system-prune", "--force", "--all"]);
     assert_no_new_host_socket_dirs(&socket_dirs_before);
+    resource_cleanup.disarm();
 }
 
 #[test]
@@ -741,7 +786,7 @@ fn test_real_pool_warm_run() {
         .to_string();
 
     // Daemon: pre-warm the default pool + a second image via --warm; listen on the socket.
-    let mut daemon = cli.spawn_background(&[
+    let mut daemon = cli.spawn_guarded_background(&[
         "pool",
         "start",
         "--image",
@@ -761,7 +806,6 @@ fn test_real_pool_warm_run() {
     let start = std::time::Instant::now();
     while !sock_path.exists() {
         if start.elapsed() > Duration::from_secs(120) {
-            cli.interrupt_background(&mut daemon);
             panic!("pool daemon never created its socket");
         }
         if let Ok(Some(status)) = daemon.try_wait() {
@@ -828,7 +872,7 @@ fn test_real_pool_warm_run() {
                 let socket = socket.as_str();
                 s.spawn(move || {
                     let tag = format!("conc-{i}");
-                    let (out, _e, ok) = cli.output(&[
+                    let (out, err, ok) = cli.output(&[
                         "pool",
                         "run",
                         "--socket",
@@ -837,13 +881,16 @@ fn test_real_pool_warm_run() {
                         "echo",
                         tag.as_str(),
                     ]);
-                    (ok, out, tag)
+                    (ok, out, err, tag)
                 })
             })
             .collect();
         for h in handles {
-            let (ok, out, tag) = h.join().expect("concurrent run thread panicked");
-            assert!(ok, "concurrent pool run failed: {out}");
+            let (ok, out, err, tag) = h.join().expect("concurrent run thread panicked");
+            assert!(
+                ok,
+                "concurrent pool run failed\nstdout:\n{out}\nstderr:\n{err}"
+            );
             assert!(
                 out.contains(&tag),
                 "concurrent run output {out:?} missing {tag}"
@@ -877,7 +924,7 @@ fn test_real_pool_warm_run() {
         "status should list both warmed images:\n{status}"
     );
 
-    cli.interrupt_background(&mut daemon);
+    daemon.interrupt();
 }
 
 /// Dockerfile RUN over the warm-pool lease path: one build stage keeps a pooled
@@ -897,7 +944,7 @@ fn test_real_build_run_pool_smoke() {
         .expect("utf8 socket path")
         .to_string();
 
-    let mut daemon = cli.spawn_background(&[
+    let mut daemon = cli.spawn_guarded_background(&[
         "pool",
         "start",
         "--image",
@@ -914,7 +961,6 @@ fn test_real_build_run_pool_smoke() {
     let start = std::time::Instant::now();
     while !sock_path.exists() {
         if start.elapsed() > Duration::from_secs(120) {
-            cli.interrupt_background(&mut daemon);
             panic!("build pool daemon never created its socket");
         }
         if let Ok(Some(status)) = daemon.try_wait() {
@@ -1004,7 +1050,7 @@ fn test_real_pool_deferred_main() {
         .expect("utf8 socket path")
         .to_string();
 
-    let mut daemon = cli.spawn_background(&[
+    let mut daemon = cli.spawn_guarded_background(&[
         "pool",
         "start",
         "--deferred",
@@ -1022,7 +1068,6 @@ fn test_real_pool_deferred_main() {
     let start = std::time::Instant::now();
     while !sock_path.exists() {
         if start.elapsed() > Duration::from_secs(120) {
-            cli.interrupt_background(&mut daemon);
             panic!("deferred pool daemon never created its socket");
         }
         if let Ok(Some(status)) = daemon.try_wait() {
@@ -1063,5 +1108,5 @@ fn test_real_pool_deferred_main() {
     ]);
     assert!(!ok2, "expected a non-zero exit from the deferred main");
 
-    cli.interrupt_background(&mut daemon);
+    daemon.interrupt();
 }

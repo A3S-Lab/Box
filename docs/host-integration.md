@@ -52,12 +52,12 @@ the run, add:
 export A3S_BOX_ALLOW_REGISTRY_PULL=1
 ```
 
-If the Linux guest init binary is missing, build it for the guest target before
-running the smoke:
+The host runner rebuilds guest init for the matching static Linux musl target on
+both macOS and Linux before every real suite. Install that Rust target first if
+it is missing; for example, on Apple Silicon or Linux arm64:
 
 ```bash
 rustup target add aarch64-unknown-linux-musl
-cargo build -p a3s-box-guest-init --target aarch64-unknown-linux-musl
 scripts/host-integration-smoke.sh --core
 ```
 
@@ -65,9 +65,11 @@ If direct cross-build linking fails on the host, install `cargo-zigbuild` and
 use `cargo zigbuild -p a3s-box-guest-init --target aarch64-unknown-linux-musl`
 instead.
 
-On macOS, `src/target/debug/a3s-box-guest-init` is a host Mach-O binary and is
-not accepted as a guest artifact. The runner expects the Linux binary under
-`src/target/<linux-musl-target>/{debug,release}/a3s-box-guest-init`.
+On macOS, `src/target/debug/a3s-box-guest-init` is a host Mach-O binary; on
+Linux it is normally a dynamically linked host ELF. Neither is accepted as a
+guest PID 1 artifact. The runner builds and selects
+`src/target/<linux-musl-target>/debug/a3s-box-guest-init` from the current
+checkout.
 
 ## Linux core smoke
 

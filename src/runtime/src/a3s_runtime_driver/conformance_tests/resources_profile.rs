@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use a3s_oci_sdk::{CONTROL_CGROUP_NAME, WORKLOAD_CGROUP_NAME};
 use a3s_runtime::contract::{RuntimeInspection, RuntimeUnitState};
 use a3s_runtime::RuntimeClient;
 
@@ -57,19 +58,66 @@ pub(super) async fn run(
         "PID limit changed before provider launch",
     )?;
 
-    let cgroup = Path::new("/sys/fs/cgroup/a3s-box").join(&record.id);
-    require(cgroup.is_dir(), "Sandbox cgroup was not created")?;
+    let pid = record
+        .pid
+        .ok_or_else(|| super::protocol("resource fixture lost its Sandbox PID"))?;
+    let control_cgroup =
+        crate::sandbox::capability::process_cgroup_v2_path(pid).ok_or_else(|| {
+            super::protocol(format!(
+                "could not resolve cgroup v2 path for Sandbox PID {pid}"
+            ))
+        })?;
+    let expected_management_suffix = Path::new("a3s-box").join(&record.id);
+    let expected_control_suffix = expected_management_suffix.join(CONTROL_CGROUP_NAME);
     require(
-        read_trimmed(&cgroup.join("cpu.max"))? == format!("{CPU_QUOTA_US} {CPU_PERIOD_US}"),
-        "cpu.max does not match the Runtime CPU request",
+        control_cgroup.ends_with(&expected_control_suffix),
+        format!(
+            "Sandbox PID {pid} does not belong to the runtime-owned control cgroup: {}",
+            control_cgroup.display()
+        ),
+    )?;
+    let management_cgroup = control_cgroup.parent().ok_or_else(|| {
+        super::protocol(format!(
+            "Sandbox control cgroup has no management parent: {}",
+            control_cgroup.display()
+        ))
+    })?;
+    require(
+        management_cgroup.ends_with(&expected_management_suffix),
+        format!(
+            "Sandbox control cgroup has an unexpected management parent: {}",
+            management_cgroup.display()
+        ),
     )?;
     require(
-        read_trimmed(&cgroup.join("memory.max"))? == MEMORY_BYTES.to_string(),
-        "memory.max does not match the exact Runtime byte limit",
+        management_cgroup.is_dir() && control_cgroup.is_dir(),
+        "Sandbox management/control cgroups were not created",
+    )?;
+    let outer_cpu_max = read_trimmed(&management_cgroup.join("cpu.max"))?;
+    let mut outer_cpu_fields = outer_cpu_max.split_whitespace();
+    let outer_cpu_quota = outer_cpu_fields
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| super::protocol("Sandbox management cpu.max quota is invalid"))?;
+    let outer_cpu_period = outer_cpu_fields
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| super::protocol("Sandbox management cpu.max period is invalid"))?;
+    require(
+        outer_cpu_quota > CPU_QUOTA_US && outer_cpu_period == CPU_PERIOD_US,
+        "Sandbox management cpu.max does not reserve control-plane headroom",
     )?;
     require(
-        read_trimmed(&cgroup.join("pids.max"))? == PIDS.to_string(),
-        "pids.max does not match the Runtime PID request",
+        read_trimmed(&management_cgroup.join("memory.max"))?
+            .parse::<u64>()
+            .is_ok_and(|value| value > MEMORY_BYTES),
+        "Sandbox management memory.max does not reserve control-plane headroom",
+    )?;
+    require(
+        read_trimmed(&management_cgroup.join("pids.max"))?
+            .parse::<u64>()
+            .is_ok_and(|value| value > u64::from(PIDS)),
+        "Sandbox management pids.max does not reserve control-plane headroom",
     )?;
 
     let visible = client
@@ -79,22 +127,47 @@ pub(super) async fn run(
             vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "cat /sys/fs/cgroup/cpu.max; cat /sys/fs/cgroup/memory.max; cat /sys/fs/cgroup/pids.max"
-                    .into(),
+                "cgroup_path=$(awk -F: '$1 == \"0\" && $2 == \"\" { print $3 }' /proc/self/cgroup); test -n \"$cgroup_path\"; printf 'cgroup=%s\\n' \"$cgroup_path\"; cat \"/sys/fs/cgroup${cgroup_path}/cpu.max\"; cat \"/sys/fs/cgroup${cgroup_path}/memory.max\"; cat \"/sys/fs/cgroup${cgroup_path}/pids.max\"".into(),
             ],
             5_000,
         ))
         .await?;
+    let mut visible_lines = visible.stdout.lines();
+    let workload_namespace_path = visible_lines
+        .next()
+        .and_then(|line| line.strip_prefix("cgroup="))
+        .ok_or_else(|| {
+            super::protocol(format!(
+                "workload did not report its cgroup path: {:?}",
+                visible.stdout
+            ))
+        })?;
+    let visible_cpu_max = visible_lines.next();
+    let visible_memory_max = visible_lines.next();
+    let visible_pids_max = visible_lines.next();
+    let expected_cpu_max = format!("{CPU_QUOTA_US} {CPU_PERIOD_US}");
+    let expected_memory_max = MEMORY_BYTES.to_string();
+    let expected_pids_max = PIDS.to_string();
     require(
-        visible
-            .stdout
-            .contains(&format!("{CPU_QUOTA_US} {CPU_PERIOD_US}"))
-            && visible.stdout.contains(&MEMORY_BYTES.to_string())
-            && visible.stdout.contains(&PIDS.to_string()),
-        "workload did not observe its configured cgroup limits",
+        visible_cpu_max == Some(expected_cpu_max.as_str())
+            && visible_memory_max == Some(expected_memory_max.as_str())
+            && visible_pids_max == Some(expected_pids_max.as_str()),
+        format!(
+            "workload did not observe its exact cgroup limits: {:?}",
+            visible.stdout
+        ),
+    )?;
+    let workload_cgroup = descendant_cgroup_path(management_cgroup, workload_namespace_path)?;
+    let expected_workload_cgroup = management_cgroup.join(WORKLOAD_CGROUP_NAME);
+    require(
+        workload_cgroup == expected_workload_cgroup && workload_cgroup.is_dir(),
+        format!(
+            "workload cgroup is not the runtime-owned workload leaf: {}",
+            workload_cgroup.display()
+        ),
     )?;
 
-    let throttled_before = counter(&cgroup.join("cpu.stat"), "nr_throttled")?;
+    let throttled_before = counter(&workload_cgroup.join("cpu.stat"), "nr_throttled")?;
     let cpu = client
         .exec(&fixture.cases.exec(
             "resources-cpu-behavior",
@@ -114,13 +187,13 @@ pub(super) async fn run(
             cpu.exit_code, cpu.stdout, cpu.stderr
         ),
     )?;
-    let throttled_after = counter(&cgroup.join("cpu.stat"), "nr_throttled")?;
+    let throttled_after = counter(&workload_cgroup.join("cpu.stat"), "nr_throttled")?;
     require(
         throttled_after > throttled_before,
         "CPU workload was never throttled by the configured quota",
     )?;
 
-    let pid_max_before = counter(&cgroup.join("pids.events"), "max")?;
+    let pid_max_before = counter(&workload_cgroup.join("pids.events"), "max")?;
     let _ = client
         .exec(&fixture.cases.exec(
             "resources-pids-behavior",
@@ -133,13 +206,13 @@ pub(super) async fn run(
             15_000,
         ))
         .await?;
-    let pid_max_after = counter(&cgroup.join("pids.events"), "max")?;
+    let pid_max_after = counter(&workload_cgroup.join("pids.events"), "max")?;
     require(
         pid_max_after > pid_max_before,
         "PID-heavy workload did not hit the configured pids.max",
     )?;
 
-    let oom_before = counter(&cgroup.join("memory.events"), "oom_kill")?;
+    let oom_before = counter(&workload_cgroup.join("memory.events"), "oom_kill")?;
     let memory = client
         .exec(&fixture.cases.exec(
             "resources-memory-behavior",
@@ -153,7 +226,7 @@ pub(super) async fn run(
             15_000,
         ))
         .await?;
-    let oom_after = counter(&cgroup.join("memory.events"), "oom_kill")?;
+    let oom_after = counter(&workload_cgroup.join("memory.events"), "oom_kill")?;
     require(
         oom_after > oom_before && memory.exit_code != 0,
         "memory-heavy workload was not killed by the exact memory limit",
@@ -168,6 +241,27 @@ pub(super) async fn run(
     require(
         observation.state == RuntimeUnitState::Running,
         "resource-limit probes killed the Sandbox Service",
+    )?;
+    let control_alive = client
+        .exec(&fixture.cases.exec(
+            "resources-control-after-oom",
+            &service.spec,
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'r17-control-alive\\n'".into(),
+            ],
+            5_000,
+        ))
+        .await?;
+    require(
+        control_alive.exit_code == 0
+            && control_alive.stdout == "r17-control-alive\n"
+            && control_alive.stderr.is_empty(),
+        format!(
+            "workload OOM damaged the Sandbox exec transport: exit_code={} stdout={:?} stderr={:?}",
+            control_alive.exit_code, control_alive.stdout, control_alive.stderr
+        ),
     )?;
 
     let timeout = fixture
@@ -196,6 +290,27 @@ fn read_trimmed(path: &Path) -> Result<String> {
     std::fs::read_to_string(path)
         .map(|value| value.trim().to_string())
         .map_err(|error| super::external(&format!("read {}", path.display()), error))
+}
+
+fn descendant_cgroup_path(sandbox_cgroup: &Path, namespace_path: &str) -> Result<PathBuf> {
+    let namespace_path = Path::new(namespace_path);
+    require(
+        namespace_path.is_absolute(),
+        format!("workload cgroup path is not absolute: {namespace_path:?}"),
+    )?;
+    let mut relative = PathBuf::new();
+    for component in namespace_path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(value) => relative.push(value),
+            _ => {
+                return Err(super::protocol(format!(
+                    "workload cgroup path contains an unsafe component: {namespace_path:?}"
+                )))
+            }
+        }
+    }
+    Ok(sandbox_cgroup.join(relative))
 }
 
 fn counter(path: &Path, key: &str) -> Result<u64> {

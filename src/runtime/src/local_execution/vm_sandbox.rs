@@ -278,8 +278,8 @@ impl VmLocalExecutionBackend {
         remove_anonymous_volumes: bool,
         force_preserve_rootfs: bool,
         timeout_secs: Option<u64>,
-    ) -> ExecutionManagerResult<KillOutcome> {
-        self.inspect_sandbox(record).await?;
+    ) -> ExecutionManagerResult<LocalExecutionTermination> {
+        let observation = self.inspect_sandbox(record).await?;
         if let Some(manager) = self.manager(&record.id) {
             return self
                 .destroy_registered(
@@ -295,7 +295,10 @@ impl VmLocalExecutionBackend {
             let anonymous_volumes = self.anonymous_volumes_for_record(record).await;
             self.cleanup_anonymous_volumes(anonymous_volumes).await;
         }
-        Ok(KillOutcome::Killed)
+        Ok(LocalExecutionTermination {
+            outcome: KillOutcome::Killed,
+            exit_code: observation.exit_code,
+        })
     }
 
     #[cfg(target_os = "linux")]

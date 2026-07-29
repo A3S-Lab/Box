@@ -160,6 +160,17 @@ fn expected_descriptor_size(size: i64, what: &str) -> Result<u64> {
     })
 }
 
+fn typed_descriptor_contract(descriptor: &Descriptor, what: &str) -> Result<(String, i64)> {
+    let digest = descriptor.digest().to_string();
+    let size = i64::try_from(descriptor.size()).map_err(|_| {
+        BoxError::OciImageError(format!(
+            "refusing {what} {digest}: descriptor size {} exceeds the supported range",
+            descriptor.size()
+        ))
+    })?;
+    Ok((digest, size))
+}
+
 /// Verify descriptor size and SHA-256 against the exact bytes to be consumed.
 pub(crate) fn validate_descriptor_bytes(
     digest: &str,
@@ -405,10 +416,11 @@ impl OciImage {
             .layers()
             .iter()
             .map(|layer| {
+                let (digest, size) = typed_descriptor_contract(layer, "layer blob")?;
                 verify_oci_blob_file(
                     &root_dir,
-                    layer.digest(),
-                    layer.size(),
+                    &digest,
+                    size,
                     MAX_OCI_LAYER_BLOB_BYTES,
                     "layer blob",
                 )
@@ -500,10 +512,11 @@ impl OciImage {
 
     /// Load the image manifest from blobs.
     fn load_manifest(root_dir: &Path, descriptor: &Descriptor) -> Result<ImageManifest> {
+        let (digest, size) = typed_descriptor_contract(descriptor, "manifest blob")?;
         let content = read_verified_oci_blob(
             root_dir,
-            descriptor.digest(),
-            descriptor.size(),
+            &digest,
+            size,
             MAX_OCI_MANIFEST_BYTES,
             "manifest blob",
         )?;
@@ -514,13 +527,9 @@ impl OciImage {
 
     /// Load the image configuration from blobs.
     fn load_config(root_dir: &Path, descriptor: &Descriptor) -> Result<OciImageConfig> {
-        let content = read_verified_oci_blob(
-            root_dir,
-            descriptor.digest(),
-            descriptor.size(),
-            MAX_OCI_CONFIG_BYTES,
-            "config blob",
-        )?;
+        let (digest, size) = typed_descriptor_contract(descriptor, "config blob")?;
+        let content =
+            read_verified_oci_blob(root_dir, &digest, size, MAX_OCI_CONFIG_BYTES, "config blob")?;
 
         let oci_config: ImageConfiguration = serde_json::from_slice(&content)
             .map_err(|e| BoxError::OciImageError(format!("Failed to parse config: {}", e)))?;
@@ -528,7 +537,7 @@ impl OciImage {
         let raw_config: serde_json::Value = serde_json::from_slice(&content)
             .map_err(|e| BoxError::OciImageError(format!("Failed to parse config JSON: {}", e)))?;
 
-        // oci-spec 0.6 does not model OnBuild or Healthcheck, so parse those
+        // oci-spec does not model OnBuild or Healthcheck, so parse those
         // Docker-compatible image fields directly from raw JSON.
         let onbuild: Vec<String> = raw_config
             .get("config")
@@ -1225,7 +1234,7 @@ mod tests {
     #[test]
     fn test_load_config_parses_onbuild_triggers() {
         // Verify that OnBuild entries in the raw OCI config JSON are parsed
-        // and surfaced in OciImageConfig.onbuild (oci-spec 0.6 doesn't model this field).
+        // and surfaced in OciImageConfig.onbuild (oci-spec does not model this field).
         let temp_dir = TempDir::new().unwrap();
         fs::create_dir_all(temp_dir.path().join("blobs/sha256")).unwrap();
         fs::write(

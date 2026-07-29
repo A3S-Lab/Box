@@ -284,42 +284,11 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
     #[cfg(not(target_os = "linux"))]
     let _ = (&sec_cap_drop, &sec_cap_keep, sec_no_new_privs);
 
-    // Create the per-container cgroup from the A3S_SEC_* limits so the TTY
-    // workload is bounded by cpu.max / pids.max / memory.* like the exec path —
-    // the PTY path previously created NO cgroup, so tty containers escaped every
-    // resource limit. Created here in the parent (allocates); the child joins it
-    // (writes its PID to cgroup.procs) before chroot. The handle lives for the
-    // connection so the cgroup dir is removed once the child exits.
+    // Join the same workload cgroup as main and exec. A separate per-PTY cgroup
+    // would turn one aggregate container budget into competing independent
+    // limits and make live updates ambiguous.
     #[cfg(target_os = "linux")]
-    let parse_u64 = |prefix: &str| {
-        request
-            .env
-            .iter()
-            .find_map(|entry| entry.strip_prefix(prefix))
-            .and_then(|value| value.trim().parse::<u64>().ok())
-    };
-    #[cfg(target_os = "linux")]
-    let parse_i64 = |prefix: &str| {
-        request
-            .env
-            .iter()
-            .find_map(|entry| entry.strip_prefix(prefix))
-            .and_then(|value| value.trim().parse::<i64>().ok())
-    };
-    #[cfg(target_os = "linux")]
-    let _container_cgroup = crate::cgroup::ContainerCgroup::create(
-        parse_u64("A3S_SEC_MEM_LIMIT="),
-        parse_u64("A3S_SEC_MEM_LOW="),
-        parse_i64("A3S_SEC_MEM_SWAP="),
-        parse_i64("A3S_SEC_CPU_QUOTA="),
-        parse_u64("A3S_SEC_CPU_PERIOD="),
-        parse_u64("A3S_SEC_CPU_SHARES="),
-        parse_u64("A3S_SEC_PIDS_LIMIT="),
-    );
-    #[cfg(target_os = "linux")]
-    let cgroup_procs: Option<std::ffi::CString> = _container_cgroup
-        .as_ref()
-        .and_then(|cgroup| std::ffi::CString::new(cgroup.procs_path()).ok());
+    let cgroup_procs = crate::exec_server::container_cgroup_procs_descriptor();
 
     // Set up the container rootfs before the fork — the child shares this mount
     // namespace and chroots into it. The exec path does all of this per spawn;
@@ -366,32 +335,12 @@ fn handle_pty_connection(fd: std::os::fd::OwnedFd) -> Result<(), Box<dyn std::er
 
             // Join the per-container cgroup FIRST, before chroot makes
             // /sys/fs/cgroup unreachable, so this process and everything it forks
-            // is bounded from birth. Async-signal-safe: open + getpid + a
-            // stack-only itoa + write + close, no allocation.
+            // is bounded from birth. The inherited descriptor avoids reopening
+            // a host-owned cgroup file from the Sandbox user namespace.
             #[cfg(target_os = "linux")]
-            if let Some(ref procs) = cgroup_procs {
-                let fd = unsafe { libc::open(procs.as_ptr(), libc::O_WRONLY) };
-                if fd >= 0 {
-                    let mut buf = [0u8; 20];
-                    let mut i = buf.len();
-                    let mut n = unsafe { libc::getpid() } as u64;
-                    if n == 0 {
-                        i -= 1;
-                        buf[i] = b'0';
-                    }
-                    while n > 0 {
-                        i -= 1;
-                        buf[i] = b'0' + (n % 10) as u8;
-                        n /= 10;
-                    }
-                    unsafe {
-                        libc::write(
-                            fd,
-                            buf[i..].as_ptr() as *const libc::c_void,
-                            (buf.len() - i) as libc::size_t,
-                        );
-                        libc::close(fd);
-                    }
+            if let Some(descriptor) = cgroup_procs {
+                if crate::cgroup::join_current_process(descriptor).is_err() {
+                    unsafe { libc::_exit(1) };
                 }
             }
 

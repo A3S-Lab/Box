@@ -1,12 +1,14 @@
-//! Live resource resize for running MicroVMs.
+//! Live resource resize for running Box backends.
 //!
-//! Tier 1 (vCPU count, memory size): NOT supported — libkrun sets these at
-//! boot via `krun_set_vm_config` and exposes no hot-resize API.
+//! Tier 1 (provisioned vCPU count and memory size) is immutable for a running
+//! Box. MicroVMs cannot hot-resize these libkrun settings, and the public Box
+//! lifecycle keeps the same stop/recreate contract across backends.
 //!
-//! Tier 2 (cgroup-based limits): Supported on Linux guests by writing to
-//! cgroup v2 control files inside the guest via the exec channel.
+//! Tier 2 (cgroup-based limits): MicroVMs write the guest workload cgroup via
+//! the exec channel. Host Sandboxes send one complete resource contract through
+//! the exact-generation A3S OCI SDK.
 
-use a3s_box_core::config::ResourceLimits;
+use a3s_box_core::config::{BoxConfig, ResourceLimits};
 use a3s_box_core::error::{BoxError, Result};
 
 /// A resource update request.
@@ -18,7 +20,7 @@ pub struct ResourceUpdate {
     pub vcpus: Option<u32>,
     /// Memory in MiB change (Tier 1 — will be rejected).
     pub memory_mb: Option<u32>,
-    /// Cgroup-based limits (Tier 2 — applied via exec).
+    /// Cgroup-based limits (Tier 2 — applied by the selected backend).
     pub limits: ResourceLimits,
 }
 
@@ -48,14 +50,81 @@ impl ResourceUpdate {
             || self.limits.cpuset_cpus.is_some()
     }
 
-    /// Build shell commands to apply Tier 2 cgroup changes inside the guest.
+    /// Merge every explicitly requested value into a complete Box config.
     ///
-    /// Returns one `sh` command per cgroup v2 control file. The resize exec runs
-    /// in the guest ROOT cgroup, so each command resolves the per-container
-    /// cgroup slice (`box-<pid>-<seq>`, joined by the container at spawn) at
-    /// runtime and writes there — a bare `/sys/fs/cgroup/<file>` write would hit
-    /// the root cgroup and silently leave the container's limits unchanged.
-    pub fn build_cgroup_commands(&self) -> Vec<String> {
+    /// Sandbox live updates use the resulting full snapshot because the A3S
+    /// OCI update contract replaces `linux.resources` atomically rather than
+    /// applying a sequence of partial cgroup writes.
+    pub fn apply_to_config(&self, config: &mut BoxConfig) {
+        if let Some(vcpus) = self.vcpus {
+            config.resources.vcpus = vcpus;
+        }
+        if let Some(memory_mb) = self.memory_mb {
+            config.resources.memory_mb = memory_mb;
+        }
+        self.apply_to_limits(&mut config.resource_limits);
+    }
+
+    /// Merge every explicitly requested Tier 2 value into existing limits.
+    pub fn apply_to_limits(&self, limits: &mut ResourceLimits) {
+        if let Some(value) = self.limits.memory_reservation {
+            limits.memory_reservation = Some(value);
+        }
+        if let Some(value) = self.limits.memory_swap {
+            limits.memory_swap = Some(value);
+        }
+        if let Some(value) = self.limits.pids_limit {
+            limits.pids_limit = Some(value);
+        }
+        if let Some(value) = self.limits.cpu_shares {
+            limits.cpu_shares = Some(value);
+        }
+        if let Some(value) = self.limits.cpu_quota {
+            limits.cpu_quota = Some(value);
+        }
+        if let Some(value) = self.limits.cpu_period {
+            limits.cpu_period = Some(value);
+        }
+        if let Some(value) = self.limits.cpuset_cpus.as_ref() {
+            limits.cpuset_cpus = Some(value.clone());
+        }
+    }
+
+    /// Stable names for Tier 2 fields carried by this request.
+    pub fn tier2_change_names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.limits.memory_reservation.is_some() {
+            names.push("memory_reservation");
+        }
+        if self.limits.memory_swap.is_some() {
+            names.push("memory_swap");
+        }
+        if self.limits.pids_limit.is_some() {
+            names.push("pids_limit");
+        }
+        if self.limits.cpu_shares.is_some() {
+            names.push("cpu_shares");
+        }
+        if self.limits.cpu_quota.is_some() {
+            names.push("cpu_quota");
+        }
+        if self.limits.cpu_period.is_some() {
+            names.push("cpu_period");
+        }
+        if self.limits.cpuset_cpus.is_some() {
+            names.push("cpuset_cpus");
+        }
+        names
+    }
+
+    /// Build shell commands to apply Tier 2 cgroup changes inside a MicroVM guest.
+    ///
+    /// Host Sandbox updates must use the A3S OCI SDK and never call this method.
+    /// For a MicroVM, the resize exec runs in the guest root cgroup, so each
+    /// command resolves the per-container `box-<pid>-<seq>` slice at runtime.
+    /// A bare `/sys/fs/cgroup/<file>` write would hit the root cgroup and silently
+    /// leave the container's limits unchanged.
+    pub fn build_microvm_cgroup_commands(&self) -> Vec<String> {
         let mut cmds = Vec::new();
 
         // cpu.max: "$QUOTA $PERIOD" (or "max $PERIOD" for unlimited)
@@ -169,20 +238,20 @@ fn cgroup_write_cmd(file: &str, value: &str) -> String {
 
 /// Validate a resource update request.
 ///
-/// Returns `Err` if Tier 1 changes are requested (not supported by libkrun).
+/// Returns `Err` if immutable Tier 1 provisioning changes are requested.
 /// Returns `Ok(())` if only Tier 2 changes or no changes.
 pub fn validate_update(update: &ResourceUpdate) -> Result<()> {
     if let Some(vcpus) = update.vcpus {
         return Err(BoxError::ResizeError(format!(
-            "Cannot change vCPU count to {} on a running VM: libkrun does not support \
-             hot-plug vCPUs. Stop and recreate the box with the desired CPU count.",
+            "Cannot change provisioned vCPU count to {} on a running Box. Stop and recreate \
+             the Box with the desired CPU count.",
             vcpus
         )));
     }
     if let Some(memory_mb) = update.memory_mb {
         return Err(BoxError::ResizeError(format!(
-            "Cannot change memory to {}MB on a running VM: libkrun does not support \
-             memory ballooning. Stop and recreate the box with the desired memory size.",
+            "Cannot change provisioned memory to {}MB on a running Box. Stop and recreate \
+             the Box with the desired memory size.",
             memory_mb
         )));
     }
@@ -190,9 +259,9 @@ pub fn validate_update(update: &ResourceUpdate) -> Result<()> {
 }
 
 /// Validate resource values independently from whether they can be changed on
-/// a running VM.
+/// a running Box.
 ///
-/// Callers that persist limits for a stopped VM must still call this function:
+/// Callers that persist limits for a stopped Box must still call this function:
 /// lifecycle state only controls hot-resize support, not input validity.
 pub fn validate_update_values(update: &ResourceUpdate) -> Result<()> {
     // Reject a malformed cpuset before it can be persisted or interpolated into
@@ -218,7 +287,34 @@ mod tests {
         let update = ResourceUpdate::default();
         assert!(!update.has_tier1_changes());
         assert!(!update.has_tier2_changes());
-        assert!(update.build_cgroup_commands().is_empty());
+        assert!(update.build_microvm_cgroup_commands().is_empty());
+        assert!(update.tier2_change_names().is_empty());
+    }
+
+    #[test]
+    fn update_merges_only_explicit_values_into_a_complete_config() {
+        let mut config = BoxConfig::default();
+        config.resources.vcpus = 2;
+        config.resources.memory_mb = 512;
+        config.resource_limits.cpu_quota = Some(20_000);
+        config.resource_limits.pids_limit = Some(64);
+        let update = ResourceUpdate {
+            limits: ResourceLimits {
+                cpu_shares: Some(512),
+                pids_limit: Some(96),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        update.apply_to_config(&mut config);
+
+        assert_eq!(config.resources.vcpus, 2);
+        assert_eq!(config.resources.memory_mb, 512);
+        assert_eq!(config.resource_limits.cpu_quota, Some(20_000));
+        assert_eq!(config.resource_limits.cpu_shares, Some(512));
+        assert_eq!(config.resource_limits.pids_limit, Some(96));
+        assert_eq!(update.tier2_change_names(), ["pids_limit", "cpu_shares"]);
     }
 
     #[test]
@@ -248,7 +344,8 @@ mod tests {
         };
         let err = validate_update(&update).unwrap_err();
         assert!(err.to_string().contains("vCPU count"));
-        assert!(err.to_string().contains("libkrun"));
+        assert!(err.to_string().contains("running Box"));
+        assert!(err.to_string().contains("Stop and recreate"));
     }
 
     #[test]
@@ -259,7 +356,8 @@ mod tests {
         };
         let err = validate_update(&update).unwrap_err();
         assert!(err.to_string().contains("memory"));
-        assert!(err.to_string().contains("ballooning"));
+        assert!(err.to_string().contains("running Box"));
+        assert!(err.to_string().contains("Stop and recreate"));
     }
 
     #[test]
@@ -285,7 +383,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert_eq!(cmds.len(), 1);
         assert!(cmds[0].contains("50000 100000"));
         assert!(cmds[0].contains("cpu.max"));
@@ -300,7 +398,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert_eq!(cmds.len(), 1);
         assert!(cmds[0].contains("max 100000"));
     }
@@ -314,7 +412,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert_eq!(cmds.len(), 1);
         assert!(cmds[0].contains("cpu.weight"));
     }
@@ -328,7 +426,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert!(cmds[0].contains("'1'"));
     }
 
@@ -341,7 +439,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert_eq!(cmds.len(), 1);
         assert!(cmds[0].contains("536870912"));
         assert!(cmds[0].contains("memory.low"));
@@ -356,7 +454,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert!(cmds[0].contains("'max'"));
         assert!(cmds[0].contains("memory.swap.max"));
     }
@@ -370,7 +468,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert!(cmds[0].contains("256"));
         assert!(cmds[0].contains("pids.max"));
     }
@@ -384,7 +482,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert!(cmds[0].contains("0,1,3"));
         assert!(cmds[0].contains("cpuset.cpus"));
     }
@@ -428,7 +526,7 @@ mod tests {
         let err = validate_update(&update).unwrap_err();
         assert!(err.to_string().contains("cpuset"));
         // And the dangerous value never makes it into a shell command.
-        assert!(update.build_cgroup_commands().is_empty());
+        assert!(update.build_microvm_cgroup_commands().is_empty());
     }
 
     #[test]
@@ -456,7 +554,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert!(cmds[0].contains("'10000'"), "got {}", cmds[0]);
     }
 
@@ -471,7 +569,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert_eq!(cmds.len(), 3);
     }
 
@@ -484,7 +582,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert_eq!(cmds.len(), 1);
         // Must resolve the per-container `box-*` slice, not write a bare root path.
         assert!(cmds[0].contains("/sys/fs/cgroup/box-*"), "got {}", cmds[0]);
@@ -506,7 +604,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let cmds = update.build_cgroup_commands();
+        let cmds = update.build_microvm_cgroup_commands();
         assert_eq!(cmds.len(), 1);
         assert!(cmds[0].contains("exit 1"), "must fail loudly: {}", cmds[0]);
         // The dangerous root-cgroup fallback must be gone: no assignment that

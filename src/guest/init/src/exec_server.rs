@@ -120,22 +120,73 @@ struct DeferredMainSpec {
 #[cfg(target_os = "linux")]
 static DEFERRED_MAIN: std::sync::Mutex<Option<DeferredMainSpec>> = std::sync::Mutex::new(None);
 
-/// The per-container cgroup's `cgroup.procs` path, stashed at boot when the box
-/// boots IDLE (deferred-main). The deferred main is spawned later by
-/// [`spawn_deferred_main`], which must write its PID here to join the cgroup —
-/// otherwise it runs OUTSIDE the cgroup and `pids.max` / `cpu.max` are
-/// unenforced (the boot-spawn path passes this to `spawn_isolated`).
+/// The single workload cgroup binding, stashed before any workload process
+/// starts. The path is read-only evidence for OOM accounting; every membership
+/// write uses the already-open descriptor so a host Sandbox never re-opens a
+/// host-root-owned cgroup file from its user namespace.
 #[cfg(target_os = "linux")]
-static DEFERRED_CGROUP_PROCS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[derive(Clone)]
+struct ContainerCgroupBinding {
+    procs_path: String,
+    procs_descriptor: std::os::fd::RawFd,
+}
 
-/// Stash the per-container cgroup's `cgroup.procs` path so a later deferred-main
-/// spawn joins the cgroup, matching the boot-spawn path. `None` (no limit set /
-/// no cgroup) leaves the deferred main uncgrouped, as before.
 #[cfg(target_os = "linux")]
-pub fn set_deferred_cgroup_procs(procs_path: Option<String>) {
-    *DEFERRED_CGROUP_PROCS
+static CONTAINER_CGROUP: std::sync::Mutex<Option<ContainerCgroupBinding>> =
+    std::sync::Mutex::new(None);
+
+/// Publish the workload cgroup before the main process or session servers start.
+#[cfg(target_os = "linux")]
+pub fn set_container_cgroup(
+    procs_path: Option<String>,
+    procs_descriptor: Option<std::os::fd::RawFd>,
+) -> std::io::Result<()> {
+    let binding = match (procs_path, procs_descriptor) {
+        (Some(procs_path), Some(procs_descriptor)) => Some(ContainerCgroupBinding {
+            procs_path,
+            procs_descriptor,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "workload cgroup path and descriptor must be published together",
+            ))
+        }
+    };
+    *CONTAINER_CGROUP.lock().unwrap_or_else(|e| e.into_inner()) = binding;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn container_cgroup() -> Option<ContainerCgroupBinding> {
+    CONTAINER_CGROUP
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = procs_path;
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+#[cfg(target_os = "linux")]
+pub fn container_cgroup_procs_descriptor() -> Option<std::os::fd::RawFd> {
+    container_cgroup().map(|binding| binding.procs_descriptor)
+}
+
+#[cfg(target_os = "linux")]
+fn container_cgroup_oom_kills() -> u64 {
+    let Some(binding) = container_cgroup() else {
+        return 0;
+    };
+    let Some(path) = Path::new(&binding.procs_path).parent() else {
+        return 0;
+    };
+    let Ok(events) = std::fs::read_to_string(path.join("memory.events")) else {
+        return 0;
+    };
+    events
+        .lines()
+        .find_map(|line| line.strip_prefix("oom_kill "))
+        .and_then(|count| count.trim().parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 /// Stash the container command for a deferred (IDLE) boot. The command already
@@ -212,10 +263,7 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
     // subject to the same pids.max / cpu.max as a boot-spawned main. Without
     // this the warm/IDLE-boot main runs outside the cgroup and the limits are
     // silently inert.
-    let cgroup_procs = DEFERRED_CGROUP_PROCS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let cgroup_procs = container_cgroup_procs_descriptor();
     let (mut command, _timeout) = build_command(
         ExecCommandSpec {
             cmd: &cmd_vec,
@@ -227,7 +275,7 @@ fn spawn_deferred_main(frame: Option<DeferredMainSpec>) -> Result<i32, String> {
             stdin_streaming: false,
             user: user.as_deref(),
         },
-        cgroup_procs.as_deref(),
+        cgroup_procs,
     )
     .map_err(|out| String::from_utf8_lossy(&out.stderr).into_owned())?;
     command
@@ -1762,7 +1810,7 @@ struct ExecCommandSpec<'a> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn build_command(
     spec: ExecCommandSpec<'_>,
-    cgroup_procs: Option<&str>,
+    cgroup_procs: Option<std::os::fd::RawFd>,
 ) -> Result<(std::process::Command, Duration), ExecOutput> {
     if spec.cmd.is_empty() {
         return Err(ExecOutput {
@@ -2126,6 +2174,10 @@ fn execute_command(
     stdin_data: Option<&[u8]>,
     user: Option<&str>,
 ) -> ExecOutput {
+    #[cfg(target_os = "linux")]
+    let cgroup_procs = container_cgroup_procs_descriptor();
+    #[cfg(not(target_os = "linux"))]
+    let cgroup_procs: Option<i32> = None;
     let (mut command, timeout) = match build_command(
         ExecCommandSpec {
             cmd,
@@ -2137,7 +2189,7 @@ fn execute_command(
             stdin_streaming: false,
             user,
         },
-        None,
+        cgroup_procs,
     ) {
         Ok(command) => command,
         Err(output) => return output,
@@ -2434,27 +2486,14 @@ fn execute_command_streaming(
     input_rx: Option<mpsc::Receiver<ExecInputEvent>>,
     writer: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Per-container cgroup v2 (memory.max / cpu.max) for resource limits + OOM
-    // accounting. Created BEFORE build_command so its cgroup.procs path can be
-    // handed to the pre-exec hook: the container joins the cgroup itself (before
-    // exec), so every worker it forks is bounded too — a parent-side join after
-    // spawn races with workers the container forks immediately.
     #[cfg(target_os = "linux")]
-    let container_cgroup = crate::cgroup::ContainerCgroup::create(
-        parse_sec_mem_limit(spec.env),
-        parse_sec_int(spec.env, "A3S_SEC_MEM_LOW=").map(|value| value as u64),
-        parse_sec_int(spec.env, "A3S_SEC_MEM_SWAP="),
-        parse_sec_int(spec.env, "A3S_SEC_CPU_QUOTA="),
-        parse_sec_int(spec.env, "A3S_SEC_CPU_PERIOD=").map(|value| value as u64),
-        parse_sec_int(spec.env, "A3S_SEC_CPU_SHARES=").map(|value| value as u64),
-        parse_sec_int(spec.env, "A3S_SEC_PIDS_LIMIT=").map(|value| value as u64),
-    );
+    let cgroup_procs = container_cgroup_procs_descriptor();
     #[cfg(target_os = "linux")]
-    let cgroup_procs = container_cgroup.as_ref().map(|cgroup| cgroup.procs_path());
+    let oom_kills_before = container_cgroup_oom_kills();
     #[cfg(not(target_os = "linux"))]
-    let cgroup_procs: Option<String> = None;
+    let cgroup_procs: Option<i32> = None;
 
-    let (mut command, timeout) = match build_command(spec, cgroup_procs.as_deref()) {
+    let (mut command, timeout) = match build_command(spec, cgroup_procs) {
         Ok(command) => command,
         Err(output) => {
             write_exec_stream_response(writer, &output)?;
@@ -2534,12 +2573,11 @@ fn execute_command_streaming(
         None => {}
     }
 
-    // A non-zero cgroup `oom_kill` count means the kernel OOM-killer reaped the
-    // container for exceeding its memory limit — report it as OOMKilled.
+    // A newly recorded workload-cgroup OOM kill means this command (or a
+    // concurrent process sharing the same exact aggregate limit) exhausted the
+    // container budget.
     #[cfg(target_os = "linux")]
-    let oom_killed = container_cgroup
-        .as_ref()
-        .is_some_and(|cgroup| cgroup.oom_kills() > 0);
+    let oom_killed = container_cgroup_oom_kills() > oom_kills_before;
     #[cfg(not(target_os = "linux"))]
     let oom_killed = false;
     write_exec_exit(writer, exit_code, oom_killed)
@@ -2558,17 +2596,13 @@ fn configure_child_process(
     cap_keep: Option<Vec<String>>,
     seccomp_localhost: Vec<String>,
     no_new_privs: bool,
-    cgroup_procs: Option<&str>,
+    cgroup_procs: Option<std::os::fd::RawFd>,
 ) {
     use std::ffi::CString;
     use std::os::unix::process::CommandExt;
 
     let rootfs = rootfs
         .map(|rootfs| CString::new(rootfs.as_bytes()).expect("rootfs path was pre-validated"));
-    // The per-container cgroup's `cgroup.procs` path; the child writes its own
-    // PID here (before chroot) so it — and everything it forks — is bounded by
-    // the cgroup's memory.max / cpu.max from birth. Built pre-fork (allocates).
-    let cgroup_procs = cgroup_procs.and_then(|path| CString::new(path.as_bytes()).ok());
     // workdir (for chdir) is only used when chrooting into a rootfs, where
     // build_command has already rejected an embedded NUL. Build the CString only
     // in that case so a workdir containing a NUL with no rootfs set cannot panic
@@ -2601,37 +2635,18 @@ fn configure_child_process(
         let _ = &cap_keep;
         let _ = &seccomp_localhost;
         let _ = no_new_privs;
+        let _ = cgroup_procs;
     }
 
     unsafe {
         command.pre_exec(move || {
             // Join the per-container cgroup FIRST, before chroot (afterwards the
             // guest /sys/fs/cgroup is unreachable). Best-effort and entirely
-            // async-signal-safe: open + getpid + a stack-only itoa + write +
-            // close, no allocation. A failure here leaves the container
-            // unbounded rather than failing its launch.
-            if let Some(procs) = cgroup_procs.as_ref() {
-                let fd = libc::open(procs.as_ptr(), libc::O_WRONLY);
-                if fd >= 0 {
-                    let mut buf = [0u8; 20];
-                    let mut i = buf.len();
-                    let mut n = libc::getpid() as u64;
-                    if n == 0 {
-                        i -= 1;
-                        buf[i] = b'0';
-                    }
-                    while n > 0 {
-                        i -= 1;
-                        buf[i] = b'0' + (n % 10) as u8;
-                        n /= 10;
-                    }
-                    let _ = libc::write(
-                        fd,
-                        buf[i..].as_ptr() as *const libc::c_void,
-                        (buf.len() - i) as libc::size_t,
-                    );
-                    let _ = libc::close(fd);
-                }
+            // async-signal-safe: one write through the runtime/guest-init-owned
+            // descriptor. Fail closed instead of launching an unbounded process.
+            #[cfg(target_os = "linux")]
+            if let Some(descriptor) = cgroup_procs {
+                crate::cgroup::join_current_process(descriptor)?;
             }
             if libc::setpgid(0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -2705,7 +2720,7 @@ fn configure_child_process(
     _cap_keep: Option<Vec<String>>,
     _seccomp_localhost: Vec<String>,
     _no_new_privs: bool,
-    _cgroup_procs: Option<&str>,
+    _cgroup_procs: Option<i32>,
 ) {
 }
 
@@ -2812,25 +2827,6 @@ pub(crate) fn ensure_container_dev_nodes(rootfs: &str) {
             warn!("Failed to symlink /dev/{link} -> {target}: {e}");
         }
     }
-}
-
-/// Parse the container memory limit (bytes) from `A3S_SEC_MEM_LIMIT=<n>`.
-/// Returns `None` when unset, zero, or unparseable (no cgroup enforcement).
-#[cfg(target_os = "linux")]
-fn parse_sec_mem_limit(env: &[String]) -> Option<u64> {
-    env.iter()
-        .find_map(|entry| entry.strip_prefix("A3S_SEC_MEM_LIMIT="))
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|limit| *limit > 0)
-}
-
-/// Parse a signed integer from an `A3S_SEC_*=<n>` env entry (the CPU
-/// `cpu_quota`/`cpu_period` cgroup limits). `None` when unset/unparseable.
-#[cfg(target_os = "linux")]
-fn parse_sec_int(env: &[String], prefix: &str) -> Option<i64> {
-    env.iter()
-        .find_map(|entry| entry.strip_prefix(prefix))
-        .and_then(|value| value.trim().parse::<i64>().ok())
 }
 
 /// Parse a `':'`-separated absolute-path list from an `A3S_SEC_*` env entry.
@@ -3442,14 +3438,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn test_build_command_uses_selected_users_home_unless_overridden() {
-        let rootfs = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(rootfs.path().join("etc")).unwrap();
+        use std::os::unix::fs::MetadataExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("etc")).unwrap();
         std::fs::write(
-            rootfs.path().join("etc/passwd"),
+            directory.path().join("etc/passwd"),
             "tester:x:1000:1000:tester:/home/tester:/bin/sh\n",
         )
         .unwrap();
-        let rootfs = rootfs.path().to_str().unwrap();
+        let rootfs = directory.path().to_str().unwrap();
 
         let build = |env: &[String]| {
             build_command(
@@ -3481,6 +3479,14 @@ mod tests {
                 .any(|(key, value)| key == "HOME"
                     && value == Some(std::ffi::OsStr::new("/workspace")))
         );
+
+        let root_device = std::fs::metadata(directory.path()).unwrap().dev();
+        for subdir in ["sys", "proc"] {
+            let mountpoint = directory.path().join(subdir);
+            if std::fs::metadata(&mountpoint).is_ok_and(|metadata| metadata.dev() != root_device) {
+                nix::mount::umount(&mountpoint).unwrap();
+            }
+        }
     }
 
     #[test]

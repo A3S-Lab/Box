@@ -1,9 +1,9 @@
-#![cfg(any(target_os = "macos", all(test, unix)))]
+#![cfg(unix)]
 
-//! Pure-Rust userspace network proxy for libkrun on macOS.
+//! Pure-Rust userspace networking for libkrun VMs.
 //!
-//! Uses a Unix datagram `socketpair()` to connect libkrun's virtio-net backend
-//! to the userspace gateway and provides the gateway services needed by the guest:
+//! On macOS, a Unix datagram `socketpair()` connects libkrun's virtio-net
+//! backend to the userspace gateway and provides these guest services:
 //!
 //! - **ARP**: handled automatically by smoltcp's interface layer.
 //! - **DNS**: UDP/53 queries forwarded to the host's configured DNS servers.
@@ -11,9 +11,13 @@
 //!   parsed from the box's `port_map` config (e.g. `"8088:80"`).
 //! - **Outbound TCP proxying**: guest connections addressed through the gateway
 //!   are terminated by smoltcp and connected through the host TCP stack.
+//!
+//! On Linux, a stream adapter switches same-network peer frames while retaining
+//! passt for gateway and egress traffic.
 
 mod device;
 mod manager;
+mod passt_bridge;
 #[cfg(test)]
 mod tests;
 
@@ -41,6 +45,7 @@ use device::{BridgePort, NetStats, UnixgramDevice, GATEWAY_MAC};
 use manager::write_stats_file;
 
 pub use manager::{spawn_inherited_netproxy, InheritedNetProxyConfig, NetProxyManager};
+pub use passt_bridge::spawn_inherited_passt_bridge;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

@@ -1,12 +1,16 @@
 //! `a3s-box start` command — Start one or more eligible boxes.
 
-use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionManager};
-use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionState};
+use a3s_box_core::{
+    ExecutionGeneration, ExecutionId, ExecutionManager, OperationId, RestartExecutionOptions,
+};
+use a3s_box_runtime::{LocalExecutionManager, ManagedExecutionOperation, ManagedExecutionState};
 use clap::Args;
 
 use crate::boot;
 use crate::resolve;
 use crate::state::StateFile;
+
+const DEFAULT_START_RESTART_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Args)]
 pub struct StartArgs {
@@ -84,16 +88,40 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
                 }
             }
         }
-        StartPlan::Managed {
-            execution_id,
-            generation,
-        } => {
+        managed_plan => {
             // Managed lifecycle APIs acquire the same cross-process lock in the
             // runtime crate, covering CLI, SDK, and reconcile entry points.
             drop(lifecycle_lock.take());
             let home = a3s_box_core::dirs_home();
             let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
-            manager.start(&execution_id, generation).await?;
+            match managed_plan {
+                StartPlan::Managed {
+                    execution_id,
+                    generation,
+                } => {
+                    manager.start(&execution_id, generation).await?;
+                }
+                StartPlan::ManagedRestart {
+                    execution_id,
+                    generation,
+                    operation_id,
+                    stop_timeout_secs,
+                } => {
+                    let operation_id = match operation_id {
+                        Some(operation_id) => operation_id,
+                        None => OperationId::new(format!("cli-start-{}", uuid::Uuid::new_v4()))?,
+                    };
+                    manager
+                        .restart_with_options(
+                            &execution_id,
+                            generation,
+                            &operation_id,
+                            RestartExecutionOptions { stop_timeout_secs },
+                        )
+                        .await?;
+                }
+                StartPlan::Legacy => unreachable!("legacy starts use the legacy branch"),
+            }
 
             let baseline_box_dir = record.box_dir.clone();
             let baseline_box_id = record.id.clone();
@@ -148,6 +176,12 @@ enum StartPlan {
         execution_id: ExecutionId,
         generation: ExecutionGeneration,
     },
+    ManagedRestart {
+        execution_id: ExecutionId,
+        generation: ExecutionGeneration,
+        operation_id: Option<OperationId>,
+        stop_timeout_secs: Option<u64>,
+    },
 }
 
 fn start_plan(record: &crate::state::BoxRecord) -> Result<StartPlan, String> {
@@ -168,10 +202,39 @@ fn start_plan(record: &crate::state::BoxRecord) -> Result<StartPlan, String> {
             generation: metadata.generation,
         }),
         ManagedExecutionState::Running => Err(format!("Box {} is already running", record.name)),
-        ManagedExecutionState::Stopped | ManagedExecutionState::Failed => Err(format!(
-            "Box {} is {state}; ordinary start cannot revive a terminal managed execution without advancing its generation",
-            record.name
-        )),
+        ManagedExecutionState::Stopped | ManagedExecutionState::Failed => {
+            Ok(StartPlan::ManagedRestart {
+                execution_id: ExecutionId::new(record.id.clone())
+                    .map_err(|error| error.to_string())?,
+                generation: metadata.generation,
+                operation_id: None,
+                stop_timeout_secs: Some(
+                    record
+                        .stop_timeout
+                        .unwrap_or(DEFAULT_START_RESTART_TIMEOUT_SECS),
+                ),
+            })
+        }
+        ManagedExecutionState::RestartStopping | ManagedExecutionState::RestartStarting => {
+            match metadata.pending_operation.as_ref() {
+                Some(ManagedExecutionOperation::Restart {
+                    operation_id,
+                    source_generation,
+                    stop_timeout_secs,
+                    ..
+                }) => Ok(StartPlan::ManagedRestart {
+                    execution_id: ExecutionId::new(record.id.clone())
+                        .map_err(|error| error.to_string())?,
+                    generation: *source_generation,
+                    operation_id: Some(operation_id.clone()),
+                    stop_timeout_secs: *stop_timeout_secs,
+                }),
+                _ => Err(format!(
+                    "Box {} has no persisted managed restart intent",
+                    record.name
+                )),
+            }
+        }
         other => Err(format!("Cannot start box in state: {other}")),
     }
 }
@@ -261,15 +324,58 @@ mod tests {
     }
 
     #[test]
-    fn managed_start_plan_rejects_terminal_resurrection() {
+    fn managed_start_plan_advances_terminal_generation() {
         for status in [
             ManagedExecutionState::Stopped,
             ManagedExecutionState::Failed,
         ] {
-            let error = start_plan(&managed_record(status)).unwrap_err();
-            assert!(error.contains("cannot revive a terminal managed execution"));
-            assert!(error.contains("advancing its generation"));
+            assert_eq!(
+                start_plan(&managed_record(status)).unwrap(),
+                StartPlan::ManagedRestart {
+                    execution_id: ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+                    generation: ExecutionGeneration::INITIAL,
+                    operation_id: None,
+                    stop_timeout_secs: Some(10),
+                }
+            );
         }
+    }
+
+    #[test]
+    fn managed_start_plan_uses_record_stop_timeout() {
+        let mut record = managed_record(ManagedExecutionState::Stopped);
+        record.stop_timeout = Some(3);
+
+        let StartPlan::ManagedRestart {
+            stop_timeout_secs, ..
+        } = start_plan(&record).unwrap()
+        else {
+            panic!("expected managed restart plan");
+        };
+        assert_eq!(stop_timeout_secs, Some(3));
+    }
+
+    #[test]
+    fn managed_start_plan_recovers_persisted_restart() {
+        let mut record = managed_record(ManagedExecutionState::RestartStarting);
+        let metadata = record.managed_execution.as_mut().unwrap();
+        metadata.generation = ExecutionGeneration::new(2).unwrap();
+        metadata.pending_operation = Some(ManagedExecutionOperation::Restart {
+            operation_id: OperationId::new("operation-restart").unwrap(),
+            source_generation: ExecutionGeneration::INITIAL,
+            source_state: ManagedExecutionState::Stopped,
+            stop_timeout_secs: Some(7),
+        });
+
+        assert_eq!(
+            start_plan(&record).unwrap(),
+            StartPlan::ManagedRestart {
+                execution_id: ExecutionId::new("11111111-1111-4111-8111-111111111111").unwrap(),
+                generation: ExecutionGeneration::INITIAL,
+                operation_id: Some(OperationId::new("operation-restart").unwrap()),
+                stop_timeout_secs: Some(7),
+            }
+        );
     }
 
     #[test]

@@ -141,6 +141,13 @@ contract, and both have real-runtime coverage. Network policy values such as
 negative tests. TEE is a host-specific capability of a qualifying MicroVM, not
 a third execution backend.
 
+Sandbox resource control also has one owner. `linux.resources` contains the
+exact workload CPU, memory, and PID contract; A3S OCI Runtime derives a bounded
+outer control-plane envelope, owns the fixed `a3s-control` and `a3s-workload`
+cgroups, and performs live updates and cleanup across both levels. Guest Init
+joins workload processes only through runtime-provided descriptors while the
+Sandbox cgroup filesystem remains read-only.
+
 > [!IMPORTANT]
 > A shared-kernel Sandbox does not defend against a working host-kernel exploit,
 > a hostile host administrator, hardware side channels, or data deliberately
@@ -312,7 +319,7 @@ or go directly to the [Rust](src/sdk/README.md),
 | Execution path | Real-runtime evidence | Remaining boundary |
 | --- | --- | --- |
 | Default MicroVM on Windows/WHPX | [`scripts/windows-whpx-soak.ps1`](scripts/windows-whpx-soak.ps1) covers lifecycle and foreground exit, published-port networking, read-only bind mounts, named volumes, volume-backed initialization success and failure, metadata-preserving commit, filesystem commit/snapshot restore, and repeated virtio-fs traversal. The current qualification completed all 12 cases and returned the start and final runtime inventories to zero. | This proves the tested x86_64 Windows/WHPX host and workload matrix, not KVM, HVF, or TEE hardware. |
-| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles, then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
+| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles; certifies every advertised R17 Base, Recovery, Networking, Mounts, Resources, Logs, Exec, and Security profile; then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process/cgroup cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
 | Linux/KVM MicroVM | A self-hosted real-KVM workflow covers the core lifecycle, SDK, CRI, leak, race, snapshot-fork, and soak paths when `KVM_CI=true`. | The job is conditionally skipped without the enrolled runner; a green hosted build alone is not real-KVM evidence. |
 | macOS/HVF MicroVM | Hosted macOS arm64 compilation checks the supported target. | A real Apple Silicon/HVF boot and soak are separate release evidence. |
 | SEV-SNP-oriented TEE | Unit and simulation tests cover application flow and protocol behavior. | No hardware security claim is made without a qualifying SEV-SNP host and attestation evidence. |

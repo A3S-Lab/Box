@@ -8,7 +8,10 @@ use std::sync::{
 };
 
 use smoltcp::time::Instant;
-use smoltcp::wire::EthernetAddress;
+use smoltcp::wire::{
+    EthernetAddress, EthernetFrame, EthernetProtocol, IpAddress, IpProtocol, Ipv4Packet, TcpPacket,
+    UdpPacket,
+};
 
 /// MAC address we assign to the virtual gateway interface.
 pub(super) const GATEWAY_MAC: EthernetAddress =
@@ -17,6 +20,9 @@ pub(super) const GATEWAY_MAC: EthernetAddress =
 pub(super) const MAX_FRAME: usize = 1514;
 /// Bound userspace buffering while the libkrun datagram endpoint catches up.
 const MAX_PENDING_TX_FRAMES: usize = 256;
+/// passt supports jumbo stream frames; keep peer-switch receive buffers large
+/// enough even though the macOS smoltcp device advertises a 1514-byte MTU.
+const MAX_BRIDGE_FRAME: usize = 65_550;
 /// Keep each non-blocking socket pass finite so network and VM work stay fair.
 const IO_BURST_FRAMES: usize = 64;
 
@@ -172,6 +178,8 @@ pub(super) struct BridgePort {
 impl BridgePort {
     pub(super) fn bind(directory: &Path, own_mac: [u8; 6]) -> io::Result<Self> {
         std::fs::create_dir_all(directory)?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
         let own_path = directory.join(mac_socket_name(own_mac));
         match std::fs::remove_file(&own_path) {
             Ok(()) => {}
@@ -197,13 +205,30 @@ impl BridgePort {
             return true;
         }
         if is_group_mac(destination) {
+            // passt proxy-answers ARP requests with its gateway MAC, including
+            // requests for another guest on the same logical A3S network. If
+            // that request also reaches the peer switch, the two replies race
+            // and the sender can cache passt's MAC for the peer IP. A3S derives
+            // every endpoint MAC from its IPv4 address, so route peer ARP
+            // requests only to the matching registered switch port.
+            if let Some(peer_mac) = peer_mac_from_arp_request(frame) {
+                let peer = self.directory.join(mac_socket_name(peer_mac));
+                if peer != self.own_path && peer.exists() {
+                    let peer_frame = prepare_peer_frame(frame);
+                    if let Err(error) = self.socket.send_to(&peer_frame, &peer) {
+                        tracing::debug!(%error, peer = %peer.display(), "Bridge peer ARP send failed");
+                    }
+                    return false;
+                }
+            }
             self.flood(frame);
             return true;
         }
 
         let peer = self.directory.join(mac_socket_name(destination));
         if peer != self.own_path && peer.exists() {
-            if let Err(error) = self.socket.send_to(frame, &peer) {
+            let peer_frame = prepare_peer_frame(frame);
+            if let Err(error) = self.socket.send_to(&peer_frame, &peer) {
                 tracing::debug!(%error, peer = %peer.display(), "Bridge peer send failed");
             }
             return false;
@@ -219,17 +244,18 @@ impl BridgePort {
         let Ok(entries) = std::fs::read_dir(&self.directory) else {
             return;
         };
+        let peer_frame = prepare_peer_frame(frame);
         for entry in entries.flatten() {
             let path = entry.path();
             if path == self.own_path || path.extension().and_then(|v| v.to_str()) != Some("sock") {
                 continue;
             }
-            let _ = self.socket.send_to(frame, path);
+            let _ = self.socket.send_to(&peer_frame, path);
         }
     }
 
     pub(super) fn drain_frames(&self, frames: &mut Vec<Vec<u8>>, limit: usize) {
-        let mut buf = [0u8; MAX_FRAME];
+        let mut buf = [0u8; MAX_BRIDGE_FRAME];
         for _ in 0..limit {
             match self.socket.recv(&mut buf) {
                 Ok(size) => {
@@ -242,6 +268,11 @@ impl BridgePort {
                 }
             }
         }
+    }
+
+    pub(super) fn raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.socket.as_raw_fd()
     }
 }
 
@@ -257,6 +288,73 @@ fn ethernet_destination(frame: &[u8]) -> Option<[u8; 6]> {
 
 fn is_group_mac(mac: [u8; 6]) -> bool {
     mac[0] & 1 == 1
+}
+
+/// Build the switch-facing copy of a guest frame.
+///
+/// Linux virtio-net advertises guest checksum offload because passt completes
+/// transport checksums on its path. Same-network traffic bypasses passt, so the
+/// userspace switch must complete the checksum before delivering that copy to
+/// another guest. The caller retains the original frame for passt.
+fn prepare_peer_frame(frame: &[u8]) -> Vec<u8> {
+    let mut peer_frame = frame.to_vec();
+    complete_peer_ipv4_transport_checksum(&mut peer_frame);
+    peer_frame
+}
+
+fn complete_peer_ipv4_transport_checksum(frame: &mut [u8]) {
+    let Ok(mut ethernet) = EthernetFrame::new_checked(frame) else {
+        return;
+    };
+    if ethernet.ethertype() != EthernetProtocol::Ipv4 {
+        return;
+    }
+
+    let Ok(mut ipv4) = Ipv4Packet::new_checked(ethernet.payload_mut()) else {
+        return;
+    };
+    if ipv4.version() != 4 || ipv4.more_frags() || ipv4.frag_offset() != 0 {
+        // A fragment does not contain the complete transport segment. Leave it
+        // untouched rather than calculating a checksum over partial data.
+        return;
+    }
+
+    let source = IpAddress::Ipv4(ipv4.src_addr());
+    let destination = IpAddress::Ipv4(ipv4.dst_addr());
+    match ipv4.next_header() {
+        IpProtocol::Tcp => {
+            if let Ok(mut tcp) = TcpPacket::new_checked(ipv4.payload_mut()) {
+                tcp.fill_checksum(&source, &destination);
+            }
+        }
+        IpProtocol::Udp => {
+            if let Ok(mut udp) = UdpPacket::new_checked(ipv4.payload_mut()) {
+                // Filling a zero IPv4 UDP checksum is valid and also covers the
+                // checksum-offload representation observed from virtio-net.
+                udp.fill_checksum(&source, &destination);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn peer_mac_from_arp_request(frame: &[u8]) -> Option<[u8; 6]> {
+    // Ethernet II ARP for IPv4 with six-byte hardware and four-byte protocol
+    // addresses. The target protocol address starts at byte 38.
+    if frame.get(12..14)? != [0x08, 0x06]
+        || frame.get(14..22)? != [0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01]
+    {
+        return None;
+    }
+    let target_ip: [u8; 4] = frame.get(38..42)?.try_into().ok()?;
+    Some([
+        0x02,
+        0x42,
+        target_ip[0],
+        target_ip[1],
+        target_ip[2],
+        target_ip[3],
+    ])
 }
 
 fn mac_socket_name(mac: [u8; 6]) -> String {

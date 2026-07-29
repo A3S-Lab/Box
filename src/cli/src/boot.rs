@@ -351,7 +351,7 @@ pub async fn boot_from_record(
 ///
 /// Reconstructs the full configuration needed to boot a VM from the
 /// persisted record fields.
-fn config_from_record(record: &BoxRecord) -> Result<BoxConfig, String> {
+pub(crate) fn config_from_record(record: &BoxRecord) -> Result<BoxConfig, String> {
     // Translate shm_size to a tmpfs entry, reusing the BOX_TMPFS_* guest init mechanism.
     let mut tmpfs = record.tmpfs.clone();
     if let Some(size_bytes) = record.shm_size {

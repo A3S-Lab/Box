@@ -870,27 +870,32 @@ mod linux {
         #[cfg(target_os = "linux")]
         ensure_dev_std_symlinks();
 
-        // Per-container cgroup for run-path resource limits that have no VM-boundary
-        // equivalent — currently `pids.max` (`--pids-limit`). `--memory`/`--cpus` on
-        // `run` are enforced by sizing the microVM itself, so only the process-count
-        // cap needs an in-guest cgroup. Created here in PID 1 before the container
-        // fork; the child joins it from `child_process` before exec (so every worker
-        // it forks is bounded too), and it is removed when this binding drops at
-        // guest-init exit, by which point the container has been reaped. Best-effort:
-        // `create` returns `None` when no such limit is set or cgroup v2 is
-        // unavailable, leaving the normal boot path untouched.
-        // Build the per-container cgroup from the runtime's A3S_SEC_* control vars.
-        // memory_max stays None on the boot path: `--memory` is enforced by sizing
-        // the microVM RAM, not an in-guest cgroup (so the runtime emits no
-        // A3S_SEC_MEM_LIMIT here). The CPU/pids caps and the memory soft-reservation
-        // (--memory-reservation) / swap cap (--memory-swap) DO have to be applied
-        // in-guest, mirrored from the same A3S_SEC_* env vars.
+        // MicroVMs create their workload cgroup here. A host Sandbox instead
+        // adopts the runtime-prepared control/workload layout through the fixed
+        // SDK descriptors.
+        // Those files are owned by host root outside the Sandbox user namespace,
+        // and cgroupfs is deliberately mounted read-only. Retaining the already-
+        // open workload descriptor prevents a path substitution race and lets
+        // every main/exec/PTY process join the exact runtime-owned leaf before
+        // exec without introducing a second cgroup management mechanism.
         #[cfg(target_os = "linux")]
         let container_cgroup = if bootstrap_mode.is_host_sandbox() {
-            None
+            let control_descriptor =
+                inherited_listener_fd(a3s_box_guest_init::cgroup::CONTROL_CGROUP_PROCS_FD_ENV)?;
+            let workload_descriptor =
+                inherited_listener_fd(a3s_box_guest_init::cgroup::WORKLOAD_CGROUP_PROCS_FD_ENV)?;
+            let cgroup = a3s_box_guest_init::cgroup::ContainerCgroup::adopt_runtime_delegation(
+                control_descriptor,
+                workload_descriptor,
+            )?;
+            std::env::remove_var(a3s_box_guest_init::cgroup::CONTROL_CGROUP_PROCS_FD_ENV);
+            std::env::remove_var(a3s_box_guest_init::cgroup::WORKLOAD_CGROUP_PROCS_FD_ENV);
+            Some(cgroup)
         } else {
-            a3s_box_guest_init::cgroup::ContainerCgroup::create(
-                None,
+            a3s_box_guest_init::cgroup::ContainerCgroup::create_for_main(
+                std::env::var("A3S_SEC_MEM_LIMIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok()),
                 std::env::var("A3S_SEC_MEM_LOW")
                     .ok()
                     .and_then(|value| value.parse::<u64>().ok()),
@@ -912,9 +917,15 @@ mod linux {
             )
         };
         #[cfg(target_os = "linux")]
-        let cgroup_procs = container_cgroup.as_ref().map(|cgroup| cgroup.procs_path());
+        let cgroup_procs_path = container_cgroup.as_ref().map(|cgroup| cgroup.procs_path());
+        #[cfg(target_os = "linux")]
+        let cgroup_procs = container_cgroup
+            .as_ref()
+            .and_then(|cgroup| cgroup.procs_descriptor());
         #[cfg(not(target_os = "linux"))]
-        let cgroup_procs: Option<String> = None;
+        let cgroup_procs: Option<std::os::fd::RawFd> = None;
+        #[cfg(target_os = "linux")]
+        exec_server::set_container_cgroup(cgroup_procs_path, cgroup_procs)?;
 
         let deferred_main = std::env::var("BOX_DEFERRED_MAIN")
             .map(|v| v == "1")
@@ -940,12 +951,6 @@ mod linux {
                 exec_config.user.clone(),
                 exec_config.stdin_null,
             );
-            // Stash the cgroup's procs path too, so the deferred main joins the
-            // per-container cgroup when spawned (the non-deferred branch below
-            // passes it to spawn_isolated). Without this a warm/IDLE-boot box runs
-            // its main outside the cgroup and pids.max / cpu.max are unenforced.
-            #[cfg(target_os = "linux")]
-            exec_server::set_deferred_cgroup_procs(cgroup_procs.clone());
             nix::unistd::Pid::from_raw(-1)
         } else {
             // Hand the main process re-openable pipe write-ends as fd 1/2 (see
@@ -966,7 +971,7 @@ mod linux {
                 exec_config.user.as_deref(),
                 exec_config.stdin_null,
                 main_stdio,
-                cgroup_procs.as_deref(),
+                cgroup_procs,
             )?;
             info!("Container process started with PID {}", container_pid_raw);
 
@@ -1917,7 +1922,7 @@ mod linux {
     /// the host before PID 1 exits and the VM halts.
     fn persist_exit_code(code: i32) {
         use std::io::Write;
-        if let Ok(mut file) = std::fs::File::create("/.a3s_exit_code") {
+        if let Ok(mut file) = std::fs::File::create(a3s_box_core::rootfs_metadata::EXIT_CODE_PATH) {
             let _ = write!(file, "{code}");
             let _ = file.sync_all();
         }

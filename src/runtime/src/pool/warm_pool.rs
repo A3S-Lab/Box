@@ -3,6 +3,8 @@
 //! Maintains a set of pre-booted VMs in `Ready` state so that
 //! `acquire()` can return a VM instantly without waiting for boot.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,6 +25,8 @@ struct WarmVm {
     /// When this VM was added to the pool.
     created_at: Instant,
 }
+
+type BootVmFuture<'a> = Pin<Box<dyn Future<Output = Result<VmManager>> + Send + 'a>>;
 
 /// Statistics about the warm pool.
 #[derive(Debug, Clone)]
@@ -465,39 +469,41 @@ impl WarmPool {
 
     /// Fill one slot: restore from the snapshot-fork template when enabled, else cold
     /// boot. Static so both `boot_new_vm` and the background replenish task use it.
-    async fn boot_or_restore(
+    fn boot_or_restore<'a>(
         snapshot_fork: bool,
-        box_config: &BoxConfig,
-        event_emitter: &EventEmitter,
-        template: &Arc<Mutex<TemplateState>>,
-    ) -> Result<VmManager> {
-        if snapshot_fork {
-            // Try the snapshot-fork template. If it can't be built (native VM
-            // snapshot unavailable — the verdict is cached so this is attempted at
-            // most once), fall back to a normal cold boot so the warm pool still
-            // fills rather than failing outright.
-            match Self::ensure_template(box_config, event_emitter, template).await {
-                Ok(tpl) => {
-                    let mut cfg = box_config.clone();
-                    cfg.snapshot_mem_file = Some(tpl.mem_file.clone());
-                    cfg.restore_from = Some(tpl.state_file.clone());
-                    cfg.snapshot_sock = None;
-                    let mut vm = VmManager::new(cfg, event_emitter.clone());
-                    vm.boot().await?;
-                    vm.wait_for_exec_available(std::time::Duration::from_secs(120))
-                        .await?;
-                    return Ok(vm);
-                }
-                Err(error) => {
-                    tracing::debug!(%error, "snapshot-fork unavailable; cold-booting this pool VM");
+        box_config: &'a BoxConfig,
+        event_emitter: &'a EventEmitter,
+        template: &'a Arc<Mutex<TemplateState>>,
+    ) -> BootVmFuture<'a> {
+        Box::pin(async move {
+            if snapshot_fork {
+                // Try the snapshot-fork template. If it can't be built (native VM
+                // snapshot unavailable — the verdict is cached so this is attempted at
+                // most once), fall back to a normal cold boot so the warm pool still
+                // fills rather than failing outright.
+                match Self::ensure_template(box_config, event_emitter, template).await {
+                    Ok(tpl) => {
+                        let mut cfg = box_config.clone();
+                        cfg.snapshot_mem_file = Some(tpl.mem_file.clone());
+                        cfg.restore_from = Some(tpl.state_file.clone());
+                        cfg.snapshot_sock = None;
+                        let mut vm = VmManager::new(cfg, event_emitter.clone());
+                        vm.boot().await?;
+                        vm.wait_for_exec_available(std::time::Duration::from_secs(120))
+                            .await?;
+                        return Ok(vm);
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "snapshot-fork unavailable; cold-booting this pool VM");
+                    }
                 }
             }
-        }
-        let mut vm = VmManager::new(box_config.clone(), event_emitter.clone());
-        vm.boot().await?;
-        vm.wait_for_exec_available(std::time::Duration::from_secs(120))
-            .await?;
-        Ok(vm)
+            let mut vm = VmManager::new(box_config.clone(), event_emitter.clone());
+            vm.boot().await?;
+            vm.wait_for_exec_available(std::time::Duration::from_secs(120))
+                .await?;
+            Ok(vm)
+        })
     }
 
     /// Get the snapshot-fork template, building it once lazily. Concurrent callers
@@ -932,6 +938,20 @@ mod tests {
 
     fn test_event_emitter() -> EventEmitter {
         EventEmitter::new(100)
+    }
+
+    #[test]
+    fn boot_or_restore_future_stays_heap_indirected() {
+        let config = BoxConfig::default();
+        let emitter = test_event_emitter();
+        let template = Arc::new(Mutex::new(TemplateState::Unbuilt));
+        let future = WarmPool::boot_or_restore(false, &config, &emitter, &template);
+
+        assert!(
+            std::mem::size_of_val(&future) <= 2 * std::mem::size_of::<usize>(),
+            "boot_or_restore future must remain pointer-sized so pool misses fit on Tokio worker stacks; got {} bytes",
+            std::mem::size_of_val(&future)
+        );
     }
 
     // --- PoolConfig validation tests ---

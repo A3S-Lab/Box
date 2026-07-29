@@ -25,6 +25,7 @@ struct FakeExecution {
 #[derive(Default)]
 struct FakeBackend {
     executions: Mutex<HashMap<String, FakeExecution>>,
+    start_terminal_exit_code: Mutex<Option<i32>>,
     start_attempts: AtomicUsize,
     starts: AtomicUsize,
     pauses: AtomicUsize,
@@ -35,8 +36,10 @@ struct FakeBackend {
     fail_quiescent_rootfs_cleanup: AtomicBool,
     fail_start: AtomicBool,
     fail_start_after_effect: AtomicBool,
+    fail_inspect: AtomicBool,
     fail_kill: AtomicBool,
     fail_kill_after_effect: AtomicBool,
+    omit_kill_exit_code: AtomicBool,
     fail_pause: AtomicBool,
     fail_pause_after_effect: AtomicBool,
     last_keep_memory: Mutex<Option<bool>>,
@@ -100,14 +103,24 @@ impl LocalExecutionBackend for FakeBackend {
         write_fake_sandbox_bundle(record)?;
         write_fake_resolved_image_config(record)?;
         let handle = Self::handle(record);
+        let terminal_exit_code = self.start_terminal_exit_code.lock().unwrap().take();
         executions.insert(
             record.id.clone(),
             FakeExecution {
-                state: ExecutionState::Running,
+                state: if terminal_exit_code.is_some() {
+                    ExecutionState::Stopped
+                } else {
+                    ExecutionState::Running
+                },
                 handle: handle.clone(),
-                exit_code: None,
+                exit_code: terminal_exit_code,
             },
         );
+        if terminal_exit_code.is_some() {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake execution completed during startup".to_string(),
+            ));
+        }
         if self.fail_start_after_effect.load(Ordering::Relaxed) {
             return Err(ExecutionManagerError::Unavailable(
                 "fake start response was lost".to_string(),
@@ -120,6 +133,11 @@ impl LocalExecutionBackend for FakeBackend {
         &self,
         record: &BoxRecord,
     ) -> ExecutionManagerResult<LocalExecutionObservation> {
+        if self.fail_inspect.load(Ordering::Relaxed) {
+            return Err(ExecutionManagerError::Unavailable(
+                "fake inspection is unavailable".to_string(),
+            ));
+        }
         let executions = self.executions.lock().unwrap();
         let execution = executions
             .get(&record.id)
@@ -236,6 +254,23 @@ impl LocalExecutionBackend for FakeBackend {
             ));
         }
         Ok(KillOutcome::Killed)
+    }
+
+    async fn kill_with_status(
+        &self,
+        record: &BoxRecord,
+    ) -> ExecutionManagerResult<LocalExecutionTermination> {
+        let outcome = self.kill(record).await?;
+        let exit_code = if self.omit_kill_exit_code.load(Ordering::Relaxed) {
+            None
+        } else {
+            record
+                .stop_signal
+                .as_deref()
+                .map(a3s_box_core::vmm::parse_signal_name)
+                .map(|signal| 128 + signal)
+        };
+        Ok(LocalExecutionTermination { outcome, exit_code })
     }
 }
 
@@ -1315,6 +1350,120 @@ async fn kill_is_generation_fenced_and_idempotent() {
 }
 
 #[tokio::test]
+async fn option_aware_kill_persists_authoritative_backend_exit_code() {
+    let (_directory, manager, _backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("sandbox-exit-status"),
+            &operation("operation-exit-status"),
+        )
+        .await
+        .unwrap();
+
+    manager
+        .kill_with_options(
+            &running.execution_id,
+            running.generation,
+            KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(stopped.exit_code, Some(137));
+}
+
+#[tokio::test]
+async fn option_aware_kill_derives_exit_code_when_backend_cannot_reap_it() {
+    let (_directory, manager, backend) = harness();
+    backend.omit_kill_exit_code.store(true, Ordering::Relaxed);
+    let running = manager
+        .create_and_start(
+            request("sandbox-signaled-exit"),
+            &operation("operation-signaled-exit"),
+        )
+        .await
+        .unwrap();
+
+    manager
+        .kill_with_options(
+            &running.execution_id,
+            running.generation,
+            KillExecutionOptions {
+                signal: Some(9),
+                timeout_secs: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(stopped.exit_code, Some(137));
+}
+
+#[tokio::test]
+async fn startup_completion_with_exact_exit_code_is_persisted_as_stopped() {
+    let (_directory, manager, backend) = harness();
+    *backend.start_terminal_exit_code.lock().unwrap() = Some(23);
+    let reservation = manager
+        .create(
+            request("startup-completion"),
+            &operation("operation-startup-completion"),
+        )
+        .await
+        .unwrap();
+
+    let error = manager
+        .start(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ExecutionManagerError::Unavailable(_)));
+    let stopped = persisted(&manager, &reservation.execution_id);
+    assert_eq!(
+        stopped.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert_eq!(stopped.exit_code, Some(23));
+}
+
+#[tokio::test]
+async fn startup_reconciliation_reports_the_secondary_inspection_error() {
+    let (_directory, manager, backend) = harness();
+    *backend.start_terminal_exit_code.lock().unwrap() = Some(23);
+    backend.fail_inspect.store(true, Ordering::Relaxed);
+    let reservation = manager
+        .create(
+            request("startup-reconciliation-error"),
+            &operation("operation-startup-reconciliation-error"),
+        )
+        .await
+        .unwrap();
+
+    let error = manager
+        .start(&reservation.execution_id, reservation.generation)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("fake execution completed during startup")
+                && message.contains("failed to inspect backend state during reconciliation")
+                && message.contains("fake inspection is unavailable")
+    ));
+    let starting = persisted(&manager, &reservation.execution_id);
+    assert_eq!(
+        starting.managed_state().unwrap(),
+        Some(ManagedExecutionState::Starting)
+    );
+    assert_eq!(starting.exit_code, None);
+}
+
+#[tokio::test]
 async fn option_aware_kill_persists_intent_and_replays_it_after_a_crash() {
     let (directory, manager, backend) = harness();
     let create_operation = operation("operation-option-aware-kill");
@@ -1405,6 +1554,26 @@ async fn startup_reconciliation_publishes_an_already_started_backend_once() {
     };
     assert_eq!(lease.execution_id, execution_id);
     assert_eq!(backend.starts.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn startup_reconciliation_persists_an_exact_terminal_result_as_stopped() {
+    let (_directory, manager, backend) = harness();
+    let operation_id = operation("operation-terminal-recovery");
+    let execution_id = ExecutionId::new("execution-terminal-recovery").unwrap();
+    let starting = reserve_starting(&manager, &execution_id, &operation_id).await;
+    *backend.start_terminal_exit_code.lock().unwrap() = Some(29);
+    backend.start(&starting).await.unwrap_err();
+
+    let outcome = manager.reconcile(&operation_id).await.unwrap();
+
+    assert!(matches!(outcome, ReconcileOutcome::Failed));
+    let stopped = persisted(&manager, &execution_id);
+    assert_eq!(
+        stopped.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert_eq!(stopped.exit_code, Some(29));
 }
 
 #[tokio::test]

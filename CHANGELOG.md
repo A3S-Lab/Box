@@ -4,6 +4,41 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Single-owner Sandbox resource contract.** `linux.resources` now carries
+  exact workload CPU, memory, swap, and PID limits. The pinned A3S OCI Runtime
+  derives the control-plane headroom, owns the fixed control/workload cgroup
+  topology, performs atomic live updates, and removes both levels. Guest Init
+  uses the SDK-defined membership descriptors with read-only cgroupfs, keeping
+  long-lived services and control transports outside workload OOM selection.
+
+### Fixed
+
+- **Sandbox cgroup namespace handoff.** Guest Init now accepts and verifies the
+  runtime's pre-isolated control membership after the namespace is rooted at
+  management and rejects a populated management envelope. The workload
+  descriptor remains the only path used by main, exec, streaming exec, and PTY
+  processes.
+- **Managed stopped-box start.** `a3s-box start` now restarts stopped or failed
+  managed boxes through the generation-fenced restart protocol, preserving the
+  Docker-like stop/start contract without reviving a terminal generation.
+- **Concurrent warm-pool cold starts.** Linux rootfs provider detection is
+  cached after one synchronized overlayfs capability probe, and the 84 KB VM
+  boot future is heap-indirected before a pool miss awaits it. Parallel misses
+  no longer multiply temporary overlay work or exhaust a Tokio worker stack.
+- **First live resource update.** MicroVM containers retain an otherwise-empty
+  per-container cgroup from startup, so `container-update` can safely apply the
+  first CPU, memory-reservation, swap, PID, or cpuset limit without targeting
+  the guest root cgroup or requiring an initial resource limit.
+- **Current guest-init qualification.** Linux host integration rebuilds the
+  static musl guest init from the current checkout instead of building an
+  unusable dynamic host binary and silently selecting an older musl artifact.
+- **Sandbox live resource updates.** Running shared-kernel Sandboxes now send
+  one complete resource update through the exact-generation A3S OCI SDK.
+  Guest-local `box-*` cgroup writes remain exclusive to MicroVMs, so Sandbox
+  creation, updates, and cleanup no longer have competing ownership paths.
+
 ## [3.2.0] — 2026-07-28
 
 ### Added
@@ -60,13 +95,29 @@ All notable changes to A3S Box will be documented in this file.
 - **Poisoned build-cache recovery.** Layer cache hits verify the regular-file
   type, recorded size, and SHA-256 content before reuse. A later valid store
   repairs a corrupt content-addressed blob instead of repeatedly serving it.
-
-### Fixed
-
 - **Reliable Cloud Sandbox completion.** Managed Sandbox inspection retains an
   A3S OCI generation until its exact exit status is available, and the default
   seccomp profile permits namespaced System V shared-memory operations needed
   by PostgreSQL while retaining its default-deny host-control boundary.
+- **Deterministic termination and filesystem diffs.** Managed kill operations
+  retain the backend's authoritative signal exit status and derive the
+  standard `128 + signal` result when an abruptly killed shim cannot be reaped.
+  One-shot commands that finish during readiness keep their exact status and
+  output for foreground draining, while the runtime installs a
+  first-writer-wins rootfs baseline before the workload can mutate the guest
+  filesystem.
+- **Linux bridge peer switching.** Named-network peer Ethernet frames are
+  switched between libkrun guests by a bounded shim adapter while passt remains
+  responsible for gateway traffic, published ports, and outbound connectivity.
+  Peer ARP requests bypass passt's proxy ARP so guests cannot cache the gateway
+  MAC for another box's address, and switch-facing TCP/UDP copies complete
+  virtio checksum offload before entering the destination guest. Detached stop
+  and remove paths reap passt before deleting its durable PID file.
+- **Ubuntu passt sandbox startup.** Bridge startup now waits until passt has
+  completed sandbox initialization and, only for an explicit unprivileged-userns
+  denial under a root launcher, retries with root as passt's sandbox identity.
+  Teardown also recognizes the packaged `passt.avx2` process name so optimized
+  passt daemons cannot survive box removal.
 
 ## [3.1.0] — 2026-07-23
 

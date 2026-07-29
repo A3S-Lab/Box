@@ -1208,12 +1208,15 @@ fn filter_run_mount_paths(
     tmpfs_mounts: &[RunTmpfsMount],
     workdir: &str,
 ) -> Vec<PathBuf> {
-    if cache_mounts.is_empty() && bind_mounts.is_empty() && tmpfs_mounts.is_empty() {
-        return paths;
-    }
-
     let mut exact_paths = Vec::new();
-    let mut subtree_paths = Vec::new();
+    // `/dev`, `/proc`, and `/sys` are runtime-provided filesystems. The pool
+    // guest may populate device nodes or mount pseudo-filesystems in the shared
+    // rootfs while executing a RUN command, but those artifacts are not image
+    // changes and must never be committed to an OCI layer.
+    let mut subtree_paths = ["dev", "proc", "sys"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
     for mount in cache_mounts {
         let mount_path = PathBuf::from(mount.target.trim_start_matches('/'));
         subtree_paths.push(mount_path.clone());
@@ -3450,6 +3453,24 @@ mod tests {
         let filtered = super::filter_run_mount_paths(paths, &mounts, &[], &[], "/");
 
         assert_eq!(filtered, vec![PathBuf::from("root/.profile")]);
+    }
+
+    #[test]
+    fn test_filter_run_mount_paths_excludes_runtime_pseudo_filesystems() {
+        let paths = vec![
+            PathBuf::from("dev/null"),
+            PathBuf::from("proc/self/status"),
+            PathBuf::from("sys/class/net/eth0"),
+            PathBuf::from("shell.txt"),
+            PathBuf::from("work/output.txt"),
+        ];
+
+        let filtered = super::filter_run_mount_paths(paths, &[], &[], &[], "/");
+
+        assert_eq!(
+            filtered,
+            vec![PathBuf::from("shell.txt"), PathBuf::from("work/output.txt")]
+        );
     }
 
     #[test]

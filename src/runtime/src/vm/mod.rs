@@ -427,6 +427,30 @@ impl VmManager {
     /// Remove host-side boot artifacts after a failed boot attempt.
     async fn cleanup_boot_failure(&mut self) {
         if let Some(mut handler) = self.handler.write().await.take() {
+            // A short-lived workload can finish before the runtime publishes
+            // its readiness endpoint. That is a normal terminal completion,
+            // not a failed rootfs build. Preserve its writable generation so a
+            // managed restart observes the same persistent filesystem while
+            // ephemeral mounts are recreated by the next runtime generation.
+            // Process termination and publication of the exact wait result are
+            // separate events. Remember both: `stop` may collect the exact
+            // status only after this initial non-blocking poll.
+            let exited_before_cleanup = handler.has_exited();
+            let collected_before_cleanup = match handler.try_wait_exit() {
+                Ok(Some(exit_code)) => {
+                    self.shim_exit_code = Some(exit_code);
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    tracing::debug!(
+                        box_id = %self.box_id,
+                        error = %error,
+                        "Failed to collect a terminal status before boot cleanup"
+                    );
+                    false
+                }
+            };
             if let Err(error) = handler.stop(default_stop_signal(), DEFAULT_SHUTDOWN_TIMEOUT_MS) {
                 tracing::warn!(
                     box_id = %self.box_id,
@@ -434,7 +458,13 @@ impl VmManager {
                     "Failed to stop VM handler after boot failure"
                 );
             }
-            self.shim_exit_code = handler.exit_code();
+            self.shim_exit_code = handler.exit_code().or(self.shim_exit_code);
+            if self.config.persistent
+                && self.shim_exit_code.is_some()
+                && (collected_before_cleanup || exited_before_cleanup)
+            {
+                self.preserve_rootfs_on_boot_failure = true;
+            }
         }
 
         if let Some(mut net_manager) = self.net_manager.take() {
@@ -1218,6 +1248,12 @@ impl VmManager {
             spec.network = Some(net_config);
         }
 
+        // Capture the pristine, guest-visible filesystem after all host-side
+        // preparation but before the provider can launch the workload. A fast
+        // entrypoint can mutate the rootfs before `VmManager::boot` returns, so
+        // command-level snapshotting is inherently racy.
+        self.create_diff_baseline(&layout);
+
         #[cfg(target_os = "macos")]
         if spec.network.is_none()
             && matches!(self.config.network, a3s_box_core::NetworkMode::Tsi)
@@ -1376,6 +1412,19 @@ impl VmManager {
         tracing::info!(parent: &boot_span, box_id = %self.box_id, "VM ready");
 
         Ok(())
+    }
+
+    fn create_diff_baseline(&self, layout: &BoxLayout) {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+        if let Err(error) =
+            crate::rootfs::create_diff_baseline_if_absent(&box_dir, &layout.rootfs_path)
+        {
+            tracing::warn!(
+                box_id = %self.box_id,
+                %error,
+                "Failed to create rootfs diff baseline before workload launch"
+            );
+        }
     }
 
     /// Destroy the VM with the default shutdown timeout and SIGTERM.
@@ -1570,6 +1619,15 @@ impl VmManager {
         }
         self.net_manager = None;
 
+        let socket_dir = self.socket_dir();
+        // A detached CLI invocation recovers the shim but has no in-memory
+        // PasstManager child handle. Reap passt from its durable PID file before
+        // removing the socket directory that contains that identity; otherwise
+        // a later managed remove cannot find the daemon and it keeps published
+        // ports bound indefinitely.
+        #[cfg(target_os = "linux")]
+        crate::network::terminate_passt(&socket_dir);
+
         // Cleanup rootfs provider (unmount overlay if applicable)
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         if let Err(e) = self.rootfs_provider.cleanup(&box_dir, preserve_rootfs) {
@@ -1580,7 +1638,6 @@ impl VmManager {
             );
         }
 
-        let socket_dir = self.socket_dir();
         if let Err(e) = std::fs::remove_dir_all(&socket_dir) {
             tracing::debug!(
                 box_id = %self.box_id,
@@ -1823,29 +1880,18 @@ impl VmManager {
         })
     }
 
-    /// Apply a live resource update to the running VM.
+    /// Apply a live resource update to the running backend.
     ///
-    /// Tier 1 changes (vCPU count, memory size) are rejected with a clear error
-    /// because libkrun does not expose a hot-resize API.
+    /// Tier 1 changes (provisioned vCPU count and memory size) retain the public
+    /// stop/recreate contract across backends.
     ///
-    /// Tier 2 changes (cgroup-based limits) are applied by executing shell
-    /// commands inside the guest that write to cgroup v2 control files.
+    /// Tier 2 changes use one backend-owned path: the exact-generation A3S OCI
+    /// update for a host Sandbox, or guest cgroup writes for a MicroVM.
     #[cfg(unix)]
     pub async fn update_resources(
-        &self,
+        &mut self,
         update: &crate::resize::ResourceUpdate,
     ) -> Result<crate::resize::ResizeResult> {
-        if self
-            .resolved_execution_plan
-            .as_ref()
-            .is_some_and(|plan| plan.backend.is_sandbox())
-            || self.config.isolation.is_sandbox()
-        {
-            return Err(BoxError::StateError(
-                "Live resource updates are not supported by the Sandbox backend yet".to_string(),
-            ));
-        }
-        // Reject Tier 1 changes upfront
         crate::resize::validate_update(update)?;
 
         let mut result = crate::resize::ResizeResult {
@@ -1857,8 +1903,38 @@ impl VmManager {
             return Ok(result);
         }
 
+        let sandbox = self
+            .resolved_execution_plan
+            .as_ref()
+            .is_some_and(|plan| plan.backend.is_sandbox())
+            || self.config.isolation.is_sandbox();
+        if sandbox {
+            let mut next_config = self.config.clone();
+            update.apply_to_config(&mut next_config);
+            let runtime_config = next_config.clone();
+            let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+            let box_id = self.box_id.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::sandbox::update_recorded_resources(&box_dir, &box_id, &runtime_config)
+            })
+            .await
+            .map_err(|error| {
+                BoxError::StateError(format!(
+                    "A3S OCI resource update worker failed for {}: {error}",
+                    self.box_id
+                ))
+            })??;
+            self.config = next_config;
+            result.applied = update
+                .tier2_change_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            return Ok(result);
+        }
+
         // Build cgroup commands and execute them inside the guest
-        let commands = update.build_cgroup_commands();
+        let commands = update.build_microvm_cgroup_commands();
         for cmd_str in &commands {
             let shell_cmd = vec!["sh".to_string(), "-c".to_string(), cmd_str.clone()];
 
@@ -2025,6 +2101,42 @@ mod tests {
         }
     }
 
+    struct CompletionCollectedByStopHandler {
+        code: i32,
+        collected: bool,
+    }
+
+    impl VmHandler for CompletionCollectedByStopHandler {
+        fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+            self.collected = true;
+            Ok(())
+        }
+
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+
+        fn is_running(&self) -> bool {
+            false
+        }
+
+        fn has_exited(&self) -> bool {
+            true
+        }
+
+        fn pid(&self) -> u32 {
+            42
+        }
+
+        fn exit_code(&self) -> Option<i32> {
+            self.collected.then_some(self.code)
+        }
+
+        fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+            Ok(None)
+        }
+    }
+
     /// A handler whose `stop` always fails — models a wedged VM that won't halt.
     struct FailingHandler;
 
@@ -2138,6 +2250,37 @@ mod tests {
         assert_eq!(vm.exit_code(), Some(23));
         assert!(vm.handler.read().await.is_none());
         assert!(!box_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_boot_completion_preserves_first_persistent_rootfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-persistent-completed-during-boot".to_string();
+        let config = BoxConfig {
+            persistent: true,
+            ..BoxConfig::default()
+        };
+        let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+        *vm.handler.write().await = Some(Box::new(CompletionCollectedByStopHandler {
+            code: 17,
+            collected: false,
+        }));
+
+        let marker = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("rootfs/r17-restart-marker");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"generation-one").unwrap();
+
+        vm.cleanup_boot_failure().await;
+
+        assert_eq!(vm.exit_code(), Some(17));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"generation-one");
+        assert!(vm.preserve_rootfs_on_boot_failure);
     }
 
     #[tokio::test]

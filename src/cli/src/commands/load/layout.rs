@@ -315,7 +315,8 @@ fn read_verified_blob(root: &Path, descriptor: &Descriptor) -> Result<Vec<u8>, S
 }
 
 fn verify_blob(root: &Path, descriptor: &Descriptor) -> Result<PathBuf, String> {
-    let path = descriptor_blob_path(root, descriptor.digest())?;
+    let digest = descriptor.digest().to_string();
+    let path = descriptor_blob_path(root, &digest)?;
     let metadata = std::fs::symlink_metadata(&path)
         .map_err(|error| format!("Missing OCI blob {}: {error}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
@@ -324,7 +325,7 @@ fn verify_blob(root: &Path, descriptor: &Descriptor) -> Result<PathBuf, String> 
             path.display()
         ));
     }
-    if descriptor.size() < 0 || metadata.len() != descriptor.size() as u64 {
+    if metadata.len() != descriptor.size() {
         return Err(format!(
             "OCI blob size mismatch for {}: descriptor says {}, file has {} bytes",
             descriptor.digest(),
@@ -333,7 +334,7 @@ fn verify_blob(root: &Path, descriptor: &Descriptor) -> Result<PathBuf, String> 
         ));
     }
 
-    let expected = descriptor.digest().strip_prefix("sha256:").ok_or_else(|| {
+    let expected = digest.strip_prefix("sha256:").ok_or_else(|| {
         format!(
             "Unsupported OCI blob digest {}: expected sha256",
             descriptor.digest()

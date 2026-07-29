@@ -25,7 +25,7 @@ dependencies = [
  "futures",
  "hex",
  "libc",
- "oci-spec 0.6.7",
+ "oci-spec",
  "rand",
  "serde",
  "serde_json",
@@ -99,6 +99,7 @@ version = "3.2.0"
 dependencies = [
  "a3s-box-core",
  "a3s-common",
+ "a3s-oci-sdk",
  "base64 0.22.1",
  "clap",
  "libc",
@@ -172,7 +173,7 @@ dependencies = [
  "hex",
  "libc",
  "oci-distribution",
- "oci-spec 0.6.7",
+ "oci-spec",
  "p256",
  "p384",
  "parking_lot",
@@ -273,7 +274,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-core"
 version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=771e5e27d005ed9eb2f52e19bdc64a43a6e4ff87#771e5e27d005ed9eb2f52e19bdc64a43a6e4ff87"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=e6b840b73a4e5c3bbfa72c2b5d6fd89104a60f9a#e6b840b73a4e5c3bbfa72c2b5d6fd89104a60f9a"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -282,12 +283,12 @@ dependencies = [
 [[package]]
 name = "a3s-oci-sdk"
 version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=771e5e27d005ed9eb2f52e19bdc64a43a6e4ff87#771e5e27d005ed9eb2f52e19bdc64a43a6e4ff87"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=e6b840b73a4e5c3bbfa72c2b5d6fd89104a60f9a#e6b840b73a4e5c3bbfa72c2b5d6fd89104a60f9a"
 dependencies = [
  "a3s-oci-core",
  "async-trait",
  "jsonschema",
- "oci-spec 0.10.0",
+ "oci-spec",
  "semver",
  "serde",
  "serde_ignored",
@@ -1218,7 +1219,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2532,21 +2533,6 @@ dependencies = [
 
 [[package]]
 name = "oci-spec"
-version = "0.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdf88ddc01cc6bccbe1044adb6a29057333f523deadcb4953c011a73158cfa5e"
-dependencies = [
- "derive_builder",
- "getset",
- "serde",
- "serde_json",
- "strum 0.26.3",
- "strum_macros 0.26.4",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "oci-spec"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3df6f876ad774d6a676f7e968f5c3edacc32f90e65fe680a8b686235396556fb"
@@ -3743,12 +3729,6 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
-version = "0.26.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
-
-[[package]]
-name = "strum"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
@@ -3760,19 +3740,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
 dependencies = [
  "strum_macros 0.28.0",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.26.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "rustversion",
- "syn 2.0.116",
 ]
 
 [[package]]
@@ -3907,10 +3874,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
