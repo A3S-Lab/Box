@@ -87,6 +87,7 @@ fn driver_allows_explicit_shared_kernel_selection() {
     let driver = BoxRuntimeDriver::new_with_isolation(
         BoxRuntimeDriverConfig {
             home_dir: directory.path().join("home"),
+            secret_root: directory.path().join("runtime-secrets"),
             control_timeout: Duration::from_secs(2),
             task_poll_interval: Duration::from_millis(5),
         },
@@ -618,7 +619,12 @@ async fn metadata_rejects_a_record_created_for_another_box_isolation_backend() {
         .unwrap();
 
     assert!(matches!(
-        validate_record_for_spec(&record, &spec, ExecutionIsolation::Microvm),
+        validate_record_for_spec(
+            &record,
+            &spec,
+            ExecutionIsolation::Microvm,
+            &driver.config.secret_root,
+        ),
         Err(RuntimeError::Protocol(message)) if message.contains("creation intent")
     ));
 }

@@ -342,6 +342,7 @@ pub(super) fn build_execution_request(
             stop_timeout: args.common.stop_timeout,
             oom_kill_disable: args.common.oom_kill_disable,
             oom_score_adj: args.common.oom_score_adj,
+            managed_secret_root: None,
         },
         rootfs_snapshot_id: None,
     }

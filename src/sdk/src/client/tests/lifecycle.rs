@@ -159,6 +159,7 @@ async fn lifecycle_calls_preserve_complete_request_and_fencing_identity() {
             stop_timeout: Some(9),
             oom_kill_disable: true,
             oom_score_adj: Some(100),
+            managed_secret_root: None,
         },
         rootfs_snapshot_id: None,
     };

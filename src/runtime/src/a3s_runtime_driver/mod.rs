@@ -120,31 +120,6 @@ impl BoxRuntimeDriver {
         self
     }
 
-    fn with_manager(
-        config: BoxRuntimeDriverConfig,
-        manager: LocalExecutionManager,
-        execution_isolation: ExecutionIsolation,
-    ) -> RuntimeResult<Self> {
-        let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
-        Self::with_manager_and_connector(config, manager, connector, execution_isolation)
-    }
-
-    fn with_manager_and_connector(
-        config: BoxRuntimeDriverConfig,
-        manager: LocalExecutionManager,
-        connector: Arc<dyn ExecutionPortConnector>,
-        execution_isolation: ExecutionIsolation,
-    ) -> RuntimeResult<Self> {
-        Self::with_manager_connector_and_materializer(
-            config,
-            manager,
-            connector,
-            execution_isolation,
-            None,
-            None,
-        )
-    }
-
     fn with_manager_connector_and_materializer(
         config: BoxRuntimeDriverConfig,
         manager: LocalExecutionManager,
