@@ -6,6 +6,7 @@
 # Usage:
 #   ./install.sh [--copy] [--home] <agent>...
 #   ./install.sh --dir <path>            # install into an explicit skills dir
+#   curl -fsSL <raw-install-url> | sh -s -- --home <agent>
 #
 #   agents:  agents  claude  codex  a3s-code  all
 #     agents   -> .agents/skills   cross-tool standard: Codex, Gemini CLI, Amp,
@@ -22,10 +23,53 @@
 #   ./install.sh all                     # wire every root in this repo
 #   ./install.sh --home agents claude    # user-wide cross-tool + Claude Code
 #   ./install.sh --dir ./my-agent/skills # any SKILL.md-format agent dir
+#   curl .../install.sh | sh -s -- --home a3s-code
 set -eu
 
-SRC="$(CDPATH= cd -- "$(dirname -- "$0")/a3s-box" && pwd)/SKILL.md"
-[ -f "$SRC" ] || { echo "error: SKILL.md not found at $SRC" >&2; exit 1; }
+SKILL_URL="${A3S_BOX_SKILL_URL:-https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/a3s-box/SKILL.md}"
+SRC=""
+REMOTE_SOURCE=0
+TEMP_SOURCE_DIR=""
+
+if [ -f "$0" ]; then
+  SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  [ -f "$SCRIPT_DIR/a3s-box/SKILL.md" ] && SRC="$SCRIPT_DIR/a3s-box/SKILL.md"
+fi
+
+cleanup() {
+  [ -n "$TEMP_SOURCE_DIR" ] && rm -rf "$TEMP_SOURCE_DIR"
+}
+
+if [ -z "$SRC" ]; then
+  command -v curl >/dev/null 2>&1 || {
+    echo "error: curl is required when install.sh is streamed" >&2
+    exit 1
+  }
+  TEMP_SOURCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/a3s-box-skill.XXXXXX")"
+  trap cleanup 0
+  trap 'cleanup; exit 1' HUP INT TERM
+  SRC="$TEMP_SOURCE_DIR/SKILL.md"
+  curl --proto '=https' --tlsv1.2 -fsSL "$SKILL_URL" -o "$SRC"
+  REMOTE_SOURCE=1
+fi
+
+grep -q '^name: a3s-box$' "$SRC" || {
+  echo "error: downloaded file is not the a3s-box Skill" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  install.sh [--copy] [--home] <agent>...
+  install.sh --dir <path>
+
+Agents: agents | claude | codex | a3s-code | all
+  --home   install in the user-level skills root
+  --copy   copy SKILL.md instead of creating a symlink
+  --dir P  install into an explicit skills root
+USAGE
+}
 
 COPY=0; SCOPE=project; DIR=""; AGENTS=""
 while [ $# -gt 0 ]; do
@@ -34,11 +78,15 @@ while [ $# -gt 0 ]; do
     --home) SCOPE=home ;;
     --dir)  shift; DIR="${1:?--dir needs a path}" ;;
     agents|claude|codex|a3s-code|all) AGENTS="$AGENTS $1" ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) echo "error: unknown arg '$1'" >&2; exit 1 ;;
   esac
   shift
 done
+
+# A streamed installer downloads SKILL.md into a temporary directory. Copy it
+# so the installed skill remains valid after cleanup, even without --copy.
+[ "$REMOTE_SOURCE" -eq 1 ] && COPY=1
 
 # skills root for a named agent at the chosen scope
 root_for() {

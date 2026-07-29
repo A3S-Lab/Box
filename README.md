@@ -346,6 +346,9 @@ evidence. Review [Host Integration](docs/host-integration.md),
 - **Coding agents** — The first-party
   [A3S Box Skill](integrations/skills/a3s-box/SKILL.md) teaches supported agents
   CLI lifecycle, snapshots, warm pools, networking boundaries, and recovery.
+  Its installer supports project or user scope across A3S Code, Codex, Claude
+  Code, and the shared `.agents/skills` convention, including remote streamed
+  installation with a durable local copy.
 
 ## Architecture
 

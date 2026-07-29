@@ -1,0 +1,135 @@
+---
+title: Agent Skill
+description: 在 A3S Code、Codex、Claude Code 及其他支持 Skill 的 Agent 中安装并使用 A3S Box Skill。
+---
+
+# A3S Box Agent Skill
+
+A3S Box Skill 会教会编码 Agent 通过 Box CLI 运行 OCI 工作负载，并正确处理生命周期、
+隔离、网络和清理规则。所有 Agent 共用同一份 `SKILL.md`，无需为每个产品维护一套集成。
+
+Skill 不负责安装 Box 运行时。请先完成[安装指南](./installation/)，再检查当前主机：
+
+```bash
+a3s-box --version
+a3s-box info
+```
+
+## 为你的 Agent 安装
+
+下面的命令会把当前 Skill 安装到用户级目录。通过网络执行时，安装器会下载并保存一份
+持久副本，不会留下指向临时文件的符号链接。
+
+### A3S Code
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home a3s-code
+```
+
+目标：`~/.a3s/skills/a3s-box/SKILL.md`
+
+### Codex
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home codex
+```
+
+目标：`~/.codex/skills/a3s-box/SKILL.md`
+
+### Claude Code
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home claude
+```
+
+目标：`~/.claude/skills/a3s-box/SKILL.md`
+
+### 安装到所有受支持目录
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home all
+```
+
+`all` 会把同一份文件安装到所选作用域下的 `.agents`、`.claude`、`.codex` 和
+`.a3s` 目录，适合同一台机器同时使用多个 Agent 的场景。
+
+> [!TIP]
+> 网络管道会执行 `main` 分支上的安装器。如果环境要求固定版本或先审计脚本，请先下载
+> 并检查安装器，再在本地执行。
+
+## 用户级与项目级作用域
+
+`--home` 表示用户级安装；去掉它即可只为当前项目安装：
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- a3s-code
+```
+
+| Agent 目标  | 项目级目录       | 用户级目录         |
+| ----------- | ---------------- | ------------------ |
+| 跨工具标准  | `.agents/skills` | `~/.agents/skills` |
+| Claude Code | `.claude/skills` | `~/.claude/skills` |
+| Codex       | `.codex/skills`  | `~/.codex/skills`  |
+| A3S Code    | `.a3s/skills`    | `~/.a3s/skills`    |
+
+如果已经检出 Box 仓库，可以直接运行 `integrations/skills/install.sh`。仓库内安装
+默认使用符号链接，使多个 Agent 始终读取同一个源文件；如果仓库之后可能移动，请增加
+`--copy`。
+
+## 重新加载并调用
+
+安装后请重启 Agent 会话或刷新 Skill 列表。支持斜杠命令的界面可直接使用
+`/a3s-box`：
+
+```text
+/a3s-box 在隔离的 MicroVM 中构建这个仓库并运行测试，保留失败日志，
+完成后清理临时 Box。
+```
+
+没有斜杠命令界面的 Agent 也可以通过自然语言激活同一个 Skill：
+
+```text
+使用 A3S Box Skill 在一次性 MicroVM 中安全运行这段生成脚本，报告退出码，
+然后删除 Box。
+```
+
+Skill 会引导 Agent 使用可重复的执行顺序：
+
+1. 首次运行工作负载前执行 `a3s-box info`。
+2. 为 Box 指定明确名称，不从面向用户的 CLI 输出中解析 ID。
+3. 将来宾命令放在 `--` 之后。
+4. 使用 `a3s-box ps -a` 验证后台工作负载。
+5. 失败时检查状态和日志，然后停止并删除临时状态。
+
+## Skill 覆盖的能力
+
+- 一次性与长时间运行的 MicroVM 工作负载。
+- 镜像构建、仓库操作、存储卷、网络和端口发布。
+- `exec`、Shell、文件复制、日志、健康检查和生命周期恢复。
+- 文件系统快照，以及恢复后的工作负载启动流程。
+- 命令超时、后台监控和常见来宾通道故障。
+
+Skill 会保留 Box 的失败关闭模型：主机无法满足请求时，不会改用更弱的隔离后端；
+它也不会绕过 Agent 的确认或工作区权限。在执行 `allowed-tools` 声明的 Agent 中，
+Shell 调用会限制为 `a3s-box` 和 `curl`。
+
+## 更新或删除
+
+再次运行相同的网络安装命令，即可用当前版本替换已安装副本。卸载时只删除对应 Skill
+目录，例如：
+
+```bash
+rm -rf ~/.a3s/skills/a3s-box
+```
+
+删除 Skill 不会卸载 A3S Box，也不会删除正在运行的工作负载、镜像、存储卷或运行时状态。
