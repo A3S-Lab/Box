@@ -495,9 +495,11 @@ fn validate_secret_root(root: &Path) -> RuntimeResult<()> {
             "Box Secret root must already be canonical and contain no links".into(),
         ));
     }
-    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+    if metadata.uid() != unsafe { libc::geteuid() }
+        || !matches!(metadata.mode() & 0o7777, 0o700 | 0o710)
+    {
         return Err(RuntimeError::ProviderUnavailable(
-            "Box Secret root must be owned by the provider process and inaccessible to group and other users"
+            "Box Secret root must be provider-owned, non-listable, and inaccessible to other users"
                 .into(),
         ));
     }
@@ -521,10 +523,10 @@ fn validate_private_directory(path: &Path) -> RuntimeResult<()> {
     if !metadata.file_type().is_dir()
         || metadata.file_type().is_symlink()
         || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.mode() & 0o777 != 0o700
+        || !matches!(metadata.mode() & 0o7777, 0o700 | 0o710)
     {
         return Err(RuntimeError::ProviderUnavailable(
-            "Box Secret materialization directory is not a provider-owned 0700 directory".into(),
+            "Box Secret materialization directory is not a private provider-owned directory".into(),
         ));
     }
     Ok(())
@@ -594,6 +596,9 @@ fn secret_io_error(error: std::io::Error) -> RuntimeError {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     #[test]
     fn material_debug_output_never_contains_plaintext() {
         let material = BoxSecretMaterial::new(b"box-secret-fixture".to_vec()).unwrap();
@@ -618,6 +623,23 @@ mod tests {
             ("username", "password\tleak"),
         ] {
             assert!(BoxRegistryCredential::new(username, password).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_allows_only_sandbox_search_access() {
+        let directory = tempfile::tempdir().unwrap();
+        for mode in [0o700, 0o710] {
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+            validate_private_directory(directory.path()).unwrap();
+        }
+
+        for mode in [0o711, 0o720, 0o740, 0o770] {
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+            assert!(validate_private_directory(directory.path()).is_err());
         }
     }
 }

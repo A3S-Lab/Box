@@ -195,7 +195,7 @@ pub fn prepare_managed_secret_mount_source(
         || !root_metadata.file_type().is_dir()
         || root_metadata.file_type().is_symlink()
         || root_metadata.uid() != unsafe { libc::geteuid() }
-        || root_metadata.permissions().mode() & 0o077 != 0
+        || !matches!(root_metadata.permissions().mode() & 0o7777, 0o700 | 0o710)
     {
         return Err(BoxError::ConfigError(
             "Sandbox Secret root must be a canonical private provider-owned directory".into(),
@@ -228,6 +228,23 @@ pub fn prepare_managed_secret_mount_source(
             "Sandbox Secret file has an invalid deterministic identity".into(),
         ));
     }
+    let materialization_directory = path.parent().ok_or_else(|| {
+        BoxError::ConfigError("Sandbox Secret file has no materialization directory".into())
+    })?;
+    let directory_metadata =
+        std::fs::symlink_metadata(materialization_directory).map_err(BoxError::IoError)?;
+    if !directory_metadata.file_type().is_dir()
+        || directory_metadata.file_type().is_symlink()
+        || directory_metadata.uid() != unsafe { libc::geteuid() }
+        || !matches!(
+            directory_metadata.permissions().mode() & 0o7777,
+            0o700 | 0o710
+        )
+    {
+        return Err(BoxError::ConfigError(
+            "Sandbox Secret materialization directory is not private and provider-owned".into(),
+        ));
+    }
     let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
     if !metadata.file_type().is_file()
         || metadata.file_type().is_symlink()
@@ -239,8 +256,28 @@ pub fn prepare_managed_secret_mount_source(
             "Sandbox Secret source is not a bounded regular file".into(),
         ));
     }
+    let (root_uid, root_gid) = mapped_root_ids(plan)?;
+    prepare_secret_directory_traversal(root, root_uid, root_gid)?;
+    prepare_secret_directory_traversal(materialization_directory, root_uid, root_gid)?;
     prepare_managed_mount_source(path, plan)?;
     validate_external_mount_access(path, plan, true)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_secret_directory_traversal(path: &Path, mapped_uid: u32, mapped_gid: u32) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+    if metadata.uid() == mapped_uid {
+        return Ok(());
+    }
+    lchown_if_needed(path, metadata.uid(), mapped_gid)?;
+    let mode = metadata.permissions().mode() & 0o7777;
+    if mode != 0o710 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o710))
+            .map_err(BoxError::IoError)?;
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
