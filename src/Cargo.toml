@@ -9,7 +9,6 @@ members = [
     "cri",
     "cli",
     "sdk",
-    "lambda",
 ]
 resolver = "2"
 

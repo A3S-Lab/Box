@@ -4,6 +4,14 @@ All notable changes to A3S Box will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- **Box-local Lambda lifecycle API.** The unpublished `a3s-box-lambda` crate
+  and its unused Lambda-specific workload envelope types are removed. Durable
+  tenant-scoped finite execution now belongs to A3S Cloud, which dispatches
+  provider-neutral A3S Runtime Tasks through Fleet; Box retains only node-local
+  Runtime provider mechanics.
+
 ### Changed
 
 - **Single-owner Sandbox resource contract.** `linux.resources` now carries
