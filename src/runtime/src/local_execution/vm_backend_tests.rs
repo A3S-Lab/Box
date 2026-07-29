@@ -41,6 +41,7 @@ struct DelayedExitStatusHandler {
     exit_polls: Arc<AtomicUsize>,
     stop_calls: Arc<AtomicUsize>,
     available_after: usize,
+    reports_running: bool,
 }
 
 impl VmHandler for DelayedExitStatusHandler {
@@ -54,15 +55,15 @@ impl VmHandler for DelayedExitStatusHandler {
     }
 
     fn is_running(&self) -> bool {
-        false
+        self.reports_running
     }
 
     fn has_exited(&self) -> bool {
-        true
+        !self.reports_running
     }
 
     fn pid(&self) -> u32 {
-        42
+        u32::MAX
     }
 
     fn exit_code(&self) -> Option<i32> {
@@ -271,6 +272,7 @@ async fn terminal_health_probe_waits_for_delayed_durable_exit_status_before_clea
             exit_polls: Arc::clone(&exit_polls),
             stop_calls: Arc::clone(&stop_calls),
             available_after: 60,
+            reports_running: false,
         }));
     }
     backend
@@ -301,6 +303,7 @@ async fn terminal_observation_retains_runtime_without_an_exact_exit_status() {
             exit_polls: Arc::clone(&exit_polls),
             stop_calls: Arc::clone(&stop_calls),
             available_after: usize::MAX,
+            reports_running: false,
         }));
     }
     backend
@@ -320,6 +323,37 @@ async fn terminal_observation_retains_runtime_without_an_exact_exit_status() {
     assert!(exit_polls.load(Ordering::SeqCst) > 1);
     assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
     assert!(backend.managers.contains_key(&record.id));
+}
+
+#[tokio::test]
+async fn disappearing_live_handle_waits_for_delayed_terminal_status() {
+    let temporary = tempfile::tempdir().unwrap();
+    let backend = VmLocalExecutionBackend::new(temporary.path());
+    let mut record = record(temporary.path(), ExecutionIsolation::Sandbox);
+    record.status = ManagedExecutionState::Running.as_status().to_string();
+    let exit_polls = Arc::new(AtomicUsize::new(0));
+    let stop_calls = Arc::new(AtomicUsize::new(0));
+    let mut runtime = backend.new_manager(&record).unwrap();
+    runtime.exec_socket_path = Some(record.exec_socket_path.clone());
+    *runtime.state.write().await = crate::BoxState::Ready;
+    *runtime.handler.write().await = Some(Box::new(DelayedExitStatusHandler {
+        exit_polls: Arc::clone(&exit_polls),
+        stop_calls: Arc::clone(&stop_calls),
+        available_after: 3,
+        reports_running: true,
+    }));
+    let manager = Arc::new(Mutex::new(runtime));
+    backend
+        .managers
+        .insert(record.id.clone(), Arc::clone(&manager));
+
+    let observation = backend.inspect_registered(&record, manager).await.unwrap();
+
+    assert_eq!(observation.state, ExecutionState::Stopped);
+    assert_eq!(observation.exit_code, Some(0));
+    assert_eq!(exit_polls.load(Ordering::SeqCst), 4);
+    assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+    assert!(backend.managers.is_empty());
 }
 
 #[test]
