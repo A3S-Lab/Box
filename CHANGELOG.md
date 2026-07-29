@@ -15,6 +15,11 @@ All notable changes to A3S Box will be documented in this file.
 
 ### Fixed
 
+- **Sandbox cgroup namespace handoff.** Guest Init now accepts and verifies the
+  runtime's pre-isolated control membership after the namespace is rooted at
+  management and rejects a populated management envelope. The workload
+  descriptor remains the only path used by main, exec, streaming exec, and PTY
+  processes.
 - **Managed stopped-box start.** `a3s-box start` now restarts stopped or failed
   managed boxes through the generation-fenced restart protocol, preserving the
   Docker-like stop/start contract without reviving a terminal generation.

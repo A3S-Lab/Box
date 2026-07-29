@@ -156,10 +156,12 @@ workload source of truth. Box adds only typed control-plane headroom
 annotations. A3S OCI Runtime derives the outer envelope, creates the fixed
 `a3s-control` and `a3s-workload` children, and passes their pre-opened
 `cgroup.procs` descriptors to Guest Init. The cgroup mount inside the Sandbox is
-read-only; Guest Init moves trusted bootstrap processes into the control child
-and joins every main, exec, streaming exec, and PTY process to the workload
-child through the inherited descriptor. Workload OOM kills therefore do not
-select the long-lived control transport or an otherwise healthy Service.
+read-only. The runtime roots the cgroup namespace at management, moves trusted
+bootstrap processes into the control child, and only then delegates domain
+controllers; Guest Init confirms that membership and joins every main, exec,
+streaming exec, and PTY process to the workload child through the inherited
+descriptor. Workload OOM kills therefore do not select the long-lived control
+transport or an otherwise healthy Service.
 
 Every host path is canonicalized and checked against an allowlisted Box-owned
 root before it enters the bundle. The checks run during planning and again

@@ -273,9 +273,10 @@ impl ContainerCgroup {
     /// Adopt the two cgroup membership descriptors prepared by the native OCI
     /// runtime before entering the Sandbox user namespace.
     ///
-    /// The runtime owns both fixed child cgroups. Guest-init moves every trusted
-    /// bootstrap process into `a3s-control`, retains only the `a3s-workload`
-    /// descriptor, and never re-opens either host-owned `cgroup.procs` path.
+    /// The runtime owns both fixed child cgroups. Guest-init requires the
+    /// management envelope to be empty, confirms trusted membership in
+    /// `a3s-control`, retains only the `a3s-workload` descriptor, and never
+    /// re-opens either host-owned `cgroup.procs` path.
     pub fn adopt_runtime_delegation(
         control_descriptor: RawFd,
         workload_descriptor: RawFd,
@@ -311,7 +312,7 @@ impl ContainerCgroup {
         let workload_path = format!("{CGROUP_ROOT}/{WORKLOAD_CGROUP_NAME}/cgroup.procs");
         validate_descriptor_path(&control, &control_path)?;
         validate_descriptor_path(&workload, &workload_path)?;
-        move_control_plane_to_descriptor(CGROUP_ROOT, control.as_raw_fd())?;
+        confirm_runtime_control_membership(CGROUP_ROOT, control.as_raw_fd())?;
 
         Ok(Self {
             path: format!("{CGROUP_ROOT}/{WORKLOAD_CGROUP_NAME}"),
@@ -464,31 +465,29 @@ fn validate_descriptor_path(file: &File, path: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn move_control_plane_to_descriptor(
+fn confirm_runtime_control_membership(
     cgroup_root: &str,
     control_descriptor: RawFd,
 ) -> std::io::Result<()> {
     let root_procs = format!("{cgroup_root}/cgroup.procs");
     let process_ids = read_cgroup_process_ids(&root_procs)?;
-    if process_ids.is_empty() {
+    if !process_ids.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "runtime cgroup root contains no bootstrap process",
+            format!(
+                "runtime cgroup management envelope still contains bootstrap processes {process_ids:?}"
+            ),
         ));
     }
-    for process_id in &process_ids {
-        write_descriptor(control_descriptor, process_id.to_string().as_bytes())?;
+    // Rejoining through the inherited descriptor proves that the trusted init
+    // can target the runtime-owned control leaf without reopening cgroupfs.
+    write_descriptor(control_descriptor, b"0")?;
+    if !read_cgroup_process_ids(&root_procs)?.is_empty() {
+        return Err(std::io::Error::other(
+            "runtime cgroup root became populated while confirming control membership",
+        ));
     }
-    let remaining = read_cgroup_process_ids(&root_procs)?;
-    if !remaining.is_empty() {
-        return Err(std::io::Error::other(format!(
-            "runtime cgroup root remained populated by {remaining:?}"
-        )));
-    }
-    debug!(
-        process_count = process_ids.len(),
-        "cgroup: moved trusted bootstrap processes through the inherited control descriptor"
-    );
+    debug!("cgroup: confirmed runtime-isolated control membership");
     Ok(())
 }
 
@@ -591,6 +590,40 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn preisolated_runtime_control_membership_keeps_management_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let root_procs = root.path().join("cgroup.procs");
+        std::fs::write(&root_procs, "").unwrap();
+        let mut control = tempfile::tempfile().unwrap();
+
+        super::confirm_runtime_control_membership(
+            root.path().to_str().unwrap(),
+            control.as_raw_fd(),
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(root_procs).unwrap(), "");
+        control.rewind().unwrap();
+        let mut written = String::new();
+        control.read_to_string(&mut written).unwrap();
+        assert_eq!(written, "0");
+    }
+
+    #[test]
+    fn populated_runtime_management_envelope_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("cgroup.procs"), "42\n").unwrap();
+        let control = tempfile::tempfile().unwrap();
+
+        let error = super::confirm_runtime_control_membership(
+            root.path().to_str().unwrap(),
+            control.as_raw_fd(),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
