@@ -63,7 +63,7 @@ impl VmHandler for DelayedExitStatusHandler {
     }
 
     fn pid(&self) -> u32 {
-        42
+        u32::MAX
     }
 
     fn exit_code(&self) -> Option<i32> {
