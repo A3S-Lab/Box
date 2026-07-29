@@ -78,7 +78,10 @@ impl BoxRuntimeConformanceFixture {
         base_case.validate().map_err(super::invalid)?;
 
         let config = driver_config(home_dir.clone());
-        let driver = Arc::new(BoxRuntimeDriver::new(config)?);
+        let driver = Arc::new(BoxRuntimeDriver::new_with_isolation(
+            config,
+            a3s_box_core::ExecutionIsolation::Sandbox,
+        )?);
         let state = Arc::new(FileRuntimeStateStore::new(&state_root));
         Ok(Self {
             home_dir,
@@ -106,7 +109,10 @@ impl BoxRuntimeConformanceFixture {
     }
 
     pub(super) fn restarted_driver(&self) -> Result<Arc<BoxRuntimeDriver>> {
-        let driver = Arc::new(BoxRuntimeDriver::new(driver_config(self.home_dir.clone()))?);
+        let driver = Arc::new(BoxRuntimeDriver::new_with_isolation(
+            driver_config(self.home_dir.clone()),
+            a3s_box_core::ExecutionIsolation::Sandbox,
+        )?);
         self.register_driver(driver.clone());
         Ok(driver)
     }

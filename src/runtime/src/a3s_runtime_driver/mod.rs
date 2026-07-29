@@ -1,4 +1,4 @@
-//! A3S Runtime provider adapter for the certified Box Sandbox backend.
+//! A3S Runtime provider adapter for Box isolation backends.
 
 mod exec;
 mod health;
@@ -24,7 +24,7 @@ use a3s_runtime::{ProviderId, RuntimeDriver, RuntimeError, RuntimeResult, Runtim
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
-use crate::LocalExecutionManager;
+use crate::{ExecutionIsolation, LocalExecutionManager};
 
 use self::service_endpoints::ServiceEndpointOwner;
 
@@ -53,38 +53,53 @@ impl Default for BoxRuntimeDriverConfig {
     }
 }
 
-/// Concrete A3S Runtime driver backed only by Box's shared-kernel Sandbox.
+/// Concrete A3S Runtime driver backed by a configured Box isolation backend.
 pub struct BoxRuntimeDriver {
     provider_id: ProviderId,
     pub(super) config: BoxRuntimeDriverConfig,
     pub(super) manager: LocalExecutionManager,
     port_connector: Arc<dyn ExecutionPortConnector>,
     service_endpoints: ServiceEndpointOwner,
+    execution_isolation: ExecutionIsolation,
     provider_build: OnceCell<String>,
 }
 
 impl BoxRuntimeDriver {
+    /// Create a Runtime driver backed by Box MicroVM isolation.
+    ///
+    /// Shared-kernel execution is never selected as an automatic fallback.
     pub fn new(config: BoxRuntimeDriverConfig) -> RuntimeResult<Self> {
+        Self::new_with_isolation(config, ExecutionIsolation::Microvm)
+    }
+
+    /// Create a Runtime driver with an explicit concrete Box isolation
+    /// backend for Runtime's provider-neutral `IsolationLevel::Sandbox`.
+    pub fn new_with_isolation(
+        config: BoxRuntimeDriverConfig,
+        execution_isolation: ExecutionIsolation,
+    ) -> RuntimeResult<Self> {
         validate_config(&config)?;
         let manager = LocalExecutionManager::with_vm_backend(
             config.home_dir.join("boxes.json"),
             &config.home_dir,
         );
-        Self::with_manager(config, manager)
+        Self::with_manager(config, manager, execution_isolation)
     }
 
     fn with_manager(
         config: BoxRuntimeDriverConfig,
         manager: LocalExecutionManager,
+        execution_isolation: ExecutionIsolation,
     ) -> RuntimeResult<Self> {
         let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
-        Self::with_manager_and_connector(config, manager, connector)
+        Self::with_manager_and_connector(config, manager, connector, execution_isolation)
     }
 
     fn with_manager_and_connector(
         config: BoxRuntimeDriverConfig,
         manager: LocalExecutionManager,
         connector: Arc<dyn ExecutionPortConnector>,
+        execution_isolation: ExecutionIsolation,
     ) -> RuntimeResult<Self> {
         validate_config(&config)?;
         let endpoint_connector = Arc::clone(&connector);
@@ -94,48 +109,37 @@ impl BoxRuntimeDriver {
             manager,
             port_connector: connector,
             service_endpoints: ServiceEndpointOwner::new(endpoint_connector),
+            execution_isolation,
             provider_build: OnceCell::new(),
         })
+    }
+
+    /// Concrete Box isolation backend selected for this provider instance.
+    pub const fn execution_isolation(&self) -> ExecutionIsolation {
+        self.execution_isolation
     }
 
     pub(super) async fn provider_build(&self) -> RuntimeResult<String> {
         self.provider_build
             .get_or_try_init(|| async {
-                let snapshot = tokio::time::timeout(
+                let execution_isolation = self.execution_isolation;
+                let provider_build = tokio::time::timeout(
                     self.config.control_timeout,
-                    tokio::task::spawn_blocking(|| {
-                        crate::sandbox::probe_sandbox_capabilities_for(
-                            a3s_box_core::ExecutionBackend::A3sOci,
-                            None,
-                            None,
-                        )
-                    }),
+                    tokio::task::spawn_blocking(move || probe_provider_build(execution_isolation)),
                 )
                 .await
                 .map_err(|_| {
                     RuntimeError::ProviderUnavailable(
-                        "Box Sandbox capability probe exceeded the control timeout".into(),
+                        "Box provider capability probe exceeded the control timeout".into(),
                     )
                 })?
                 .map_err(|error| {
                     RuntimeError::ProviderUnavailable(format!(
-                        "Box Sandbox capability probe failed: {error}"
+                        "Box provider capability probe failed: {error}"
                     ))
-                })?;
-                snapshot
-                    .require_ready()
-                    .map_err(|error| RuntimeError::ProviderUnavailable(error.to_string()))?;
-                let runtime = snapshot.a3s_oci.ok_or_else(|| {
-                    RuntimeError::ProviderUnavailable(
-                        "Box Sandbox capability probe returned no A3S OCI artifacts".into(),
-                    )
-                })?;
-                Ok::<String, RuntimeError>(format!(
-                    "a3s-box/{} a3s-oci/sha256:{} agent/sha256:{}",
-                    env!("CARGO_PKG_VERSION"),
-                    &runtime.runtime_sha256[..16],
-                    &runtime.agent_sha256[..16]
-                ))
+                })?
+                .map_err(RuntimeError::ProviderUnavailable)?;
+                Ok::<String, RuntimeError>(provider_build)
             })
             .await
             .cloned()
@@ -152,6 +156,39 @@ impl BoxRuntimeDriver {
                     "Box {operation} exceeded the configured control timeout"
                 ))
             })?
+    }
+}
+
+fn probe_provider_build(execution_isolation: ExecutionIsolation) -> Result<String, String> {
+    match execution_isolation {
+        ExecutionIsolation::Microvm => {
+            let support = crate::host_check::check_virtualization_support()
+                .map_err(|error| format!("microVM unavailable: {error}"))?;
+            Ok(format!(
+                "a3s-box/{} isolation/microvm hypervisor/{}",
+                env!("CARGO_PKG_VERSION"),
+                support.backend
+            ))
+        }
+        ExecutionIsolation::Sandbox => {
+            let snapshot = crate::sandbox::probe_sandbox_capabilities_for(
+                a3s_box_core::ExecutionBackend::A3sOci,
+                None,
+                None,
+            );
+            snapshot
+                .require_ready()
+                .map_err(|error| format!("shared-kernel backend unavailable: {error}"))?;
+            let runtime = snapshot.a3s_oci.ok_or_else(|| {
+                "shared-kernel capability probe returned no A3S OCI artifacts".to_string()
+            })?;
+            Ok(format!(
+                "a3s-box/{} isolation/sandbox a3s-oci/sha256:{} agent/sha256:{}",
+                env!("CARGO_PKG_VERSION"),
+                &runtime.runtime_sha256[..16],
+                &runtime.agent_sha256[..16]
+            ))
+        }
     }
 }
 
@@ -182,6 +219,8 @@ impl RuntimeDriver for BoxRuntimeDriver {
             provider_build: self.provider_build().await?,
             unit_classes: vec![RuntimeUnitClass::Task, RuntimeUnitClass::Service],
             artifact_media_types: vec![OCI_IMAGE_MANIFEST.into(), OCI_IMAGE_INDEX.into()],
+            // Runtime 0.2 uses `Sandbox` as the provider-neutral isolation
+            // class. `execution_isolation` selects Box's concrete backend.
             isolation_levels: vec![IsolationLevel::Sandbox],
             network_modes: vec![NetworkMode::None, NetworkMode::Service],
             mount_kinds: vec![MountKind::Tmpfs],

@@ -1,4 +1,4 @@
-//! Lossless Runtime protocol to Box Sandbox creation mapping.
+//! Lossless Runtime protocol to Box execution creation mapping.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -21,17 +21,20 @@ use super::{OCI_IMAGE_INDEX, OCI_IMAGE_MANIFEST};
 const CPU_PERIOD_US: u64 = 100_000;
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
-pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateExecutionRequest> {
+pub(super) fn creation_request(
+    spec: &RuntimeUnitSpec,
+    execution_isolation: ExecutionIsolation,
+) -> RuntimeResult<CreateExecutionRequest> {
     spec.validate().map_err(RuntimeError::InvalidRequest)?;
     validate_provider_unit_id(&spec.unit_id)?;
     validate_supported_shape(spec)?;
     let spec_digest = spec.digest().map_err(RuntimeError::InvalidRequest)?;
     let memory_mb = spec.resources.memory_bytes.div_ceil(BYTES_PER_MIB);
     let memory_mb = u32::try_from(memory_mb).map_err(|_| {
-        RuntimeError::InvalidRequest("Box Sandbox memory limit exceeds u32 MiB metadata".into())
+        RuntimeError::InvalidRequest("Box execution memory limit exceeds u32 MiB metadata".into())
     })?;
     let vcpus = u32::try_from(spec.resources.cpu_millis.div_ceil(1_000)).map_err(|_| {
-        RuntimeError::InvalidRequest("Box Sandbox CPU limit exceeds u32 vCPUs".into())
+        RuntimeError::InvalidRequest("Box execution CPU limit exceeds u32 vCPUs".into())
     })?;
     let cpu_quota = spec
         .resources
@@ -39,10 +42,10 @@ pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateEx
         .checked_mul(CPU_PERIOD_US / 1_000)
         .and_then(|value| i64::try_from(value).ok())
         .ok_or_else(|| {
-            RuntimeError::InvalidRequest("Box Sandbox CPU quota overflows i64".into())
+            RuntimeError::InvalidRequest("Box execution CPU quota overflows i64".into())
         })?;
     let memory_swap = i64::try_from(spec.resources.memory_bytes).map_err(|_| {
-        RuntimeError::InvalidRequest("Box Sandbox memory limit overflows i64".into())
+        RuntimeError::InvalidRequest("Box execution memory limit overflows i64".into())
     })?;
     let task_timeout_secs = spec
         .resources
@@ -60,7 +63,7 @@ pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateEx
 
     let config = BoxConfig {
         image: image_reference(&spec.artifact)?,
-        isolation: ExecutionIsolation::Sandbox,
+        isolation: execution_isolation,
         resources: ResourceConfig {
             vcpus,
             memory_mb,
@@ -83,7 +86,9 @@ pub(super) fn creation_request(spec: &RuntimeUnitSpec) -> RuntimeResult<CreateEx
             cpu_quota: Some(cpu_quota),
             cpu_period: Some(CPU_PERIOD_US),
             memory_swap: Some(memory_swap),
-            sandbox_memory_limit_bytes: Some(spec.resources.memory_bytes),
+            sandbox_memory_limit_bytes: execution_isolation
+                .is_sandbox()
+                .then_some(spec.resources.memory_bytes),
             ..Default::default()
         },
         persistent: true,
@@ -231,7 +236,7 @@ fn validate_tmpfs_target(target: &str) -> RuntimeResult<()> {
     });
     if !normalized || target.contains(':') {
         return Err(RuntimeError::InvalidRequest(format!(
-            "Box Sandbox tmpfs target must be an encodable normalized absolute path: {target:?}"
+            "Box Runtime tmpfs target must be an encodable normalized absolute path: {target:?}"
         )));
     }
     let is_or_below = |root: &Path| {
@@ -247,7 +252,7 @@ fn validate_tmpfs_target(target: &str) -> RuntimeResult<()> {
         || is_or_below(Path::new("/run/a3s-box"));
     if protected {
         return Err(RuntimeError::InvalidRequest(format!(
-            "Box Sandbox tmpfs target is protected: {target:?}"
+            "Box Runtime tmpfs target is protected: {target:?}"
         )));
     }
     Ok(())

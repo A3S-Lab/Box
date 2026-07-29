@@ -45,7 +45,10 @@ async fn partial_creation_replays_same_provider_identity(
     let provider_reservation = fixture
         .driver
         .manager
-        .create(creation_request(&request.spec)?, &operation(&request.spec)?)
+        .create(
+            creation_request(&request.spec, fixture.driver.execution_isolation())?,
+            &operation(&request.spec)?,
+        )
         .await
         .map_err(|error| super::external("reserve partial Sandbox creation", error))?;
     let provider_id = provider_reservation.execution_id.to_string();
@@ -348,7 +351,10 @@ async fn duplicate_resource_detection(
     let reservation = fixture
         .driver
         .manager
-        .create(creation_request(&request.spec)?, &injection_operation)
+        .create(
+            creation_request(&request.spec, fixture.driver.execution_isolation())?,
+            &injection_operation,
+        )
         .await
         .map_err(|error| super::external("reserve duplicate Sandbox", error))?;
     fixture

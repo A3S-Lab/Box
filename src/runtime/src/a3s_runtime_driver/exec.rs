@@ -41,7 +41,7 @@ impl BoxRuntimeDriver {
                     unit_id: unit.spec.unit_id.clone(),
                 })?;
         provider_identity_matches(&unit.observation, &record)?;
-        validate_record_for_spec(&record, &unit.spec)?;
+        validate_record_for_spec(&record, &unit.spec, self.execution_isolation)?;
         let (execution_id, generation, _) = local_identity(&record)?;
 
         // Refresh provider state before crossing the exec boundary. The
@@ -63,7 +63,7 @@ impl BoxRuntimeDriver {
             .ok_or_else(|| RuntimeError::NotFound {
                 unit_id: unit.spec.unit_id.clone(),
             })?;
-        validate_record_for_spec(&record, &unit.spec)?;
+        validate_record_for_spec(&record, &unit.spec, self.execution_isolation)?;
         let (_, refreshed_generation, state) = local_identity(&record)?;
         if state != ManagedExecutionState::Running {
             return Err(RuntimeError::InvalidRequest(format!(
@@ -115,7 +115,7 @@ impl BoxRuntimeDriver {
             .ok_or_else(|| RuntimeError::NotFound {
                 unit_id: unit.spec.unit_id.clone(),
             })?;
-        validate_record_for_spec(&record, &unit.spec)?;
+        validate_record_for_spec(&record, &unit.spec, self.execution_isolation)?;
         let observation = self.observe_service_health(&unit.spec, &record).await?;
         let result = RuntimeExecResult {
             schema: RuntimeExecResult::SCHEMA.into(),

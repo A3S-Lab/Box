@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use a3s_box_core::ExecutionManager;
+use a3s_box_core::{ExecutionIsolation, ExecutionManager};
 use a3s_runtime::contract::{
     ArtifactRef, HealthCheckKind, HealthProbe, IsolationLevel, MountKind, NetworkMode,
     ResourceControl, ResourceLimits, RestartPolicy, RuntimeFeature, RuntimeHealthCheck,
@@ -13,6 +13,8 @@ use a3s_runtime::RuntimeDriver;
 use super::mapping::{creation_request, operation};
 use super::metadata::validate_record_for_spec;
 use super::*;
+
+const TEST_EXECUTION_ISOLATION: ExecutionIsolation = ExecutionIsolation::Microvm;
 
 fn spec(class: RuntimeUnitClass) -> RuntimeUnitSpec {
     RuntimeUnitSpec {
@@ -68,6 +70,31 @@ fn driver(directory: &tempfile::TempDir) -> BoxRuntimeDriver {
     .unwrap()
 }
 
+#[test]
+fn driver_defaults_to_microvm_without_shared_kernel_fallback() {
+    let directory = tempfile::tempdir().unwrap();
+    assert_eq!(
+        driver(&directory).execution_isolation(),
+        ExecutionIsolation::Microvm
+    );
+}
+
+#[test]
+fn driver_allows_explicit_shared_kernel_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = BoxRuntimeDriver::new_with_isolation(
+        BoxRuntimeDriverConfig {
+            home_dir: directory.path().join("home"),
+            control_timeout: Duration::from_secs(2),
+            task_poll_interval: Duration::from_millis(5),
+        },
+        ExecutionIsolation::Sandbox,
+    )
+    .unwrap();
+
+    assert_eq!(driver.execution_isolation(), ExecutionIsolation::Sandbox);
+}
+
 fn mutate_record(
     driver: &BoxRuntimeDriver,
     execution_id: &str,
@@ -92,7 +119,7 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
     let driver = driver(&directory);
     driver
         .provider_build
-        .set("a3s-box/test a3s-oci/sha256:0123456789abcdef agent/sha256:fedcba9876543210".into())
+        .set("a3s-box/test isolation/microvm hypervisor/test".into())
         .unwrap();
 
     let capabilities = driver.capabilities().await.unwrap();
@@ -144,7 +171,8 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
 #[test]
 fn mapping_preserves_digest_resources_timeout_and_hardening() {
     let spec = spec(RuntimeUnitClass::Task);
-    let request = creation_request(&spec).unwrap();
+    let request = creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap();
+    assert_eq!(request.config.isolation, ExecutionIsolation::Microvm);
     assert_eq!(
         request.config.image,
         format!("registry.example/a3s/runtime@sha256:{}", "a".repeat(64))
@@ -157,7 +185,7 @@ fn mapping_preserves_digest_resources_timeout_and_hardening() {
     assert_eq!(request.config.resource_limits.pids_limit, Some(37));
     assert_eq!(
         request.config.resource_limits.sandbox_memory_limit_bytes,
-        Some(spec.resources.memory_bytes)
+        None
     );
     assert_eq!(
         request.config.resource_limits.memory_swap,
@@ -192,10 +220,22 @@ fn runtime_health_does_not_enable_cli_or_image_health_policy() {
         failure_threshold: 3,
     });
 
-    let request = creation_request(&spec).unwrap();
+    let request = creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap();
 
     assert!(request.policy.health_check.is_none());
     assert!(request.policy.healthcheck_disabled);
+}
+
+#[test]
+fn mapping_honors_an_explicit_shared_kernel_backend() {
+    let spec = spec(RuntimeUnitClass::Service);
+    let request = creation_request(&spec, ExecutionIsolation::Sandbox).unwrap();
+
+    assert_eq!(request.config.isolation, ExecutionIsolation::Sandbox);
+    assert_eq!(
+        request.config.resource_limits.sandbox_memory_limit_bytes,
+        Some(spec.resources.memory_bytes)
+    );
 }
 
 #[test]
@@ -209,7 +249,7 @@ fn mapping_rejects_path_like_unit_identity_before_mutation() {
         let mut spec = spec(RuntimeUnitClass::Service);
         spec.unit_id = unit_id.into();
         assert!(matches!(
-            creation_request(&spec),
+            creation_request(&spec, TEST_EXECUTION_ISOLATION),
             Err(RuntimeError::InvalidRequest(message))
                 if message.contains("path traversal")
         ));
@@ -217,7 +257,7 @@ fn mapping_rejects_path_like_unit_identity_before_mutation() {
 
     let mut namespaced = spec(RuntimeUnitClass::Service);
     namespaced.unit_id = "tenant/provider-id".into();
-    assert!(creation_request(&namespaced).is_ok());
+    assert!(creation_request(&namespaced, TEST_EXECUTION_ISOLATION).is_ok());
 }
 
 #[test]
@@ -242,7 +282,7 @@ fn mapping_compiles_bounded_tmpfs_mounts_and_read_only_intent() {
         },
     ];
 
-    let request = creation_request(&spec).unwrap();
+    let request = creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap();
 
     assert_eq!(
         request.config.tmpfs,
@@ -268,7 +308,7 @@ fn mapping_rejects_unadvertised_mount_kinds_before_mutation() {
     });
 
     assert!(matches!(
-        creation_request(&spec),
+        creation_request(&spec, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::UnsupportedCapabilities(missing))
             if missing == vec!["mount_kind:Volume"]
     ));
@@ -285,7 +325,7 @@ fn mapping_rejects_protected_or_unencodable_tmpfs_targets() {
             read_only: false,
         });
         assert!(matches!(
-            creation_request(&spec),
+            creation_request(&spec, TEST_EXECUTION_ISOLATION),
             Err(RuntimeError::InvalidRequest(message)) if message.contains("protected")
         ));
     }
@@ -304,7 +344,7 @@ fn mapping_rejects_protected_or_unencodable_tmpfs_targets() {
             read_only: false,
         });
         assert!(matches!(
-            creation_request(&spec),
+            creation_request(&spec, TEST_EXECUTION_ISOLATION),
             Err(RuntimeError::InvalidRequest(message)) if message.contains("encodable")
         ));
     }
@@ -314,23 +354,23 @@ fn mapping_rejects_protected_or_unencodable_tmpfs_targets() {
 fn mapping_accepts_oci_indexes_and_rejects_unpinned_mismatched_or_unsupported_artifacts() {
     let mut value = spec(RuntimeUnitClass::Service);
     value.artifact.uri = "oci://registry.example/a3s/runtime:latest".into();
-    assert!(creation_request(&value).is_err());
+    assert!(creation_request(&value, TEST_EXECUTION_ISOLATION).is_err());
 
     let mut value = spec(RuntimeUnitClass::Service);
     value.artifact.uri = format!(
         "oci://registry.example/a3s/runtime@sha256:{}",
         "b".repeat(64)
     );
-    assert!(creation_request(&value).is_err());
+    assert!(creation_request(&value, TEST_EXECUTION_ISOLATION).is_err());
 
     let mut value = spec(RuntimeUnitClass::Service);
     value.artifact.media_type = OCI_IMAGE_INDEX.into();
-    assert!(creation_request(&value).is_ok());
+    assert!(creation_request(&value, TEST_EXECUTION_ISOLATION).is_ok());
 
     let mut value = spec(RuntimeUnitClass::Service);
     value.artifact.media_type = "application/vnd.docker.distribution.manifest.v2+json".into();
     assert!(matches!(
-        creation_request(&value),
+        creation_request(&value, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::UnsupportedCapabilities(_))
     ));
 
@@ -339,7 +379,7 @@ fn mapping_accepts_oci_indexes_and_rejects_unpinned_mismatched_or_unsupported_ar
         "oci://user:secret@registry.example/a3s/runtime@sha256:{}",
         "a".repeat(64)
     );
-    assert!(creation_request(&value).is_err());
+    assert!(creation_request(&value, TEST_EXECUTION_ISOLATION).is_err());
 }
 
 #[test]
@@ -347,14 +387,14 @@ fn mapping_rejects_numeric_overflow_before_mutation() {
     let mut value = spec(RuntimeUnitClass::Service);
     value.resources.memory_bytes = i64::MAX as u64 + 1;
     assert!(matches!(
-        creation_request(&value),
+        creation_request(&value, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::InvalidRequest(message)) if message.contains("memory")
     ));
 
     let mut value = spec(RuntimeUnitClass::Service);
     value.resources.cpu_millis = u64::MAX;
     assert!(matches!(
-        creation_request(&value),
+        creation_request(&value, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::InvalidRequest(message)) if message.contains("CPU")
     ));
 }
@@ -363,11 +403,15 @@ fn mapping_rejects_numeric_overflow_before_mutation() {
 async fn metadata_tamper_is_rejected_fail_closed() {
     let directory = tempfile::tempdir().unwrap();
     let driver = driver(&directory);
-    let spec = spec(RuntimeUnitClass::Service);
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.resources.cpu_millis = 500;
     let operation_id = operation(&spec).unwrap();
     let reservation = driver
         .manager
-        .create(creation_request(&spec).unwrap(), &operation_id)
+        .create(
+            creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap(),
+            &operation_id,
+        )
         .await
         .unwrap();
     let mut record = driver
@@ -376,14 +420,41 @@ async fn metadata_tamper_is_rejected_fail_closed() {
         .await
         .unwrap()
         .unwrap();
-    validate_record_for_spec(&record, &spec).unwrap();
+    validate_record_for_spec(&record, &spec, TEST_EXECUTION_ISOLATION).unwrap();
 
     record
         .labels
         .insert(super::metadata::GENERATION_LABEL.into(), "8".into());
     assert!(matches!(
-        validate_record_for_spec(&record, &spec),
+        validate_record_for_spec(&record, &spec, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::Protocol(message)) if message.contains("identity") || message.contains("intent")
+    ));
+}
+
+#[tokio::test]
+async fn metadata_rejects_a_record_created_for_another_box_isolation_backend() {
+    let directory = tempfile::tempdir().unwrap();
+    let driver = driver(&directory);
+    let spec = spec(RuntimeUnitClass::Service);
+    let operation_id = operation(&spec).unwrap();
+    let reservation = driver
+        .manager
+        .create(
+            creation_request(&spec, ExecutionIsolation::Sandbox).unwrap(),
+            &operation_id,
+        )
+        .await
+        .unwrap();
+    let record = driver
+        .manager
+        .managed_record(&reservation.execution_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        validate_record_for_spec(&record, &spec, ExecutionIsolation::Microvm),
+        Err(RuntimeError::Protocol(message)) if message.contains("creation intent")
     ));
 }
 
@@ -391,10 +462,14 @@ async fn metadata_tamper_is_rejected_fail_closed() {
 async fn discovery_rejects_a_runtime_record_hidden_by_unit_label_tamper() {
     let directory = tempfile::tempdir().unwrap();
     let driver = driver(&directory);
-    let spec = spec(RuntimeUnitClass::Service);
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.resources.cpu_millis = 500;
     let reservation = driver
         .manager
-        .create(creation_request(&spec).unwrap(), &operation(&spec).unwrap())
+        .create(
+            creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap(),
+            &operation(&spec).unwrap(),
+        )
         .await
         .unwrap();
 
@@ -414,10 +489,14 @@ async fn discovery_rejects_a_runtime_record_hidden_by_unit_label_tamper() {
 async fn discovery_rejects_a_runtime_operation_that_lost_all_labels() {
     let directory = tempfile::tempdir().unwrap();
     let driver = driver(&directory);
-    let spec = spec(RuntimeUnitClass::Service);
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.resources.cpu_millis = 500;
     let reservation = driver
         .manager
-        .create(creation_request(&spec).unwrap(), &operation(&spec).unwrap())
+        .create(
+            creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap(),
+            &operation(&spec).unwrap(),
+        )
         .await
         .unwrap();
 

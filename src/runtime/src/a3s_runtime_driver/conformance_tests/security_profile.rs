@@ -406,11 +406,14 @@ async fn namespace_separation(fixture: &BoxRuntimeConformanceFixture) -> Result<
     .map_err(|error| super::external("seed sibling immutable image store", error))?;
     let sibling_state_root = sibling_home.join("runtime-state");
     fixture.register_state_root(sibling_state_root.clone());
-    let sibling_driver = Arc::new(BoxRuntimeDriver::new(BoxRuntimeDriverConfig {
-        home_dir: sibling_home,
-        control_timeout: Duration::from_secs(120),
-        task_poll_interval: Duration::from_millis(25),
-    })?);
+    let sibling_driver = Arc::new(BoxRuntimeDriver::new_with_isolation(
+        BoxRuntimeDriverConfig {
+            home_dir: sibling_home,
+            control_timeout: Duration::from_secs(120),
+            task_poll_interval: Duration::from_millis(25),
+        },
+        a3s_box_core::ExecutionIsolation::Sandbox,
+    )?);
     fixture.register_driver(sibling_driver.clone());
     let sibling_state = Arc::new(FileRuntimeStateStore::new(&sibling_state_root));
     let sibling = fixture.client_with(sibling_driver.clone(), sibling_state);
