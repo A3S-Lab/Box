@@ -35,6 +35,7 @@ SOAK_FAILED_COMMAND=""
 SOAK_SUMMARY_ITERATIONS=0
 SOAK_SUMMARY_FAILURES=0
 SOAK_STARTED_EPOCH=0
+SOAK_FINAL_CAPTURED=0
 
 usage() {
     cat <<'EOF'
@@ -618,6 +619,18 @@ capture_cli_snapshot() {
     } >"$SOAK_EVIDENCE_DIR/${label}-cli-snapshot.txt"
 }
 
+capture_final_soak_state() {
+    if [ "$SOAK_FINAL_CAPTURED" -eq 1 ]; then
+        return
+    fi
+
+    # Arm the guard before writing either artifact so an ERR/EXIT trap cannot
+    # append a second final sample while handling a partial capture failure.
+    SOAK_FINAL_CAPTURED=1
+    write_resource_sample "final"
+    capture_cli_snapshot "final"
+}
+
 prepare_bench_image() {
     local tar_path bin image
     tar_path="$(offline_image_tar)"
@@ -772,8 +785,7 @@ handle_soak_exit() {
     trap - ERR
     trap - EXIT
     if [ -n "$SOAK_EVIDENCE_DIR" ] && [ -d "$SOAK_EVIDENCE_DIR" ]; then
-        write_resource_sample "final" || true
-        capture_cli_snapshot "final" || true
+        capture_final_soak_state || true
         write_soak_summary "fail" "$SOAK_SUMMARY_ITERATIONS" "$SOAK_SUMMARY_FAILURES" "$rc"
         log "Host soak failed: exit_code=$rc evidence=$SOAK_EVIDENCE_DIR"
     fi
@@ -813,6 +825,7 @@ run_soak_suite() {
     SOAK_EVIDENCE_DIR="${SOAK_OUTPUT_DIR:-$WORKSPACE/target/a3s-box-soak/$SOAK_RUN_ID}"
     export SOAK_RUN_ID SOAK_EVIDENCE_DIR
     mkdir -p "$SOAK_EVIDENCE_DIR"
+    SOAK_FINAL_CAPTURED=0
     SOAK_FAILURE_TRAP_ARMED=1
     trap 'record_soak_failure' ERR
     trap 'handle_soak_exit "$?"' EXIT
@@ -859,8 +872,7 @@ run_soak_suite() {
         fi
     done
 
-    write_resource_sample "final"
-    capture_cli_snapshot "final"
+    capture_final_soak_state
     if [ "$failures" -eq 0 ]; then
         write_soak_summary "pass" "$iteration" "$failures"
     else

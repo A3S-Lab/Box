@@ -848,18 +848,18 @@ impl VmManager {
             return Ok(Some(code));
         }
 
-        // Unix guests expose the overlay exit file only once their shutdown is
-        // effectively complete. On Windows the shared-rootfs file appears while
-        // the shim still has to relay guest stdout/stderr into the host logs, so
-        // treating it as completion here races teardown against that relay.
         #[cfg(not(target_os = "windows"))]
-        if let Some(code) = self.persisted_exit_code() {
-            self.shim_exit_code = Some(code);
-            return Ok(Some(code));
-        }
+        let persisted_exit_code = self.persisted_exit_code();
 
         let mut handler = self.handler.write().await;
         let Some(handler) = handler.as_mut() else {
+            // A recovered terminal manager can have no live provider handle.
+            // In that state the durable guest result is the remaining source
+            // of truth and no runtime writer can still append console bytes.
+            #[cfg(not(target_os = "windows"))]
+            if let Some(code) = persisted_exit_code {
+                self.shim_exit_code = Some(code);
+            }
             return Ok(self.shim_exit_code);
         };
 
@@ -870,31 +870,52 @@ impl VmManager {
                 &self.log_config,
                 code,
             )?;
+            #[cfg(not(target_os = "windows"))]
+            let code = persisted_exit_code.unwrap_or(code);
             self.shim_exit_code = Some(code);
             return Ok(Some(code));
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        if handler.has_exited() {
+            // Attached handlers cannot reap another process owner's child, but
+            // zombie-aware provider completion still proves that the shim has
+            // closed the raw streams and joined its log processor. Prefer the
+            // durable workload status over a provider-specific status.
+            if let Some(code) = persisted_exit_code.or_else(|| handler.exit_code()) {
+                self.shim_exit_code = Some(code);
+                return Ok(Some(code));
+            }
         }
 
         Ok(None)
     }
 
-    /// Return true once the foreground container is known to have finished, even
-    /// if the shim exit status has not been reaped yet.
+    /// Return true once the runtime provider has finished its terminal work.
+    ///
+    /// The guest can persist its workload status before the shim has relayed the
+    /// final console bytes. That durable status alone must not publish provider
+    /// completion or foreground cleanup can terminate the shim mid-drain.
     pub async fn has_exited(&self) -> bool {
         if self.shim_exit_code.is_some() {
             return true;
         }
 
+        let handler = self.handler.read().await;
+        if let Some(handler) = handler.as_ref() {
+            return handler.has_exited();
+        }
+        drop(handler);
+
         #[cfg(not(target_os = "windows"))]
-        if self.persisted_exit_code().is_some() {
-            return true;
+        {
+            self.persisted_exit_code().is_some()
         }
 
-        self.handler
-            .read()
-            .await
-            .as_ref()
-            .map(|handler| handler.has_exited())
-            .unwrap_or(false)
+        #[cfg(target_os = "windows")]
+        {
+            false
+        }
     }
 
     /// Run a command as the container MAIN in an IDLE-booted (deferred-main) VM.
@@ -2521,6 +2542,32 @@ mod tests {
         assert_eq!(vm.try_wait_exit().await.unwrap(), Some(42));
         assert_eq!(vm.exit_code(), Some(42));
         assert!(vm.has_exited().await);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_guest_exit_code_waits_for_runtime_log_drain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-pending-log-drain".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        *vm.handler.write().await = Some(Box::new(RecordingHandler {
+            stopped: Arc::new(AtomicBool::new(false)),
+        }));
+
+        let exit_path = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("upper")
+            .join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        std::fs::write(exit_path, "7\n").unwrap();
+
+        assert_eq!(vm.try_wait_exit().await.unwrap(), None);
+        assert_eq!(vm.exit_code(), None);
+        assert!(!vm.has_exited().await);
     }
 
     #[tokio::test]

@@ -83,6 +83,17 @@ require_grep() {
     grep -qE -- "$pattern" "$file" || fail "pattern '$pattern' not found in $file"
 }
 
+require_tsv_phase_count() {
+    local expected="$1"
+    local phase="$2"
+    local file="$3"
+    local actual
+
+    actual="$(awk -F '\t' -v phase="$phase" 'NR > 1 && $2 == phase { count++ } END { print count + 0 }' "$file")"
+    [ "$actual" -eq "$expected" ] ||
+        fail "phase '$phase' appeared $actual times in $file; expected $expected"
+}
+
 expect_failure() {
     local name="$1"
     local pattern="$2"
@@ -840,6 +851,7 @@ require_grep '^failed_iterations=0$' "$host_runner_gate_fail_dir/summary.txt"
 require_grep 'failed_command=.*/deploy/scripts/verify-soak-evidence.sh --kind host --min-duration-secs 3600 ' \
     "$host_runner_gate_fail_dir/summary.txt"
 require_grep 'host soak duration too short' "$host_runner_gate_fail_dir/verify.out"
+require_tsv_phase_count 1 final "$host_runner_gate_fail_dir/resource-samples.tsv"
 expect_failure host-runner-gate-failure-diagnostic 'host soak failed: failed_iterations=0' \
     "$VERIFY_SCRIPT" --kind host "$host_runner_gate_fail_dir"
 
@@ -862,6 +874,7 @@ require_grep '^failed_iterations=1$' "$host_runner_fail_dir/summary.txt"
 require_grep '^exit_code=1$' "$host_runner_fail_dir/summary.txt"
 require_grep '^failed_at=iteration-1-bench-leak$' "$host_runner_fail_dir/summary.txt"
 require_grep '^failed_command=run_bench_leak$' "$host_runner_fail_dir/summary.txt"
+require_tsv_phase_count 1 final "$host_runner_fail_dir/resource-samples.tsv"
 expect_failure host-runner-failure-diagnostic 'host soak failed: failed_iterations=1' \
     "$VERIFY_SCRIPT" --kind host "$host_runner_fail_dir"
 

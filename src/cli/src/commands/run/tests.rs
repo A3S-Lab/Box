@@ -871,7 +871,7 @@ fn test_foreground_poll_cadence_avoids_fixed_startup_delay() {
 }
 
 #[tokio::test]
-async fn finished_sandbox_writers_need_no_additional_quiet_period() {
+async fn finished_foreground_writers_need_no_additional_quiet_period() {
     let directory = tempfile::tempdir().unwrap();
     let log = directory.path().join("console.log");
     std::fs::write(&log, b"complete").unwrap();
@@ -886,7 +886,7 @@ async fn finished_sandbox_writers_need_no_additional_quiet_period() {
 }
 
 #[tokio::test]
-async fn finished_sandbox_writer_wait_still_requires_tail_catch_up() {
+async fn finished_foreground_writer_wait_still_requires_tail_catch_up() {
     let directory = tempfile::tempdir().unwrap();
     let log = directory.path().join("console.log");
     std::fs::write(&log, b"pending").unwrap();

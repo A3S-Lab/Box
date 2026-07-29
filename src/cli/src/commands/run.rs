@@ -640,8 +640,8 @@ async fn run_foreground(
         foreground_start.elapsed(),
     );
 
-    let sandbox_natural_exit =
-        stop_reason == ForegroundStopReason::ProcessExited && ctx.record.isolation.is_sandbox();
+    let natural_exit = stop_reason == ForegroundStopReason::ProcessExited;
+    let sandbox_natural_exit = natural_exit && ctx.record.isolation.is_sandbox();
     if sandbox_natural_exit {
         // The generation-owned worker exits only after the A3S OCI owner has closed both
         // raw console streams and projected their final records. Once it is
@@ -656,9 +656,13 @@ async fn run_foreground(
     }
 
     let raw_log_drain_start = std::time::Instant::now();
+    // A natural Sandbox completion is published only after its generation-owned
+    // log worker exits. A natural MicroVM completion is published only after the
+    // shim closes the raw streams and joins its log processor. In both cases the
+    // lengths are immutable, so wait only for the terminal tailers to catch up.
     wait_for_foreground_log_drain(
         &[(&console_log, &stdout_pos), (&console_err, &stderr_pos)],
-        sandbox_natural_exit,
+        natural_exit,
     )
     .await;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
