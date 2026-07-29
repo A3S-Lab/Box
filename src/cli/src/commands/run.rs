@@ -154,6 +154,13 @@ struct RunContext {
     completed_during_start: bool,
 }
 
+pub(super) fn is_completed_managed_start(record: &BoxRecord) -> bool {
+    record.exit_code.is_some()
+        && record
+            .managed_state()
+            .is_ok_and(|state| state == Some(a3s_box_runtime::ManagedExecutionState::Stopped))
+}
+
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     validate_run_mode(&args, std::io::stdin().is_terminal())
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -400,7 +407,7 @@ use setup::setup_and_boot;
 #[cfg(test)]
 use setup::{
     build_box_config, build_execution_request, interactive_keepalive_entrypoint,
-    is_completed_managed_start, should_create_diff_baseline, RunRecordPolicy,
+    should_create_diff_baseline, RunRecordPolicy,
 };
 
 // ============================================================================
@@ -640,8 +647,8 @@ async fn run_foreground(
         foreground_start.elapsed(),
     );
 
-    let sandbox_natural_exit =
-        stop_reason == ForegroundStopReason::ProcessExited && ctx.record.isolation.is_sandbox();
+    let natural_exit = stop_reason == ForegroundStopReason::ProcessExited;
+    let sandbox_natural_exit = natural_exit && ctx.record.isolation.is_sandbox();
     if sandbox_natural_exit {
         // The generation-owned worker exits only after the A3S OCI owner has closed both
         // raw console streams and projected their final records. Once it is
@@ -656,9 +663,13 @@ async fn run_foreground(
     }
 
     let raw_log_drain_start = std::time::Instant::now();
+    // A natural Sandbox completion is published only after its generation-owned
+    // log worker exits. A natural MicroVM completion is published only after the
+    // shim closes the raw streams and joins its log processor. In both cases the
+    // lengths are immutable, so wait only for the terminal tailers to catch up.
     wait_for_foreground_log_drain(
         &[(&console_log, &stdout_pos), (&console_err, &stderr_pos)],
-        sandbox_natural_exit,
+        natural_exit,
     )
     .await;
     a3s_box_core::lifecycle_profile::record_lifecycle_phase(
@@ -682,7 +693,7 @@ async fn run_foreground(
         );
     }
 
-    let persisted_exit_code = a3s_box_runtime::rootfs::read_persisted_exit_code(&ctx.box_dir);
+    let persisted_exit_code = foreground_workload_exit_code(&ctx.box_dir, ctx.record.exit_code);
     let exit_code = foreground_exit_code(stop_reason, persisted_exit_code);
     let archive_start = std::time::Instant::now();
     archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
@@ -805,6 +816,13 @@ fn foreground_exit_code(reason: ForegroundStopReason, vm_exit_code: Option<i32>)
         ForegroundStopReason::VmUnhealthy => vm_exit_code.or(Some(1)),
         ForegroundStopReason::TimedOut => Some(124),
     }
+}
+
+fn foreground_workload_exit_code(
+    box_dir: &std::path::Path,
+    recorded_exit_code: Option<i32>,
+) -> Option<i32> {
+    a3s_box_runtime::rootfs::read_persisted_exit_code(box_dir).or(recorded_exit_code)
 }
 
 fn managed_process_alive(ctx: &RunContext) -> bool {

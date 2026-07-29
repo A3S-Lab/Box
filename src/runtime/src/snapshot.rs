@@ -96,6 +96,7 @@ impl SnapshotStore {
 
     /// Save a managed Sandbox snapshot with an authoritative terminal rootfs
     /// metadata manifest captured while the source execution is quiesced.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn save_managed(
         &self,
         metadata: SnapshotMetadata,

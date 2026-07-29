@@ -413,12 +413,19 @@ async fn namespace_separation(fixture: &BoxRuntimeConformanceFixture) -> Result<
     // Keep this independent provider namespace short enough for the fixed
     // A3S OCI `runtime.sock` path. This profile certifies namespace separation;
     // nesting it under the already isolated primary home would instead test
-    // the platform `sockaddr_un.sun_path` limit.
+    // the platform `sockaddr_un.sun_path` limit. Seed only the immutable,
+    // digest-addressed image store so a registry outage cannot turn this local
+    // security oracle into a network test.
     let namespace_id = uuid::Uuid::new_v4().simple().to_string();
     let sibling_home = std::env::temp_dir().join(format!("a3s-r17n-{}", &namespace_id[..16]));
     std::fs::create_dir(&sibling_home)
         .map_err(|error| super::external("create sibling provider namespace", error))?;
     fixture.register_removable_home(sibling_home.clone());
+    crate::cache::layer_cache::copy_dir_recursive(
+        &fixture.home_dir.join("images"),
+        &sibling_home.join("images"),
+    )
+    .map_err(|error| super::external("seed sibling immutable image store", error))?;
     let sibling_state_root = sibling_home.join("runtime-state");
     fixture.register_state_root(sibling_state_root.clone());
     let sibling_driver = Arc::new(BoxRuntimeDriver::new(BoxRuntimeDriverConfig {

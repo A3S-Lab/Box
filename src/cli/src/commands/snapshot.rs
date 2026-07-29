@@ -182,6 +182,10 @@ async fn execute_create(args: SnapshotCreateArgs) -> Result<(), Box<dyn std::err
 
     // Snapshot the box's current root filesystem (overlay `merged` or the plain
     // provider's `rootfs`), so runtime changes are captured — not an empty dir.
+    // A stopped macOS box retains that filesystem in its APFS sparse image, so
+    // attach it for the duration of the copy instead of archiving the empty
+    // mountpoint left behind after runtime teardown.
+    let _attached_rootfs = a3s_box_runtime::rootfs::attach_persistent_rootfs(&record.box_dir)?;
     let rootfs_path = super::resolve_box_rootfs(&record.box_dir).ok_or_else(|| {
         format!(
             "Rootfs not found for box '{}' under {} (looked for merged/ and rootfs/); \

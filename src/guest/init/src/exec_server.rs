@@ -2165,6 +2165,18 @@ fn read_bounded_pipe(mut pipe: impl Read, limit: usize) -> BoundedPipeOutput {
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn one_shot_exec_poll_delay(
+    elapsed: Duration,
+    timeout: Duration,
+    max_interval: Duration,
+) -> Option<Duration> {
+    timeout
+        .checked_sub(elapsed)
+        .filter(|remaining| !remaining.is_zero())
+        .map(|remaining| remaining.min(max_interval))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn execute_command(
     cmd: &[String],
     timeout_ns: u64,
@@ -2231,7 +2243,8 @@ fn execute_command(
                 );
             }
             Ok(None) => {
-                if start.elapsed() >= timeout {
+                let Some(delay) = one_shot_exec_poll_delay(start.elapsed(), timeout, poll_interval)
+                else {
                     warn!("Exec command timed out after {:?}, killing", timeout);
                     kill_child_process_group(&mut child);
 
@@ -2240,8 +2253,8 @@ fn execute_command(
                     stderr.extend_from_slice(b"\nProcess killed: timeout exceeded");
 
                     return bounded_exec_output_with_truncation(stdout, stderr, 137, truncated);
-                }
-                std::thread::sleep(poll_interval);
+                };
+                std::thread::sleep(delay);
             }
             Err(ref e) if e.raw_os_error() == Some(libc::ECHILD) => {
                 // Child already reaped (timing race in microVM PID 1 context).
@@ -3338,6 +3351,26 @@ mod tests {
         let output = execute_command(&[], 0, &[], None, None, None, None);
         assert_eq!(output.exit_code, 1);
         assert_eq!(output.stderr, b"Empty command");
+    }
+
+    #[test]
+    fn one_shot_exec_poll_never_sleeps_past_timeout() {
+        assert_eq!(
+            one_shot_exec_poll_delay(
+                Duration::from_millis(10),
+                Duration::from_millis(25),
+                Duration::from_millis(50),
+            ),
+            Some(Duration::from_millis(15))
+        );
+        assert_eq!(
+            one_shot_exec_poll_delay(
+                Duration::from_millis(25),
+                Duration::from_millis(25),
+                Duration::from_millis(50),
+            ),
+            None
+        );
     }
 
     #[test]

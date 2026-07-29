@@ -820,6 +820,24 @@ fn test_foreground_exit_code_preserves_vm_code() {
 }
 
 #[test]
+fn test_foreground_workload_exit_code_falls_back_to_completed_start_record() {
+    let temporary = tempfile::tempdir().unwrap();
+
+    assert_eq!(
+        foreground_workload_exit_code(temporary.path(), Some(0)),
+        Some(0)
+    );
+
+    let exit_path = temporary.path().join("upper/.a3s_exit_code");
+    std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+    std::fs::write(exit_path, "7\n").unwrap();
+    assert_eq!(
+        foreground_workload_exit_code(temporary.path(), Some(1)),
+        Some(7)
+    );
+}
+
+#[test]
 fn test_foreground_natural_exit_without_guest_result_fails_closed() {
     assert_eq!(
         foreground_exit_code(ForegroundStopReason::ProcessExited, None),
@@ -871,7 +889,7 @@ fn test_foreground_poll_cadence_avoids_fixed_startup_delay() {
 }
 
 #[tokio::test]
-async fn finished_sandbox_writers_need_no_additional_quiet_period() {
+async fn finished_foreground_writers_need_no_additional_quiet_period() {
     let directory = tempfile::tempdir().unwrap();
     let log = directory.path().join("console.log");
     std::fs::write(&log, b"complete").unwrap();
@@ -886,7 +904,7 @@ async fn finished_sandbox_writers_need_no_additional_quiet_period() {
 }
 
 #[tokio::test]
-async fn finished_sandbox_writer_wait_still_requires_tail_catch_up() {
+async fn finished_foreground_writer_wait_still_requires_tail_catch_up() {
     let directory = tempfile::tempdir().unwrap();
     let log = directory.path().join("console.log");
     std::fs::write(&log, b"pending").unwrap();

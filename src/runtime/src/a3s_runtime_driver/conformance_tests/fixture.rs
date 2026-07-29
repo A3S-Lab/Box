@@ -236,7 +236,7 @@ impl BoxRuntimeConformanceFixture {
         for ((home, id), resource) in seen {
             for (kind, path) in [
                 ("box-dir", home.join("boxes").join(&id)),
-                ("a3s-oci-root", home.join("run/a3s-oci").join(&id)),
+                ("a3s-oci-root", crate::vm::sandbox_runtime_root(&home, &id)),
                 (
                     "socket-dir",
                     PathBuf::from("/tmp/a3s-box-sockets").join(&id),
@@ -529,10 +529,7 @@ fn emit_missing_exit_diagnostics(home_dir: &Path, record: &crate::BoxRecord) {
         ),
         (
             "A3S OCI generation",
-            home_dir
-                .join("run/a3s-oci")
-                .join(&record.id)
-                .join("record.json"),
+            crate::vm::sandbox_runtime_root(home_dir, &record.id).join("record.json"),
         ),
     ] {
         let Ok(bytes) = std::fs::read(&path) else {

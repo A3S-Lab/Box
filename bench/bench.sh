@@ -16,6 +16,7 @@
 #   POOL_SIZE warm-pool / fork fill size            (default: 16)
 #   CHURN     create/run/remove cycles for the leak test (default: 30)
 #   RACE      concurrent `run -d` processes for the cross-process race (default: 8)
+#   RACE_WORKLOAD_SECS lifetime of each race workload before forced cleanup (default: 300)
 #   FOREGROUND_RUNS samples for the cached foreground no-op benchmark (default: RUNS)
 #   FOREGROUND_WARMUPS warm-up runs per runtime before sampling (default: 1)
 #   FOREGROUND_DOCKER 1 compares Docker when available, 0 skips it (default: 1)
@@ -46,6 +47,7 @@ RUNS="${RUNS:-20}"
 POOL_SIZE="${POOL_SIZE:-16}"
 CHURN="${CHURN:-30}"
 RACE="${RACE:-8}"
+RACE_WORKLOAD_SECS="${RACE_WORKLOAD_SECS:-300}"
 FOREGROUND_RUNS="${FOREGROUND_RUNS:-$RUNS}"
 FOREGROUND_WARMUPS="${FOREGROUND_WARMUPS:-1}"
 FOREGROUND_DOCKER="${FOREGROUND_DOCKER:-1}"
@@ -109,11 +111,22 @@ require_runtime() {
 # Count host-side resources that a leak would grow.
 shim_count() {
   local count
-  count=$(pgrep -xc 'a3s-box-shim' 2>/dev/null || pgrep -fc 'a3s-box-shim' 2>/dev/null || true)
-  echo "${count:-0}"
+  count=$({ pgrep -x 'a3s-box-shim' 2>/dev/null || true; } | awk 'END { print NR + 0 }')
+  echo "$count"
 }
-mount_count() { mount 2>/dev/null | awk '/\/\.a3s\/boxes|\/a3s\/boxes/ { n++ } END { print n + 0 }'; }
-boxdir_count() { find "${HOME}/.a3s/boxes" -mindepth 1 -maxdepth 1 -print 2>/dev/null | awk 'END { print NR + 0 }'; }
+a3s_home_dir() { echo "${A3S_HOME:-${HOME}/.a3s}"; }
+mount_count() {
+  local boxes_dir
+  boxes_dir="$(a3s_home_dir)/boxes"
+  mount 2>/dev/null | awk -v boxes_dir="$boxes_dir" '
+    index($0, boxes_dir) { n++ }
+    END { print n + 0 }
+  '
+}
+boxdir_count() {
+  find "$(a3s_home_dir)/boxes" -mindepth 1 -maxdepth 1 -print 2>/dev/null |
+    awk 'END { print NR + 0 }'
+}
 
 bench_cold() {
   echo "## Cold boot ($RUNS runs, $IMAGE)"
@@ -472,18 +485,37 @@ bench_leak() {
   local b_shim b_mount b_dir
   b_shim=$(shim_count); b_mount=$(mount_count); b_dir=$(boxdir_count)
   echo "  baseline: shims=$b_shim mounts=$b_mount box-dirs=$b_dir"
-  for _ in $(seq 1 "$CHURN"); do
-    "$A3S_BOX" run --rm "$IMAGE" -- true >/dev/null 2>&1
+
+  local log_dir="${TMPDIR:-/tmp}/a3s-box-bench-leak-$$"
+  rm -rf -- "$log_dir"
+  mkdir -p "$log_dir"
+
+  local i run_failures=0
+  for i in $(seq 1 "$CHURN"); do
+    if ! "$A3S_BOX" run --rm "$IMAGE" -- true >"$log_dir/run-$i.log" 2>&1; then
+      echo "  FAIL: churn run $i exited unsuccessfully"
+      sed 's/^/    /' "$log_dir/run-$i.log" | tail -n 80
+      run_failures=$(( run_failures + 1 ))
+    fi
   done
   sleep 3
   local a_shim a_mount a_dir
   a_shim=$(shim_count); a_mount=$(mount_count); a_dir=$(boxdir_count)
   echo "  after:    shims=$a_shim mounts=$a_mount box-dirs=$a_dir"
   local leak=0
+  if [ "$run_failures" -gt 0 ]; then
+    echo "  FAIL: $run_failures/$CHURN churn runs failed"
+    leak=1
+  fi
   [ "$a_shim" -gt "$b_shim" ]  && { echo "  LEAK: $(( a_shim - b_shim )) orphan shim(s)"; leak=1; }
   [ "$a_mount" -gt "$b_mount" ] && { echo "  LEAK: $(( a_mount - b_mount )) leaked overlay mount(s)"; leak=1; }
   [ "$a_dir" -gt "$b_dir" ]    && { echo "  LEAK: $(( a_dir - b_dir )) leaked box dir(s)"; leak=1; }
-  if [ "$leak" -eq 0 ]; then echo "  PASS: no orphan shims / mounts / box dirs after churn"; else echo "  FAIL: resource leak detected"; fi
+  if [ "$leak" -eq 0 ]; then
+    echo "  PASS: all churn runs completed with no orphan shims / mounts / box dirs"
+  else
+    echo "  FAIL: churn execution or resource leak assertion failed"
+  fi
+  rm -rf -- "$log_dir"
   return "$leak"
 }
 
@@ -502,21 +534,45 @@ bench_race() {
   local tag="race-$$"
   echo "## Cross-process race ($N concurrent run -d -> boxes.json)"
 
+  case "$N" in
+    ''|*[!0-9]*|0) echo "  ERROR: RACE must be a positive integer" >&2; return 2 ;;
+  esac
+  case "$RACE_WORKLOAD_SECS" in
+    ''|*[!0-9]*|0) echo "  ERROR: RACE_WORKLOAD_SECS must be a positive integer" >&2; return 2 ;;
+  esac
+
   # Baseline must load cleanly, so a failure below is attributable to the race.
   if ! "$A3S_BOX" ps -a >/dev/null 2>&1; then
     echo "  FAIL: boxes.json does not load before the race"; return 1
   fi
 
+  local log_dir="${TMPDIR:-/tmp}/a3s-box-bench-race-$$"
+  rm -rf -- "$log_dir"
+  mkdir -p "$log_dir"
+
   local pids="" p
   for i in $(seq 1 "$N"); do
-    "$A3S_BOX" run -d --name "$tag-$i" "$IMAGE" -- sleep 30 >/dev/null 2>&1 &
+    "$A3S_BOX" run -d --name "$tag-$i" "$IMAGE" -- \
+      sleep "$RACE_WORKLOAD_SECS" >"$log_dir/launch-$i.log" 2>&1 &
     pids="$pids $!"
   done
-  local ok=0
-  for p in $pids; do wait "$p" && ok=$(( ok + 1 )); done
+  local ok=0 rc=0 launch_index=0
+  for p in $pids; do
+    launch_index=$(( launch_index + 1 ))
+    if wait "$p"; then
+      ok=$(( ok + 1 ))
+    else
+      rc=1
+      echo "  FAIL: detached launch $launch_index exited unsuccessfully"
+      sed 's/^/    /' "$log_dir/launch-$launch_index.log" | tail -n 80
+    fi
+  done
   echo "  launched: $ok/$N detached boxes reported success"
+  if [ "$ok" -ne "$N" ]; then
+    echo "  FAIL: $(( N - ok ))/$N detached launches failed"
+    rc=1
+  fi
 
-  local rc=0
   # The CLI re-reads boxes.json here; a torn write makes this fail or quarantine.
   if ! "$A3S_BOX" ps -a >/dev/null 2>&1; then
     echo "  FAIL: boxes.json is unreadable after the race (torn write)"
@@ -524,21 +580,27 @@ bench_race() {
   else
     local persisted
     persisted=$("$A3S_BOX" ps -a --format '{{.Names}}' 2>/dev/null | grep -c "^$tag-")
-    echo "  persisted: $persisted entries named $tag-* (expected $ok)"
-    if [ "$persisted" -ne "$ok" ]; then
-      echo "  FAIL: lost update — $ok launches succeeded but only $persisted persisted"
+    echo "  persisted: $persisted entries named $tag-* (expected $N)"
+    if [ "$persisted" -ne "$N" ]; then
+      echo "  FAIL: persistence mismatch — $N launches were required but $persisted entries persisted"
       rc=1
     else
-      echo "  PASS: every successful launch persisted (no lost update, JSON intact)"
+      echo "  PASS: every required launch persisted (no lost update, JSON intact)"
     fi
   fi
 
   # Cleanup: remove every race box and verify none linger (the test must not leak).
-  for i in $(seq 1 "$N"); do "$A3S_BOX" rm -f "$tag-$i" >/dev/null 2>&1; done
+  for i in $(seq 1 "$N"); do
+    if ! "$A3S_BOX" rm -f "$tag-$i" >/dev/null 2>&1; then
+      echo "  FAIL: could not remove race box $tag-$i"
+      rc=1
+    fi
+  done
   sleep 2
   local left
   left=$("$A3S_BOX" ps -a --format '{{.Names}}' 2>/dev/null | grep -c "^$tag-")
   [ "$left" -ne 0 ] && { echo "  FAIL: $left race box(es) survived cleanup"; rc=1; }
+  rm -rf -- "$log_dir"
   return "$rc"
 }
 

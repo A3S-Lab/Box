@@ -46,6 +46,8 @@ Tunables (env):
 | `SANDBOX_LOG_DIR` | `/tmp/a3s-box-sandbox-lifecycle-<pid>` | raw opt-in JSONL profile logs |
 | `POOL_SIZE` | `16` | warm-pool / fork fill size |
 | `CHURN` | `30` | create/run/remove cycles for the leak test |
+| `RACE` | `8` | concurrent detached launches required to succeed and persist |
+| `RACE_WORKLOAD_SECS` | `300` | workload lifetime during the race; cleanup removes boxes earlier |
 | `PNPM_PROJECT` | unset | project directory with `package.json` and `pnpm-lock.yaml` for `pnpm` mode |
 | `PNPM_IMAGE` | `node:22-alpine` | Node image used by `pnpm` mode |
 | `PNPM_VERSION` | `10.30.3` | version passed to `corepack prepare` |
@@ -83,7 +85,12 @@ Tunables (env):
 - **leak** — snapshots host-side resources a leak would grow (orphan
   `a3s-box-shim` processes, overlay mounts under `~/.a3s/boxes`, box dirs),
   runs `CHURN` `run --rm` cycles, then asserts they return to baseline.
-  **Exits non-zero on any leak**, so it is CI-gateable.
+  **Exits non-zero when any churn run fails or any resource grows**, so a
+  missing image or boot failure cannot be reported as a leak-free pass.
+- **race** — starts `RACE` detached boxes from separate CLI processes and
+  requires every launch to succeed, every unique record to persist in
+  `boxes.json`, and every race box to disappear during cleanup. Per-launch
+  diagnostics are printed on failure and removed after the gate completes.
 - **pnpm** — runs `node:22-alpine` against a real project mount or the reduced
   fixture at [`fixtures/pnpm`](./fixtures/pnpm). It reports p50/p90 for VM boot,
   `corepack + pnpm` setup, `pnpm fetch` (registry download plus extraction/import
@@ -114,8 +121,8 @@ only the benchmark-owned `a3s-bench-pnpm-store` volume.
 
 ## Wiring into CI
 
-The self-hosted KVM job runs the foreground benchmark with an absolute p50 gate
-and the leak assertion with its resource-count gate (see
+The self-hosted KVM job runs the foreground benchmark with an absolute p50 gate,
+the leak assertion, and the strict cross-process race gate (see
 [`../docs/ci-kvm-runner.md`](../docs/ci-kvm-runner.md)). Keep absolute latency
 limits on a stable dedicated runner; use the Docker ratio gate for manual
 macOS/HVF comparisons on the host class from issue #33.

@@ -178,7 +178,7 @@ impl LocalExecutionManager {
                 }
                 RuntimeUpdate::RestartAdvance => clear_live_runtime(record, None),
                 RuntimeUpdate::RestartHandle(handle) => apply_restart_handle(record, &handle),
-                RuntimeUpdate::RestartFailed(exit_code) => clear_live_runtime(record, exit_code),
+                RuntimeUpdate::RestartTerminal(exit_code) => clear_live_runtime(record, exit_code),
             })
         })
         .await
@@ -265,7 +265,7 @@ pub(super) enum RuntimeUpdate {
     },
     RestartAdvance,
     RestartHandle(LocalExecutionHandle),
-    RestartFailed(Option<i32>),
+    RestartTerminal(Option<i32>),
 }
 
 pub(super) async fn run_store<T>(

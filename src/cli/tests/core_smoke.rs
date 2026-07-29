@@ -14,6 +14,8 @@
 //! - `A3S_BOX_SMOKE_IMAGE`: image to use (default: `docker.io/library/alpine:latest`)
 //! - `A3S_BOX_SMOKE_IMAGE_TAR`: load this OCI archive into the isolated `A3S_HOME`
 //!   before running, useful for offline HVF/KVM smoke tests
+//! - `A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR`: preload the BuildKit helper image from
+//!   this OCI archive for reproducible macOS BuildKit smoke tests
 //! - `A3S_BOX_TEST_ALPINE_TAR`: fallback OCI archive path shared with host smoke coverage
 //! - `A3S_BOX_SMOKE_SKIP_PULL=1`: skip the explicit `pull` step for cached images
 //! - `A3S_BOX_SMOKE_TIMEOUT_SECS`: command and polling timeout (default: 300)
@@ -502,6 +504,23 @@ impl CoreSmoke {
         panic!("timeout waiting for {name} to become {expected}\nlast inspect:\n{last}");
     }
 
+    #[cfg(target_os = "macos")]
+    fn wait_for_named_terminal_status(&self, name: &str) -> serde_json::Value {
+        let start = Instant::now();
+        let mut last = String::new();
+
+        while start.elapsed() < self.timeout {
+            let value = self.inspect_json(name);
+            last = value.to_string();
+            if matches!(json_string_field(&value, "status"), "stopped" | "dead") {
+                return value;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        panic!("timeout waiting for {name} to become terminal\nlast inspect:\n{last}");
+    }
+
     fn wait_for_named_health(&self, name: &str, expected: &str) -> serde_json::Value {
         let start = Instant::now();
         let mut last = String::new();
@@ -722,6 +741,26 @@ fn smoke_image_tar() -> Option<String> {
         .ok()
         .or_else(|| std::env::var("A3S_BOX_TEST_ALPINE_TAR").ok())
         .filter(|path| !path.trim().is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn seed_optional_image_tar(smoke: &CoreSmoke, variable: &str, image: &str) {
+    let Ok(path) = std::env::var(variable) else {
+        return;
+    };
+    if path.trim().is_empty() {
+        return;
+    }
+    smoke.ok(&["load", "--input", &path, "--tag", image]);
+}
+
+#[cfg(target_os = "macos")]
+fn seed_buildkit_image(smoke: &CoreSmoke) {
+    let image = std::env::var("A3S_BOX_BUILDKIT_IMAGE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "moby/buildkit:latest".to_string());
+    seed_optional_image_tar(smoke, "A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR", &image);
 }
 
 fn skip_pull() -> bool {
@@ -1213,12 +1252,11 @@ fn real_core_published_port_http_smoke() {
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore]
-fn real_core_tsi_published_redis_nonblocking_accept_and_exec() {
+fn real_core_tsi_published_tcp_nonblocking_accept_and_exec() {
     use std::io::{Read, Write};
 
     let smoke = CoreSmoke::new();
-    let image =
-        std::env::var("A3S_BOX_REDIS_SMOKE_IMAGE").unwrap_or_else(|_| "redis:7-alpine".to_string());
+    let image = smoke_image();
     let host_port = unused_tcp_port();
     let publish = format!("{host_port}:6379");
     let _cleanup = NamedBoxCleanup {
@@ -1226,15 +1264,34 @@ fn real_core_tsi_published_redis_nonblocking_accept_and_exec() {
         name: smoke.name.clone(),
     };
 
-    smoke.ok(&["pull", &image]);
-    smoke.ok(&["run", "-d", "--name", &smoke.name, "-p", &publish, &image]);
+    seed_smoke_image(&smoke, &image);
+    smoke.ok(&[
+        "run",
+        "-d",
+        "--name",
+        &smoke.name,
+        "-p",
+        &publish,
+        &image,
+        "--",
+        "/bin/sh",
+        "-c",
+        r#"cat >/tmp/a3s-pong <<'EOF'
+#!/bin/sh
+dd bs=1 count=14 of=/dev/null 2>/dev/null
+printf '+PONG\r\n'
+EOF
+chmod +x /tmp/a3s-pong
+echo TSI_ACCEPT_READY
+exec nc -ll -p 6379 -e /tmp/a3s-pong"#,
+    ]);
     smoke.wait_for_running();
-    smoke.wait_for_logs("Ready to accept connections");
+    smoke.wait_for_logs("TSI_ACCEPT_READY");
 
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], host_port));
     for connection in 1..=2 {
         let mut stream = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(5))
-            .unwrap_or_else(|error| panic!("connect Redis client {connection}: {error}"));
+            .unwrap_or_else(|error| panic!("connect TSI client {connection}: {error}"));
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -1242,7 +1299,7 @@ fn real_core_tsi_published_redis_nonblocking_accept_and_exec() {
         let mut pong = [0u8; 7];
         stream
             .read_exact(&mut pong)
-            .unwrap_or_else(|error| panic!("read Redis PONG for client {connection}: {error}"));
+            .unwrap_or_else(|error| panic!("read TSI PONG for client {connection}: {error}"));
         assert_eq!(&pong, b"+PONG\r\n");
     }
 
@@ -1254,7 +1311,7 @@ fn real_core_tsi_published_redis_nonblocking_accept_and_exec() {
         "-c",
         "echo EXEC_AFTER_PONG",
     ]);
-    assert_contains(&exec, "EXEC_AFTER_PONG", "exec after Redis PONG");
+    assert_contains(&exec, "EXEC_AFTER_PONG", "exec after TSI PONG");
 
     smoke.ok(&["rm", "-f", &smoke.name]);
 }
@@ -2709,7 +2766,7 @@ fi"#;
     ]);
     let first = smoke.wait_for_named_logs(&smoke.name, "CASE_SENSITIVE_CREATED");
     assert_contains(&first, "CASE_SENSITIVE_CREATED", "first case-sensitive run");
-    smoke.wait_for_named_status(&smoke.name, "dead");
+    smoke.wait_for_named_terminal_status(&smoke.name);
 
     smoke.ok(&["start", &smoke.name]);
     let second = smoke.wait_for_named_logs(&smoke.name, "CASE_SENSITIVE_PERSISTED");
@@ -2718,6 +2775,7 @@ fi"#;
         "CASE_SENSITIVE_PERSISTED",
         "persistent case-sensitive restart",
     );
+    smoke.wait_for_named_terminal_status(&smoke.name);
 
     smoke.ok(&["rm", &smoke.name]);
     let boxes_dir = smoke.home_path().join("boxes");
@@ -2746,7 +2804,7 @@ fi"#;
     assert!(
         smoke
             .home_path()
-            .join("cache/rootfs-apfs")
+            .join("cache/rootfs-apfs-v2")
             .read_dir()
             .map(|mut entries| entries.next().is_some())
             .unwrap_or(false),
@@ -2759,19 +2817,26 @@ fi"#;
 #[ignore]
 fn real_core_buildkit_vm_preserves_multiple_build_args_with_spaces() {
     let smoke = CoreSmoke::new();
-    let base = smoke_image();
     let tag = format!("{}-build-args:latest", smoke.name);
     let context = smoke.home_path().join("buildkit-context");
     std::fs::create_dir_all(&context).unwrap();
+    std::fs::write(context.join("payload"), "buildkit-offline-smoke\n").unwrap();
     std::fs::write(
         context.join("Dockerfile"),
-        format!(
-            "FROM {base} AS chosen\nARG FIRST=default\nARG SECOND=none\nRUN printf '%s|%s' \"$FIRST\" \"$SECOND\" >/ok\n\nFROM {base} AS default\nRUN printf wrong >/ok\n"
-        ),
+        "FROM scratch AS chosen\n\
+         ARG FIRST=default\n\
+         ARG SECOND=none\n\
+         COPY payload /payload\n\
+         LABEL a3s.smoke.first=\"$FIRST\" a3s.smoke.second=\"$SECOND\" a3s.smoke.target=\"chosen\"\n\
+         \n\
+         FROM scratch AS default\n\
+         COPY payload /payload\n\
+         LABEL a3s.smoke.target=\"default\"\n",
     )
     .unwrap();
     let context_arg = context.to_string_lossy().to_string();
 
+    seed_buildkit_image(&smoke);
     smoke.ok(&[
         "build",
         "--builder",
@@ -2790,8 +2855,12 @@ fn real_core_buildkit_vm_preserves_multiple_build_args_with_spaces() {
         &tag,
         &context_arg,
     ]);
-    let result = smoke.ok(&["run", "--rm", "--entrypoint", "/bin/cat", &tag, "--", "/ok"]);
-    assert_contains(&result, "two words|custom", "BuildKit build args");
+    let result: serde_json::Value =
+        serde_json::from_str(&smoke.ok(&["image-inspect", &tag])).unwrap();
+    let labels = &result[0]["Config"]["Labels"];
+    assert_eq!(labels["a3s.smoke.first"], "two words");
+    assert_eq!(labels["a3s.smoke.second"], "custom");
+    assert_eq!(labels["a3s.smoke.target"], "chosen");
 }
 
 #[cfg(target_os = "macos")]
@@ -2810,6 +2879,7 @@ fn real_core_buildkit_vm_executes_amd64_run_on_arm64_host() {
     .unwrap();
     let context_arg = context.to_string_lossy().to_string();
 
+    seed_buildkit_image(&smoke);
     smoke.ok(&[
         "build",
         "--platform",

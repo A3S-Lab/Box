@@ -700,15 +700,7 @@ handle_exit() {
     trap - EXIT
     stop_sampler
     if [ -f "$OUTPUT_DIR/summary.txt" ] && grep -q '^result=pass$' "$OUTPUT_DIR/summary.txt"; then
-        {
-            echo "finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "result=fail"
-            echo "duration_secs=$(duration_secs)"
-            echo "exit_code=$exit_code"
-            echo "failed_at=${FAILED_AT:-unknown}"
-            echo "failed_command=${FAILED_COMMAND:-unknown}"
-            echo "evidence_dir=$OUTPUT_DIR"
-        } >"$OUTPUT_DIR/failure-summary.txt"
+        write_failure_summary "$exit_code"
         collect_post_cleanup_evidence
         log "RuntimeClass soak failed after cleanup: exit_code=$exit_code evidence=$OUTPUT_DIR"
         exit "$exit_code"

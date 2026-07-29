@@ -35,6 +35,7 @@ SOAK_FAILED_COMMAND=""
 SOAK_SUMMARY_ITERATIONS=0
 SOAK_SUMMARY_FAILURES=0
 SOAK_STARTED_EPOCH=0
+SOAK_FINAL_CAPTURED=0
 
 usage() {
     cat <<'EOF'
@@ -71,6 +72,8 @@ Options:
 
 Common environment:
   A3S_BOX_SMOKE_IMAGE_TAR=/path/to/alpine-oci.tar   Offline core_smoke image.
+  A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR=/path/to/buildkit-oci.tar
+                                                    Preloaded macOS BuildKit helper image.
   A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar   Offline host/core image.
   A3S_BOX_SMOKE_SKIP_PULL=1                         Reuse preloaded core image.
   A3S_BOX_ALLOW_REGISTRY_PULL=1                     Allow live registry pulls.
@@ -424,12 +427,13 @@ EOF
 
 build_real_binaries() {
     log "Building real host binaries"
-    run_real cargo build -p a3s-box-cli -p a3s-box-shim
-    build_guest_init
+    run_real cargo build -p a3s-box-cli -p a3s-box-shim || return $?
+    build_guest_init || return $?
 }
 
 run_pure_suite() {
     log "Running stub-backed baseline checks"
+    run_real "$REPO_ROOT/bench/bench-self-test.sh"
     run cargo fmt --all -- --check
     run_stub cargo clippy --workspace --all-targets --all-features -- -D warnings
     run_stub cargo test --workspace --lib
@@ -437,23 +441,23 @@ run_pure_suite() {
 }
 
 run_core_suite() {
-    require_image_source "core smoke"
-    build_real_binaries
+    require_image_source "core smoke" || return $?
+    build_real_binaries || return $?
     log "Running real MicroVM core smoke"
     run_real cargo test -p a3s-box-cli --test core_smoke -- --ignored --nocapture --test-threads=1
 }
 
 run_host_suite() {
-    require_image_source "host smoke"
-    build_real_binaries
+    require_image_source "host smoke" || return $?
+    build_real_binaries || return $?
     log "Running host VM command matrix"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_vm_command_matrix -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_vm_command_matrix -- --ignored --nocapture --test-threads=1 || return $?
     log "Running warm-pool command smoke"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_pool_warm_run -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_pool_warm_run -- --ignored --nocapture --test-threads=1 || return $?
     log "Running warm-pool Dockerfile RUN smoke"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_build_run_pool_smoke -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_build_run_pool_smoke -- --ignored --nocapture --test-threads=1 || return $?
     log "Running host Compose smoke"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_compose_acl_smoke -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_compose_acl_smoke -- --ignored --nocapture --test-threads=1 || return $?
 
     if [ -n "${A3S_BOX_PUSH_TEST_REF:-}" ]; then
         log "Running registry push smoke"
@@ -479,15 +483,15 @@ run_linux_run_suite() {
         return
     fi
 
-    build_real_binaries
+    build_real_binaries || return $?
     log "Running Linux Dockerfile RUN chroot smoke"
     run_real cargo test -p a3s-box-cli --test host_smoke test_linux_build_run_chroot_smoke -- --ignored --nocapture --test-threads=1
 }
 
 run_cri_suite() {
-    build_real_binaries
+    build_real_binaries || return $?
     log "Building CRI server"
-    run_real cargo build -p a3s-box-cri
+    run_real cargo build -p a3s-box-cri || return $?
     log "Running crictl CRI smoke"
     printf '+ A3S_BOX_CRI_SMOKE=1 cargo test -p a3s-box-cri --test crictl_smoke -- --ignored --nocapture --test-threads=1\n'
     env -u A3S_DEPS_STUB A3S_BOX_CRI_SMOKE=1 \
@@ -496,12 +500,17 @@ run_cri_suite() {
 
 shim_count() {
     local count
-    count="$(pgrep -xc 'a3s-box-shim' 2>/dev/null || pgrep -fc 'a3s-box-shim' 2>/dev/null || true)"
-    echo "${count:-0}"
+    count="$({ pgrep -x 'a3s-box-shim' 2>/dev/null || true; } | awk 'END { print NR + 0 }')"
+    echo "$count"
 }
 
 mount_count() {
-    mount 2>/dev/null | awk '/\/\.a3s\/boxes|\/a3s\/boxes/ { n++ } END { print n + 0 }'
+    local boxes_dir
+    boxes_dir="$(a3s_home_dir)/boxes"
+    mount 2>/dev/null | awk -v boxes_dir="$boxes_dir" '
+        index($0, boxes_dir) { n++ }
+        END { print n + 0 }
+    '
 }
 
 boxdir_count() {
@@ -612,11 +621,39 @@ capture_cli_snapshot() {
     } >"$SOAK_EVIDENCE_DIR/${label}-cli-snapshot.txt"
 }
 
+capture_final_soak_state() {
+    if [ "$SOAK_FINAL_CAPTURED" -eq 1 ]; then
+        return
+    fi
+
+    # Arm the guard before writing either artifact so an ERR/EXIT trap cannot
+    # append a second final sample while handling a partial capture failure.
+    SOAK_FINAL_CAPTURED=1
+    write_resource_sample "final"
+    capture_cli_snapshot "final"
+}
+
+prepare_bench_image() {
+    local tar_path bin image
+    tar_path="$(offline_image_tar)"
+    if [ -z "$tar_path" ]; then
+        return
+    fi
+
+    prepare_offline_image_env
+    bin="${A3S_BOX:-$WORKSPACE/target/debug/a3s-box}"
+    image="${IMAGE:-alpine:latest}"
+    log "Seeding offline benchmark image $image"
+    run_real "$bin" load --input "$tar_path" --tag "$image"
+}
+
 run_bench_leak() {
+    prepare_bench_image
     A3S_BOX="${A3S_BOX:-$WORKSPACE/target/debug/a3s-box}" run_real "$REPO_ROOT/bench/bench.sh" leak
 }
 
 run_bench_race() {
+    prepare_bench_image
     A3S_BOX="${A3S_BOX:-$WORKSPACE/target/debug/a3s-box}" run_real "$REPO_ROOT/bench/bench.sh" race
 }
 
@@ -659,19 +696,25 @@ run_soak_iteration() {
 
     if [ "$RUN_CORE" -eq 1 ]; then
         run_soak_step "$iteration" core run_core_suite || rc=1
+        write_resource_sample "iteration-${iteration}-after-core"
     fi
     if [ "$RUN_HOST" -eq 1 ]; then
         run_soak_step "$iteration" host run_host_suite || rc=1
+        write_resource_sample "iteration-${iteration}-after-host"
     fi
     if [ "$RUN_LINUX_RUN" -eq 1 ]; then
         run_soak_step "$iteration" linux-run run_linux_run_suite || rc=1
+        write_resource_sample "iteration-${iteration}-after-linux-run"
     fi
     if [ "$RUN_CRI" -eq 1 ]; then
         run_soak_step "$iteration" cri run_cri_suite || rc=1
+        write_resource_sample "iteration-${iteration}-after-cri"
     fi
     if [ "$SOAK_RUN_BENCH" -eq 1 ]; then
         run_soak_step "$iteration" bench-leak run_bench_leak || rc=1
+        write_resource_sample "iteration-${iteration}-after-bench-leak"
         run_soak_step "$iteration" bench-race run_bench_race || rc=1
+        write_resource_sample "iteration-${iteration}-after-bench-race"
     fi
 
     capture_cli_snapshot "iteration-${iteration}"
@@ -744,8 +787,7 @@ handle_soak_exit() {
     trap - ERR
     trap - EXIT
     if [ -n "$SOAK_EVIDENCE_DIR" ] && [ -d "$SOAK_EVIDENCE_DIR" ]; then
-        write_resource_sample "final" || true
-        capture_cli_snapshot "final" || true
+        capture_final_soak_state || true
         write_soak_summary "fail" "$SOAK_SUMMARY_ITERATIONS" "$SOAK_SUMMARY_FAILURES" "$rc"
         log "Host soak failed: exit_code=$rc evidence=$SOAK_EVIDENCE_DIR"
     fi
@@ -785,6 +827,7 @@ run_soak_suite() {
     SOAK_EVIDENCE_DIR="${SOAK_OUTPUT_DIR:-$WORKSPACE/target/a3s-box-soak/$SOAK_RUN_ID}"
     export SOAK_RUN_ID SOAK_EVIDENCE_DIR
     mkdir -p "$SOAK_EVIDENCE_DIR"
+    SOAK_FINAL_CAPTURED=0
     SOAK_FAILURE_TRAP_ARMED=1
     trap 'record_soak_failure' ERR
     trap 'handle_soak_exit "$?"' EXIT
@@ -831,8 +874,7 @@ run_soak_suite() {
         fi
     done
 
-    write_resource_sample "final"
-    capture_cli_snapshot "final"
+    capture_final_soak_state
     if [ "$failures" -eq 0 ]; then
         write_soak_summary "pass" "$iteration" "$failures"
     else

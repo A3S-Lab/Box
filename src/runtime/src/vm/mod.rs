@@ -9,7 +9,10 @@ mod spec;
 #[cfg(windows)]
 mod windows_stop;
 
-pub(crate) use layout::{persistent_rootfs_generation_exists, runtime_socket_dir};
+pub(crate) use layout::{
+    legacy_sandbox_runtime_root, persistent_rootfs_generation_exists, runtime_socket_dir,
+    sandbox_runtime_root,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -431,6 +434,8 @@ impl VmManager {
 
     /// Remove host-side boot artifacts after a failed boot attempt.
     async fn cleanup_boot_failure(&mut self) {
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+
         if let Some(mut handler) = self.handler.write().await.take() {
             // A short-lived workload can finish before the runtime publishes
             // its readiness endpoint. That is a normal terminal completion,
@@ -465,9 +470,17 @@ impl VmManager {
                     "Failed to stop VM handler after boot failure"
                 );
             }
-            self.shim_exit_code = handler.exit_code().or(self.shim_exit_code);
+            let provider_exit_code = handler.exit_code().or(self.shim_exit_code);
+            #[cfg(not(target_os = "windows"))]
+            {
+                self.shim_exit_code =
+                    crate::rootfs::read_persisted_exit_code(&box_dir).or(provider_exit_code);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                self.shim_exit_code = provider_exit_code;
+            }
             if exited_before_cleanup && self.shim_exit_code.is_none() {
-                let box_dir = self.home_dir.join("boxes").join(&self.box_id);
                 self.shim_exit_code =
                     wait_for_delayed_terminal_exit(handler.as_mut(), &box_dir, &self.box_id).await;
             }
@@ -845,18 +858,18 @@ impl VmManager {
             return Ok(Some(code));
         }
 
-        // Unix guests expose the overlay exit file only once their shutdown is
-        // effectively complete. On Windows the shared-rootfs file appears while
-        // the shim still has to relay guest stdout/stderr into the host logs, so
-        // treating it as completion here races teardown against that relay.
         #[cfg(not(target_os = "windows"))]
-        if let Some(code) = self.persisted_exit_code() {
-            self.shim_exit_code = Some(code);
-            return Ok(Some(code));
-        }
+        let box_dir = self.home_dir.join("boxes").join(&self.box_id);
 
         let mut handler = self.handler.write().await;
         let Some(handler) = handler.as_mut() else {
+            // A recovered terminal manager can have no live provider handle.
+            // In that state the durable guest result is the remaining source
+            // of truth and no runtime writer can still append console bytes.
+            #[cfg(not(target_os = "windows"))]
+            if let Some(code) = crate::rootfs::read_persisted_exit_code(&box_dir) {
+                self.shim_exit_code = Some(code);
+            }
             return Ok(self.shim_exit_code);
         };
 
@@ -867,31 +880,54 @@ impl VmManager {
                 &self.log_config,
                 code,
             )?;
+            #[cfg(not(target_os = "windows"))]
+            let code = crate::rootfs::read_persisted_exit_code(&box_dir).unwrap_or(code);
             self.shim_exit_code = Some(code);
             return Ok(Some(code));
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        if handler.has_exited() {
+            // Attached handlers cannot reap another process owner's child, but
+            // zombie-aware provider completion still proves that the shim has
+            // closed the raw streams and joined its log processor. Prefer the
+            // durable workload status over a provider-specific status.
+            if let Some(code) =
+                crate::rootfs::read_persisted_exit_code(&box_dir).or_else(|| handler.exit_code())
+            {
+                self.shim_exit_code = Some(code);
+                return Ok(Some(code));
+            }
         }
 
         Ok(None)
     }
 
-    /// Return true once the foreground container is known to have finished, even
-    /// if the shim exit status has not been reaped yet.
+    /// Return true once the runtime provider has finished its terminal work.
+    ///
+    /// The guest can persist its workload status before the shim has relayed the
+    /// final console bytes. That durable status alone must not publish provider
+    /// completion or foreground cleanup can terminate the shim mid-drain.
     pub async fn has_exited(&self) -> bool {
         if self.shim_exit_code.is_some() {
             return true;
         }
 
+        let handler = self.handler.read().await;
+        if let Some(handler) = handler.as_ref() {
+            return handler.has_exited();
+        }
+        drop(handler);
+
         #[cfg(not(target_os = "windows"))]
-        if self.persisted_exit_code().is_some() {
-            return true;
+        {
+            self.persisted_exit_code().is_some()
         }
 
-        self.handler
-            .read()
-            .await
-            .as_ref()
-            .map(|handler| handler.has_exited())
-            .unwrap_or(false)
+        #[cfg(target_os = "windows")]
+        {
+            false
+        }
     }
 
     /// Run a command as the container MAIN in an IDLE-booted (deferred-main) VM.
@@ -2158,6 +2194,45 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
+    struct PersistedExitOnCompletionHandler {
+        provider_code: i32,
+        persisted_code: i32,
+        exit_path: PathBuf,
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    impl VmHandler for PersistedExitOnCompletionHandler {
+        fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+            Ok(())
+        }
+
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+
+        fn is_running(&self) -> bool {
+            false
+        }
+
+        fn has_exited(&self) -> bool {
+            true
+        }
+
+        fn pid(&self) -> u32 {
+            42
+        }
+
+        fn exit_code(&self) -> Option<i32> {
+            Some(self.provider_code)
+        }
+
+        fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+            std::fs::write(&self.exit_path, format!("{}\n", self.persisted_code))?;
+            Ok(Some(self.provider_code))
+        }
+    }
+
     struct CompletionCollectedByStopHandler {
         code: i32,
         collected: bool,
@@ -2518,6 +2593,93 @@ mod tests {
         assert_eq!(vm.try_wait_exit().await.unwrap(), Some(42));
         assert_eq!(vm.exit_code(), Some(42));
         assert!(vm.has_exited().await);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_try_wait_exit_rereads_guest_exit_code_after_provider_completion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-exit-code-during-completion".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+
+        let exit_path = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("upper")
+            .join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        *vm.handler.write().await = Some(Box::new(PersistedExitOnCompletionHandler {
+            provider_code: 1,
+            persisted_code: 0,
+            exit_path,
+        }));
+
+        assert_eq!(vm.try_wait_exit().await.unwrap(), Some(0));
+        assert_eq!(vm.exit_code(), Some(0));
+        assert!(vm.has_exited().await);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_boot_cleanup_prefers_guest_exit_written_during_provider_completion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-boot-cleanup-exit-code".to_string();
+        let mut vm = VmManager::with_box_id(
+            BoxConfig {
+                persistent: true,
+                ..BoxConfig::default()
+            },
+            EventEmitter::new(16),
+            box_id.clone(),
+        );
+        vm.home_dir = tmp.path().to_path_buf();
+
+        let exit_path = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("upper")
+            .join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        *vm.handler.write().await = Some(Box::new(PersistedExitOnCompletionHandler {
+            provider_code: 1,
+            persisted_code: 0,
+            exit_path,
+        }));
+
+        vm.cleanup_boot_failure().await;
+
+        assert_eq!(vm.exit_code(), Some(0));
+        assert!(vm.preserve_rootfs_on_boot_failure);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn test_guest_exit_code_waits_for_runtime_log_drain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-pending-log-drain".to_string();
+        let mut vm =
+            VmManager::with_box_id(BoxConfig::default(), EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        *vm.handler.write().await = Some(Box::new(RecordingHandler {
+            stopped: Arc::new(AtomicBool::new(false)),
+        }));
+
+        let exit_path = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("upper")
+            .join(".a3s_exit_code");
+        std::fs::create_dir_all(exit_path.parent().unwrap()).unwrap();
+        std::fs::write(exit_path, "7\n").unwrap();
+
+        assert_eq!(vm.try_wait_exit().await.unwrap(), None);
+        assert_eq!(vm.exit_code(), None);
+        assert!(!vm.has_exited().await);
     }
 
     #[tokio::test]

@@ -5,6 +5,11 @@
 //! host-to-guest command execution, and network configuration for
 //! passt-based virtio-net interfaces.
 
+// The guest library executes on Linux. macOS builds it only so the host
+// workspace can compile and cross-build the real Linux guest artifact; Linux-
+// only entrypoints consequently appear unused to host-target linting.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+
 pub mod attest_server;
 #[cfg(target_os = "linux")]
 pub mod cgroup;

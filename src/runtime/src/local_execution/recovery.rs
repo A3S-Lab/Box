@@ -183,15 +183,23 @@ impl LocalExecutionManager {
                 ManagedExecutionState::RestartStarting,
                 ExecutionState::Stopped | ExecutionState::Failed,
             ) => {
+                self.release_execution_resources(&record).await?;
+                let terminal_state =
+                    startup_terminal_state(observation.state, observation.exit_code);
                 let record = self
                     .transition(
                         &record,
                         ManagedExecutionState::RestartStarting,
-                        ManagedExecutionState::Failed,
-                        RuntimeUpdate::RestartFailed(observation.exit_code),
+                        terminal_state,
+                        RuntimeUpdate::RestartTerminal(observation.exit_code),
                     )
                     .await?;
-                Ok((record, ExecutionState::Failed))
+                let state = if terminal_state == ManagedExecutionState::Stopped {
+                    ExecutionState::Stopped
+                } else {
+                    ExecutionState::Failed
+                };
+                Ok((record, state))
             }
             (ManagedExecutionState::Running, ExecutionState::Running) => {
                 Ok((record, ExecutionState::Running))

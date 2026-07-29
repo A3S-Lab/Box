@@ -100,6 +100,7 @@ pub fn is_process_running_with_identity(pid: u32, expected_start_time: Option<u6
 /// owner was spawned by a short-lived client process: a later recovery process
 /// cannot reap the former client's child, but it can safely remove runtime
 /// state once that child has finished executing.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn wait_for_process_stop_with_identity(
     pid: u32,
     expected_start_time: u64,
@@ -172,6 +173,7 @@ fn try_reap_exited_child_with_identity(pid: u32, expected_start_time: u64) -> bo
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn try_reap_exited_child_with_identity(pid: u32, expected_start_time: u64) -> bool {
     !is_process_alive_with_identity(pid, Some(expected_start_time))
 }

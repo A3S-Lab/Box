@@ -31,6 +31,20 @@ pub(crate) fn runtime_socket_dir(home_dir: &Path, box_id: &str) -> PathBuf {
     }
 }
 
+/// Short host path for one Sandbox runtime owner and its private control socket.
+///
+/// Unix-domain socket paths have a small fixed kernel limit. Keeping the A3S
+/// OCI root below the already-short external socket directory makes Sandbox
+/// startup independent of the configured A3S home path length.
+pub(crate) fn sandbox_runtime_root(home_dir: &Path, box_id: &str) -> PathBuf {
+    runtime_socket_dir(home_dir, box_id).join("oci")
+}
+
+/// Runtime root used before Sandbox owners moved beside the short socket paths.
+pub(crate) fn legacy_sandbox_runtime_root(home_dir: &Path, box_id: &str) -> PathBuf {
+    home_dir.join("run").join("a3s-oci").join(box_id)
+}
+
 fn registry_auth_for_image(home_dir: &Path, reference: &str) -> Result<crate::oci::RegistryAuth> {
     let parsed = crate::oci::ImageReference::parse(reference)?;
     Ok(crate::oci::RegistryAuth::from_credential_store_at(
@@ -777,13 +791,46 @@ impl VmManager {
     /// Find the guest init binary in common locations.
     ///
     /// Searches in order:
-    /// 1. Same directory as current executable
-    /// 2. target/debug or target/release (for development)
-    /// 3. PATH
+    /// 1. The installed `A3S_HOME/bin` asset
+    /// 2. Same directory as current executable
+    /// 3. target/debug or target/release (for development)
+    /// 4. PATH
     ///
     /// The binary must be a Linux ELF executable since it runs inside the VM.
     pub(crate) fn find_guest_init() -> Result<PathBuf> {
-        let mut candidates = Self::find_binary_candidates("a3s-box-guest-init");
+        let name = "a3s-box-guest-init";
+        let installed = a3s_box_core::dirs_home().join("bin").join(name);
+        let candidates = Self::find_binary_candidates(name);
+
+        if let Some(path) = Self::select_guest_init(&installed, candidates) {
+            return Ok(path);
+        }
+
+        Err(BoxError::BoxBootError {
+            message: "Linux guest init binary not found".to_string(),
+            hint: Some(
+                "Cross-compile the static guest init for your guest arch, e.g.: \
+                 cargo build -p a3s-box-guest-init --release --target x86_64-unknown-linux-musl \
+                 (or aarch64-unknown-linux-musl). A glibc-dynamic host build is rejected because \
+                 it cannot run as PID 1 inside a minimal guest rootfs."
+                    .to_string(),
+            ),
+        })
+    }
+
+    fn select_guest_init(installed: &Path, mut candidates: Vec<PathBuf>) -> Option<PathBuf> {
+        // An explicitly installed asset belongs to the active A3S_HOME and must
+        // not be shadowed by a stale development artifact in target/. Release
+        // installation already puts the static guest binary at this fixed path.
+        if Self::is_linux_elf(installed) {
+            return Some(installed.to_path_buf());
+        }
+        if installed.exists() {
+            tracing::debug!(
+                path = %installed.display(),
+                "Skipping installed guest init (not a static Linux ELF binary)"
+            );
+        }
 
         // Prefer the cross-compiled musl-static build over any host build on
         // ALL platforms. On a Linux x86_64 host, `cargo build --workspace`
@@ -802,7 +849,7 @@ impl VmManager {
 
         for path in candidates {
             if Self::is_linux_elf(&path) {
-                return Ok(path);
+                return Some(path);
             }
             tracing::debug!(
                 path = %path.display(),
@@ -810,16 +857,7 @@ impl VmManager {
             );
         }
 
-        Err(BoxError::BoxBootError {
-            message: "Linux guest init binary not found".to_string(),
-            hint: Some(
-                "Cross-compile the static guest init for your guest arch, e.g.: \
-                 cargo build -p a3s-box-guest-init --release --target x86_64-unknown-linux-musl \
-                 (or aarch64-unknown-linux-musl). A glibc-dynamic host build is rejected because \
-                 it cannot run as PID 1 inside a minimal guest rootfs."
-                    .to_string(),
-            ),
-        })
+        None
     }
 
     /// Search common locations for a binary by name.
@@ -869,12 +907,6 @@ impl VmManager {
             if path.exists() {
                 candidates.push(path);
             }
-        }
-
-        // Try PATH
-        let home_bin = a3s_box_core::dirs_home().join("bin").join(name);
-        if home_bin.exists() {
-            candidates.push(home_bin);
         }
 
         // Try PATH
@@ -1057,6 +1089,14 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::RwLock;
 
+    struct RuntimeSocketDirGuard(PathBuf);
+
+    impl Drop for RuntimeSocketDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn make_vm_manager_with_home(home_dir: &Path) -> VmManager {
         use a3s_box_core::event::EventEmitter;
         let config = BoxConfig::default();
@@ -1089,6 +1129,63 @@ mod tests {
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
         }
+    }
+
+    fn write_static_test_elf(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut elf = vec![0_u8; 64];
+        elf[0..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        std::fs::write(path, elf).unwrap();
+    }
+
+    #[test]
+    fn installed_guest_init_cannot_be_shadowed_by_a_stale_development_build() {
+        let temporary = TempDir::new().unwrap();
+        let installed = temporary.path().join("home/bin/a3s-box-guest-init");
+        let development = temporary
+            .path()
+            .join("target/x86_64-unknown-linux-musl/debug/a3s-box-guest-init");
+        write_static_test_elf(&installed);
+        write_static_test_elf(&development);
+
+        assert_eq!(
+            VmManager::select_guest_init(&installed, vec![development]),
+            Some(installed)
+        );
+    }
+
+    #[test]
+    fn invalid_installed_guest_init_falls_back_to_a_static_development_build() {
+        let temporary = TempDir::new().unwrap();
+        let installed = temporary.path().join("home/bin/a3s-box-guest-init");
+        let development = temporary
+            .path()
+            .join("target/x86_64-unknown-linux-musl/release/a3s-box-guest-init");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, b"not an ELF executable").unwrap();
+        write_static_test_elf(&development);
+
+        assert_eq!(
+            VmManager::select_guest_init(&installed, vec![development.clone()]),
+            Some(development)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_runtime_socket_stays_below_the_unix_path_limit_for_long_homes() {
+        let long_home = PathBuf::from("/var/lib")
+            .join("a3s-home-component".repeat(16))
+            .join("nested-provider-namespace");
+        let box_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let runtime_root = sandbox_runtime_root(&long_home, box_id);
+        let runtime_socket = runtime_root.join("runtime.sock");
+
+        assert!(runtime_root.starts_with(runtime_socket_dir(&long_home, box_id)));
+        assert!(runtime_socket.as_os_str().len() < 108);
+        assert!(!runtime_root.starts_with(&long_home));
     }
 
     fn image_health_check(test: &[&str]) -> crate::oci::OciHealthCheck {
@@ -1226,14 +1323,16 @@ mod tests {
         )
         .unwrap();
 
-        let box_dir = home.path().join("boxes/test-box");
+        let mut vm = make_vm_manager_with_home(home.path());
+        vm.box_id = format!("layout-test-{}", uuid::Uuid::new_v4().simple());
+        let _socket_dir_guard = RuntimeSocketDirGuard(vm.socket_dir());
+        let box_dir = home.path().join("boxes").join(&vm.box_id);
         std::fs::create_dir_all(&box_dir).unwrap();
         std::fs::write(
             box_dir.join(".snapshot-lower"),
             lower.to_string_lossy().as_bytes(),
         )
         .unwrap();
-        let mut vm = make_vm_manager_with_home(home.path());
         vm.config.image = "example.invalid/runtime:latest".to_string();
         vm.rootfs_provider = Box::new(crate::rootfs::CopyProvider);
 

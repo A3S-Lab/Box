@@ -39,11 +39,19 @@ cd crates/box
 # Optional but recommended for offline/reproducible runs.
 export A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar
 export A3S_BOX_SMOKE_IMAGE_TAR="$A3S_BOX_TEST_ALPINE_TAR"
+export A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR=/path/to/buildkit-arm64-oci.tar
 export A3S_BOX_SMOKE_SKIP_PULL=1
 export A3S_BOX_SMOKE_TIMEOUT_SECS=300
 
 scripts/host-integration-smoke.sh --core
 ```
+
+The BuildKit archive must contain the Linux arm64 image selected by
+`A3S_BOX_BUILDKIT_IMAGE` (default: `moby/buildkit:latest`). The core suite loads
+it into each isolated test home before running the macOS BuildKit cases. This
+avoids repeatedly downloading the large helper image. Cross-architecture
+Dockerfile base images must still be reachable by BuildKit through their image
+references, such as a local registry or a configured registry mirror.
 
 If you do not have an offline archive and want to pull from the registry during
 the run, add:
@@ -387,6 +395,11 @@ runner repeats the selected real suites, runs `bench/bench.sh leak` and
 `bench/bench.sh race` by default, samples host resource counts, and writes an
 evidence directory under `src/target/a3s-box-soak/`.
 
+When `A3S_BOX_TEST_ALPINE_TAR` or `A3S_BOX_SMOKE_IMAGE_TAR` is set, the runner
+reloads that archive with the configured `IMAGE` tag before each benchmark
+step. This keeps the leak and race gates reproducibly offline even when an
+earlier host suite intentionally runs `system-prune --all`.
+
 ```bash
 cd crates/box
 export A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar
@@ -395,6 +408,7 @@ export A3S_BOX_HOST_SMOKE_TIMEOUT_SECS=300
 export IMAGE=docker.m.daocloud.io/library/alpine:latest
 export CHURN=2500
 export RACE=32
+export RACE_WORKLOAD_SECS=300
 
 scripts/host-integration-smoke.sh \
   --no-pure \

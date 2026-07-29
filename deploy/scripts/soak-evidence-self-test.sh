@@ -83,6 +83,17 @@ require_grep() {
     grep -qE -- "$pattern" "$file" || fail "pattern '$pattern' not found in $file"
 }
 
+require_tsv_phase_count() {
+    local expected="$1"
+    local phase="$2"
+    local file="$3"
+    local actual
+
+    actual="$(awk -F '\t' -v phase="$phase" 'NR > 1 && $2 == phase { count++ } END { print count + 0 }' "$file")"
+    [ "$actual" -eq "$expected" ] ||
+        fail "phase '$phase' appeared $actual times in $file; expected $expected"
+}
+
 expect_failure() {
     local name="$1"
     local pattern="$2"
@@ -840,6 +851,7 @@ require_grep '^failed_iterations=0$' "$host_runner_gate_fail_dir/summary.txt"
 require_grep 'failed_command=.*/deploy/scripts/verify-soak-evidence.sh --kind host --min-duration-secs 3600 ' \
     "$host_runner_gate_fail_dir/summary.txt"
 require_grep 'host soak duration too short' "$host_runner_gate_fail_dir/verify.out"
+require_tsv_phase_count 1 final "$host_runner_gate_fail_dir/resource-samples.tsv"
 expect_failure host-runner-gate-failure-diagnostic 'host soak failed: failed_iterations=0' \
     "$VERIFY_SCRIPT" --kind host "$host_runner_gate_fail_dir"
 
@@ -862,8 +874,61 @@ require_grep '^failed_iterations=1$' "$host_runner_fail_dir/summary.txt"
 require_grep '^exit_code=1$' "$host_runner_fail_dir/summary.txt"
 require_grep '^failed_at=iteration-1-bench-leak$' "$host_runner_fail_dir/summary.txt"
 require_grep '^failed_command=run_bench_leak$' "$host_runner_fail_dir/summary.txt"
+require_tsv_phase_count 1 final "$host_runner_fail_dir/resource-samples.tsv"
 expect_failure host-runner-failure-diagnostic 'host soak failed: failed_iterations=1' \
     "$VERIFY_SCRIPT" --kind host "$host_runner_fail_dir"
+
+log "Verifying host soak runner stops after a real binary build failure"
+host_build_fail_dir="$TMP_ROOT/host-build-fail"
+host_build_fail_bin="$TMP_ROOT/host-build-fail-bin"
+host_build_fail_calls="$TMP_ROOT/host-build-fail-cargo.calls"
+host_build_fail_image="$TMP_ROOT/host-build-fail-image.tar"
+mkdir -p "$host_build_fail_bin"
+write_nonempty_file "$host_build_fail_image"
+cat >"$host_build_fail_bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+    echo "cargo synthetic"
+    exit 0
+fi
+printf '%s\n' "$*" >>"$HOST_BUILD_FAIL_CALLS"
+exit 17
+EOF
+cat >"$host_build_fail_bin/a3s-box" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+    echo "a3s-box synthetic"
+fi
+EOF
+chmod +x "$host_build_fail_bin/cargo" "$host_build_fail_bin/a3s-box"
+set +e
+PATH="$host_build_fail_bin:$PATH" \
+    HOST_BUILD_FAIL_CALLS="$host_build_fail_calls" \
+    A3S_BOX="$host_build_fail_bin/a3s-box" \
+    A3S_HOME="$TMP_ROOT/host-build-fail-home" \
+    A3S_BOX_TEST_ALPINE_TAR="$host_build_fail_image" \
+    "$HOST_INTEGRATION" --no-pure --core --soak --soak-no-bench \
+        --soak-duration 0 --soak-iterations 1 --soak-output "$host_build_fail_dir" \
+        >"$host_build_fail_dir.out" 2>"$host_build_fail_dir.err"
+host_build_fail_status="$?"
+set -e
+if [ "$host_build_fail_status" -eq 0 ]; then
+    fail "host runner build failure rehearsal unexpectedly passed"
+fi
+require_grep '^result=fail$' "$host_build_fail_dir/summary.txt"
+require_grep '^failed_iterations=1$' "$host_build_fail_dir/summary.txt"
+require_grep '^failed_at=iteration-1-core$' "$host_build_fail_dir/summary.txt"
+require_grep '^failed_command=run_core_suite$' "$host_build_fail_dir/summary.txt"
+require_grep '^build -p a3s-box-cli -p a3s-box-shim$' "$host_build_fail_calls"
+if [ "$(wc -l <"$host_build_fail_calls" | tr -d ' ')" -ne 1 ]; then
+    fail "host runner continued invoking cargo after the binary build failed"
+fi
+if grep -qE -- 'a3s-box-guest-init|(^| )test( |$)' "$host_build_fail_calls"; then
+    fail "host runner continued into guest or test work after the binary build failed"
+fi
+require_tsv_phase_count 1 final "$host_build_fail_dir/resource-samples.tsv"
 
 log "Verifying synthetic cluster evidence"
 cluster_pass="$TMP_ROOT/cluster-pass"
