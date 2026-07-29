@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useLang, withBase } from '@rspress/core/runtime';
+import { Content, useLang, withBase } from '@rspress/core/runtime';
 
 const installCommands = [
   {
@@ -49,6 +49,7 @@ const content = {
     heroSubtitle:
       'A3S Box 是一个本地 OCI 运行时，将隔离策略作为每次请求的一部分。默认使用独立来宾内核；共享内核执行必须显式启用，并通过能力检查。',
     getStarted: '快速开始',
+    exploreCode: '代码漫游',
     copy: '复制',
     copied: '已复制',
     copyInstall: '复制安装命令',
@@ -180,6 +181,7 @@ const content = {
     heroSubtitle:
       'A3S Box is a local OCI runtime that makes isolation part of every request. Dedicated guest kernels are the default. Shared-kernel execution is an explicit, capability-checked opt-in.',
     getStarted: 'Get started',
+    exploreCode: 'Code walkthrough',
     copy: 'Copy',
     copied: 'Copied',
     copyInstall: 'Copy install command',
@@ -438,6 +440,13 @@ export function HomeLayout() {
             </a>
             <a
               className="box-button box-button--secondary"
+              href="#homepage-code-hike"
+            >
+              {copy.exploreCode}
+              <ArrowIcon />
+            </a>
+            <a
+              className="box-button box-button--secondary"
               href="https://github.com/A3S-Lab/Box"
               target="_blank"
               rel="noreferrer"
@@ -541,6 +550,10 @@ export function HomeLayout() {
             <span>{detail}</span>
           </div>
         ))}
+      </section>
+
+      <section id="sdk-code-tour" className="box-section box-home-code-tour">
+        <Content />
       </section>
 
       <section className="box-section box-principles">

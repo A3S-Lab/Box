@@ -141,17 +141,19 @@ main().catch((error: unknown) => {
 <Tab label="Python" value="python">
 
 ```python
-from a3s_box import Sandbox
+import asyncio
+
+from a3s_box import AsyncSandbox
 
 
-def main() -> None:
-    with Sandbox.create("alpine:3.20") as sandbox:
-        result = sandbox.commands.run("printf ready")
+async def main() -> None:
+    async with await AsyncSandbox.create("alpine:3.20") as sandbox:
+        result = await sandbox.commands.run("printf ready")
         print(result.stdout)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
 ```
 
 </Tab>

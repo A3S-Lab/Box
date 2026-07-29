@@ -5,3 +5,217 @@ description: A local OCI workload runtime with dedicated-kernel MicroVM isolatio
 sidebar: false
 outline: false
 ---
+
+import { Tab, Tabs } from '@rspress/core/theme';
+import { withBase } from '@rspress/core/runtime';
+import CodeHikeCode from '../../../theme/components/CodeHikeCode';
+import {
+  ScrollyCode,
+  ScrollyCoding,
+  ScrollyStep,
+  ScrollySteps,
+} from '../../../theme/components/CodeWalkthrough';
+
+<div className="box-section-heading box-home-code-tour__heading">
+  <span>INTERACTIVE SDK · CODE HIKE</span>
+  <h2>Four languages. One runtime contract you can walk through.</h2>
+  <p>
+    Switch complete examples with the same Tabs pattern used by the a3s-code
+    docs, then watch the Sandbox lifecycle unfold with Code Hike.
+  </p>
+</div>
+
+<div className="box-home-code-tour__label">
+  <span>01 / LANGUAGE TABS</span>
+  <strong>Choose your SDK</strong>
+</div>
+
+<Tabs
+  groupId="box-sdk-language"
+  className="box-sdk-tabs box-home-sdk-tabs"
+>
+<Tab label="Rust" value="rust">
+
+```rust
+use a3s_box_sdk::Sandbox;
+
+#[tokio::main]
+async fn main() -> Result<(), a3s_box_sdk::ClientError> {
+    let sandbox = Sandbox::create("alpine:3.20").await?;
+    let result = sandbox.commands.run("printf ready").await?;
+
+    println!("{}", result.stdout);
+    sandbox.kill().await?;
+    Ok(())
+}
+```
+
+</Tab>
+<Tab label="TypeScript" value="typescript">
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+</Tab>
+<Tab label="Python" value="python">
+
+```python
+import asyncio
+
+from a3s_box import AsyncSandbox
+
+
+async def main() -> None:
+    async with await AsyncSandbox.create("alpine:3.20") as sandbox:
+        result = await sandbox.commands.run("printf ready")
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+</Tab>
+<Tab label="Go" value="go">
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    box "github.com/A3S-Lab/Box/sdk/go/v3"
+)
+
+func main() {
+    ctx := context.Background()
+    sandbox, err := box.Create(ctx, "alpine:3.20")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer sandbox.Close(context.Background())
+
+    result, err := sandbox.Run(ctx, box.Argv("printf", "ready"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println(result.StdoutString())
+}
+```
+
+</Tab>
+</Tabs>
+
+<div
+  id="homepage-code-hike"
+  className="box-home-code-tour__label box-home-code-tour__label--walk"
+>
+  <span>02 / CODE WALKTHROUGH</span>
+  <strong>Follow one complete lifecycle</strong>
+</div>
+
+<ScrollyCoding ariaLabel="Homepage A3S Box TypeScript SDK walkthrough">
+<ScrollySteps>
+<ScrollyStep index={0}>
+  <h3>Establish the boundary</h3>
+  <p>Create a Sandbox from OCI while dedicated-kernel MicroVM stays the default.</p>
+</ScrollyStep>
+<ScrollyStep index={1}>
+  <h3>Run guest work</h3>
+  <p>
+    Execute a guest command, inspect its typed result, and guarantee cleanup
+    with <code>finally</code>.
+  </p>
+</ScrollyStep>
+<ScrollyStep index={2}>
+  <h3>Write, verify, release</h3>
+  <p>Persist workspace state, check the exit code, and release the Sandbox deterministically.</p>
+</ScrollyStep>
+</ScrollySteps>
+<ScrollyCode title="sandbox.ts">
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+  await sandbox.kill();
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+```typescript walkthrough
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    await sandbox.files.write('/workspace/status.txt', 'ready\n');
+    console.log(await sandbox.files.read('/workspace/status.txt'));
+
+    const result = await sandbox.commands.run('test -s /workspace/status.txt');
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr);
+    }
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+</ScrollyCode>
+</ScrollyCoding>
+
+<a className="box-inline-link" href={withBase('/en/guide/quick-start.html')}>
+  Open the complete quick start →
+</a>

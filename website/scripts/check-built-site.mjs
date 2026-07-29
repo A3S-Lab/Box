@@ -76,6 +76,33 @@ if (!rootHomepage.includes(`${base}en/`)) {
 if (!englishHomepage.includes('Run agent workloads')) {
   throw new Error('The /en/ homepage is not rendered in English.');
 }
+for (const [homepagePath, html] of [
+  ['index.html', rootHomepage],
+  ['en/index.html', englishHomepage],
+]) {
+  for (const marker of [
+    'id="sdk-code-tour"',
+    'id="homepage-code-hike"',
+    'href="#homepage-code-hike"',
+    'box-home-sdk-tabs',
+    'data-code-walkthrough="true"',
+    'data-codehike="true"',
+    '3<!-- --> snapshots',
+  ]) {
+    if (!html.includes(marker)) {
+      throw new Error(
+        `${homepagePath} does not visibly render its homepage SDK tour marker: ${marker}`,
+      );
+    }
+  }
+  for (const language of ['Rust', 'TypeScript', 'Python', 'Go']) {
+    if (!html.includes(`>${language}<`)) {
+      throw new Error(
+        `${homepagePath} does not render the ${language} homepage SDK tab.`,
+      );
+    }
+  }
+}
 for (const route of [
   `${base}en/guide/quick-start.html`,
   `${base}en/sdk/rust.html`,

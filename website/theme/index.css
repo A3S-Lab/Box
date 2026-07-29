@@ -469,6 +469,76 @@ body {
   text-transform: uppercase;
 }
 
+.box-home-code-tour {
+  scroll-margin-top: calc(var(--rp-nav-height) + 18px);
+  background:
+    radial-gradient(
+      circle at 85% 8%,
+      rgba(98, 215, 139, 0.12),
+      transparent 30rem
+    ),
+    linear-gradient(145deg, rgba(98, 215, 139, 0.025), transparent 42%), #090d0b;
+}
+
+.box-home-code-tour::before {
+  position: absolute;
+  top: 36px;
+  right: 68px;
+  padding: 6px 9px;
+  border: 1px solid rgba(98, 215, 139, 0.22);
+  border-radius: 5px;
+  background: rgba(98, 215, 139, 0.055);
+  color: var(--box-green);
+  content: 'NEW · INTERACTIVE';
+  font-family: var(--box-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.box-home-code-tour__heading {
+  max-width: 900px;
+}
+
+.box-home-code-tour__label {
+  display: flex;
+  margin-top: 58px;
+  padding: 0 2px 13px;
+  border-bottom: 1px solid var(--box-line);
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.box-home-code-tour__label > span {
+  color: var(--box-green);
+  font-family: var(--box-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.box-home-code-tour__label > strong {
+  color: var(--box-muted);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.box-home-code-tour__label--walk {
+  margin-top: 72px;
+  scroll-margin-top: calc(var(--rp-nav-height) + 22px);
+}
+
+.box-home-sdk-tabs {
+  margin-top: 18px !important;
+  margin-bottom: 0 !important;
+}
+
+.box-home-code-tour .box-code-walkthrough {
+  margin-top: 22px;
+  margin-bottom: 44px;
+}
+
 .box-home,
 .box-home * {
   box-sizing: border-box;
@@ -1641,6 +1711,22 @@ body {
   .box-code-walkthrough__step {
     min-height: 155px;
     padding: 28px 20px 20px;
+  }
+
+  .box-home-code-tour::before {
+    top: 26px;
+    right: 24px;
+  }
+
+  .box-home-code-tour__label {
+    margin-top: 44px;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .box-home-code-tour__label--walk {
+    margin-top: 58px;
   }
 
   .box-hero-copy {

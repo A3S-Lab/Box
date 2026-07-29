@@ -196,6 +196,10 @@ if (translationFailures.length > 0) {
 }
 
 for (const language of languages) {
+  const homepage = await readFile(
+    path.join(docsRoot, language, 'index.mdx'),
+    'utf8',
+  );
   const quickStart = await readFile(
     path.join(docsRoot, language, 'guide', 'quick-start.mdx'),
     'utf8',
@@ -216,6 +220,33 @@ for (const language of languages) {
       programFailures.push(
         `${language}: no complete ${languageName} programs were found`,
       );
+    }
+
+    if (!homepage.includes(`\`\`\`${languageName}`)) {
+      programFailures.push(
+        `${language}/index.mdx: missing visible homepage ${languageName} program`,
+      );
+    }
+  }
+
+  const asyncPythonContract = [
+    'import asyncio',
+    'from a3s_box import AsyncSandbox',
+    'async def main() -> None:',
+    'async with await AsyncSandbox.create',
+    'result = await sandbox.commands.run',
+    'asyncio.run(main())',
+  ];
+  for (const [filePath, source] of [
+    [`${language}/index.mdx`, homepage],
+    [`${language}/guide/quick-start.mdx`, quickStart],
+  ]) {
+    for (const marker of asyncPythonContract) {
+      if (!source.includes(marker)) {
+        programFailures.push(
+          `${filePath}: incomplete asynchronous Python SDK program; missing ${marker}`,
+        );
+      }
     }
   }
 
@@ -267,6 +298,39 @@ for (const language of languages) {
   if (snapshotCount !== 3) {
     experienceFailures.push(
       `${language}/guide/quick-start.mdx: expected 3 Code Hike snapshots, found ${snapshotCount}`,
+    );
+  }
+
+  for (const marker of [
+    'groupId="box-sdk-language"',
+    'className="box-sdk-tabs box-home-sdk-tabs"',
+    "import CodeHikeCode from '../../../theme/components/CodeHikeCode';",
+    '<ScrollyCoding',
+    '<ScrollySteps>',
+    '<ScrollyCode title="sandbox.ts">',
+  ]) {
+    if (!homepage.includes(marker)) {
+      experienceFailures.push(
+        `${language}/index.mdx: missing visible homepage experience marker ${marker}`,
+      );
+    }
+  }
+
+  const homepageStepCount = (
+    homepage.match(/<ScrollyStep index=\{\d+\}>/g) ?? []
+  ).length;
+  if (homepageStepCount !== 3) {
+    experienceFailures.push(
+      `${language}/index.mdx: expected 3 homepage walkthrough steps, found ${homepageStepCount}`,
+    );
+  }
+
+  const homepageSnapshotCount = (
+    homepage.match(/^```typescript walkthrough\s*$/gm) ?? []
+  ).length;
+  if (homepageSnapshotCount !== 3) {
+    experienceFailures.push(
+      `${language}/index.mdx: expected 3 homepage Code Hike snapshots, found ${homepageSnapshotCount}`,
     );
   }
 }
