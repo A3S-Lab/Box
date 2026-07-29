@@ -217,6 +217,24 @@ ownership, and cleanup in the runtime layer before Box considers exposing a
 broader network contract. It is capability evidence, not an advertised Box
 feature.
 
+## Runtime health intent
+
+The A3S Runtime provider supports HTTP, TCP, and command health probes for
+Services without creating another monitor or persisted health registry. HTTP
+and TCP probes reach only declared TCP ports through the existing
+generation-fenced `ExecutionPortConnector`; command probes cross the existing
+generation-fenced exec session boundary. Apply owns bounded start-period and
+threshold convergence. Inspect and exec return one current sample, then re-read
+the canonical execution lifecycle so a Service exit always takes precedence
+over a stale in-flight result.
+
+Runtime health policy is not projected into the CLI
+`ExecutionRecordPolicy.health_check`. Consequently a Runtime-owned Service has
+one health owner and does not spawn the CLI's detached health worker. Probe
+stdout, stderr, transport details, and provider errors are not published in the
+Runtime observation; messages are single-line and bounded by the Runtime
+contract.
+
 ## Storage and initialization
 
 The bundle compiler distinguishes:

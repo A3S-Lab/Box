@@ -1,6 +1,7 @@
 //! A3S Runtime provider adapter for the certified Box Sandbox backend.
 
 mod exec;
+mod health;
 mod lifecycle;
 mod logs;
 mod mapping;
@@ -14,7 +15,7 @@ use std::time::Duration;
 
 use a3s_box_core::ExecutionPortConnector;
 use a3s_runtime::contract::{
-    IsolationLevel, MountKind, NetworkMode, ResourceControl, RuntimeActionRequest,
+    HealthCheckKind, IsolationLevel, MountKind, NetworkMode, ResourceControl, RuntimeActionRequest,
     RuntimeCapabilities, RuntimeExecRequest, RuntimeExecResult, RuntimeFeature, RuntimeInspection,
     RuntimeLogChunk, RuntimeLogQuery, RuntimeObservation, RuntimeRemoval, RuntimeUnitClass,
     RuntimeUnitSpec,
@@ -57,6 +58,7 @@ pub struct BoxRuntimeDriver {
     provider_id: ProviderId,
     pub(super) config: BoxRuntimeDriverConfig,
     pub(super) manager: LocalExecutionManager,
+    port_connector: Arc<dyn ExecutionPortConnector>,
     service_endpoints: ServiceEndpointOwner,
     provider_build: OnceCell<String>,
 }
@@ -85,11 +87,13 @@ impl BoxRuntimeDriver {
         connector: Arc<dyn ExecutionPortConnector>,
     ) -> RuntimeResult<Self> {
         validate_config(&config)?;
+        let endpoint_connector = Arc::clone(&connector);
         Ok(Self {
             provider_id: ProviderId::parse("a3s-box")?,
             config,
             manager,
-            service_endpoints: ServiceEndpointOwner::new(connector),
+            port_connector: connector,
+            service_endpoints: ServiceEndpointOwner::new(endpoint_connector),
             provider_build: OnceCell::new(),
         })
     }
@@ -181,7 +185,11 @@ impl RuntimeDriver for BoxRuntimeDriver {
             isolation_levels: vec![IsolationLevel::Sandbox],
             network_modes: vec![NetworkMode::None, NetworkMode::Service],
             mount_kinds: vec![MountKind::Tmpfs],
-            health_check_kinds: Vec::new(),
+            health_check_kinds: vec![
+                HealthCheckKind::Http,
+                HealthCheckKind::Tcp,
+                HealthCheckKind::Command,
+            ],
             resource_controls: vec![
                 ResourceControl::Cpu,
                 ResourceControl::Memory,

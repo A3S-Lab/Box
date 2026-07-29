@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use a3s_box_core::ExecutionManager;
 use a3s_runtime::contract::{
-    ArtifactRef, IsolationLevel, MountKind, NetworkMode, ResourceControl, ResourceLimits,
-    RestartPolicy, RuntimeFeature, RuntimeMount, RuntimeMountSource, RuntimeNetworkSpec,
-    RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
+    ArtifactRef, HealthCheckKind, HealthProbe, IsolationLevel, MountKind, NetworkMode,
+    ResourceControl, ResourceLimits, RestartPolicy, RuntimeFeature, RuntimeHealthCheck,
+    RuntimeMount, RuntimeMountSource, RuntimeNetworkSpec, RuntimePort, RuntimeProcessSpec,
+    RuntimeUnitClass, RuntimeUnitSpec, TransportProtocol,
 };
 use a3s_runtime::RuntimeDriver;
 
@@ -110,7 +111,14 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
         vec![NetworkMode::None, NetworkMode::Service]
     );
     assert_eq!(capabilities.mount_kinds, vec![MountKind::Tmpfs]);
-    assert!(capabilities.health_check_kinds.is_empty());
+    assert_eq!(
+        capabilities.health_check_kinds,
+        vec![
+            HealthCheckKind::Http,
+            HealthCheckKind::Tcp,
+            HealthCheckKind::Command,
+        ]
+    );
     assert_eq!(
         capabilities.resource_controls,
         vec![
@@ -158,6 +166,36 @@ fn mapping_preserves_digest_resources_timeout_and_hardening() {
     assert!(request.config.persistent);
     assert_eq!(request.config.cap_drop, vec!["ALL"]);
     assert_eq!(request.config.security_opt, vec!["no-new-privileges"]);
+}
+
+#[test]
+fn runtime_health_does_not_enable_cli_or_image_health_policy() {
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.network = RuntimeNetworkSpec {
+        mode: NetworkMode::Service,
+        ports: vec![RuntimePort {
+            name: "health".into(),
+            container_port: 8_080,
+            protocol: TransportProtocol::Tcp,
+        }],
+    };
+    spec.health = Some(RuntimeHealthCheck {
+        probe: HealthProbe::Http {
+            port: "health".into(),
+            path: "/ready".into(),
+            expected_statuses: vec![200],
+        },
+        interval_ms: 1_000,
+        timeout_ms: 500,
+        start_period_ms: 0,
+        success_threshold: 1,
+        failure_threshold: 3,
+    });
+
+    let request = creation_request(&spec).unwrap();
+
+    assert!(request.policy.health_check.is_none());
+    assert!(request.policy.healthcheck_disabled);
 }
 
 #[test]
