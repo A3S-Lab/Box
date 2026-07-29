@@ -27,7 +27,7 @@ impl BoxRuntimeDriver {
     ) -> RuntimeResult<RuntimeObservation> {
         // Complete validation and conversion before any Box state or provider
         // mutation. The returned request is reused for identity comparison.
-        let request = creation_request(spec)?;
+        let request = creation_request(spec, self.execution_isolation)?;
         let mut record = self.find_generation(spec).await?;
 
         if let Some(existing) = record.as_ref() {
@@ -60,7 +60,7 @@ impl BoxRuntimeDriver {
                             "Box lost a durable execution immediately after reservation".into(),
                         )
                     })?;
-                validate_record_for_spec(&record, spec)?;
+                validate_record_for_spec(&record, spec, self.execution_isolation)?;
                 self.ensure_started(spec, record).await?
             }
         };
@@ -168,7 +168,7 @@ impl BoxRuntimeDriver {
         spec: &RuntimeUnitSpec,
         record: BoxRecord,
     ) -> RuntimeResult<BoxRecord> {
-        validate_record_for_spec(&record, spec)?;
+        validate_record_for_spec(&record, spec, self.execution_isolation)?;
         let (execution_id, generation, state) = local_identity(&record)?;
         match state {
             ManagedExecutionState::Creating
@@ -234,7 +234,7 @@ impl BoxRuntimeDriver {
                             Some(RuntimeUnitState::Failed),
                             Some(RuntimeFailure {
                                 code: "provider_lost".into(),
-                                message: "Box lost the Sandbox provider resource".into(),
+                                message: "Box lost the provider resource".into(),
                                 retryable: true,
                             }),
                         )
@@ -305,7 +305,7 @@ impl BoxRuntimeDriver {
             .ok_or_else(|| RuntimeError::NotFound {
                 unit_id: spec.unit_id.clone(),
             })?;
-        validate_record_for_spec(&record, spec)?;
+        validate_record_for_spec(&record, spec, self.execution_isolation)?;
         Ok(record)
     }
 
@@ -351,7 +351,7 @@ impl BoxRuntimeDriver {
                 remaining.len()
             )));
         }
-        validate_record_for_spec(&remaining[0], spec)
+        validate_record_for_spec(&remaining[0], spec, self.execution_isolation)
     }
 
     pub(super) async fn retire_record(
@@ -453,7 +453,7 @@ impl BoxRuntimeDriver {
         state_override: Option<RuntimeUnitState>,
         failure_override: Option<RuntimeFailure>,
     ) -> RuntimeResult<RuntimeObservation> {
-        validate_record_for_spec(record, spec)?;
+        validate_record_for_spec(record, spec, self.execution_isolation)?;
         let state = state_override.unwrap_or(runtime_state(spec, record)?);
         let terminal = state.is_terminal();
         let metadata = record.managed_execution.as_ref().ok_or_else(|| {
@@ -540,8 +540,8 @@ fn runtime_state(spec: &RuntimeUnitSpec, record: &BoxRecord) -> RuntimeResult<Ru
 
 fn exit_failure(record: &BoxRecord) -> RuntimeFailure {
     let message = match record.exit_code {
-        Some(code) => format!("Box Sandbox exited with code {code}"),
-        None => "Box Sandbox exited without a recoverable exit code".into(),
+        Some(code) => format!("Box execution exited with code {code}"),
+        None => "Box execution exited without a recoverable exit code".into(),
     };
     RuntimeFailure {
         code: "sandbox_exit".into(),

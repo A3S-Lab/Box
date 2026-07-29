@@ -304,11 +304,12 @@ where
             task_poll_interval: Duration::from_millis(5),
         },
         manager,
+        a3s_box_core::ExecutionIsolation::Microvm,
     )
     .unwrap();
     driver
         .provider_build
-        .set("a3s-box/test a3s-oci/sha256:0123456789abcdef agent/sha256:fedcba9876543210".into())
+        .set("a3s-box/test isolation/microvm hypervisor/test".into())
         .unwrap();
     driver
 }

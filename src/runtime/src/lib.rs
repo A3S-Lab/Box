@@ -97,7 +97,7 @@ pub use host_check::check_virtualization_support;
 pub use network::NetworkStore;
 
 // OCI images
-pub use a3s_box_core::StoredImage;
+pub use a3s_box_core::{ExecutionIsolation, StoredImage};
 pub use oci::{
     prune_stale_pull_temp_dirs, ImagePuller, ImageReference, ImageStore, PullProgress,
     PullProgressEventFn, PullProgressState, PullTempPruneResult, RegistryAuth, RegistryPullPolicy,

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use a3s_box_core::{ExecutionGeneration, ExecutionId, OperationId};
+use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionIsolation, OperationId};
 use a3s_runtime::contract::{RuntimeObservation, RuntimeUnitSpec, RuntimeUnitState};
 use a3s_runtime::{RuntimeError, RuntimeResult};
 use sha2::{Digest, Sha256};
@@ -82,7 +82,7 @@ impl BoxRuntimeDriver {
         let Some(record) = matches.into_iter().next() else {
             return Ok(None);
         };
-        validate_record_for_spec(&record, spec)?;
+        validate_record_for_spec(&record, spec, self.execution_isolation)?;
         Ok(Some(record))
     }
 
@@ -149,9 +149,10 @@ fn has_runtime_ownership_marker(record: &BoxRecord) -> bool {
 pub(super) fn validate_record_for_spec(
     record: &BoxRecord,
     spec: &RuntimeUnitSpec,
+    execution_isolation: ExecutionIsolation,
 ) -> RuntimeResult<()> {
     validate_owned_record(record, &spec.unit_id)?;
-    let expected_request = creation_request(spec)?;
+    let expected_request = creation_request(spec, execution_isolation)?;
     let metadata = record.managed_execution.as_ref().ok_or_else(|| {
         RuntimeError::Protocol(format!("Box execution {} lost managed metadata", record.id))
     })?;
