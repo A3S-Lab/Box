@@ -119,7 +119,11 @@ pub(super) fn creation_request_for(
             healthcheck_disabled: true,
             log_config: LogConfig::default(),
             init: true,
-            managed_secret_root: (!spec.secrets.is_empty()).then(|| secret_root.to_path_buf()),
+            managed_secret_root: spec
+                .secrets
+                .iter()
+                .any(|reference| !matches!(reference.target, SecretTarget::RegistryCredential))
+                .then(|| secret_root.to_path_buf()),
             ..Default::default()
         },
         rootfs_snapshot_id: None,
@@ -231,6 +235,17 @@ fn compile_secret_inputs(
             "Runtime process environment cannot use reserved Box key {SECRET_ENVIRONMENT_MANIFEST:?}"
         )));
     }
+    if spec
+        .secrets
+        .iter()
+        .filter(|secret| matches!(secret.target, SecretTarget::RegistryCredential))
+        .count()
+        > 1
+    {
+        return Err(RuntimeError::InvalidRequest(
+            "Box Runtime specification has multiple registry credential Secrets".into(),
+        ));
+    }
     let digest = spec_digest.strip_prefix("sha256:").ok_or_else(|| {
         RuntimeError::Protocol("Box Secret compilation requires a SHA-256 spec digest".into())
     })?;
@@ -273,11 +288,7 @@ fn compile_secret_inputs(
                 validate_secret_file_target(path)?;
                 PathBuf::from(path)
             }
-            SecretTarget::RegistryCredential => {
-                return Err(RuntimeError::UnsupportedCapabilities(vec![
-                    "feature:RegistryCredentials".into(),
-                ]))
-            }
+            SecretTarget::RegistryCredential => continue,
         };
         if destinations
             .iter()

@@ -45,12 +45,15 @@ pub(crate) fn legacy_sandbox_runtime_root(home_dir: &Path, box_id: &str) -> Path
     home_dir.join("run").join("a3s-oci").join(box_id)
 }
 
-fn registry_auth_for_image(home_dir: &Path, reference: &str) -> Result<crate::oci::RegistryAuth> {
+fn registry_auth_for_image(
+    home_dir: &Path,
+    reference: &str,
+    transient: Option<crate::oci::RegistryAuth>,
+) -> Result<crate::oci::RegistryAuth> {
     let parsed = crate::oci::ImageReference::parse(reference)?;
-    Ok(crate::oci::RegistryAuth::from_credential_store_at(
-        home_dir,
-        &parsed.registry,
-    ))
+    Ok(transient.unwrap_or_else(|| {
+        crate::oci::RegistryAuth::from_credential_store_at(home_dir, &parsed.registry)
+    }))
 }
 
 pub(crate) fn persistent_rootfs_generation_exists(box_dir: &Path) -> Result<bool> {
@@ -98,7 +101,8 @@ fn validate_image_health_support(
 }
 
 impl VmManager {
-    pub(crate) async fn prepare_layout(&self) -> Result<BoxLayout> {
+    pub(crate) async fn prepare_layout(&mut self) -> Result<BoxLayout> {
+        let transient_registry_auth = self.transient_registry_auth.take();
         // Create box-specific directories
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         let socket_dir = self.socket_dir();
@@ -298,7 +302,7 @@ impl VmManager {
 
         let images_dir = self.home_dir.join("images");
         let store = crate::oci::ImageStore::new(&images_dir, crate::DEFAULT_IMAGE_CACHE_SIZE)?;
-        let auth = registry_auth_for_image(&self.home_dir, reference)?;
+        let auth = registry_auth_for_image(&self.home_dir, reference, transient_registry_auth)?;
         let mut puller = crate::oci::ImagePuller::new(std::sync::Arc::new(store), auth);
         if let Some(ref m) = self.prom {
             puller = puller.set_metrics(m.clone());
@@ -310,6 +314,10 @@ impl VmManager {
         tracing::info!(reference = %reference, "Pulling OCI image from registry");
 
         let oci_image = puller.pull(reference).await?;
+        // The image object owns only the cached OCI layout. Drop the puller as
+        // soon as the registry boundary closes so transient authorization is
+        // zeroized before rootfs extraction or guest preparation begins.
+        drop(puller);
         validate_image_health_support(
             oci_image.config().health_check.as_ref(),
             self.healthcheck_disabled,
@@ -1129,6 +1137,7 @@ mod tests {
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
             managed_secret_root: None,
+            transient_registry_auth: None,
         }
     }
 
@@ -1236,6 +1245,7 @@ mod tests {
         let auth = registry_auth_for_image(
             home.path(),
             "manager-layout.invalid:5443/a3s/private:latest",
+            None,
         )
         .unwrap();
 
@@ -1243,6 +1253,56 @@ mod tests {
             auth.basic_credentials(),
             Some(("layout-user".to_string(), "layout-secret".to_string()))
         );
+    }
+
+    #[test]
+    fn transient_image_auth_overrides_the_persistent_store() {
+        let home = TempDir::new().unwrap();
+        let store = crate::oci::CredentialStore::new(home.path().join("auth/credentials.json"));
+        store
+            .store(
+                "manager-layout.invalid:5443",
+                "persistent-user",
+                "persistent-secret",
+            )
+            .unwrap();
+
+        let auth = registry_auth_for_image(
+            home.path(),
+            "manager-layout.invalid:5443/a3s/private:latest",
+            Some(crate::RegistryAuth::basic(
+                "transient-user",
+                "transient-secret",
+            )),
+        )
+        .unwrap();
+
+        assert_eq!(
+            auth.basic_credentials(),
+            Some(("transient-user".to_string(), "transient-secret".to_string()))
+        );
+    }
+
+    #[test]
+    fn explicit_anonymous_image_auth_disables_the_persistent_store() {
+        let home = TempDir::new().unwrap();
+        let store = crate::oci::CredentialStore::new(home.path().join("auth/credentials.json"));
+        store
+            .store(
+                "manager-layout.invalid:5443",
+                "persistent-user",
+                "persistent-secret",
+            )
+            .unwrap();
+
+        let auth = registry_auth_for_image(
+            home.path(),
+            "manager-layout.invalid:5443/a3s/private:latest",
+            Some(crate::RegistryAuth::anonymous()),
+        )
+        .unwrap();
+
+        assert!(auth.basic_credentials().is_none());
     }
 
     #[test]

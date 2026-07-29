@@ -364,6 +364,10 @@ pub struct VmManager {
     /// Runtime-owned tmpfs root whose regular files may be prepared for the
     /// Sandbox user namespace. Arbitrary external bind mounts remain immutable.
     pub(crate) managed_secret_root: Option<PathBuf>,
+
+    /// One in-memory registry authorization selected for this boot attempt.
+    /// It is consumed and zeroized while preparing the image layout.
+    pub(crate) transient_registry_auth: Option<crate::oci::RegistryAuth>,
 }
 
 impl VmManager {
@@ -400,6 +404,7 @@ impl VmManager {
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
             managed_secret_root: None,
+            transient_registry_auth: None,
         }
     }
 
@@ -435,6 +440,7 @@ impl VmManager {
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
             managed_secret_root: None,
+            transient_registry_auth: None,
         }
     }
 
@@ -627,6 +633,7 @@ impl VmManager {
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
             managed_secret_root: None,
+            transient_registry_auth: None,
         }
     }
 

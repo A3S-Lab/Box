@@ -12,6 +12,7 @@ mod health_profile;
 mod logs_profile;
 mod mounts_profile;
 mod networking_profile;
+mod private_registry_profile;
 mod recovery_profile;
 mod resources_profile;
 mod security_profile;
@@ -29,6 +30,9 @@ type Result<T> = RuntimeResult<T>;
 
 const R17_RUNNER_STACK_BYTES: usize = 32 * 1024 * 1024;
 const R17_WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const PRIVATE_REGISTRY_SECRET_REFERENCE: &str = "secret://r17/registry-credential/v1";
+pub(super) const PRIVATE_REGISTRY_USERNAME: &str = "r17-registry-user";
+pub(super) const PRIVATE_REGISTRY_PASSWORD: &str = "r17-registry-password-long";
 
 fn failure(message: impl Into<String>) -> RuntimeError {
     RuntimeError::ProviderUnavailable(message.into())
@@ -114,4 +118,8 @@ async fn run_all_advertised_profiles() {
             .collect::<std::collections::BTreeSet<_>>(),
         expected
     );
+
+    private_registry_profile::run(&fixture)
+        .await
+        .expect("R17 authenticated private-registry pull must pass");
 }

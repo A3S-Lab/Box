@@ -16,13 +16,16 @@ All notable changes to A3S Box will be documented in this file.
 
 - **Caller-authorized Runtime Secret materialization.** The shared
   `BoxRuntimeDriver` can compose one `BoxSecretMaterializer` and advertise
-  environment and file `SecretReferences` only when a canonical private Linux
-  tmpfs root is ready. Material is mounted read-only, recovered without
-  rematerializing a live generation, retained across stop/restart, removed with
-  stale or deleted generations, zeroized at the provider boundary, and redacted
-  after per-read reauthorization before log cursor construction. Plaintext is
-  excluded from durable Box state, creation intent, and OCI configuration;
-  registry credentials remain explicitly unsupported.
+  environment, file, and registry-credential `SecretReferences`. Environment
+  and file material requires a canonical private Linux tmpfs root, is mounted
+  read-only, survives an explicit restart, and is removed with stale or deleted
+  generations. Registry credentials resolve only at an uncached image-pull
+  boundary, pass through a token-fenced in-memory handoff, override every
+  persistent credential source (including with explicit anonymous auth), and
+  are zeroized immediately after the pull. Running-generation recovery never
+  rematerializes Secrets. Log reads reauthorize and redact only material that
+  can enter the workload. Plaintext is excluded from durable Box state,
+  creation intent, OCI configuration, logs, cursors, and credential stores.
 
 ### Changed
 

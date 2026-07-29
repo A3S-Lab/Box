@@ -217,6 +217,15 @@ impl BoxRuntimeDriver {
             ManagedExecutionState::Creating
             | ManagedExecutionState::Created
             | ManagedExecutionState::Starting => {
+                let _registry_auth = self
+                    .secret_materialization
+                    .prepare_registry_auth_for_start(
+                        spec,
+                        &record,
+                        &self.config.home_dir,
+                        self.transient_registry_auth.as_ref(),
+                    )
+                    .await?;
                 let result = self
                     .bounded("startup", async {
                         self.manager
@@ -263,14 +272,16 @@ impl BoxRuntimeDriver {
         if matches!(
             state,
             ManagedExecutionState::Creating | ManagedExecutionState::Created
-        ) || matches!(
+        ) {
+            self.secret_materialization
+                .materialize_for_start(spec)
+                .await
+        } else if matches!(
             state,
             ManagedExecutionState::Stopped | ManagedExecutionState::Failed
         ) && should_restart(spec, record)?
         {
-            self.secret_materialization
-                .materialize_for_start(spec)
-                .await
+            Ok(())
         } else {
             self.secret_materialization.require_materialized(spec).await
         }
@@ -399,6 +410,18 @@ impl BoxRuntimeDriver {
         spec: &RuntimeUnitSpec,
         record: BoxRecord,
     ) -> RuntimeResult<BoxRecord> {
+        self.secret_materialization
+            .materialize_for_start(spec)
+            .await?;
+        let _registry_auth = self
+            .secret_materialization
+            .prepare_registry_auth_for_start(
+                spec,
+                &record,
+                &self.config.home_dir,
+                self.transient_registry_auth.as_ref(),
+            )
+            .await?;
         let (execution_id, generation, _) = local_identity(&record)?;
         let operation_id = restart_operation(spec, generation)?;
         let result = self

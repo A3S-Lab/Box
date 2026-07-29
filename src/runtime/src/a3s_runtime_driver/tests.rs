@@ -318,7 +318,7 @@ fn mapping_compiles_deterministic_non_secret_environment_and_file_bindings() {
         },
     ];
 
-    let request = creation_request(&spec).unwrap();
+    let request = creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap();
     let digest = spec.digest().unwrap();
     let digest = digest.strip_prefix("sha256:").unwrap();
     assert_eq!(
@@ -355,7 +355,7 @@ fn mapping_compiles_deterministic_non_secret_environment_and_file_bindings() {
 }
 
 #[test]
-fn mapping_rejects_secret_collisions_unencodable_targets_and_registry_credentials() {
+fn mapping_rejects_secret_collisions_and_unencodable_targets() {
     let environment_secret = SecretReference {
         name: "provider-token".into(),
         reference: "secret://provider/token/v7".into(),
@@ -371,7 +371,7 @@ fn mapping_rejects_secret_collisions_unencodable_targets_and_registry_credential
         .insert("A3S_PROVIDER_TOKEN".into(), "literal".into());
     literal_collision.secrets.push(environment_secret.clone());
     assert!(matches!(
-        creation_request(&literal_collision),
+        creation_request(&literal_collision, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::InvalidRequest(message)) if message.contains("conflicts")
     ));
 
@@ -382,7 +382,7 @@ fn mapping_rejects_secret_collisions_unencodable_targets_and_registry_credential
     );
     reserved.secrets.push(environment_secret);
     assert!(matches!(
-        creation_request(&reserved),
+        creation_request(&reserved, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::InvalidRequest(message)) if message.contains("reserved")
     ));
 
@@ -403,7 +403,7 @@ fn mapping_rejects_secret_collisions_unencodable_targets_and_registry_credential
             },
         });
         assert!(matches!(
-            creation_request(&invalid),
+            creation_request(&invalid, TEST_EXECUTION_ISOLATION),
             Err(RuntimeError::InvalidRequest(message)) if message.contains("Secret file target")
         ));
     }
@@ -424,7 +424,7 @@ fn mapping_rejects_secret_collisions_unencodable_targets_and_registry_credential
         },
     });
     assert!(matches!(
-        creation_request(&overlap),
+        creation_request(&overlap, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::InvalidRequest(message)) if message.contains("overlaps")
     ));
 
@@ -434,10 +434,18 @@ fn mapping_rejects_secret_collisions_unencodable_targets_and_registry_credential
         reference: "secret://registry/credential/v2".into(),
         target: SecretTarget::RegistryCredential,
     });
+    let request = creation_request(&registry, TEST_EXECUTION_ISOLATION).unwrap();
+    assert!(request.config.volumes.is_empty());
+    assert!(request.policy.managed_secret_root.is_none());
+
+    registry.secrets.push(SecretReference {
+        name: "registry-secondary".into(),
+        reference: "secret://registry/credential/v3".into(),
+        target: SecretTarget::RegistryCredential,
+    });
     assert!(matches!(
-        creation_request(&registry),
-        Err(RuntimeError::UnsupportedCapabilities(missing))
-            if missing == vec!["feature:RegistryCredentials"]
+        creation_request(&registry, TEST_EXECUTION_ISOLATION),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("multiple registry")
     ));
 }
 

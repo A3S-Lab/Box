@@ -133,6 +133,59 @@ fn manager_uses_the_backend_pull_progress_callback() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn recovery_manager_does_not_consume_transient_registry_authorization() {
+    let temporary = tempfile::tempdir().unwrap();
+    let broker = TransientRegistryAuthBroker::default();
+    let backend =
+        VmLocalExecutionBackend::new(temporary.path()).with_transient_registry_auth(broker.clone());
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+    let lease = broker
+        .bind(
+            &record.id,
+            crate::RegistryAuth::basic("transient-user", "transient-password"),
+        )
+        .unwrap();
+
+    let manager = backend.new_manager(&record).unwrap();
+
+    assert_eq!(broker.pending(), 1);
+    assert!(manager.transient_registry_auth.is_none());
+    drop(lease);
+    assert_eq!(broker.pending(), 0);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn boot_claim_consumes_only_its_transient_registry_authorization() {
+    let temporary = tempfile::tempdir().unwrap();
+    let broker = TransientRegistryAuthBroker::default();
+    let backend =
+        VmLocalExecutionBackend::new(temporary.path()).with_transient_registry_auth(broker.clone());
+    let record = record(temporary.path(), ExecutionIsolation::Microvm);
+    let lease = broker
+        .bind(
+            &record.id,
+            crate::RegistryAuth::basic("transient-user", "transient-password"),
+        )
+        .unwrap();
+    let mut manager = backend.new_manager(&record).unwrap();
+
+    backend.claim_transient_registry_auth_for_boot(&mut manager);
+
+    assert_eq!(broker.pending(), 0);
+    assert_eq!(
+        manager
+            .transient_registry_auth
+            .as_ref()
+            .and_then(crate::RegistryAuth::basic_credentials),
+        Some(("transient-user".into(), "transient-password".into()))
+    );
+    drop(lease);
+    assert_eq!(broker.pending(), 0);
+}
+
+#[test]
 fn manager_applies_persisted_shared_memory_policy_to_runtime_config() {
     let temporary = tempfile::tempdir().unwrap();
     let backend = VmLocalExecutionBackend::new(temporary.path());

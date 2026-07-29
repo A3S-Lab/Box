@@ -35,6 +35,14 @@ fn environment_secret(reference: &str) -> SecretReference {
     }
 }
 
+fn registry_secret(reference: &str) -> SecretReference {
+    SecretReference {
+        name: "registry-credential".into(),
+        reference: reference.into(),
+        target: SecretTarget::RegistryCredential,
+    }
+}
+
 #[tokio::test]
 async fn unconfigured_secret_port_rejects_before_provider_mutation() {
     let directory = tempfile::tempdir().unwrap();
@@ -168,6 +176,112 @@ async fn stale_generation_retirement_removes_only_its_secret_material() {
         .await
         .unwrap();
     assert!(!second_directory.exists());
+}
+
+#[tokio::test]
+async fn registry_credentials_resolve_only_for_an_uncached_start_and_never_persist() {
+    let directory = tempfile::tempdir().unwrap();
+    let secret_root = directory.path().join("runtime-secrets");
+    let materializer = Arc::new(DriverFakeSecretMaterializer::default());
+    let reference = "secret://registry/credential/v7";
+    materializer.insert_registry_credential(
+        reference,
+        "box-registry-user",
+        "box-registry-password",
+    );
+    let (driver, backend) =
+        fake_driver_with_secret_materializer(&directory, secret_root.clone(), materializer.clone());
+    let mut spec = runtime_spec("registry-secret", 1, RuntimeUnitClass::Service);
+    spec.secrets.push(registry_secret(reference));
+
+    materializer.fail_next();
+    assert!(matches!(
+        driver.apply(&spec, &accepted(&spec)).await,
+        Err(RuntimeError::ProviderUnavailable(message))
+            if message.contains("temporarily unavailable")
+    ));
+    assert_eq!(backend.starts(), 0);
+    assert_eq!(
+        driver.transient_registry_auth.as_ref().unwrap().pending(),
+        0
+    );
+
+    backend.fail_next_start_response();
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    assert_eq!(running.state, RuntimeUnitState::Running);
+    assert_eq!(backend.starts(), 1);
+    assert_eq!(materializer.calls(), 2);
+    assert_eq!(
+        driver.transient_registry_auth.as_ref().unwrap().pending(),
+        0
+    );
+    assert!(!secret_root.exists());
+
+    let state = std::fs::read_to_string(driver.manager.state_path()).unwrap();
+    assert!(!state.contains("box-registry-user"));
+    assert!(!state.contains("box-registry-password"));
+    assert!(state.contains(reference));
+
+    let reopened = fake_driver_with_backend_and_secret_materializer(
+        &directory,
+        backend.clone(),
+        secret_root,
+        materializer.clone(),
+    );
+    let replayed = reopened.apply(&spec, &running).await.unwrap();
+    assert_eq!(replayed.provider_resource_id, running.provider_resource_id);
+    assert_eq!(materializer.calls(), 2);
+
+    let provider_id = replayed.provider_resource_id.clone().unwrap();
+    backend.finish(&provider_id, 9);
+    let inspection = reopened
+        .inspect(&unit(spec.clone(), replayed))
+        .await
+        .unwrap();
+    assert!(matches!(
+        inspection,
+        RuntimeInspection::Found { ref observation, .. }
+            if observation.state == RuntimeUnitState::Running
+    ));
+    assert_eq!(backend.starts(), 2);
+    assert_eq!(materializer.calls(), 3);
+    assert_eq!(
+        reopened.transient_registry_auth.as_ref().unwrap().pending(),
+        0
+    );
+
+    let state = std::fs::read_to_string(reopened.manager.state_path()).unwrap();
+    assert!(!state.contains("box-registry-user"));
+    assert!(!state.contains("box-registry-password"));
+}
+
+#[tokio::test]
+async fn cached_registry_artifact_does_not_resolve_its_credential() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let images = home.join("images");
+    let source = directory.path().join("cached-image");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("fixture"), b"cached").unwrap();
+    let digest = format!("sha256:{}", "a".repeat(64));
+    let reference = format!("registry.example/a3s/runtime@{digest}");
+    let store = crate::ImageStore::new(&images, crate::DEFAULT_IMAGE_CACHE_SIZE).unwrap();
+    store.put(&reference, &digest, &source).await.unwrap();
+
+    let materializer = Arc::new(DriverFakeSecretMaterializer::default());
+    let (driver, backend) = fake_driver_with_secret_materializer(
+        &directory,
+        directory.path().join("runtime-secrets"),
+        materializer.clone(),
+    );
+    let mut spec = runtime_spec("cached-registry-secret", 1, RuntimeUnitClass::Service);
+    spec.secrets
+        .push(registry_secret("secret://registry/credential/unregistered"));
+
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    assert_eq!(running.state, RuntimeUnitState::Running);
+    assert_eq!(backend.starts(), 1);
+    assert_eq!(materializer.calls(), 0);
 }
 
 #[tokio::test]

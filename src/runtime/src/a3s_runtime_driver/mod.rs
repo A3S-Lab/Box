@@ -25,12 +25,15 @@ use a3s_runtime::{ProviderId, RuntimeDriver, RuntimeError, RuntimeResult, Runtim
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
-use crate::{ExecutionIsolation, LocalExecutionManager};
+use crate::local_execution::TransientRegistryAuthBroker;
+use crate::{ExecutionIsolation, LocalExecutionManager, VmLocalExecutionBackend};
 
 use self::secret::SecretMaterializationOwner;
 use self::service_endpoints::ServiceEndpointOwner;
 
-pub use self::secret::{BoxSecretMaterial, BoxSecretMaterializationError, BoxSecretMaterializer};
+pub use self::secret::{
+    BoxRegistryCredential, BoxSecretMaterial, BoxSecretMaterializationError, BoxSecretMaterializer,
+};
 
 pub(super) const OCI_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(super) const OCI_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
@@ -72,6 +75,7 @@ pub struct BoxRuntimeDriver {
     service_endpoints: ServiceEndpointOwner,
     execution_isolation: ExecutionIsolation,
     secret_materialization: SecretMaterializationOwner,
+    transient_registry_auth: Option<TransientRegistryAuthBroker>,
     provider_build: OnceCell<String>,
 }
 
@@ -90,11 +94,16 @@ impl BoxRuntimeDriver {
         execution_isolation: ExecutionIsolation,
     ) -> RuntimeResult<Self> {
         validate_config(&config)?;
-        let manager = LocalExecutionManager::with_vm_backend(
-            config.home_dir.join("boxes.json"),
-            &config.home_dir,
-        );
-        Self::with_manager(config, manager, execution_isolation)
+        let (manager, broker) = production_manager(&config);
+        let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
+        Self::with_manager_connector_and_materializer(
+            config,
+            manager,
+            connector,
+            execution_isolation,
+            None,
+            Some(broker),
+        )
     }
 
     /// Compose the shared Box driver with one caller-owned Secret resolver.
@@ -103,23 +112,12 @@ impl BoxRuntimeDriver {
     /// authenticated control channel. It is not a second lifecycle or Secret
     /// store, and Box never persists the returned bytes.
     pub fn with_secret_materializer(
-        config: BoxRuntimeDriverConfig,
-        execution_isolation: ExecutionIsolation,
+        mut self,
         materializer: Arc<dyn BoxSecretMaterializer>,
-    ) -> RuntimeResult<Self> {
-        validate_config(&config)?;
-        let manager = LocalExecutionManager::with_vm_backend(
-            config.home_dir.join("boxes.json"),
-            &config.home_dir,
-        );
-        let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
-        Self::with_manager_connector_and_materializer(
-            config,
-            manager,
-            connector,
-            execution_isolation,
-            Some(materializer),
-        )
+    ) -> Self {
+        self.secret_materialization =
+            SecretMaterializationOwner::new(self.config.secret_root.clone(), Some(materializer));
+        self
     }
 
     fn with_manager(
@@ -143,6 +141,7 @@ impl BoxRuntimeDriver {
             connector,
             execution_isolation,
             None,
+            None,
         )
     }
 
@@ -152,6 +151,7 @@ impl BoxRuntimeDriver {
         connector: Arc<dyn ExecutionPortConnector>,
         execution_isolation: ExecutionIsolation,
         materializer: Option<Arc<dyn BoxSecretMaterializer>>,
+        transient_registry_auth: Option<TransientRegistryAuthBroker>,
     ) -> RuntimeResult<Self> {
         validate_config(&config)?;
         let endpoint_connector = Arc::clone(&connector);
@@ -165,6 +165,7 @@ impl BoxRuntimeDriver {
             service_endpoints: ServiceEndpointOwner::new(endpoint_connector),
             execution_isolation,
             secret_materialization,
+            transient_registry_auth,
             provider_build: OnceCell::new(),
         })
     }
@@ -212,6 +213,20 @@ impl BoxRuntimeDriver {
                 ))
             })?
     }
+}
+
+fn production_manager(
+    config: &BoxRuntimeDriverConfig,
+) -> (LocalExecutionManager, TransientRegistryAuthBroker) {
+    let broker = TransientRegistryAuthBroker::default();
+    let backend =
+        VmLocalExecutionBackend::new(&config.home_dir).with_transient_registry_auth(broker.clone());
+    let manager = LocalExecutionManager::new(
+        config.home_dir.join("boxes.json"),
+        &config.home_dir,
+        Arc::new(backend),
+    );
+    (manager, broker)
 }
 
 fn probe_provider_build(execution_isolation: ExecutionIsolation) -> Result<String, String> {

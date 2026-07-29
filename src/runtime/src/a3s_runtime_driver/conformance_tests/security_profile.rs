@@ -17,6 +17,7 @@ use super::fixture::{
     BoxRuntimeConformanceFixture, SECRET_ENV_REFERENCE, SECRET_ENV_VALUE, SECRET_FILE_REFERENCE,
     SECRET_FILE_VALUE,
 };
+use super::PRIVATE_REGISTRY_SECRET_REFERENCE;
 use super::{require, Result};
 
 pub(super) async fn run(
@@ -149,23 +150,6 @@ async fn reject_hostile_inputs(
         "Box accepted an unadvertised volume mount",
     )?;
 
-    let mut registry_secret = template.clone();
-    registry_secret.request_id = fixture.cases.request_id("security-registry-secret");
-    registry_secret.spec.unit_id = fixture.cases.unit_id("security-registry-secret");
-    registry_secret.spec.secrets = vec![SecretReference {
-        name: "registry-credential".into(),
-        reference: "secret://r17/registry/v1".into(),
-        target: SecretTarget::RegistryCredential,
-    }];
-    require(
-        matches!(
-            client.apply(&registry_secret).await,
-            Err(RuntimeError::UnsupportedCapabilities(missing))
-                if missing == vec!["feature:RegistryCredentials"]
-        ),
-        "Box accepted an unadvertised registry credential",
-    )?;
-
     let after = fixture
         .driver
         .manager
@@ -204,6 +188,11 @@ async fn secret_nondisclosure(
                 mode: 0o400,
             },
         },
+        SecretReference {
+            name: "registry-credential".into(),
+            reference: PRIVATE_REGISTRY_SECRET_REFERENCE.into(),
+            target: SecretTarget::RegistryCredential,
+        },
     ];
     let secret_directory = super::super::secret::secret_directory(
         &fixture.home_dir.join("runtime-secrets"),
@@ -218,7 +207,7 @@ async fn secret_nondisclosure(
     )?;
     require(
         fixture.secret_materialization_calls() == calls_before_apply + 2,
-        "Secret materialization did not resolve each reference exactly once before start",
+        "Secret materialization did not resolve container references exactly once or resolved a cached registry credential",
     )?;
     require(
         secret_directory.is_dir(),

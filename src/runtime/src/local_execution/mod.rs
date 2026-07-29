@@ -24,6 +24,8 @@ mod session_unsupported;
 mod snapshot;
 mod store;
 mod support;
+#[cfg(all(feature = "vm", target_os = "linux"))]
+mod transient_registry_auth;
 #[cfg(feature = "vm")]
 mod vm_backend;
 #[cfg(feature = "vm")]
@@ -42,6 +44,8 @@ pub use backend::{
 };
 use record::{build_managed_record, status_from_record};
 use store::RuntimeUpdate;
+#[cfg(all(feature = "vm", target_os = "linux"))]
+pub(crate) use transient_registry_auth::{TransientRegistryAuthBroker, TransientRegistryAuthLease};
 #[cfg(feature = "vm")]
 pub use vm_backend::VmLocalExecutionBackend;
 

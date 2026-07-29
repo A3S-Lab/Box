@@ -351,8 +351,11 @@ evidence. Review [Host Integration](docs/host-integration.md),
   OCI configuration. Recovery validates the existing generation without
   rematerializing it, stop retains restartable material, and remove or stale
   generation retirement cleans it. Log reads reauthorize every reference and
-  redact exact material before cursor construction. Registry credentials remain
-  an explicit unsupported capability rather than a silent downgrade.
+  redact exact workload material before cursor construction. A registry target
+  is resolved only for an uncached pull, handed to the image boundary in memory,
+  and zeroized after use; cached images do not request it. The Runtime driver
+  passes explicit anonymous auth when no registry target is present, so it never
+  falls back to a Box-local or process-environment credential source.
 - **Kubernetes RuntimeClass** — The CRI server and containerd shim let selected
   Linux/KVM pods use `runtimeClassName: a3s-box`; installers and soak manifests
   live under [`deploy/`](deploy/).

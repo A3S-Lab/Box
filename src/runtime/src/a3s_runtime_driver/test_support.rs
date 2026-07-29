@@ -16,14 +16,15 @@ use a3s_runtime::RuntimeUnitRecord;
 use async_trait::async_trait;
 use tokio::sync::{oneshot, Semaphore};
 
+use crate::local_execution::TransientRegistryAuthBroker;
 use crate::{
     BoxRecord, LocalExecutionBackend, LocalExecutionHandle, LocalExecutionManager,
     LocalExecutionObservation,
 };
 
 use super::{
-    BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial, BoxSecretMaterializationError,
-    BoxSecretMaterializer, OCI_IMAGE_MANIFEST,
+    BoxRegistryCredential, BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial,
+    BoxSecretMaterializationError, BoxSecretMaterializer, OCI_IMAGE_MANIFEST,
 };
 
 #[derive(Clone)]
@@ -303,6 +304,7 @@ impl LocalExecutionBackend for DriverFakeBackend {
 #[derive(Default)]
 pub(super) struct DriverFakeSecretMaterializer {
     materials: Mutex<HashMap<String, Vec<u8>>>,
+    registry_credentials: Mutex<HashMap<String, (String, String)>>,
     calls: AtomicUsize,
     failures: AtomicUsize,
 }
@@ -319,8 +321,28 @@ impl DriverFakeSecretMaterializer {
         self.failures.fetch_add(1, Ordering::SeqCst);
     }
 
+    pub(super) fn insert_registry_credential(
+        &self,
+        reference: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) {
+        self.registry_credentials
+            .lock()
+            .unwrap()
+            .insert(reference.into(), (username.into(), password.into()));
+    }
+
     pub(super) fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn should_fail(&self) -> bool {
+        self.failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
     }
 }
 
@@ -331,13 +353,7 @@ impl BoxSecretMaterializer for DriverFakeSecretMaterializer {
         reference: &SecretReference,
     ) -> Result<BoxSecretMaterial, BoxSecretMaterializationError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if self
-            .failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                (remaining > 0).then(|| remaining - 1)
-            })
-            .is_ok()
-        {
+        if self.should_fail() {
             return Err(BoxSecretMaterializationError::Unavailable(
                 "injected retryable fixture failure".into(),
             ));
@@ -354,6 +370,31 @@ impl BoxSecretMaterializer for DriverFakeSecretMaterializer {
                 )
             })?;
         BoxSecretMaterial::new(value)
+    }
+
+    async fn materialize_registry_credential(
+        &self,
+        reference: &SecretReference,
+        _registry: &str,
+    ) -> Result<BoxRegistryCredential, BoxSecretMaterializationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.should_fail() {
+            return Err(BoxSecretMaterializationError::Unavailable(
+                "injected retryable fixture failure".into(),
+            ));
+        }
+        let (username, password) = self
+            .registry_credentials
+            .lock()
+            .unwrap()
+            .get(&reference.reference)
+            .cloned()
+            .ok_or_else(|| {
+                BoxSecretMaterializationError::Rejected(
+                    "fixture registry reference is not registered".into(),
+                )
+            })?;
+        BoxRegistryCredential::new(username, password)
     }
 }
 
@@ -456,6 +497,7 @@ fn configured_driver_with_materializer(
         connector,
         a3s_box_core::ExecutionIsolation::Microvm,
         materializer,
+        Some(TransientRegistryAuthBroker::default()),
     )
     .unwrap();
     driver

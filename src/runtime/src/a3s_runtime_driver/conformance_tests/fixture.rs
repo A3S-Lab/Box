@@ -16,11 +16,14 @@ use async_trait::async_trait;
 
 use super::super::metadata::{local_identity, UNIT_LABEL};
 use super::super::{
-    BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial, BoxSecretMaterializationError,
-    BoxSecretMaterializer,
+    BoxRegistryCredential, BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial,
+    BoxSecretMaterializationError, BoxSecretMaterializer,
 };
 use super::cases::CaseFactory;
-use super::{external, failure, require, Result};
+use super::{
+    external, failure, require, Result, PRIVATE_REGISTRY_PASSWORD,
+    PRIVATE_REGISTRY_SECRET_REFERENCE, PRIVATE_REGISTRY_USERNAME,
+};
 
 pub(super) const SECRET_ENV_REFERENCE: &str = "secret://r17/provider-token/v1";
 pub(super) const SECRET_ENV_VALUE: &str = "r17-secret-alpha-long";
@@ -63,6 +66,27 @@ impl BoxSecretMaterializer for ConformanceSecretMaterializer {
             }
         };
         BoxSecretMaterial::new(value.as_bytes().to_vec())
+    }
+
+    async fn materialize_registry_credential(
+        &self,
+        reference: &SecretReference,
+        registry: &str,
+    ) -> std::result::Result<BoxRegistryCredential, BoxSecretMaterializationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.authorized.load(Ordering::SeqCst) {
+            return Err(BoxSecretMaterializationError::Rejected(
+                "R17 fixture authorization was revoked".into(),
+            ));
+        }
+        if reference.reference != PRIVATE_REGISTRY_SECRET_REFERENCE
+            || !registry.starts_with("127.0.0.1:")
+        {
+            return Err(BoxSecretMaterializationError::Rejected(
+                "R17 fixture registry reference is not registered for this registry".into(),
+            ));
+        }
+        BoxRegistryCredential::new(PRIVATE_REGISTRY_USERNAME, PRIVATE_REGISTRY_PASSWORD)
     }
 }
 
@@ -133,11 +157,13 @@ impl BoxRuntimeConformanceFixture {
         )?;
         let config = driver_config(home_dir.clone());
         let secret_materializer = Arc::new(ConformanceSecretMaterializer::default());
-        let driver = Arc::new(BoxRuntimeDriver::with_secret_materializer(
-            config,
-            a3s_box_core::ExecutionIsolation::Sandbox,
-            secret_materializer.clone(),
-        )?);
+        let driver = Arc::new(
+            BoxRuntimeDriver::new_with_isolation(
+                config,
+                a3s_box_core::ExecutionIsolation::Sandbox,
+            )?
+            .with_secret_materializer(secret_materializer.clone()),
+        );
         let state = Arc::new(FileRuntimeStateStore::new(&state_root));
         Ok(Self {
             home_dir,
@@ -166,11 +192,13 @@ impl BoxRuntimeConformanceFixture {
     }
 
     pub(super) fn restarted_driver(&self) -> Result<Arc<BoxRuntimeDriver>> {
-        let driver = Arc::new(BoxRuntimeDriver::with_secret_materializer(
-            driver_config(self.home_dir.clone()),
-            a3s_box_core::ExecutionIsolation::Sandbox,
-            self.secret_materializer.clone(),
-        )?);
+        let driver = Arc::new(
+            BoxRuntimeDriver::new_with_isolation(
+                driver_config(self.home_dir.clone()),
+                a3s_box_core::ExecutionIsolation::Sandbox,
+            )?
+            .with_secret_materializer(self.secret_materializer.clone()),
+        );
         self.register_driver(driver.clone());
         Ok(driver)
     }
@@ -195,6 +223,30 @@ impl BoxRuntimeConformanceFixture {
 
     pub(super) fn register_removable_home(&self, home: PathBuf) {
         self.removable_homes.lock().unwrap().insert(home);
+    }
+
+    pub(super) fn private_registry_driver(
+        &self,
+        home_dir: PathBuf,
+    ) -> Result<Arc<BoxRuntimeDriver>> {
+        let driver = Arc::new(
+            BoxRuntimeDriver::new_with_isolation(
+                BoxRuntimeDriverConfig {
+                    secret_root: self.home_dir.join("runtime-secrets"),
+                    home_dir,
+                    control_timeout: Duration::from_secs(120),
+                    task_poll_interval: Duration::from_millis(25),
+                },
+                a3s_box_core::ExecutionIsolation::Sandbox,
+            )?
+            .with_secret_materializer(self.secret_materializer.clone()),
+        );
+        self.register_driver(driver.clone());
+        Ok(driver)
+    }
+
+    pub(super) async fn cleanup_registered(&self) -> Result<()> {
+        self.cleanup_all().await
     }
 
     pub(super) async fn record_for(&self, spec: &RuntimeUnitSpec) -> Result<crate::BoxRecord> {
