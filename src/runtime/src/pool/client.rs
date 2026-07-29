@@ -23,7 +23,7 @@ pub struct PoolRunRequest {
     /// Image to run in; `None` means use the daemon's default image.
     #[serde(default)]
     pub image: Option<String>,
-    /// User to run as (uid[:gid] or name); `None` runs as the image default.
+    /// User to run as (`uid[:gid]` or name); `None` runs as the image default.
     #[serde(default)]
     pub user: Option<String>,
     /// Working directory inside the sandbox.

@@ -9,7 +9,8 @@ use a3s_box_core::{
     ExecutionRestartPolicy, NetworkMode, ResourceConfig, ResourceLimits,
 };
 use a3s_runtime::contract::{
-    ArtifactRef, MountKind, RestartPolicy, RuntimeMountSource, RuntimeUnitClass, RuntimeUnitSpec,
+    ArtifactRef, MountKind, NetworkMode as RuntimeNetworkMode, RestartPolicy, RuntimeMountSource,
+    RuntimeUnitClass, RuntimeUnitSpec, TransportProtocol,
 };
 use a3s_runtime::{RuntimeError, RuntimeResult};
 use url::Position;
@@ -130,11 +131,24 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
             spec.isolation
         )]));
     }
-    if spec.network.mode != a3s_runtime::contract::NetworkMode::None {
+    if !matches!(
+        spec.network.mode,
+        RuntimeNetworkMode::None | RuntimeNetworkMode::Service
+    ) {
         return Err(RuntimeError::UnsupportedCapabilities(vec![format!(
             "network_mode:{:?}",
             spec.network.mode
         )]));
+    }
+    if spec
+        .network
+        .ports
+        .iter()
+        .any(|port| port.protocol != TransportProtocol::Tcp)
+    {
+        return Err(RuntimeError::UnsupportedCapabilities(vec![
+            "feature:ServiceUdp".into(),
+        ]));
     }
     let unsupported_mount_kinds = spec
         .mounts

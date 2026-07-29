@@ -81,12 +81,18 @@ impl BoxRuntimeDriver {
     ) -> RuntimeResult<RuntimeInspection> {
         unit.validate().map_err(RuntimeError::Protocol)?;
         let Some(record) = self.find_generation(&unit.spec).await? else {
+            self.service_endpoints
+                .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
+                .await;
             return Ok(not_found(&unit.spec));
         };
         provider_identity_matches(&unit.observation, &record)?;
         let before = local_identity(&record)?.2;
         let record = self.refresh_record(&unit.spec, record).await?;
         if provider_was_lost(before, &record)? {
+            self.service_endpoints
+                .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
+                .await;
             return Ok(not_found(&unit.spec));
         }
 
@@ -110,16 +116,25 @@ impl BoxRuntimeDriver {
         request.validate().map_err(RuntimeError::InvalidRequest)?;
         validate_action_identity(unit, request)?;
         if unit.observation.state.is_terminal() {
+            self.service_endpoints
+                .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
+                .await;
             return Ok(unit.observation.clone());
         }
 
         let Some(record) = self.find_generation(&unit.spec).await? else {
+            self.service_endpoints
+                .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
+                .await;
             return unknown_observation(&unit.observation);
         };
         provider_identity_matches(&unit.observation, &record)?;
         let before = local_identity(&record)?.2;
         let mut record = self.refresh_record(&unit.spec, record).await?;
         if provider_was_lost(before, &record)? {
+            self.service_endpoints
+                .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
+                .await;
             return unknown_observation(&unit.observation);
         }
 
@@ -133,6 +148,10 @@ impl BoxRuntimeDriver {
                 .map_err(|error| map_execution_error(&unit.spec.unit_id, error))?;
             record = self.load_record(&unit.spec, &execution_id).await?;
         }
+
+        self.service_endpoints
+            .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
+            .await;
 
         self.observation(&unit.spec, &record, Some(RuntimeUnitState::Stopped), None)
             .await
@@ -151,6 +170,9 @@ impl BoxRuntimeDriver {
             provider_identity_matches(&unit.observation, &record)?;
             self.retire_record(record, &unit.spec.unit_id).await?;
         }
+        self.service_endpoints
+            .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
+            .await;
         let removal = RuntimeRemoval {
             schema: RuntimeRemoval::SCHEMA.into(),
             request_id: request.request_id.clone(),
@@ -397,7 +419,10 @@ impl BoxRuntimeDriver {
                 })
                 .await
             {
-                Ok(ReconcileOutcome::Absent) => return Ok(()),
+                Ok(ReconcileOutcome::Absent) => {
+                    self.service_endpoints.remove_provider(&execution_id).await;
+                    return Ok(());
+                }
                 Ok(_) => {}
                 Err(error) => return Err(error),
             }
@@ -441,6 +466,8 @@ impl BoxRuntimeDriver {
                 })?;
             generation = local_identity(&record)?.1;
         }
+
+        self.service_endpoints.remove_provider(&execution_id).await;
 
         self.bounded("generation retirement removal", async {
             self.manager
@@ -520,6 +547,13 @@ impl BoxRuntimeDriver {
             provider_attestation: None,
             failure,
         };
+        if spec.class == RuntimeUnitClass::Service {
+            let (execution_id, execution_generation, _) = local_identity(record)?;
+            return self
+                .service_endpoints
+                .reconcile(spec, execution_id, execution_generation, observation)
+                .await;
+        }
         observation
             .validate_against(spec)
             .map_err(RuntimeError::Protocol)?;
@@ -631,6 +665,7 @@ fn unknown_observation(current: &RuntimeObservation) -> RuntimeResult<RuntimeObs
     unknown.health = None;
     unknown.outputs.clear();
     unknown.failure = None;
+    unknown.clear_service_endpoints();
     unknown.validate().map_err(RuntimeError::Protocol)?;
     Ok(unknown)
 }

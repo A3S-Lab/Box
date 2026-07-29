@@ -130,7 +130,7 @@ the host requirements below before running real workloads.
 | Isolation class | `hardware-vm` | `shared-kernel` |
 | Intended workload | Untrusted workloads and stronger tenant boundaries | Trusted or semi-trusted tools, benchmarks, and automation |
 | Required host | Linux/KVM, Apple Silicon/HVF, or Windows/WHPX | Certified Linux host with namespaces, seccomp, subordinate IDs, and delegated cgroup v2 |
-| Bridge networking and published ports | Supported within platform limits | Static publication is rejected; generation-fenced loopback forwarding is explicit |
+| Bridge networking and published ports | Supported within platform limits | CLI static publication is rejected; declared Runtime Services receive generation-fenced node-local TCP endpoints |
 | TEE, warm pool, and snapshot-fork | Available on qualifying MicroVM hosts | Rejected |
 | Automatic fallback | Never | Never |
 
@@ -334,9 +334,13 @@ evidence. Review [Host Integration](docs/host-integration.md),
 
 - **A3S Runtime provider** — Maps digest-pinned Tasks and Services onto the
   A3S OCI shared-kernel Sandbox with generation fencing, recovery, structured
-  logs, bounded idempotent exec, resource controls, and tmpfs. Its artifact
-  contract accepts OCI image manifests and multi-platform OCI image indexes;
-  it does not advertise a Docker manifest media type.
+  logs, bounded idempotent exec, resource controls, tmpfs, and exact node-local
+  TCP endpoints for declared Service ports. Endpoint listeners are in-memory,
+  bound to the Box execution generation, and relayed through the canonical
+  Sandbox port connector; Box does not create a second lifecycle store or
+  durable endpoint registry. The artifact contract accepts OCI image manifests
+  and multi-platform OCI image indexes; it does not advertise a Docker manifest
+  media type.
 - **Kubernetes RuntimeClass** — The CRI server and containerd shim let selected
   Linux/KVM pods use `runtimeClassName: a3s-box`; installers and soak manifests
   live under [`deploy/`](deploy/).

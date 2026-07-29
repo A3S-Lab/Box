@@ -5,11 +5,14 @@ mod lifecycle;
 mod logs;
 mod mapping;
 mod metadata;
+mod service_endpoints;
 
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use a3s_box_core::ExecutionPortConnector;
 use a3s_runtime::contract::{
     IsolationLevel, MountKind, NetworkMode, ResourceControl, RuntimeActionRequest,
     RuntimeCapabilities, RuntimeExecRequest, RuntimeExecResult, RuntimeFeature, RuntimeInspection,
@@ -21,6 +24,8 @@ use async_trait::async_trait;
 use tokio::sync::OnceCell;
 
 use crate::LocalExecutionManager;
+
+use self::service_endpoints::ServiceEndpointOwner;
 
 pub(super) const OCI_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(super) const OCI_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
@@ -52,6 +57,7 @@ pub struct BoxRuntimeDriver {
     provider_id: ProviderId,
     pub(super) config: BoxRuntimeDriverConfig,
     pub(super) manager: LocalExecutionManager,
+    service_endpoints: ServiceEndpointOwner,
     provider_build: OnceCell<String>,
 }
 
@@ -69,11 +75,21 @@ impl BoxRuntimeDriver {
         config: BoxRuntimeDriverConfig,
         manager: LocalExecutionManager,
     ) -> RuntimeResult<Self> {
+        let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
+        Self::with_manager_and_connector(config, manager, connector)
+    }
+
+    fn with_manager_and_connector(
+        config: BoxRuntimeDriverConfig,
+        manager: LocalExecutionManager,
+        connector: Arc<dyn ExecutionPortConnector>,
+    ) -> RuntimeResult<Self> {
         validate_config(&config)?;
         Ok(Self {
             provider_id: ProviderId::parse("a3s-box")?,
             config,
             manager,
+            service_endpoints: ServiceEndpointOwner::new(connector),
             provider_build: OnceCell::new(),
         })
     }
@@ -163,7 +179,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
             unit_classes: vec![RuntimeUnitClass::Task, RuntimeUnitClass::Service],
             artifact_media_types: vec![OCI_IMAGE_MANIFEST.into(), OCI_IMAGE_INDEX.into()],
             isolation_levels: vec![IsolationLevel::Sandbox],
-            network_modes: vec![NetworkMode::None],
+            network_modes: vec![NetworkMode::None, NetworkMode::Service],
             mount_kinds: vec![MountKind::Tmpfs],
             health_check_kinds: Vec::new(),
             resource_controls: vec![
@@ -176,6 +192,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
                 RuntimeFeature::DurableIdentity,
                 RuntimeFeature::Stop,
                 RuntimeFeature::Remove,
+                RuntimeFeature::ServiceTcp,
                 RuntimeFeature::Logs,
                 RuntimeFeature::Exec,
             ],
@@ -237,6 +254,8 @@ mod conformance_tests;
 mod exec_integration_tests;
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod service_endpoint_tests;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]

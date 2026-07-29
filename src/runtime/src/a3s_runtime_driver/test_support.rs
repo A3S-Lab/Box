@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use a3s_box_core::{
-    ExecutionId, ExecutionManagerError, ExecutionManagerResult, ExecutionState, KillOutcome,
+    ExecutionId, ExecutionManagerError, ExecutionManagerResult, ExecutionPortConnector,
+    ExecutionState, KillOutcome,
 };
 use a3s_runtime::contract::{
     ArtifactRef, IsolationLevel, NetworkMode, ResourceLimits, RestartPolicy, RuntimeActionRequest,
@@ -314,13 +315,37 @@ where
     let home_dir = directory.path().join("home");
     let manager =
         LocalExecutionManager::new(home_dir.join("boxes.json"), &home_dir, backend.clone());
-    let driver = BoxRuntimeDriver::with_manager(
+    let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
+    configured_driver(home_dir, manager, connector)
+}
+
+pub(super) fn fake_driver_with_backend_and_connector<B, C>(
+    directory: &tempfile::TempDir,
+    backend: Arc<B>,
+    connector: Arc<C>,
+) -> BoxRuntimeDriver
+where
+    B: LocalExecutionBackend + 'static,
+    C: ExecutionPortConnector + 'static,
+{
+    let home_dir = directory.path().join("home");
+    let manager = LocalExecutionManager::new(home_dir.join("boxes.json"), &home_dir, backend);
+    configured_driver(home_dir, manager, connector)
+}
+
+fn configured_driver(
+    home_dir: std::path::PathBuf,
+    manager: LocalExecutionManager,
+    connector: Arc<dyn ExecutionPortConnector>,
+) -> BoxRuntimeDriver {
+    let driver = BoxRuntimeDriver::with_manager_and_connector(
         BoxRuntimeDriverConfig {
             home_dir,
             control_timeout: Duration::from_secs(2),
             task_poll_interval: Duration::from_millis(5),
         },
         manager,
+        connector,
     )
     .unwrap();
     driver
@@ -404,6 +429,7 @@ pub(super) fn unknown(previous: &RuntimeObservation) -> RuntimeObservation {
     observation.state = RuntimeUnitState::Unknown;
     observation.finished_at_ms = None;
     observation.failure = None;
+    observation.clear_service_endpoints();
     observation
 }
 

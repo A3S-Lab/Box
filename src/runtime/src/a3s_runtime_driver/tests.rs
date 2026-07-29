@@ -105,7 +105,10 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
         vec![RuntimeUnitClass::Task, RuntimeUnitClass::Service]
     );
     assert_eq!(capabilities.isolation_levels, vec![IsolationLevel::Sandbox]);
-    assert_eq!(capabilities.network_modes, vec![NetworkMode::None]);
+    assert_eq!(
+        capabilities.network_modes,
+        vec![NetworkMode::None, NetworkMode::Service]
+    );
     assert_eq!(capabilities.mount_kinds, vec![MountKind::Tmpfs]);
     assert!(capabilities.health_check_kinds.is_empty());
     assert_eq!(
@@ -123,6 +126,7 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
             RuntimeFeature::DurableIdentity,
             RuntimeFeature::Stop,
             RuntimeFeature::Remove,
+            RuntimeFeature::ServiceTcp,
             RuntimeFeature::Logs,
             RuntimeFeature::Exec,
         ]
