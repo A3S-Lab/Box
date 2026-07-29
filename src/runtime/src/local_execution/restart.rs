@@ -3,6 +3,7 @@ use a3s_box_core::{
     ExecutionState, OperationId, RestartExecutionOptions,
 };
 
+use super::create::startup_terminal_state;
 use super::record::{execution_id, lease_from_record};
 use super::store::RuntimeUpdate;
 use super::support::{generation, managed_state, require_generation, required_handle};
@@ -290,8 +291,14 @@ impl LocalExecutionManager {
                         .await
                     }
                     ExecutionState::Stopped | ExecutionState::Failed => {
-                        self.publish_restart_failure(&record, observation.exit_code)
-                            .await?;
+                        let terminal_state =
+                            startup_terminal_state(observation.state, observation.exit_code);
+                        self.publish_restart_terminal(
+                            &record,
+                            terminal_state,
+                            observation.exit_code,
+                        )
+                        .await?;
                         Err(start_error)
                     }
                     ExecutionState::Created | ExecutionState::Creating | ExecutionState::Paused => {
@@ -300,16 +307,18 @@ impl LocalExecutionManager {
                 }
             }
             Err(ExecutionManagerError::NotFound(_)) => {
-                self.publish_restart_failure(&record, None).await?;
+                self.publish_restart_terminal(&record, ManagedExecutionState::Failed, None)
+                    .await?;
                 Err(start_error)
             }
             Err(_) => Err(start_error),
         }
     }
 
-    async fn publish_restart_failure(
+    async fn publish_restart_terminal(
         &self,
         record: &BoxRecord,
+        terminal_state: ManagedExecutionState,
         exit_code: Option<i32>,
     ) -> ExecutionManagerResult<()> {
         self.release_execution_resources(record).await?;
@@ -319,8 +328,8 @@ impl LocalExecutionManager {
             .transition(
                 record,
                 ManagedExecutionState::RestartStarting,
-                ManagedExecutionState::Failed,
-                RuntimeUpdate::RestartFailed(exit_code),
+                terminal_state,
+                RuntimeUpdate::RestartTerminal(exit_code),
             )
             .await
         {
@@ -457,14 +466,26 @@ fn completed_restart_result(
             ),
         })));
     }
-    if completed.outcome == ManagedRestartOutcome::Failed {
-        return Ok(Some(Err(ExecutionManagerError::Conflict {
-            execution_id: id,
-            message: format!(
-                "restart operation {operation_id} failed at generation {}",
-                completed.target_generation.get()
-            ),
-        })));
+    match completed.outcome {
+        ManagedRestartOutcome::Failed => {
+            return Ok(Some(Err(ExecutionManagerError::Conflict {
+                execution_id: id,
+                message: format!(
+                    "restart operation {operation_id} failed at generation {}",
+                    completed.target_generation.get()
+                ),
+            })));
+        }
+        ManagedRestartOutcome::Stopped => {
+            return Ok(Some(Err(ExecutionManagerError::Conflict {
+                execution_id: id,
+                message: format!(
+                    "restart operation {operation_id} completed in stopped state at generation {}",
+                    completed.target_generation.get()
+                ),
+            })));
+        }
+        ManagedRestartOutcome::Running => {}
     }
     let current_generation = generation(record, &id)?;
     if managed_state(record)? == ManagedExecutionState::Running

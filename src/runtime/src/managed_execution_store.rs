@@ -349,7 +349,9 @@ impl ManagedExecutionStore {
             if expected_state == ManagedExecutionState::RestartStarting
                 && matches!(
                     next_state,
-                    ManagedExecutionState::Running | ManagedExecutionState::Failed
+                    ManagedExecutionState::Running
+                        | ManagedExecutionState::Stopped
+                        | ManagedExecutionState::Failed
                 )
             {
                 let Some(ManagedExecutionOperation::Restart {
@@ -363,15 +365,22 @@ impl ManagedExecutionStore {
                         "restart completion for {execution_id} has no persisted restart intent"
                     )));
                 };
+                let outcome = if next_state == ManagedExecutionState::Running {
+                    ManagedRestartOutcome::Running
+                } else if next_state == ManagedExecutionState::Stopped {
+                    ManagedRestartOutcome::Stopped
+                } else if next_state == ManagedExecutionState::Failed {
+                    ManagedRestartOutcome::Failed
+                } else {
+                    return Err(ManagedExecutionStoreError::InvalidRecord(format!(
+                        "restart completion for {execution_id} has non-terminal state {next_state}"
+                    )));
+                };
                 metadata.last_restart = Some(ManagedRestartCompletion {
                     operation_id: operation_id.clone(),
                     source_generation: *source_generation,
                     target_generation: next_generation,
-                    outcome: if next_state == ManagedExecutionState::Running {
-                        ManagedRestartOutcome::Running
-                    } else {
-                        ManagedRestartOutcome::Failed
-                    },
+                    outcome,
                     stop_timeout_secs: *stop_timeout_secs,
                 });
             }
@@ -497,7 +506,7 @@ fn transition_generation(
             | (Killing, Stopped | Failed)
             | (Stopped | Failed, RestartStopping)
             | (RestartStopping, RestartStarting)
-            | (RestartStarting, Running | Failed)
+            | (RestartStarting, Running | Stopped | Failed)
     );
     if !legal {
         return Err(ManagedExecutionStoreError::InvalidTransition {

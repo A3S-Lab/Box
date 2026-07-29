@@ -194,7 +194,8 @@ fn load_recorded_sandbox_runtime_identity(
                 record_path.display()
             ))
         })?;
-    let expected_runtime_root = home_dir.join("run/a3s-oci").join(box_id);
+    let expected_runtime_root = crate::vm::sandbox_runtime_root(home_dir, box_id);
+    let legacy_runtime_root = crate::vm::legacy_sandbox_runtime_root(home_dir, box_id);
     let expected_bundle = box_dir.join("sandbox/bundle");
     let log_worker_identity_valid = match (record.log_worker_pid, record.log_worker_pid_start_time)
     {
@@ -205,7 +206,7 @@ fn load_recorded_sandbox_runtime_identity(
     let runtime_identity_valid = record.schema
         == crate::sandbox::runtime_record::SANDBOX_RUNTIME_RECORD_SCHEMA
         && record.runtime_socket.as_deref()
-            == Some(expected_runtime_root.join("runtime.sock").as_path())
+            == Some(record.runtime_root.join("runtime.sock").as_path())
         && record.generation.is_some_and(|generation| generation > 0)
         && matches!(record.owner_pid, Some(pid) if pid > 0)
         && matches!(record.owner_pid_start_time, Some(start_time) if start_time > 0)
@@ -214,7 +215,8 @@ fn load_recorded_sandbox_runtime_identity(
         && record.agent_sha256.as_deref().is_some_and(valid_sha256);
     if !runtime_identity_valid
         || record.container_id != box_id
-        || record.runtime_root != expected_runtime_root
+        || (record.runtime_root != expected_runtime_root
+            && record.runtime_root != legacy_runtime_root)
         || record.bundle_dir != expected_bundle
         || record.init_pid == 0
         || !log_worker_identity_valid

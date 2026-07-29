@@ -430,6 +430,7 @@ build_real_binaries() {
 
 run_pure_suite() {
     log "Running stub-backed baseline checks"
+    run_real "$REPO_ROOT/bench/bench-self-test.sh"
     run cargo fmt --all -- --check
     run_stub cargo clippy --workspace --all-targets --all-features -- -D warnings
     run_stub cargo test --workspace --lib
@@ -496,12 +497,17 @@ run_cri_suite() {
 
 shim_count() {
     local count
-    count="$(pgrep -xc 'a3s-box-shim' 2>/dev/null || pgrep -fc 'a3s-box-shim' 2>/dev/null || true)"
-    echo "${count:-0}"
+    count="$({ pgrep -x 'a3s-box-shim' 2>/dev/null || true; } | awk 'END { print NR + 0 }')"
+    echo "$count"
 }
 
 mount_count() {
-    mount 2>/dev/null | awk '/\/\.a3s\/boxes|\/a3s\/boxes/ { n++ } END { print n + 0 }'
+    local boxes_dir
+    boxes_dir="$(a3s_home_dir)/boxes"
+    mount 2>/dev/null | awk -v boxes_dir="$boxes_dir" '
+        index($0, boxes_dir) { n++ }
+        END { print n + 0 }
+    '
 }
 
 boxdir_count() {
@@ -659,19 +665,25 @@ run_soak_iteration() {
 
     if [ "$RUN_CORE" -eq 1 ]; then
         run_soak_step "$iteration" core run_core_suite || rc=1
+        write_resource_sample "iteration-${iteration}-after-core"
     fi
     if [ "$RUN_HOST" -eq 1 ]; then
         run_soak_step "$iteration" host run_host_suite || rc=1
+        write_resource_sample "iteration-${iteration}-after-host"
     fi
     if [ "$RUN_LINUX_RUN" -eq 1 ]; then
         run_soak_step "$iteration" linux-run run_linux_run_suite || rc=1
+        write_resource_sample "iteration-${iteration}-after-linux-run"
     fi
     if [ "$RUN_CRI" -eq 1 ]; then
         run_soak_step "$iteration" cri run_cri_suite || rc=1
+        write_resource_sample "iteration-${iteration}-after-cri"
     fi
     if [ "$SOAK_RUN_BENCH" -eq 1 ]; then
         run_soak_step "$iteration" bench-leak run_bench_leak || rc=1
+        write_resource_sample "iteration-${iteration}-after-bench-leak"
         run_soak_step "$iteration" bench-race run_bench_race || rc=1
+        write_resource_sample "iteration-${iteration}-after-bench-race"
     fi
 
     capture_cli_snapshot "iteration-${iteration}"

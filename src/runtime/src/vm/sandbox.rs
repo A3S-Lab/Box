@@ -63,7 +63,7 @@ impl VmManager {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         let sandbox_dir = box_dir.join("sandbox");
         let bundle_dir = sandbox_dir.join("bundle");
-        let runtime_root = self.home_dir.join("run").join("a3s-oci").join(&self.box_id);
+        let runtime_root = super::sandbox_runtime_root(&self.home_dir, &self.box_id);
         let runtime_record = sandbox_dir.join("runtime.json");
         let runtime = capabilities
             .a3s_oci

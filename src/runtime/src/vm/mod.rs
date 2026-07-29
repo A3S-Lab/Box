@@ -9,7 +9,10 @@ mod spec;
 #[cfg(windows)]
 mod windows_stop;
 
-pub(crate) use layout::{persistent_rootfs_generation_exists, runtime_socket_dir};
+pub(crate) use layout::{
+    legacy_sandbox_runtime_root, persistent_rootfs_generation_exists, runtime_socket_dir,
+    sandbox_runtime_root,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -76,6 +76,10 @@ pub(super) async fn run(
             control_cgroup.display()
         ),
     )?;
+    require(
+        control_cgroup.is_dir(),
+        "Sandbox control cgroup was not created",
+    )?;
     let management_cgroup = control_cgroup.parent().ok_or_else(|| {
         super::protocol(format!(
             "Sandbox control cgroup has no management parent: {}",
@@ -83,15 +87,15 @@ pub(super) async fn run(
         ))
     })?;
     require(
-        management_cgroup.ends_with(&expected_management_suffix),
+        management_cgroup.ends_with(&expected_management_suffix) && management_cgroup.is_dir(),
         format!(
-            "Sandbox control cgroup has an unexpected management parent: {}",
+            "Sandbox management cgroup was not created at the expected path: {}",
             management_cgroup.display()
         ),
     )?;
     require(
-        management_cgroup.is_dir() && control_cgroup.is_dir(),
-        "Sandbox management/control cgroups were not created",
+        read_trimmed(&management_cgroup.join("cgroup.procs"))?.is_empty(),
+        "Sandbox management cgroup retained processes after staged activation",
     )?;
     let outer_cpu_max = read_trimmed(&management_cgroup.join("cpu.max"))?;
     let mut outer_cpu_fields = outer_cpu_max.split_whitespace();
@@ -148,6 +152,10 @@ pub(super) async fn run(
     let expected_cpu_max = format!("{CPU_QUOTA_US} {CPU_PERIOD_US}");
     let expected_memory_max = MEMORY_BYTES.to_string();
     let expected_pids_max = PIDS.to_string();
+    require(
+        workload_namespace_path == format!("/{WORKLOAD_CGROUP_NAME}"),
+        format!("workload joined an unexpected cgroup namespace path: {workload_namespace_path:?}"),
+    )?;
     require(
         visible_cpu_max == Some(expected_cpu_max.as_str())
             && visible_memory_max == Some(expected_memory_max.as_str())

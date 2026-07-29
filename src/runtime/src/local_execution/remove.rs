@@ -95,10 +95,14 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
     remove_tree_if_present(&socket_dir)
         .map_err(|error| cleanup_error(record, "remove the runtime socket directory", error))?;
 
-    let runtime_root = home_dir.join("run/a3s-oci").join(&record.id);
-    remove_tree_if_present(&runtime_root).map_err(|error| {
-        cleanup_error(record, "remove the Sandbox runtime state directory", error)
-    })?;
+    for runtime_root in [
+        crate::vm::sandbox_runtime_root(home_dir, &record.id),
+        crate::vm::legacy_sandbox_runtime_root(home_dir, &record.id),
+    ] {
+        remove_tree_if_present(&runtime_root).map_err(|error| {
+            cleanup_error(record, "remove the Sandbox runtime state directory", error)
+        })?;
+    }
 
     let bind_mount_dir = std::env::temp_dir().join(format!("a3s-fs-mount-{}", record.id));
     remove_tree_if_present(&bind_mount_dir)

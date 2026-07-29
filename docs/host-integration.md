@@ -395,6 +395,7 @@ export A3S_BOX_HOST_SMOKE_TIMEOUT_SECS=300
 export IMAGE=docker.m.daocloud.io/library/alpine:latest
 export CHURN=2500
 export RACE=32
+export RACE_WORKLOAD_SECS=300
 
 scripts/host-integration-smoke.sh \
   --no-pure \

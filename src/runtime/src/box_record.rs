@@ -392,6 +392,7 @@ pub enum ManagedExecutionOperation {
 #[serde(rename_all = "snake_case")]
 pub enum ManagedRestartOutcome {
     Running,
+    Stopped,
     Failed,
 }
 

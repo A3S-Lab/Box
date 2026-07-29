@@ -151,7 +151,8 @@ Pass criteria:
 - `core_smoke` and `host_smoke` pass on every admitted node.
 - `bench/bench.sh leak` returns to the baseline count for shims, mounts, and
   box directories.
-- `bench/bench.sh race` reports no lost update and leaves no race boxes behind.
+- `bench/bench.sh race` reports `RACE/RACE` successful launches, persists all
+  `RACE` records without a lost update, and leaves no race boxes behind.
 - `a3s-box ps -a`, `a3s-box images`, `a3s-box volume ls`, and
   `a3s-box snapshot ls` are readable after the run.
 
@@ -243,6 +244,7 @@ Per selected node:
 export IMAGE=docker.m.daocloud.io/library/alpine:latest
 export CHURN=2500
 export RACE=32
+export RACE_WORKLOAD_SECS=300
 scripts/host-integration-smoke.sh \
   --no-pure \
   --core \

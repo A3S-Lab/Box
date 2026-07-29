@@ -15,7 +15,8 @@ use super::metadata::{
 use super::BoxRuntimeDriver;
 
 const NANOS_PER_MILLISECOND: u64 = 1_000_000;
-const EXEC_RESPONSE_BUDGET_MS: u64 = 100;
+const MAX_EXEC_RESPONSE_BUDGET_MS: u64 = 100;
+const MIN_EXEC_PHASE_BUDGET_MS: u64 = 10;
 
 impl BoxRuntimeDriver {
     pub(super) async fn execute_runtime_command(
@@ -152,14 +153,18 @@ fn effective_timeout_at(request: &RuntimeExecRequest, now_ms: u64) -> RuntimeRes
         let remaining_ms = deadline_at_ms.checked_sub(now_ms).ok_or_else(|| {
             RuntimeError::DeadlineExceeded("exec request expired before provider dispatch".into())
         })?;
-        let execution_budget_ms = remaining_ms
-            .checked_sub(EXEC_RESPONSE_BUDGET_MS)
-            .filter(|budget| *budget > 0)
-            .ok_or_else(|| {
-                RuntimeError::DeadlineExceeded(
-                    "exec request has insufficient time for a provider response".into(),
-                )
-            })?;
+        // Prefer the full response allowance for ordinary requests. Tight
+        // deadlines split the remaining window evenly so the command timeout
+        // and its replayable response both retain useful, non-zero budgets.
+        let response_budget_ms = MAX_EXEC_RESPONSE_BUDGET_MS.min(remaining_ms / 2);
+        let execution_budget_ms = remaining_ms.saturating_sub(response_budget_ms);
+        if response_budget_ms < MIN_EXEC_PHASE_BUDGET_MS
+            || execution_budget_ms < MIN_EXEC_PHASE_BUDGET_MS
+        {
+            return Err(RuntimeError::DeadlineExceeded(
+                "exec request has insufficient time for a provider response".into(),
+            ));
+        }
         // Runtime bounds the complete provider future by this same deadline.
         // Stop the guest command first so the driver can collect its bounded
         // output, reconstruct the observation, and return a replayable result.
@@ -223,6 +228,12 @@ mod tests {
         );
 
         request.deadline_at_ms = Some(1_100);
+        assert_eq!(
+            effective_timeout_at(&request, 1_000).unwrap(),
+            Duration::from_millis(50)
+        );
+
+        request.deadline_at_ms = Some(1_019);
         assert!(matches!(
             effective_timeout_at(&request, 1_000),
             Err(RuntimeError::DeadlineExceeded(message))

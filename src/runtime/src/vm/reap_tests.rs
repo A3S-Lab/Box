@@ -7,7 +7,7 @@ fn write_runtime_record(
     box_id: &str,
     mutate: impl FnOnce(&mut SandboxRuntimeRecord),
 ) {
-    let runtime_root = home_dir.join("run/a3s-oci").join(box_id);
+    let runtime_root = crate::vm::sandbox_runtime_root(home_dir, box_id);
     let mut record = SandboxRuntimeRecord {
         schema: SANDBOX_RUNTIME_RECORD_SCHEMA.to_string(),
         container_id: box_id.to_string(),
@@ -134,8 +134,24 @@ fn structurally_valid_runtime_record_loads_before_owner_certification() {
 
     assert_eq!(
         record.map(|record| record.runtime_root),
-        Some(home.path().join("run/a3s-oci").join(box_id))
+        Some(crate::vm::sandbox_runtime_root(home.path(), box_id))
     );
+}
+
+#[test]
+fn structurally_valid_legacy_runtime_record_remains_recoverable() {
+    let home = tempfile::tempdir().unwrap();
+    let box_id = "recorded-sandbox-legacy-a3s-oci";
+    let box_dir = home.path().join("boxes").join(box_id);
+    let legacy_root = crate::vm::legacy_sandbox_runtime_root(home.path(), box_id);
+    write_runtime_record(home.path(), &box_dir, box_id, |record| {
+        record.runtime_root = legacy_root.clone();
+        record.runtime_socket = Some(legacy_root.join("runtime.sock"));
+    });
+
+    let record = load_recorded_sandbox_runtime_identity(home.path(), &box_dir, box_id).unwrap();
+
+    assert_eq!(record.map(|record| record.runtime_root), Some(legacy_root));
 }
 
 #[test]

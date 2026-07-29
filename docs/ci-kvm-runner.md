@@ -70,8 +70,9 @@ that PR branch to run the same gate before merge.
    cycles and asserts orphan shims, overlay mounts, and box dirs all return to
    baseline. A resource-leak regression fails the gate.
 7. **Race assertion** (`bench/bench.sh race`) — boots `RACE` detached boxes
-   concurrently and asserts `boxes.json` still parses and every successful
-   launch persisted. This is the only check that exercises the cross-process
+   concurrently and requires all `RACE` launches to succeed, `boxes.json` to
+   remain readable, and all `RACE` records to persist. This is the only check
+   that exercises the cross-process
    advisory lock (`flock` on `boxes.json.lock`) across separate processes — the
    unit tests only race in-process threads. A lost update fails the gate.
 

@@ -1735,6 +1735,75 @@ async fn restart_running_execution_advances_generation_once_and_is_idempotent() 
 }
 
 #[tokio::test]
+async fn restart_completion_with_exact_exit_code_is_persisted_as_stopped() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("restart-completion"),
+            &operation("create-restart-completion"),
+        )
+        .await
+        .unwrap();
+    let restart_operation = operation("restart-completion-operation");
+    *backend.start_terminal_exit_code.lock().unwrap() = Some(0);
+
+    let error = manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ExecutionManagerError::Unavailable(message)
+            if message.contains("fake execution completed during startup")
+    ));
+    let starts_after_completion = backend.starts.load(Ordering::Relaxed);
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(
+        stopped.managed_state().unwrap(),
+        Some(ManagedExecutionState::Stopped)
+    );
+    assert_eq!(stopped.exit_code, Some(0));
+    assert_eq!(
+        stopped.managed_execution.as_ref().unwrap().generation,
+        ExecutionGeneration::new(2).unwrap()
+    );
+    let completed = stopped
+        .managed_execution
+        .as_ref()
+        .unwrap()
+        .last_restart
+        .as_ref()
+        .unwrap();
+    assert_eq!(completed.operation_id, restart_operation);
+    assert_eq!(completed.source_generation, running.generation);
+    assert_eq!(
+        completed.target_generation,
+        ExecutionGeneration::new(2).unwrap()
+    );
+    assert_eq!(completed.outcome, crate::ManagedRestartOutcome::Stopped);
+
+    let retry = manager
+        .restart(
+            &running.execution_id,
+            running.generation,
+            &restart_operation,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(retry, ExecutionManagerError::Conflict { .. }));
+    assert_eq!(
+        backend.starts.load(Ordering::Relaxed),
+        starts_after_completion
+    );
+}
+
+#[tokio::test]
 async fn stale_restart_generation_has_no_backend_side_effects() {
     let (_directory, manager, backend) = harness();
     let running = manager
@@ -2003,6 +2072,66 @@ async fn restart_recovers_after_generation_advance_before_backend_start() {
 
     assert_eq!(restarted.generation, ExecutionGeneration::new(2).unwrap());
     assert_eq!(backend.starts.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn restart_observation_with_exact_exit_code_completes_as_stopped() {
+    let (_directory, manager, backend) = harness();
+    let running = manager
+        .create_and_start(
+            request("restart-observation"),
+            &operation("create-restart-observation"),
+        )
+        .await
+        .unwrap();
+    let restart_operation = operation("restart-observation-operation");
+    let record = persisted(&manager, &running.execution_id);
+    let claimed = manager
+        .transition(
+            &record,
+            ManagedExecutionState::Running,
+            ManagedExecutionState::RestartStopping,
+            RuntimeUpdate::RestartClaim {
+                operation_id: restart_operation.clone(),
+                options: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    backend.kill(&claimed).await.unwrap();
+    let restarting = manager
+        .transition(
+            &claimed,
+            ManagedExecutionState::RestartStopping,
+            ManagedExecutionState::RestartStarting,
+            RuntimeUpdate::RestartAdvance,
+        )
+        .await
+        .unwrap();
+    *backend.start_terminal_exit_code.lock().unwrap() = Some(0);
+    let start_error = backend.start(&restarting).await.unwrap_err();
+    assert!(matches!(start_error, ExecutionManagerError::Unavailable(_)));
+    let starts_after_completion = backend.starts.load(Ordering::Relaxed);
+
+    let status = manager.inspect(&running.execution_id).await.unwrap();
+
+    assert_eq!(status.state, ExecutionState::Stopped);
+    assert_eq!(status.generation, ExecutionGeneration::new(2).unwrap());
+    assert_eq!(
+        backend.starts.load(Ordering::Relaxed),
+        starts_after_completion
+    );
+    let stopped = persisted(&manager, &running.execution_id);
+    assert_eq!(stopped.exit_code, Some(0));
+    assert_eq!(
+        stopped
+            .managed_execution
+            .unwrap()
+            .last_restart
+            .unwrap()
+            .outcome,
+        crate::ManagedRestartOutcome::Stopped
+    );
 }
 
 #[tokio::test]
