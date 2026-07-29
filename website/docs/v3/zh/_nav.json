@@ -10,6 +10,10 @@
     "activeMatch": "^/sdk/"
   },
   {
+    "text": "Agent Skill",
+    "link": "/guide/agent-skill.html"
+  },
+  {
     "text": "参考",
     "link": "/reference/",
     "activeMatch": "^/reference/"

@@ -14,6 +14,7 @@ const requiredPages = [
   'guide/index.mdx',
   'guide/installation.mdx',
   'guide/quick-start.mdx',
+  'guide/agent-skill.mdx',
   'guide/architecture.mdx',
   'guide/images-builds.mdx',
   'guide/networking-compose.mdx',
@@ -204,6 +205,10 @@ for (const language of languages) {
     path.join(docsRoot, language, 'guide', 'quick-start.mdx'),
     'utf8',
   );
+  const agentSkill = await readFile(
+    path.join(docsRoot, language, 'guide', 'agent-skill.mdx'),
+    'utf8',
+  );
   const networking = await readFile(
     path.join(docsRoot, language, 'guide', 'networking-compose.mdx'),
     'utf8',
@@ -254,6 +259,22 @@ for (const language of languages) {
     programFailures.push(
       `${language}/guide/networking-compose.mdx: ACL example must use an acl fence`,
     );
+  }
+
+  for (const marker of [
+    'integrations/skills/install.sh',
+    'sh -s -- --home a3s-code',
+    'sh -s -- --home codex',
+    'sh -s -- --home claude',
+    'sh -s -- --home all',
+    '/a3s-box',
+    'allowed-tools',
+  ]) {
+    if (!agentSkill.includes(marker)) {
+      experienceFailures.push(
+        `${language}/guide/agent-skill.mdx: missing Skill integration marker ${marker}`,
+      );
+    }
   }
 
   const tabsContract = [
@@ -352,5 +373,5 @@ if (experienceFailures.length > 0) {
 }
 
 console.log(
-  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, complete Rust/TypeScript/Python/Go programs in Tabs, Code Hike walkthroughs, and ACL fences.`,
+  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, Agent Skill integration, complete Rust/TypeScript/Python/Go programs in Tabs, Code Hike walkthroughs, and ACL fences.`,
 );

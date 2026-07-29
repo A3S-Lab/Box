@@ -14,6 +14,7 @@ const routeFiles = [
   'guide/index.html',
   'guide/installation.html',
   'guide/quick-start.html',
+  'guide/agent-skill.html',
   'guide/architecture.html',
   'guide/images-builds.html',
   'guide/networking-compose.html',
@@ -81,6 +82,10 @@ for (const [homepagePath, html] of [
   ['en/index.html', englishHomepage],
 ]) {
   for (const marker of [
+    'id="agent-skill"',
+    'box-global-grid-canvas',
+    'a3s-box · skill installer',
+    'integrations/skills/install.sh',
     'id="sdk-code-tour"',
     'id="homepage-code-hike"',
     'href="#homepage-code-hike"',
@@ -104,6 +109,7 @@ for (const [homepagePath, html] of [
   }
 }
 for (const route of [
+  `${base}en/guide/agent-skill.html`,
   `${base}en/guide/quick-start.html`,
   `${base}en/sdk/rust.html`,
   `${base}en/sdk/typescript.html`,
@@ -118,6 +124,34 @@ for (const route of [
 }
 
 for (const localePrefix of ['', 'en/']) {
+  const agentSkillPath = `${localePrefix}guide/agent-skill.html`;
+  const agentSkillHtml = await readFile(
+    path.join(outputRoot, agentSkillPath),
+    'utf8',
+  );
+  const agentSkillText = agentSkillHtml
+    .replace(/<[^>]+>/g, '')
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&amp;', '&')
+    .replace(/\s+/g, ' ');
+
+  for (const marker of [
+    'integrations/skills/install.sh',
+    'sh -s -- --home a3s-code',
+    'sh -s -- --home codex',
+    'sh -s -- --home claude',
+    'sh -s -- --home all',
+    '/a3s-box',
+    'allowed-tools',
+  ]) {
+    if (!agentSkillText.includes(marker)) {
+      throw new Error(
+        `${agentSkillPath} is missing its Skill integration marker: ${marker}`,
+      );
+    }
+  }
+
   const quickStartPath = `${localePrefix}guide/quick-start.html`;
   const quickStartHtml = await readFile(
     path.join(outputRoot, quickStartPath),
@@ -237,5 +271,5 @@ if (brokenReferences.length > 0) {
 }
 
 console.log(
-  `Bilingual Tabs, Code Hike walkthroughs, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
+  `Bilingual Agent Skill, Tabs, Code Hike walkthroughs, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
 );

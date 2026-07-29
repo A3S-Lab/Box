@@ -1,5 +1,8 @@
 import { useState } from 'react';
 import { Content, useLang, withBase } from '@rspress/core/runtime';
+import { AgentSkillSection } from './AgentSkillSection';
+import { CanvasGridEffect } from './CanvasGridEffect';
+import { PremiumInteractions } from './PremiumInteractions';
 
 const installCommands = [
   {
@@ -49,6 +52,7 @@ const content = {
     heroSubtitle:
       'A3S Box 是一个本地 OCI 运行时，将隔离策略作为每次请求的一部分。默认使用独立来宾内核；共享内核执行必须显式启用，并通过能力检查。',
     getStarted: '快速开始',
+    installSkill: '安装 Agent Skill',
     exploreCode: '代码漫游',
     copy: '复制',
     copied: '已复制',
@@ -75,8 +79,8 @@ const content = {
     signals: [
       ['独立内核', '默认隔离'],
       ['OCI 原生', '镜像与构建'],
-      ['4 种 SDK', '统一运行时契约'],
-      ['3 类主机', 'KVM · HVF · WHPX'],
+      ['Agent Skill', 'A3S Code · Codex · Claude'],
+      ['4 种 SDK', 'Rust · Go · Python · TypeScript'],
     ],
     principleKicker: '将隔离作为数据',
     principleTitle: '让执行边界在代码中清晰可见。',
@@ -181,6 +185,7 @@ const content = {
     heroSubtitle:
       'A3S Box is a local OCI runtime that makes isolation part of every request. Dedicated guest kernels are the default. Shared-kernel execution is an explicit, capability-checked opt-in.',
     getStarted: 'Get started',
+    installSkill: 'Install Agent Skill',
     exploreCode: 'Code walkthrough',
     copy: 'Copy',
     copied: 'Copied',
@@ -207,8 +212,8 @@ const content = {
     signals: [
       ['Dedicated kernel', 'default isolation'],
       ['OCI-native', 'images and builds'],
-      ['4 SDKs', 'one runtime contract'],
-      ['3 hosts', 'KVM · HVF · WHPX'],
+      ['Agent Skill', 'A3S Code · Codex · Claude'],
+      ['4 SDKs', 'Rust · Go · Python · TypeScript'],
     ],
     principleKicker: 'ISOLATION AS DATA',
     principleTitle: 'Make the execution boundary visible in code.',
@@ -365,18 +370,6 @@ function ArrowIcon() {
   );
 }
 
-function GithubIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        fill="currentColor"
-        stroke="none"
-        d="M12 .8a11.4 11.4 0 0 0-3.6 22.2c.6.1.8-.2.8-.5v-2.2c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.6.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5A11.4 11.4 0 0 0 12 .8Z"
-      />
-    </svg>
-  );
-}
-
 function CopyIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -419,6 +412,15 @@ export function HomeLayout() {
 
   return (
     <main className="box-home">
+      <PremiumInteractions />
+      <div className="box-global-grid" aria-hidden="true">
+        <CanvasGridEffect
+          cellSize={54}
+          className="box-global-grid-canvas"
+          intensity={0.62}
+          interactionScope="page"
+        />
+      </div>
       <section className="box-hero" aria-labelledby="box-hero-title">
         <div className="box-hero-copy">
           <div className="box-eyebrow">
@@ -438,6 +440,10 @@ export function HomeLayout() {
               {copy.getStarted}
               <ArrowIcon />
             </a>
+            <a className="box-button box-button--secondary" href="#agent-skill">
+              {copy.installSkill}
+              <ArrowIcon />
+            </a>
             <a
               className="box-button box-button--secondary"
               href="#homepage-code-hike"
@@ -445,18 +451,9 @@ export function HomeLayout() {
               {copy.exploreCode}
               <ArrowIcon />
             </a>
-            <a
-              className="box-button box-button--secondary"
-              href="https://github.com/A3S-Lab/Box"
-              target="_blank"
-              rel="noreferrer"
-            >
-              <GithubIcon />
-              GitHub
-            </a>
           </div>
 
-          <div className="box-install">
+          <div className="box-install box-premium-surface">
             <div className="box-install-tabs" role="tablist">
               {installCommands.map((option) => (
                 <button
@@ -492,7 +489,7 @@ export function HomeLayout() {
         </div>
 
         <div className="box-hero-visual" aria-label={copy.isolationAria}>
-          <div className="box-runtime-window">
+          <div className="box-runtime-window box-premium-surface">
             <header>
               <span className="box-runtime-status" />
               {copy.visual.resolver}
@@ -552,6 +549,11 @@ export function HomeLayout() {
         ))}
       </section>
 
+      <AgentSkillSection
+        guideHref={docLink('/guide/agent-skill.html')}
+        locale={isChinese ? 'zh' : 'en'}
+      />
+
       <section id="sdk-code-tour" className="box-section box-home-code-tour">
         <Content />
       </section>
@@ -564,7 +566,7 @@ export function HomeLayout() {
         </div>
         <div className="box-principle-grid">
           {copy.principles.map((principle) => (
-            <article key={principle.label}>
+            <article className="box-premium-surface" key={principle.label}>
               <span>{principle.label}</span>
               <h3>{principle.title}</h3>
               <p>{principle.body}</p>
@@ -584,7 +586,10 @@ export function HomeLayout() {
         </div>
         <div className="box-capability-grid">
           {copy.capabilities.map((card) => (
-            <article key={card.index} className={card.className}>
+            <article
+              key={card.index}
+              className={`${card.className} box-premium-surface`}
+            >
               <div className="box-card-index">{card.index}</div>
               <span>{card.eyebrow}</span>
               <h3>{card.title}</h3>
@@ -607,7 +612,11 @@ export function HomeLayout() {
         </div>
         <div className="box-sdk-grid">
           {sdkCards.map((sdk) => (
-            <a key={sdk.language} href={docLink(sdk.href)}>
+            <a
+              className="box-premium-surface"
+              key={sdk.language}
+              href={docLink(sdk.href)}
+            >
               <header>
                 <span>{sdk.language}</span>
                 <ArrowIcon />

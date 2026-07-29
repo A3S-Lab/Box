@@ -1,0 +1,257 @@
+/* Canvas UI-inspired interaction layer, aligned with the A3S Code website. */
+
+.box-premium-effects-anchor {
+  position: absolute;
+  overflow: hidden;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.rp-nav {
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.28);
+}
+
+.rp-nav::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(98, 215, 139, 0.08) 22%,
+    rgba(98, 215, 139, 0.58) 48%,
+    rgba(245, 185, 95, 0.18) 68%,
+    transparent 100%
+  );
+  content: '';
+  opacity: 0.56;
+  pointer-events: none;
+}
+
+.box-home {
+  --box-premium-green: 98, 215, 139;
+  --box-premium-amber: 245, 185, 95;
+  isolation: isolate;
+}
+
+.box-global-grid {
+  position: fixed;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  inset: var(--rp-nav-height, 72px) 0 0;
+}
+
+.box-global-grid-canvas {
+  position: absolute;
+  display: block;
+  width: 100%;
+  height: 100%;
+  inset: 0;
+  mix-blend-mode: screen;
+  opacity: 0.68;
+}
+
+.box-signal-strip {
+  position: relative;
+  z-index: 1;
+}
+
+.box-home::after {
+  position: fixed;
+  z-index: 3;
+  background-image: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.16) 0.4px,
+    transparent 0.68px
+  );
+  background-size: 4px 4px;
+  content: '';
+  inset: 0;
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.52),
+    rgba(0, 0, 0, 0.13) 38%,
+    rgba(0, 0, 0, 0.36)
+  );
+  mix-blend-mode: soft-light;
+  opacity: 0.075;
+  pointer-events: none;
+}
+
+.box-hero {
+  --box-hero-x: 72%;
+  --box-hero-y: 34%;
+  isolation: isolate;
+}
+
+.box-hero::before {
+  position: absolute;
+  z-index: 0;
+  background:
+    radial-gradient(
+      circle 350px at var(--box-hero-x) var(--box-hero-y),
+      rgba(var(--box-premium-green), 0.15),
+      rgba(var(--box-premium-green), 0.045) 40%,
+      transparent 72%
+    ),
+    conic-gradient(
+      from 205deg at 70% 42%,
+      transparent 0deg,
+      rgba(var(--box-premium-green), 0.075) 48deg,
+      transparent 112deg,
+      rgba(var(--box-premium-amber), 0.03) 184deg,
+      transparent 250deg
+    );
+  content: '';
+  filter: blur(22px);
+  inset: -16%;
+  opacity: 0.82;
+  pointer-events: none;
+}
+
+.box-hero-copy,
+.box-hero-visual {
+  position: relative;
+  z-index: 1;
+}
+
+.box-hero h1 {
+  text-shadow: 0 18px 54px rgba(0, 0, 0, 0.42);
+}
+
+.box-hero h1 > span {
+  filter: drop-shadow(0 12px 28px rgba(75, 180, 111, 0.14));
+}
+
+.box-button--primary {
+  box-shadow:
+    0 12px 34px rgba(34, 136, 71, 0.17),
+    inset 0 1px rgba(255, 255, 255, 0.1);
+}
+
+.box-premium-surface {
+  --box-spot-x: 50%;
+  --box-spot-y: 50%;
+  position: relative;
+  isolation: isolate;
+}
+
+.box-premium-surface::before {
+  position: absolute;
+  z-index: 0;
+  background: radial-gradient(
+    380px circle at var(--box-spot-x) var(--box-spot-y),
+    rgba(var(--box-premium-green), 0.12),
+    rgba(var(--box-premium-amber), 0.025) 38%,
+    transparent 69%
+  );
+  content: '';
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 260ms ease;
+}
+
+.box-premium-surface.is-pointer-active::before,
+.box-premium-surface:focus-within::before {
+  opacity: 1;
+}
+
+.box-premium-surface > * {
+  position: relative;
+  z-index: 1;
+}
+
+.box-card-index {
+  position: absolute;
+  z-index: 1;
+}
+
+.box-install {
+  border-color: rgba(98, 215, 139, 0.24);
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.22),
+    0 0 0 1px rgba(98, 215, 139, 0.018);
+}
+
+.box-runtime-window,
+.box-agent-skill-console {
+  transition:
+    border-color 300ms ease,
+    box-shadow 300ms ease;
+}
+
+.box-runtime-window:hover,
+.box-agent-skill-console:hover,
+.box-agent-skill-console:focus-within {
+  border-color: rgba(98, 215, 139, 0.48);
+  box-shadow:
+    0 38px 112px rgba(0, 0, 0, 0.47),
+    0 0 0 1px rgba(98, 215, 139, 0.045),
+    0 0 86px rgba(48, 150, 85, 0.09),
+    inset 0 1px rgba(255, 255, 255, 0.055);
+}
+
+.box-section-heading {
+  position: relative;
+}
+
+.box-section-heading::after {
+  position: absolute;
+  bottom: -22px;
+  left: 0;
+  width: min(34%, 320px);
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    rgba(var(--box-premium-green), 0.48),
+    transparent
+  );
+  content: '';
+  pointer-events: none;
+}
+
+.box-principle-grid article,
+.box-capability-grid article,
+.box-sdk-grid > a,
+.box-agent-skill-flow li {
+  transition:
+    border-color 220ms ease,
+    background 220ms ease,
+    box-shadow 220ms ease,
+    transform 220ms ease;
+}
+
+.box-principle-grid article:hover,
+.box-capability-grid article:hover,
+.box-agent-skill-flow li:hover {
+  border-color: rgba(98, 215, 139, 0.33);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.035);
+  transform: translateY(-2px);
+}
+
+.box-sdk-grid > a:hover {
+  border-color: rgba(98, 215, 139, 0.33);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .box-global-grid-canvas {
+    opacity: 0.42;
+  }
+
+  .box-hero::before {
+    background: radial-gradient(
+      circle at 72% 34%,
+      rgba(var(--box-premium-green), 0.09),
+      transparent 44%
+    );
+  }
+
+  .box-premium-surface::before {
+    display: none;
+  }
+}

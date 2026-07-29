@@ -6,6 +6,22 @@ file* works in every agent that supports skills — there is no per-agent varian
 
 ## Install
 
+Install directly from GitHub at user scope:
+
+```sh
+# A3S Code
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home a3s-code
+
+# Every supported skill root
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home all
+```
+
+Or install from a repository checkout:
+
 ```sh
 ./install.sh all                   # .agents + .claude + .codex + .a3s, this repo
 ./install.sh --home agents claude  # user-wide (~/.agents, ~/.claude)
@@ -13,8 +29,14 @@ file* works in every agent that supports skills — there is no per-agent varian
 ./install.sh --copy all            # copy instead of symlink
 ```
 
-The installer symlinks the one `SKILL.md` into each skills root (single source
-of truth). Manual equivalent: `ln -s "$(pwd)/a3s-box/SKILL.md" <root>/a3s-box/SKILL.md`.
+From a checkout, the installer symlinks the one `SKILL.md` into each skills
+root by default (single source of truth). A streamed installer downloads and
+copies `SKILL.md`, because a symlink to its temporary download would not remain
+valid. The manual equivalent is:
+
+```sh
+ln -s "$(pwd)/a3s-box/SKILL.md" <root>/a3s-box/SKILL.md
+```
 
 ## Which agents this reaches
 

@@ -1,0 +1,141 @@
+---
+title: Agent Skill
+description: Install and use the A3S Box Skill with A3S Code, Codex, Claude Code, and other skill-aware agents.
+---
+
+# A3S Box Agent Skill
+
+The A3S Box Skill teaches a coding agent how to run OCI workloads through the
+Box CLI without guessing lifecycle, isolation, networking, or cleanup rules.
+It is one shared `SKILL.md`, not a separate integration for each agent.
+
+The Skill does not install the Box runtime. Complete the
+[installation guide](./installation/) first, then verify the host:
+
+```bash
+a3s-box --version
+a3s-box info
+```
+
+## Install for your agent
+
+The commands below install the current Skill at user scope. The streamed
+installer downloads a durable copy of `SKILL.md`; it does not leave a symlink
+to a temporary file.
+
+### A3S Code
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home a3s-code
+```
+
+Target: `~/.a3s/skills/a3s-box/SKILL.md`
+
+### Codex
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home codex
+```
+
+Target: `~/.codex/skills/a3s-box/SKILL.md`
+
+### Claude Code
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home claude
+```
+
+Target: `~/.claude/skills/a3s-box/SKILL.md`
+
+### Every supported root
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- --home all
+```
+
+`all` installs the same file into `.agents`, `.claude`, `.codex`, and `.a3s`
+under the selected scope. It is useful when several agents share one machine.
+
+> [!TIP]
+> A network pipe executes the installer from `main`. Download and review the
+> script first when your environment requires a pinned or audited source.
+
+## User scope or project scope
+
+`--home` selects user scope. Omit it to install for only the current project:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/A3S-Lab/Box/main/integrations/skills/install.sh |
+  sh -s -- a3s-code
+```
+
+| Agent target | Project root     | User root          |
+| ------------ | ---------------- | ------------------ |
+| Cross-tool   | `.agents/skills` | `~/.agents/skills` |
+| Claude Code  | `.claude/skills` | `~/.claude/skills` |
+| Codex        | `.codex/skills`  | `~/.codex/skills`  |
+| A3S Code     | `.a3s/skills`    | `~/.a3s/skills`    |
+
+From a Box repository checkout, run `integrations/skills/install.sh` directly.
+Checkout installs use symlinks by default so every agent reads one source file;
+pass `--copy` when the checkout may move.
+
+## Reload and invoke
+
+Restart the agent session or refresh its Skill list after installation. In an
+interface that exposes skills as slash commands, start with `/a3s-box`:
+
+```text
+/a3s-box Build this repository and run its tests in an isolated MicroVM.
+Preserve failing logs and clean up the temporary Box when finished.
+```
+
+Agents without a slash-command UI can activate the same Skill from a natural
+request:
+
+```text
+Use the A3S Box Skill to run this generated script safely in a disposable
+MicroVM, report its exit code, and remove the Box afterward.
+```
+
+The Skill guides the agent through a repeatable sequence:
+
+1. Run `a3s-box info` before the first workload.
+2. Choose an explicit Box name instead of parsing human CLI output.
+3. Keep the guest command after `--`.
+4. Verify detached workloads with `a3s-box ps -a`.
+5. Inspect status and logs on failure, then stop and remove temporary state.
+
+## What the Skill covers
+
+- One-shot and long-running MicroVM workloads.
+- Image builds, registry operations, volumes, networks, and published ports.
+- `exec`, shell access, copy, logs, health checks, and lifecycle recovery.
+- Filesystem snapshots and restored workload startup.
+- Command timeouts, detached monitoring, and common guest-channel failures.
+
+The Skill preserves Box's fail-closed model. It does not request a weaker
+isolation backend when the host cannot satisfy a workload, and it does not
+bypass agent approval or workspace policy. Where an agent enforces the
+`allowed-tools` declaration, shell access is limited to `a3s-box` and `curl`.
+
+## Update or remove
+
+Run the same streamed command again to replace the installed copy with the
+current Skill. Remove only the target directory to uninstall it, for example:
+
+```bash
+rm -rf ~/.a3s/skills/a3s-box
+```
+
+Removing a Skill does not remove A3S Box, running workloads, images, volumes,
+or runtime state.
