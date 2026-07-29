@@ -504,6 +504,7 @@ impl CoreSmoke {
         panic!("timeout waiting for {name} to become {expected}\nlast inspect:\n{last}");
     }
 
+    #[cfg(target_os = "macos")]
     fn wait_for_named_terminal_status(&self, name: &str) -> serde_json::Value {
         let start = Instant::now();
         let mut last = String::new();
