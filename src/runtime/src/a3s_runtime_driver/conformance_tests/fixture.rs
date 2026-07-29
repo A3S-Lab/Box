@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use a3s_runtime::contract::{
-    RuntimeCapabilities, RuntimeInspection, RuntimeUnitSpec, RuntimeUnitState,
+    RuntimeCapabilities, RuntimeInspection, RuntimeUnitSpec, RuntimeUnitState, SecretReference,
 };
 use a3s_runtime::{
     runtime_profile_requirements, FileRuntimeStateStore, ManagedRuntimeClient, RuntimeClient,
@@ -14,9 +15,56 @@ use a3s_runtime::{
 use async_trait::async_trait;
 
 use super::super::metadata::{local_identity, UNIT_LABEL};
-use super::super::{BoxRuntimeDriver, BoxRuntimeDriverConfig};
+use super::super::{
+    BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial, BoxSecretMaterializationError,
+    BoxSecretMaterializer,
+};
 use super::cases::CaseFactory;
 use super::{external, failure, require, Result};
+
+pub(super) const SECRET_ENV_REFERENCE: &str = "secret://r17/provider-token/v1";
+pub(super) const SECRET_ENV_VALUE: &str = "r17-secret-alpha-long";
+pub(super) const SECRET_FILE_REFERENCE: &str = "secret://r17/provider-file/v1";
+pub(super) const SECRET_FILE_VALUE: &str = "secret-alpha";
+
+struct ConformanceSecretMaterializer {
+    calls: AtomicUsize,
+    authorized: AtomicBool,
+}
+
+impl Default for ConformanceSecretMaterializer {
+    fn default() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            authorized: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait]
+impl BoxSecretMaterializer for ConformanceSecretMaterializer {
+    async fn materialize(
+        &self,
+        reference: &SecretReference,
+    ) -> std::result::Result<BoxSecretMaterial, BoxSecretMaterializationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.authorized.load(Ordering::SeqCst) {
+            return Err(BoxSecretMaterializationError::Rejected(
+                "R17 fixture authorization was revoked".into(),
+            ));
+        }
+        let value = match reference.reference.as_str() {
+            SECRET_ENV_REFERENCE => SECRET_ENV_VALUE,
+            SECRET_FILE_REFERENCE => SECRET_FILE_VALUE,
+            _ => {
+                return Err(BoxSecretMaterializationError::Rejected(
+                    "R17 fixture reference is not registered".into(),
+                ))
+            }
+        };
+        BoxSecretMaterial::new(value.as_bytes().to_vec())
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 struct SeenResource {
@@ -35,6 +83,7 @@ pub(super) struct BoxRuntimeConformanceFixture {
     pub(super) state: Arc<FileRuntimeStateStore>,
     pub(super) cases: CaseFactory,
     base_case: a3s_runtime::RuntimeBaseConformanceCase,
+    secret_materializer: Arc<ConformanceSecretMaterializer>,
     drivers: Mutex<Vec<Arc<BoxRuntimeDriver>>>,
     state_roots: Mutex<BTreeSet<PathBuf>>,
     removable_homes: Mutex<BTreeSet<PathBuf>>,
@@ -77,10 +126,17 @@ impl BoxRuntimeConformanceFixture {
         let base_case = cases.base_case();
         base_case.validate().map_err(super::invalid)?;
 
+        let secret_root = home_dir.join("runtime-secrets");
+        require(
+            secret_root.is_dir(),
+            "A3S_HOME/runtime-secrets must be a pre-mounted private tmpfs directory",
+        )?;
         let config = driver_config(home_dir.clone());
-        let driver = Arc::new(BoxRuntimeDriver::new_with_isolation(
+        let secret_materializer = Arc::new(ConformanceSecretMaterializer::default());
+        let driver = Arc::new(BoxRuntimeDriver::with_secret_materializer(
             config,
             a3s_box_core::ExecutionIsolation::Sandbox,
+            secret_materializer.clone(),
         )?);
         let state = Arc::new(FileRuntimeStateStore::new(&state_root));
         Ok(Self {
@@ -89,6 +145,7 @@ impl BoxRuntimeConformanceFixture {
             state,
             cases,
             base_case,
+            secret_materializer,
             drivers: Mutex::new(vec![driver]),
             state_roots: Mutex::new(BTreeSet::from([state_root])),
             removable_homes: Mutex::new(BTreeSet::new()),
@@ -109,12 +166,23 @@ impl BoxRuntimeConformanceFixture {
     }
 
     pub(super) fn restarted_driver(&self) -> Result<Arc<BoxRuntimeDriver>> {
-        let driver = Arc::new(BoxRuntimeDriver::new_with_isolation(
+        let driver = Arc::new(BoxRuntimeDriver::with_secret_materializer(
             driver_config(self.home_dir.clone()),
             a3s_box_core::ExecutionIsolation::Sandbox,
+            self.secret_materializer.clone(),
         )?);
         self.register_driver(driver.clone());
         Ok(driver)
+    }
+
+    pub(super) fn secret_materialization_calls(&self) -> usize {
+        self.secret_materializer.calls.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn set_secret_authorized(&self, authorized: bool) {
+        self.secret_materializer
+            .authorized
+            .store(authorized, Ordering::SeqCst);
     }
 
     pub(super) fn register_driver(&self, driver: Arc<BoxRuntimeDriver>) {
@@ -436,6 +504,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
 
 fn driver_config(home_dir: PathBuf) -> BoxRuntimeDriverConfig {
     BoxRuntimeDriverConfig {
+        secret_root: home_dir.join("runtime-secrets"),
         home_dir,
         control_timeout: Duration::from_secs(120),
         task_poll_interval: Duration::from_millis(25),

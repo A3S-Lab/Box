@@ -12,6 +12,18 @@ All notable changes to A3S Box will be documented in this file.
   provider-neutral A3S Runtime Tasks through Fleet; Box retains only node-local
   Runtime provider mechanics.
 
+### Added
+
+- **Caller-authorized Runtime Secret materialization.** The shared
+  `BoxRuntimeDriver` can compose one `BoxSecretMaterializer` and advertise
+  environment and file `SecretReferences` only when a canonical private Linux
+  tmpfs root is ready. Material is mounted read-only, recovered without
+  rematerializing a live generation, retained across stop/restart, removed with
+  stale or deleted generations, zeroized at the provider boundary, and redacted
+  after per-read reauthorization before log cursor construction. Plaintext is
+  excluded from durable Box state, creation intent, and OCI configuration;
+  registry credentials remain explicitly unsupported.
+
 ### Changed
 
 - **Single-owner Sandbox resource contract.** `linux.resources` now carries

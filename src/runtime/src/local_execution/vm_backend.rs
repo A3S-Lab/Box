@@ -119,6 +119,7 @@ impl VmLocalExecutionBackend {
         manager.anonymous_volumes = record.anonymous_volumes.clone();
         manager.set_log_config(record.log_config.clone());
         manager.resolved_execution_plan = Some(metadata.plan.clone());
+        manager.managed_secret_root = metadata.request.policy.managed_secret_root.clone();
         Ok(manager)
     }
 

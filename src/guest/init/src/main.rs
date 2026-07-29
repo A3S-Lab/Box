@@ -14,12 +14,14 @@ mod linux {
     use a3s_box_core::guest_exec::{
         GuestExecConfig, MAX_RUNTIME_EXEC_CONFIG_BYTES, RUNTIME_EXEC_CONFIG_PATH,
     };
+    use a3s_box_core::secret::{SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST};
     use a3s_box_guest_init::{
         attest_server, exec_server, host_config, namespace, network, port_forward, pty_server,
     };
     use std::process;
     use std::sync::atomic::{AtomicI32, Ordering};
     use tracing::{error, info, warn};
+    use zeroize::{Zeroize, Zeroizing};
 
     /// Signal forwarded to the container process group during graceful shutdown.
     /// Zero means no shutdown has been requested.
@@ -276,6 +278,14 @@ mod linux {
         stdin_null: bool,
     }
 
+    impl Drop for ExecConfig {
+        fn drop(&mut self) {
+            for (_, value) in &mut self.env {
+                value.zeroize();
+            }
+        }
+    }
+
     impl ExecConfig {
         /// Parse container entrypoint configuration from environment variables.
         ///
@@ -387,6 +397,113 @@ mod linux {
                 user,
                 stdin_null,
             })
+        }
+
+        /// Replace the non-sensitive Runtime binding manifest with exact
+        /// values read from read-only files that Box mounted from node tmpfs.
+        /// The manifest itself never reaches the workload environment.
+        fn materialize_secret_environment(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            self.materialize_secret_environment_from(std::path::Path::new("/.a3s-box-secrets"))
+        }
+
+        fn materialize_secret_environment_from(
+            &mut self,
+            internal_root: &std::path::Path,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let manifests = self
+                .env
+                .iter()
+                .enumerate()
+                .filter(|(_, (key, _))| key == SECRET_ENVIRONMENT_MANIFEST)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if manifests.is_empty() {
+                return Ok(());
+            }
+            if manifests.len() != 1 {
+                return Err("duplicate Box Secret environment manifests".into());
+            }
+            let (_, encoded) = self.env.remove(manifests[0]);
+            let encoded = Zeroizing::new(encoded);
+            let bindings: Vec<SecretEnvironmentBinding> = serde_json::from_str(&encoded)
+                .map_err(|_| "Box Secret environment manifest is not valid version-1 JSON")?;
+            if bindings.is_empty() || bindings.len() > 128 {
+                return Err("Box Secret environment manifest has an invalid binding count".into());
+            }
+
+            let mut variables = std::collections::BTreeSet::new();
+            let mut paths = std::collections::BTreeSet::new();
+            for binding in bindings {
+                binding.validate()?;
+                if !variables.insert(binding.variable.clone())
+                    || !paths.insert(binding.path.clone())
+                {
+                    return Err(
+                        "Box Secret environment manifest contains duplicate bindings".into(),
+                    );
+                }
+                let path = std::path::Path::new(&binding.path);
+                let relative = path.strip_prefix(internal_root).map_err(|_| {
+                    "Box Secret environment file escaped the reserved guest directory"
+                })?;
+                let components = relative
+                    .components()
+                    .filter_map(|component| match component {
+                        std::path::Component::Normal(value) => value.to_str(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if components.len() != 2
+                    || components[0].len() != 64
+                    || !components[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || components[1].len() != 10
+                    || !components[1].as_bytes()[..3]
+                        .iter()
+                        .all(|byte| byte.is_ascii_digit())
+                    || &components[1].as_bytes()[3..] != b".secret"
+                    || components[1][..3]
+                        .parse::<usize>()
+                        .ok()
+                        .is_none_or(|index| index >= 128)
+                {
+                    return Err(
+                        "Box Secret environment file has an invalid reserved identity".into(),
+                    );
+                }
+                let metadata = std::fs::symlink_metadata(path)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                    if !metadata.file_type().is_file()
+                        || metadata.file_type().is_symlink()
+                        || metadata.nlink() != 1
+                        || metadata.len() == 0
+                        || metadata.len() > 1024 * 1024
+                        || metadata.permissions().mode() & 0o777 != 0o400
+                    {
+                        return Err("Box Secret environment file violates its regular-file, size, or mode contract".into());
+                    }
+                }
+                let bytes = Zeroizing::new(std::fs::read(path)?);
+                if bytes.is_empty() || bytes.len() > 1024 * 1024 {
+                    return Err("Box Secret environment value has an invalid size".into());
+                }
+                let mut value = std::str::from_utf8(bytes.as_slice())
+                    .map_err(|_| "Box Secret environment value is not UTF-8")?
+                    .to_owned();
+                if value.contains('\0') {
+                    value.zeroize();
+                    return Err("Box Secret environment value contains a NUL byte".into());
+                }
+                if self.env.iter().any(|(key, _)| key == &binding.variable) {
+                    value.zeroize();
+                    return Err(
+                        "Box Secret environment binding conflicts with an existing value".into(),
+                    );
+                }
+                self.env.push((binding.variable, value));
+            }
+            Ok(())
         }
     }
 
@@ -732,7 +849,7 @@ mod linux {
         // the process file before a later read-only remount. An OCI runtime may
         // mount a Sandbox root read-only before PID 1 starts, so retain that copy;
         // runtime-internal paths are excluded from snapshots and commits.
-        let exec_config = if bootstrap_mode.is_host_sandbox() {
+        let mut exec_config = if bootstrap_mode.is_host_sandbox() {
             ExecConfig::from_env_without_consuming_staged_file()?
         } else {
             ExecConfig::from_env()?
@@ -757,6 +874,11 @@ mod linux {
             #[cfg(target_os = "linux")]
             let _ = a3s_box_guest_init::cgroup::ensure_cgroup2_ready();
         }
+
+        // Host Sandbox mounts are already installed by the OCI runtime before
+        // PID 1 starts. Resolve Secret environment values only now, after all
+        // backend-owned mount setup and immediately before process creation.
+        exec_config.materialize_secret_environment()?;
 
         // Step 2.6: Bind the exec (vsock 4089) and PTY (vsock 4090) listening sockets
         // NOW, before the slower network bring-up and container spawn below. These are
@@ -2007,6 +2129,17 @@ mod linux {
     mod tests {
         use super::*;
 
+        fn test_exec_config(env: Vec<(String, String)>) -> ExecConfig {
+            ExecConfig {
+                executable: "/bin/sh".into(),
+                args: Vec::new(),
+                env,
+                workdir: "/".into(),
+                user: None,
+                stdin_null: true,
+            }
+        }
+
         #[test]
         fn bootstrap_mode_is_explicit_and_fail_closed() {
             assert_eq!(
@@ -2030,6 +2163,81 @@ mod linux {
                 console_handoff_delay(BootstrapMode::Microvm),
                 std::time::Duration::from_millis(250)
             );
+        }
+
+        #[test]
+        fn secret_environment_manifest_is_validated_consumed_and_injected() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let directory = tempfile::tempdir().unwrap();
+            let internal_root = directory.path().join(".a3s-box-secrets");
+            let digest = "a".repeat(64);
+            let secret_directory = internal_root.join(&digest);
+            std::fs::create_dir_all(&secret_directory).unwrap();
+            let secret_path = secret_directory.join("000.secret");
+            std::fs::write(&secret_path, b"guest-secret-value").unwrap();
+            std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o400)).unwrap();
+            let manifest = serde_json::to_string(&vec![SecretEnvironmentBinding {
+                variable: "A3S_PROVIDER_TOKEN".into(),
+                path: secret_path.to_string_lossy().into_owned(),
+            }])
+            .unwrap();
+            let mut config = test_exec_config(vec![
+                ("LANG".into(), "C.UTF-8".into()),
+                (SECRET_ENVIRONMENT_MANIFEST.into(), manifest),
+            ]);
+
+            config
+                .materialize_secret_environment_from(&internal_root)
+                .unwrap();
+
+            assert_eq!(
+                config
+                    .env
+                    .iter()
+                    .find(|(key, _)| key == "A3S_PROVIDER_TOKEN")
+                    .map(|(_, value)| value.as_str()),
+                Some("guest-secret-value")
+            );
+            assert!(config
+                .env
+                .iter()
+                .all(|(key, _)| key != SECRET_ENVIRONMENT_MANIFEST));
+            assert!(config.env.contains(&("LANG".into(), "C.UTF-8".into())));
+        }
+
+        #[test]
+        fn secret_environment_manifest_fails_closed_on_tamper() {
+            let directory = tempfile::tempdir().unwrap();
+            let internal_root = directory.path().join(".a3s-box-secrets");
+            std::fs::create_dir_all(&internal_root).unwrap();
+
+            let mut invalid_json = test_exec_config(vec![(
+                SECRET_ENVIRONMENT_MANIFEST.into(),
+                "not-json".into(),
+            )]);
+            assert!(invalid_json
+                .materialize_secret_environment_from(&internal_root)
+                .unwrap_err()
+                .to_string()
+                .contains("version-1 JSON"));
+            assert!(invalid_json
+                .env
+                .iter()
+                .all(|(key, _)| key != SECRET_ENVIRONMENT_MANIFEST));
+
+            let escaped = serde_json::to_string(&vec![SecretEnvironmentBinding {
+                variable: "A3S_PROVIDER_TOKEN".into(),
+                path: "/etc/passwd".into(),
+            }])
+            .unwrap();
+            let mut escaped_path =
+                test_exec_config(vec![(SECRET_ENVIRONMENT_MANIFEST.into(), escaped)]);
+            assert!(escaped_path
+                .materialize_secret_environment_from(&internal_root)
+                .unwrap_err()
+                .to_string()
+                .contains("escaped"));
         }
 
         #[test]

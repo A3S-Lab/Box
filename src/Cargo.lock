@@ -116,6 +116,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -183,6 +184,7 @@ dependencies = [
  "x509-cert",
  "xattr",
  "xz2",
+ "zeroize",
  "zstd",
 ]
 

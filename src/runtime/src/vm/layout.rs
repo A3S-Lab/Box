@@ -1128,6 +1128,7 @@ mod tests {
             pull_progress_fn: None,
             log_config: a3s_box_core::log::LogConfig::default(),
             resolved_execution_plan: None,
+            managed_secret_root: None,
         }
     }
 

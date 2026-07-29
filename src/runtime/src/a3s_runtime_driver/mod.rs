@@ -6,6 +6,7 @@ mod lifecycle;
 mod logs;
 mod mapping;
 mod metadata;
+mod secret;
 mod service_endpoints;
 
 use std::future::Future;
@@ -26,7 +27,10 @@ use tokio::sync::OnceCell;
 
 use crate::{ExecutionIsolation, LocalExecutionManager};
 
+use self::secret::SecretMaterializationOwner;
 use self::service_endpoints::ServiceEndpointOwner;
+
+pub use self::secret::{BoxSecretMaterial, BoxSecretMaterializationError, BoxSecretMaterializer};
 
 pub(super) const OCI_IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub(super) const OCI_IMAGE_INDEX: &str = "application/vnd.oci.image.index.v1+json";
@@ -41,12 +45,18 @@ pub struct BoxRuntimeDriverConfig {
     pub control_timeout: Duration,
     /// Poll cadence while waiting for a finite Task to reach a terminal state.
     pub task_poll_interval: Duration,
+    /// Existing private Linux tmpfs mount used only for transient Runtime
+    /// Secret files. The provider never creates or silently downgrades this
+    /// mount to disk-backed storage.
+    pub secret_root: PathBuf,
 }
 
 impl Default for BoxRuntimeDriverConfig {
     fn default() -> Self {
+        let home_dir = a3s_box_core::dirs_home();
         Self {
-            home_dir: a3s_box_core::dirs_home(),
+            secret_root: home_dir.join("runtime-secrets"),
+            home_dir,
             control_timeout: Duration::from_secs(60),
             task_poll_interval: Duration::from_millis(50),
         }
@@ -61,6 +71,7 @@ pub struct BoxRuntimeDriver {
     port_connector: Arc<dyn ExecutionPortConnector>,
     service_endpoints: ServiceEndpointOwner,
     execution_isolation: ExecutionIsolation,
+    secret_materialization: SecretMaterializationOwner,
     provider_build: OnceCell<String>,
 }
 
@@ -86,6 +97,31 @@ impl BoxRuntimeDriver {
         Self::with_manager(config, manager, execution_isolation)
     }
 
+    /// Compose the shared Box driver with one caller-owned Secret resolver.
+    ///
+    /// The resolver is normally backed by the node agent's existing
+    /// authenticated control channel. It is not a second lifecycle or Secret
+    /// store, and Box never persists the returned bytes.
+    pub fn with_secret_materializer(
+        config: BoxRuntimeDriverConfig,
+        execution_isolation: ExecutionIsolation,
+        materializer: Arc<dyn BoxSecretMaterializer>,
+    ) -> RuntimeResult<Self> {
+        validate_config(&config)?;
+        let manager = LocalExecutionManager::with_vm_backend(
+            config.home_dir.join("boxes.json"),
+            &config.home_dir,
+        );
+        let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
+        Self::with_manager_connector_and_materializer(
+            config,
+            manager,
+            connector,
+            execution_isolation,
+            Some(materializer),
+        )
+    }
+
     fn with_manager(
         config: BoxRuntimeDriverConfig,
         manager: LocalExecutionManager,
@@ -101,8 +137,26 @@ impl BoxRuntimeDriver {
         connector: Arc<dyn ExecutionPortConnector>,
         execution_isolation: ExecutionIsolation,
     ) -> RuntimeResult<Self> {
+        Self::with_manager_connector_and_materializer(
+            config,
+            manager,
+            connector,
+            execution_isolation,
+            None,
+        )
+    }
+
+    fn with_manager_connector_and_materializer(
+        config: BoxRuntimeDriverConfig,
+        manager: LocalExecutionManager,
+        connector: Arc<dyn ExecutionPortConnector>,
+        execution_isolation: ExecutionIsolation,
+        materializer: Option<Arc<dyn BoxSecretMaterializer>>,
+    ) -> RuntimeResult<Self> {
         validate_config(&config)?;
         let endpoint_connector = Arc::clone(&connector);
+        let secret_materialization =
+            SecretMaterializationOwner::new(config.secret_root.clone(), materializer);
         Ok(Self {
             provider_id: ProviderId::parse("a3s-box")?,
             config,
@@ -110,6 +164,7 @@ impl BoxRuntimeDriver {
             port_connector: connector,
             service_endpoints: ServiceEndpointOwner::new(endpoint_connector),
             execution_isolation,
+            secret_materialization,
             provider_build: OnceCell::new(),
         })
     }
@@ -203,6 +258,36 @@ fn validate_config(config: &BoxRuntimeDriverConfig) -> RuntimeResult<()> {
             "Box Runtime timeout and poll interval must be positive".into(),
         ));
     }
+    let secret_root = config.secret_root.to_str().ok_or_else(|| {
+        RuntimeError::InvalidRequest(
+            "Box Runtime Secret root must be an encodable UTF-8 Linux path".into(),
+        )
+    })?;
+    let normalized_secret_root = secret_root.strip_prefix('/').is_some_and(|relative| {
+        !relative.is_empty()
+            && relative
+                .split('/')
+                .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+    });
+    if !normalized_secret_root
+        || secret_root.contains([':', '\0'])
+        || secret_root.bytes().any(|byte| byte.is_ascii_control())
+        || !config.secret_root.is_absolute()
+        || config.secret_root.parent().is_none()
+        || config.secret_root.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::CurDir
+                    | std::path::Component::ParentDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(RuntimeError::InvalidRequest(
+            "Box Runtime Secret root must be an encodable absolute normalized non-root Linux path"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
@@ -213,6 +298,20 @@ impl RuntimeDriver for BoxRuntimeDriver {
     }
 
     async fn capabilities(&self) -> RuntimeResult<RuntimeCapabilities> {
+        if self.secret_materialization.configured() {
+            self.secret_materialization.require_ready().await?;
+        }
+        let mut features = vec![
+            RuntimeFeature::DurableIdentity,
+            RuntimeFeature::Stop,
+            RuntimeFeature::Remove,
+            RuntimeFeature::ServiceTcp,
+            RuntimeFeature::Logs,
+            RuntimeFeature::Exec,
+        ];
+        if self.secret_materialization.configured() {
+            features.push(RuntimeFeature::SecretReferences);
+        }
         let capabilities = RuntimeCapabilities {
             schema: RuntimeCapabilities::SCHEMA.into(),
             provider_id: self.provider_id.clone(),
@@ -235,14 +334,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
                 ResourceControl::Pids,
                 ResourceControl::ExecutionTimeout,
             ],
-            features: vec![
-                RuntimeFeature::DurableIdentity,
-                RuntimeFeature::Stop,
-                RuntimeFeature::Remove,
-                RuntimeFeature::ServiceTcp,
-                RuntimeFeature::Logs,
-                RuntimeFeature::Exec,
-            ],
+            features,
         };
         capabilities.validate().map_err(RuntimeError::Protocol)?;
         Ok(capabilities)

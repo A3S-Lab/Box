@@ -1,14 +1,174 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use a3s_runtime::contract::{RestartPolicy, RuntimeInspection, RuntimeUnitClass, RuntimeUnitState};
+use a3s_runtime::contract::{
+    RestartPolicy, RuntimeFeature, RuntimeInspection, RuntimeUnitClass, RuntimeUnitState,
+    SecretReference, SecretTarget,
+};
 use a3s_runtime::{RuntimeDriver, RuntimeError};
 
 use super::metadata::GENERATION_LABEL;
 use super::test_support::{
-    accepted, action, fake_driver, fake_driver_with_backend, runtime_spec, unit, unknown,
-    DriverFakeBackend,
+    accepted, action, fake_driver, fake_driver_with_backend,
+    fake_driver_with_backend_and_secret_materializer, fake_driver_with_secret_materializer,
+    runtime_spec, unit, unknown, DriverFakeBackend, DriverFakeSecretMaterializer,
 };
+
+fn tmpfs_secret_root() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mount = tempfile::tempdir_in("/dev/shm")
+        .expect("Linux Runtime Secret tests require the standard /dev/shm tmpfs");
+    let root = mount.path().join("runtime-secrets");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (mount, root)
+}
+
+fn environment_secret(reference: &str) -> SecretReference {
+    SecretReference {
+        name: "provider-token".into(),
+        reference: reference.into(),
+        target: SecretTarget::Environment {
+            variable: "A3S_PROVIDER_TOKEN".into(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn unconfigured_secret_port_rejects_before_provider_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let (driver, backend) = fake_driver(&directory);
+    let mut spec = runtime_spec("secret-unconfigured", 1, RuntimeUnitClass::Service);
+    spec.secrets
+        .push(environment_secret("secret://provider/token/v1"));
+
+    assert!(matches!(
+        driver.apply(&spec, &accepted(&spec)).await,
+        Err(RuntimeError::UnsupportedCapabilities(missing))
+            if missing == vec!["feature:SecretReferences"]
+    ));
+    assert_eq!(backend.starts(), 0);
+    assert!(driver.manager.managed_records().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn secret_materialization_recovers_without_persisting_plaintext_and_cleans_on_remove() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_secret_mount, secret_root) = tmpfs_secret_root();
+    let materializer = Arc::new(DriverFakeSecretMaterializer::default());
+    let reference = "secret://provider/token/v7";
+    let plaintext = "box-fixture-secret-plaintext";
+    materializer.insert(reference, plaintext.as_bytes().to_vec());
+    let (driver, backend) =
+        fake_driver_with_secret_materializer(&directory, secret_root.clone(), materializer.clone());
+    let mut spec = runtime_spec("secret-retry", 1, RuntimeUnitClass::Service);
+    spec.secrets.push(environment_secret(reference));
+
+    let capabilities = driver.capabilities().await.unwrap();
+    assert!(capabilities
+        .features
+        .contains(&RuntimeFeature::SecretReferences));
+
+    materializer.fail_next();
+    assert!(matches!(
+        driver.apply(&spec, &accepted(&spec)).await,
+        Err(RuntimeError::ProviderUnavailable(message))
+            if message.contains("temporarily unavailable")
+    ));
+    assert_eq!(backend.starts(), 0);
+    assert_eq!(driver.manager.managed_records().await.unwrap().len(), 1);
+    let materialized_directory = super::secret::secret_directory(&secret_root, &spec).unwrap();
+    assert!(!materialized_directory.exists());
+
+    let running = driver.apply(&spec, &accepted(&spec)).await.unwrap();
+    assert_eq!(running.state, RuntimeUnitState::Running);
+    assert_eq!(backend.starts(), 1);
+    let materialized = super::secret::secret_file(&secret_root, &spec, 0).unwrap();
+    assert_eq!(std::fs::read(&materialized).unwrap(), plaintext.as_bytes());
+
+    let state = std::fs::read_to_string(driver.manager.state_path()).unwrap();
+    assert!(!state.contains(plaintext));
+    let record = driver.manager.managed_records().await.unwrap().remove(0);
+    let creation_intent =
+        serde_json::to_string(&record.managed_execution.unwrap().request).unwrap();
+    assert!(!creation_intent.contains(plaintext));
+
+    let calls_before_reconstruction = materializer.calls();
+    let reopened = fake_driver_with_backend_and_secret_materializer(
+        &directory,
+        backend.clone(),
+        secret_root.clone(),
+        materializer.clone(),
+    );
+    let replayed = reopened.apply(&spec, &running).await.unwrap();
+    assert_eq!(replayed.provider_resource_id, running.provider_resource_id);
+    assert_eq!(backend.starts(), 1);
+    assert_eq!(materializer.calls(), calls_before_reconstruction);
+    assert!(materialized.exists());
+
+    let running_unit = unit(spec.clone(), replayed);
+    let stopped = reopened
+        .stop(&running_unit, &action("secret-stop", &spec))
+        .await
+        .unwrap();
+    assert_eq!(stopped.state, RuntimeUnitState::Stopped);
+    assert!(materialized.exists(), "stop must retain restart material");
+
+    reopened
+        .remove(
+            &unit(spec.clone(), stopped),
+            &action("secret-remove", &spec),
+        )
+        .await
+        .unwrap();
+    assert!(!materialized_directory.exists());
+    assert!(reopened.manager.managed_records().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stale_generation_retirement_removes_only_its_secret_material() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_secret_mount, secret_root) = tmpfs_secret_root();
+    let materializer = Arc::new(DriverFakeSecretMaterializer::default());
+    materializer.insert("secret://provider/token/v1", b"generation-one".to_vec());
+    materializer.insert("secret://provider/token/v2", b"generation-two".to_vec());
+    let (driver, _backend) =
+        fake_driver_with_secret_materializer(&directory, secret_root.clone(), materializer);
+    let mut first = runtime_spec("secret-handoff", 1, RuntimeUnitClass::Service);
+    first
+        .secrets
+        .push(environment_secret("secret://provider/token/v1"));
+    driver.apply(&first, &accepted(&first)).await.unwrap();
+    let first_directory = super::secret::secret_directory(&secret_root, &first).unwrap();
+    assert!(first_directory.exists());
+
+    let mut second = runtime_spec("secret-handoff", 2, RuntimeUnitClass::Service);
+    second.process.args = vec!["-c".into(), "echo generation-two".into()];
+    second
+        .secrets
+        .push(environment_secret("secret://provider/token/v2"));
+    let second_running = driver.apply(&second, &accepted(&second)).await.unwrap();
+    let second_directory = super::secret::secret_directory(&secret_root, &second).unwrap();
+
+    assert!(!first_directory.exists());
+    assert!(second_directory.exists());
+    let records = driver.manager.managed_records().await.unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        second_running.provider_resource_id.as_deref(),
+        Some(records[0].id.as_str())
+    );
+
+    driver
+        .remove(
+            &unit(second.clone(), second_running),
+            &action("secret-handoff-remove", &second),
+        )
+        .await
+        .unwrap();
+    assert!(!second_directory.exists());
+}
 
 #[tokio::test]
 async fn service_replay_reopens_the_same_identity_and_stop_remove_are_idempotent() {

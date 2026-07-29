@@ -1,6 +1,7 @@
 # A3S Box Runtime
 
-MicroVM runtime implementation for A3S Box.
+Local MicroVM, Sandbox, and shared A3S Runtime provider implementation for A3S
+Box.
 
 ## Overview
 
@@ -12,6 +13,10 @@ This package provides the actual runtime implementation for A3S Box, including:
 - **gRPC Communication**: Guest agent health checking over Unix socket
 - **Filesystem Operations**: virtio-fs mount management
 - **Metrics Collection**: Runtime metrics and monitoring
+- **A3S Runtime Provider**: generation-fenced Tasks and Services over the
+  explicit Linux Sandbox backend
+- **Transient Secrets**: caller-authorized environment and file Secret
+  materialization without durable plaintext
 
 ## Architecture
 
@@ -29,6 +34,49 @@ The runtime package builds on top of `a3s-box-core` which provides foundational 
 │  (Config, Error, Event)            │
 └─────────────────────────────────────┘
 ```
+
+## Shared A3S Runtime provider
+
+`BoxRuntimeDriver` implements the shared `a3s-runtime` contract. It maps
+digest-pinned OCI Tasks and Services onto the canonical local execution manager
+instead of creating a second Box lifecycle path. The driver owns provider
+identity, generation fencing, recovery, Service endpoints, health observations,
+logs, exec, resource controls, and cleanup.
+
+Callers that need Runtime Secrets compose the driver with exactly one
+`BoxSecretMaterializer`:
+
+```rust
+use std::sync::Arc;
+
+use a3s_box_runtime::{BoxRuntimeDriver, BoxRuntimeDriverConfig};
+
+let config = BoxRuntimeDriverConfig {
+    secret_root: "/run/a3s-box/runtime-secrets".into(),
+    ..Default::default()
+};
+let driver = BoxRuntimeDriver::with_secret_materializer(
+    config,
+    Arc::new(node_secret_materializer),
+)?;
+```
+
+The configured `secret_root` must already be a canonical provider-owned `0700`
+Linux tmpfs mount. Box never creates it and never falls back to disk. The caller
+owns reference authorization and transport; Box owns only node-local
+materialization, deterministic read-only Sandbox mounts, recovery validation,
+log redaction, and lifecycle cleanup.
+
+Environment and file targets are supported. Environment values use a
+non-sensitive `A3S_BOX_SECRET_ENV_V1` binding manifest that Guest Init validates
+and consumes immediately before process creation. Registry credential targets
+remain unsupported. Secret bytes are zeroized in memory where they cross the
+materializer boundary and never enter durable Box records, creation intent, or
+OCI configuration. Stopping retains material for an explicit restart; removal
+and stale-generation retirement remove it. A reconstructed driver validates the
+existing live generation without rematerializing it. Every log read reauthorizes
+the references, redacts exact values longest-first, and hashes only redacted
+content into its cursor.
 
 ## Components
 

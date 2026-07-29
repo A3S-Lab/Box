@@ -61,7 +61,10 @@ pub mod scale;
 pub use audit::{read_audit_log, AuditLog, AuditQuery};
 
 #[cfg(all(feature = "vm", target_os = "linux"))]
-pub use a3s_runtime_driver::{BoxRuntimeDriver, BoxRuntimeDriverConfig};
+pub use a3s_runtime_driver::{
+    BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial, BoxSecretMaterializationError,
+    BoxSecretMaterializer,
+};
 
 // Canonical local execution metadata
 pub use box_record::{

@@ -269,6 +269,13 @@ jobs:
             echo 'root:100000:65536' | sudo tee -a /etc/subuid
           grep -q '^root:' /etc/subgid ||
             echo 'root:100000:65536' | sudo tee -a /etc/subgid
+      - name: Mount private Runtime Secret tmpfs
+        run: |
+          sudo install -d -m 700 "$A3S_HOME/runtime-secrets"
+          sudo mount -t tmpfs \
+            -o size=16m,mode=0700,nosuid,nodev,noexec \
+            a3s-runtime-secrets "$A3S_HOME/runtime-secrets"
+          mountpoint -q "$A3S_HOME/runtime-secrets"
       - name: Certify all advertised A3S Runtime R17 profiles
         run: |
           cd src
@@ -309,11 +316,16 @@ jobs:
       - name: Verify cleanup
         if: always()
         run: |
+          cleanup_status=0
           if pgrep -f 'a3s-box-shim|a3s-oci.*native-linux-service|a3s-oci-agent' >/dev/null; then
             ps aux | grep -E 'a3s-box-shim|a3s-oci.*native-linux-service|a3s-oci-agent' | grep -v grep
-            exit 1
+            cleanup_status=1
+          fi
+          if mountpoint -q "$A3S_HOME/runtime-secrets"; then
+            sudo umount "$A3S_HOME/runtime-secrets" || cleanup_status=1
           fi
           sudo rm -rf "$A3S_HOME"
+          exit "$cleanup_status"
 
   # ── Build check (compile only, no artifacts) ────────────────────
   build-check:

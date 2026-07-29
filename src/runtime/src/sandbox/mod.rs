@@ -145,5 +145,6 @@ pub use oci::{
 pub use path_access::prepare_sandbox_path_access;
 pub use rootfs::{
     inspect_rootfs_identity_requirements, mapped_root_ids, prepare_managed_mount_source,
-    prepare_rootfs_ownership, validate_external_mount_access, RootfsIdentityRequirements,
+    prepare_managed_secret_mount_source, prepare_rootfs_ownership, validate_external_mount_access,
+    RootfsIdentityRequirements,
 };

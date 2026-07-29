@@ -761,6 +761,7 @@ async fn create_preserves_complete_caller_record_policy() {
         stop_timeout: Some(12),
         oom_kill_disable: true,
         oom_score_adj: Some(100),
+        managed_secret_root: None,
     };
 
     let reservation = manager

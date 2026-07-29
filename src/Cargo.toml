@@ -68,6 +68,7 @@ notify = "6.1"
 # Cryptography (for integrity checks)
 sha2 = "0.10"
 hex = "0.4"
+zeroize = "1"
 
 # Cryptography (for TEE attestation verification)
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }

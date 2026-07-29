@@ -1,6 +1,7 @@
 //! Stable provider ownership metadata and fail-closed record discovery.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use a3s_box_core::{ExecutionGeneration, ExecutionId, ExecutionIsolation, OperationId};
@@ -10,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{BoxRecord, ManagedExecutionState};
 
-use super::mapping::{creation_request, labels_as_hash_map};
+use super::mapping::{creation_request_for, labels_as_hash_map};
 use super::BoxRuntimeDriver;
 
 pub(super) const MANAGED_LABEL: &str = "a3s.runtime.managed";
@@ -82,7 +83,12 @@ impl BoxRuntimeDriver {
         let Some(record) = matches.into_iter().next() else {
             return Ok(None);
         };
-        validate_record_for_spec(&record, spec, self.execution_isolation)?;
+        validate_record_for_spec(
+            &record,
+            spec,
+            self.execution_isolation,
+            &self.config.secret_root,
+        )?;
         Ok(Some(record))
     }
 
@@ -150,9 +156,10 @@ pub(super) fn validate_record_for_spec(
     record: &BoxRecord,
     spec: &RuntimeUnitSpec,
     execution_isolation: ExecutionIsolation,
+    secret_root: &Path,
 ) -> RuntimeResult<()> {
     validate_owned_record(record, &spec.unit_id)?;
-    let expected_request = creation_request(spec, execution_isolation)?;
+    let expected_request = creation_request_for(spec, execution_isolation, secret_root)?;
     let metadata = record.managed_execution.as_ref().ok_or_else(|| {
         RuntimeError::Protocol(format!("Box execution {} lost managed metadata", record.id))
     })?;

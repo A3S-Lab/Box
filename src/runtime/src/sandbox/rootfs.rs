@@ -172,6 +172,89 @@ pub fn validate_external_mount_access(
     Ok(())
 }
 
+/// Validate and prepare one Runtime-owned Secret file without granting Box
+/// ownership over any other external bind source.
+#[cfg(target_os = "linux")]
+pub fn prepare_managed_secret_mount_source(
+    root: &Path,
+    path: &Path,
+    plan: &SandboxIdMappingPlan,
+    read_only: bool,
+) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    if !read_only {
+        return Err(BoxError::ConfigError(
+            "Sandbox Secret material must use a read-only bind mount".into(),
+        ));
+    }
+    let root_metadata = std::fs::symlink_metadata(root).map_err(BoxError::IoError)?;
+    let canonical_root = root.canonicalize().map_err(BoxError::IoError)?;
+    if canonical_root != root
+        || !root_metadata.file_type().is_dir()
+        || root_metadata.file_type().is_symlink()
+        || root_metadata.uid() != unsafe { libc::geteuid() }
+        || root_metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(BoxError::ConfigError(
+            "Sandbox Secret root must be a canonical private provider-owned directory".into(),
+        ));
+    }
+    let root_c = std::ffi::CString::new(root.as_os_str().as_bytes())
+        .map_err(|_| BoxError::ConfigError("Sandbox Secret root contains NUL".into()))?;
+    let mut status = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(root_c.as_ptr(), status.as_mut_ptr()) } != 0 {
+        return Err(BoxError::IoError(std::io::Error::last_os_error()));
+    }
+    if unsafe { status.assume_init() }.f_type as libc::c_long != 0x0102_1994 {
+        return Err(BoxError::ConfigError(
+            "Sandbox Secret root is not a Linux tmpfs mount".into(),
+        ));
+    }
+
+    let relative = path.strip_prefix(root).map_err(|_| {
+        BoxError::ConfigError("Sandbox Secret file escaped its configured root".into())
+    })?;
+    let components = relative.components().collect::<Vec<_>>();
+    let valid_identity = matches!(components.as_slice(), [Component::Normal(digest), Component::Normal(file)]
+        if digest.as_bytes().len() == 64
+            && digest.as_bytes().iter().all(u8::is_ascii_hexdigit)
+            && file.as_bytes().len() == 10
+            && file.as_bytes()[..3].iter().all(u8::is_ascii_digit)
+            && &file.as_bytes()[3..] == b".secret");
+    if !valid_identity {
+        return Err(BoxError::ConfigError(
+            "Sandbox Secret file has an invalid deterministic identity".into(),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(BoxError::IoError)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.nlink() != 1
+        || metadata.len() == 0
+        || metadata.len() > 1024 * 1024
+    {
+        return Err(BoxError::ConfigError(
+            "Sandbox Secret source is not a bounded regular file".into(),
+        ));
+    }
+    prepare_managed_mount_source(path, plan)?;
+    validate_external_mount_access(path, plan, true)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn prepare_managed_secret_mount_source(
+    _root: &Path,
+    _path: &Path,
+    _plan: &SandboxIdMappingPlan,
+    _read_only: bool,
+) -> Result<()> {
+    Err(BoxError::ConfigError(
+        "Sandbox Secret preparation requires Linux".into(),
+    ))
+}
+
 #[cfg(not(unix))]
 pub fn validate_external_mount_access(
     _path: &Path,
