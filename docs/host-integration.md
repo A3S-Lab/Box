@@ -39,11 +39,19 @@ cd crates/box
 # Optional but recommended for offline/reproducible runs.
 export A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar
 export A3S_BOX_SMOKE_IMAGE_TAR="$A3S_BOX_TEST_ALPINE_TAR"
+export A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR=/path/to/buildkit-arm64-oci.tar
 export A3S_BOX_SMOKE_SKIP_PULL=1
 export A3S_BOX_SMOKE_TIMEOUT_SECS=300
 
 scripts/host-integration-smoke.sh --core
 ```
+
+The BuildKit archive must contain the Linux arm64 image selected by
+`A3S_BOX_BUILDKIT_IMAGE` (default: `moby/buildkit:latest`). The core suite loads
+it into each isolated test home before running the macOS BuildKit cases. This
+avoids repeatedly downloading the large helper image. Cross-architecture
+Dockerfile base images must still be reachable by BuildKit through their image
+references, such as a local registry or a configured registry mirror.
 
 If you do not have an offline archive and want to pull from the registry during
 the run, add:

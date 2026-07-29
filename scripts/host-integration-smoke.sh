@@ -72,6 +72,8 @@ Options:
 
 Common environment:
   A3S_BOX_SMOKE_IMAGE_TAR=/path/to/alpine-oci.tar   Offline core_smoke image.
+  A3S_BOX_BUILDKIT_SMOKE_IMAGE_TAR=/path/to/buildkit-oci.tar
+                                                    Preloaded macOS BuildKit helper image.
   A3S_BOX_TEST_ALPINE_TAR=/path/to/alpine-oci.tar   Offline host/core image.
   A3S_BOX_SMOKE_SKIP_PULL=1                         Reuse preloaded core image.
   A3S_BOX_ALLOW_REGISTRY_PULL=1                     Allow live registry pulls.
@@ -425,8 +427,8 @@ EOF
 
 build_real_binaries() {
     log "Building real host binaries"
-    run_real cargo build -p a3s-box-cli -p a3s-box-shim
-    build_guest_init
+    run_real cargo build -p a3s-box-cli -p a3s-box-shim || return $?
+    build_guest_init || return $?
 }
 
 run_pure_suite() {
@@ -439,23 +441,23 @@ run_pure_suite() {
 }
 
 run_core_suite() {
-    require_image_source "core smoke"
-    build_real_binaries
+    require_image_source "core smoke" || return $?
+    build_real_binaries || return $?
     log "Running real MicroVM core smoke"
     run_real cargo test -p a3s-box-cli --test core_smoke -- --ignored --nocapture --test-threads=1
 }
 
 run_host_suite() {
-    require_image_source "host smoke"
-    build_real_binaries
+    require_image_source "host smoke" || return $?
+    build_real_binaries || return $?
     log "Running host VM command matrix"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_vm_command_matrix -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_vm_command_matrix -- --ignored --nocapture --test-threads=1 || return $?
     log "Running warm-pool command smoke"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_pool_warm_run -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_pool_warm_run -- --ignored --nocapture --test-threads=1 || return $?
     log "Running warm-pool Dockerfile RUN smoke"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_build_run_pool_smoke -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_build_run_pool_smoke -- --ignored --nocapture --test-threads=1 || return $?
     log "Running host Compose smoke"
-    run_real cargo test -p a3s-box-cli --test host_smoke test_real_compose_acl_smoke -- --ignored --nocapture --test-threads=1
+    run_real cargo test -p a3s-box-cli --test host_smoke test_real_compose_acl_smoke -- --ignored --nocapture --test-threads=1 || return $?
 
     if [ -n "${A3S_BOX_PUSH_TEST_REF:-}" ]; then
         log "Running registry push smoke"
@@ -481,15 +483,15 @@ run_linux_run_suite() {
         return
     fi
 
-    build_real_binaries
+    build_real_binaries || return $?
     log "Running Linux Dockerfile RUN chroot smoke"
     run_real cargo test -p a3s-box-cli --test host_smoke test_linux_build_run_chroot_smoke -- --ignored --nocapture --test-threads=1
 }
 
 run_cri_suite() {
-    build_real_binaries
+    build_real_binaries || return $?
     log "Building CRI server"
-    run_real cargo build -p a3s-box-cri
+    run_real cargo build -p a3s-box-cri || return $?
     log "Running crictl CRI smoke"
     printf '+ A3S_BOX_CRI_SMOKE=1 cargo test -p a3s-box-cri --test crictl_smoke -- --ignored --nocapture --test-threads=1\n'
     env -u A3S_DEPS_STUB A3S_BOX_CRI_SMOKE=1 \

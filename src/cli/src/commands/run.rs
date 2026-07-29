@@ -154,6 +154,13 @@ struct RunContext {
     completed_during_start: bool,
 }
 
+pub(super) fn is_completed_managed_start(record: &BoxRecord) -> bool {
+    record.exit_code.is_some()
+        && record
+            .managed_state()
+            .is_ok_and(|state| state == Some(a3s_box_runtime::ManagedExecutionState::Stopped))
+}
+
 pub async fn execute(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     validate_run_mode(&args, std::io::stdin().is_terminal())
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -400,7 +407,7 @@ use setup::setup_and_boot;
 #[cfg(test)]
 use setup::{
     build_box_config, build_execution_request, interactive_keepalive_entrypoint,
-    is_completed_managed_start, should_create_diff_baseline, RunRecordPolicy,
+    should_create_diff_baseline, RunRecordPolicy,
 };
 
 // ============================================================================
@@ -686,7 +693,7 @@ async fn run_foreground(
         );
     }
 
-    let persisted_exit_code = a3s_box_runtime::rootfs::read_persisted_exit_code(&ctx.box_dir);
+    let persisted_exit_code = foreground_workload_exit_code(&ctx.box_dir, ctx.record.exit_code);
     let exit_code = foreground_exit_code(stop_reason, persisted_exit_code);
     let archive_start = std::time::Instant::now();
     archive_auto_removed_logs(&ctx, args.rm, exit_code, stop_reason.stopped_by_user());
@@ -809,6 +816,13 @@ fn foreground_exit_code(reason: ForegroundStopReason, vm_exit_code: Option<i32>)
         ForegroundStopReason::VmUnhealthy => vm_exit_code.or(Some(1)),
         ForegroundStopReason::TimedOut => Some(124),
     }
+}
+
+fn foreground_workload_exit_code(
+    box_dir: &std::path::Path,
+    recorded_exit_code: Option<i32>,
+) -> Option<i32> {
+    a3s_box_runtime::rootfs::read_persisted_exit_code(box_dir).or(recorded_exit_code)
 }
 
 fn managed_process_alive(ctx: &RunContext) -> bool {

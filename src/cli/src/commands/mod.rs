@@ -244,10 +244,10 @@ pub(crate) fn resolve_box_rootfs(box_dir: &std::path::Path) -> Option<PathBuf> {
     }
     let rootfs = box_dir.join("rootfs");
     let apfs_data = rootfs.join(".a3s-rootfs");
-    if apfs_data.is_dir() {
+    if is_populated(&apfs_data) {
         return Some(apfs_data);
     }
-    if rootfs.is_dir() {
+    if is_populated(&rootfs) {
         return Some(rootfs);
     }
     None
@@ -686,6 +686,31 @@ pub async fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 mod isolation_cli_tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn rootfs_resolution_ignores_empty_provider_mountpoints() {
+        let temporary = tempfile::tempdir().unwrap();
+        let rootfs = temporary.path().join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+
+        assert_eq!(resolve_box_rootfs(temporary.path()), None);
+
+        std::fs::write(rootfs.join("file"), "rootfs").unwrap();
+        assert_eq!(resolve_box_rootfs(temporary.path()), Some(rootfs));
+    }
+
+    #[test]
+    fn rootfs_resolution_prefers_populated_merged_view() {
+        let temporary = tempfile::tempdir().unwrap();
+        let rootfs = temporary.path().join("rootfs");
+        let merged = temporary.path().join("merged");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::fs::create_dir_all(&merged).unwrap();
+        std::fs::write(rootfs.join("file"), "rootfs").unwrap();
+        std::fs::write(merged.join("file"), "merged").unwrap();
+
+        assert_eq!(resolve_box_rootfs(temporary.path()), Some(merged));
+    }
 
     #[test]
     fn run_accepts_explicit_sandbox_isolation() {

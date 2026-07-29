@@ -260,7 +260,14 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let dst_preexisted = dst.exists();
-        if copy_dir_recursive_cow(src, dst).unwrap_or(false) {
+        // copyfile(3) gives an existing destination directory different
+        // semantics from this helper: it creates `dst/src.file_name()` instead
+        // of copying the source directory's contents directly into `dst`.
+        // APFS rootfs mountpoints already exist, so taking that fast path would
+        // restore a snapshot below `.a3s-rootfs/rootfs/`. Fall back to the
+        // entry-by-entry copy for an existing destination; nested directories
+        // can still use APFS clones once their destination does not exist.
+        if !dst_preexisted && copy_dir_recursive_cow(src, dst).unwrap_or(false) {
             return Ok(());
         }
         if !dst_preexisted && dst.exists() {
@@ -976,6 +983,30 @@ mod tests {
             std::fs::read_to_string(dst.join("sub/deep/c.txt")).unwrap(),
             "ccc"
         );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_copies_contents_into_existing_destination() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("rootfs");
+        let dst = tmp.path().join("existing");
+
+        create_test_layer(&src, &[("bin/sh", "shell"), ("etc/config", "value")]);
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("marker"), "keep").unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("bin/sh")).unwrap(),
+            "shell"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.join("etc/config")).unwrap(),
+            "value"
+        );
+        assert_eq!(std::fs::read_to_string(dst.join("marker")).unwrap(), "keep");
+        assert!(!dst.join("rootfs").exists());
     }
 
     #[cfg(unix)]

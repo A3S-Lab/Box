@@ -240,14 +240,7 @@ fn completed_start_record(box_id: &str) -> Result<Option<BoxRecord>, Box<dyn std
     let Some(record) = state.find_by_id(box_id) else {
         return Ok(None);
     };
-    Ok(is_completed_managed_start(record).then(|| record.clone()))
-}
-
-pub(super) fn is_completed_managed_start(record: &BoxRecord) -> bool {
-    record.exit_code.is_some()
-        && record
-            .managed_state()
-            .is_ok_and(|state| state == Some(a3s_box_runtime::ManagedExecutionState::Stopped))
+    Ok(super::is_completed_managed_start(record).then(|| record.clone()))
 }
 
 fn pull_progress_callback(image_name: String) -> a3s_box_runtime::PullProgressFn {

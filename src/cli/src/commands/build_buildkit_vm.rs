@@ -83,7 +83,11 @@ pub(super) async fn execute(options: Build) -> Result<(), Box<dyn std::error::Er
         )
         .into());
     }
-    let load_args = load_args(&output_tar, options.tag.as_deref());
+    let load_args = load_args(
+        &output_tar,
+        options.tag.as_deref(),
+        options.platform.as_deref(),
+    );
     run_current_a3s_box(&load_args).await?;
     Ok(())
 }
@@ -342,7 +346,7 @@ fn output_attr(options: &Build, output_name: &str) -> Result<String, Box<dyn std
     Ok(format!("type=oci,dest=/out/{output_name}"))
 }
 
-fn load_args(output_tar: &Path, tag: Option<&str>) -> Vec<String> {
+fn load_args(output_tar: &Path, tag: Option<&str>, platform: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "load".to_string(),
         "--input".to_string(),
@@ -351,6 +355,10 @@ fn load_args(output_tar: &Path, tag: Option<&str>) -> Vec<String> {
     if let Some(tag) = tag {
         args.push("--tag".to_string());
         args.push(tag.to_string());
+    }
+    if let Some(platform) = platform {
+        args.push("--platform".to_string());
+        args.push(platform.to_string());
     }
     args
 }
@@ -531,8 +539,12 @@ mod tests {
     }
 
     #[test]
-    fn test_load_args_adds_tag() {
-        let args = load_args(Path::new("/tmp/out/image.tar"), Some("app:latest"));
+    fn test_load_args_preserves_tag_and_platform() {
+        let args = load_args(
+            Path::new("/tmp/out/image.tar"),
+            Some("app:latest"),
+            Some("linux/amd64"),
+        );
         assert_eq!(
             args,
             vec![
@@ -540,7 +552,9 @@ mod tests {
                 "--input",
                 "/tmp/out/image.tar",
                 "--tag",
-                "app:latest"
+                "app:latest",
+                "--platform",
+                "linux/amd64"
             ]
         );
     }

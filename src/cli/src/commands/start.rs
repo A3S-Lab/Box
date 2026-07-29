@@ -94,13 +94,11 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
             drop(lifecycle_lock.take());
             let home = a3s_box_core::dirs_home();
             let manager = LocalExecutionManager::with_vm_backend(home.join("boxes.json"), &home);
-            match managed_plan {
+            let start_result = match managed_plan {
                 StartPlan::Managed {
                     execution_id,
                     generation,
-                } => {
-                    manager.start(&execution_id, generation).await?;
-                }
+                } => manager.start(&execution_id, generation).await,
                 StartPlan::ManagedRestart {
                     execution_id,
                     generation,
@@ -118,9 +116,22 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
                             &operation_id,
                             RestartExecutionOptions { stop_timeout_secs },
                         )
-                        .await?;
+                        .await
                 }
                 StartPlan::Legacy => unreachable!("legacy starts use the legacy branch"),
+            };
+            if let Err(error) = start_result {
+                // A short workload may complete between the backend start and
+                // its readiness handshake. The runtime persists the exact exit
+                // code and terminal state before returning that startup error;
+                // `start` should still succeed, just like a normal detached
+                // start whose process exits immediately afterward.
+                let completed = StateFile::load_readonly()?
+                    .find_by_id(&box_id)
+                    .is_some_and(super::run::is_completed_managed_start);
+                if !completed {
+                    return Err(error.into());
+                }
             }
 
             let baseline_box_dir = record.box_dir.clone();
@@ -152,7 +163,7 @@ async fn start_one(state: &StateFile, query: &str) -> Result<(), Box<dyn std::er
         }
     };
     drop(lifecycle_lock);
-    if let Some(record) = started_record {
+    if let Some(record) = started_record.filter(crate::status::is_active) {
         crate::health::spawn_detached_health_checker(&record)
             .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     }

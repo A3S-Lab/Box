@@ -15,6 +15,7 @@ use super::{BoxRecord, LocalExecutionManager};
 
 impl LocalExecutionManager {
     /// Load one managed record without reconciling provider state.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) async fn managed_record(
         &self,
         execution_id: &ExecutionId,
@@ -23,6 +24,7 @@ impl LocalExecutionManager {
     }
 
     /// Load the complete managed inventory without exposing legacy CLI boxes.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) async fn managed_records(&self) -> ExecutionManagerResult<Vec<BoxRecord>> {
         let store = self.store.clone();
         run_store(move || store.list()).await
