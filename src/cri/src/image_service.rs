@@ -742,9 +742,12 @@ mod tests {
             password: "secret".into(),
             ..Default::default()
         });
-        assert!(ra.is_some());
-        let dbg = format!("{ra:?}");
-        assert!(dbg.contains("alice") && dbg.contains("secret"), "got {dbg}");
+        let ra = ra.expect("username/password auth");
+        assert_eq!(
+            ra.basic_credentials(),
+            Some(("alice".into(), "secret".into()))
+        );
+        assert_eq!(format!("{ra:?}"), "<redacted-registry-auth>");
 
         // Docker-config base64 "user:pass" auth field -> basic
         use base64::Engine;
@@ -752,9 +755,10 @@ mod tests {
         let ra = auth_config_to_registry_auth(&AuthConfig {
             auth: encoded,
             ..Default::default()
-        });
-        let dbg = format!("{ra:?}");
-        assert!(dbg.contains("bob") && dbg.contains("pw123"), "got {dbg}");
+        })
+        .expect("encoded username/password auth");
+        assert_eq!(ra.basic_credentials(), Some(("bob".into(), "pw123".into())));
+        assert_eq!(format!("{ra:?}"), "<redacted-registry-auth>");
 
         // Bearer-token-only AuthConfig -> None (no RegistryAuth bearer support yet)
         assert!(auth_config_to_registry_auth(&AuthConfig {
