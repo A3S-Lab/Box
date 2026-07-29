@@ -96,6 +96,11 @@ const WINDOWS_GUEST_RESULT_MARKER: &str = ".a3s_host_result_collected";
 #[cfg(target_os = "windows")]
 const WINDOWS_LIVE_LOGS_DRAINED_MARKER: &str = ".a3s_host_live_logs_drained";
 
+pub(crate) const TERMINAL_EXIT_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(25);
+pub(crate) const TERMINAL_EXIT_POLL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
 /// Append a completed Windows guest stream to its raw host console, filtering
 /// libkrun's pre-guest C-init diagnostics while preserving arbitrary bytes.
 #[cfg(target_os = "windows")]
@@ -433,8 +438,10 @@ impl VmManager {
             // managed restart observes the same persistent filesystem while
             // ephemeral mounts are recreated by the next runtime generation.
             // Process termination and publication of the exact wait result are
-            // separate events. Remember both: `stop` may collect the exact
-            // status only after this initial non-blocking poll.
+            // separate events. Try once before cleanup, let `stop` collect its
+            // owned child, then wait within the common terminal bound only when
+            // the workload was already known to have exited naturally. A live
+            // boot failure stopped by Box must not be reclassified as success.
             let exited_before_cleanup = handler.has_exited();
             let collected_before_cleanup = match handler.try_wait_exit() {
                 Ok(Some(exit_code)) => {
@@ -459,6 +466,11 @@ impl VmManager {
                 );
             }
             self.shim_exit_code = handler.exit_code().or(self.shim_exit_code);
+            if exited_before_cleanup && self.shim_exit_code.is_none() {
+                let box_dir = self.home_dir.join("boxes").join(&self.box_id);
+                self.shim_exit_code =
+                    wait_for_delayed_terminal_exit(handler.as_mut(), &box_dir, &self.box_id).await;
+            }
             if self.config.persistent
                 && self.shim_exit_code.is_some()
                 && (collected_before_cleanup || exited_before_cleanup)
@@ -2009,12 +2021,57 @@ fn default_stop_signal() -> i32 {
     15
 }
 
+async fn wait_for_delayed_terminal_exit(
+    handler: &mut dyn VmHandler,
+    box_dir: &Path,
+    box_id: &str,
+) -> Option<i32> {
+    let deadline = tokio::time::Instant::now() + TERMINAL_EXIT_POLL_TIMEOUT;
+    let mut reported_wait_error = false;
+    loop {
+        if let Some(exit_code) = handler.exit_code() {
+            return Some(exit_code);
+        }
+        if let Some(exit_code) = boot_failure_persisted_exit_code(box_dir) {
+            return Some(exit_code);
+        }
+        match handler.try_wait_exit() {
+            Ok(Some(exit_code)) => return Some(exit_code),
+            Ok(None) => {}
+            Err(error) => {
+                if !reported_wait_error {
+                    tracing::debug!(
+                        %box_id,
+                        %error,
+                        "Terminal status remained unavailable after boot cleanup"
+                    );
+                    reported_wait_error = true;
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(TERMINAL_EXIT_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn boot_failure_persisted_exit_code(box_dir: &Path) -> Option<i32> {
+    crate::rootfs::read_persisted_exit_code(box_dir)
+}
+
+#[cfg(target_os = "windows")]
+fn boot_failure_persisted_exit_code(_box_dir: &Path) -> Option<i32> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use a3s_box_core::event::EventEmitter;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     };
 
@@ -2134,6 +2191,42 @@ mod tests {
 
         fn try_wait_exit(&mut self) -> Result<Option<i32>> {
             Ok(None)
+        }
+    }
+
+    struct DelayedCompletionHandler {
+        polls: Arc<AtomicUsize>,
+        available_after: usize,
+    }
+
+    impl VmHandler for DelayedCompletionHandler {
+        fn stop(&mut self, _signal: i32, _timeout_ms: u64) -> Result<()> {
+            Ok(())
+        }
+
+        fn metrics(&self) -> crate::vmm::VmMetrics {
+            crate::vmm::VmMetrics::default()
+        }
+
+        fn is_running(&self) -> bool {
+            false
+        }
+
+        fn has_exited(&self) -> bool {
+            true
+        }
+
+        fn pid(&self) -> u32 {
+            42
+        }
+
+        fn exit_code(&self) -> Option<i32> {
+            (self.polls.load(Ordering::SeqCst) > self.available_after).then_some(0)
+        }
+
+        fn try_wait_exit(&mut self) -> Result<Option<i32>> {
+            let poll = self.polls.fetch_add(1, Ordering::SeqCst);
+            Ok((poll >= self.available_after).then_some(0))
         }
     }
 
@@ -2280,6 +2373,39 @@ mod tests {
 
         assert_eq!(vm.exit_code(), Some(17));
         assert_eq!(std::fs::read(&marker).unwrap(), b"generation-one");
+        assert!(vm.preserve_rootfs_on_boot_failure);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_boot_failure_waits_for_delayed_terminal_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let box_id = "box-delayed-completion-during-boot".to_string();
+        let config = BoxConfig {
+            persistent: true,
+            ..BoxConfig::default()
+        };
+        let mut vm = VmManager::with_box_id(config, EventEmitter::new(16), box_id.clone());
+        vm.home_dir = tmp.path().to_path_buf();
+        vm.set_rootfs_provider(Box::new(crate::rootfs::CopyProvider));
+        let polls = Arc::new(AtomicUsize::new(0));
+        *vm.handler.write().await = Some(Box::new(DelayedCompletionHandler {
+            polls: Arc::clone(&polls),
+            available_after: 3,
+        }));
+
+        let marker = tmp
+            .path()
+            .join("boxes")
+            .join(&box_id)
+            .join("rootfs/r17-delayed-exit-marker");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"completed").unwrap();
+
+        vm.cleanup_boot_failure().await;
+
+        assert_eq!(vm.exit_code(), Some(0));
+        assert_eq!(polls.load(Ordering::SeqCst), 4);
+        assert_eq!(std::fs::read(&marker).unwrap(), b"completed");
         assert!(vm.preserve_rootfs_on_boot_failure);
     }
 

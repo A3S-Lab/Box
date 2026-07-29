@@ -22,15 +22,13 @@ use super::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
     LocalExecutionTermination,
 };
+use crate::vm::{TERMINAL_EXIT_POLL_INTERVAL, TERMINAL_EXIT_POLL_TIMEOUT};
 use crate::{
     BoxRecord, ManagedExecutionMetadata, ManagedExecutionOperation, ManagedExecutionState,
     VmManager,
 };
 
 type SharedVm = Arc<Mutex<VmManager>>;
-
-const TERMINAL_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const TERMINAL_EXIT_POLL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runtime adapter that owns live [`VmManager`] handles and reconstructs them
 /// from durable runtime evidence after a control-plane restart.
