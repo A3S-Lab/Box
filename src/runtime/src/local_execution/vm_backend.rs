@@ -245,7 +245,21 @@ impl VmLocalExecutionBackend {
             });
         }
         let visible_state = visible_active_state(record)?;
-        let handle = self.handle_from_manager(record, &manager).await?;
+        let handle = match self.handle_from_manager(record, &manager).await {
+            Ok(handle) => handle,
+            Err(ExecutionManagerError::NotFound(_)) => {
+                // The runtime state and health probes can still report a live
+                // Sandbox after its host process has exited. Treat the missing
+                // handle as the same terminal signal as a failed health probe
+                // and wait for the exact status before projecting provider
+                // loss. This closes the restart/replay race without creating a
+                // second lifecycle path.
+                return self
+                    .finish_registered_terminal(record, &shared, manager, preserve_rootfs, None)
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
         Ok(LocalExecutionObservation {
             state: visible_state,
             handle: Some(handle),
