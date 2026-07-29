@@ -43,7 +43,7 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`250315fc3aead8284affc361a9ee8bee1cdd15fd`, which implements the versioned
+`a0b999cf20792c8a8c834943b82efdb094c03005`, which implements the versioned
 control/workload cgroup layout and retains the earlier cross-platform
 qualification.
 
