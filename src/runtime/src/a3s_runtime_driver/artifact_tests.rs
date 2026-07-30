@@ -279,7 +279,7 @@ async fn missing_artifact_port_fails_before_box_reservation() {
 }
 
 #[tokio::test]
-async fn persistent_volume_reuses_data_and_detaches_without_becoming_an_artifact_store() {
+async fn persistent_volume_plan_reuses_data_without_becoming_an_artifact_store() {
     let directory = tempfile::tempdir().unwrap();
     let (driver, _) = fake_driver(&directory);
     let mut first = runtime_spec("persistent-volume", 1, RuntimeUnitClass::Service);
@@ -296,9 +296,11 @@ async fn persistent_volume_reuses_data_and_detaches_without_becoming_an_artifact
     let store = volume_store(&driver.config.home_dir);
     let volumes = store.list().unwrap();
     assert_eq!(volumes.len(), 1);
+    let record = driver.find_generation(&first).await.unwrap().unwrap();
     assert_eq!(
-        volumes[0].in_use_by,
-        vec![running.provider_resource_id.clone().unwrap()]
+        record.volume_names,
+        vec![volumes[0].name.clone()],
+        "the Runtime plan must delegate attachment to Box's existing named-Volume lifecycle"
     );
     let marker = PathBuf::from(&volumes[0].mount_point).join("generation-one");
     std::fs::write(&marker, b"durable").unwrap();
@@ -319,9 +321,11 @@ async fn persistent_volume_reuses_data_and_detaches_without_becoming_an_artifact
     let reused = store.list().unwrap();
     assert_eq!(reused.len(), 1);
     assert_eq!(std::fs::read(&marker).unwrap(), b"durable");
+    let record = driver.find_generation(&second).await.unwrap().unwrap();
     assert_eq!(
-        reused[0].in_use_by,
-        vec![running.provider_resource_id.clone().unwrap()]
+        record.volume_names,
+        vec![reused[0].name.clone()],
+        "the second generation must reuse the same Box Volume identity"
     );
 
     driver

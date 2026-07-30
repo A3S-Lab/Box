@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use a3s_runtime::contract::{RestartPolicy, RuntimeMount, RuntimeMountSource, RuntimeUnitState};
 use a3s_runtime::RuntimeClient;
@@ -77,21 +78,38 @@ async fn persistent_volume_reuse(
         "persistent Volume did not detach while retaining its data",
     )?;
 
-    let mut reader = fixture.cases.task(
+    let mut reader = fixture.cases.service(
         "mount-persistent-reader",
-        "if sh -c 'printf forbidden > /mnt/r17-persistent/forbidden' 2>/dev/null; then exit 74; fi; test \"$(cat /mnt/r17-persistent/marker)\" = durable",
-        10_000,
+        "if sh -c 'printf forbidden > /mnt/r17-persistent/forbidden' 2>/dev/null; then exit 74; fi; test \"$(cat /mnt/r17-persistent/marker)\" = durable || exit 75; printf ready > /workspace/r17-persistent-reader-ready; exec sleep 3600",
     );
     reader.spec.mounts = vec![volume("workspace", &volume_id, TARGET, true)];
     let read = client.apply(&reader).await?;
     require(
-        read.state == RuntimeUnitState::Succeeded,
-        "persistent Volume was not reused read-only by a second Runtime unit",
+        read.state == RuntimeUnitState::Running,
+        "persistent-Volume reader did not reach running",
     )?;
     let reader_record = fixture.record_for(&reader.spec).await?;
+    wait_for_file(
+        &reader_record
+            .box_dir
+            .join("workspace/r17-persistent-reader-ready"),
+        "persistent-Volume reader did not verify retained read-only data",
+    )
+    .await?;
+    require(
+        !Path::new(&detached.mount_point).join("forbidden").exists(),
+        "persistent Volume accepted a write through its read-only reuse",
+    )?;
     require(
         reader_record.volume_names == vec![volume_name.clone()],
         "persistent Volume identity changed across Runtime units",
+    )?;
+    require(
+        store
+            .get(&volume_name)
+            .map_err(|error| super::external("load reused persistent Volume", error))?
+            .is_some_and(|volume| volume.in_use_by == vec![reader_record.id.clone()]),
+        "persistent Volume did not fence its second live Box attachment",
     )?;
     require_bind_config(&reader_record, TARGET, true)?;
     fixture
@@ -301,6 +319,19 @@ fn volume(name: &str, volume_id: &str, target: &str, read_only: bool) -> Runtime
         },
         target: target.into(),
         read_only,
+    }
+}
+
+async fn wait_for_file(path: &Path, message: &str) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if path.is_file() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(super::failure(message));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
