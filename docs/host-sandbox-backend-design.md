@@ -248,6 +248,14 @@ Mount destinations are normalized, traversal is rejected, and overlapping
 reserved paths fail validation. Volume ownership and UID/GID mapping are
 preserved across stop/restart and released exactly once at terminal cleanup.
 
+Caller-owned read-only sources may live below a provider directory that is
+intentionally not searchable by the mapped container identity. Box opens the
+canonical source before launch, verifies the source root permissions, and pins
+it as a read-only, private bind alias below the execution-owned Sandbox tree.
+The OCI bundle references only that alias. Box never copies, chowns, or chmods
+the caller tree, and the same alias owner detaches it during failed boot,
+normal stop, removal, and crash recovery before any Box directory is deleted.
+
 Box initialization stages its protected guest-init plus a bounded executable,
 argument-vector, and environment configuration. SDK script helpers deliver
 script bytes through the authenticated exec channel after readiness rather

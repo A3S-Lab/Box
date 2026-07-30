@@ -170,7 +170,8 @@ runtime state changes instead of being silently stored or weakened.
   multi-stage builds, selected `RUN --mount` forms, and content-addressed
   caching.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
-  commit, filesystem snapshots, and copy-on-write restore.
+  commit, filesystem snapshots, copy-on-write restore, and Box-owned read-only
+  aliases for caller-provided Artifact trees below private provider roots.
 - **Networking and Compose** — TSI, named bridge networks, peer discovery, TCP
   publishing, generation-fenced Sandbox loopback forwarding, and an explicit
   Compose subset. ACL is the canonical project format; YAML is a bounded
@@ -320,7 +321,7 @@ or go directly to the [Rust](src/sdk/README.md),
 | Execution path | Real-runtime evidence | Remaining boundary |
 | --- | --- | --- |
 | Default MicroVM on Windows/WHPX | [`scripts/windows-whpx-soak.ps1`](scripts/windows-whpx-soak.ps1) covers lifecycle and foreground exit, published-port networking, read-only bind mounts, named volumes, volume-backed initialization success and failure, metadata-preserving commit, filesystem commit/snapshot restore, and repeated virtio-fs traversal. The current qualification completed all 12 cases and returned the start and final runtime inventories to zero. | This proves the tested x86_64 Windows/WHPX host and workload matrix, not KVM, HVF, or TEE hardware. |
-| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles; certifies every advertised R17 Base, Recovery, Networking, Mounts, Health, Resources, Logs, Exec, and Security profile, including transient Secret nondisclosure, restart recovery, log reauthorization and redaction, and cleanup; then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process/cgroup cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
+| Explicit Linux Sandbox | The required `SDK Local Sandbox (A3S OCI Runtime)` CI job runs the pinned runtime's native Linux network, storage, and initialization profiles; certifies every advertised R17 Base, Recovery, Networking, Mounts, Health, Resources, Logs, Exec, and Security profile, including private read-only Artifact attachment without weakening its provider root, transient Secret nondisclosure, restart recovery, log reauthorization and redaction, and cleanup; then exercises the Rust, Python, TypeScript, and Go local SDKs and verifies process/cgroup cleanup. | Sandbox remains a shared-kernel preview and intentionally rejects VM-only features. |
 | Linux/KVM MicroVM | A self-hosted real-KVM workflow covers the core lifecycle, SDK, CRI, leak, race, snapshot-fork, and soak paths when `KVM_CI=true`. | The job is conditionally skipped without the enrolled runner; a green hosted build alone is not real-KVM evidence. |
 | macOS/HVF MicroVM | Hosted macOS arm64 compilation checks the supported target. | A real Apple Silicon/HVF boot and soak are separate release evidence. |
 | SEV-SNP-oriented TEE | Unit and simulation tests cover application flow and protocol behavior. | No hardware security claim is made without a qualifying SEV-SNP host and attestation evidence. |
@@ -343,8 +344,12 @@ evidence. Review [Host Integration](docs/host-integration.md),
   CLI monitor policy, so Box creates no second lifecycle store, durable endpoint
   registry, health registry, or health worker for the same Service. The artifact
   contract accepts OCI image manifests and multi-platform OCI image indexes; it
-  does not advertise a Docker manifest media type. A caller can compose this
-  same driver with one `BoxSecretMaterializer`; Box then advertises
+  does not advertise a Docker manifest media type. Caller-owned read-only
+  Artifact directories are descriptor-pinned behind one Box-owned mount alias,
+  so a private provider parent stays private and no Artifact is copied, chowned,
+  or chmodded. The alias is removed on failed boot, stop, removal, and crash
+  recovery. A caller can compose this same driver with one
+  `BoxSecretMaterializer`; Box then advertises
   `SecretReferences`, resolves shared Runtime references through that caller,
   and mounts environment or file material read-only from a pre-mounted private
   Linux tmpfs. Secret bytes never enter durable Box state, creation intent, or
