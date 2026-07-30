@@ -578,7 +578,7 @@ async fn namespace_separation(fixture: &BoxRuntimeConformanceFixture) -> Result<
     let sibling_home = std::env::temp_dir().join(format!("a3s-r17n-{}", &namespace_id[..16]));
     std::fs::create_dir(&sibling_home)
         .map_err(|error| super::external("create sibling provider namespace", error))?;
-    fixture.register_removable_home(sibling_home.clone());
+    fixture.register_provider_home(sibling_home.clone());
     crate::cache::layer_cache::copy_dir_recursive(
         &fixture.home_dir.join("images"),
         &sibling_home.join("images"),

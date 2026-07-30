@@ -229,7 +229,8 @@ pub(super) struct BoxRuntimeConformanceFixture {
     private_artifact_root: PathBuf,
     drivers: Mutex<Vec<Arc<BoxRuntimeDriver>>>,
     state_roots: Mutex<BTreeSet<PathBuf>>,
-    removable_homes: Mutex<BTreeSet<PathBuf>>,
+    provider_homes: Mutex<BTreeSet<PathBuf>>,
+    fixture_roots: Mutex<BTreeSet<PathBuf>>,
     seen: Mutex<BTreeMap<(PathBuf, String), SeenResource>>,
 }
 
@@ -319,7 +320,8 @@ impl BoxRuntimeConformanceFixture {
             private_artifact_root: private_artifact_root.clone(),
             drivers: Mutex::new(vec![driver]),
             state_roots: Mutex::new(BTreeSet::from([state_root])),
-            removable_homes: Mutex::new(BTreeSet::from([private_artifact_root])),
+            provider_homes: Mutex::new(BTreeSet::new()),
+            fixture_roots: Mutex::new(BTreeSet::from([private_artifact_root])),
             seen: Mutex::new(BTreeMap::new()),
         })
     }
@@ -383,8 +385,8 @@ impl BoxRuntimeConformanceFixture {
         self.state_roots.lock().unwrap().insert(root);
     }
 
-    pub(super) fn register_removable_home(&self, home: PathBuf) {
-        self.removable_homes.lock().unwrap().insert(home);
+    pub(super) fn register_provider_home(&self, home: PathBuf) {
+        self.provider_homes.lock().unwrap().insert(home);
     }
 
     pub(super) fn private_registry_driver(
@@ -580,7 +582,7 @@ impl BoxRuntimeConformanceFixture {
                 );
             }
         }
-        for home in self.removable_homes.lock().unwrap().iter() {
+        for home in self.provider_homes.lock().unwrap().iter() {
             if home.exists() {
                 entries.insert(
                     format!("provider-home:{}", home.display()),
@@ -626,9 +628,17 @@ impl BoxRuntimeConformanceFixture {
                 failures.push(format!("remove Runtime state {}: {error}", root.display()));
             }
         }
-        for home in self.removable_homes.lock().unwrap().iter() {
+        for home in self.provider_homes.lock().unwrap().iter() {
             if let Err(error) = remove_tree(home) {
                 failures.push(format!("remove provider home {}: {error}", home.display()));
+            }
+        }
+        for root in self.fixture_roots.lock().unwrap().iter() {
+            if let Err(error) = remove_tree(root) {
+                failures.push(format!(
+                    "remove external fixture root {}: {error}",
+                    root.display()
+                ));
             }
         }
         for path in [
