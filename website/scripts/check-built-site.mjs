@@ -68,13 +68,13 @@ const englishHomepage = await readFile(
   'utf8',
 );
 
-if (!rootHomepage.includes('在本机运行')) {
+if (!rootHomepage.includes('给每个任务')) {
   throw new Error('The default homepage is not rendered in Chinese.');
 }
 if (!rootHomepage.includes(`${base}en/`)) {
   throw new Error('The Chinese homepage does not expose the English locale.');
 }
-if (!englishHomepage.includes('Run OCI workloads')) {
+if (!englishHomepage.includes('Give every task')) {
   throw new Error('The /en/ homepage is not rendered in English.');
 }
 for (const [homepagePath, html] of [
@@ -95,6 +95,12 @@ for (const [homepagePath, html] of [
     'data-tutorial-step="create"',
     'data-tutorial-step="cleanup"',
     'data-focus="true"',
+    'id="runtime-features"',
+    'box-agent-probe',
+    'box-vm-barrier',
+    'box-cow-scene',
+    'box-pool-scene',
+    '--snapshot-fork',
   ]) {
     if (!html.includes(marker)) {
       throw new Error(
@@ -271,5 +277,5 @@ if (brokenReferences.length > 0) {
 }
 
 console.log(
-  `Bilingual Agent Skill, Tabs, line-focus tutorials, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
+  `Bilingual runtime features, Agent Skill, Tabs, line-focus tutorials, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
 );
