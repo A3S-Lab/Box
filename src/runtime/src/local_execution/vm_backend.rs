@@ -18,6 +18,8 @@ use tokio::sync::Mutex;
 
 use super::resources::ExecutionResourceGuard;
 use super::vm_process::{locate_microvm_process, LocatedProcess};
+#[cfg(target_os = "linux")]
+use super::TransientRegistryAuthBroker;
 use super::{
     LocalExecutionBackend, LocalExecutionHandle, LocalExecutionObservation,
     LocalExecutionTermination,
@@ -37,6 +39,8 @@ pub struct VmLocalExecutionBackend {
     home_dir: PathBuf,
     managers: Arc<DashMap<String, SharedVm>>,
     pull_progress_fn: Option<crate::PullProgressFn>,
+    #[cfg(target_os = "linux")]
+    transient_registry_auth: Option<TransientRegistryAuthBroker>,
 }
 
 impl VmLocalExecutionBackend {
@@ -45,11 +49,22 @@ impl VmLocalExecutionBackend {
             home_dir: home_dir.into(),
             managers: Arc::new(DashMap::new()),
             pull_progress_fn: None,
+            #[cfg(target_os = "linux")]
+            transient_registry_auth: None,
         }
     }
 
     pub fn with_pull_progress_fn(mut self, pull_progress_fn: crate::PullProgressFn) -> Self {
         self.pull_progress_fn = Some(pull_progress_fn);
+        self
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_transient_registry_auth(
+        mut self,
+        broker: TransientRegistryAuthBroker,
+    ) -> Self {
+        self.transient_registry_auth = Some(broker);
         self
     }
 
@@ -119,7 +134,16 @@ impl VmLocalExecutionBackend {
         manager.anonymous_volumes = record.anonymous_volumes.clone();
         manager.set_log_config(record.log_config.clone());
         manager.resolved_execution_plan = Some(metadata.plan.clone());
+        manager.managed_secret_root = metadata.request.policy.managed_secret_root.clone();
         Ok(manager)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn claim_transient_registry_auth_for_boot(&self, manager: &mut VmManager) {
+        manager.transient_registry_auth = self
+            .transient_registry_auth
+            .as_ref()
+            .and_then(|broker| broker.take(manager.box_id()));
     }
 
     fn manager(&self, execution_id: &str) -> Option<SharedVm> {
@@ -623,6 +647,8 @@ impl LocalExecutionBackend for VmLocalExecutionBackend {
                 )));
             }
         };
+        #[cfg(target_os = "linux")]
+        self.claim_transient_registry_auth_for_boot(&mut guard);
         if let Err(error) = guard.boot().await {
             guard.config.persistent = requested_persistence;
             // Sandbox boot cleanup synchronously asks the authoritative OCI

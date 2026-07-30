@@ -116,6 +116,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
@@ -183,6 +184,7 @@ dependencies = [
  "x509-cert",
  "xattr",
  "xz2",
+ "zeroize",
  "zstd",
 ]
 
@@ -255,7 +257,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-core"
 version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=0bd7929b9842184b3cf98986bfe1b6ef79ca5282#0bd7929b9842184b3cf98986bfe1b6ef79ca5282"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2#6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -264,7 +266,7 @@ dependencies = [
 [[package]]
 name = "a3s-oci-sdk"
 version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=0bd7929b9842184b3cf98986bfe1b6ef79ca5282#0bd7929b9842184b3cf98986bfe1b6ef79ca5282"
+source = "git+https://github.com/A3S-Lab/OCI-Runtime.git?rev=6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2#6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2"
 dependencies = [
  "a3s-oci-core",
  "async-trait",
@@ -1135,7 +1137,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2252,7 +2254,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3055,7 +3057,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3576,10 +3578,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0136791f7c95b1f6dd99f9cc786b91bb81c3800b639b3478e561ddb7be95e5f1"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

@@ -5,8 +5,10 @@ use a3s_runtime::contract::{RuntimeLogChunk, RuntimeLogQuery, RuntimeLogStream};
 use a3s_runtime::{RuntimeError, RuntimeResult, RuntimeUnitRecord};
 use chrono::DateTime;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::metadata::{local_identity, map_execution_error, provider_identity_matches};
+use super::secret::BoxSecretMaterial;
 use super::BoxRuntimeDriver;
 
 const RECORDS_PER_SECOND: u64 = 1_000_000;
@@ -31,19 +33,25 @@ impl BoxRuntimeDriver {
                 })?;
         provider_identity_matches(&unit.observation, &record)?;
         let (execution_id, local_generation, _) = local_identity(&record)?;
+        let secret_material = self
+            .secret_materialization
+            .resolve_for_redaction(&unit.spec)
+            .await?;
         let entries = self
             .manager
             .read_logs(&execution_id, local_generation)
             .await
             .map_err(|error| map_execution_error(&unit.spec.unit_id, error))?;
-        project_logs(entries, query)
+        project_logs(entries, query, &secret_material)
     }
 }
 
 fn project_logs(
     entries: Vec<a3s_box_core::log::LogEntry>,
     query: &RuntimeLogQuery,
+    secret_material: &[BoxSecretMaterial],
 ) -> RuntimeResult<Vec<RuntimeLogChunk>> {
+    let redactions = redaction_values(secret_material);
     let requested_cursor = query.cursor.as_deref().map(LogCursor::parse).transpose()?;
     if requested_cursor
         .as_ref()
@@ -100,10 +108,11 @@ fn project_logs(
             timestamp_ns,
             ordinal,
             stream,
-            data: entry.log,
+            data: Zeroizing::new(entry.log),
         };
         ordinal += 1;
-        let cursor = LogCursor::new(&raw).encode();
+        let redacted = Zeroizing::new(redact_log(raw.data.as_str(), &redactions));
+        let cursor = LogCursor::new(&raw, redacted.as_str()).encode();
         let sequence = log_sequence(second, ordinal)?;
 
         if !cursor_found {
@@ -123,7 +132,7 @@ fn project_logs(
             sequence,
             observed_at_ms,
             stream,
-            data: raw.data,
+            data: redacted.as_str().to_owned(),
         };
         chunk.validate().map_err(RuntimeError::Protocol)?;
         chunks.push(chunk);
@@ -154,7 +163,41 @@ struct RawLogRecord {
     timestamp_ns: i64,
     ordinal: u64,
     stream: RuntimeLogStream,
-    data: String,
+    data: Zeroizing<String>,
+}
+
+fn redaction_values(material: &[BoxSecretMaterial]) -> Vec<&str> {
+    let mut values = material
+        .iter()
+        .filter_map(|material| std::str::from_utf8(material.as_bytes()).ok())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values
+        .sort_unstable_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    values.dedup();
+    values
+}
+
+fn redact_log(value: &str, redactions: &[&str]) -> String {
+    let mut redacted = String::with_capacity(value.len());
+    let mut offset = 0;
+    while offset < value.len() {
+        if let Some(secret) = redactions
+            .iter()
+            .copied()
+            .find(|secret| value[offset..].starts_with(secret))
+        {
+            redacted.push_str("[REDACTED]");
+            offset += secret.len();
+            continue;
+        }
+        let Some(character) = value[offset..].chars().next() else {
+            break;
+        };
+        redacted.push(character);
+        offset += character.len_utf8();
+    }
+    redacted
 }
 
 struct LogCursor {
@@ -166,7 +209,7 @@ struct LogCursor {
 }
 
 impl LogCursor {
-    fn new(record: &RawLogRecord) -> Self {
+    fn new(record: &RawLogRecord, redacted_data: &str) -> Self {
         let mut hash = Sha256::new();
         hash.update(b"a3s-box-log-cursor-v1\0");
         hash.update(record.generation.to_be_bytes());
@@ -176,7 +219,9 @@ impl LogCursor {
             RuntimeLogStream::Stdout => b"stdout".as_slice(),
             RuntimeLogStream::Stderr => b"stderr".as_slice(),
         });
-        hash.update(record.data.as_bytes());
+        // A cursor must never become an offline verifier for low-entropy
+        // Secret material that a workload wrote to its raw provider log.
+        hash.update(redacted_data.as_bytes());
         let digest = format!("{:x}", hash.finalize());
         Self {
             generation: record.generation,
@@ -290,13 +335,14 @@ mod tests {
                 time: "2026-07-17T00:00:01Z".into(),
             },
         ];
-        let all = project_logs(entries.clone(), &query(None, None)).unwrap();
+        let all = project_logs(entries.clone(), &query(None, None), &[]).unwrap();
         assert_eq!(all.len(), 3);
         assert!(all[0].sequence < all[1].sequence && all[1].sequence < all[2].sequence);
 
         let resumed = project_logs(
             entries,
             &query(Some(all[0].cursor.clone()), Some(RuntimeLogStream::Stdout)),
+            &[],
         )
         .unwrap();
         assert_eq!(resumed.len(), 1);
@@ -313,7 +359,61 @@ mod tests {
             digest: "0123456789abcdef".into(),
         }
         .encode();
-        let error = project_logs(Vec::new(), &query(Some(cursor), None)).unwrap_err();
+        let error = project_logs(Vec::new(), &query(Some(cursor), None), &[]).unwrap_err();
         assert!(error.to_string().contains("rotation gap"));
+    }
+
+    #[test]
+    fn exact_overlapping_secret_values_are_redacted_longest_first() {
+        let entries = vec![LogEntry {
+            log: "token=abc123 fallback=abc untouched=abcd\n".into(),
+            stream: "stdout".into(),
+            time: "2026-07-17T00:00:00Z".into(),
+        }];
+        let secrets = [
+            BoxSecretMaterial::new(b"abc".to_vec()).unwrap(),
+            BoxSecretMaterial::new(b"abc123".to_vec()).unwrap(),
+        ];
+        let chunks = project_logs(entries, &query(None, None), &secrets).unwrap();
+        assert_eq!(
+            chunks[0].data,
+            "token=[REDACTED] fallback=[REDACTED] untouched=[REDACTED]d\n"
+        );
+        assert!(!chunks[0].data.contains("abc"));
+    }
+
+    #[test]
+    fn replacement_markers_are_not_reprocessed_as_secret_material() {
+        assert_eq!(
+            redact_log("abc123 RED", &["abc123", "RED"]),
+            "[REDACTED] [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn cursor_digest_uses_redacted_data_instead_of_secret_plaintext() {
+        let first = project_logs(
+            vec![LogEntry {
+                log: "token=alpha\n".into(),
+                stream: "stdout".into(),
+                time: "2026-07-17T00:00:00Z".into(),
+            }],
+            &query(None, None),
+            &[BoxSecretMaterial::new(b"alpha".to_vec()).unwrap()],
+        )
+        .unwrap();
+        let second = project_logs(
+            vec![LogEntry {
+                log: "token=bravo\n".into(),
+                stream: "stdout".into(),
+                time: "2026-07-17T00:00:00Z".into(),
+            }],
+            &query(None, None),
+            &[BoxSecretMaterial::new(b"bravo".to_vec()).unwrap()],
+        )
+        .unwrap();
+
+        assert_eq!(first[0].data, "token=[REDACTED]\n");
+        assert_eq!(first[0].cursor, second[0].cursor);
     }
 }

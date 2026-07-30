@@ -12,6 +12,21 @@ All notable changes to A3S Box will be documented in this file.
   provider-neutral A3S Runtime Tasks through Fleet; Box retains only node-local
   Runtime provider mechanics.
 
+### Added
+
+- **Caller-authorized Runtime Secret materialization.** The shared
+  `BoxRuntimeDriver` can compose one `BoxSecretMaterializer` and advertise
+  environment, file, and registry-credential `SecretReferences`. Environment
+  and file material requires a canonical private Linux tmpfs root, is mounted
+  read-only, survives an explicit restart, and is removed with stale or deleted
+  generations. Registry credentials resolve only at an uncached image-pull
+  boundary, pass through a token-fenced in-memory handoff, override every
+  persistent credential source (including with explicit anonymous auth), and
+  are zeroized immediately after the pull. Running-generation recovery never
+  rematerializes Secrets. Log reads reauthorize and redact only material that
+  can enter the workload. Plaintext is excluded from durable Box state,
+  creation intent, OCI configuration, logs, cursors, and credential stores.
+
 ### Changed
 
 - **Single-owner Sandbox resource contract.** `linux.resources` now carries

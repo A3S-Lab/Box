@@ -10,18 +10,22 @@ use a3s_box_core::{
 use a3s_runtime::contract::{
     ArtifactRef, IsolationLevel, NetworkMode, ResourceLimits, RestartPolicy, RuntimeActionRequest,
     RuntimeNetworkSpec, RuntimeObservation, RuntimeProcessSpec, RuntimeUnitClass, RuntimeUnitSpec,
-    RuntimeUnitState,
+    RuntimeUnitState, SecretReference,
 };
 use a3s_runtime::RuntimeUnitRecord;
 use async_trait::async_trait;
 use tokio::sync::{oneshot, Semaphore};
 
+use crate::local_execution::TransientRegistryAuthBroker;
 use crate::{
     BoxRecord, LocalExecutionBackend, LocalExecutionHandle, LocalExecutionManager,
     LocalExecutionObservation,
 };
 
-use super::{BoxRuntimeDriver, BoxRuntimeDriverConfig, OCI_IMAGE_MANIFEST};
+use super::{
+    BoxRegistryCredential, BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial,
+    BoxSecretMaterializationError, BoxSecretMaterializer, OCI_IMAGE_MANIFEST,
+};
 
 #[derive(Clone)]
 struct FakeExecution {
@@ -297,6 +301,103 @@ impl LocalExecutionBackend for DriverFakeBackend {
     }
 }
 
+#[derive(Default)]
+pub(super) struct DriverFakeSecretMaterializer {
+    materials: Mutex<HashMap<String, Vec<u8>>>,
+    registry_credentials: Mutex<HashMap<String, (String, String)>>,
+    calls: AtomicUsize,
+    failures: AtomicUsize,
+}
+
+impl DriverFakeSecretMaterializer {
+    pub(super) fn insert(&self, reference: impl Into<String>, value: impl Into<Vec<u8>>) {
+        self.materials
+            .lock()
+            .unwrap()
+            .insert(reference.into(), value.into());
+    }
+
+    pub(super) fn fail_next(&self) {
+        self.failures.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(super) fn insert_registry_credential(
+        &self,
+        reference: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) {
+        self.registry_credentials
+            .lock()
+            .unwrap()
+            .insert(reference.into(), (username.into(), password.into()));
+    }
+
+    pub(super) fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn should_fail(&self) -> bool {
+        self.failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                (remaining > 0).then(|| remaining - 1)
+            })
+            .is_ok()
+    }
+}
+
+#[async_trait]
+impl BoxSecretMaterializer for DriverFakeSecretMaterializer {
+    async fn materialize(
+        &self,
+        reference: &SecretReference,
+    ) -> Result<BoxSecretMaterial, BoxSecretMaterializationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.should_fail() {
+            return Err(BoxSecretMaterializationError::Unavailable(
+                "injected retryable fixture failure".into(),
+            ));
+        }
+        let value = self
+            .materials
+            .lock()
+            .unwrap()
+            .get(&reference.reference)
+            .cloned()
+            .ok_or_else(|| {
+                BoxSecretMaterializationError::Rejected(
+                    "fixture reference is not registered".into(),
+                )
+            })?;
+        BoxSecretMaterial::new(value)
+    }
+
+    async fn materialize_registry_credential(
+        &self,
+        reference: &SecretReference,
+        _registry: &str,
+    ) -> Result<BoxRegistryCredential, BoxSecretMaterializationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.should_fail() {
+            return Err(BoxSecretMaterializationError::Unavailable(
+                "injected retryable fixture failure".into(),
+            ));
+        }
+        let (username, password) = self
+            .registry_credentials
+            .lock()
+            .unwrap()
+            .get(&reference.reference)
+            .cloned()
+            .ok_or_else(|| {
+                BoxSecretMaterializationError::Rejected(
+                    "fixture registry reference is not registered".into(),
+                )
+            })?;
+        BoxRegistryCredential::new(username, password)
+    }
+}
+
 pub(super) fn fake_driver(
     directory: &tempfile::TempDir,
 ) -> (BoxRuntimeDriver, Arc<DriverFakeBackend>) {
@@ -333,13 +434,61 @@ where
     configured_driver(home_dir, manager, connector)
 }
 
+pub(super) fn fake_driver_with_secret_materializer(
+    directory: &tempfile::TempDir,
+    secret_root: std::path::PathBuf,
+    materializer: Arc<dyn BoxSecretMaterializer>,
+) -> (BoxRuntimeDriver, Arc<DriverFakeBackend>) {
+    let backend = Arc::new(DriverFakeBackend::default());
+    let driver = fake_driver_with_backend_and_secret_materializer(
+        directory,
+        backend.clone(),
+        secret_root,
+        materializer,
+    );
+    (driver, backend)
+}
+
+pub(super) fn fake_driver_with_backend_and_secret_materializer<B>(
+    directory: &tempfile::TempDir,
+    backend: Arc<B>,
+    secret_root: std::path::PathBuf,
+    materializer: Arc<dyn BoxSecretMaterializer>,
+) -> BoxRuntimeDriver
+where
+    B: LocalExecutionBackend + 'static,
+{
+    let home_dir = directory.path().join("home");
+    let manager = LocalExecutionManager::new(home_dir.join("boxes.json"), &home_dir, backend);
+    let connector: Arc<dyn ExecutionPortConnector> = Arc::new(manager.clone());
+    configured_driver_with_materializer(
+        home_dir,
+        secret_root,
+        manager,
+        connector,
+        Some(materializer),
+    )
+}
+
 fn configured_driver(
     home_dir: std::path::PathBuf,
     manager: LocalExecutionManager,
     connector: Arc<dyn ExecutionPortConnector>,
 ) -> BoxRuntimeDriver {
-    let driver = BoxRuntimeDriver::with_manager_and_connector(
+    let secret_root = home_dir.join("runtime-secrets");
+    configured_driver_with_materializer(home_dir, secret_root, manager, connector, None)
+}
+
+fn configured_driver_with_materializer(
+    home_dir: std::path::PathBuf,
+    secret_root: std::path::PathBuf,
+    manager: LocalExecutionManager,
+    connector: Arc<dyn ExecutionPortConnector>,
+    materializer: Option<Arc<dyn BoxSecretMaterializer>>,
+) -> BoxRuntimeDriver {
+    let driver = BoxRuntimeDriver::with_manager_connector_and_materializer(
         BoxRuntimeDriverConfig {
+            secret_root,
             home_dir,
             control_timeout: Duration::from_secs(2),
             task_poll_interval: Duration::from_millis(5),
@@ -347,6 +496,8 @@ fn configured_driver(
         manager,
         connector,
         a3s_box_core::ExecutionIsolation::Microvm,
+        materializer,
+        Some(TransientRegistryAuthBroker::default()),
     )
     .unwrap();
     driver

@@ -156,6 +156,7 @@ pub async fn execute(args: CreateArgs) -> Result<(), Box<dyn std::error::Error>>
         stop_timeout: args.common.stop_timeout,
         oom_kill_disable: args.common.oom_kill_disable,
         oom_score_adj: args.common.oom_score_adj,
+        managed_secret_root: None,
     };
     let operation_id = OperationId::new(format!("cli-create-{}", uuid::Uuid::new_v4()))?;
     let request = CreateExecutionRequest {

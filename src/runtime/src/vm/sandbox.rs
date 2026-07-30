@@ -17,7 +17,8 @@ use crate::sandbox::rootfs::{
 };
 use crate::sandbox::A3sOciController;
 use crate::sandbox::{
-    compile_oci_spec, plan_id_mappings, prepare_managed_mount_source, prepare_sandbox_path_access,
+    compile_oci_spec, plan_id_mappings, prepare_managed_mount_source,
+    prepare_managed_secret_mount_source, prepare_sandbox_path_access,
     probe_sandbox_capabilities_for, validate_external_mount_access, write_bundle,
     SandboxBundleSpec, SandboxLaunchSpec, SandboxMount, SandboxResources, SandboxTmpfs,
 };
@@ -370,7 +371,20 @@ impl VmManager {
         let managed = self.managed_sandbox_mount_sources(&layout.workspace_path, mounts)?;
 
         for mount in mounts {
-            if managed.contains(&mount.source) {
+            if self
+                .managed_secret_root
+                .as_ref()
+                .is_some_and(|root| mount.source.starts_with(root))
+            {
+                prepare_managed_secret_mount_source(
+                    self.managed_secret_root.as_deref().ok_or_else(|| {
+                        BoxError::ConfigError("Sandbox Secret root disappeared".into())
+                    })?,
+                    &mount.source,
+                    id_mappings,
+                    mount.read_only,
+                )?;
+            } else if managed.contains(&mount.source) {
                 prepare_managed_mount_source(&mount.source, id_mappings)?;
             } else {
                 validate_external_mount_access(&mount.source, id_mappings, mount.read_only)?;

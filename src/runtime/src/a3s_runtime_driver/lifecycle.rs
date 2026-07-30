@@ -12,10 +12,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{BoxRecord, ManagedExecutionState};
 
-use super::mapping::{creation_request, operation};
+use super::mapping::{creation_request_for, operation};
 use super::metadata::{
     local_identity, map_execution_error, now_ms, provider_identity_matches, timestamp_ms,
-    validate_record_for_spec,
+    validate_record_for_spec, SPEC_DIGEST_LABEL,
 };
 use super::BoxRuntimeDriver;
 
@@ -27,7 +27,9 @@ impl BoxRuntimeDriver {
     ) -> RuntimeResult<RuntimeObservation> {
         // Complete validation and conversion before any Box state or provider
         // mutation. The returned request is reused for identity comparison.
-        let request = creation_request(spec, self.execution_isolation)?;
+        let request =
+            creation_request_for(spec, self.execution_isolation, &self.config.secret_root)?;
+        self.secret_materialization.require_configured_for(spec)?;
         let mut record = self.find_generation(spec).await?;
 
         if let Some(existing) = record.as_ref() {
@@ -39,7 +41,7 @@ impl BoxRuntimeDriver {
         }
 
         let record = match record {
-            Some(record) => self.ensure_started(spec, record).await?,
+            Some(record) => record,
             None => {
                 let operation_id = operation(spec)?;
                 let reservation = self
@@ -60,10 +62,17 @@ impl BoxRuntimeDriver {
                             "Box lost a durable execution immediately after reservation".into(),
                         )
                     })?;
-                validate_record_for_spec(&record, spec, self.execution_isolation)?;
-                self.ensure_started(spec, record).await?
+                validate_record_for_spec(
+                    &record,
+                    spec,
+                    self.execution_isolation,
+                    &self.config.secret_root,
+                )?;
+                record
             }
         };
+        self.prepare_secret_material(spec, &record).await?;
+        let record = self.ensure_started(spec, record).await?;
 
         // Retire older Runtime generations as soon as the current generation
         // has a durable provider identity. A retry resumes any partial cleanup.
@@ -87,6 +96,7 @@ impl BoxRuntimeDriver {
             self.service_endpoints
                 .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
                 .await;
+            self.secret_materialization.cleanup_spec(&unit.spec).await?;
             return Ok(not_found(&unit.spec));
         };
         provider_identity_matches(&unit.observation, &record)?;
@@ -98,6 +108,8 @@ impl BoxRuntimeDriver {
                 .await;
             return Ok(not_found(&unit.spec));
         }
+
+        self.prepare_secret_material(&unit.spec, &record).await?;
 
         let record = if should_restart(&unit.spec, &record)? {
             self.restart_record(&unit.spec, record).await?
@@ -176,6 +188,7 @@ impl BoxRuntimeDriver {
         self.service_endpoints
             .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
             .await;
+        self.secret_materialization.cleanup_spec(&unit.spec).await?;
         let removal = RuntimeRemoval {
             schema: RuntimeRemoval::SCHEMA.into(),
             request_id: request.request_id.clone(),
@@ -193,12 +206,26 @@ impl BoxRuntimeDriver {
         spec: &RuntimeUnitSpec,
         record: BoxRecord,
     ) -> RuntimeResult<BoxRecord> {
-        validate_record_for_spec(&record, spec, self.execution_isolation)?;
+        validate_record_for_spec(
+            &record,
+            spec,
+            self.execution_isolation,
+            &self.config.secret_root,
+        )?;
         let (execution_id, generation, state) = local_identity(&record)?;
         match state {
             ManagedExecutionState::Creating
             | ManagedExecutionState::Created
             | ManagedExecutionState::Starting => {
+                let _registry_auth = self
+                    .secret_materialization
+                    .prepare_registry_auth_for_start(
+                        spec,
+                        &record,
+                        &self.config.home_dir,
+                        self.transient_registry_auth.as_ref(),
+                    )
+                    .await?;
                 let result = self
                     .bounded("startup", async {
                         self.manager
@@ -230,6 +257,33 @@ impl BoxRuntimeDriver {
                 "Box execution {} cannot be applied while in state {state}",
                 record.id
             ))),
+        }
+    }
+
+    async fn prepare_secret_material(
+        &self,
+        spec: &RuntimeUnitSpec,
+        record: &BoxRecord,
+    ) -> RuntimeResult<()> {
+        if spec.secrets.is_empty() {
+            return Ok(());
+        }
+        let state = local_identity(record)?.2;
+        if matches!(
+            state,
+            ManagedExecutionState::Creating | ManagedExecutionState::Created
+        ) {
+            self.secret_materialization
+                .materialize_for_start(spec)
+                .await
+        } else if matches!(
+            state,
+            ManagedExecutionState::Stopped | ManagedExecutionState::Failed
+        ) && should_restart(spec, record)?
+        {
+            Ok(())
+        } else {
+            self.secret_materialization.require_materialized(spec).await
         }
     }
 
@@ -328,7 +382,12 @@ impl BoxRuntimeDriver {
             .ok_or_else(|| RuntimeError::NotFound {
                 unit_id: spec.unit_id.clone(),
             })?;
-        validate_record_for_spec(&record, spec, self.execution_isolation)?;
+        validate_record_for_spec(
+            &record,
+            spec,
+            self.execution_isolation,
+            &self.config.secret_root,
+        )?;
         Ok(record)
     }
 
@@ -351,6 +410,18 @@ impl BoxRuntimeDriver {
         spec: &RuntimeUnitSpec,
         record: BoxRecord,
     ) -> RuntimeResult<BoxRecord> {
+        self.secret_materialization
+            .materialize_for_start(spec)
+            .await?;
+        let _registry_auth = self
+            .secret_materialization
+            .prepare_registry_auth_for_start(
+                spec,
+                &record,
+                &self.config.home_dir,
+                self.transient_registry_auth.as_ref(),
+            )
+            .await?;
         let (execution_id, generation, _) = local_identity(&record)?;
         let operation_id = restart_operation(spec, generation)?;
         let result = self
@@ -394,7 +465,12 @@ impl BoxRuntimeDriver {
                 remaining.len()
             )));
         }
-        validate_record_for_spec(&remaining[0], spec, self.execution_isolation)
+        validate_record_for_spec(
+            &remaining[0],
+            spec,
+            self.execution_isolation,
+            &self.config.secret_root,
+        )
     }
 
     pub(super) async fn retire_record(
@@ -402,6 +478,16 @@ impl BoxRuntimeDriver {
         mut record: BoxRecord,
         unit_id: &str,
     ) -> RuntimeResult<()> {
+        let secret_digest = record
+            .labels
+            .get(SPEC_DIGEST_LABEL)
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeError::Protocol(format!(
+                    "Box execution {} has no Runtime specification digest",
+                    record.id
+                ))
+            })?;
         let (execution_id, mut generation, mut state) = local_identity(&record)?;
         if matches!(
             state,
@@ -424,6 +510,9 @@ impl BoxRuntimeDriver {
             {
                 Ok(ReconcileOutcome::Absent) => {
                     self.service_endpoints.remove_provider(&execution_id).await;
+                    self.secret_materialization
+                        .cleanup_digest(&secret_digest)
+                        .await?;
                     return Ok(());
                 }
                 Ok(_) => {}
@@ -471,6 +560,9 @@ impl BoxRuntimeDriver {
         }
 
         self.service_endpoints.remove_provider(&execution_id).await;
+        self.secret_materialization
+            .cleanup_digest(&secret_digest)
+            .await?;
 
         self.bounded("generation retirement removal", async {
             self.manager
@@ -501,7 +593,12 @@ impl BoxRuntimeDriver {
         state_override: Option<RuntimeUnitState>,
         failure_override: Option<RuntimeFailure>,
     ) -> RuntimeResult<RuntimeObservation> {
-        validate_record_for_spec(record, spec, self.execution_isolation)?;
+        validate_record_for_spec(
+            record,
+            spec,
+            self.execution_isolation,
+            &self.config.secret_root,
+        )?;
         let state = state_override.unwrap_or(runtime_state(spec, record)?);
         let terminal = state.is_terminal();
         let metadata = record.managed_execution.as_ref().ok_or_else(|| {

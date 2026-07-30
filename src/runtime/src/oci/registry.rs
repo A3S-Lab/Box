@@ -15,6 +15,7 @@ use oci_distribution::manifest::{
 use oci_distribution::secrets::RegistryAuth as OciRegistryAuth;
 use oci_distribution::{Client, Reference};
 use oci_reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+use zeroize::Zeroize;
 
 use super::credentials::CredentialStore;
 use super::reference::ImageReference;
@@ -100,10 +101,31 @@ struct PulledImageManifest {
 }
 
 /// Authentication credentials for a container registry.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegistryAuth {
     username: Option<String>,
     password: Option<String>,
+}
+
+impl std::fmt::Debug for RegistryAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(if self.basic_credentials().is_some() {
+            "<redacted-registry-auth>"
+        } else {
+            "<anonymous-registry-auth>"
+        })
+    }
+}
+
+impl Drop for RegistryAuth {
+    fn drop(&mut self) {
+        if let Some(username) = &mut self.username {
+            username.zeroize();
+        }
+        if let Some(password) = &mut self.password {
+            password.zeroize();
+        }
+    }
 }
 
 impl RegistryAuth {
@@ -1583,6 +1605,7 @@ mod tests {
         let auth = RegistryAuth::basic("user", "pass");
         assert_eq!(auth.username, Some("user".to_string()));
         assert_eq!(auth.password, Some("pass".to_string()));
+        assert_eq!(format!("{auth:?}"), "<redacted-registry-auth>");
     }
 
     #[test]

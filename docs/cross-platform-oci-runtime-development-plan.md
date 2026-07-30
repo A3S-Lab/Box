@@ -43,8 +43,9 @@ Box now:
 - rejects any reintroduction of the removed integration symbols in CI.
 
 The exact integration revision is
-`0bd7929b9842184b3cf98986bfe1b6ef79ca5282`, which implements the versioned
-control/workload cgroup layout and retains the earlier cross-platform
+`6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2`, which implements the versioned
+control/workload cgroup layout, prepares parent-namespace read-only bind mounts
+before user-namespace entry, and retains the earlier cross-platform
 qualification.
 
 ## Upgrade behavior

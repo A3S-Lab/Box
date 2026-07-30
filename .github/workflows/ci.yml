@@ -14,7 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   A3S_DEPS_STUB: "1"
-  A3S_OCI_RUNTIME_REV: 0bd7929b9842184b3cf98986bfe1b6ef79ca5282
+  A3S_OCI_RUNTIME_REV: 6b9e0cf2137f1ab9da52e71f566267c97fd9cfa2
 
 jobs:
   # ── Lint & Format ──────────────────────────────────────────────
@@ -269,7 +269,23 @@ jobs:
             echo 'root:100000:65536' | sudo tee -a /etc/subuid
           grep -q '^root:' /etc/subgid ||
             echo 'root:100000:65536' | sudo tee -a /etc/subgid
-      - name: Certify all advertised A3S Runtime R17 profiles
+      - name: Mount private Runtime Secret tmpfs
+        run: |
+          sudo install -d -m 700 "$A3S_HOME/runtime-secrets"
+          sudo mount -t tmpfs \
+            -o size=16m,mode=0700,nosuid,nodev,noexec \
+            a3s-runtime-secrets "$A3S_HOME/runtime-secrets"
+          mountpoint -q "$A3S_HOME/runtime-secrets"
+      - name: Cache the pinned public R17 image over HTTPS
+        run: |
+          sudo env \
+              PATH="$PATH" \
+              HOME="$HOME" \
+              A3S_DEPS_STUB=1 \
+              A3S_HOME="$A3S_HOME" \
+              "$GITHUB_WORKSPACE/src/target/debug/a3s-box" pull \
+                'docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc'
+      - name: Certify all advertised R17 profiles and private registry pull
         run: |
           cd src
           sudo env \
@@ -284,6 +300,7 @@ jobs:
               A3S_BOX_RUNTIME_CONFORMANCE=1 \
               A3S_BOX_RUNTIME_CONFORMANCE_IMAGE='docker.io/library/alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc' \
               A3S_BOX_RUNTIME_CONFORMANCE_MEDIA_TYPE='application/vnd.oci.image.index.v1+json' \
+              A3S_REGISTRY_PROTOCOL=http \
               RUST_MIN_STACK=33554432 \
               cargo test --locked -p a3s-box-runtime --lib \
                 box_runtime_passes_all_advertised_profiles \
@@ -309,11 +326,16 @@ jobs:
       - name: Verify cleanup
         if: always()
         run: |
+          cleanup_status=0
           if pgrep -f 'a3s-box-shim|a3s-oci.*native-linux-service|a3s-oci-agent' >/dev/null; then
             ps aux | grep -E 'a3s-box-shim|a3s-oci.*native-linux-service|a3s-oci-agent' | grep -v grep
-            exit 1
+            cleanup_status=1
+          fi
+          if mountpoint -q "$A3S_HOME/runtime-secrets"; then
+            sudo umount "$A3S_HOME/runtime-secrets" || cleanup_status=1
           fi
           sudo rm -rf "$A3S_HOME"
+          exit "$cleanup_status"
 
   # ── Build check (compile only, no artifacts) ────────────────────
   build-check:

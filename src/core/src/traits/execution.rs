@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU16;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -287,6 +288,14 @@ pub struct ExecutionRecordPolicy {
     /// Requested host OOM score adjustment.
     #[serde(default)]
     pub oom_score_adj: Option<i32>,
+    /// Runtime-owned Linux tmpfs root containing transient Secret files.
+    ///
+    /// This path is persisted only so a reconstructed backend can distinguish
+    /// caller-owned bind mounts from transient files that A3S Box is allowed to
+    /// prepare for the Sandbox user namespace. Secret values never enter this
+    /// policy or the creation request.
+    #[serde(default)]
+    pub managed_secret_root: Option<PathBuf>,
 }
 
 impl Default for ExecutionRecordPolicy {
@@ -309,6 +318,7 @@ impl Default for ExecutionRecordPolicy {
             stop_timeout: None,
             oom_kill_disable: false,
             oom_score_adj: None,
+            managed_secret_root: None,
         }
     }
 }

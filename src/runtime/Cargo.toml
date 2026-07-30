@@ -47,6 +47,7 @@ tracing = { workspace = true }
 # Cryptography
 sha2 = { workspace = true }
 hex = { workspace = true }
+zeroize = { workspace = true }
 
 # Image signature verification
 p256 = { workspace = true }

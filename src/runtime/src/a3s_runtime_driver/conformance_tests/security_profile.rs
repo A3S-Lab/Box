@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
+use a3s_box_core::secret::SECRET_ENVIRONMENT_MANIFEST;
 use a3s_runtime::contract::{
     NetworkMode, RuntimeInspection, RuntimeMount, RuntimeMountSource, RuntimeUnitState,
     SecretReference, SecretTarget,
@@ -13,7 +15,11 @@ use a3s_runtime::{
 
 use super::super::metadata::GENERATION_LABEL;
 use super::super::{BoxRuntimeDriver, BoxRuntimeDriverConfig};
-use super::fixture::BoxRuntimeConformanceFixture;
+use super::fixture::{
+    BoxRuntimeConformanceFixture, SECRET_ENV_REFERENCE, SECRET_ENV_VALUE, SECRET_FILE_REFERENCE,
+    SECRET_FILE_VALUE,
+};
+use super::PRIVATE_REGISTRY_SECRET_REFERENCE;
 use super::{require, Result};
 
 pub(super) async fn run(
@@ -43,6 +49,7 @@ pub(super) async fn run(
     verify_workload_least_privilege(fixture, client, &service.spec).await?;
     metadata_tamper_fails_closed(fixture, client, &service.spec, &record.id).await?;
     namespace_separation(fixture).await?;
+    secret_nondisclosure(fixture, client).await?;
 
     fixture
         .remove_unit(client, &service.spec, "security-service")
@@ -145,25 +152,6 @@ async fn reject_hostile_inputs(
         "Box accepted an unadvertised volume mount",
     )?;
 
-    let mut secret = template.clone();
-    secret.request_id = fixture.cases.request_id("security-secret");
-    secret.spec.unit_id = fixture.cases.unit_id("security-secret");
-    secret.spec.secrets = vec![SecretReference {
-        name: "provider-token".into(),
-        reference: "secret://r17/provider-token".into(),
-        target: SecretTarget::Environment {
-            variable: "R17_PROVIDER_TOKEN".into(),
-        },
-    }];
-    require(
-        matches!(
-            client.apply(&secret).await,
-            Err(RuntimeError::UnsupportedCapabilities(missing))
-                if missing == vec!["feature:SecretReferences"]
-        ),
-        "Box accepted an unadvertised secret reference",
-    )?;
-
     let after = fixture
         .driver
         .manager
@@ -176,6 +164,218 @@ async fn reject_hostile_inputs(
         after.len() == baseline_records,
         "hostile input mutated provider inventory before rejection",
     )
+}
+
+async fn secret_nondisclosure(
+    fixture: &BoxRuntimeConformanceFixture,
+    client: &dyn RuntimeClient,
+) -> Result<()> {
+    let mut request = fixture.cases.service(
+        "security-secret-nondisclosure",
+        "test -n \"$R17_PROVIDER_TOKEN\"; test -s /run/a3s-secrets/provider-token; printf 'secret-env=%s\\n' \"$R17_PROVIDER_TOKEN\"; printf 'secret-file=%s\\n' \"$(cat /run/a3s-secrets/provider-token)\"; printf 'secret-mode=%s\\n' \"$(stat -c %a /run/a3s-secrets/provider-token)\"; exec sleep 3600",
+    );
+    request.spec.secrets = vec![
+        SecretReference {
+            name: "provider-token".into(),
+            reference: SECRET_ENV_REFERENCE.into(),
+            target: SecretTarget::Environment {
+                variable: "R17_PROVIDER_TOKEN".into(),
+            },
+        },
+        SecretReference {
+            name: "provider-token-file".into(),
+            reference: SECRET_FILE_REFERENCE.into(),
+            target: SecretTarget::File {
+                path: "/run/a3s-secrets/provider-token".into(),
+                mode: 0o400,
+            },
+        },
+        SecretReference {
+            name: "registry-credential".into(),
+            reference: PRIVATE_REGISTRY_SECRET_REFERENCE.into(),
+            target: SecretTarget::RegistryCredential,
+        },
+    ];
+    let secret_directory = super::super::secret::secret_directory(
+        &fixture.home_dir.join("runtime-secrets"),
+        &request.spec,
+    )?;
+    let calls_before_apply = fixture.secret_materialization_calls();
+
+    let running = client.apply(&request).await?;
+    require(
+        running.state == RuntimeUnitState::Running,
+        "Secret nondisclosure Service did not reach running",
+    )?;
+    require(
+        fixture.secret_materialization_calls() == calls_before_apply + 2,
+        "Secret materialization did not resolve container references exactly once or resolved a cached registry credential",
+    )?;
+    require(
+        secret_directory.is_dir(),
+        "Secret materialization directory was not retained for the running generation",
+    )?;
+
+    let record = fixture.record_for(&request.spec).await?;
+    let creation_intent = serde_json::to_vec(
+        &record
+            .managed_execution
+            .as_ref()
+            .ok_or_else(|| super::protocol("Secret execution lost managed creation intent"))?
+            .request,
+    )
+    .map_err(|error| super::external("encode Secret creation intent", error))?;
+    let boxes = std::fs::read(fixture.home_dir.join("boxes.json"))
+        .map_err(|error| super::external("read Box state for Secret nondisclosure", error))?;
+    let bundle_directory = record.box_dir.join("sandbox/bundle");
+    let oci = std::fs::read(bundle_directory.join("config.json"))
+        .map_err(|error| super::external("read Secret Sandbox OCI configuration", error))?;
+    let oci_spec: serde_json::Value = serde_json::from_slice(&oci)
+        .map_err(|error| super::external("decode Secret Sandbox OCI configuration", error))?;
+    let rootfs_path = oci_spec
+        .pointer("/root/path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| super::protocol("Secret Sandbox OCI configuration omitted root.path"))?;
+    let rootfs_path = if Path::new(rootfs_path).is_absolute() {
+        Path::new(rootfs_path).to_path_buf()
+    } else {
+        bundle_directory.join(rootfs_path)
+    };
+    let staged_environment =
+        std::fs::read(rootfs_path.join(RUNTIME_ENV_PATH.trim_start_matches('/')))
+            .map_err(|error| super::external("read Secret Sandbox staged environment", error))?;
+    for (label, bytes) in [
+        ("managed creation intent", creation_intent.as_slice()),
+        ("boxes.json", boxes.as_slice()),
+        ("Sandbox OCI configuration", oci.as_slice()),
+        ("Sandbox staged environment", staged_environment.as_slice()),
+    ] {
+        let value = String::from_utf8_lossy(bytes);
+        require(
+            !value.contains(SECRET_ENV_VALUE) && !value.contains(SECRET_FILE_VALUE),
+            format!("{label} persisted Secret plaintext"),
+        )?;
+    }
+    require(
+        String::from_utf8_lossy(&oci).contains(&format!("BOX_EXEC_ENV_FILE={RUNTIME_ENV_PATH}")),
+        "Sandbox OCI configuration omitted the protected environment staging pointer",
+    )?;
+    require(
+        String::from_utf8_lossy(&staged_environment)
+            .lines()
+            .any(|line| line.starts_with(&format!("{SECRET_ENVIRONMENT_MANIFEST}="))),
+        "Sandbox staged environment omitted the non-secret environment binding manifest",
+    )?;
+
+    let calls_before_reconstruction = fixture.secret_materialization_calls();
+    let restarted_driver = fixture.restarted_driver()?;
+    let restarted = fixture.client_with(restarted_driver, fixture.state.clone());
+    require(
+        matches!(
+            restarted.inspect(&request.spec.unit_id).await?,
+            RuntimeInspection::Found { observation, .. }
+                if observation.state == RuntimeUnitState::Running
+        ),
+        "reconstructed Box driver did not adopt the running Secret generation",
+    )?;
+    require(
+        fixture.secret_materialization_calls() == calls_before_reconstruction,
+        "driver reconstruction rematerialized a live Secret generation",
+    )?;
+
+    let chunks = wait_for_redacted_secret_logs(fixture, &restarted, &request.spec).await?;
+    require(
+        chunks.iter().all(|chunk| {
+            !chunk.data.contains(SECRET_ENV_VALUE) && !chunk.data.contains(SECRET_FILE_VALUE)
+        }),
+        "Runtime log projection exposed Secret plaintext",
+    )?;
+    require(
+        chunks
+            .iter()
+            .map(|chunk| chunk.data.matches("[REDACTED]").count())
+            .sum::<usize>()
+            >= 2,
+        "Runtime log projection did not redact both Secret values",
+    )?;
+    require(
+        chunks
+            .iter()
+            .any(|chunk| chunk.data.contains("secret-mode=400")),
+        "file Secret did not preserve its requested mode",
+    )?;
+    require(
+        fixture.secret_materialization_calls() >= calls_before_reconstruction + 2,
+        "Runtime log read did not reauthorize Secret references",
+    )?;
+
+    fixture.set_secret_authorized(false);
+    let denied = restarted
+        .logs(&fixture.cases.logs(&request.spec, None, 100, None))
+        .await;
+    fixture.set_secret_authorized(true);
+    require(
+        matches!(denied, Err(RuntimeError::InvalidRequest(_))),
+        "Runtime log read ignored revoked Secret authorization",
+    )?;
+
+    let stopped = restarted
+        .stop(&fixture.cases.action("security-secret-stop", &request.spec))
+        .await?;
+    require(
+        matches!(
+            stopped,
+            RuntimeInspection::Found { ref observation, .. }
+                if observation.state == RuntimeUnitState::Stopped
+        ),
+        "Secret Service did not stop cleanly",
+    )?;
+    require(
+        secret_directory.is_dir(),
+        "stop removed Secret material needed for an explicit restart",
+    )?;
+
+    restarted
+        .remove(
+            &fixture
+                .cases
+                .action("security-secret-remove", &request.spec),
+        )
+        .await?;
+    require(
+        !secret_directory.exists(),
+        "removal left Secret material behind",
+    )
+}
+
+async fn wait_for_redacted_secret_logs(
+    fixture: &BoxRuntimeConformanceFixture,
+    client: &dyn RuntimeClient,
+    spec: &a3s_runtime::contract::RuntimeUnitSpec,
+) -> Result<Vec<a3s_runtime::contract::RuntimeLogChunk>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let chunks = client
+            .logs(&fixture.cases.logs(spec, None, 100, None))
+            .await?;
+        if chunks
+            .iter()
+            .any(|chunk| chunk.data.contains("secret-mode=400"))
+            && chunks
+                .iter()
+                .map(|chunk| chunk.data.matches("[REDACTED]").count())
+                .sum::<usize>()
+                >= 2
+        {
+            return Ok(chunks);
+        }
+        if Instant::now() >= deadline {
+            return Err(super::protocol(
+                "Secret workload logs did not converge within five seconds",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 fn verify_digest_pin(
@@ -408,6 +608,7 @@ async fn namespace_separation(fixture: &BoxRuntimeConformanceFixture) -> Result<
     fixture.register_state_root(sibling_state_root.clone());
     let sibling_driver = Arc::new(BoxRuntimeDriver::new_with_isolation(
         BoxRuntimeDriverConfig {
+            secret_root: sibling_home.join("runtime-secrets"),
             home_dir: sibling_home,
             control_timeout: Duration::from_secs(120),
             task_poll_interval: Duration::from_millis(25),

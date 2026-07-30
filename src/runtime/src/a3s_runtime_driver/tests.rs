@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use a3s_box_core::secret::{SecretEnvironmentBinding, SECRET_ENVIRONMENT_MANIFEST};
 use a3s_box_core::{ExecutionIsolation, ExecutionManager};
 use a3s_runtime::contract::{
     ArtifactRef, HealthCheckKind, HealthProbe, IsolationLevel, MountKind, NetworkMode,
     ResourceControl, ResourceLimits, RestartPolicy, RuntimeFeature, RuntimeHealthCheck,
     RuntimeMount, RuntimeMountSource, RuntimeNetworkSpec, RuntimePort, RuntimeProcessSpec,
-    RuntimeUnitClass, RuntimeUnitSpec, TransportProtocol,
+    RuntimeUnitClass, RuntimeUnitSpec, SecretReference, SecretTarget, TransportProtocol,
 };
 use a3s_runtime::RuntimeDriver;
 
@@ -64,6 +65,7 @@ fn spec(class: RuntimeUnitClass) -> RuntimeUnitSpec {
 fn driver(directory: &tempfile::TempDir) -> BoxRuntimeDriver {
     BoxRuntimeDriver::new(BoxRuntimeDriverConfig {
         home_dir: directory.path().join("home"),
+        secret_root: directory.path().join("runtime-secrets"),
         control_timeout: Duration::from_secs(2),
         task_poll_interval: Duration::from_millis(5),
     })
@@ -85,6 +87,7 @@ fn driver_allows_explicit_shared_kernel_selection() {
     let driver = BoxRuntimeDriver::new_with_isolation(
         BoxRuntimeDriverConfig {
             home_dir: directory.path().join("home"),
+            secret_root: directory.path().join("runtime-secrets"),
             control_timeout: Duration::from_secs(2),
             task_poll_interval: Duration::from_millis(5),
         },
@@ -296,6 +299,158 @@ fn mapping_compiles_bounded_tmpfs_mounts_and_read_only_intent() {
 }
 
 #[test]
+fn mapping_compiles_deterministic_non_secret_environment_and_file_bindings() {
+    let mut spec = spec(RuntimeUnitClass::Service);
+    spec.secrets = vec![
+        SecretReference {
+            name: "provider-token".into(),
+            reference: "secret://provider/token/v7".into(),
+            target: SecretTarget::Environment {
+                variable: "A3S_PROVIDER_TOKEN".into(),
+            },
+        },
+        SecretReference {
+            name: "provider-certificate".into(),
+            reference: "secret://provider/certificate/v4".into(),
+            target: SecretTarget::File {
+                path: "/run/provider/certificate.pem".into(),
+                mode: 0o440,
+            },
+        },
+    ];
+
+    let request = creation_request(&spec, TEST_EXECUTION_ISOLATION).unwrap();
+    let digest = spec.digest().unwrap();
+    let digest = digest.strip_prefix("sha256:").unwrap();
+    assert_eq!(
+        request.config.volumes,
+        vec![
+            format!(
+                "/run/a3s-box/runtime-secrets/{digest}/000.secret:/.a3s-box-secrets/{digest}/000.secret:ro"
+            ),
+            format!(
+                "/run/a3s-box/runtime-secrets/{digest}/001.secret:/run/provider/certificate.pem:ro"
+            ),
+        ]
+    );
+    assert_eq!(
+        request.policy.managed_secret_root.as_deref(),
+        Some(std::path::Path::new("/run/a3s-box/runtime-secrets"))
+    );
+    let manifest = request
+        .config
+        .extra_env
+        .iter()
+        .find(|(key, _)| key == SECRET_ENVIRONMENT_MANIFEST)
+        .map(|(_, value)| value)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<SecretEnvironmentBinding>>(manifest).unwrap(),
+        vec![SecretEnvironmentBinding {
+            variable: "A3S_PROVIDER_TOKEN".into(),
+            path: format!("/.a3s-box-secrets/{digest}/000.secret"),
+        }]
+    );
+    let intent = serde_json::to_string(&request).unwrap();
+    assert!(!intent.contains("fixture-secret-plaintext"));
+}
+
+#[test]
+fn mapping_rejects_secret_collisions_and_unencodable_targets() {
+    let environment_secret = SecretReference {
+        name: "provider-token".into(),
+        reference: "secret://provider/token/v7".into(),
+        target: SecretTarget::Environment {
+            variable: "A3S_PROVIDER_TOKEN".into(),
+        },
+    };
+
+    let mut literal_collision = spec(RuntimeUnitClass::Service);
+    literal_collision
+        .process
+        .environment
+        .insert("A3S_PROVIDER_TOKEN".into(), "literal".into());
+    literal_collision.secrets.push(environment_secret.clone());
+    assert!(matches!(
+        creation_request(&literal_collision, TEST_EXECUTION_ISOLATION),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("conflicts")
+    ));
+
+    let mut reserved = spec(RuntimeUnitClass::Service);
+    reserved.process.environment.insert(
+        SECRET_ENVIRONMENT_MANIFEST.into(),
+        "caller-controlled".into(),
+    );
+    reserved.secrets.push(environment_secret);
+    assert!(matches!(
+        creation_request(&reserved, TEST_EXECUTION_ISOLATION),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("reserved")
+    ));
+
+    for target in [
+        "/run/provider/token:alternate",
+        "/run/provider//token",
+        "/run/provider/./token",
+        "/proc/provider-token",
+        "/.a3s-box-secrets/escape",
+    ] {
+        let mut invalid = spec(RuntimeUnitClass::Service);
+        invalid.secrets.push(SecretReference {
+            name: "provider-token".into(),
+            reference: "secret://provider/token/v7".into(),
+            target: SecretTarget::File {
+                path: target.into(),
+                mode: 0o400,
+            },
+        });
+        assert!(matches!(
+            creation_request(&invalid, TEST_EXECUTION_ISOLATION),
+            Err(RuntimeError::InvalidRequest(message)) if message.contains("Secret file target")
+        ));
+    }
+
+    let mut overlap = spec(RuntimeUnitClass::Service);
+    overlap.mounts.push(RuntimeMount {
+        name: "runtime".into(),
+        source: RuntimeMountSource::Tmpfs { size_bytes: 4096 },
+        target: "/run/provider".into(),
+        read_only: false,
+    });
+    overlap.secrets.push(SecretReference {
+        name: "provider-token".into(),
+        reference: "secret://provider/token/v7".into(),
+        target: SecretTarget::File {
+            path: "/run/provider/token".into(),
+            mode: 0o400,
+        },
+    });
+    assert!(matches!(
+        creation_request(&overlap, TEST_EXECUTION_ISOLATION),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("overlaps")
+    ));
+
+    let mut registry = spec(RuntimeUnitClass::Service);
+    registry.secrets.push(SecretReference {
+        name: "registry".into(),
+        reference: "secret://registry/credential/v2".into(),
+        target: SecretTarget::RegistryCredential,
+    });
+    let request = creation_request(&registry, TEST_EXECUTION_ISOLATION).unwrap();
+    assert!(request.config.volumes.is_empty());
+    assert!(request.policy.managed_secret_root.is_none());
+
+    registry.secrets.push(SecretReference {
+        name: "registry-secondary".into(),
+        reference: "secret://registry/credential/v3".into(),
+        target: SecretTarget::RegistryCredential,
+    });
+    assert!(matches!(
+        creation_request(&registry, TEST_EXECUTION_ISOLATION),
+        Err(RuntimeError::InvalidRequest(message)) if message.contains("unique")
+    ));
+}
+
+#[test]
 fn mapping_rejects_unadvertised_mount_kinds_before_mutation() {
     let mut spec = spec(RuntimeUnitClass::Service);
     spec.mounts.push(RuntimeMount {
@@ -420,13 +575,24 @@ async fn metadata_tamper_is_rejected_fail_closed() {
         .await
         .unwrap()
         .unwrap();
-    validate_record_for_spec(&record, &spec, TEST_EXECUTION_ISOLATION).unwrap();
+    validate_record_for_spec(
+        &record,
+        &spec,
+        TEST_EXECUTION_ISOLATION,
+        &driver.config.secret_root,
+    )
+    .unwrap();
 
     record
         .labels
         .insert(super::metadata::GENERATION_LABEL.into(), "8".into());
     assert!(matches!(
-        validate_record_for_spec(&record, &spec, TEST_EXECUTION_ISOLATION),
+        validate_record_for_spec(
+            &record,
+            &spec,
+            TEST_EXECUTION_ISOLATION,
+            &driver.config.secret_root,
+        ),
         Err(RuntimeError::Protocol(message)) if message.contains("identity") || message.contains("intent")
     ));
 }
@@ -453,7 +619,12 @@ async fn metadata_rejects_a_record_created_for_another_box_isolation_backend() {
         .unwrap();
 
     assert!(matches!(
-        validate_record_for_spec(&record, &spec, ExecutionIsolation::Microvm),
+        validate_record_for_spec(
+            &record,
+            &spec,
+            ExecutionIsolation::Microvm,
+            &driver.config.secret_root,
+        ),
         Err(RuntimeError::Protocol(message)) if message.contains("creation intent")
     ));
 }
