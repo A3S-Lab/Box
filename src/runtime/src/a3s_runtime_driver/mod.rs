@@ -9,6 +9,7 @@ mod mapping;
 mod metadata;
 mod secret;
 mod service_endpoints;
+mod volume_storage;
 
 use std::future::Future;
 use std::path::PathBuf;
