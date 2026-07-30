@@ -12,10 +12,11 @@ import { RuntimeTutorial } from '../../../theme/components/RuntimeTutorial';
 
 <div className="box-section-heading box-home-code-tour__heading">
   <span>SDK EXAMPLES</span>
-  <h2>Control the local runtime from Rust, TypeScript, Python, or Go.</h2>
+  <h2>Control the local runtime from Rust, Go, Python, or TypeScript.</h2>
   <p>
-    Choose a language for a complete example, then scroll through creation,
-    resources, files, commands, and cleanup in TypeScript.
+    {
+      'Choose a language for a complete example, then scroll through creation, resources, files, commands, and cleanup in TypeScript.'
+    }
   </p>
 </div>
 
@@ -42,48 +43,6 @@ async fn main() -> Result<(), a3s_box_sdk::ClientError> {
     sandbox.kill().await?;
     Ok(())
 }
-```
-
-</Tab>
-<Tab label="TypeScript" value="typescript">
-
-```typescript
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    const result = await sandbox.commands.run('printf ready');
-    console.log(result.stdout);
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-</Tab>
-<Tab label="Python" value="python">
-
-```python
-import asyncio
-
-from a3s_box import AsyncSandbox
-
-
-async def main() -> None:
-    async with await AsyncSandbox.create("alpine:3.20") as sandbox:
-        result = await sandbox.commands.run("printf ready")
-        print(result.stdout)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
 ```
 
 </Tab>
@@ -115,6 +74,48 @@ func main() {
 
     fmt.Println(result.StdoutString())
 }
+```
+
+</Tab>
+<Tab label="Python" value="python">
+
+```python
+import asyncio
+
+from a3s_box import AsyncSandbox
+
+
+async def main() -> None:
+    async with await AsyncSandbox.create("alpine:3.20") as sandbox:
+        result = await sandbox.commands.run("printf ready")
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+</Tab>
+<Tab label="TypeScript" value="typescript">
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
 ```
 
 </Tab>

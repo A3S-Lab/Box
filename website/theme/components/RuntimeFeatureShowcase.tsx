@@ -1,14 +1,27 @@
 type Locale = 'zh' | 'en';
 
 type KernelSceneLabels = {
-  host: string;
+  comparison: string;
+  tradeoff: string;
+  sandbox: string;
+  sharedMode: string;
+  microvm: string;
+  dedicatedMode: string;
+  startup: string;
+  lowerCost: string;
+  higherCost: string;
+  ready: string;
+  agent: string;
+  processBoundary: string;
   hostKernel: string;
   hostData: string;
-  vmBoundary: string;
   guestKernel: string;
-  agent: string;
-  attempt: string;
+  vmBoundary: string;
+  sharedAttempt: string;
+  hostRisk: string;
+  microvmAttempt: string;
   blocked: string;
+  poolHint: string;
 };
 
 type CowSceneLabels = {
@@ -29,30 +42,61 @@ type PoolSceneLabels = {
   leased: string;
 };
 
+type TeeSceneLabels = {
+  setupCost: string;
+  verifier: string;
+  policy: string;
+  report: string;
+  verified: string;
+  secret: string;
+  protectedVm: string;
+  workload: string;
+  protectedMemory: string;
+  hostView: string;
+  ciphertext: string;
+  boot: string;
+  attest: string;
+  release: string;
+  run: string;
+};
+
 const benchmarkHref =
   'https://github.com/A3S-Lab/Box/blob/main/docs/ANNOUNCEMENT-v2.1.0.md';
 
 const content = {
   zh: {
     kicker: '核心实现',
-    title: '每个任务一个内核；重复任务不必每次冷启动。',
-    body: '默认 MicroVM、写时复制和暖池是三套可以组合使用的机制。隔离负责挡住共享内核攻击面，CoW 减少重复数据，暖池把启动移出任务热路径。',
+    title: '独立内核要多付启动成本；暖池让任务不用等待。',
+    body: '共享内核进程启动更轻，但保留宿主内核攻击面。A3S Box 默认使用独立来宾内核；CoW 和暖池减少重复启动成本，符合条件的 SEV-SNP 主机还可在证明通过后注入密钥。',
     kernel: {
-      label: '01 / 独立内核',
-      title: 'Agent 与宿主机不共享内核',
-      body: '每个 Box 默认运行在自己的来宾 Linux 内核中。Agent 即使利用了来宾内核漏洞，仍需跨过硬件虚拟机边界才能接触宿主机；没有显式挂载的宿主目录也不会出现在来宾中。',
+      label: '01 / 内核边界',
+      title: '共享内核更轻；独立内核多一道硬件边界',
+      body: 'Sandbox 用 namespace、seccomp、从属 ID 和 cgroup v2 隔离进程，因此不必启动来宾内核；但 Agent 与宿主机仍共用 Linux 内核。如果有效的宿主内核漏洞被利用，进程隔离可能失效。默认 MicroVM 为任务启动独立来宾内核，即使 Agent 取得来宾内核，仍需再跨过硬件 VM 边界。',
       boundary:
-        'MicroVM 降低共享内核风险，但不能替代 Hypervisor、硬件和挂载策略本身的安全审查。',
+        '创建 MicroVM 还要启动 VMM、来宾内核和 guest init，耗时和内存开销高于共享内核进程。暖池和 snapshot-fork 可提前支付这部分成本；Hypervisor、硬件、挂载、网络和侧信道仍需审查。',
       command: 'a3s-box run --rm alpine:3.20 -- uname -a',
       scene: {
-        host: 'HOST',
-        hostKernel: '宿主机内核',
-        hostData: '宿主机数据',
-        vmBoundary: '硬件 VM 边界',
-        guestKernel: '来宾 Linux 内核',
+        comparison: '同一个 Agent，两种隔离路径',
+        tradeoff: '启动开销与攻击路径',
+        sandbox: 'SANDBOX',
+        sharedMode: '共享内核',
+        microvm: 'MICROVM',
+        dedicatedMode: '独立内核',
+        startup: '创建路径',
+        lowerCost: '进程创建 · 较低开销',
+        higherCost: 'VMM → 内核 → INIT · 较高开销',
+        ready: 'READY',
         agent: 'AGENT',
-        attempt: '内核越界尝试',
-        blocked: '被 VM 边界阻断',
+        processBoundary: 'NAMESPACE + SECCOMP',
+        hostKernel: '共享宿主 Linux 内核',
+        hostData: '宿主机数据',
+        guestKernel: '来宾 Linux 内核',
+        vmBoundary: '硬件 VM 边界',
+        sharedAttempt: '宿主内核漏洞利用成功时',
+        hostRisk: '可能影响宿主机',
+        microvmAttempt: '取得来宾内核后仍需 VM 逃逸',
+        blocked: '在 VM 边界停下',
+        poolHint: '暖池可预先完成启动',
       },
     },
     cow: {
@@ -88,37 +132,67 @@ const content = {
         leased: '租约 0',
       },
     },
+    tee: {
+      label: '04 / 机密计算',
+      title: '先验证来宾，再把密钥送进去',
+      body: '在符合条件的 AMD SEV-SNP 主机上，来宾先生成硬件证明。客户端或密钥服务按策略验证工作负载度量后，才通过 RA-TLS 把密钥送入来宾的受保护内存；该流程用于降低宿主侧直接读取来宾明文内存的风险。',
+      boundary:
+        'TEE 会增加受保护 VM 初始化、证明验证和密钥释放开销。当前仓库的单元与模拟测试只覆盖流程；没有真实 SEV-SNP 硬件证明证据就不作硬件安全声明。它也不防应用泄漏、拒绝服务或全部侧信道。',
+      command: 'a3s-box attest secure-job --ratls --policy policy.json',
+      scene: {
+        setupCost: '额外路径 · 受保护启动 + 证明',
+        verifier: '密钥服务',
+        policy: '度量策略',
+        report: '证明报告',
+        verified: '验证通过',
+        secret: '密钥',
+        protectedVm: 'SEV-SNP MICROVM',
+        workload: 'AGENT WORKLOAD',
+        protectedMemory: '受保护的来宾内存',
+        hostView: '宿主侧读取',
+        ciphertext: '加密内存页',
+        boot: '受保护启动',
+        attest: '验证证明',
+        release: '释放密钥',
+        run: '开始执行',
+      },
+    },
     platformLink: '查看平台支持范围',
-    moreLabel: '同时提供',
-    more: [
-      ['OCI 构建', '多阶段 · 缓存 · save/load'],
-      ['持久存储', '命名卷 · tmpfs · 快照'],
-      ['网络', 'TSI · Bridge · TCP 端口'],
-      ['可编程 CI/CD', '镜像 · 脚本 · 并行分叉'],
-      ['Kubernetes', 'CRI · containerd shim'],
-      ['机密计算', 'SEV-SNP · 证明 · 密钥注入'],
-    ],
   },
   en: {
     kicker: 'CORE MECHANISMS',
-    title: 'One kernel per task, without a cold boot for every repeat run.',
-    body: 'Default MicroVMs, copy-on-write forks, and warm pools solve different parts of the runtime path. Isolation removes the shared-kernel attack surface, CoW avoids duplicate data, and the pool moves boot work out of the request path.',
+    title:
+      'A dedicated kernel costs more to start; a warm pool keeps it off the request path.',
+    body: 'A shared-kernel process starts lighter but keeps the host-kernel attack surface. A3S Box defaults to a dedicated guest kernel; CoW and warm pools reduce repeated startup work, while qualifying SEV-SNP hosts can inject secrets after attestation.',
     kernel: {
-      label: '01 / DEDICATED KERNEL',
-      title: 'The agent does not share the host kernel',
-      body: 'Every Box runs with its own guest Linux kernel by default. Exploiting that guest kernel still leaves the hardware VM boundary between the agent and the host. Host directories are absent unless they are mounted explicitly.',
+      label: '01 / KERNEL BOUNDARY',
+      title: 'Shared kernels start lighter; MicroVMs add a hardware boundary',
+      body: 'A Sandbox uses namespace, seccomp, subordinate IDs, and cgroup v2 process isolation, so it does not boot a guest kernel. The agent still shares the host Linux kernel: if a working host-kernel exploit succeeds, process isolation may fail with it. The default MicroVM boots a dedicated guest kernel, so taking over that guest kernel still leaves a hardware VM boundary to cross.',
       boundary:
-        'A MicroVM reduces shared-kernel risk; it does not replace review of the hypervisor, hardware, or mount policy.',
+        'Creating a MicroVM has higher startup and memory cost because it starts a VMM, guest kernel, and guest init. Warm pools and snapshot-fork can pay that cost before a task arrives. The hypervisor, hardware, mounts, network exposure, and side channels still require review.',
       command: 'a3s-box run --rm alpine:3.20 -- uname -a',
       scene: {
-        host: 'HOST',
-        hostKernel: 'host kernel',
-        hostData: 'host data',
-        vmBoundary: 'hardware VM boundary',
-        guestKernel: 'guest Linux kernel',
+        comparison: 'ONE AGENT · TWO ISOLATION PATHS',
+        tradeoff: 'startup cost and attack path',
+        sandbox: 'SANDBOX',
+        sharedMode: 'shared kernel',
+        microvm: 'MICROVM',
+        dedicatedMode: 'dedicated kernel',
+        startup: 'create path',
+        lowerCost: 'process create · lower cost',
+        higherCost: 'VMM → kernel → init · higher cost',
+        ready: 'READY',
         agent: 'AGENT',
-        attempt: 'kernel escape attempt',
+        processBoundary: 'namespace + seccomp',
+        hostKernel: 'shared host kernel',
+        hostData: 'host data',
+        guestKernel: 'guest Linux kernel',
+        vmBoundary: 'hardware VM boundary',
+        sharedAttempt: 'if a host-kernel exploit succeeds',
+        hostRisk: 'host may be affected',
+        microvmAttempt: 'guest-kernel control still needs a VM escape',
         blocked: 'stopped at VM boundary',
+        poolHint: 'a warm pool can boot this ahead of time',
       },
     },
     cow: {
@@ -154,16 +228,32 @@ const content = {
         leased: 'leased 0',
       },
     },
+    tee: {
+      label: '04 / CONFIDENTIAL COMPUTING',
+      title: 'Verify the guest before releasing a secret',
+      body: 'On a qualifying AMD SEV-SNP host, the guest first produces hardware attestation evidence. A client or key service checks the workload measurement against policy, then sends secrets into protected guest memory over RA-TLS. This reduces the risk of the host directly reading guest plaintext memory.',
+      boundary:
+        'TEE adds protected-VM initialization, attestation, and key-release work. No hardware security claim is made without evidence from a qualifying SEV-SNP host; current unit and simulation tests cover the flow only. TEE does not stop application leaks, denial of service, or every side channel.',
+      command: 'a3s-box attest secure-job --ratls --policy policy.json',
+      scene: {
+        setupCost: 'extra path · protected boot + attestation',
+        verifier: 'KEY SERVICE',
+        policy: 'measurement policy',
+        report: 'attestation report',
+        verified: 'verified',
+        secret: 'secret',
+        protectedVm: 'SEV-SNP MICROVM',
+        workload: 'AGENT WORKLOAD',
+        protectedMemory: 'protected guest memory',
+        hostView: 'host memory view',
+        ciphertext: 'encrypted pages',
+        boot: 'protected boot',
+        attest: 'verify evidence',
+        release: 'release secret',
+        run: 'run workload',
+      },
+    },
     platformLink: 'Check platform support',
-    moreLabel: 'ALSO INCLUDED',
-    more: [
-      ['OCI builds', 'multi-stage · cache · save/load'],
-      ['Persistent storage', 'volumes · tmpfs · snapshots'],
-      ['Networking', 'TSI · bridge · TCP ports'],
-      ['Programmable CI/CD', 'images · scripts · parallel forks'],
-      ['Kubernetes', 'CRI · containerd shim'],
-      ['Confidential workloads', 'SEV-SNP · attestation · secrets'],
-    ],
   },
 } as const;
 
@@ -171,29 +261,77 @@ function KernelBoundaryScene({ labels }: { labels: KernelSceneLabels }) {
   return (
     <div className="box-kernel-scene" aria-hidden="true">
       <header>
-        <span>{labels.host}</span>
-        <small>KVM · HVF · WHPX</small>
+        <span>{labels.comparison}</span>
+        <small>{labels.tradeoff}</small>
       </header>
-      <div className="box-host-target">
-        <span>{labels.hostKernel}</span>
-        <strong>{labels.hostData}</strong>
-        <i />
-      </div>
-      <div className="box-microvm-boundary">
-        <span>{labels.vmBoundary}</span>
-        <div className="box-guest-kernel">{labels.guestKernel}</div>
-        <div className="box-agent-probe">
-          <i />
-          <strong>{labels.agent}</strong>
-        </div>
-        <div className="box-escape-trace">
-          <span>{labels.attempt}</span>
-          <i />
-        </div>
-        <div className="box-vm-barrier">
-          <i />
-          <strong>{labels.blocked}</strong>
-        </div>
+      <div className="box-kernel-compare">
+        <section className="box-kernel-lane box-kernel-lane--shared">
+          <header>
+            <span>{labels.sandbox}</span>
+            <strong>{labels.sharedMode}</strong>
+          </header>
+          <div className="box-kernel-startup">
+            <header>
+              <span>{labels.startup}</span>
+              <strong>{labels.ready}</strong>
+            </header>
+            <div>
+              <i />
+            </div>
+            <small>{labels.lowerCost}</small>
+          </div>
+          <div className="box-kernel-stack">
+            <div className="box-kernel-agent">
+              <i />
+              <strong>{labels.agent}</strong>
+            </div>
+            <div className="box-process-boundary">{labels.processBoundary}</div>
+            <div className="box-shared-kernel">{labels.hostKernel}</div>
+            <div className="box-kernel-host">{labels.hostData}</div>
+            <div className="box-shared-risk-path">
+              <i />
+              <strong>{labels.hostRisk}</strong>
+            </div>
+          </div>
+          <footer>{labels.sharedAttempt}</footer>
+        </section>
+
+        <section className="box-kernel-lane box-kernel-lane--microvm">
+          <header>
+            <span>{labels.microvm}</span>
+            <strong>{labels.dedicatedMode}</strong>
+          </header>
+          <div className="box-kernel-startup">
+            <header>
+              <span>{labels.startup}</span>
+              <strong>{labels.ready}</strong>
+            </header>
+            <div>
+              <i />
+            </div>
+            <small>{labels.higherCost}</small>
+          </div>
+          <div className="box-kernel-stack">
+            <div className="box-kernel-agent">
+              <i />
+              <strong>{labels.agent}</strong>
+            </div>
+            <div className="box-guest-kernel">{labels.guestKernel}</div>
+            <div className="box-vm-boundary">
+              <i />
+              <span>{labels.vmBoundary}</span>
+            </div>
+            <div className="box-kernel-host">HOST · {labels.hostKernel}</div>
+            <div className="box-microvm-risk-path">
+              <i />
+              <strong>{labels.blocked}</strong>
+            </div>
+          </div>
+          <footer>
+            {labels.microvmAttempt}
+            <small>{labels.poolHint}</small>
+          </footer>
+        </section>
       </div>
     </div>
   );
@@ -278,6 +416,77 @@ function WarmPoolScene({ labels }: { labels: PoolSceneLabels }) {
   );
 }
 
+function TeeAttestationScene({ labels }: { labels: TeeSceneLabels }) {
+  return (
+    <div className="box-tee-scene" aria-hidden="true">
+      <header>
+        <span>SEV-SNP · RA-TLS</span>
+        <small>{labels.setupCost}</small>
+      </header>
+      <div className="box-tee-flow">
+        <section className="box-tee-verifier">
+          <header>{labels.verifier}</header>
+          <div className="box-tee-policy">
+            <i />
+            <span>{labels.policy}</span>
+          </div>
+          <div className="box-tee-verdict">
+            <i />
+            <strong>{labels.verified}</strong>
+          </div>
+          <div className="box-tee-key">
+            <i />
+            <span>{labels.secret}</span>
+          </div>
+        </section>
+
+        <div className="box-tee-channel">
+          <span className="box-tee-report-label">{labels.report}</span>
+          <i className="box-tee-report-line" />
+          <i className="box-tee-report-packet" />
+          <span className="box-tee-secret-label">{labels.secret}</span>
+          <i className="box-tee-secret-line" />
+          <i className="box-tee-secret-packet" />
+        </div>
+
+        <section className="box-tee-guest">
+          <header>
+            <span>{labels.protectedVm}</span>
+            <small>HARDWARE TEE</small>
+          </header>
+          <div className="box-tee-workload">
+            <i />
+            <strong>{labels.workload}</strong>
+          </div>
+          <div className="box-tee-memory">
+            <span>{labels.protectedMemory}</span>
+            <div>
+              {Array.from({ length: 12 }, (_, index) => (
+                <i key={index} />
+              ))}
+            </div>
+          </div>
+          <div className="box-tee-host-view">
+            <span>{labels.hostView}</span>
+            <strong>{labels.ciphertext}</strong>
+            <i />
+          </div>
+        </section>
+      </div>
+      <footer>
+        {[labels.boot, labels.attest, labels.release, labels.run].map(
+          (step, index) => (
+            <span key={step}>
+              <i>{String(index + 1).padStart(2, '0')}</i>
+              {step}
+            </span>
+          ),
+        )}
+      </footer>
+    </div>
+  );
+}
+
 export function RuntimeFeatureShowcase({
   locale,
   platformHref,
@@ -300,7 +509,10 @@ export function RuntimeFeatureShowcase({
       </div>
 
       <div className="box-feature-list">
-        <article className="box-feature-row box-feature-row--kernel">
+        <article
+          className="box-feature-row box-feature-row--kernel"
+          id="kernel-boundary"
+        >
           <div className="box-feature-copy">
             <span>{copy.kernel.label}</span>
             <h3>{copy.kernel.title}</h3>
@@ -311,7 +523,10 @@ export function RuntimeFeatureShowcase({
           <KernelBoundaryScene labels={copy.kernel.scene} />
         </article>
 
-        <article className="box-feature-row box-feature-row--cow">
+        <article
+          className="box-feature-row box-feature-row--cow"
+          id="copy-on-write"
+        >
           <div className="box-feature-copy">
             <span>{copy.cow.label}</span>
             <h3>{copy.cow.title}</h3>
@@ -322,7 +537,10 @@ export function RuntimeFeatureShowcase({
           <CowForkScene labels={copy.cow.scene} />
         </article>
 
-        <article className="box-feature-row box-feature-row--pool">
+        <article
+          className="box-feature-row box-feature-row--pool"
+          id="warm-pool"
+        >
           <div className="box-feature-copy">
             <span>{copy.pool.label}</span>
             <h3>{copy.pool.title}</h3>
@@ -338,18 +556,23 @@ export function RuntimeFeatureShowcase({
           </div>
           <WarmPoolScene labels={copy.pool.scene} />
         </article>
-      </div>
 
-      <div className="box-feature-more">
-        <header>{copy.moreLabel}</header>
-        <div>
-          {copy.more.map(([title, detail]) => (
-            <article key={title}>
-              <strong>{title}</strong>
-              <span>{detail}</span>
-            </article>
-          ))}
-        </div>
+        <article
+          className="box-feature-row box-feature-row--tee"
+          id="confidential-computing"
+        >
+          <div className="box-feature-copy">
+            <span>{copy.tee.label}</span>
+            <h3>{copy.tee.title}</h3>
+            <p>{copy.tee.body}</p>
+            <small>{copy.tee.boundary}</small>
+            <div className="box-feature-links">
+              <a href={platformHref}>{copy.platformLink}</a>
+            </div>
+            <code>{copy.tee.command}</code>
+          </div>
+          <TeeAttestationScene labels={copy.tee.scene} />
+        </article>
       </div>
     </section>
   );

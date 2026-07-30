@@ -1,0 +1,249 @@
+.box-install-switcher {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+  max-width: 680px;
+  margin-top: auto;
+  padding-top: 38px;
+}
+
+.box-install-console {
+  overflow: hidden;
+  border: 1px solid #313b35;
+  border-radius: 10px;
+  background: #0c110e;
+  box-shadow:
+    0 20px 58px rgba(0, 0, 0, 0.3),
+    inset 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.box-install-platforms {
+  display: grid;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid #29332d;
+  background: #0a0f0c;
+  grid-template-columns: repeat(7, minmax(72px, 1fr));
+  scrollbar-width: none;
+}
+
+.box-install-platforms::-webkit-scrollbar {
+  display: none;
+}
+
+.box-install-platforms button {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 60px;
+  padding: 8px 6px 7px;
+  border: 0;
+  border-right: 1px solid #29332d;
+  background: transparent;
+  color: #68756d;
+  cursor: pointer;
+  font-family: var(--box-mono);
+  gap: 5px;
+  justify-items: center;
+}
+
+.box-install-platforms button:last-child {
+  border-right: 0;
+}
+
+.box-install-platforms button::after {
+  position: absolute;
+  right: 10px;
+  bottom: -1px;
+  left: 10px;
+  height: 2px;
+  background: linear-gradient(90deg, var(--box-green), var(--box-amber));
+  content: '';
+  opacity: 0;
+  transform: scaleX(0.3);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.box-install-target-icons {
+  display: flex;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.box-home .box-install-target-icons svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: none;
+}
+
+.box-home .box-install-target-icons:has(svg + svg) svg {
+  width: 17px;
+  height: 17px;
+}
+
+.box-home .box-install-target-icons path {
+  stroke: none;
+}
+
+.box-install-platforms button > strong {
+  overflow: hidden;
+  max-width: 100%;
+  font-size: 8px;
+  font-weight: 540;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.box-install-platforms button:hover {
+  background: rgba(98, 215, 139, 0.045);
+  color: #b8c4bd;
+}
+
+.box-install-platforms button.is-active {
+  background: linear-gradient(
+    180deg,
+    rgba(98, 215, 139, 0.105),
+    rgba(54, 127, 80, 0.025)
+  );
+  color: #edf3ef;
+}
+
+.box-install-platforms button.is-active::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+.box-install-platforms button:focus-visible,
+.box-install-copy:focus-visible,
+.box-install-code:focus-visible {
+  z-index: 3;
+  outline: 2px solid rgba(98, 215, 139, 0.78);
+  outline-offset: -2px;
+}
+
+.box-install-panel {
+  background: rgba(8, 12, 9, 0.86);
+}
+
+.box-install-panel-meta {
+  display: flex;
+  min-height: 46px;
+  padding: 7px 9px 7px 13px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.box-install-panel-meta > span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.box-install-panel-meta > span strong {
+  overflow: hidden;
+  color: #c7d1ca;
+  font-family: var(--box-mono);
+  font-size: 9.5px;
+  font-weight: 540;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.box-install-panel-meta > span small {
+  color: #5d6b62;
+  font-family: var(--box-mono);
+  font-size: 7px;
+  letter-spacing: 0.08em;
+}
+
+.box-install-copy {
+  display: inline-flex;
+  min-width: 70px;
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid #354139;
+  border-radius: 6px;
+  background: #141b16;
+  color: #9da9a1;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: var(--box-mono);
+  font-size: 9px;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.box-install-copy:hover {
+  border-color: #566b5d;
+  background: #19221c;
+  color: #e0e8e3;
+  transform: translateY(-1px);
+}
+
+.box-install-copy.is-copied {
+  border-color: rgba(98, 215, 139, 0.45);
+  color: var(--box-green);
+}
+
+.box-install-code {
+  display: grid;
+  height: 80px;
+  overflow: auto;
+  padding: 8px 12px;
+  border-top: 1px solid #252e28;
+  background:
+    linear-gradient(90deg, rgba(98, 215, 139, 0.04), transparent 44%),
+    rgba(5, 9, 6, 0.82);
+  align-content: center;
+  scrollbar-width: none;
+}
+
+.box-install-code::-webkit-scrollbar {
+  display: none;
+}
+
+.box-install-code > div {
+  display: grid;
+  min-width: max-content;
+  min-height: 20px;
+  align-items: baseline;
+  gap: 10px;
+  grid-template-columns: 24px max-content;
+}
+
+.box-install-code > div > span {
+  color: var(--box-green);
+  font-family: var(--box-mono);
+  font-size: 9.5px;
+  text-align: right;
+}
+
+.box-install-code code {
+  color: #d7e0da;
+  font-family: var(--box-mono);
+  font-size: 9.5px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+@media (max-width: 640px) {
+  .box-install-switcher {
+    padding-top: 34px;
+  }
+
+  .box-install-platforms {
+    grid-template-columns: repeat(7, minmax(68px, 1fr));
+  }
+}

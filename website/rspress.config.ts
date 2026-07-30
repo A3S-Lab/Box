@@ -77,7 +77,7 @@ export default defineConfig({
   siteOrigin,
   title: 'A3S Box',
   description:
-    '本地 OCI 工作负载运行时，默认使用独立内核 MicroVM 隔离，并提供 Rust、TypeScript、Python 和 Go 原生 SDK。',
+    '本地 OCI 工作负载运行时，默认使用独立内核 MicroVM 隔离，并提供 Rust、Go、Python 和 TypeScript 原生 SDK。',
   lang: 'zh',
   locales: [
     {
@@ -85,7 +85,7 @@ export default defineConfig({
       label: '简体中文',
       title: 'A3S Box',
       description:
-        '本地 OCI 工作负载运行时，默认使用独立内核 MicroVM 隔离，并提供 Rust、TypeScript、Python 和 Go 原生 SDK。',
+        '本地 OCI 工作负载运行时，默认使用独立内核 MicroVM 隔离，并提供 Rust、Go、Python 和 TypeScript 原生 SDK。',
     },
     {
       lang: 'en',

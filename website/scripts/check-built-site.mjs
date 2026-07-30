@@ -88,7 +88,6 @@ for (const [homepagePath, html] of [
     'integrations/skills/install.sh',
     'id="sdk-code-tour"',
     'id="homepage-code-hike"',
-    'href="#homepage-code-hike"',
     'box-home-sdk-tabs',
     'data-runtime-tutorial="true"',
     'class="box-tutorial-sticky"',
@@ -96,10 +95,33 @@ for (const [homepagePath, html] of [
     'data-tutorial-step="cleanup"',
     'data-focus="true"',
     'id="runtime-features"',
-    'box-agent-probe',
-    'box-vm-barrier',
+    'id="kernel-boundary"',
+    'id="copy-on-write"',
+    'id="warm-pool"',
+    'id="confidential-computing"',
+    'id="platform-support"',
+    'id="runtime-capabilities"',
+    'id="native-sdks"',
+    'id="home-cta"',
+    'box-install-platforms',
+    'id="box-install-tab-unix"',
+    'id="box-install-tab-homebrew"',
+    'data-terminal-scenario="microvm"',
+    'data-terminal-scenario="sandbox"',
+    'data-terminal-scenario="cow"',
+    'data-terminal-scenario="pool"',
+    'data-terminal-scenario="tee"',
+    'box-kernel-lane--shared',
+    'box-kernel-lane--microvm',
+    'box-shared-kernel',
+    'box-vm-boundary',
     'box-cow-scene',
     'box-pool-scene',
+    'box-tee-scene',
+    'box-tee-report-packet',
+    'box-tee-secret-packet',
+    'SEV-SNP',
+    'RA-TLS',
     '--snapshot-fork',
   ]) {
     if (!html.includes(marker)) {
@@ -107,6 +129,31 @@ for (const [homepagePath, html] of [
         `${homepagePath} does not visibly render its homepage SDK tour marker: ${marker}`,
       );
     }
+  }
+
+  const narrativeSequence = [
+    'id="runtime-features"',
+    'id="platform-support"',
+    'id="runtime-capabilities"',
+    'id="native-sdks"',
+    'id="sdk-code-tour"',
+    'id="agent-skill"',
+    'id="home-cta"',
+  ];
+  let previousNarrativeIndex = -1;
+  for (const marker of narrativeSequence) {
+    const markerIndex = html.indexOf(marker);
+    if (markerIndex <= previousNarrativeIndex) {
+      throw new Error(
+        `${homepagePath} has a missing or out-of-order homepage section at ${marker}.`,
+      );
+    }
+    previousNarrativeIndex = markerIndex;
+  }
+  if (html.includes('box-principles')) {
+    throw new Error(
+      `${homepagePath} renders the duplicated isolation principles section.`,
+    );
   }
   for (const language of ['Rust', 'TypeScript', 'Python', 'Go']) {
     if (!html.includes(`>${language}<`)) {

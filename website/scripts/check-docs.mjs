@@ -12,15 +12,37 @@ const tutorialComponent = await readFile(
   path.join(websiteRoot, 'theme', 'components', 'RuntimeTutorial.tsx'),
   'utf8',
 );
+const homeComponent = await readFile(
+  path.join(websiteRoot, 'theme', 'components', 'HomeLayout.tsx'),
+  'utf8',
+);
 const featureComponent = await readFile(
   path.join(websiteRoot, 'theme', 'components', 'RuntimeFeatureShowcase.tsx'),
   'utf8',
 );
-const featureStyles = (
+const installComponent = await readFile(
+  path.join(websiteRoot, 'theme', 'components', 'BoxInstallSwitcher.tsx'),
+  'utf8',
+);
+const terminalComponent = await readFile(
+  path.join(websiteRoot, 'theme', 'components', 'RuntimeTerminalShowcase.tsx'),
+  'utf8',
+);
+const heroStyles = (
   await Promise.all(
-    ['runtime-features.css', 'runtime-features-responsive.css'].map((file) =>
+    ['hero-install.css', 'hero-terminal.css'].map((file) =>
       readFile(path.join(websiteRoot, 'theme', file), 'utf8'),
     ),
+  )
+).join('\n');
+const featureStyles = (
+  await Promise.all(
+    [
+      'runtime-features.css',
+      'runtime-isolation.css',
+      'runtime-tee.css',
+      'runtime-features-responsive.css',
+    ].map((file) => readFile(path.join(websiteRoot, 'theme', file), 'utf8')),
   )
 ).join('\n');
 const tutorialSteps = JSON.parse(
@@ -198,12 +220,114 @@ for (const marker of [
   }
 }
 
+const homepageSequence = [
+  '<RuntimeFeatureShowcase',
+  'id="platform-support"',
+  'id="runtime-capabilities"',
+  'id="native-sdks"',
+  'id="sdk-code-tour"',
+  '<AgentSkillSection',
+  'id="home-cta"',
+];
+let previousHomepageIndex = -1;
+for (const marker of homepageSequence) {
+  const markerIndex = homeComponent.indexOf(marker);
+  if (markerIndex <= previousHomepageIndex) {
+    experienceFailures.push(
+      `HomeLayout.tsx: homepage narrative sequence is missing or out of order at ${marker}`,
+    );
+  }
+  previousHomepageIndex = markerIndex;
+}
+if (homeComponent.includes('box-principles')) {
+  experienceFailures.push(
+    'HomeLayout.tsx: duplicated isolation principles must not return after the core mechanisms',
+  );
+}
+
+for (const marker of [
+  "from 'simple-icons'",
+  "id: 'unix'",
+  "id: 'windows'",
+  "id: 'homebrew'",
+  "id: 'rust'",
+  "id: 'go'",
+  "id: 'python'",
+  "id: 'typescript'",
+  'role="tablist"',
+  "event.key === 'ArrowRight'",
+  "event.key === 'Home'",
+  'navigator.clipboard.writeText',
+]) {
+  if (!installComponent.includes(marker)) {
+    experienceFailures.push(
+      `BoxInstallSwitcher.tsx: missing install-switcher contract ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  'data-terminal-phase={phase}',
+  'data-terminal-scenario={scenario.id}',
+  'IntersectionObserver',
+  "document.addEventListener('visibilitychange'",
+  "window.matchMedia('(prefers-reduced-motion: reduce)')",
+  "type TerminalPhase = 'typing' | 'output' | 'complete'",
+  'aria-pressed={index === activeIndex}',
+  'onClick={restart}',
+]) {
+  if (!terminalComponent.includes(marker)) {
+    experienceFailures.push(
+      `RuntimeTerminalShowcase.tsx: missing animated terminal contract ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  '.box-install-target-icons',
+  '.box-terminal-scenarios',
+  '@keyframes box-terminal-cursor',
+  '@media (prefers-reduced-motion: reduce)',
+]) {
+  if (!heroStyles.includes(marker)) {
+    experienceFailures.push(
+      `hero styles: missing A3S Code-aligned hero contract ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  "import { BoxInstallSwitcher } from './BoxInstallSwitcher'",
+  "import { RuntimeTerminalShowcase } from './RuntimeTerminalShowcase'",
+  '<BoxInstallSwitcher',
+  '<RuntimeTerminalShowcase',
+]) {
+  if (!homeComponent.includes(marker)) {
+    experienceFailures.push(
+      `HomeLayout.tsx: missing A3S Code-aligned hero contract ${marker}`,
+    );
+  }
+}
+
 for (const marker of [
   'id="runtime-features"',
-  'className="box-agent-probe"',
-  'className="box-vm-barrier"',
+  'className="box-kernel-lane box-kernel-lane--shared"',
+  'className="box-kernel-lane box-kernel-lane--microvm"',
+  'className="box-shared-kernel"',
+  'className="box-vm-boundary"',
+  'namespace + seccomp',
+  'shared host kernel',
+  'guest Linux kernel',
+  'hardware VM boundary',
+  'higher startup and memory cost',
   'className="box-cow-scene"',
   'className="box-pool-scene"',
+  'className="box-tee-scene"',
+  'className="box-tee-report-packet"',
+  'className="box-tee-secret-packet"',
+  'SEV-SNP',
+  'RA-TLS',
+  'No hardware security claim',
   'MAP_PRIVATE',
   '--snapshot-fork',
   'Linux/KVM',
@@ -217,9 +341,14 @@ for (const marker of [
 }
 
 for (const marker of [
-  '@keyframes box-agent-escape',
+  '@keyframes box-shared-startup',
+  '@keyframes box-microvm-startup',
+  '@keyframes box-shared-risk-path',
+  '@keyframes box-microvm-risk-path',
   '@keyframes box-dirty-page',
   '@keyframes box-pool-request',
+  '@keyframes box-tee-report',
+  '@keyframes box-tee-secret',
   '@media (prefers-reduced-motion: reduce)',
 ]) {
   if (!featureStyles.includes(marker)) {
@@ -303,6 +432,46 @@ for (const language of languages) {
     path.join(docsRoot, language, 'guide', 'networking-compose.mdx'),
     'utf8',
   );
+  const guideMeta = JSON.parse(
+    await readFile(
+      path.join(docsRoot, language, 'guide', '_meta.json'),
+      'utf8',
+    ),
+  );
+  const sdkMeta = JSON.parse(
+    await readFile(path.join(docsRoot, language, 'sdk', '_meta.json'), 'utf8'),
+  );
+  const navigation = JSON.parse(
+    await readFile(path.join(docsRoot, language, '_nav.json'), 'utf8'),
+  );
+
+  const expectedGuideOrder = [
+    'index',
+    'installation',
+    'quick-start',
+    'architecture',
+    'images-builds',
+    'storage-snapshots',
+    'networking-compose',
+    'windows',
+    'agent-skill',
+  ];
+  const expectedSdkOrder = ['index', 'rust', 'go', 'python', 'typescript'];
+  const expectedNavigation =
+    language === 'zh'
+      ? ['指南', 'SDK', '参考', 'Agent Skill', '资源']
+      : ['Guides', 'SDKs', 'Reference', 'Agent Skill', 'Resources'];
+  for (const [label, actual, expected] of [
+    ['guide sidebar', guideMeta, expectedGuideOrder],
+    ['SDK sidebar', sdkMeta, expectedSdkOrder],
+    ['top navigation', navigation.map((item) => item.text), expectedNavigation],
+  ]) {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      experienceFailures.push(
+        `${language}: ${label} does not follow the product narrative order`,
+      );
+    }
+  }
 
   for (const languageName of Object.keys(completeProgramContracts)) {
     if (!quickStart.includes(`\`\`\`${languageName}`)) {
@@ -370,15 +539,32 @@ for (const language of languages) {
   const tabsContract = [
     '<Tabs groupId="box-sdk-language" className="box-sdk-tabs">',
     '<Tab label="Rust" value="rust">',
-    '<Tab label="TypeScript" value="typescript">',
-    '<Tab label="Python" value="python">',
     '<Tab label="Go" value="go">',
+    '<Tab label="Python" value="python">',
+    '<Tab label="TypeScript" value="typescript">',
   ];
   for (const marker of tabsContract) {
     if (!quickStart.includes(marker)) {
       experienceFailures.push(
         `${language}/guide/quick-start.mdx: missing SDK Tabs marker ${marker}`,
       );
+    }
+  }
+
+  const sdkTabSequence = tabsContract.slice(1);
+  for (const [filePath, source] of [
+    [`${language}/index.mdx`, homepage],
+    [`${language}/guide/quick-start.mdx`, quickStart],
+  ]) {
+    let previousTabIndex = -1;
+    for (const marker of sdkTabSequence) {
+      const markerIndex = source.indexOf(marker);
+      if (markerIndex <= previousTabIndex) {
+        experienceFailures.push(
+          `${filePath}: SDK tabs are out of order at ${marker}`,
+        );
+      }
+      previousTabIndex = markerIndex;
     }
   }
 
@@ -424,5 +610,5 @@ if (experienceFailures.length > 0) {
 }
 
 console.log(
-  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, runtime feature animations, Agent Skill integration, complete Rust/TypeScript/Python/Go programs in Tabs, the five-step line-focus tutorial, and ACL fences.`,
+  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, ordered navigation, runtime feature animations, Agent Skill integration, complete Rust/Go/Python/TypeScript programs in Tabs, the five-step line-focus tutorial, and ACL fences.`,
 );

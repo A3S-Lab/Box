@@ -5,7 +5,7 @@ description: 选择原生 A3S Box SDK，并理解共享的本地运行时契约�
 
 # 原生 SDK
 
-A3S Box 提供一方 Rust、TypeScript、Python 和 Go SDK。它们与 CLI 管理相同的本地
+A3S Box 提供一方 Rust、Go、Python 和 TypeScript SDK。它们与 CLI 管理相同的本地
 镜像、Sandbox、卷、网络、快照、日志和运行时状态。
 
 ## 选择语言
@@ -30,7 +30,7 @@ A3S Box 提供一方 Rust、TypeScript、Python 和 Go SDK。它们与 CLI 管�
 - 隔离属于请求数据：默认是 MicroVM，共享内核 Sandbox 仅在 Linux 上显式选择。
 - 不支持的主机与后端组合在产生副作用前失败。
 
-Rust 直接调用类型化运行时组件。TypeScript、Python 和 Go 使用已安装运行时的版本化
+Rust 直接调用类型化运行时组件。Go、Python 和 TypeScript 使用已安装运行时的版本化
 机器桥接，从不解析人类可读 CLI 输出。
 
 ## 通用对象模型

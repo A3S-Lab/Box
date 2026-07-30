@@ -5,7 +5,7 @@ description: Choose a native A3S Box SDK and understand the shared local contrac
 
 # Native SDKs
 
-A3S Box provides first-party Rust, Python, TypeScript, and Go SDKs. They manage
+A3S Box provides first-party Rust, Go, Python, and TypeScript SDKs. They manage
 the same local images, Sandboxes, volumes, networks, snapshots, logs, and
 runtime state as the CLI.
 
@@ -33,7 +33,7 @@ All SDKs are local-first:
   shared-kernel Sandbox is an explicit Linux-only selection.
 - Expect unsupported host and backend combinations to fail before mutation.
 
-Rust calls typed runtime components directly. Python, TypeScript, and Go use
+Rust calls typed runtime components directly. Go, Python, and TypeScript use
 the installed runtime's versioned machine bridge and never parse human CLI
 output.
 

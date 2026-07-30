@@ -20,7 +20,8 @@
     "@rspress/core": "^2.0.17",
     "codehike": "1.1.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react-dom": "^19.2.7",
+    "simple-icons": "^16.27.1"
   },
   "devDependencies": {
     "@types/node": "^22.8.1",
