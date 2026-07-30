@@ -155,7 +155,7 @@ for (const [homepagePath, html] of [
       `${homepagePath} renders the duplicated isolation principles section.`,
     );
   }
-  for (const language of ['Rust', 'TypeScript', 'Python', 'Go']) {
+  for (const language of ['Rust', 'Go', 'Python', 'TypeScript']) {
     if (!html.includes(`>${language}<`)) {
       throw new Error(
         `${homepagePath} does not render the ${language} homepage SDK tab.`,
@@ -227,7 +227,7 @@ for (const localePrefix of ['', 'en/']) {
       );
     }
   }
-  for (const language of ['Rust', 'TypeScript', 'Python', 'Go']) {
+  for (const language of ['Rust', 'Go', 'Python', 'TypeScript']) {
     if (!quickStartHtml.includes(`>${language}<`)) {
       throw new Error(
         `${quickStartPath} does not render the ${language} SDK tab.`,

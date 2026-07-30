@@ -5,31 +5,33 @@ description: Learn how to install, operate, and integrate A3S Box.
 
 # A3S Box guides
 
-A3S Box is a local OCI workload runtime. It is not a hosted sandbox service and
-does not expose a remote control plane. The CLI and native SDKs operate the
-runtime installed on the same machine.
+A3S Box is a local OCI workload runtime, not a hosted Sandbox service or a
+remote control plane. The CLI, native SDKs, and Agent Skill ultimately operate
+the same runtime installed on the current machine.
 
-Every public lifecycle request reaches the same generation-fenced execution
-manager. Images, networks, volumes, snapshots, logs, policy checks, and cleanup
-therefore have one durable local owner.
+The default execution path uses a MicroVM with a dedicated Linux guest kernel.
+On a certified Linux host, a shared-kernel Sandbox is an explicit choice; Box
+never falls back between the two isolation classes.
 
 ## Start here
 
 | Guide                                           | Use it to                                                     |
 | ----------------------------------------------- | ------------------------------------------------------------- |
 | [Installation](./installation/)                 | Install a verified release on Linux, macOS, or Windows.       |
-| [Quick start](./quick-start/)                   | Run a MicroVM, manage a service, and inspect the runtime.     |
+| [Quick start](./quick-start/)                   | Inspect the host, run a MicroVM, and manage a first service.  |
 | [Architecture](./architecture/)                 | Understand the isolation resolver and local runtime boundary. |
 | [Images and builds](./images-builds/)           | Pull, build, tag, save, load, and prune OCI images.           |
-| [Networking and Compose](./networking-compose/) | Configure TSI, named networks, published ports, and Compose.  |
 | [Storage and snapshots](./storage-snapshots/)   | Use bind mounts, volumes, tmpfs, commits, and snapshots.      |
+| [Networking and Compose](./networking-compose/) | Configure TSI, named networks, published ports, and Compose.  |
 | [Windows WHPX](./windows/)                      | Enable WHPX and work within the Windows capability boundary.  |
+| [Agent Skill](./agent-skill/)                   | Let a coding agent use Box with the right lifecycle rules.    |
+
+This order gets a minimal workload running before explaining the runtime
+boundary, then moves into durable image, data, and network resources. For one
+command, go directly to the [CLI reference](/reference/). If the language is
+already decided, start from the [SDK overview](/sdk/).
 
 ## Choose the execution boundary
-
-The default request runs in a MicroVM backed by libkrun. On a certified Linux
-host, `--isolation sandbox` explicitly selects the shared-kernel A3S OCI
-Runtime.
 
 | Contract           | Default MicroVM                                    | Explicit Sandbox                        |
 | ------------------ | -------------------------------------------------- | --------------------------------------- |
@@ -44,8 +46,13 @@ Runtime.
 > hostile host administrator, hardware side channels, or data deliberately
 > exposed through a bind mount. Use the default MicroVM when those risks matter.
 
-## Native automation
+## Choose how to use Box
 
-Box also ships native [Rust, Go, Python, and TypeScript SDKs](/sdk/). They use
-the same local execution manager and return typed results instead of parsing
-human CLI output.
+| Entry                         | Best for                                 | Start with                             |
+| ----------------------------- | ---------------------------------------- | -------------------------------------- |
+| CLI                           | Interactive runs, diagnosis, and ops     | [Quick start](./quick-start/)          |
+| [Native SDKs](/sdk/)          | Applications, agent workers, and CI/CD   | Rust, Go, Python, or TypeScript        |
+| [Agent Skill](./agent-skill/) | Coding agents that orchestrate local Box | Install the Skill and reload the agent |
+
+All three entries share one execution manager, image store, volumes, networks,
+snapshots, logs, and generation fences. None creates a second local state model.

@@ -13,9 +13,9 @@ A3S Box 提供一方 Rust、Go、Python 和 TypeScript SDK。它们与 CLI 管�
 | 语言                        | 包                                 | 适用场景                                |
 | --------------------------- | ---------------------------------- | --------------------------------------- |
 | [Rust](./rust/)             | `a3s-box-sdk`                      | 直接类型化运行时集成和管理应用          |
-| [TypeScript](./typescript/) | `@a3s-lab/box`                     | Node.js 应用和 JavaScript 构建系统      |
-| [Python](./python/)         | `a3s-box`                          | 同步或异步自动化和数据工具              |
 | [Go](./go/)                 | `github.com/A3S-Lab/Box/sdk/go/v3` | 支持 context 的服务、Agent 和 CI worker |
+| [Python](./python/)         | `a3s-box`                          | 同步或异步自动化和数据工具              |
+| [TypeScript](./typescript/) | `@a3s-lab/box`                     | Node.js 应用和 JavaScript 构建系统      |
 
 每种语言都有独立指南和完整可运行程序，不需要把 Python 片段自行翻译成 Go，也不会在
 同一个工作流中途切换语言。
@@ -68,8 +68,8 @@ Sandbox 生命周期使用代际围栏。陈旧句柄不能修改同一个盒子
 ## 完整示例
 
 - [Rust SDK](./rust/)
-- [TypeScript SDK](./typescript/)
-- [Python SDK](./python/)
 - [Go SDK](./go/)
+- [Python SDK](./python/)
+- [TypeScript SDK](./typescript/)
 
 底层隔离模型见[架构与隔离](/guide/architecture)。

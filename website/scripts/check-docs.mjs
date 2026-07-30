@@ -116,6 +116,18 @@ const completeProgramContracts = {
   ],
 };
 
+function recordMarkerOrder(source, markers, label, failures) {
+  let previousIndex = -1;
+  for (const marker of markers) {
+    const markerIndex = source.indexOf(marker);
+    if (markerIndex <= previousIndex) {
+      failures.push(`${label}: missing or out of order at ${marker}`);
+      return;
+    }
+    previousIndex = markerIndex;
+  }
+}
+
 async function collectFiles(directory, matcher) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
@@ -416,6 +428,18 @@ if (translationFailures.length > 0) {
 }
 
 for (const language of languages) {
+  const guideOverview = await readFile(
+    path.join(docsRoot, language, 'guide', 'index.mdx'),
+    'utf8',
+  );
+  const sdkOverview = await readFile(
+    path.join(docsRoot, language, 'sdk', 'index.mdx'),
+    'utf8',
+  );
+  const imageGuide = await readFile(
+    path.join(docsRoot, language, 'guide', 'images-builds.mdx'),
+    'utf8',
+  );
   const homepage = await readFile(
     path.join(docsRoot, language, 'index.mdx'),
     'utf8',
@@ -469,6 +493,57 @@ for (const language of languages) {
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       experienceFailures.push(
         `${language}: ${label} does not follow the product narrative order`,
+      );
+    }
+  }
+
+  recordMarkerOrder(
+    guideOverview,
+    [
+      '](./installation/)',
+      '](./quick-start/)',
+      '](./architecture/)',
+      '](./images-builds/)',
+      '](./storage-snapshots/)',
+      '](./networking-compose/)',
+      '](./windows/)',
+      '](./agent-skill/)',
+    ],
+    `${language}/guide/index.mdx: guide journey`,
+    experienceFailures,
+  );
+  recordMarkerOrder(
+    sdkOverview,
+    ['](./rust/)', '](./go/)', '](./python/)', '](./typescript/)'],
+    `${language}/sdk/index.mdx: SDK journey`,
+    experienceFailures,
+  );
+  recordMarkerOrder(
+    imageGuide,
+    ['](/sdk/rust)', '](/sdk/go)', '](/sdk/python)', '](/sdk/typescript)'],
+    `${language}/guide/images-builds.mdx: SDK links`,
+    experienceFailures,
+  );
+
+  const nextStepContracts = [
+    ['installation.mdx', '](./quick-start/)'],
+    ['quick-start.mdx', '](./architecture/)'],
+    ['architecture.mdx', '](./images-builds/)'],
+    ['images-builds.mdx', '](./storage-snapshots/)'],
+    ['storage-snapshots.mdx', '](./networking-compose/)'],
+    ['networking-compose.mdx', '](/reference/platforms)'],
+    ['windows.mdx', '](./agent-skill/)'],
+    ['agent-skill.mdx', '](/sdk/)'],
+  ];
+  for (const [fileName, nextLink] of nextStepContracts) {
+    const source = await readFile(
+      path.join(docsRoot, language, 'guide', fileName),
+      'utf8',
+    );
+    const nextHeading = language === 'zh' ? '## 下一步' : '## Next step';
+    if (!source.includes(nextHeading) || !source.includes(nextLink)) {
+      experienceFailures.push(
+        `${language}/guide/${fileName}: missing its contextual next step ${nextLink}`,
       );
     }
   }
@@ -610,5 +685,5 @@ if (experienceFailures.length > 0) {
 }
 
 console.log(
-  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, ordered navigation, runtime feature animations, Agent Skill integration, complete Rust/Go/Python/TypeScript programs in Tabs, the five-step line-focus tutorial, and ACL fences.`,
+  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, ordered navigation and guide handoffs, runtime feature animations, Agent Skill integration, complete Rust/Go/Python/TypeScript programs in Tabs, the five-step line-focus tutorial, and ACL fences.`,
 );

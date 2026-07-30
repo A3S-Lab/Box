@@ -92,7 +92,7 @@ export default defineConfig({
       label: 'English',
       title: 'A3S Box',
       description:
-        'A local OCI workload runtime with dedicated-kernel MicroVM isolation, an explicit shared-kernel Sandbox, and native SDKs for Rust, TypeScript, Python, and Go.',
+        'A local OCI workload runtime with dedicated-kernel MicroVM isolation, an explicit shared-kernel Sandbox, and native SDKs for Rust, Go, Python, and TypeScript.',
     },
   ],
   icon: '/favicon.svg',
