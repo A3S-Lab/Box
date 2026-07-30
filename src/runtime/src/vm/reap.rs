@@ -373,12 +373,13 @@ fn reap_recorded_sandbox(home_dir: &Path, box_dir: &Path, box_id: &str) -> Sandb
             );
         }
     };
-    reap_orphaned_a3s_oci(record, box_dir, box_id)
+    reap_orphaned_a3s_oci(record, home_dir, box_dir, box_id)
 }
 
 #[cfg(target_os = "linux")]
 fn reap_orphaned_a3s_oci(
     record: RecordedSandboxRuntime,
+    home_dir: &Path,
     box_dir: &Path,
     box_id: &str,
 ) -> SandboxReap {

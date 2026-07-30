@@ -16,8 +16,9 @@ use async_trait::async_trait;
 
 use super::super::metadata::{local_identity, UNIT_LABEL};
 use super::super::{
-    BoxRegistryCredential, BoxRuntimeDriver, BoxRuntimeDriverConfig, BoxSecretMaterial,
-    BoxSecretMaterializationError, BoxSecretMaterializer,
+    BoxArtifactPort, BoxArtifactPortError, BoxRegistryCredential, BoxRuntimeDriver,
+    BoxRuntimeDriverConfig, BoxSecretMaterial, BoxSecretMaterializationError,
+    BoxSecretMaterializer,
 };
 use super::cases::CaseFactory;
 use super::{
@@ -90,6 +91,40 @@ impl BoxSecretMaterializer for ConformanceSecretMaterializer {
     }
 }
 
+struct ConformanceArtifactPort {
+    source: PathBuf,
+}
+
+#[async_trait]
+impl BoxArtifactPort for ConformanceArtifactPort {
+    async fn mount_path(
+        &self,
+        _spec: &RuntimeUnitSpec,
+        _mount: &a3s_runtime::contract::RuntimeMount,
+    ) -> std::result::Result<PathBuf, BoxArtifactPortError> {
+        Ok(self.source.clone())
+    }
+
+    async fn capture_output(
+        &self,
+        _spec: &RuntimeUnitSpec,
+        _output: &a3s_runtime::contract::RuntimeOutputSpec,
+        _source: &Path,
+    ) -> std::result::Result<a3s_runtime::contract::RuntimeOutputArtifact, BoxArtifactPortError>
+    {
+        Err(BoxArtifactPortError::Rejected(
+            "R17 private attachment fixture does not publish outputs".into(),
+        ))
+    }
+
+    async fn cleanup_spec(
+        &self,
+        _spec_digest: &str,
+    ) -> std::result::Result<(), BoxArtifactPortError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct SeenResource {
     pid: Option<u32>,
@@ -108,6 +143,8 @@ pub(super) struct BoxRuntimeConformanceFixture {
     pub(super) cases: CaseFactory,
     base_case: a3s_runtime::RuntimeBaseConformanceCase,
     secret_materializer: Arc<ConformanceSecretMaterializer>,
+    artifact_port: Arc<ConformanceArtifactPort>,
+    private_artifact_root: PathBuf,
     drivers: Mutex<Vec<Arc<BoxRuntimeDriver>>>,
     state_roots: Mutex<BTreeSet<PathBuf>>,
     removable_homes: Mutex<BTreeSet<PathBuf>>,
@@ -157,12 +194,34 @@ impl BoxRuntimeConformanceFixture {
         )?;
         let config = driver_config(home_dir.clone());
         let secret_materializer = Arc::new(ConformanceSecretMaterializer::default());
+        let private_artifact_root = home_dir
+            .parent()
+            .ok_or_else(|| failure("R17 home has no parent for private Artifact storage"))?
+            .join(format!(
+                ".a3s-r17-artifacts-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+        let private_artifact_source = private_artifact_root.join("mount");
+        std::fs::create_dir(&private_artifact_root)
+            .map_err(|error| external("create private Artifact root", error))?;
+        std::fs::create_dir(&private_artifact_source)
+            .map_err(|error| external("create private Artifact mount", error))?;
+        set_private_artifact_modes(&private_artifact_root, &private_artifact_source)?;
+        std::fs::write(
+            private_artifact_source.join("payload.txt"),
+            b"r17-private-artifact",
+        )
+        .map_err(|error| external("write private Artifact payload", error))?;
+        let artifact_port = Arc::new(ConformanceArtifactPort {
+            source: private_artifact_source,
+        });
         let driver = Arc::new(
             BoxRuntimeDriver::new_with_isolation(
                 config,
                 a3s_box_core::ExecutionIsolation::Sandbox,
             )?
-            .with_secret_materializer(secret_materializer.clone()),
+            .with_secret_materializer(secret_materializer.clone())
+            .with_artifact_port(artifact_port.clone()),
         );
         let state = Arc::new(FileRuntimeStateStore::new(&state_root));
         Ok(Self {
@@ -172,9 +231,11 @@ impl BoxRuntimeConformanceFixture {
             cases,
             base_case,
             secret_materializer,
+            artifact_port,
+            private_artifact_root: private_artifact_root.clone(),
             drivers: Mutex::new(vec![driver]),
             state_roots: Mutex::new(BTreeSet::from([state_root])),
-            removable_homes: Mutex::new(BTreeSet::new()),
+            removable_homes: Mutex::new(BTreeSet::from([private_artifact_root])),
             seen: Mutex::new(BTreeMap::new()),
         })
     }
@@ -197,7 +258,8 @@ impl BoxRuntimeConformanceFixture {
                 driver_config(self.home_dir.clone()),
                 a3s_box_core::ExecutionIsolation::Sandbox,
             )?
-            .with_secret_materializer(self.secret_materializer.clone()),
+            .with_secret_materializer(self.secret_materializer.clone())
+            .with_artifact_port(self.artifact_port.clone()),
         );
         self.register_driver(driver.clone());
         Ok(driver)
@@ -211,6 +273,14 @@ impl BoxRuntimeConformanceFixture {
         self.secret_materializer
             .authorized
             .store(authorized, Ordering::SeqCst);
+    }
+
+    pub(super) fn private_artifact_source(&self) -> &Path {
+        &self.artifact_port.source
+    }
+
+    pub(super) fn private_artifact_root(&self) -> &Path {
+        &self.private_artifact_root
     }
 
     pub(super) fn register_driver(&self, driver: Arc<BoxRuntimeDriver>) {
@@ -588,6 +658,23 @@ fn driver_config(home_dir: PathBuf) -> BoxRuntimeDriverConfig {
         control_timeout: Duration::from_secs(120),
         task_poll_interval: Duration::from_millis(25),
     }
+}
+
+#[cfg(unix)]
+fn set_private_artifact_modes(root: &Path, source: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| external("protect private Artifact root", error))?;
+    std::fs::set_permissions(source, std::fs::Permissions::from_mode(0o755))
+        .map_err(|error| external("make private Artifact mount readable", error))
+}
+
+#[cfg(not(unix))]
+fn set_private_artifact_modes(_root: &Path, _source: &Path) -> Result<()> {
+    Err(failure(
+        "R17 private Artifact attachment certification requires Unix permissions",
+    ))
 }
 
 fn validate_runtime_assets(home_dir: &Path) -> Result<()> {
