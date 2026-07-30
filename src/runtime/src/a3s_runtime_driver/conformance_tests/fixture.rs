@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use a3s_runtime::contract::{
-    RuntimeCapabilities, RuntimeInspection, RuntimeUnitSpec, RuntimeUnitState, SecretReference,
+    ArtifactRef, RuntimeCapabilities, RuntimeInspection, RuntimeOutputArtifact, RuntimeOutputSpec,
+    RuntimeUnitSpec, RuntimeUnitState, SecretReference,
 };
 use a3s_runtime::{
     runtime_profile_requirements, FileRuntimeStateStore, ManagedRuntimeClient, RuntimeClient,
@@ -13,6 +14,7 @@ use a3s_runtime::{
     RuntimeConformanceProfileEvidence, RuntimeError, RuntimeResult,
 };
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 use super::super::metadata::{local_identity, UNIT_LABEL};
 use super::super::{
@@ -91,8 +93,18 @@ impl BoxSecretMaterializer for ConformanceSecretMaterializer {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConformanceOutputCapture {
+    pub(super) spec_digest: String,
+    pub(super) name: String,
+    pub(super) files: BTreeMap<String, Vec<u8>>,
+    pub(super) artifact: RuntimeOutputArtifact,
+}
+
 struct ConformanceArtifactPort {
     source: PathBuf,
+    captures: Mutex<Vec<ConformanceOutputCapture>>,
+    cleanups: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -107,22 +119,92 @@ impl BoxArtifactPort for ConformanceArtifactPort {
 
     async fn capture_output(
         &self,
-        _spec: &RuntimeUnitSpec,
-        _output: &a3s_runtime::contract::RuntimeOutputSpec,
-        _source: &Path,
-    ) -> std::result::Result<a3s_runtime::contract::RuntimeOutputArtifact, BoxArtifactPortError>
-    {
-        Err(BoxArtifactPortError::Rejected(
-            "R17 private attachment fixture does not publish outputs".into(),
-        ))
+        spec: &RuntimeUnitSpec,
+        output: &RuntimeOutputSpec,
+        source: &Path,
+    ) -> std::result::Result<RuntimeOutputArtifact, BoxArtifactPortError> {
+        let mut files = BTreeMap::new();
+        let entries = std::fs::read_dir(source).map_err(|error| {
+            BoxArtifactPortError::Unavailable(format!(
+                "R17 output directory could not be read: {error}"
+            ))
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                BoxArtifactPortError::Unavailable(format!(
+                    "R17 output entry could not be read: {error}"
+                ))
+            })?;
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+                BoxArtifactPortError::Unavailable(format!(
+                    "R17 output metadata could not be read: {error}"
+                ))
+            })?;
+            if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                return Err(BoxArtifactPortError::Rejected(
+                    "R17 output fixture accepts only regular root-level files".into(),
+                ));
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                BoxArtifactPortError::Rejected("R17 output name is not UTF-8".into())
+            })?;
+            let value = std::fs::read(entry.path()).map_err(|error| {
+                BoxArtifactPortError::Unavailable(format!(
+                    "R17 output content could not be read: {error}"
+                ))
+            })?;
+            files.insert(name, value);
+        }
+        let size_bytes = files.values().try_fold(0_u64, |total, value| {
+            total
+                .checked_add(value.len() as u64)
+                .ok_or_else(|| BoxArtifactPortError::Rejected("R17 output size overflowed".into()))
+        })?;
+        if size_bytes == 0 || size_bytes > output.max_bytes {
+            return Err(BoxArtifactPortError::Rejected(
+                "R17 output violates its declared bound".into(),
+            ));
+        }
+        let digest = output_digest(&files);
+        let artifact = RuntimeOutputArtifact {
+            name: output.name.clone(),
+            artifact: ArtifactRef {
+                uri: format!("https://artifacts.example/a3s/r17/{digest}"),
+                digest,
+                media_type: output.media_type.clone(),
+            },
+            size_bytes,
+        };
+        self.captures
+            .lock()
+            .unwrap()
+            .push(ConformanceOutputCapture {
+                spec_digest: spec.digest().map_err(BoxArtifactPortError::Rejected)?,
+                name: output.name.clone(),
+                files,
+                artifact: artifact.clone(),
+            });
+        Ok(artifact)
     }
 
     async fn cleanup_spec(
         &self,
-        _spec_digest: &str,
+        spec_digest: &str,
     ) -> std::result::Result<(), BoxArtifactPortError> {
+        self.cleanups.lock().unwrap().push(spec_digest.into());
         Ok(())
     }
+}
+
+pub(super) fn output_digest(files: &BTreeMap<String, Vec<u8>>) -> String {
+    let mut digest = Sha256::new();
+    for (name, value) in files {
+        digest.update((name.len() as u64).to_be_bytes());
+        digest.update(name.as_bytes());
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value);
+    }
+    format!("sha256:{:x}", digest.finalize())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -214,6 +296,8 @@ impl BoxRuntimeConformanceFixture {
         .map_err(|error| external("write private Artifact payload", error))?;
         let artifact_port = Arc::new(ConformanceArtifactPort {
             source: private_artifact_source,
+            captures: Mutex::new(Vec::new()),
+            cleanups: Mutex::new(Vec::new()),
         });
         let driver = Arc::new(
             BoxRuntimeDriver::new_with_isolation(
@@ -281,6 +365,14 @@ impl BoxRuntimeConformanceFixture {
 
     pub(super) fn private_artifact_root(&self) -> &Path {
         &self.private_artifact_root
+    }
+
+    pub(super) fn output_captures(&self) -> Vec<ConformanceOutputCapture> {
+        self.artifact_port.captures.lock().unwrap().clone()
+    }
+
+    pub(super) fn artifact_cleanup_calls(&self) -> Vec<String> {
+        self.artifact_port.cleanups.lock().unwrap().clone()
     }
 
     pub(super) fn register_driver(&self, driver: Arc<BoxRuntimeDriver>) {
@@ -606,6 +698,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Logs,
             RuntimeConformanceProfile::Exec,
             RuntimeConformanceProfile::Security,
+            RuntimeConformanceProfile::Outputs,
         ])
     }
 
@@ -636,6 +729,7 @@ impl RuntimeConformanceFixture for BoxRuntimeConformanceFixture {
             RuntimeConformanceProfile::Security => {
                 super::security_profile::run(self, client).await?
             }
+            RuntimeConformanceProfile::Outputs => super::outputs_profile::run(self, client).await?,
             unsupported => {
                 return Err(RuntimeError::Protocol(format!(
                     "Box R17 fixture cannot execute unexpected {} profile",
