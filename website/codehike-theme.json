@@ -1,0 +1,96 @@
+{
+  "name": "a3s-box",
+  "type": "dark",
+  "colors": {
+    "editor.background": "#0a0e0c",
+    "editor.foreground": "#d4ddd7",
+    "editorLineNumber.foreground": "#3f4a43",
+    "editorLineNumber.activeForeground": "#8fa098",
+    "editor.selectionBackground": "#1f4931"
+  },
+  "tokenColors": [
+    {
+      "scope": ["comment", "punctuation.definition.comment"],
+      "settings": {
+        "foreground": "#65736b",
+        "fontStyle": "italic"
+      }
+    },
+    {
+      "scope": [
+        "keyword",
+        "storage",
+        "storage.type",
+        "storage.modifier",
+        "keyword.control",
+        "keyword.operator.word"
+      ],
+      "settings": {
+        "foreground": "#8fc7a5"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.function",
+        "support.function",
+        "meta.function-call",
+        "variable.function"
+      ],
+      "settings": {
+        "foreground": "#dfbd7f"
+      }
+    },
+    {
+      "scope": [
+        "entity.name.type",
+        "entity.name.class",
+        "support.type",
+        "support.class",
+        "entity.name.namespace"
+      ],
+      "settings": {
+        "foreground": "#bda9dd"
+      }
+    },
+    {
+      "scope": ["string", "string.quoted", "string.template"],
+      "settings": {
+        "foreground": "#a1c98f"
+      }
+    },
+    {
+      "scope": [
+        "constant.numeric",
+        "constant.language",
+        "constant.character",
+        "constant.other"
+      ],
+      "settings": {
+        "foreground": "#d99a77"
+      }
+    },
+    {
+      "scope": [
+        "variable.parameter",
+        "variable.other",
+        "meta.object-literal.key",
+        "meta.mapping.key"
+      ],
+      "settings": {
+        "foreground": "#cfd8d2"
+      }
+    },
+    {
+      "scope": ["punctuation", "meta.brace", "meta.delimiter"],
+      "settings": {
+        "foreground": "#7c8981"
+      }
+    },
+    {
+      "scope": ["keyword.operator", "operator"],
+      "settings": {
+        "foreground": "#80a9a0"
+      }
+    }
+  ]
+}

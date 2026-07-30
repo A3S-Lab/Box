@@ -11,12 +11,14 @@
     "dev": "rspress dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "generate:tutorial": "node scripts/generate-runtime-tutorial.mjs",
     "lint": "tsc --noEmit && npm run check:docs",
+    "prebuild": "npm run generate:tutorial",
     "preview": "rspress preview"
   },
   "dependencies": {
     "@rspress/core": "^2.0.17",
-    "codehike": "1.0.7",
+    "codehike": "1.1.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

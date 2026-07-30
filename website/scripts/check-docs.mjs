@@ -8,6 +8,16 @@ const websiteRoot = path.resolve(
 );
 const docsRoot = path.join(websiteRoot, 'docs', 'v3');
 const languages = ['zh', 'en'];
+const tutorialComponent = await readFile(
+  path.join(websiteRoot, 'theme', 'components', 'RuntimeTutorial.tsx'),
+  'utf8',
+);
+const tutorialSteps = JSON.parse(
+  await readFile(
+    path.join(websiteRoot, 'theme', 'generated', 'runtime-tutorial.json'),
+    'utf8',
+  ),
+);
 
 const requiredPages = [
   'index.mdx',
@@ -138,6 +148,44 @@ const programCounts = Object.fromEntries(
     ),
   ]),
 );
+
+if (tutorialSteps.length !== 5) {
+  experienceFailures.push(
+    `runtime tutorial: expected 5 steps, found ${tutorialSteps.length}`,
+  );
+}
+
+for (const step of tutorialSteps) {
+  const focusAnnotation = step.highlighted?.annotations?.find(
+    (annotation) => annotation.name === 'focus',
+  );
+  if (
+    !step.id ||
+    !step.code ||
+    !Array.isArray(step.focus) ||
+    step.focus.length !== 2 ||
+    focusAnnotation?.fromLineNumber !== step.focus[0] ||
+    focusAnnotation?.toLineNumber !== step.focus[1]
+  ) {
+    experienceFailures.push(
+      `runtime tutorial: ${step.id || 'unknown step'} is missing matching line-focus data`,
+    );
+  }
+}
+
+for (const marker of [
+  'rootMargin="-42% 0px -42% 0px"',
+  "selectOn={['scroll']}",
+  'className="box-tutorial-sticky"',
+  'className="box-code-line is-focused"',
+  'data-runtime-tutorial="true"',
+]) {
+  if (!tutorialComponent.includes(marker)) {
+    experienceFailures.push(
+      `RuntimeTutorial.tsx: missing scroll-and-focus contract ${marker}`,
+    );
+  }
+}
 
 for (const language of languages) {
   const languageRoot = path.join(docsRoot, language);
@@ -293,66 +341,27 @@ for (const language of languages) {
   }
 
   for (const marker of [
-    "import CodeHikeCode from '../../../../theme/components/CodeHikeCode';",
-    '<ScrollyCoding',
-    '<ScrollySteps>',
-    '<ScrollyCode title="sandbox.ts">',
+    "import { RuntimeTutorial } from '../../../../theme/components/RuntimeTutorial';",
+    `<RuntimeTutorial locale="${language}" />`,
   ]) {
     if (!quickStart.includes(marker)) {
       experienceFailures.push(
-        `${language}/guide/quick-start.mdx: missing Code Hike marker ${marker}`,
+        `${language}/guide/quick-start.mdx: missing runtime tutorial marker ${marker}`,
       );
     }
-  }
-
-  const stepCount = (quickStart.match(/<ScrollyStep index=\{\d+\}>/g) ?? [])
-    .length;
-  if (stepCount !== 3) {
-    experienceFailures.push(
-      `${language}/guide/quick-start.mdx: expected 3 walkthrough steps, found ${stepCount}`,
-    );
-  }
-
-  const snapshotCount = (
-    quickStart.match(/^```typescript walkthrough\s*$/gm) ?? []
-  ).length;
-  if (snapshotCount !== 3) {
-    experienceFailures.push(
-      `${language}/guide/quick-start.mdx: expected 3 Code Hike snapshots, found ${snapshotCount}`,
-    );
   }
 
   for (const marker of [
     'groupId="box-sdk-language"',
     'className="box-sdk-tabs box-home-sdk-tabs"',
-    "import CodeHikeCode from '../../../theme/components/CodeHikeCode';",
-    '<ScrollyCoding',
-    '<ScrollySteps>',
-    '<ScrollyCode title="sandbox.ts">',
+    "import { RuntimeTutorial } from '../../../theme/components/RuntimeTutorial';",
+    `<RuntimeTutorial locale="${language}" />`,
   ]) {
     if (!homepage.includes(marker)) {
       experienceFailures.push(
         `${language}/index.mdx: missing visible homepage experience marker ${marker}`,
       );
     }
-  }
-
-  const homepageStepCount = (
-    homepage.match(/<ScrollyStep index=\{\d+\}>/g) ?? []
-  ).length;
-  if (homepageStepCount !== 3) {
-    experienceFailures.push(
-      `${language}/index.mdx: expected 3 homepage walkthrough steps, found ${homepageStepCount}`,
-    );
-  }
-
-  const homepageSnapshotCount = (
-    homepage.match(/^```typescript walkthrough\s*$/gm) ?? []
-  ).length;
-  if (homepageSnapshotCount !== 3) {
-    experienceFailures.push(
-      `${language}/index.mdx: expected 3 homepage Code Hike snapshots, found ${homepageSnapshotCount}`,
-    );
   }
 }
 
@@ -373,5 +382,5 @@ if (experienceFailures.length > 0) {
 }
 
 console.log(
-  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, Agent Skill integration, complete Rust/TypeScript/Python/Go programs in Tabs, Code Hike walkthroughs, and ACL fences.`,
+  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, Agent Skill integration, complete Rust/TypeScript/Python/Go programs in Tabs, the five-step line-focus tutorial, and ACL fences.`,
 );

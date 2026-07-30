@@ -1,7 +1,5 @@
 import * as path from 'node:path';
 import { defineConfig } from '@rspress/core';
-import type { RawCode } from 'codehike/code';
-import { remarkCodeHike } from 'codehike/mdx';
 
 const base = process.env.DOCS_BASE ?? '/Box/';
 const siteOrigin = process.env.DOCS_ORIGIN ?? 'https://a3s-lab.github.io';
@@ -73,17 +71,6 @@ const aclLanguage = {
   ],
 };
 
-const codeHikeConfig = {
-  components: {
-    code: 'CodeHikeCode',
-  },
-  syntaxHighlighting: {
-    theme: 'one-dark-pro',
-  },
-  ignoreCode: (codeblock: RawCode) =>
-    !/(?:^|\s)walkthrough(?:\s|$)/.test(codeblock.meta),
-};
-
 export default defineConfig({
   root: path.join(__dirname, 'docs'),
   base,
@@ -114,7 +101,6 @@ export default defineConfig({
   outDir: 'doc_build',
   llms: true,
   markdown: {
-    remarkPlugins: [[remarkCodeHike, codeHikeConfig]],
     shiki: {
       langs: [
         'bash',

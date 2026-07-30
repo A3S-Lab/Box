@@ -40,8 +40,8 @@ const installTargets = [
 const copy = {
   zh: {
     kicker: 'AGENT SKILL',
-    title: '让 Agent 把不受信任的执行交给 Box。',
-    body: '安装一次，即可让 A3S Code、Codex、Claude Code 等支持 Skill 的 Agent 理解 Box 的隔离模型、生命周期、网络、快照与故障恢复。',
+    title: '为编码 Agent 安装 A3S Box Skill。',
+    body: 'Skill 向 A3S Code、Codex 和 Claude Code 提供 A3S Box 的命令、隔离模式、生命周期和清理规则。',
     guide: '阅读完整 Skill 指南',
     consoleTitle: 'a3s-box · skill installer',
     consoleStatus: '远程副本',
@@ -49,22 +49,22 @@ const copy = {
     copyCommand: '复制 Skill 安装命令',
     copy: '复制',
     copied: '已复制',
-    flowLabel: '三步接入',
+    flowLabel: '安装步骤',
     steps: [
       {
         label: '01 / INSTALL',
         title: '选择 Agent',
-        body: '命令会将同一份 SKILL.md 写入所选用户级技能目录。',
+        body: '安装脚本会把 SKILL.md 写入对应的用户级 Skill 目录。',
       },
       {
         label: '02 / RELOAD',
-        title: '重新加载 Agent',
-        body: '重启会话或刷新 Skill 列表，让 Agent 发现 /a3s-box。',
+        title: '重新加载 Skill',
+        body: '重启会话或刷新 Skill 列表，然后确认 /a3s-box 可用。',
       },
       {
         label: '03 / RUN',
-        title: '描述隔离任务',
-        body: 'Agent 会先检查主机能力，再使用明确的 Box 生命周期完成任务和清理。',
+        title: '提交任务',
+        body: '说明镜像、命令、文件和清理要求。Agent 会先检查本机能力。',
       },
     ],
     promptLabel: '示例请求',
@@ -72,12 +72,12 @@ const copy = {
       '在隔离的 MicroVM 中构建这个仓库并运行测试，保留失败日志，完成后清理临时 Box。',
     boundaryLabel: '工具边界',
     boundary:
-      '在 Agent 执行 allowed-tools 的环境中，Skill 仅开放 a3s-box 与 curl 的 Shell 调用；文件读取仍由 Agent 自身权限控制。',
+      'Skill 只声明 a3s-box 和 curl 的 Shell 调用。最终可用工具仍由 Agent 的 allowed-tools 和文件权限决定。',
   },
   en: {
     kicker: 'AGENT SKILL',
-    title: 'Give agents a safe place to execute untrusted work.',
-    body: 'Install once so A3S Code, Codex, Claude Code, and other skill-aware agents understand Box isolation, lifecycle, networking, snapshots, and recovery.',
+    title: 'Install the A3S Box Skill for coding agents.',
+    body: 'The Skill gives A3S Code, Codex, and Claude Code the A3S Box commands, isolation modes, lifecycle, and cleanup rules.',
     guide: 'Read the complete Skill guide',
     consoleTitle: 'a3s-box · skill installer',
     consoleStatus: 'remote copy',
@@ -85,22 +85,22 @@ const copy = {
     copyCommand: 'Copy the Skill install command',
     copy: 'Copy',
     copied: 'Copied',
-    flowLabel: 'THREE-STEP SETUP',
+    flowLabel: 'INSTALLATION',
     steps: [
       {
         label: '01 / INSTALL',
         title: 'Choose an agent',
-        body: 'The command writes the same SKILL.md into the selected user-level skill root.',
+        body: 'The installer writes SKILL.md to the selected user-level Skill directory.',
       },
       {
         label: '02 / RELOAD',
-        title: 'Reload the agent',
-        body: 'Restart the session or refresh skills so the agent discovers /a3s-box.',
+        title: 'Reload Skills',
+        body: 'Restart the session or refresh the Skill list, then confirm that /a3s-box is available.',
       },
       {
         label: '03 / RUN',
-        title: 'Describe isolated work',
-        body: 'The agent checks host capabilities, then uses an explicit Box lifecycle and cleanup path.',
+        title: 'Submit a task',
+        body: 'State the image, command, files, and cleanup requirements. The agent checks the local host first.',
       },
     ],
     promptLabel: 'EXAMPLE REQUEST',
@@ -108,7 +108,7 @@ const copy = {
       'Build this repository and run its tests in an isolated MicroVM. Preserve failing logs and clean up the temporary Box.',
     boundaryLabel: 'TOOL BOUNDARY',
     boundary:
-      'Where an agent enforces allowed-tools, the Skill limits shell calls to a3s-box and curl. File reads remain governed by the agent policy.',
+      'The Skill declares only a3s-box and curl shell calls. The agent allowed-tools and file policy still decide what is available.',
   },
 } as const;
 

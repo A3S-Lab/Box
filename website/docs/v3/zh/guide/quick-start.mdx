@@ -6,13 +6,7 @@ outline: false
 ---
 
 import { Tab, Tabs } from '@rspress/core/theme';
-import CodeHikeCode from '../../../../theme/components/CodeHikeCode';
-import {
-  ScrollyCode,
-  ScrollyCoding,
-  ScrollyStep,
-  ScrollySteps,
-} from '../../../../theme/components/CodeWalkthrough';
+import { RuntimeTutorial } from '../../../../theme/components/RuntimeTutorial';
 
 # 快速开始
 
@@ -190,96 +184,11 @@ func main() {
 </Tab>
 </Tabs>
 
-## Code Hike 代码漫游
+## TypeScript 生命周期
 
-滚动页面或点击步骤卡片，右侧代码面板会保持可见，并在三个完整、可运行的
-TypeScript 程序之间执行逐 token 过渡动画。
+向下滚动或点击步骤，右侧会显示对应代码并高亮当前操作。
 
-<ScrollyCoding ariaLabel="A3S Box TypeScript SDK 生命周期代码漫游">
-<ScrollySteps>
-<ScrollyStep index={0}>
-  <h3>建立隔离边界</h3>
-  <p>
-    从 OCI 镜像创建 Sandbox。MicroVM 仍是默认隔离方式，顶层错误处理会明确呈现启动失败。
-  </p>
-</ScrollyStep>
-<ScrollyStep index={1}>
-  <h3>执行来宾任务</h3>
-  <p>
-    执行参数安全的来宾命令并检查类型化结果。在继续增加任务前，先把资源清理放入
-    <code>finally</code>。
-  </p>
-</ScrollyStep>
-<ScrollyStep index={2}>
-  <h3>持久化、验证并清理</h3>
-  <p>
-    写入并读取工作区文件，拒绝非零来宾退出码，并始终以确定的方式释放 Sandbox。
-  </p>
-</ScrollyStep>
-</ScrollySteps>
-<ScrollyCode title="sandbox.ts">
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-  await sandbox.kill();
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    const result = await sandbox.commands.run('printf ready');
-    console.log(result.stdout);
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    await sandbox.files.write('/workspace/status.txt', 'ready\n');
-    console.log(await sandbox.files.read('/workspace/status.txt'));
-
-    const result = await sandbox.commands.run('test -s /workspace/status.txt');
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr);
-    }
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-</ScrollyCode>
-</ScrollyCoding>
+<RuntimeTutorial locale="zh" />
 
 [SDK 总览](/sdk/)说明了四种语言共享的契约，并链接到每种语言的完整指南。
 
