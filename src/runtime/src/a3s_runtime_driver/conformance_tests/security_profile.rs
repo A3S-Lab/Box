@@ -3,6 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use a3s_box_core::rootfs_metadata::RUNTIME_ENV_PATH;
+use a3s_box_core::secret::SECRET_ENVIRONMENT_MANIFEST;
 use a3s_runtime::contract::{
     NetworkMode, RuntimeInspection, RuntimeMount, RuntimeMountSource, RuntimeUnitState,
     SecretReference, SecretTarget,
@@ -225,12 +227,28 @@ async fn secret_nondisclosure(
     .map_err(|error| super::external("encode Secret creation intent", error))?;
     let boxes = std::fs::read(fixture.home_dir.join("boxes.json"))
         .map_err(|error| super::external("read Box state for Secret nondisclosure", error))?;
-    let oci = std::fs::read(record.box_dir.join("sandbox/bundle/config.json"))
+    let bundle_directory = record.box_dir.join("sandbox/bundle");
+    let oci = std::fs::read(bundle_directory.join("config.json"))
         .map_err(|error| super::external("read Secret Sandbox OCI configuration", error))?;
+    let oci_spec: serde_json::Value = serde_json::from_slice(&oci)
+        .map_err(|error| super::external("decode Secret Sandbox OCI configuration", error))?;
+    let rootfs_path = oci_spec
+        .pointer("/root/path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| super::protocol("Secret Sandbox OCI configuration omitted root.path"))?;
+    let rootfs_path = if Path::new(rootfs_path).is_absolute() {
+        Path::new(rootfs_path).to_path_buf()
+    } else {
+        bundle_directory.join(rootfs_path)
+    };
+    let staged_environment =
+        std::fs::read(rootfs_path.join(RUNTIME_ENV_PATH.trim_start_matches('/')))
+            .map_err(|error| super::external("read Secret Sandbox staged environment", error))?;
     for (label, bytes) in [
         ("managed creation intent", creation_intent.as_slice()),
         ("boxes.json", boxes.as_slice()),
         ("Sandbox OCI configuration", oci.as_slice()),
+        ("Sandbox staged environment", staged_environment.as_slice()),
     ] {
         let value = String::from_utf8_lossy(bytes);
         require(
@@ -239,8 +257,14 @@ async fn secret_nondisclosure(
         )?;
     }
     require(
-        String::from_utf8_lossy(&oci).contains("A3S_BOX_SECRET_ENV_V1"),
-        "Sandbox OCI configuration omitted the non-secret environment binding manifest",
+        String::from_utf8_lossy(&oci).contains(&format!("BOX_EXEC_ENV_FILE={RUNTIME_ENV_PATH}")),
+        "Sandbox OCI configuration omitted the protected environment staging pointer",
+    )?;
+    require(
+        String::from_utf8_lossy(&staged_environment)
+            .lines()
+            .any(|line| line.starts_with(&format!("{SECRET_ENVIRONMENT_MANIFEST}="))),
+        "Sandbox staged environment omitted the non-secret environment binding manifest",
     )?;
 
     let calls_before_reconstruction = fixture.secret_materialization_calls();
