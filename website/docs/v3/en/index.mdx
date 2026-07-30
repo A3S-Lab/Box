@@ -8,26 +8,20 @@ outline: false
 
 import { Tab, Tabs } from '@rspress/core/theme';
 import { withBase } from '@rspress/core/runtime';
-import CodeHikeCode from '../../../theme/components/CodeHikeCode';
-import {
-  ScrollyCode,
-  ScrollyCoding,
-  ScrollyStep,
-  ScrollySteps,
-} from '../../../theme/components/CodeWalkthrough';
+import { RuntimeTutorial } from '../../../theme/components/RuntimeTutorial';
 
 <div className="box-section-heading box-home-code-tour__heading">
-  <span>INTERACTIVE SDK · CODE HIKE</span>
-  <h2>Four languages. One runtime contract you can walk through.</h2>
+  <span>SDK EXAMPLES</span>
+  <h2>Control the local runtime from Rust, TypeScript, Python, or Go.</h2>
   <p>
-    Switch complete examples with the same Tabs pattern used by the a3s-code
-    docs, then watch the Sandbox lifecycle unfold with Code Hike.
+    Choose a language for a complete example, then scroll through creation,
+    resources, files, commands, and cleanup in TypeScript.
   </p>
 </div>
 
 <div className="box-home-code-tour__label">
-  <span>01 / LANGUAGE TABS</span>
-  <strong>Choose your SDK</strong>
+  <span>01 / SDK</span>
+  <strong>Choose a language</strong>
 </div>
 
 <Tabs
@@ -130,91 +124,11 @@ func main() {
   id="homepage-code-hike"
   className="box-home-code-tour__label box-home-code-tour__label--walk"
 >
-  <span>02 / CODE WALKTHROUGH</span>
-  <strong>Follow one complete lifecycle</strong>
+  <span>02 / TYPESCRIPT</span>
+  <strong>Review the complete lifecycle</strong>
 </div>
 
-<ScrollyCoding ariaLabel="Homepage A3S Box TypeScript SDK walkthrough">
-<ScrollySteps>
-<ScrollyStep index={0}>
-  <h3>Establish the boundary</h3>
-  <p>Create a Sandbox from OCI while dedicated-kernel MicroVM stays the default.</p>
-</ScrollyStep>
-<ScrollyStep index={1}>
-  <h3>Run guest work</h3>
-  <p>
-    Execute a guest command, inspect its typed result, and guarantee cleanup
-    with <code>finally</code>.
-  </p>
-</ScrollyStep>
-<ScrollyStep index={2}>
-  <h3>Write, verify, release</h3>
-  <p>Persist workspace state, check the exit code, and release the Sandbox deterministically.</p>
-</ScrollyStep>
-</ScrollySteps>
-<ScrollyCode title="sandbox.ts">
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-  await sandbox.kill();
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    const result = await sandbox.commands.run('printf ready');
-    console.log(result.stdout);
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    await sandbox.files.write('/workspace/status.txt', 'ready\n');
-    console.log(await sandbox.files.read('/workspace/status.txt'));
-
-    const result = await sandbox.commands.run('test -s /workspace/status.txt');
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr);
-    }
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-</ScrollyCode>
-</ScrollyCoding>
+<RuntimeTutorial locale="en" />
 
 <a className="box-inline-link" href={withBase('/en/guide/quick-start.html')}>
   Open the complete quick start →

@@ -8,26 +8,20 @@ outline: false
 
 import { Tab, Tabs } from '@rspress/core/theme';
 import { withBase } from '@rspress/core/runtime';
-import CodeHikeCode from '../../../theme/components/CodeHikeCode';
-import {
-  ScrollyCode,
-  ScrollyCoding,
-  ScrollyStep,
-  ScrollySteps,
-} from '../../../theme/components/CodeWalkthrough';
+import { RuntimeTutorial } from '../../../theme/components/RuntimeTutorial';
 
 <div className="box-section-heading box-home-code-tour__heading">
-  <span>交互式 SDK · CODE HIKE</span>
-  <h2>四种语言，一个可以漫游的运行时契约。</h2>
+  <span>SDK 示例</span>
+  <h2>用 Rust、TypeScript、Python 或 Go 控制本地运行时。</h2>
   <p>
-    用与 a3s-code 文档一致的 Tabs 切换完整示例，再通过 Code Hike
-    观察沙箱生命周期如何逐步展开。
+    先选择语言查看完整示例，再向下滚动逐步查看 TypeScript
+    示例中的创建、资源、文件、命令和清理。
   </p>
 </div>
 
 <div className="box-home-code-tour__label">
-  <span>01 / LANGUAGE TABS</span>
-  <strong>选择你的 SDK</strong>
+  <span>01 / SDK</span>
+  <strong>选择语言</strong>
 </div>
 
 <Tabs
@@ -130,90 +124,11 @@ func main() {
   id="homepage-code-hike"
   className="box-home-code-tour__label box-home-code-tour__label--walk"
 >
-  <span>02 / CODE WALKTHROUGH</span>
-  <strong>跟着代码完成一次生命周期</strong>
+  <span>02 / TYPESCRIPT</span>
+  <strong>逐步查看完整生命周期</strong>
 </div>
 
-<ScrollyCoding ariaLabel="首页 A3S Box TypeScript SDK 代码漫游">
-<ScrollySteps>
-<ScrollyStep index={0}>
-  <h3>建立隔离边界</h3>
-  <p>从 OCI 镜像创建 Sandbox；默认隔离仍然是独立内核 MicroVM。</p>
-</ScrollyStep>
-<ScrollyStep index={1}>
-  <h3>执行来宾任务</h3>
-  <p>
-    运行来宾命令并读取类型化结果，同时用 <code>finally</code> 保证清理。
-  </p>
-</ScrollyStep>
-<ScrollyStep index={2}>
-  <h3>写入、验证、释放</h3>
-  <p>持久化工作区状态、检查退出码，并确定性释放 Sandbox。</p>
-</ScrollyStep>
-</ScrollySteps>
-<ScrollyCode title="sandbox.ts">
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-  await sandbox.kill();
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    const result = await sandbox.commands.run('printf ready');
-    console.log(result.stdout);
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-```typescript walkthrough
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    await sandbox.files.write('/workspace/status.txt', 'ready\n');
-    console.log(await sandbox.files.read('/workspace/status.txt'));
-
-    const result = await sandbox.commands.run('test -s /workspace/status.txt');
-    if (result.exitCode !== 0) {
-      throw new Error(result.stderr);
-    }
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-</ScrollyCode>
-</ScrollyCoding>
+<RuntimeTutorial locale="zh" />
 
 <a className="box-inline-link" href={withBase('/guide/quick-start.html')}>
   打开完整快速开始 →

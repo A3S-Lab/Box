@@ -68,13 +68,13 @@ const englishHomepage = await readFile(
   'utf8',
 );
 
-if (!rootHomepage.includes('让 Agent 任务')) {
+if (!rootHomepage.includes('在本机运行')) {
   throw new Error('The default homepage is not rendered in Chinese.');
 }
 if (!rootHomepage.includes(`${base}en/`)) {
   throw new Error('The Chinese homepage does not expose the English locale.');
 }
-if (!englishHomepage.includes('Run agent workloads')) {
+if (!englishHomepage.includes('Run OCI workloads')) {
   throw new Error('The /en/ homepage is not rendered in English.');
 }
 for (const [homepagePath, html] of [
@@ -90,9 +90,11 @@ for (const [homepagePath, html] of [
     'id="homepage-code-hike"',
     'href="#homepage-code-hike"',
     'box-home-sdk-tabs',
-    'data-code-walkthrough="true"',
-    'data-codehike="true"',
-    '3<!-- --> snapshots',
+    'data-runtime-tutorial="true"',
+    'class="box-tutorial-sticky"',
+    'data-tutorial-step="create"',
+    'data-tutorial-step="cleanup"',
+    'data-focus="true"',
   ]) {
     if (!html.includes(marker)) {
       throw new Error(
@@ -160,13 +162,15 @@ for (const localePrefix of ['', 'en/']) {
 
   for (const marker of [
     'box-sdk-tabs',
-    'data-code-walkthrough="true"',
-    'data-codehike="true"',
-    'Code Hike',
+    'data-runtime-tutorial="true"',
+    'class="box-tutorial-sticky"',
+    'data-tutorial-step="create"',
+    'data-tutorial-step="cleanup"',
+    'data-focus="true"',
   ]) {
     if (!quickStartHtml.includes(marker)) {
       throw new Error(
-        `${quickStartPath} is missing its SDK Tabs or Code Hike marker: ${marker}`,
+        `${quickStartPath} is missing its SDK Tabs or line-focus tutorial marker: ${marker}`,
       );
     }
   }
@@ -178,16 +182,12 @@ for (const localePrefix of ['', 'en/']) {
     }
   }
 
-  const snapshotCount = (quickStartHtml.match(/data-codehike="true"/g) ?? [])
-    .length;
-  if (snapshotCount !== 1) {
+  const tutorialStepCount = (
+    quickStartHtml.match(/data-tutorial-step="[^"]+"/g) ?? []
+  ).length;
+  if (tutorialStepCount !== 5) {
     throw new Error(
-      `${quickStartPath} should server-render the selected Code Hike snapshot, found ${snapshotCount}.`,
-    );
-  }
-  if (!quickStartHtml.includes('3<!-- --> snapshots')) {
-    throw new Error(
-      `${quickStartPath} does not expose all 3 interactive Code Hike snapshots.`,
+      `${quickStartPath} should server-render 5 tutorial steps, found ${tutorialStepCount}.`,
     );
   }
 
@@ -271,5 +271,5 @@ if (brokenReferences.length > 0) {
 }
 
 console.log(
-  `Bilingual Agent Skill, Tabs, Code Hike walkthroughs, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
+  `Bilingual Agent Skill, Tabs, line-focus tutorials, references, and ACL highlighting verified across ${htmlFiles.length} HTML pages.`,
 );
