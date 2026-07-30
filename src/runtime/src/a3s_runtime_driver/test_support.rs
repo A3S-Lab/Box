@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -60,6 +61,7 @@ pub(super) struct DriverFakeBackend {
     fail_start_after_effect: AtomicBool,
     fail_start_after_effect_at: AtomicUsize,
     next_start_terminal: Mutex<VecDeque<(ExecutionState, Option<i32>)>>,
+    next_start_writes: Mutex<VecDeque<(PathBuf, Vec<u8>)>>,
     cancelled_inspection: Mutex<Option<Arc<CancelledInspection>>>,
 }
 
@@ -124,6 +126,13 @@ impl DriverFakeBackend {
             .push_back((state, Some(exit_code)));
     }
 
+    pub(super) fn write_on_next_start(&self, path: PathBuf, value: impl Into<Vec<u8>>) {
+        self.next_start_writes
+            .lock()
+            .unwrap()
+            .push_back((path, value.into()));
+    }
+
     pub(super) fn finish(&self, execution_id: &str, exit_code: i32) {
         let mut executions = self.executions.lock().unwrap();
         let execution = executions.get_mut(execution_id).unwrap();
@@ -181,6 +190,20 @@ impl DriverFakeBackend {
 impl LocalExecutionBackend for DriverFakeBackend {
     async fn start(&self, record: &BoxRecord) -> ExecutionManagerResult<LocalExecutionHandle> {
         let handle = Self::handle(record)?;
+        if let Some((path, value)) = self.next_start_writes.lock().unwrap().pop_front() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    ExecutionManagerError::Internal(format!(
+                        "failed to create fake Task-output directory: {error}"
+                    ))
+                })?;
+            }
+            std::fs::write(path, value).map_err(|error| {
+                ExecutionManagerError::Internal(format!(
+                    "failed to write fake Task output: {error}"
+                ))
+            })?;
+        }
         let mut executions = self.executions.lock().unwrap();
         if let Some(execution) = executions.get(&record.id) {
             if matches!(
@@ -497,6 +520,7 @@ fn configured_driver_with_materializer(
         connector,
         a3s_box_core::ExecutionIsolation::Microvm,
         materializer,
+        None,
         Some(TransientRegistryAuthBroker::default()),
     )
     .unwrap();

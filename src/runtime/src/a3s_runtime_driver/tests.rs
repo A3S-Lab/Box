@@ -140,7 +140,10 @@ async fn capabilities_claim_only_the_mapped_box_surface() {
         capabilities.network_modes,
         vec![NetworkMode::None, NetworkMode::Service]
     );
-    assert_eq!(capabilities.mount_kinds, vec![MountKind::Tmpfs]);
+    assert_eq!(
+        capabilities.mount_kinds,
+        vec![MountKind::Volume, MountKind::Tmpfs]
+    );
     assert_eq!(
         capabilities.health_check_kinds,
         vec![
@@ -447,25 +450,6 @@ fn mapping_rejects_secret_collisions_and_unencodable_targets() {
     assert!(matches!(
         creation_request(&registry, TEST_EXECUTION_ISOLATION),
         Err(RuntimeError::InvalidRequest(message)) if message.contains("unique")
-    ));
-}
-
-#[test]
-fn mapping_rejects_unadvertised_mount_kinds_before_mutation() {
-    let mut spec = spec(RuntimeUnitClass::Service);
-    spec.mounts.push(RuntimeMount {
-        name: "data".into(),
-        source: RuntimeMountSource::Volume {
-            volume_id: "runtime-data".into(),
-        },
-        target: "/data".into(),
-        read_only: false,
-    });
-
-    assert!(matches!(
-        creation_request(&spec, TEST_EXECUTION_ISOLATION),
-        Err(RuntimeError::UnsupportedCapabilities(missing))
-            if missing == vec!["mount_kind:Volume"]
     ));
 }
 

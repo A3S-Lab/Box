@@ -10,12 +10,13 @@ use a3s_box_core::{
     ExecutionRestartPolicy, NetworkMode, ResourceConfig, ResourceLimits,
 };
 use a3s_runtime::contract::{
-    ArtifactRef, MountKind, NetworkMode as RuntimeNetworkMode, RestartPolicy, RuntimeMountSource,
+    ArtifactRef, NetworkMode as RuntimeNetworkMode, RestartPolicy, RuntimeMountSource,
     RuntimeUnitClass, RuntimeUnitSpec, SecretTarget, TransportProtocol,
 };
 use a3s_runtime::{RuntimeError, RuntimeResult};
 use url::Position;
 
+use super::artifact::RuntimeStoragePlan;
 use super::metadata::{managed_labels, operation_id};
 use super::secret::secret_file;
 use super::{OCI_IMAGE_INDEX, OCI_IMAGE_MANIFEST};
@@ -28,8 +29,10 @@ pub(super) fn creation_request_for(
     spec: &RuntimeUnitSpec,
     execution_isolation: ExecutionIsolation,
     secret_root: &Path,
+    storage: &RuntimeStoragePlan,
 ) -> RuntimeResult<CreateExecutionRequest> {
     spec.validate().map_err(RuntimeError::InvalidRequest)?;
+    storage.validate_for(spec)?;
     validate_provider_unit_id(&spec.unit_id)?;
     validate_supported_shape(spec)?;
     let spec_digest = spec.digest().map_err(RuntimeError::InvalidRequest)?;
@@ -66,6 +69,8 @@ pub(super) fn creation_request_for(
     let tmpfs = compile_tmpfs_mounts(spec)?;
     let (secret_volumes, secret_environment_manifest) =
         compile_secret_inputs(spec, secret_root, &spec_digest)?;
+    let mut volumes = storage.volumes().to_vec();
+    volumes.extend(secret_volumes);
     let mut extra_env = spec
         .process
         .environment
@@ -88,7 +93,7 @@ pub(super) fn creation_request_for(
         cmd,
         entrypoint_override,
         workdir: spec.process.working_directory.clone(),
-        volumes: secret_volumes,
+        volumes,
         extra_env,
         network: NetworkMode::None,
         tmpfs,
@@ -124,6 +129,7 @@ pub(super) fn creation_request_for(
                 .iter()
                 .any(|reference| !matches!(reference.target, SecretTarget::RegistryCredential))
                 .then(|| secret_root.to_path_buf()),
+            volume_names: storage.volume_names().to_vec(),
             ..Default::default()
         },
         rootfs_snapshot_id: None,
@@ -135,11 +141,25 @@ pub(super) fn creation_request(
     spec: &RuntimeUnitSpec,
     execution_isolation: ExecutionIsolation,
 ) -> RuntimeResult<CreateExecutionRequest> {
+    let storage = RuntimeStoragePlan::empty(spec)?;
     creation_request_for(
         spec,
         execution_isolation,
         Path::new("/run/a3s-box/runtime-secrets"),
+        &storage,
     )
+}
+
+/// Validate every provider-owned creation field before storage preparation can
+/// create a named Volume. The empty plan is replaced by the exact prepared
+/// plan only after this side-effect-free pass succeeds.
+pub(super) fn validate_creation_spec(
+    spec: &RuntimeUnitSpec,
+    execution_isolation: ExecutionIsolation,
+    secret_root: &Path,
+) -> RuntimeResult<()> {
+    let storage = RuntimeStoragePlan::empty(spec)?;
+    creation_request_for(spec, execution_isolation, secret_root, &storage).map(|_| ())
 }
 
 pub(super) fn operation(spec: &RuntimeUnitSpec) -> RuntimeResult<a3s_box_core::OperationId> {
@@ -183,25 +203,6 @@ fn validate_supported_shape(spec: &RuntimeUnitSpec) -> RuntimeResult<()> {
     {
         return Err(RuntimeError::UnsupportedCapabilities(vec![
             "feature:ServiceUdp".into(),
-        ]));
-    }
-    let unsupported_mount_kinds = spec
-        .mounts
-        .iter()
-        .map(|mount| mount.source.kind())
-        .filter(|kind| *kind != MountKind::Tmpfs)
-        .collect::<std::collections::BTreeSet<_>>();
-    if !unsupported_mount_kinds.is_empty() {
-        return Err(RuntimeError::UnsupportedCapabilities(
-            unsupported_mount_kinds
-                .into_iter()
-                .map(|kind| format!("mount_kind:{kind:?}"))
-                .collect(),
-        ));
-    }
-    if !spec.outputs.is_empty() {
-        return Err(RuntimeError::UnsupportedCapabilities(vec![
-            "feature:OutputArtifacts".into(),
         ]));
     }
     if spec.resources.ephemeral_storage_bytes.is_some() {
@@ -355,18 +356,17 @@ fn validate_provider_unit_id(unit_id: &str) -> RuntimeResult<()> {
 fn compile_tmpfs_mounts(spec: &RuntimeUnitSpec) -> RuntimeResult<Vec<String>> {
     spec.mounts
         .iter()
-        .map(|mount| {
+        .filter_map(|mount| {
             let RuntimeMountSource::Tmpfs { size_bytes } = &mount.source else {
-                return Err(RuntimeError::Protocol(
-                    "Box tmpfs compilation received an unsupported mount kind".into(),
-                ));
+                return None;
             };
-            validate_tmpfs_target(&mount.target)?;
-            Ok(format!(
-                "{}:size={size_bytes},{}",
-                mount.target,
-                if mount.read_only { "ro" } else { "rw" }
-            ))
+            Some(validate_tmpfs_target(&mount.target).map(|()| {
+                format!(
+                    "{}:size={size_bytes},{}",
+                    mount.target,
+                    if mount.read_only { "ro" } else { "rw" }
+                )
+            }))
         })
         .collect()
 }

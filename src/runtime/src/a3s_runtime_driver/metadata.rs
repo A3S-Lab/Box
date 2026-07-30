@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{BoxRecord, ManagedExecutionState};
 
+use super::artifact::RuntimeStoragePlan;
 use super::mapping::{creation_request_for, labels_as_hash_map};
 use super::BoxRuntimeDriver;
 
@@ -89,6 +90,7 @@ impl BoxRuntimeDriver {
             self.execution_isolation,
             &self.config.secret_root,
         )?;
+        self.artifact_storage.validate_record(spec, &record).await?;
         Ok(Some(record))
     }
 
@@ -159,10 +161,15 @@ pub(super) fn validate_record_for_spec(
     secret_root: &Path,
 ) -> RuntimeResult<()> {
     validate_owned_record(record, &spec.unit_id)?;
-    let expected_request = creation_request_for(spec, execution_isolation, secret_root)?;
     let metadata = record.managed_execution.as_ref().ok_or_else(|| {
         RuntimeError::Protocol(format!("Box execution {} lost managed metadata", record.id))
     })?;
+    // Reconstruct the persisted storage portion first so static intent
+    // validation remains independent of caller I/O. `find_generation` then
+    // compares it with the exact plan required by the live Artifact port and
+    // Box VolumeStore.
+    let storage = RuntimeStoragePlan::from_request(spec, &metadata.request)?;
+    let expected_request = creation_request_for(spec, execution_isolation, secret_root, &storage)?;
     let actual_request = serde_json::to_value(&metadata.request)
         .map_err(|error| RuntimeError::Protocol(error.to_string()))?;
     let expected_request = serde_json::to_value(&expected_request)

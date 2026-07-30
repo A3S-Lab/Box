@@ -1,5 +1,6 @@
 //! A3S Runtime provider adapter for Box isolation backends.
 
+mod artifact;
 mod exec;
 mod health;
 mod lifecycle;
@@ -8,6 +9,7 @@ mod mapping;
 mod metadata;
 mod secret;
 mod service_endpoints;
+mod volume_storage;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -28,9 +30,11 @@ use tokio::sync::OnceCell;
 use crate::local_execution::TransientRegistryAuthBroker;
 use crate::{ExecutionIsolation, LocalExecutionManager, VmLocalExecutionBackend};
 
+use self::artifact::ArtifactStorageOwner;
 use self::secret::SecretMaterializationOwner;
 use self::service_endpoints::ServiceEndpointOwner;
 
+pub use self::artifact::{BoxArtifactPort, BoxArtifactPortError};
 pub use self::secret::{
     BoxRegistryCredential, BoxSecretMaterial, BoxSecretMaterializationError, BoxSecretMaterializer,
 };
@@ -74,6 +78,7 @@ pub struct BoxRuntimeDriver {
     port_connector: Arc<dyn ExecutionPortConnector>,
     service_endpoints: ServiceEndpointOwner,
     execution_isolation: ExecutionIsolation,
+    artifact_storage: ArtifactStorageOwner,
     secret_materialization: SecretMaterializationOwner,
     transient_registry_auth: Option<TransientRegistryAuthBroker>,
     provider_build: OnceCell<String>,
@@ -102,6 +107,7 @@ impl BoxRuntimeDriver {
             connector,
             execution_isolation,
             None,
+            None,
             Some(broker),
         )
     }
@@ -120,18 +126,30 @@ impl BoxRuntimeDriver {
         self
     }
 
+    /// Compose the shared Box driver with one caller-owned Artifact boundary.
+    ///
+    /// The caller keeps authenticated transport and Artifact admission. Box
+    /// reuses its existing VolumeStore and lifecycle records for mount wiring,
+    /// Task-output staging, generation fencing, and cleanup.
+    pub fn with_artifact_port(mut self, port: Arc<dyn BoxArtifactPort>) -> Self {
+        self.artifact_storage = ArtifactStorageOwner::new(self.config.home_dir.clone(), Some(port));
+        self
+    }
+
     fn with_manager_connector_and_materializer(
         config: BoxRuntimeDriverConfig,
         manager: LocalExecutionManager,
         connector: Arc<dyn ExecutionPortConnector>,
         execution_isolation: ExecutionIsolation,
         materializer: Option<Arc<dyn BoxSecretMaterializer>>,
+        artifact_port: Option<Arc<dyn BoxArtifactPort>>,
         transient_registry_auth: Option<TransientRegistryAuthBroker>,
     ) -> RuntimeResult<Self> {
         validate_config(&config)?;
         let endpoint_connector = Arc::clone(&connector);
         let secret_materialization =
             SecretMaterializationOwner::new(config.secret_root.clone(), materializer);
+        let artifact_storage = ArtifactStorageOwner::new(config.home_dir.clone(), artifact_port);
         Ok(Self {
             provider_id: ProviderId::parse("a3s-box")?,
             config,
@@ -139,6 +157,7 @@ impl BoxRuntimeDriver {
             port_connector: connector,
             service_endpoints: ServiceEndpointOwner::new(endpoint_connector),
             execution_isolation,
+            artifact_storage,
             secret_materialization,
             transient_registry_auth,
             provider_build: OnceCell::new(),
@@ -302,6 +321,13 @@ impl RuntimeDriver for BoxRuntimeDriver {
         if self.secret_materialization.configured() {
             features.push(RuntimeFeature::SecretReferences);
         }
+        if self.artifact_storage.artifact_configured() {
+            features.push(RuntimeFeature::OutputArtifacts);
+        }
+        let mut mount_kinds = vec![MountKind::Volume, MountKind::Tmpfs];
+        if self.artifact_storage.artifact_configured() {
+            mount_kinds.insert(0, MountKind::Artifact);
+        }
         let capabilities = RuntimeCapabilities {
             schema: RuntimeCapabilities::SCHEMA.into(),
             provider_id: self.provider_id.clone(),
@@ -312,7 +338,7 @@ impl RuntimeDriver for BoxRuntimeDriver {
             // class. `execution_isolation` selects Box's concrete backend.
             isolation_levels: vec![IsolationLevel::Sandbox],
             network_modes: vec![NetworkMode::None, NetworkMode::Service],
-            mount_kinds: vec![MountKind::Tmpfs],
+            mount_kinds,
             health_check_kinds: vec![
                 HealthCheckKind::Http,
                 HealthCheckKind::Tcp,
@@ -377,6 +403,8 @@ impl RuntimeDriver for BoxRuntimeDriver {
     }
 }
 
+#[cfg(test)]
+mod artifact_tests;
 #[cfg(test)]
 mod conformance_tests;
 #[cfg(test)]

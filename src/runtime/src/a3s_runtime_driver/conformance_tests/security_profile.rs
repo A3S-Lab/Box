@@ -132,26 +132,6 @@ async fn reject_hostile_inputs(
         "Box accepted an unadvertised outbound network",
     )?;
 
-    let mut volume = template.clone();
-    volume.request_id = fixture.cases.request_id("security-volume");
-    volume.spec.unit_id = fixture.cases.unit_id("security-volume");
-    volume.spec.mounts = vec![RuntimeMount {
-        name: "provider-volume".into(),
-        source: RuntimeMountSource::Volume {
-            volume_id: "r17-provider-volume".into(),
-        },
-        target: "/mnt/provider-volume".into(),
-        read_only: false,
-    }];
-    require(
-        matches!(
-            client.apply(&volume).await,
-            Err(RuntimeError::UnsupportedCapabilities(missing))
-                if missing == vec!["mount_kind:Volume"]
-        ),
-        "Box accepted an unadvertised volume mount",
-    )?;
-
     let after = fixture
         .driver
         .manager

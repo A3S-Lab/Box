@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{BoxRecord, ManagedExecutionState};
 
-use super::mapping::{creation_request_for, operation};
+use super::mapping::{creation_request_for, operation, validate_creation_spec};
 use super::metadata::{
     local_identity, map_execution_error, now_ms, provider_identity_matches, timestamp_ms,
     validate_record_for_spec, SPEC_DIGEST_LABEL,
@@ -25,11 +25,11 @@ impl BoxRuntimeDriver {
         spec: &RuntimeUnitSpec,
         current: &RuntimeObservation,
     ) -> RuntimeResult<RuntimeObservation> {
-        // Complete validation and conversion before any Box state or provider
-        // mutation. The returned request is reused for identity comparison.
-        let request =
-            creation_request_for(spec, self.execution_isolation, &self.config.secret_root)?;
+        // Complete the side-effect-free validation pass before storage
+        // preparation can materialize a caller view or create a named Volume.
+        validate_creation_spec(spec, self.execution_isolation, &self.config.secret_root)?;
         self.secret_materialization.require_configured_for(spec)?;
+        self.artifact_storage.require_configured_for(spec)?;
         let mut record = self.find_generation(spec).await?;
 
         if let Some(existing) = record.as_ref() {
@@ -43,6 +43,13 @@ impl BoxRuntimeDriver {
         let record = match record {
             Some(record) => record,
             None => {
+                let storage = self.artifact_storage.prepare_plan(spec).await?;
+                let request = creation_request_for(
+                    spec,
+                    self.execution_isolation,
+                    &self.config.secret_root,
+                    &storage,
+                )?;
                 let operation_id = operation(spec)?;
                 let reservation = self
                     .bounded("reservation", async {
@@ -68,6 +75,7 @@ impl BoxRuntimeDriver {
                     self.execution_isolation,
                     &self.config.secret_root,
                 )?;
+                self.artifact_storage.validate_record(spec, &record).await?;
                 record
             }
         };
@@ -97,6 +105,7 @@ impl BoxRuntimeDriver {
                 .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
                 .await;
             self.secret_materialization.cleanup_spec(&unit.spec).await?;
+            self.artifact_storage.cleanup_spec(&unit.spec).await?;
             return Ok(not_found(&unit.spec));
         };
         provider_identity_matches(&unit.observation, &record)?;
@@ -184,6 +193,10 @@ impl BoxRuntimeDriver {
         if let Some(record) = record {
             provider_identity_matches(&unit.observation, &record)?;
             self.retire_record(record, &unit.spec.unit_id).await?;
+        } else {
+            // A previous removal may have crossed the durable Box boundary
+            // before caller-owned Artifact cleanup completed.
+            self.artifact_storage.cleanup_spec(&unit.spec).await?;
         }
         self.service_endpoints
             .remove_runtime(&unit.spec.unit_id, unit.spec.generation)
@@ -212,6 +225,7 @@ impl BoxRuntimeDriver {
             self.execution_isolation,
             &self.config.secret_root,
         )?;
+        self.artifact_storage.validate_record(spec, &record).await?;
         let (execution_id, generation, state) = local_identity(&record)?;
         match state {
             ManagedExecutionState::Creating
@@ -226,6 +240,13 @@ impl BoxRuntimeDriver {
                         self.transient_registry_auth.as_ref(),
                     )
                     .await?;
+                // A recovered `Starting` record has already crossed the start
+                // boundary, so resetting it would race a live attachment. For
+                // a fresh `Creating`/`Created` record, clear output staging at
+                // the last safe point before Box attaches and starts it.
+                if state != ManagedExecutionState::Starting {
+                    self.artifact_storage.reset_outputs_for_start(spec).await?;
+                }
                 let result = self
                     .bounded("startup", async {
                         self.manager
@@ -388,6 +409,7 @@ impl BoxRuntimeDriver {
             self.execution_isolation,
             &self.config.secret_root,
         )?;
+        self.artifact_storage.validate_record(spec, &record).await?;
         Ok(record)
     }
 
@@ -422,6 +444,7 @@ impl BoxRuntimeDriver {
                 self.transient_registry_auth.as_ref(),
             )
             .await?;
+        self.artifact_storage.reset_outputs_for_start(spec).await?;
         let (execution_id, generation, _) = local_identity(&record)?;
         let operation_id = restart_operation(spec, generation)?;
         let result = self
@@ -470,7 +493,10 @@ impl BoxRuntimeDriver {
             spec,
             self.execution_isolation,
             &self.config.secret_root,
-        )
+        )?;
+        self.artifact_storage
+            .validate_record(spec, &remaining[0])
+            .await
     }
 
     pub(super) async fn retire_record(
@@ -513,6 +539,7 @@ impl BoxRuntimeDriver {
                     self.secret_materialization
                         .cleanup_digest(&secret_digest)
                         .await?;
+                    self.artifact_storage.cleanup_digest(&secret_digest).await?;
                     return Ok(());
                 }
                 Ok(_) => {}
@@ -583,6 +610,7 @@ impl BoxRuntimeDriver {
                 execution_id
             )));
         }
+        self.artifact_storage.cleanup_digest(&secret_digest).await?;
         Ok(())
     }
 
@@ -599,6 +627,7 @@ impl BoxRuntimeDriver {
             self.execution_isolation,
             &self.config.secret_root,
         )?;
+        self.artifact_storage.validate_record(spec, record).await?;
         let state = state_override.unwrap_or(runtime_state(spec, record)?);
         let terminal = state.is_terminal();
         let metadata = record.managed_execution.as_ref().ok_or_else(|| {
@@ -628,6 +657,11 @@ impl BoxRuntimeDriver {
         } else {
             None
         };
+        let outputs = if state == RuntimeUnitState::Succeeded {
+            self.artifact_storage.capture_outputs(spec).await?
+        } else {
+            Vec::new()
+        };
         let observation = RuntimeObservation {
             schema: RuntimeObservation::SCHEMA.into(),
             unit_id: spec.unit_id.clone(),
@@ -641,7 +675,7 @@ impl BoxRuntimeDriver {
             started_at_ms,
             finished_at_ms,
             health: None,
-            outputs: Vec::new(),
+            outputs,
             usage: None,
             evidence: None,
             provider_attestation: None,
