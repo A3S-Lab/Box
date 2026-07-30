@@ -5,35 +5,49 @@ description: 从安装到生产边界，系统了解 A3S Box。
 
 # A3S Box 指南
 
-A3S Box 是本地 OCI 工作负载运行时。默认执行路径使用独立 Linux 客体内核的
-MicroVM；在经过认证的 Linux 主机上，也可以显式选择共享内核 Sandbox。
+A3S Box 是本地 OCI 工作负载运行时，不是托管 Sandbox 服务，也不提供远程控制平面。
+CLI、原生 SDK 和 Agent Skill 最终操作的都是当前机器上安装的同一个运行时。
 
-运行时不会在两种隔离之间自动降级。主机无法执行请求时，会在写入运行时状态或
-拉取镜像之前返回明确错误。
+默认执行路径使用独立 Linux 客体内核的 MicroVM。在经过认证的 Linux 主机上，可以
+显式选择共享内核 Sandbox；两种隔离之间不会自动降级。
 
-## 建议阅读顺序
+## 建议路径
 
 | 指南                                    | 解决的问题                                        |
 | --------------------------------------- | ------------------------------------------------- |
 | [安装](./installation/)                 | 在 Linux、macOS 或 Windows 上安装经过校验的发布包 |
-| [快速开始](./quick-start/)              | 运行 MicroVM、管理服务并调用四种原生 SDK          |
+| [快速开始](./quick-start/)              | 检查主机、运行 MicroVM 并管理第一个服务           |
 | [架构与隔离](./architecture/)           | 理解能力解析、代际围栏和本地运行时边界            |
 | [镜像与构建](./images-builds/)          | 拉取、构建、标记、保存、加载和清理 OCI 镜像       |
-| [网络与 Compose](./networking-compose/) | 配置 TSI、命名网络、端口发布和 ACL 项目           |
 | [存储与快照](./storage-snapshots/)      | 使用绑定挂载、卷、tmpfs、提交和文件系统快照       |
+| [网络与 Compose](./networking-compose/) | 配置 TSI、命名网络、端口发布和 ACL 项目           |
 | [Windows WHPX](./windows/)              | 启用 WHPX，并了解 Windows 当前能力边界            |
+| [Agent Skill](./agent-skill/)           | 让编码 Agent 按正确的隔离和清理规则调用 Box       |
 
-## 不变量
+这个顺序先跑通最小工作负载，再解释运行时边界，最后进入镜像、数据和网络等需要长期维护的资源。
+如果只查某个命令，可以直接打开 [CLI 参考](/reference/)；如果已经确定开发语言，可以
+直接进入 [SDK 总览](/sdk/)。
 
-- 不传 `--isolation` 即选择默认 MicroVM。
-- `--isolation sandbox` 是经过认证的 Linux 主机上的显式选择。
-- 不支持的组合在产生运行时副作用之前失败。
-- CLI、Rust、TypeScript、Python、Go 和集群适配器共享同一个本地状态所有者。
-- 盒子生命周期使用代际围栏，陈旧句柄不能修改更新后的实例。
-- SDK 与运行时应使用同一 A3S Box 发布版本。
+## 选择执行边界
 
-## 选择入口
+| 契约     | 默认 MicroVM                                 | 显式 Sandbox          |
+| -------- | -------------------------------------------- | --------------------- |
+| 内核边界 | 独立 Linux 客体内核                          | 共享宿主 Linux 内核   |
+| 隔离类别 | `hardware-vm`                                | `shared-kernel`       |
+| 适用任务 | 不可信工作负载和需要更强租户边界的任务       | 可信自动化和受控工具  |
+| 主机要求 | Linux/KVM、Apple Silicon/HVF 或 Windows/WHPX | 经过认证的 Linux 主机 |
+| 自动回退 | 永不                                         | 永不                  |
 
-交互式排障和运维使用 CLI；应用程序和 CI/CD 使用
-[原生 SDK](/sdk/)。两种入口操作相同的本地镜像、Sandbox、卷、网络、快照和日志，
-不存在第二套远程控制平面。
+> [!IMPORTANT]
+> 共享内核 Sandbox 无法防护宿主内核漏洞、恶意宿主管理员、硬件侧信道或通过绑定挂载主动
+> 暴露的数据。涉及这些风险时，使用默认 MicroVM。
+
+## 选择使用方式
+
+| 入口                          | 适合场景                        | 从哪里开始                          |
+| ----------------------------- | ------------------------------- | ----------------------------------- |
+| CLI                           | 交互运行、排障和日常运维        | [快速开始](./quick-start/)          |
+| [原生 SDK](/sdk/)             | 应用程序、Agent worker 和 CI/CD | 选择 Rust、Go、Python 或 TypeScript |
+| [Agent Skill](./agent-skill/) | 让编码 Agent 直接编排本地 Box   | 安装 Skill 并重新加载 Agent         |
+
+三种入口共享同一个执行管理器、镜像、卷、网络、快照、日志和代际围栏，不会建立第二套本地状态。

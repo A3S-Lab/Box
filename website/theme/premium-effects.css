@@ -171,21 +171,22 @@
   z-index: 1;
 }
 
-.box-install {
+.box-install-console {
   border-color: rgba(98, 215, 139, 0.24);
   box-shadow:
     0 24px 70px rgba(0, 0, 0, 0.22),
     0 0 0 1px rgba(98, 215, 139, 0.018);
 }
 
-.box-runtime-window,
+.box-terminal,
 .box-agent-skill-console {
   transition:
     border-color 300ms ease,
     box-shadow 300ms ease;
 }
 
-.box-runtime-window:hover,
+.box-terminal:hover,
+.box-terminal:focus-within,
 .box-agent-skill-console:hover,
 .box-agent-skill-console:focus-within {
   border-color: rgba(98, 215, 139, 0.48);
@@ -215,7 +216,6 @@
   pointer-events: none;
 }
 
-.box-principle-grid article,
 .box-capability-grid article,
 .box-sdk-grid > a,
 .box-agent-skill-flow li {
@@ -226,7 +226,6 @@
     transform 220ms ease;
 }
 
-.box-principle-grid article:hover,
 .box-capability-grid article:hover,
 .box-agent-skill-flow li:hover {
   border-color: rgba(98, 215, 139, 0.33);

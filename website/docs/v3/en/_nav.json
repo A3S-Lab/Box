@@ -10,13 +10,13 @@
     "activeMatch": "^/sdk/"
   },
   {
-    "text": "Agent Skill",
-    "link": "/guide/agent-skill.html"
-  },
-  {
     "text": "Reference",
     "link": "/reference/",
     "activeMatch": "^/reference/"
+  },
+  {
+    "text": "Agent Skill",
+    "link": "/guide/agent-skill.html"
   },
   {
     "text": "Resources",

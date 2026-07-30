@@ -5,7 +5,7 @@ description: Choose a native A3S Box SDK and understand the shared local contrac
 
 # Native SDKs
 
-A3S Box provides first-party Rust, Python, TypeScript, and Go SDKs. They manage
+A3S Box provides first-party Rust, Go, Python, and TypeScript SDKs. They manage
 the same local images, Sandboxes, volumes, networks, snapshots, logs, and
 runtime state as the CLI.
 
@@ -14,9 +14,9 @@ runtime state as the CLI.
 | Language                    | Package                            | Best fit                                                     |
 | --------------------------- | ---------------------------------- | ------------------------------------------------------------ |
 | [Rust](./rust/)             | `a3s-box-sdk`                      | Direct typed runtime integration and management applications |
+| [Go](./go/)                 | `github.com/A3S-Lab/Box/sdk/go/v3` | Context-aware services, agents, and CI workers               |
 | [Python](./python/)         | `a3s-box`                          | Synchronous or asynchronous automation and data tooling      |
 | [TypeScript](./typescript/) | `@a3s-lab/box`                     | Node.js applications and JavaScript build systems            |
-| [Go](./go/)                 | `github.com/A3S-Lab/Box/sdk/go/v3` | Context-aware services, agents, and CI workers               |
 
 Each language has its own guide and complete example. You do not need to
 translate a Python example into Go or switch languages halfway through a
@@ -33,7 +33,7 @@ All SDKs are local-first:
   shared-kernel Sandbox is an explicit Linux-only selection.
 - Expect unsupported host and backend combinations to fail before mutation.
 
-Rust calls typed runtime components directly. Python, TypeScript, and Go use
+Rust calls typed runtime components directly. Go, Python, and TypeScript use
 the installed runtime's versioned machine bridge and never parse human CLI
 output.
 
@@ -80,9 +80,9 @@ images, or arbitrary generated data.
 Pick one language:
 
 - [Rust SDK](./rust/)
+- [Go SDK](./go/)
 - [Python SDK](./python/)
 - [TypeScript SDK](./typescript/)
-- [Go SDK](./go/)
 
 For the underlying isolation model, read
 [Architecture and isolation](/guide/architecture).

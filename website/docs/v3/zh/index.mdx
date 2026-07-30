@@ -1,7 +1,7 @@
 ---
 pageType: home
 title: A3S Box
-description: 本地 OCI 工作负载运行时，默认使用独立内核的 MicroVM 隔离，并提供显式的共享内核 Sandbox 和 Rust、TypeScript、Python、Go 原生 SDK。
+description: 本地 OCI 工作负载运行时，默认使用独立内核的 MicroVM 隔离，并提供显式的共享内核 Sandbox 和 Rust、Go、Python、TypeScript 原生 SDK。
 sidebar: false
 outline: false
 ---
@@ -12,10 +12,11 @@ import { RuntimeTutorial } from '../../../theme/components/RuntimeTutorial';
 
 <div className="box-section-heading box-home-code-tour__heading">
   <span>SDK 示例</span>
-  <h2>用 Rust、TypeScript、Python 或 Go 控制本地运行时。</h2>
+  <h2>用 Rust、Go、Python 或 TypeScript 控制本地运行时。</h2>
   <p>
-    先选择语言查看完整示例，再向下滚动逐步查看 TypeScript
-    示例中的创建、资源、文件、命令和清理。
+    {
+      '先选择语言查看完整示例，再向下滚动逐步查看 TypeScript 示例中的创建、资源、文件、命令和清理。'
+    }
   </p>
 </div>
 
@@ -42,48 +43,6 @@ async fn main() -> Result<(), a3s_box_sdk::ClientError> {
     sandbox.kill().await?;
     Ok(())
 }
-```
-
-</Tab>
-<Tab label="TypeScript" value="typescript">
-
-```typescript
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    const result = await sandbox.commands.run('printf ready');
-    console.log(result.stdout);
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-</Tab>
-<Tab label="Python" value="python">
-
-```python
-import asyncio
-
-from a3s_box import AsyncSandbox
-
-
-async def main() -> None:
-    async with await AsyncSandbox.create("alpine:3.20") as sandbox:
-        result = await sandbox.commands.run("printf ready")
-        print(result.stdout)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
 ```
 
 </Tab>
@@ -115,6 +74,48 @@ func main() {
 
     fmt.Println(result.StdoutString())
 }
+```
+
+</Tab>
+<Tab label="Python" value="python">
+
+```python
+import asyncio
+
+from a3s_box import AsyncSandbox
+
+
+async def main() -> None:
+    async with await AsyncSandbox.create("alpine:3.20") as sandbox:
+        result = await sandbox.commands.run("printf ready")
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+</Tab>
+<Tab label="TypeScript" value="typescript">
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
 ```
 
 </Tab>

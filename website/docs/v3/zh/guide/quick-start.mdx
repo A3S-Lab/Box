@@ -109,48 +109,6 @@ async fn main() -> Result<(), a3s_box_sdk::ClientError> {
 ```
 
 </Tab>
-<Tab label="TypeScript" value="typescript">
-
-```typescript
-import { Sandbox } from '@a3s-lab/box';
-
-async function main(): Promise<void> {
-  const sandbox = await Sandbox.create('alpine:3.20');
-
-  try {
-    const result = await sandbox.commands.run('printf ready');
-    console.log(result.stdout);
-  } finally {
-    await sandbox.kill();
-  }
-}
-
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
-```
-
-</Tab>
-<Tab label="Python" value="python">
-
-```python
-import asyncio
-
-from a3s_box import AsyncSandbox
-
-
-async def main() -> None:
-    async with await AsyncSandbox.create("alpine:3.20") as sandbox:
-        result = await sandbox.commands.run("printf ready")
-        print(result.stdout)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-</Tab>
 <Tab label="Go" value="go">
 
 ```go
@@ -182,6 +140,48 @@ func main() {
 ```
 
 </Tab>
+<Tab label="Python" value="python">
+
+```python
+import asyncio
+
+from a3s_box import AsyncSandbox
+
+
+async def main() -> None:
+    async with await AsyncSandbox.create("alpine:3.20") as sandbox:
+        result = await sandbox.commands.run("printf ready")
+        print(result.stdout)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+</Tab>
+<Tab label="TypeScript" value="typescript">
+
+```typescript
+import { Sandbox } from '@a3s-lab/box';
+
+async function main(): Promise<void> {
+  const sandbox = await Sandbox.create('alpine:3.20');
+
+  try {
+    const result = await sandbox.commands.run('printf ready');
+    console.log(result.stdout);
+  } finally {
+    await sandbox.kill();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+```
+
+</Tab>
 </Tabs>
 
 ## TypeScript 生命周期
@@ -201,3 +201,8 @@ func main() {
 
 依赖平台特性前，请检查[平台矩阵](/reference/platforms)和
 [Windows 指南](./windows/)。
+
+## 下一步
+
+继续阅读[架构与隔离](./architecture/)，理解刚才运行的工作负载如何完成能力准入、
+隔离选择和生命周期持久化；随后进入[镜像与构建](./images-builds/)。
