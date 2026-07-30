@@ -3,6 +3,7 @@ import { Content, useLang, withBase } from '@rspress/core/runtime';
 import { AgentSkillSection } from './AgentSkillSection';
 import { CanvasGridEffect } from './CanvasGridEffect';
 import { PremiumInteractions } from './PremiumInteractions';
+import { RuntimeFeatureShowcase } from './RuntimeFeatureShowcase';
 
 const installCommands = [
   {
@@ -47,12 +48,12 @@ const installCommands = [
 const content = {
   zh: {
     eyebrow: '本地 OCI 运行时 · v3',
-    heroLineOne: '在本机运行',
-    heroLineTwo: 'OCI 工作负载。',
+    heroLineOne: '给每个任务',
+    heroLineTwo: '一个独立内核。',
     heroSubtitle:
-      'A3S Box 在本机创建和管理 OCI 工作负载。默认使用独立内核 MicroVM；Linux 共享内核 Sandbox 需要显式选择，并通过主机能力检查。',
+      'A3S Box 默认在独立内核 MicroVM 中运行 OCI 工作负载。Linux/KVM 可用 CoW snapshot-fork 填充暖池，让重复任务直接从已就绪的 VM 开始。',
     getStarted: '快速开始',
-    installSkill: '安装 Agent Skill',
+    exploreFeatures: '查看核心特性',
     exploreCode: '代码漫游',
     copy: '复制',
     copied: '已复制',
@@ -78,8 +79,8 @@ const content = {
     },
     signals: [
       ['独立内核', '默认隔离'],
-      ['OCI 原生', '镜像与构建'],
-      ['Agent Skill', 'A3S Code · Codex · Claude'],
+      ['写时复制', 'ROOTFS · RAM'],
+      ['暖池', '预启动 MicroVM'],
       ['4 种 SDK', 'Rust · Go · Python · TypeScript'],
     ],
     principleKicker: '隔离模式',
@@ -180,12 +181,12 @@ const content = {
   },
   en: {
     eyebrow: 'LOCAL OCI RUNTIME · v3',
-    heroLineOne: 'Run OCI workloads',
-    heroLineTwo: 'on your machine.',
+    heroLineOne: 'Give every task',
+    heroLineTwo: 'a dedicated kernel.',
     heroSubtitle:
-      'A3S Box creates and manages OCI workloads locally. It uses dedicated-kernel MicroVMs by default. The shared-kernel Linux Sandbox must be selected explicitly and pass host capability checks.',
+      'A3S Box runs OCI workloads in dedicated-kernel MicroVMs by default. On Linux/KVM, CoW snapshot-fork can fill warm pools so repeated tasks start from ready VMs.',
     getStarted: 'Get started',
-    installSkill: 'Install Agent Skill',
+    exploreFeatures: 'Explore core features',
     exploreCode: 'Code walkthrough',
     copy: 'Copy',
     copied: 'Copied',
@@ -211,8 +212,8 @@ const content = {
     },
     signals: [
       ['Dedicated kernel', 'default isolation'],
-      ['OCI-native', 'images and builds'],
-      ['Agent Skill', 'A3S Code · Codex · Claude'],
+      ['Copy on write', 'ROOTFS · RAM'],
+      ['Warm pool', 'pre-booted MicroVMs'],
       ['4 SDKs', 'Rust · Go · Python · TypeScript'],
     ],
     principleKicker: 'ISOLATION MODES',
@@ -441,8 +442,11 @@ export function HomeLayout() {
               {copy.getStarted}
               <ArrowIcon />
             </a>
-            <a className="box-button box-button--secondary" href="#agent-skill">
-              {copy.installSkill}
+            <a
+              className="box-button box-button--secondary"
+              href="#runtime-features"
+            >
+              {copy.exploreFeatures}
               <ArrowIcon />
             </a>
             <a
@@ -549,6 +553,11 @@ export function HomeLayout() {
           </div>
         ))}
       </section>
+
+      <RuntimeFeatureShowcase
+        locale={isChinese ? 'zh' : 'en'}
+        platformHref={docLink('/reference/platforms.html')}
+      />
 
       <AgentSkillSection
         guideHref={docLink('/guide/agent-skill.html')}

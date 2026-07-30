@@ -12,6 +12,17 @@ const tutorialComponent = await readFile(
   path.join(websiteRoot, 'theme', 'components', 'RuntimeTutorial.tsx'),
   'utf8',
 );
+const featureComponent = await readFile(
+  path.join(websiteRoot, 'theme', 'components', 'RuntimeFeatureShowcase.tsx'),
+  'utf8',
+);
+const featureStyles = (
+  await Promise.all(
+    ['runtime-features.css', 'runtime-features-responsive.css'].map((file) =>
+      readFile(path.join(websiteRoot, 'theme', file), 'utf8'),
+    ),
+  )
+).join('\n');
 const tutorialSteps = JSON.parse(
   await readFile(
     path.join(websiteRoot, 'theme', 'generated', 'runtime-tutorial.json'),
@@ -183,6 +194,37 @@ for (const marker of [
   if (!tutorialComponent.includes(marker)) {
     experienceFailures.push(
       `RuntimeTutorial.tsx: missing scroll-and-focus contract ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  'id="runtime-features"',
+  'className="box-agent-probe"',
+  'className="box-vm-barrier"',
+  'className="box-cow-scene"',
+  'className="box-pool-scene"',
+  'MAP_PRIVATE',
+  '--snapshot-fork',
+  'Linux/KVM',
+  'not a universal performance guarantee',
+]) {
+  if (!featureComponent.includes(marker)) {
+    experienceFailures.push(
+      `RuntimeFeatureShowcase.tsx: missing runtime feature contract ${marker}`,
+    );
+  }
+}
+
+for (const marker of [
+  '@keyframes box-agent-escape',
+  '@keyframes box-dirty-page',
+  '@keyframes box-pool-request',
+  '@media (prefers-reduced-motion: reduce)',
+]) {
+  if (!featureStyles.includes(marker)) {
+    experienceFailures.push(
+      `runtime-features.css: missing animation or accessibility contract ${marker}`,
     );
   }
 }
@@ -382,5 +424,5 @@ if (experienceFailures.length > 0) {
 }
 
 console.log(
-  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, Agent Skill integration, complete Rust/TypeScript/Python/Go programs in Tabs, the five-step line-focus tutorial, and ACL fences.`,
+  `Documentation contract verified: ${requiredPages.length} routes × ${languages.length} languages, runtime feature animations, Agent Skill integration, complete Rust/TypeScript/Python/Go programs in Tabs, the five-step line-focus tutorial, and ACL fences.`,
 );
