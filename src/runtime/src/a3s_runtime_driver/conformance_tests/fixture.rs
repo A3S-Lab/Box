@@ -479,6 +479,33 @@ impl BoxRuntimeConformanceFixture {
             }
         }
         remove_empty_directory(&self.home_dir.join("boxes"));
+        let volume_store = crate::VolumeStore::new(
+            self.home_dir.join("volumes.json"),
+            self.home_dir.join("volumes"),
+        );
+        match volume_store.list() {
+            Ok(volumes) => {
+                for volume in volumes {
+                    if let Err(error) = volume_store.remove(&volume.name, false) {
+                        failures.push(format!(
+                            "remove conformance Volume {:?}: {error}",
+                            volume.name
+                        ));
+                    }
+                }
+            }
+            Err(error) => failures.push(format!("load conformance Volumes: {error}")),
+        }
+        for path in [
+            self.home_dir.join("volumes.json"),
+            self.home_dir.join("volumes.json.lock"),
+            self.home_dir.join("volumes.json.tmp"),
+        ] {
+            if let Err(error) = remove_file(&path) {
+                failures.push(format!("remove Volume state {}: {error}", path.display()));
+            }
+        }
+        remove_empty_directory(&self.home_dir.join("volumes"));
         remove_empty_directory(&self.home_dir.join("run/a3s-oci"));
         remove_empty_directory(&self.home_dir.join("run"));
 

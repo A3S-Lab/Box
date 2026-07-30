@@ -148,6 +148,7 @@ impl BoxRuntimeDriver {
         let endpoint_connector = Arc::clone(&connector);
         let secret_materialization =
             SecretMaterializationOwner::new(config.secret_root.clone(), materializer);
+        let artifact_storage = ArtifactStorageOwner::new(config.home_dir.clone(), artifact_port);
         Ok(Self {
             provider_id: ProviderId::parse("a3s-box")?,
             config,
@@ -155,7 +156,7 @@ impl BoxRuntimeDriver {
             port_connector: connector,
             service_endpoints: ServiceEndpointOwner::new(endpoint_connector),
             execution_isolation,
-            artifact_storage: ArtifactStorageOwner::new(config.home_dir.clone(), artifact_port),
+            artifact_storage,
             secret_materialization,
             transient_registry_auth,
             provider_build: OnceCell::new(),

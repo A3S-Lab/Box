@@ -313,8 +313,9 @@ impl ArtifactStorageOwner {
             let home_dir = self.home_dir.clone();
             let spec = spec.clone();
             let output = output.clone();
+            let output_for_lookup = output.clone();
             let resolved = tokio::task::spawn_blocking(move || {
-                resolve_output_volume(&home_dir, &spec, &output, create_volumes)
+                resolve_output_volume(&home_dir, &spec, &output_for_lookup, create_volumes)
             })
             .await
             .map_err(|error| {

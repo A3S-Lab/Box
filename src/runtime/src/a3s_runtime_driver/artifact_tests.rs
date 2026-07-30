@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use a3s_box_core::ExecutionManager;
 use a3s_runtime::contract::{
     ArtifactRef, MountKind, RestartPolicy, RuntimeMount, RuntimeMountSource, RuntimeOutputArtifact,
     RuntimeOutputSpec, RuntimeUnitClass, RuntimeUnitSpec, SecretReference, SecretTarget,
@@ -15,7 +14,7 @@ use crate::VolumeStore;
 
 use super::mapping::creation_request_for;
 use super::test_support::{
-    accepted, action, fake_driver, fake_driver_with_backend, runtime_spec, unit, DriverFakeBackend,
+    accepted, action, fake_driver, fake_driver_with_backend, runtime_spec, unit,
 };
 use super::{BoxArtifactPort, BoxArtifactPortError};
 

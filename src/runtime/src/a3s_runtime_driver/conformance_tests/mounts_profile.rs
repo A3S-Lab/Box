@@ -14,7 +14,103 @@ pub(super) async fn run(
 ) -> Result<()> {
     read_only_enforcement(fixture, client).await?;
     tmpfs_isolation(fixture, client).await?;
+    persistent_volume_reuse(fixture, client).await?;
     mount_cleanup(fixture, client).await
+}
+
+async fn persistent_volume_reuse(
+    fixture: &BoxRuntimeConformanceFixture,
+    client: &dyn RuntimeClient,
+) -> Result<()> {
+    const TARGET: &str = "/mnt/r17-persistent";
+    let mut writer = fixture.cases.service(
+        "mount-persistent-writer",
+        "printf durable > /mnt/r17-persistent/marker; exec sleep 3600",
+    );
+    let volume_id = format!("{}-volume", writer.spec.unit_id);
+    writer.spec.mounts = vec![volume("workspace", &volume_id, TARGET, false)];
+    let running = client.apply(&writer).await?;
+    require(
+        running.state == RuntimeUnitState::Running,
+        "persistent-Volume writer did not reach running",
+    )?;
+    let writer_record = fixture.record_for(&writer.spec).await?;
+    let volume_name = writer_record
+        .volume_names
+        .first()
+        .cloned()
+        .ok_or_else(|| super::protocol("persistent-Volume writer has no named Volume"))?;
+    require(
+        writer_record.volume_names.len() == 1,
+        "persistent-Volume writer attached an unexpected named Volume",
+    )?;
+    require_bind_config(&writer_record, TARGET, false)?;
+    let store = crate::VolumeStore::new(
+        fixture.home_dir.join("volumes.json"),
+        fixture.home_dir.join("volumes"),
+    );
+    let attached = store
+        .get(&volume_name)
+        .map_err(|error| super::external("load attached persistent Volume", error))?
+        .ok_or_else(|| super::protocol("persistent Volume disappeared while attached"))?;
+    require(
+        attached.in_use_by == vec![writer_record.id.clone()],
+        "persistent Volume did not fence its live Box attachment",
+    )?;
+    let marker = Path::new(&attached.mount_point).join("marker");
+    require(
+        std::fs::read(&marker)
+            .map_err(|error| super::external("read persistent-Volume marker", error))?
+            == b"durable",
+        "persistent Volume did not expose the workload write on its canonical host path",
+    )?;
+
+    fixture
+        .remove_unit(client, &writer.spec, "mount-persistent-writer")
+        .await?;
+    let detached = store
+        .get(&volume_name)
+        .map_err(|error| super::external("load detached persistent Volume", error))?
+        .ok_or_else(|| super::protocol("persistent Volume was deleted with its first workload"))?;
+    require(
+        detached.in_use_by.is_empty() && marker.is_file(),
+        "persistent Volume did not detach while retaining its data",
+    )?;
+
+    let mut reader = fixture.cases.task(
+        "mount-persistent-reader",
+        "if sh -c 'printf forbidden > /mnt/r17-persistent/forbidden' 2>/dev/null; then exit 74; fi; test \"$(cat /mnt/r17-persistent/marker)\" = durable",
+        10_000,
+    );
+    reader.spec.mounts = vec![volume("workspace", &volume_id, TARGET, true)];
+    let read = client.apply(&reader).await?;
+    require(
+        read.state == RuntimeUnitState::Succeeded,
+        "persistent Volume was not reused read-only by a second Runtime unit",
+    )?;
+    let reader_record = fixture.record_for(&reader.spec).await?;
+    require(
+        reader_record.volume_names == vec![volume_name.clone()],
+        "persistent Volume identity changed across Runtime units",
+    )?;
+    require_bind_config(&reader_record, TARGET, true)?;
+    fixture
+        .remove_unit(client, &reader.spec, "mount-persistent-reader")
+        .await?;
+    require(
+        store
+            .get(&volume_name)
+            .map_err(|error| super::external("load reused persistent Volume", error))?
+            .is_some_and(|volume| volume.in_use_by.is_empty()),
+        "persistent Volume remained attached after second removal",
+    )?;
+    store
+        .remove(&volume_name, false)
+        .map_err(|error| super::external("remove conformance persistent Volume", error))?;
+    require(
+        !marker.exists(),
+        "persistent-Volume conformance cleanup retained workload data",
+    )
 }
 
 async fn read_only_enforcement(
@@ -195,6 +291,44 @@ fn tmpfs(name: &str, target: &str, read_only: bool) -> RuntimeMount {
         target: target.into(),
         read_only,
     }
+}
+
+fn volume(name: &str, volume_id: &str, target: &str, read_only: bool) -> RuntimeMount {
+    RuntimeMount {
+        name: name.into(),
+        source: RuntimeMountSource::Volume {
+            volume_id: volume_id.into(),
+        },
+        target: target.into(),
+        read_only,
+    }
+}
+
+fn require_bind_config(record: &crate::BoxRecord, target: &str, read_only: bool) -> Result<()> {
+    let bundle = record.box_dir.join("sandbox/bundle/config.json");
+    let value: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&bundle)
+            .map_err(|error| super::external("read Volume Sandbox OCI configuration", error))?,
+    )
+    .map_err(|error| super::external("decode Volume Sandbox OCI configuration", error))?;
+    let mount = value["mounts"]
+        .as_array()
+        .and_then(|mounts| {
+            mounts
+                .iter()
+                .find(|mount| mount["destination"].as_str() == Some(target))
+        })
+        .ok_or_else(|| super::protocol("Sandbox OCI configuration omitted the Runtime Volume"))?;
+    let options = mount["options"]
+        .as_array()
+        .ok_or_else(|| super::protocol("Runtime Volume has no OCI mount options"))?;
+    let expected_mode = if read_only { "ro" } else { "rw" };
+    require(
+        mount["type"] == "bind"
+            && options.iter().any(|option| option == "rbind")
+            && options.iter().any(|option| option == expected_mode),
+        "Sandbox OCI bind mount did not preserve Runtime Volume access mode",
+    )
 }
 
 fn require_tmpfs_config(record: &crate::BoxRecord, target: &str, read_only: bool) -> Result<()> {
