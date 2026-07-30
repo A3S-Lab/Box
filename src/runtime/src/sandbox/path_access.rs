@@ -11,7 +11,7 @@ use a3s_box_core::error::{BoxError, Result};
 
 #[cfg(target_os = "linux")]
 use super::mapped_root_ids;
-use super::SandboxIdMappingPlan;
+use super::{SandboxIdMappingPlan, SandboxMount};
 
 /// Make only A3S-owned bundle/rootfs parents searchable by mapped container root.
 ///
@@ -24,6 +24,7 @@ pub fn prepare_sandbox_path_access(
     box_id: &str,
     bundle_dir: &Path,
     rootfs_path: &Path,
+    mounts: &[SandboxMount],
     id_mappings: &SandboxIdMappingPlan,
 ) -> Result<()> {
     let boxes_dir = home_dir.join("boxes");
@@ -53,10 +54,33 @@ pub fn prepare_sandbox_path_access(
         make_managed_directory_searchable(path, mapped_uid, mapped_gid)?;
     }
 
+    let attachment_root = super::sandbox_mount_alias_root(home_dir, box_id);
+    let attachment_mounts = mounts
+        .iter()
+        .filter(|mount| mount.source.starts_with(&attachment_root))
+        .collect::<Vec<_>>();
+    if !attachment_mounts.is_empty() {
+        for mount in &attachment_mounts {
+            if mount.source.parent() != Some(attachment_root.as_path()) {
+                return Err(BoxError::BoxBootError {
+                    message: format!(
+                        "Sandbox attachment alias is outside its managed root: {}",
+                        mount.source.display()
+                    ),
+                    hint: Some("Remove the invalid Sandbox state and retry creation".into()),
+                });
+            }
+        }
+        make_managed_directory_searchable(&attachment_root, mapped_uid, mapped_gid)?;
+    }
+
     require_directory(bundle_dir, "Sandbox bundle")?;
     require_directory(rootfs_path, "Sandbox rootfs")?;
     require_searchable_parents(bundle_dir, mapped_uid, mapped_gid)?;
     require_searchable_path(rootfs_path, mapped_uid, mapped_gid)?;
+    for mount in mounts {
+        super::validate_external_mount_access(&mount.source, id_mappings, mount.read_only)?;
+    }
     Ok(())
 }
 
@@ -66,6 +90,7 @@ pub fn prepare_sandbox_path_access(
     _box_id: &str,
     _bundle_dir: &Path,
     _rootfs_path: &Path,
+    _mounts: &[SandboxMount],
     _id_mappings: &SandboxIdMappingPlan,
 ) -> Result<()> {
     Err(BoxError::ConfigError(
@@ -253,8 +278,15 @@ mod tests {
         // that access without requiring this unit test to run as host root.
         set_mode(&rootfs, 0o701);
 
-        prepare_sandbox_path_access(&home, "execution-1", &bundle, &rootfs, &mappings(uid, gid))
-            .unwrap();
+        prepare_sandbox_path_access(
+            &home,
+            "execution-1",
+            &bundle,
+            &rootfs,
+            &[],
+            &mappings(uid, gid),
+        )
+        .unwrap();
 
         for path in [
             &home,
@@ -282,6 +314,7 @@ mod tests {
             "execution-1",
             &bundle,
             &rootfs,
+            &[],
             &mappings(uid, gid),
         )
         .unwrap_err();
@@ -301,6 +334,7 @@ mod tests {
             "execution-1",
             &wrong,
             &rootfs,
+            &[],
             &mappings(100_000, 200_000),
         )
         .unwrap_err();

@@ -81,6 +81,8 @@ fn cleanup_execution_paths(home_dir: &Path, record: &BoxRecord) -> ExecutionMana
     if record.isolation.is_sandbox() {
         crate::vm::reap::cleanup_recorded_sandbox_runtime_in(home_dir, &record.box_dir, &record.id)
             .map_err(|error| cleanup_error(record, "delete the recorded Sandbox runtime", error))?;
+        crate::sandbox::cleanup_sandbox_mount_aliases(home_dir, &record.id)
+            .map_err(|error| cleanup_error(record, "detach Sandbox attachment aliases", error))?;
     }
 
     remove_anonymous_volumes(home_dir, record)?;

@@ -96,6 +96,15 @@ fn reap_orphaned_box_in(home_dir: &Path, box_id: &str) {
     // still alive would race the VM's own files.
     wait_for_exit(&killed, std::time::Duration::from_secs(5));
 
+    if let Err(error) = crate::sandbox::cleanup_sandbox_mount_aliases(home_dir, box_id) {
+        tracing::error!(
+            box_id,
+            %error,
+            "Refusing to remove a box with attached Sandbox mount aliases"
+        );
+        return;
+    }
+
     // Unmount the box overlay; MNT_DETACH (lazy) inside overlay_unmount handles
     // a mount that is somehow still busy.
     let merged = box_dir.join("merged");
@@ -491,6 +500,12 @@ fn reap_orphaned_a3s_oci(
     }
 
     drain_recorded_log_worker(&record, box_id);
+    if let Err(error) = crate::sandbox::cleanup_sandbox_mount_aliases(home_dir, box_id) {
+        return failed_sandbox_reap(
+            box_id,
+            format!("failed to detach Sandbox attachment aliases: {error}"),
+        );
+    }
     let _ = std::fs::remove_dir_all(&record.bundle_dir);
     let _ = std::fs::remove_dir_all(&record.runtime_root);
     let _ = std::fs::remove_file(box_dir.join("sandbox/runtime.json"));

@@ -543,6 +543,17 @@ impl VmManager {
     fn cleanup_box_dir(&self) {
         let box_dir = self.home_dir.join("boxes").join(&self.box_id);
         let socket_dir = self.socket_dir();
+        let mount_aliases_clean = match self.cleanup_sandbox_mount_aliases() {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    box_id = %self.box_id,
+                    %error,
+                    "Failed to cleanup Sandbox attachment aliases after boot failure"
+                );
+                false
+            }
+        };
 
         // Reap the box's passt daemon (Linux bridge mode) BEFORE removing its
         // socket dir. A boot that fails after passt spawned but before
@@ -581,7 +592,7 @@ impl VmManager {
         // A failed restart must never erase a persistent writable rootfs. The
         // provider cleanup above detaches transient mounts while retaining the
         // persistent generation; only ephemeral boxes are removed wholesale.
-        if !self.config.persistent {
+        if !self.config.persistent && mount_aliases_clean {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -594,6 +605,14 @@ impl VmManager {
                     );
                 }
             }
+        }
+    }
+
+    fn cleanup_sandbox_mount_aliases(&self) -> Result<()> {
+        if self.config.isolation.is_sandbox() {
+            crate::sandbox::cleanup_sandbox_mount_aliases(&self.home_dir, &self.box_id)
+        } else {
+            Ok(())
         }
     }
 
@@ -1681,6 +1700,21 @@ impl VmManager {
         }
         self.net_manager = None;
 
+        let mount_aliases_clean = match self.cleanup_sandbox_mount_aliases() {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    box_id = %self.box_id,
+                    %error,
+                    "Failed to cleanup Sandbox attachment aliases"
+                );
+                if stop_error.is_none() {
+                    stop_error = Some(error);
+                }
+                false
+            }
+        };
+
         let socket_dir = self.socket_dir();
         // A detached CLI invocation recovers the shim but has no in-memory
         // PasstManager child handle. Reap passt from its durable PID file before
@@ -1715,7 +1749,7 @@ impl VmManager {
         // accumulation slows later RunPodSandbox calls until they time out
         // (observed: pod #21 after churning 20). Persistent boxes keep their
         // dir intentionally.
-        if !preserve_rootfs {
+        if !preserve_rootfs && mount_aliases_clean {
             match std::fs::remove_dir_all(&box_dir) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
