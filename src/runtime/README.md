@@ -85,6 +85,52 @@ workload-visible references, redacts exact values longest-first, and hashes only
 redacted content into its cursor. Registry credentials are never injected into
 the workload and therefore never become log-redaction inputs.
 
+## Cloud image-build boundary
+
+`BoxBuildPlan` is the closed A3S ACL admission contract for Cloud-owned image
+build intent. It validates one `build "oci"` block, produces canonical ACL
+bytes and a stable SHA-256 digest through `a3s-acl`, confines both the context
+and build file to one canonical source root, and compiles into the existing
+`BuildConfig`. It does not introduce another build engine, cache, scheduler, or
+lifecycle store. Content-changing build arguments are deliberately absent from
+version 1; adding them requires a new closed schema so they cannot alter output
+behind an unchanged plan digest.
+
+```acl
+build "oci" {
+  cache = "content-addressed"
+  context = "."
+  file = "Dockerfile"
+  network = "none"
+  platform = "linux/amd64"
+  schema = "a3s.box.build-plan.v1"
+}
+```
+
+The admitted cache values are `content-addressed` and `disabled`. Network is
+closed to `none` or `outbound`. `none` rejects remote URL `ADD`, binds the
+policy into every `RUN` cache identity, and adds a private Linux network
+namespace to every native `RUN`. Base-image and external-stage resolution stay
+host-side OCI operations; they are not executed inside the build rootfs.
+Network-none plans reject the warm RUN pool until that provider can prove an
+equivalent isolated network boundary.
+
+```rust
+use std::path::Path;
+
+use a3s_box_runtime::{BoxBuildOptions, BoxBuildPlan};
+
+let plan = BoxBuildPlan::parse_acl(plan_acl)?;
+let digest = plan.canonical_digest()?;
+let config = plan.compile(Path::new("/srv/a3s/source"), BoxBuildOptions::default())?;
+let result = a3s_box_runtime::oci::build::build(config, image_store).await?;
+```
+
+This contract is the Box-owned `BX0.4` foundation. Cloud integration must still
+preserve publication, content-addressed cache evidence, SPDX/SLSA evidence,
+signing, cancellation, process-death recovery, and cleanup before the gate can
+be called complete.
+
 ## Components
 
 ### VM Manager

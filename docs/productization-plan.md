@@ -362,6 +362,13 @@ Current notes:
   multi-platform requests and non-Linux target platforms fail instead of
   silently producing a single-platform or wrong-OS image. The default output
   platform is Linux with the host architecture, not the host OS.
+- The Cloud-facing foundation is one closed `a3s.box.build-plan.v1` A3S ACL
+  contract compiled into that same `BuildConfig`. Canonical ACL and digest
+  identity, bounded relative POSIX paths, canonical source-root confinement,
+  exact cache/network enums, and symlink-escape rejection pass focused tests.
+  `network = "none"` rejects remote URL `ADD`, changes the native `RUN` cache
+  identity, and adds a private network namespace on Linux. It rejects the warm
+  RUN pool until that path has equivalent isolation evidence.
 - Dockerfile `RUN` no longer has any silent skip path on unsupported hosts.
   Linux uses isolated `chroot`; the built-in engine also has an isolated
   warm-pool VM lease path via `--run-pool`, which mounts each mutable build

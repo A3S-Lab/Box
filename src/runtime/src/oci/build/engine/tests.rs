@@ -5,9 +5,11 @@
 mod tests {
     use super::super::utils::*;
     use super::super::{
-        build, default_target_platform, scratch_config, validate_build_config, BuildConfig,
-        BuildState,
+        build, default_target_platform, run_instruction_cache_repr, scratch_config,
+        validate_build_config, validate_instruction_network, BuildConfig, BuildNetworkPolicy,
+        BuildRunPoolConfig, BuildState,
     };
+    use crate::oci::build::dockerfile::{Instruction, RunCommand};
     use crate::oci::{ImageStore, OciImage};
     use a3s_box_core::platform::Platform;
     use std::collections::HashMap;
@@ -92,9 +94,60 @@ mod tests {
             platforms,
             target: None,
             no_cache: false,
+            network: BuildNetworkPolicy::Outbound,
             metrics: None,
             run_pool: None,
         }
+    }
+
+    #[test]
+    fn test_network_none_rejects_warm_pool_without_isolation_evidence() {
+        let mut config = test_build_config(vec![Platform::linux_amd64()]);
+        config.network = BuildNetworkPolicy::None;
+        config.run_pool = Some(BuildRunPoolConfig {
+            socket: "/tmp/a3s-box-test-pool.sock".to_string(),
+            image: None,
+            vcpus: 1,
+            memory_mb: 256,
+            guest_rootfs: "/run/a3s/build-rootfs".to_string(),
+            timeout_ns: 1_000_000_000,
+            run_cache_dir: PathBuf::from("/tmp/a3s-box-test-run-cache"),
+        });
+
+        let error = validate_build_config(&config).unwrap_err().to_string();
+        assert!(error.contains("network-none builds cannot use a warm RUN pool"));
+    }
+
+    #[test]
+    fn test_network_none_rejects_remote_add_before_cache_or_download() {
+        let instruction = Instruction::Add {
+            src: vec!["https://example.invalid/archive.tar".to_string()],
+            dst: "/src/".to_string(),
+            chown: None,
+        };
+
+        let error = validate_instruction_network(&instruction, BuildNetworkPolicy::None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("network-none builds reject remote URL ADD"));
+        validate_instruction_network(&instruction, BuildNetworkPolicy::Outbound).unwrap();
+    }
+
+    #[test]
+    fn test_run_cache_identity_binds_network_policy() {
+        let instruction = Instruction::Run {
+            command: RunCommand::Shell("make release".to_string()),
+            cache_mounts: Vec::new(),
+            bind_mounts: Vec::new(),
+            tmpfs_mounts: Vec::new(),
+        };
+
+        let outbound = run_instruction_cache_repr(&instruction, BuildNetworkPolicy::Outbound);
+        let isolated = run_instruction_cache_repr(&instruction, BuildNetworkPolicy::None);
+
+        assert_ne!(outbound, isolated);
+        assert!(outbound.ends_with("a3s.box.build.network=outbound"));
+        assert!(isolated.ends_with("a3s.box.build.network=none"));
     }
 
     #[cfg(all(feature = "pool", not(windows)))]
@@ -212,6 +265,7 @@ LABEL org.opencontainers.image.title="scratch-smoke"
                 platforms: vec![],
                 target: None,
                 no_cache: false,
+                network: BuildNetworkPolicy::Outbound,
                 metrics: None,
                 run_pool: None,
             },
@@ -427,6 +481,7 @@ CMD ["cat", "/app/copied.txt"]
                     platforms: vec![],
                     target: None,
                     no_cache: true,
+                    network: BuildNetworkPolicy::Outbound,
                     metrics: None,
                     run_pool: Some(BuildRunPoolConfig {
                         socket: socket.to_string_lossy().to_string(),
@@ -580,6 +635,7 @@ RUN --mount=type=bind,source=src,target=. cat input.txt > /out.txt
                     platforms: vec![],
                     target: None,
                     no_cache: true,
+                    network: BuildNetworkPolicy::Outbound,
                     metrics: None,
                     run_pool: Some(BuildRunPoolConfig {
                         socket: socket.to_string_lossy().to_string(),
@@ -763,6 +819,7 @@ RUN --mount=type=bind,from=builder,source=/artifact.txt,target=artifact.txt cat 
                     platforms: vec![],
                     target: None,
                     no_cache: true,
+                    network: BuildNetworkPolicy::Outbound,
                     metrics: None,
                     run_pool: Some(BuildRunPoolConfig {
                         socket: socket.to_string_lossy().to_string(),
@@ -841,6 +898,7 @@ RUN --mount=type=bind,from=external-bind-source:latest,source=/artifact.txt,targ
                 platforms: vec![],
                 target: None,
                 no_cache: true,
+                network: BuildNetworkPolicy::Outbound,
                 metrics: None,
                 run_pool: None,
             },
@@ -936,6 +994,7 @@ RUN --mount=type=bind,from=external-bind-source:latest,source=/artifact.txt,targ
                     platforms: vec![],
                     target: None,
                     no_cache: true,
+                    network: BuildNetworkPolicy::Outbound,
                     metrics: None,
                     run_pool: Some(BuildRunPoolConfig {
                         socket: socket.to_string_lossy().to_string(),
@@ -1083,6 +1142,7 @@ RUN --mount=type=tmpfs,target=tmp printf ok > /out.txt
                     platforms: vec![],
                     target: None,
                     no_cache: true,
+                    network: BuildNetworkPolicy::Outbound,
                     metrics: None,
                     run_pool: Some(BuildRunPoolConfig {
                         socket: socket.to_string_lossy().to_string(),
@@ -1223,6 +1283,7 @@ RUN --mount=type=cache,id=failed,target=/root/.cache echo before-failure > /root
                     platforms: vec![],
                     target: None,
                     no_cache: true,
+                    network: BuildNetworkPolicy::Outbound,
                     metrics: None,
                     run_pool: Some(BuildRunPoolConfig {
                         socket: socket.to_string_lossy().to_string(),
@@ -1381,6 +1442,7 @@ RUN --mount=type=cache,id=warm,target=/root/.cache cat /root/.cache/cache-only.t
                     platforms: vec![],
                     target: None,
                     no_cache: true,
+                    network: BuildNetworkPolicy::Outbound,
                     metrics: None,
                     run_pool: Some(BuildRunPoolConfig {
                         socket: socket.to_string_lossy().to_string(),
@@ -1532,6 +1594,7 @@ RUN --mount=type=cache,id=seeded,sharing=locked,from=builder,source=/seed-cache,
                     platforms: vec![],
                     target: None,
                     no_cache: true,
+                    network: BuildNetworkPolicy::Outbound,
                     metrics: None,
                     run_pool: Some(BuildRunPoolConfig {
                         socket: socket.to_string_lossy().to_string(),
@@ -1596,6 +1659,7 @@ RUN --mount=type=cache,id=seeded,sharing=locked,from=builder,source=/seed-cache,
                 platforms: vec![],
                 target: Some("builder".to_string()),
                 no_cache: false,
+                network: BuildNetworkPolicy::Outbound,
                 metrics: None,
                 run_pool: None,
             },
@@ -1622,6 +1686,7 @@ RUN --mount=type=cache,id=seeded,sharing=locked,from=builder,source=/seed-cache,
                 platforms: vec![],
                 target: Some("nope".to_string()),
                 no_cache: false,
+                network: BuildNetworkPolicy::Outbound,
                 metrics: None,
                 run_pool: None,
             },
@@ -1665,6 +1730,7 @@ RUN --mount=type=cache,id=seeded,sharing=locked,from=builder,source=/seed-cache,
                 platforms: vec![],
                 target: None,
                 no_cache: true,
+                network: BuildNetworkPolicy::Outbound,
                 metrics: None,
                 run_pool: None,
             },
@@ -1737,6 +1803,7 @@ CMD ["/work/run.sh"]
                 platforms: vec![],
                 target: None,
                 no_cache: false,
+                network: BuildNetworkPolicy::Outbound,
                 metrics: None,
                 run_pool: None,
             },

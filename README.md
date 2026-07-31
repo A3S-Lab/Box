@@ -168,7 +168,9 @@ runtime state changes instead of being silently stored or weakened.
 - **OCI images and builds** — bounded resumable pulls, concurrent verified
   layers, registry credentials, optional cosign verification, save/load,
   multi-stage builds, selected `RUN --mount` forms, and content-addressed
-  caching.
+  caching. Closed A3S ACL build plans add canonical identities, source-root
+  path confinement, and an enforced network-none Linux `RUN` policy over the
+  same native build engine.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
   commit, filesystem snapshots, copy-on-write restore, and Box-owned read-only
   aliases for caller-provided Artifact trees below private provider roots.

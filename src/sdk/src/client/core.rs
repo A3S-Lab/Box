@@ -330,6 +330,7 @@ impl A3sBoxClient {
                 platforms: request.platforms,
                 target: request.target,
                 no_cache: request.no_cache,
+                network: BuildNetworkPolicy::Outbound,
                 metrics: None,
                 run_pool: None,
             },
