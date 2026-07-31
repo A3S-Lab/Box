@@ -11,6 +11,7 @@ use super::super::dockerignore::DockerIgnore;
 use super::super::layer::{
     create_layer_with_chown, create_layer_with_deletions, sha256_bytes, LayerInfo,
 };
+use super::control::BuildExecutionControl;
 use super::stages::resolve_stage_rootfs;
 use super::utils::{
     assert_within, copy_dir_filtered, expand_args, extract_tar_to_dst, is_tar_archive,
@@ -402,7 +403,7 @@ pub(super) fn handle_copy(
 /// must route isolated execution through the native engine's warm-pool path.
 /// Returns Some(LayerInfo) if a layer was created, None if skipped.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn handle_run(
+pub(super) async fn handle_run(
     command: &RunCommand,
     cache_mounts: &[RunCacheMount],
     bind_mounts: &[RunBindMount],
@@ -418,7 +419,11 @@ pub(super) fn handle_run(
     layer_index: usize,
     quiet: bool,
     ignore: Option<&DockerIgnore>,
+    control: Option<&BuildExecutionControl>,
 ) -> Result<Option<LayerInfo>> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = control;
+
     #[cfg(target_os = "macos")]
     {
         if network == super::BuildNetworkPolicy::None {
@@ -478,7 +483,9 @@ pub(super) fn handle_run(
         let run_mounts =
             run_mounts.with_cache_mounts(rootfs_dir, cache_mounts, completed_stages)?;
 
-        let output = execute_linux_run_command(rootfs_dir, command, workdir, env, shell, network)?;
+        let output =
+            execute_linux_run_command(rootfs_dir, command, workdir, env, shell, network, control)
+                .await?;
 
         if !output.status.success() {
             return Err(run_command_failed_error(
@@ -535,6 +542,7 @@ pub(super) fn handle_run(
             quiet,
             ignore,
             network,
+            control,
         );
         Err(BoxError::BuildError(format!(
             "Dockerfile RUN is not supported on this platform yet because isolated Linux build execution is not implemented: {}",
@@ -892,23 +900,26 @@ fn run_env_entries(env: &[(String, String)]) -> Vec<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn execute_linux_run_command(
+async fn execute_linux_run_command(
     rootfs_dir: &Path,
     command: &RunCommand,
     workdir: &str,
     env: &[(String, String)],
     shell: &[String],
     network: super::BuildNetworkPolicy,
+    control: Option<&BuildExecutionControl>,
 ) -> Result<std::process::Output> {
     let unshare = find_linux_run_unshare()?;
-    let mut cmd =
+    let cmd =
         isolated_linux_run_command(&unshare, rootfs_dir, command, workdir, env, shell, network);
-    cmd.output().map_err(|error| {
-        BoxError::BuildError(format!(
-            "Failed to execute Dockerfile RUN in an isolated PID namespace with {}: {error}",
-            unshare.display()
-        ))
-    })
+    super::run_process::command_output(cmd, control)
+        .await
+        .map_err(|error| {
+            BoxError::BuildError(format!(
+                "Failed to execute Dockerfile RUN in an isolated PID namespace with {}: {error}",
+                unshare.display()
+            ))
+        })
 }
 
 #[cfg(target_os = "linux")]
@@ -984,8 +995,30 @@ fn isolated_linux_run_command(
         }
     }
     configure_run_command_env(&mut cmd, env);
+    configure_run_parent_death_fence(&mut cmd);
     cmd
 }
+
+#[cfg(target_os = "linux")]
+fn configure_run_parent_death_fence(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    let expected_parent = std::process::id();
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() as u32 != expected_parent {
+                libc::_exit(127);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(all(test, not(target_os = "linux")))]
+fn configure_run_parent_death_fence(_command: &mut std::process::Command) {}
 
 #[cfg(any(target_os = "linux", test))]
 fn configure_run_command_env(cmd: &mut std::process::Command, env: &[(String, String)]) {
@@ -3108,8 +3141,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn test_linux_run_waits_for_detached_descendants_to_be_killed() {
+    #[tokio::test]
+    async fn test_linux_run_waits_for_detached_descendants_to_be_killed() {
         if unsafe { libc::geteuid() } != 0 {
             return;
         }
@@ -3123,7 +3156,9 @@ mod tests {
             &[],
             &[],
             BuildNetworkPolicy::Outbound,
+            None,
         )
+        .await
         .expect("util-linux unshare must be installed for Linux RUN");
         if !probe.status.success() {
             let stderr = String::from_utf8_lossy(&probe.stderr);
@@ -3144,7 +3179,9 @@ mod tests {
             &[],
             &[],
             BuildNetworkPolicy::Outbound,
+            None,
         )
+        .await
         .unwrap();
         assert!(
             output.status.success(),
@@ -4508,8 +4545,8 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn test_handle_run_rejects_macos_without_unsafe_opt_in() {
+    #[tokio::test]
+    async fn test_handle_run_rejects_macos_without_unsafe_opt_in() {
         std::env::remove_var(super::UNSAFE_HOST_RUN_ENV);
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -4535,7 +4572,9 @@ mod tests {
             0,
             true,
             None,
-        );
+            None,
+        )
+        .await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Dockerfile RUN is not supported on macOS yet"));
         assert!(err.contains("--run-pool"));

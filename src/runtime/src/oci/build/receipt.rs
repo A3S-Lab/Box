@@ -1,13 +1,15 @@
-//! Durable terminal receipts for plan-bound native OCI builds.
+//! Durable lifecycle records and terminal receipts for native OCI builds.
 //!
-//! Receipts bind one caller operation and immutable source digest to the exact
-//! native OCI output already owned by [`ImageStore`]. They deliberately do not
-//! copy image content or supervise an in-flight build. A later operation
-//! supervisor can use this terminal boundary for start/inspect/cancel recovery
-//! without adding another build engine or image store.
+//! The receipt journal is the sole build-operation state machine. It binds one
+//! caller operation and immutable source digest to the native engine, its
+//! operation-owned workspace, and the exact output already owned by
+//! [`ImageStore`]. The legacy pending intent and successful receipt schemas are
+//! retained as compatible states in this same journal rather than introducing
+//! a second supervisor store.
 
 use a3s_box_core::platform::Platform;
 use a3s_box_core::OperationId;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -19,11 +21,12 @@ use crate::oci::ImageStore;
 
 const MAX_OPERATION_ID_BYTES: usize = 255;
 const MAX_RECEIPT_BYTES: u64 = 64 * 1024;
+const MAX_TERMINAL_MESSAGE_BYTES: usize = 4 * 1024;
 const RECEIPT_DIRECTORY: &str = "build-receipts";
 
 mod journal;
 
-pub(super) use journal::BuildOperationJournal;
+pub(super) use journal::{BuildExecutionLease, BuildOperationJournal, LockedBuildOperation};
 
 /// Immutable caller identity for one recoverable build output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +84,11 @@ impl BuildOperationIdentity {
     }
 }
 
-/// Intent persisted before native build side effects begin.
+/// Legacy pre-supervision intent accepted as a state in the same journal.
+///
+/// New starts write [`SupervisedBuildOperation`] directly. This schema remains
+/// readable so an upgrade can adopt a committed output or migrate an abandoned
+/// intent without a second compatibility store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PendingBuildOperation {
@@ -95,6 +102,7 @@ pub(super) struct PendingBuildOperation {
 impl PendingBuildOperation {
     const SCHEMA: &'static str = "a3s.box.build-output-intent.v1";
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn new(
         identity: &BuildOperationIdentity,
         plan_digest: String,
@@ -156,10 +164,217 @@ impl PendingBuildOperation {
     }
 }
 
+/// Stable host-process identity persisted in the one operation journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct BuildProcessIdentity {
+    pub(super) pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) start_time: Option<u64>,
+}
+
+impl BuildProcessIdentity {
+    pub(super) fn current() -> Self {
+        let pid = std::process::id();
+        Self {
+            pid,
+            start_time: crate::process::pid_start_time(pid),
+        }
+    }
+
+    fn validate(self, operation_id: &OperationId) -> Result<(), BuildReceiptError> {
+        if self.pid == 0 {
+            return Err(BuildReceiptError::InvalidReceipt {
+                operation_id: operation_id.to_string(),
+                message: "persisted build process has PID zero".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Non-success phases represented by the authoritative operation record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PersistedBuildPhase {
+    Running,
+    Cancelling,
+    Cancelled,
+    Failed,
+}
+
+/// Supervised lifecycle state stored in the existing receipt journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct SupervisedBuildOperation {
+    schema: String,
+    operation_id: OperationId,
+    source_digest: String,
+    plan_digest: String,
+    output_reference: String,
+    pub(super) phase: PersistedBuildPhase,
+    owner: BuildProcessIdentity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) run_process: Option<BuildProcessIdentity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    started_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl SupervisedBuildOperation {
+    pub(super) const SCHEMA: &'static str = "a3s.box.build-operation.v1";
+
+    pub(super) fn new(
+        identity: &BuildOperationIdentity,
+        plan_digest: String,
+    ) -> Result<Self, BuildReceiptError> {
+        let now = Utc::now();
+        let operation = Self {
+            schema: Self::SCHEMA.to_string(),
+            operation_id: identity.operation_id.clone(),
+            source_digest: identity.source_digest.clone(),
+            plan_digest,
+            output_reference: identity.output_reference.clone(),
+            phase: PersistedBuildPhase::Running,
+            owner: BuildProcessIdentity::current(),
+            run_process: None,
+            message: None,
+            started_at: now,
+            updated_at: now,
+        };
+        operation.validate()?;
+        operation.require_identity(identity, &operation.plan_digest)?;
+        Ok(operation)
+    }
+
+    pub(super) fn from_pending(
+        pending: &PendingBuildOperation,
+        identity: &BuildOperationIdentity,
+        plan_digest: &str,
+    ) -> Result<Self, BuildReceiptError> {
+        pending.require_identity(identity, plan_digest)?;
+        Self::new(identity, plan_digest.to_string())
+    }
+
+    fn validate(&self) -> Result<(), BuildReceiptError> {
+        if self.schema != Self::SCHEMA
+            || !valid_operation_id(&self.operation_id)
+            || canonical_sha256_digest_hex(&self.source_digest).is_err()
+            || canonical_sha256_digest_hex(&self.plan_digest).is_err()
+            || self.output_reference
+                != format!(
+                    "a3s-box/build-operation:{}",
+                    operation_key(&self.operation_id)
+                )
+            || self.updated_at < self.started_at
+        {
+            return Err(BuildReceiptError::InvalidReceipt {
+                operation_id: self.operation_id.to_string(),
+                message: "supervised build operation violates its closed identity".to_string(),
+            });
+        }
+        self.owner.validate(&self.operation_id)?;
+        if let Some(process) = self.run_process {
+            process.validate(&self.operation_id)?;
+        }
+        let terminal = matches!(
+            self.phase,
+            PersistedBuildPhase::Cancelled | PersistedBuildPhase::Failed
+        );
+        if terminal != self.message.is_some()
+            || self.message.as_ref().is_some_and(|message| {
+                message.is_empty() || message.len() > MAX_TERMINAL_MESSAGE_BYTES
+            })
+            || (terminal && self.run_process.is_some())
+        {
+            return Err(BuildReceiptError::InvalidReceipt {
+                operation_id: self.operation_id.to_string(),
+                message: "supervised build phase fields are inconsistent".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_identity(
+        &self,
+        identity: &BuildOperationIdentity,
+        plan_digest: &str,
+    ) -> Result<(), BuildReceiptError> {
+        self.validate()?;
+        if self.operation_id != identity.operation_id
+            || self.source_digest != identity.source_digest
+            || self.plan_digest != plan_digest
+            || self.output_reference != identity.output_reference
+        {
+            return Err(BuildReceiptError::Conflict {
+                operation_id: identity.operation_id.to_string(),
+                message: "the supervised source, plan, or output identity differs".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(super) fn request_cancellation(&mut self) -> bool {
+        if self.phase != PersistedBuildPhase::Running {
+            return false;
+        }
+        self.phase = PersistedBuildPhase::Cancelling;
+        self.updated_at = Utc::now();
+        true
+    }
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(super) fn set_run_process(
+        &mut self,
+        process: Option<BuildProcessIdentity>,
+    ) -> Result<(), BuildReceiptError> {
+        if matches!(
+            self.phase,
+            PersistedBuildPhase::Cancelled | PersistedBuildPhase::Failed
+        ) {
+            return Err(BuildReceiptError::Conflict {
+                operation_id: self.operation_id.to_string(),
+                message: "a terminal build cannot own a RUN process".to_string(),
+            });
+        }
+        self.run_process = process;
+        self.updated_at = Utc::now();
+        self.validate()
+    }
+
+    pub(super) fn finish(&mut self, phase: PersistedBuildPhase, message: String) {
+        debug_assert!(matches!(
+            phase,
+            PersistedBuildPhase::Cancelled | PersistedBuildPhase::Failed
+        ));
+        self.phase = phase;
+        self.run_process = None;
+        self.message = Some(bounded_terminal_message(message));
+        self.updated_at = Utc::now();
+    }
+
+    pub(super) fn terminal_message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    pub(super) fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
+
+    fn matches_receipt(&self, receipt: &BuildOutputReceipt) -> bool {
+        self.operation_id == receipt.operation_id
+            && self.source_digest == receipt.source_digest
+            && self.plan_digest == receipt.plan_digest
+            && self.output_reference == receipt.output.reference
+    }
+}
+
 /// Strict on-disk state for one build operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub(super) enum PersistedBuildOperation {
+    Supervised(SupervisedBuildOperation),
     Pending(PendingBuildOperation),
     Succeeded(BuildOutputReceipt),
 }
@@ -167,6 +382,7 @@ pub(super) enum PersistedBuildOperation {
 impl PersistedBuildOperation {
     fn validate(&self) -> Result<(), BuildReceiptError> {
         match self {
+            Self::Supervised(operation) => operation.validate(),
             Self::Pending(pending) => pending.validate(),
             Self::Succeeded(receipt) => receipt.validate(),
         }
@@ -174,6 +390,7 @@ impl PersistedBuildOperation {
 
     fn operation_id(&self) -> &OperationId {
         match self {
+            Self::Supervised(operation) => &operation.operation_id,
             Self::Pending(pending) => &pending.operation_id,
             Self::Succeeded(receipt) => &receipt.operation_id,
         }
@@ -406,6 +623,36 @@ pub struct RecordedBuildResult {
     pub replayed: bool,
 }
 
+/// Typed observation of the one durable build-operation state machine.
+#[derive(Debug)]
+pub enum RecordedBuildStatus {
+    /// The native engine owns the operation execution lease.
+    Running,
+    /// Cancellation is durable and the native engine is fencing current work.
+    Cancelling,
+    /// Cancellation completed and the operation-owned workspace was reclaimed.
+    Cancelled { message: String },
+    /// Execution failed and the operation-owned workspace was reclaimed.
+    Failed { message: String },
+    /// The exact ImageStore output and successful receipt were revalidated.
+    Succeeded(Box<RecordedBuildResult>),
+}
+
+/// Idempotent outcome from requesting cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildCancellationOutcome {
+    /// No operation record exists.
+    NotFound,
+    /// The live build accepted a new durable cancellation request.
+    Requested,
+    /// A cancellation request was already durable and remains in progress.
+    AlreadyRequested,
+    /// The operation was already durably cancelled.
+    AlreadyCancelled,
+    /// The operation had already reached success or failure.
+    AlreadyTerminal,
+}
+
 /// Fail-closed receipt identity, persistence, conflict, and output errors.
 #[derive(Debug, Error)]
 pub enum BuildReceiptError {
@@ -467,6 +714,21 @@ fn valid_operation_id(operation_id: &OperationId) -> bool {
             .as_str()
             .bytes()
             .any(|byte| byte.is_ascii_control())
+}
+
+fn bounded_terminal_message(mut message: String) -> String {
+    if message.is_empty() {
+        return "build operation ended without an error message".to_string();
+    }
+    if message.len() <= MAX_TERMINAL_MESSAGE_BYTES {
+        return message;
+    }
+    let mut boundary = MAX_TERMINAL_MESSAGE_BYTES;
+    while !message.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    message.truncate(boundary);
+    message
 }
 
 #[cfg(test)]

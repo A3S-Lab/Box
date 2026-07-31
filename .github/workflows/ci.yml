@@ -123,6 +123,80 @@ jobs:
             echo 'A removed external build or Docker execution path was reintroduced'
             exit 1
           fi
+      - name: Enforce the sole recorded-build authority
+        run: |
+          removed_patterns=(
+            'BuildSupervisor'"Store"
+            'BuildOperation'"Store"
+            'BuildReceipt'"Store"
+            'BuildWorkspace'"Store"
+            'BuildJob'"Queue"
+            'BuildOperation'"Queue"
+            'Build'"Scheduler"
+            'BuildImage'"Store"
+            'build-operations.'"json"
+            'build-jobs.'"json"
+            'build-queue.'"json"
+          )
+          found=0
+          for pattern in "${removed_patterns[@]}"; do
+            if git grep -n -I -F -e "$pattern" -- \
+              .github docs scripts src README.md justfile \
+              ':(exclude)src/Cargo.lock'; then
+              found=1
+            fi
+          done
+          if ((found != 0)); then
+            echo 'A second recorded-build store, queue, scheduler, or image authority was introduced'
+            exit 1
+          fi
+
+          require_single_authority() {
+            local pattern="$1"
+            local expected_file="$2"
+            local actual_files
+            actual_files="$(git grep -l -F "$pattern" -- \
+              src/runtime/src/oci/build || true)"
+            if [[ "$actual_files" != "$expected_file" ]]; then
+              echo "Recorded-build authority '$pattern' must exist only in $expected_file"
+              exit 1
+            fi
+          }
+
+          require_single_authority \
+            'pub async fn start_recorded_build_plan' \
+            'src/runtime/src/oci/build/execution.rs'
+          require_single_authority \
+            'pub async fn cancel_recorded_build_plan' \
+            'src/runtime/src/oci/build/execution.rs'
+          require_single_authority \
+            'pub struct BuildOperationJournal' \
+            'src/runtime/src/oci/build/receipt/journal.rs'
+          require_single_authority \
+            'fn persist_record(' \
+            'src/runtime/src/oci/build/receipt/journal.rs'
+          require_single_authority \
+            'fn remove_workspace_if_present(' \
+            'src/runtime/src/oci/build/receipt/journal.rs'
+          require_single_authority \
+            'fn spawn_supervised_build(' \
+            'src/runtime/src/oci/build/execution.rs'
+          require_single_authority \
+            'store.put(reference' \
+            'src/runtime/src/oci/build/engine/mod.rs'
+          require_single_authority \
+            'tokio::process::Command' \
+            'src/runtime/src/oci/build/engine/run_process.rs'
+
+          if git grep -n -I -E \
+            '(tokio|std)::sync::(mpsc|broadcast|watch)|\b(VecDeque|BinaryHeap)\b' -- \
+            src/runtime/src/oci/build/execution.rs \
+            src/runtime/src/oci/build/receipt.rs \
+            src/runtime/src/oci/build/receipt/journal.rs \
+            src/runtime/src/oci/build/engine/control.rs; then
+            echo 'The recorded-build supervisor must not own an in-memory queue or scheduler'
+            exit 1
+          fi
 
   clippy:
     name: Clippy

@@ -47,6 +47,34 @@ impl FileLock {
         Ok(Self { _file: file })
     }
 
+    /// Try to acquire an exclusive advisory lock without waiting on Unix.
+    ///
+    /// `Ok(None)` means another process or file descriptor currently owns the
+    /// lock. Every other I/O error remains fail-closed.
+    #[cfg(unix)]
+    pub(crate) fn try_acquire(target: &Path) -> std::io::Result<Option<Self>> {
+        use std::os::unix::io::AsRawFd;
+
+        let lock_path = lock_path(target);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(Self { _file: file }));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            return Ok(None);
+        }
+        Err(error)
+    }
+
     /// Acquire the Windows lock by opening the sibling file without sharing.
     ///
     /// `CreateFileW` reports a sharing violation instead of blocking, so retry
@@ -87,10 +115,48 @@ impl FileLock {
         }
     }
 
+    /// Try to acquire the Windows lock without retrying a sharing violation.
+    #[cfg(windows)]
+    pub(crate) fn try_acquire(target: &Path) -> std::io::Result<Option<Self>> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+
+        let lock_path = lock_path(target);
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&lock_path)
+        {
+            Ok(file) => Ok(Some(Self { _file: file })),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Fallback for platforms without a native implementation.
     #[cfg(not(any(unix, windows)))]
     pub(crate) fn acquire(_target: &Path) -> std::io::Result<Self> {
         Ok(Self {})
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn try_acquire(_target: &Path) -> std::io::Result<Option<Self>> {
+        Ok(Some(Self {}))
     }
 }
 
@@ -141,5 +207,16 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(2))
             .expect("second lock acquisition should proceed after drop");
         waiter.join().unwrap();
+    }
+
+    #[test]
+    fn try_acquire_reports_live_owner_without_blocking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("operation.json");
+        let guard = FileLock::acquire(&target).unwrap();
+
+        assert!(FileLock::try_acquire(&target).unwrap().is_none());
+        drop(guard);
+        assert!(FileLock::try_acquire(&target).unwrap().is_some());
     }
 }

@@ -172,15 +172,19 @@ runtime state changes instead of being silently stored or weakened.
   path confinement, an enforced network-none Linux `RUN` policy, and
   plan-bound typed OCI descriptors with durable image-layout paths over the
   same native build engine. The sole recorded-plan boundary persists immutable
-  operation, source, and plan intent before build side effects, then commits a
-  path-independent terminal receipt over the same ImageStore. Restarted callers
-  adopt an output committed before the terminal receipt and revalidate the
-  complete OCI graph, platform, blob inventory, and byte count before replay.
-  The internal operation journal is derived from the ImageStore and is not a
-  second caller-configurable output store or build engine. The CLI exposes
-  only this native engine: Linux `RUN` uses the isolated local path and macOS
-  uses the same engine through `--run-pool`; publication remains the separate
-  `a3s-box push` image operation.
+  operation, source, and plan identity in one ImageStore-derived journal and
+  exposes typed start, nonblocking inspect, cancel, exact replay, and terminal
+  cleanup. A crash-released execution lease distinguishes live work from a
+  dead caller without becoming another state store. Every supervised build uses
+  a hash-derived operation workspace below that journal; cancellation, failure,
+  and caller-death recovery fence the current Linux `RUN` process tree before
+  reclaiming it. Restarted callers adopt an output committed before the
+  terminal receipt and revalidate the complete OCI graph, platform, blob
+  inventory, and byte count before replay. The journal, native engine, and
+  ImageStore remain the only lifecycle, execution, and image authorities. The
+  CLI exposes only this native engine: Linux `RUN` uses the isolated local path
+  and macOS uses the same engine through `--run-pool`; publication remains the
+  separate `a3s-box push` image operation.
 - **Storage** — bind mounts, named volumes, tmpfs, file copy, diff, export,
   commit, filesystem snapshots, copy-on-write restore, and Box-owned read-only
   aliases for caller-provided Artifact trees below private provider roots.

@@ -31,13 +31,14 @@ mod receipt;
 pub use dockerfile::{Dockerfile, Instruction};
 pub use engine::{build, BuildConfig, BuildNetworkPolicy, BuildRunPoolConfig};
 pub use execution::{
-    execute_recorded_build_plan, inspect_recorded_build_plan, remove_recorded_build_plan,
+    cancel_recorded_build_plan, execute_recorded_build_plan, inspect_recorded_build_plan,
+    inspect_recorded_build_status, remove_recorded_build_plan, start_recorded_build_plan,
     BuildPlanExecutionError,
 };
 pub use layer::{DirSnapshot, LayerInfo};
 pub use output::{BuildOutputDescriptor, BuildResult, OCI_IMAGE_MANIFEST_MEDIA_TYPE};
 pub use plan::{BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy};
 pub use receipt::{
-    BuildOperationIdentity, BuildOutputReceipt, BuildReceiptError, BuildReceiptOutput,
-    RecordedBuildResult,
+    BuildCancellationOutcome, BuildOperationIdentity, BuildOutputReceipt, BuildReceiptError,
+    BuildReceiptOutput, RecordedBuildResult, RecordedBuildStatus,
 };

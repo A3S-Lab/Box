@@ -147,12 +147,13 @@ pub use volume::VolumeStore;
 
 #[cfg(feature = "build")]
 pub use oci::{
-    execute_recorded_build_plan, inspect_recorded_build_plan, remove_recorded_build_plan,
-    BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy, BuildConfig,
-    BuildNetworkPolicy, BuildOperationIdentity, BuildOutputDescriptor, BuildOutputReceipt,
-    BuildPlanExecutionError, BuildReceiptError, BuildReceiptOutput, BuildResult,
-    BuildRunPoolConfig, Dockerfile, Instruction, RecordedBuildResult,
-    OCI_IMAGE_MANIFEST_MEDIA_TYPE,
+    cancel_recorded_build_plan, execute_recorded_build_plan, inspect_recorded_build_plan,
+    inspect_recorded_build_status, remove_recorded_build_plan, start_recorded_build_plan,
+    BoxBuildOptions, BoxBuildPlan, BoxBuildPlanError, BuildCachePolicy, BuildCancellationOutcome,
+    BuildConfig, BuildNetworkPolicy, BuildOperationIdentity, BuildOutputDescriptor,
+    BuildOutputReceipt, BuildPlanExecutionError, BuildReceiptError, BuildReceiptOutput,
+    BuildResult, BuildRunPoolConfig, Dockerfile, Instruction, RecordedBuildResult,
+    RecordedBuildStatus, OCI_IMAGE_MANIFEST_MEDIA_TYPE,
 };
 
 #[cfg(feature = "compose")]
