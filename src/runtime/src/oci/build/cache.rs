@@ -22,6 +22,14 @@ use serde::{Deserialize, Serialize};
 
 use super::layer::{sha256_bytes, sha256_file, LayerInfo};
 
+mod export;
+
+pub(super) use export::{inspect_build_cache_export, BuildCacheExportIdentity, BuildCacheTrace};
+pub use export::{
+    BuildCacheReceipt, RecordedBuildCache, BUILD_CACHE_ARTIFACT_MEDIA_TYPE,
+    BUILD_CACHE_CONFIG_MEDIA_TYPE,
+};
+
 /// Per-process counter for unique staging-file names in `store`.
 static STORE_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -47,6 +55,7 @@ struct KeyRecord {
 }
 
 /// A cache hit: a previously produced layer that can be reused.
+#[derive(Debug, Clone)]
 pub(crate) struct CachedLayer {
     /// Path to the cached layer tar.gz blob.
     pub(crate) blob_path: PathBuf,
@@ -79,6 +88,10 @@ impl BuildCache {
         Some(Self { dir })
     }
 
+    fn lock(&self) -> std::io::Result<crate::file_lock::FileLock> {
+        crate::file_lock::FileLock::acquire(&self.dir.join("cache"))
+    }
+
     /// Compute the next chain key from the previous key, the canonical
     /// instruction representation, and an optional input hash.
     ///
@@ -106,6 +119,11 @@ impl BuildCache {
     /// Returns the cached layer only if its key record exists and the
     /// referenced blob is a regular file with the recorded size and digest.
     pub(crate) fn lookup(&self, key: &str) -> Option<CachedLayer> {
+        let _lock = self.lock().ok()?;
+        self.lookup_unlocked(key)
+    }
+
+    fn lookup_unlocked(&self, key: &str) -> Option<CachedLayer> {
         let key_path = self.dir.join("keys").join(key);
         let bytes = std::fs::read(&key_path).ok()?;
         let record: KeyRecord = serde_json::from_slice(&bytes).ok()?;
@@ -129,6 +147,13 @@ impl BuildCache {
     /// absent or invalid, then writes the `keys/<key>` record. Best-effort: I/O
     /// errors are ignored.
     pub(crate) fn store(&self, key: &str, layer: &LayerInfo, diff_id: &str) {
+        let Ok(_lock) = self.lock() else {
+            return;
+        };
+        self.store_unlocked(key, layer, diff_id);
+    }
+
+    fn store_unlocked(&self, key: &str, layer: &LayerInfo, diff_id: &str) {
         if !cached_blob_is_valid(&layer.path, &layer.digest, layer.size) {
             return;
         }
@@ -171,17 +196,27 @@ impl BuildCache {
             size: layer.size,
         };
         if let Ok(bytes) = serde_json::to_vec(&record) {
-            let _ = std::fs::write(self.dir.join("keys").join(key), bytes);
+            let target = self.dir.join("keys").join(key);
+            let temporary = target.with_extension("tmp");
+            let _ = a3s_box_core::fs_atomic::write_durable(&temporary, &target, &bytes);
         }
 
-        self.prune_to(configured_max_bytes());
+        self.prune_to_unlocked(configured_max_bytes());
     }
 
     /// Evict oldest layer blobs (by modification time) until the total blob
     /// size is at or below `cap` bytes. Best-effort; key records that point at
     /// an evicted blob simply miss on the next lookup (and the instruction is
     /// re-run), so eviction can never corrupt a build.
+    #[cfg(test)]
     fn prune_to(&self, cap: u64) {
+        let Ok(_lock) = self.lock() else {
+            return;
+        };
+        self.prune_to_unlocked(cap);
+    }
+
+    fn prune_to_unlocked(&self, cap: u64) {
         let blobs_dir = self.dir.join("blobs");
         let Ok(read_dir) = std::fs::read_dir(&blobs_dir) else {
             return;
@@ -317,215 +352,4 @@ fn collect_files(root: &Path, current: &Path, out: &mut Vec<(PathBuf, PathBuf)>)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    /// Test constructor: open a cache at an explicit directory.
-    fn open_at(dir: &Path) -> BuildCache {
-        BuildCache::open_in(dir.to_path_buf()).expect("open build cache at temp dir")
-    }
-
-    #[test]
-    fn test_chain_is_deterministic() {
-        let a = BuildCache::chain("prev", "RUN echo hi", None);
-        let b = BuildCache::chain("prev", "RUN echo hi", None);
-        assert_eq!(a, b);
-        assert_eq!(a.len(), 64); // SHA256 hex
-    }
-
-    #[test]
-    fn test_chain_is_order_sensitive() {
-        // Different repr -> different key.
-        let a = BuildCache::chain("prev", "RUN echo a", None);
-        let b = BuildCache::chain("prev", "RUN echo b", None);
-        assert_ne!(a, b);
-
-        // Different prev key -> different key (order of instructions matters).
-        let c = BuildCache::chain("prev1", "RUN echo a", None);
-        let d = BuildCache::chain("prev2", "RUN echo a", None);
-        assert_ne!(c, d);
-    }
-
-    #[test]
-    fn test_chain_input_hash_changes_key() {
-        let none = BuildCache::chain("prev", "COPY . /app", None);
-        let some = BuildCache::chain("prev", "COPY . /app", Some("deadbeef"));
-        assert_ne!(none, some);
-
-        let other = BuildCache::chain("prev", "COPY . /app", Some("cafebabe"));
-        assert_ne!(some, other);
-    }
-
-    #[test]
-    fn test_store_then_lookup_round_trips() {
-        let tmp = TempDir::new().unwrap();
-        let cache_dir = tmp.path().join("buildcache");
-        let cache = open_at(&cache_dir);
-
-        // Create a fake layer blob to be cached.
-        let layer_path = tmp.path().join("layer.tar.gz");
-        let contents = b"fake layer contents";
-        fs::write(&layer_path, contents).unwrap();
-        let layer = LayerInfo {
-            path: layer_path,
-            digest: sha256_bytes(contents),
-            size: contents.len() as u64,
-        };
-
-        let key = BuildCache::chain("", "RUN echo hi", None);
-        assert!(cache.lookup(&key).is_none());
-
-        cache.store(&key, &layer, "diff-id-xyz");
-
-        let hit = cache
-            .lookup(&key)
-            .expect("expected a cache hit after store");
-        assert_eq!(hit.digest, sha256_bytes(contents));
-        assert_eq!(hit.diff_id, "diff-id-xyz");
-        assert_eq!(hit.size, contents.len() as u64);
-        assert!(hit.blob_path.exists());
-        assert_eq!(fs::read(&hit.blob_path).unwrap(), b"fake layer contents");
-    }
-
-    #[test]
-    fn prune_evicts_orphan_key_records() {
-        let tmp = TempDir::new().unwrap();
-        let cache_dir = tmp.path().join("buildcache");
-        let cache = open_at(&cache_dir);
-
-        let layer_path = tmp.path().join("layer.tar.gz");
-        let contents = vec![0u8; 4096];
-        fs::write(&layer_path, &contents).unwrap();
-        let layer = LayerInfo {
-            path: layer_path,
-            digest: sha256_bytes(&contents),
-            size: 4096,
-        };
-        let key = BuildCache::chain("", "RUN make", None);
-        cache.store(&key, &layer, "diff");
-
-        let blob = cache_dir.join("blobs").join(&layer.digest);
-        let key_file = cache_dir.join("keys").join(&key);
-        assert!(blob.exists() && key_file.exists());
-
-        // Force the cache under the blob size: evicts the blob AND prunes its
-        // now-dangling key record (previously the key file leaked forever).
-        cache.prune_to(0);
-        assert!(!blob.exists(), "blob should be evicted");
-        assert!(!key_file.exists(), "orphaned key record should be pruned");
-    }
-
-    #[test]
-    fn test_lookup_misses_when_blob_removed() {
-        let tmp = TempDir::new().unwrap();
-        let cache = open_at(&tmp.path().join("buildcache"));
-
-        let layer_path = tmp.path().join("layer.tar.gz");
-        let contents = b"data";
-        fs::write(&layer_path, contents).unwrap();
-        let layer = LayerInfo {
-            path: layer_path,
-            digest: sha256_bytes(contents),
-            size: contents.len() as u64,
-        };
-        let key = BuildCache::chain("", "RUN x", None);
-        cache.store(&key, &layer, "diff");
-
-        // Remove the blob; the key record remains but lookup must miss.
-        fs::remove_file(tmp.path().join("buildcache/blobs").join(&layer.digest)).unwrap();
-        assert!(cache.lookup(&key).is_none());
-    }
-
-    #[test]
-    fn test_lookup_rejects_and_store_repairs_corrupt_blob() {
-        let tmp = TempDir::new().unwrap();
-        let cache_dir = tmp.path().join("buildcache");
-        let cache = open_at(&cache_dir);
-        let contents = b"verified layer";
-        let layer_path = tmp.path().join("layer.tar.gz");
-        fs::write(&layer_path, contents).unwrap();
-        let layer = LayerInfo {
-            path: layer_path,
-            digest: sha256_bytes(contents),
-            size: contents.len() as u64,
-        };
-        let key = BuildCache::chain("", "COPY value /value", None);
-        cache.store(&key, &layer, "diff");
-
-        let blob = cache_dir.join("blobs").join(&layer.digest);
-        fs::write(&blob, b"corrupted data").unwrap();
-        assert!(cache.lookup(&key).is_none());
-
-        cache.store(&key, &layer, "diff");
-        assert_eq!(fs::read(&blob).unwrap(), contents);
-        assert!(cache.lookup(&key).is_some());
-    }
-
-    #[test]
-    fn test_hash_context_sources_detects_change() {
-        let ctx = TempDir::new().unwrap();
-        fs::write(ctx.path().join("a.txt"), "hello").unwrap();
-        fs::create_dir(ctx.path().join("sub")).unwrap();
-        fs::write(ctx.path().join("sub/b.txt"), "world").unwrap();
-
-        let srcs = vec![".".to_string()];
-        let h1 = hash_context_sources(ctx.path(), &srcs).unwrap();
-        let h2 = hash_context_sources(ctx.path(), &srcs).unwrap();
-        assert_eq!(h1, h2, "stable hash for unchanged content");
-
-        // Change a file -> different hash.
-        fs::write(ctx.path().join("a.txt"), "HELLO").unwrap();
-        let h3 = hash_context_sources(ctx.path(), &srcs).unwrap();
-        assert_ne!(h1, h3, "changed content must change the hash");
-    }
-
-    #[test]
-    fn test_prune_evicts_until_under_cap() {
-        let tmp = TempDir::new().unwrap();
-        let cache = open_at(&tmp.path().join("buildcache"));
-
-        // Store three ~100-byte blobs under distinct keys/digests.
-        for i in 0..3 {
-            let payload = vec![b'x' + i as u8; 100];
-            let src = tmp.path().join(format!("src{i}"));
-            fs::write(&src, &payload).unwrap();
-            let layer = LayerInfo {
-                path: src,
-                digest: sha256_bytes(&payload),
-                size: payload.len() as u64,
-            };
-            cache.store(
-                &BuildCache::chain("", &format!("RUN step {i}"), None),
-                &layer,
-                "d",
-            );
-        }
-
-        let blobs_dir = tmp.path().join("buildcache/blobs");
-        let total = |dir: &Path| -> u64 {
-            fs::read_dir(dir)
-                .unwrap()
-                .flatten()
-                .map(|e| e.metadata().unwrap().len())
-                .sum()
-        };
-        assert_eq!(total(&blobs_dir), 300, "three blobs stored");
-
-        // Cap at 150 bytes: prune must leave the total at or below the cap.
-        cache.prune_to(150);
-        assert!(
-            total(&blobs_dir) <= 150,
-            "prune must bring total under the cap"
-        );
-        assert!(total(&blobs_dir) > 0, "prune must keep what fits");
-    }
-
-    #[test]
-    fn test_hash_context_sources_missing_source_is_none() {
-        let ctx = TempDir::new().unwrap();
-        let srcs = vec!["does-not-exist".to_string()];
-        assert!(hash_context_sources(ctx.path(), &srcs).is_none());
-    }
-}
+mod tests;

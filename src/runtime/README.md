@@ -150,12 +150,26 @@ asynchronous subprocess boundary with kill-on-drop, a parent-death signal, a
 private PID namespace, and a journaled PID/start-time identity. Recovery fences
 that process tree before removing the hash-derived operation workspace.
 The existing journal lock serializes cancellation with ImageStore publication;
-publication is the commit point, so recovery adopts and validates an output
-written in the output-to-receipt crash gap instead of publishing it again.
+content-addressed plans use that same permit to publish one operation-owned
+Box-native OCI cache artifact before the ImageStore commit. One trace records
+hits and stores from the existing `BuildCache`; there is no export cache,
+publisher, or cache lifecycle store alongside it. Export layers are copied
+into an immutable snapshot so receipt validation and cleanup cannot mutate the
+live cache authority through shared inodes.
 
-This completes the Box-owned `BX0.4` supervision slice. Content-addressed cache
-receipts, multi-platform OCI assembly, Cloud Node Agent consumption,
-publication, and end-to-end SPDX/SLSA signing evidence remain separate gates.
+The cache key length-binds the source digest, canonical plan digest, platform,
+and cache schema profile. The v2 supervised operation record persists the
+admitted cache policy: a new `content-addressed` operation must commit cache
+evidence, while a `disabled` operation must not. Legacy v1 operation and output
+records remain readable without cache evidence. Replay rejects extra,
+missing, symlinked, or changed cache entries and revalidates the manifest,
+config, layers, descriptor sizes, exact blob inventory, and byte count before
+returning the cache receipt.
+
+This completes the Box-owned `BX0.4` supervision and portable cache-export
+receipt slices. Typed cache import and hydration, multi-platform OCI assembly,
+Cloud Node Agent consumption, publication, and end-to-end SPDX/SLSA signing
+evidence remain separate gates.
 
 ## Components
 

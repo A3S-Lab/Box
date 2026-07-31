@@ -9,6 +9,7 @@ use super::{
     PersistedBuildPhase, SupervisedBuildOperation, MAX_RECEIPT_BYTES, RECEIPT_DIRECTORY,
 };
 use crate::file_lock::FileLock;
+use crate::oci::build::cache::RecordedBuildCache;
 use crate::oci::image::{read_regular_file_bounded, validate_plain_directory};
 use crate::oci::ImageStore;
 
@@ -82,6 +83,11 @@ impl BuildOperationJournal {
             .join(format!("{}.workspace", operation_key(operation_id)))
     }
 
+    pub(in crate::oci::build) fn cache_export_path(&self, operation_id: &OperationId) -> PathBuf {
+        self.root
+            .join(format!("{}.cache", operation_key(operation_id)))
+    }
+
     fn execution_lock_target(&self, operation_id: &OperationId) -> PathBuf {
         self.root
             .join(format!("{}.execution", operation_key(operation_id)))
@@ -142,14 +148,21 @@ impl BuildOperationJournal {
     ) -> Result<PathBuf, BuildReceiptError> {
         let root = self.root.clone();
         let workspace = self.workspace_path(operation_id);
+        let cache_export = self.cache_export_path(operation_id);
         let operation = operation_id.to_string();
         tokio::task::spawn_blocking(move || {
-            remove_workspace_if_present(&root, &workspace, &operation)?;
+            remove_operation_directory_if_present(&root, &workspace, "workspace", &operation)?;
+            remove_operation_directory_if_present(
+                &root,
+                &cache_export,
+                "cache export",
+                &operation,
+            )?;
             std::fs::create_dir(&workspace).map_err(|source| BuildReceiptError::StoreIo {
                 message: format!("failed to create workspace for operation {operation}"),
                 source,
             })?;
-            validate_workspace(&root, &workspace, &operation)
+            validate_operation_directory(&root, &workspace, "workspace", &operation)
         })
         .await
         .map_err(|error| BuildReceiptError::Task {
@@ -166,12 +179,95 @@ impl BuildOperationJournal {
         let workspace = self.workspace_path(operation_id);
         let operation = operation_id.to_string();
         tokio::task::spawn_blocking(move || {
-            remove_workspace_if_present(&root, &workspace, &operation)
+            remove_operation_directory_if_present(&root, &workspace, "workspace", &operation)
         })
         .await
         .map_err(|error| BuildReceiptError::Task {
             operation_id: operation_id.to_string(),
             message: format!("workspace cleanup task failed: {error}"),
+        })?
+    }
+
+    pub(in crate::oci::build) async fn publish_cache_export(
+        &self,
+        operation_id: &OperationId,
+        staged: RecordedBuildCache,
+    ) -> Result<RecordedBuildCache, BuildReceiptError> {
+        let root = self.root.clone();
+        let workspace = self.workspace_path(operation_id);
+        let target = self.cache_export_path(operation_id);
+        let operation = operation_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let workspace =
+                validate_operation_directory(&root, &workspace, "workspace", &operation)?;
+            let staging = staged.layout_directory.canonicalize().map_err(|source| {
+                BuildReceiptError::StoreIo {
+                    message: format!(
+                        "failed to canonicalize cache export staging for operation {operation}"
+                    ),
+                    source,
+                }
+            })?;
+            if staging.parent() != Some(workspace.as_path()) {
+                return Err(BuildReceiptError::UnsafeStore {
+                    message: format!(
+                        "cache export staging {} escaped operation workspace {}",
+                        staging.display(),
+                        workspace.display()
+                    ),
+                });
+            }
+            match std::fs::symlink_metadata(&target) {
+                Ok(_) => {
+                    return Err(BuildReceiptError::Conflict {
+                        operation_id: operation,
+                        message: "a cache export already exists before publication".to_string(),
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(BuildReceiptError::StoreIo {
+                        message: format!(
+                            "failed to inspect cache export target for operation {operation}"
+                        ),
+                        source,
+                    })
+                }
+            }
+            std::fs::rename(&staging, &target).map_err(|source| BuildReceiptError::StoreIo {
+                message: format!("failed to publish cache export for operation {operation}"),
+                source,
+            })?;
+            let target = validate_operation_directory(&root, &target, "cache export", &operation)?;
+            if let Ok(directory) = std::fs::File::open(&root) {
+                let _ = directory.sync_all();
+            }
+            Ok(RecordedBuildCache {
+                receipt: staged.receipt,
+                layout_directory: target,
+            })
+        })
+        .await
+        .map_err(|error| BuildReceiptError::Task {
+            operation_id: operation_id.to_string(),
+            message: format!("cache export publication task failed: {error}"),
+        })?
+    }
+
+    pub(in crate::oci::build) async fn cleanup_cache_export(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<(), BuildReceiptError> {
+        let root = self.root.clone();
+        let cache_export = self.cache_export_path(operation_id);
+        let operation = operation_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            remove_operation_directory_if_present(&root, &cache_export, "cache export", &operation)
+        })
+        .await
+        .map_err(|error| BuildReceiptError::Task {
+            operation_id: operation_id.to_string(),
+            message: format!("cache export cleanup task failed: {error}"),
         })?
     }
 }
@@ -209,8 +305,10 @@ impl LockedBuildOperation {
         let operation_id = self.operation_id.clone();
         tokio::task::spawn_blocking(move || {
             match read_receipt_file(&path, &operation_id)? {
-                Some(PersistedBuildOperation::Succeeded(existing)) if existing == receipt => {
-                    return Ok(existing);
+                Some(PersistedBuildOperation::Succeeded(existing))
+                    if existing.as_ref() == &receipt =>
+                {
+                    return Ok(*existing);
                 }
                 Some(PersistedBuildOperation::Pending(pending))
                     if pending.matches_receipt(&receipt) => {}
@@ -243,7 +341,7 @@ impl LockedBuildOperation {
             persist_record(
                 &path,
                 &operation_id,
-                &PersistedBuildOperation::Succeeded(receipt.clone()),
+                &PersistedBuildOperation::Succeeded(Box::new(receipt.clone())),
             )?;
             Ok(receipt)
         })
@@ -336,6 +434,8 @@ fn valid_supervised_transition(
         || existing.source_digest != next.source_digest
         || existing.plan_digest != next.plan_digest
         || existing.output_reference != next.output_reference
+        || existing.schema != next.schema
+        || existing.cache_policy != next.cache_policy
         || existing.started_at != next.started_at
         || existing.owner != next.owner
     {
@@ -421,26 +521,27 @@ fn persist_record(
     })
 }
 
-fn validate_workspace(
+fn validate_operation_directory(
     root: &Path,
-    workspace: &Path,
+    directory: &Path,
+    label: &str,
     operation_id: &str,
 ) -> Result<PathBuf, BuildReceiptError> {
-    validate_plain_directory(workspace, "build operation workspace").map_err(|error| {
+    validate_plain_directory(directory, &format!("build operation {label}")).map_err(|error| {
         BuildReceiptError::UnsafeStore {
             message: error.to_string(),
         }
     })?;
-    let canonical = workspace
+    let canonical = directory
         .canonicalize()
         .map_err(|source| BuildReceiptError::StoreIo {
-            message: format!("failed to canonicalize workspace for operation {operation_id}"),
+            message: format!("failed to canonicalize {label} for operation {operation_id}"),
             source,
         })?;
     if canonical.parent() != Some(root) {
         return Err(BuildReceiptError::UnsafeStore {
             message: format!(
-                "workspace {} escaped receipt journal {}",
+                "{label} {} escaped receipt journal {}",
                 canonical.display(),
                 root.display()
             ),
@@ -449,23 +550,24 @@ fn validate_workspace(
     Ok(canonical)
 }
 
-fn remove_workspace_if_present(
+fn remove_operation_directory_if_present(
     root: &Path,
-    workspace: &Path,
+    directory: &Path,
+    label: &str,
     operation_id: &str,
 ) -> Result<(), BuildReceiptError> {
-    match std::fs::symlink_metadata(workspace) {
+    match std::fs::symlink_metadata(directory) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             Err(BuildReceiptError::UnsafeStore {
                 message: format!(
-                    "workspace path for operation {operation_id} is not a plain directory"
+                    "{label} path for operation {operation_id} is not a plain directory"
                 ),
             })
         }
         Ok(_) => {
-            validate_workspace(root, workspace, operation_id)?;
-            std::fs::remove_dir_all(workspace).map_err(|source| BuildReceiptError::StoreIo {
-                message: format!("failed to remove workspace for operation {operation_id}"),
+            validate_operation_directory(root, directory, label, operation_id)?;
+            std::fs::remove_dir_all(directory).map_err(|source| BuildReceiptError::StoreIo {
+                message: format!("failed to remove {label} for operation {operation_id}"),
                 source,
             })?;
             if let Ok(directory) = std::fs::File::open(root) {
@@ -475,7 +577,7 @@ fn remove_workspace_if_present(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(BuildReceiptError::StoreIo {
-            message: format!("failed to inspect workspace for operation {operation_id}"),
+            message: format!("failed to inspect {label} for operation {operation_id}"),
             source,
         }),
     }

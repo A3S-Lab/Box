@@ -134,9 +134,16 @@ jobs:
             'BuildOperation'"Queue"
             'Build'"Scheduler"
             'BuildImage'"Store"
+            'BuildCache'"Store"
+            'BuildCache'"Service"
+            'BuildCache'"Queue"
+            'BuildCache'"Scheduler"
+            'CacheExport'"Store"
+            'CacheExport'"Publisher"
             'build-operations.'"json"
             'build-jobs.'"json"
             'build-queue.'"json"
+            'build-cache-exports.'"json"
           )
           found=0
           for pattern in "${removed_patterns[@]}"; do
@@ -176,11 +183,26 @@ jobs:
             'fn persist_record(' \
             'src/runtime/src/oci/build/receipt/journal.rs'
           require_single_authority \
-            'fn remove_workspace_if_present(' \
+            'fn remove_operation_directory_if_present(' \
+            'src/runtime/src/oci/build/receipt/journal.rs'
+          require_single_authority \
+            'pub(crate) struct BuildCache {' \
+            'src/runtime/src/oci/build/cache.rs'
+          require_single_authority \
+            'pub(in crate::oci::build) fn stage_export(' \
+            'src/runtime/src/oci/build/cache/export.rs'
+          require_single_authority \
+            'pub(in crate::oci::build) async fn publish_cache_export(' \
+            'src/runtime/src/oci/build/receipt/journal.rs'
+          require_single_authority \
+            'pub(in crate::oci::build) async fn cleanup_cache_export(' \
             'src/runtime/src/oci/build/receipt/journal.rs'
           require_single_authority \
             'fn spawn_supervised_build(' \
             'src/runtime/src/oci/build/execution.rs'
+          require_single_authority \
+            'pub(super) struct JournalBuildObserver {' \
+            'src/runtime/src/oci/build/execution/supervision.rs'
           require_single_authority \
             'store.put(reference' \
             'src/runtime/src/oci/build/engine/mod.rs'
@@ -191,6 +213,7 @@ jobs:
           if git grep -n -I -E \
             '(tokio|std)::sync::(mpsc|broadcast|watch)|\b(VecDeque|BinaryHeap)\b' -- \
             src/runtime/src/oci/build/execution.rs \
+            src/runtime/src/oci/build/execution/supervision.rs \
             src/runtime/src/oci/build/receipt.rs \
             src/runtime/src/oci/build/receipt/journal.rs \
             src/runtime/src/oci/build/engine/control.rs; then

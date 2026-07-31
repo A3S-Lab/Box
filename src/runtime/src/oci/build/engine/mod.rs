@@ -11,7 +11,10 @@ use std::sync::Arc;
 use a3s_box_core::error::{BoxError, Result};
 use a3s_box_core::platform::Platform;
 
-use super::cache::{hash_context_sources, BuildCache};
+use super::cache::{
+    hash_context_sources, BuildCache, BuildCacheExportIdentity, BuildCacheTrace, CachedLayer,
+    RecordedBuildCache,
+};
 use super::dockerfile::{Dockerfile, Instruction, RunBindMount, RunCacheMount};
 use super::dockerignore::DockerIgnore;
 use super::layer::{sha256_bytes, sha256_file, LayerInfo};
@@ -40,6 +43,11 @@ use stages::{global_arg_decls, resolve_stage_rootfs, split_into_stages};
 use utils::{compute_diff_id, expand_args, format_size, resolve_path};
 
 pub(super) use control::{BuildExecutionControl, BuildExecutionObserver, BuildImageCommitPermit};
+
+pub(super) struct SupervisedBuildResult {
+    pub(super) output: BuildResult,
+    pub(super) cache: Option<RecordedBuildCache>,
+}
 
 /// Network access available to Dockerfile execution instructions.
 ///
@@ -488,7 +496,9 @@ pub async fn build(config: BuildConfig, store: Arc<ImageStore>) -> Result<BuildR
 
     let build_dir = tempfile::TempDir::new()
         .map_err(|e| BoxError::BuildError(format!("Failed to create build directory: {}", e)))?;
-    build_in_workspace(config, store, build_dir.path(), None).await
+    build_in_workspace(config, store, build_dir.path(), None, None)
+        .await
+        .map(|result| result.output)
 }
 
 /// Execute the same native engine in one journal-owned workspace.
@@ -497,10 +507,11 @@ pub(super) async fn build_supervised(
     store: Arc<ImageStore>,
     workspace: &Path,
     control: BuildExecutionControl,
-) -> Result<BuildResult> {
+    cache_identity: Option<BuildCacheExportIdentity>,
+) -> Result<SupervisedBuildResult> {
     validate_build_config(&config)?;
     control.ensure_active().await?;
-    build_in_workspace(config, store, workspace, Some(control)).await
+    build_in_workspace(config, store, workspace, Some(control), cache_identity).await
 }
 
 async fn build_in_workspace(
@@ -508,7 +519,8 @@ async fn build_in_workspace(
     store: Arc<ImageStore>,
     build_dir: &Path,
     control: Option<BuildExecutionControl>,
-) -> Result<BuildResult> {
+    cache_identity: Option<BuildCacheExportIdentity>,
+) -> Result<SupervisedBuildResult> {
     // Parse Dockerfile
     let dockerfile = Dockerfile::from_file(&config.dockerfile_path)?;
 
@@ -556,6 +568,15 @@ async fn build_in_workspace(
 
     let total_instructions = dockerfile.instructions.len();
     let mut global_step = 0;
+    // One cache implementation and one trace span every stage. The trace owns
+    // no blobs or persistence; it only selects exact entries for the terminal
+    // portable artifact.
+    let cache = if config.no_cache {
+        None
+    } else {
+        BuildCache::open()
+    };
+    let mut cache_trace = cache_identity.as_ref().map(|_| BuildCacheTrace::default());
 
     for (stage_idx, stage) in stages.iter().enumerate() {
         if let Some(control) = &control {
@@ -583,12 +604,6 @@ async fn build_in_workspace(
         }
         let mut base_layers: Vec<LayerInfo> = Vec::new();
         let mut base_diff_ids: Vec<String> = Vec::new();
-        // Layer-level build cache (best-effort; None disables caching).
-        let cache = if config.no_cache {
-            None
-        } else {
-            BuildCache::open()
-        };
         // Running chain key over all instructions in this stage. Reset at FROM.
         let mut chain_key = String::new();
         // Once a cache miss forces re-execution, all later layers must be rebuilt.
@@ -770,7 +785,7 @@ async fn build_in_workspace(
                     } else {
                         format!("COPY {} {}", src.join(" "), dst)
                     };
-                    if try_reuse_cached_layer(
+                    if let Some(cached) = try_reuse_cached_layer(
                         CachedLayerReuse {
                             cache_valid,
                             cache: cache.as_ref(),
@@ -781,9 +796,10 @@ async fn build_in_workspace(
                             created_by: &created_by,
                         },
                         &mut state,
-                    )?
-                    .is_some()
-                    {
+                    )? {
+                        if let Some(trace) = &mut cache_trace {
+                            trace.record(&chain_key, &cached)?;
+                        }
                         if !config.quiet {
                             println!(
                                 "Step {}/{}: {} (CACHED)",
@@ -836,9 +852,13 @@ async fn build_in_workspace(
                             None,
                         )?;
                         let diff_id = compute_diff_id(&layer_info.path)?;
-                        if let Some(c) = &cache {
-                            c.store(&chain_key, &layer_info, &diff_id);
-                        }
+                        store_cache_entry(
+                            cache.as_ref(),
+                            cache_trace.as_mut(),
+                            &chain_key,
+                            &layer_info,
+                            &diff_id,
+                        )?;
                         state.diff_ids.push(diff_id);
                         state.layers.push(layer_info);
                         state.history.push(HistoryEntry {
@@ -872,9 +892,13 @@ async fn build_in_workspace(
                             Some(&dockerignore),
                         )?;
                         let diff_id = compute_diff_id(&layer_info.path)?;
-                        if let Some(c) = &cache {
-                            c.store(&chain_key, &layer_info, &diff_id);
-                        }
+                        store_cache_entry(
+                            cache.as_ref(),
+                            cache_trace.as_mut(),
+                            &chain_key,
+                            &layer_info,
+                            &diff_id,
+                        )?;
                         state.diff_ids.push(diff_id);
                         state.layers.push(layer_info);
                         state.history.push(HistoryEntry {
@@ -886,7 +910,7 @@ async fn build_in_workspace(
 
                 Instruction::Add { src, dst, chown } => {
                     let created_by = format!("ADD {} {}", src.join(" "), dst);
-                    if try_reuse_cached_layer(
+                    if let Some(cached) = try_reuse_cached_layer(
                         CachedLayerReuse {
                             cache_valid,
                             cache: cache.as_ref(),
@@ -897,9 +921,10 @@ async fn build_in_workspace(
                             created_by: &created_by,
                         },
                         &mut state,
-                    )?
-                    .is_some()
-                    {
+                    )? {
+                        if let Some(trace) = &mut cache_trace {
+                            trace.record(&chain_key, &cached)?;
+                        }
                         if !config.quiet {
                             println!(
                                 "Step {}/{}: {} (CACHED)",
@@ -931,9 +956,13 @@ async fn build_in_workspace(
                         Some(&dockerignore),
                     )?;
                     let diff_id = compute_diff_id(&layer_info.path)?;
-                    if let Some(c) = &cache {
-                        c.store(&chain_key, &layer_info, &diff_id);
-                    }
+                    store_cache_entry(
+                        cache.as_ref(),
+                        cache_trace.as_mut(),
+                        &chain_key,
+                        &layer_info,
+                        &diff_id,
+                    )?;
                     state.diff_ids.push(diff_id);
                     state.layers.push(layer_info);
                     state.history.push(HistoryEntry {
@@ -949,7 +978,7 @@ async fn build_in_workspace(
                     tmpfs_mounts,
                 } => {
                     let created_by = instruction_to_string(instruction);
-                    if try_reuse_cached_layer(
+                    if let Some(cached) = try_reuse_cached_layer(
                         CachedLayerReuse {
                             cache_valid,
                             cache: cache.as_ref(),
@@ -960,9 +989,10 @@ async fn build_in_workspace(
                             created_by: &created_by,
                         },
                         &mut state,
-                    )?
-                    .is_some()
-                    {
+                    )? {
+                        if let Some(trace) = &mut cache_trace {
+                            trace.record(&chain_key, &cached)?;
+                        }
                         if !config.quiet {
                             println!(
                                 "Step {}/{}: {} (CACHED)",
@@ -1028,9 +1058,13 @@ async fn build_in_workspace(
                     };
                     if let Some(layer_info) = layer_opt {
                         let diff_id = compute_diff_id(&layer_info.path)?;
-                        if let Some(c) = &cache {
-                            c.store(&chain_key, &layer_info, &diff_id);
-                        }
+                        store_cache_entry(
+                            cache.as_ref(),
+                            cache_trace.as_mut(),
+                            &chain_key,
+                            &layer_info,
+                            &diff_id,
+                        )?;
                         state.diff_ids.push(diff_id);
                         state.layers.push(layer_info);
                         state.history.push(HistoryEntry {
@@ -1299,6 +1333,22 @@ async fn build_in_workspace(
     if let Some(control) = &control {
         control.ensure_active().await?;
     }
+    let staged_cache = match cache_identity.as_ref() {
+        Some(identity) => {
+            let cache = cache.as_ref().ok_or_else(|| {
+                BoxError::BuildError(
+                    "content-addressed build cache could not be opened for export".to_string(),
+                )
+            })?;
+            let trace = cache_trace.as_ref().ok_or_else(|| {
+                BoxError::BuildError(
+                    "content-addressed build cache export lost its native trace".to_string(),
+                )
+            })?;
+            Some(cache.stage_export(trace, identity, &build_dir.join("_cache_export"))?)
+        }
+        None => None,
+    };
     let result = assemble_image(
         &reference,
         &final_state,
@@ -1308,6 +1358,7 @@ async fn build_in_workspace(
         &store,
         &target_platform,
         control.as_ref(),
+        staged_cache,
     )
     .await?;
 
@@ -1315,8 +1366,8 @@ async fn build_in_workspace(
         println!(
             "Successfully built {} ({} layers, {}, {})",
             reference,
-            result.layer_count,
-            format_size(result.size),
+            result.output.layer_count,
+            format_size(result.output.size),
             target_platform,
         );
     }
@@ -1332,12 +1383,40 @@ async fn build_in_workspace(
 // Helper functions
 // =============================================================================
 
+fn store_cache_entry(
+    cache: Option<&BuildCache>,
+    trace: Option<&mut BuildCacheTrace>,
+    chain_key: &str,
+    layer: &LayerInfo,
+    diff_id: &str,
+) -> Result<()> {
+    let Some(cache) = cache else {
+        if trace.is_some() {
+            return Err(BoxError::BuildError(
+                "content-addressed build cache could not be opened".to_string(),
+            ));
+        }
+        return Ok(());
+    };
+    cache.store(chain_key, layer, diff_id);
+    if let Some(trace) = trace {
+        let cached = cache.lookup(chain_key).ok_or_else(|| {
+            BoxError::BuildError(format!(
+                "content-addressed build cache did not retain chain key sha256:{chain_key}"
+            ))
+        })?;
+        trace.record(chain_key, &cached)?;
+    }
+    Ok(())
+}
+
 /// Attempt to reuse a cached layer for a layer-producing instruction.
 ///
 /// On a cache hit (and only when `cache_valid` is still true and a cache is
 /// open), this applies the cached layer's diff to `rootfs_dir` so later
 /// instructions build on the correct rootfs, then records the layer, diff_id,
-/// and a non-empty history entry in `state`. Returns `Some(())` on a hit (the
+/// and a non-empty history entry in `state`. Returns the verified cache entry
+/// on a hit (the
 /// caller should `continue`), or `None` to fall through to normal execution.
 struct CachedLayerReuse<'a> {
     cache_valid: bool,
@@ -1352,7 +1431,7 @@ struct CachedLayerReuse<'a> {
 fn try_reuse_cached_layer(
     request: CachedLayerReuse<'_>,
     state: &mut BuildState,
-) -> Result<Option<()>> {
+) -> Result<Option<CachedLayer>> {
     if !request.cache_valid {
         return Ok(None);
     }
@@ -1382,15 +1461,15 @@ fn try_reuse_cached_layer(
 
     state.layers.push(LayerInfo {
         path: local_layer,
-        digest: cached.digest,
+        digest: cached.digest.clone(),
         size: local_size,
     });
-    state.diff_ids.push(cached.diff_id);
+    state.diff_ids.push(cached.diff_id.clone());
     state.history.push(HistoryEntry {
         created_by: request.created_by.to_string(),
         empty_layer: false,
     });
-    Ok(Some(()))
+    Ok(Some(cached))
 }
 
 /// Handle FROM: pull base image and extract layers into rootfs.
@@ -1566,7 +1645,8 @@ async fn assemble_image(
     store: &Arc<ImageStore>,
     target_platform: &Platform,
     control: Option<&BuildExecutionControl>,
-) -> Result<BuildResult> {
+    staged_cache: Option<RecordedBuildCache>,
+) -> Result<SupervisedBuildResult> {
     // Create output directory
     let output_dir = layers_dir.join("_output");
     let blobs_dir = output_dir.join("blobs").join("sha256");
@@ -1762,8 +1842,20 @@ async fn assemble_image(
         Some(control) => Some(control.acquire_image_commit_permit().await?),
         None => None,
     };
+    let cache = match staged_cache {
+        Some(staged) => {
+            let control = control.ok_or_else(|| {
+                BoxError::BuildError(
+                    "native cache export requires the recorded-build journal".to_string(),
+                )
+            })?;
+            Some(control.publish_cache_export(staged).await?)
+        }
+        None => None,
+    };
     let stored = store.put(reference, &digest_str, &output_dir).await?;
-    inspect_stored_build_output(reference, stored, store.store_dir())
+    let output = inspect_stored_build_output(reference, stored, store.store_dir())?;
+    Ok(SupervisedBuildResult { output, cache })
 }
 
 fn copy_layer_blob(layer: &LayerInfo, blob_path: &Path, label: &str) -> Result<()> {

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use a3s_box_core::OperationId;
 
 use super::*;
+use crate::oci::build::engine::BuildExecutionObserver;
 use crate::OCI_IMAGE_MANIFEST_MEDIA_TYPE;
 
 #[tokio::test]
@@ -114,7 +115,9 @@ build "oci" {{
         .unwrap();
     let locked = journal.lock(identity.operation_id()).await.unwrap();
     locked
-        .write_supervised(SupervisedBuildOperation::new(&identity, plan_digest.clone()).unwrap())
+        .write_supervised(
+            SupervisedBuildOperation::new(&identity, plan_digest.clone(), plan.cache()).unwrap(),
+        )
         .await
         .unwrap();
     drop(locked);
@@ -123,6 +126,7 @@ build "oci" {{
         journal,
         identity: identity.clone(),
         plan_digest,
+        cache_policy: plan.cache(),
     };
     let permit = observer.acquire_image_commit_permit().await.unwrap();
     let cancellation_identity = identity.clone();

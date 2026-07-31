@@ -13,6 +13,7 @@ use a3s_acl::{
     ParseLimits, Schema, SchemaDiagnosticCode, Value, ValueSchema,
 };
 use a3s_box_core::platform::Platform;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::engine::{BuildConfig, BuildNetworkPolicy};
@@ -29,7 +30,8 @@ const BUILD_PLAN_LIMITS: ParseLimits = ParseLimits {
 };
 
 /// Cache behavior admitted by the Box build-plan contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum BuildCachePolicy {
     /// Reuse only content-addressed native build-engine cache entries.
     ContentAddressed,
